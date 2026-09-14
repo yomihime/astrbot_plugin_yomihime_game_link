@@ -59,11 +59,17 @@ https://github.com/yomihime/astrbot_plugin_yomihime_game_link
 ```powershell
 ruff format .
 ruff check .
-python -m compileall -q main.py
+python -m unittest discover -v
+python -m compileall -q api core examples tests main.py
 ```
 
 当前没有额外运行依赖。后续引入第三方库时，通过 `requirements.txt` 声明。
 插件依赖 AstrBot 运行时，不应直接执行 `python main.py`。
+
+公共契约、参数校验与上下文签发已有本地测试，最小使用示例见
+[examples/contracts.py](examples/contracts.py)，实际交付范围见
+[C00 契约基线](.coordination/contracts/C00-baseline.md)。服务 Protocol
+尚无完整后端实现；这些测试不代表游戏能力或 AstrBot 集成已经可用。
 
 ## 开发约定
 
