@@ -1,83 +1,48 @@
 # Yomihime Game Link · 怜的游戏连结
 
-连接你的游戏世界，在聊天中查询角色、战绩、游戏平台账号与游戏资讯。
+AstrBot 游戏信息聚合插件，面向游戏角色、战绩与游戏平台资讯查询。
 
-> 开发准备阶段：当前仅提供 `/ygl` 插件介绍命令，游戏查询与账号绑定尚未实现。
+> 项目开发中。当前仅提供 `/ygl` 插件介绍命令，游戏查询、账号绑定和订阅功能尚未开放。
 
-## 目标
+## 功能规划
 
-- 功能分为“游戏”和“游戏平台”两类。
-- 游戏首批计划支持 Dota2、FF14 与炽焰天穹。
-- 游戏平台首批计划支持 Steam。
-- Dota2：对局详情、玩家战绩。
-- FF14：角色相关 Logs 查询。
-- Steam：绑定个人账号，通过命令或自然语言查询平台资料、游戏当前价格、折扣与可用的历史低价信息。
-- 炽焰天穹：通过 B 站账号扫码授权查询个人信息、持有风格（BOX）与高分挑战，并生成可分享图片。
-- 按聊天用户绑定游戏角色、游戏账号或游戏平台账号，让“查询我的战绩”“我的 Steam”等请求使用对应绑定。
-- 可选订阅游戏活动日历、游戏平台活动日历和游戏折扣提醒；推送默认关闭，由用户或群聊主动开启。
-- 主体采用模块注册制：核心可在没有任何游戏功能时独立运行；各游戏或游戏平台模块自行注册能力、配置、凭据、状态检查和推送类型。
-- 插件提供独立管理页面，根据注册信息动态展示模块，每个游戏或游戏平台均可独立启用和停用。
-- 允许第三方将游戏或游戏平台实现作为独立扩展包安装，通过公开、版本化的注册接口接入主体，无需修改主体代码。
-- 为后续游戏与信息源保留模块扩展空间。
+| 模块 | 计划支持 |
+| --- | --- |
+| Dota 2 | 玩家资料、近期战绩、对局详情 |
+| FF14 | 角色与 FFLogs 成绩查询 |
+| Steam | 平台账号、游戏检索、价格与折扣 |
+| 炽焰天穹（HBR） | 账号资料、BOX 与高分挑战 |
 
-自然语言查询是目标能力，尤其应支持直接询问 Steam 游戏价格；多账号规则、FF14 国服与国际服支持范围及部分数据源仍待确定。
-Yomihime Arcade 名称预留给未来的 Bot 聊天游戏项目。
+## 安装
 
-## 需求文档
-
-详见 [需求文档](docs/requirements.md)，包含要实现的能力、参考项目、整体实现思路、范围边界和待确认需求，不代表功能已经实现。
-
-## 开发方式
-
-本项目是独立 Git 仓库。本地路径：
-
-```text
-E:\AI\Dev\AstrBot\astrbot_plugin_yomihime_game_link
-```
-
-相邻的 AstrBot 本体仓库用于本体调试和 PR 工作，不作为本插件的本地运行环境。
-本地只进行插件代码开发与静态检查；集成验证在实际部署的 AstrBot 环境中进行。
-
-## 安装与集成验证
-
-在实际运行的 AstrBot WebUI 中，通过插件管理使用本仓库地址安装：
+在 AstrBot WebUI 的插件管理中，使用以下仓库地址安装：
 
 ```text
 https://github.com/yomihime/astrbot_plugin_yomihime_game_link
 ```
 
-确认插件加载后，向 Bot 发送 `/ygl`，应返回插件名称与开发状态。
-更新代码后，在部署环境更新插件并重载，再次验证命令。
-实际命令前缀、唤醒条件和平台接入以 AstrBot 配置为准。
+安装后启用插件。更新时通过插件管理更新并重载。
 
-当前尚未完成真实 AstrBot 环境的加载及消息收发验证，也未确定最低兼容版本。
+## 使用
 
-## 本地检查
+| 命令 | 说明 |
+| --- | --- |
+| `/ygl` | 查看插件介绍与开发状态 |
 
-准备 Python 3.12 或以上与 Ruff，在插件目录运行：
+命令前缀和唤醒方式以 AstrBot 配置为准。当前版本尚未完成部署环境的集成验证。
 
-```powershell
-ruff format .
-ruff check .
-python -m unittest discover -v
-python -m compileall -q api core examples tests main.py
-```
+## 文档
 
-当前没有额外运行依赖。后续引入第三方库时，通过 `requirements.txt` 声明。
-插件依赖 AstrBot 运行时，不应直接执行 `python main.py`。
+- [需求说明](docs/requirements.md)
+- [基本设计](docs/basic-design.md)
+- [代码架构](docs/code-architecture.md)
+- [开发指南](CONTRIBUTING.md)
 
-公共契约、参数校验与上下文签发已有本地测试，最小使用示例见
-[examples/contracts.py](examples/contracts.py)，实际交付范围见
-[C00 契约基线](.coordination/contracts/C00-baseline.md)。服务 Protocol
-尚无完整后端实现；这些测试不代表游戏能力或 AstrBot 集成已经可用。
+## 反馈
 
-## 开发约定
+问题反馈与功能建议请提交至 [Issues](https://github.com/yomihime/astrbot_plugin_yomihime_game_link/issues)。
 
-- 游戏业务按实际需求逐步拆分为模块。
-- 持久化账号与缓存放在 AstrBot 数据目录，不写入插件源码目录。
-- API 凭据通过 AstrBot 插件配置管理，不提交到仓库。
-- 网络请求使用异步客户端，并处理超时、限流与上游错误。
+## 许可证
 
-## 来源与许可
-
-基于 [AstrBot 官方插件开发指南](https://docs.astrbot.app/dev/star/plugin-new.html) 推荐的 [Soulter/helloworld](https://github.com/Soulter/helloworld) 模板初始化，保留模板的 AGPL-3.0 许可证，详见 [LICENSE](LICENSE)。
+采用 [AGPL-3.0](LICENSE) 许可证。项目基于 AstrBot 官方推荐的
+[helloworld 插件模板](https://github.com/Soulter/helloworld) 初始化。
