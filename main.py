@@ -5,7 +5,7 @@ from astrbot.api.star import Star, register
 @register(
     "astrbot_plugin_yomihime_game_link",
     "yomihime",
-    "怜的游戏连结：聚合游戏角色、战绩与资讯。",
+    "如月怜的游戏连结：聚合游戏角色、战绩与资讯。",
     "0.1.0",
 )
 class YomihimeGameLink(Star):
@@ -19,7 +19,7 @@ class YomihimeGameLink(Star):
             event: The incoming command event.
         """
         yield event.plain_result(
-            "Yomihime Game Link · 怜的游戏连结\n"
+            "Yomihime Game Link · 如月怜的游戏连结\n"
             "连接你的游戏世界。\n\n"
             "插件骨架已就绪。\n"
             "Dota2 战绩、FF14 Logs 与账号绑定功能正在规划中。"

@@ -1,5 +1,5 @@
 name: astrbot_plugin_yomihime_game_link
-display_name: Yomihime Game Link · 怜的游戏连结
+display_name: Yomihime Game Link · 如月怜的游戏连结
 desc: 连接你的游戏世界，在聊天中查询角色、战绩与游戏资讯。当前为开发骨架，游戏查询与绑定尚未实现。
 version: v0.1.0
 author: yomihime

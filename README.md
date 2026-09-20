@@ -1,4 +1,4 @@
-# Yomihime Game Link · 怜的游戏连结
+# Yomihime Game Link · 如月怜的游戏连结
 
 AstrBot 游戏信息聚合插件，面向游戏角色、战绩与游戏平台资讯查询。
 
