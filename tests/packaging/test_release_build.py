@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import base64
+import csv
 import hashlib
+import io
 import tempfile
 import unittest
 from pathlib import Path
+from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
 from scripts.build_dashboard_zip import ROOT_FILES, RUNTIME_DIRS, included_files
 from scripts.build_release import (
@@ -14,8 +18,48 @@ from scripts.build_release import (
     validate_tag,
     write_checksums,
 )
+from setup import normalize_wheel_archive
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def _render_record(payloads: dict[str, bytes], record_name: str) -> bytes:
+    output = io.StringIO(newline="")
+    writer = csv.writer(output, lineterminator="\n")
+    for name, data in payloads.items():
+        digest = base64.urlsafe_b64encode(hashlib.sha256(data).digest())
+        writer.writerow(
+            (name, f"sha256={digest.decode('ascii').rstrip('=')}", str(len(data)))
+        )
+    writer.writerow((record_name, "", ""))
+    return output.getvalue().encode("utf-8")
+
+
+def _write_posix_wheel(path: Path) -> tuple[dict[str, bytes], str]:
+    record_name = "yomihime_module_sdk-1.1.0.dist-info/RECORD"
+    payloads = {
+        "yomihime_sdk/__init__.py": b"SDK_VALUE = 1\n",
+        "yomihime_module_sdk-1.1.0.dist-info/METADATA": (
+            b"Metadata-Version: 2.4\nName: yomihime-module-sdk\nVersion: 1.1.0\n"
+        ),
+        "yomihime_module_sdk-1.1.0.dist-info/WHEEL": (
+            b"Wheel-Version: 1.0\nGenerator: fixture\n"
+            b"Root-Is-Purelib: true\nTag: py3-none-any\n"
+        ),
+        "yomihime_module_sdk-1.1.0.dist-info/top_level.txt": b"yomihime_sdk\n",
+        "yomihime_module_sdk-1.1.0.dist-info/licenses/LICENSE": b"MIT\n",
+    }
+    with ZipFile(path, "w", compression=ZIP_DEFLATED) as archive:
+        for name, data in (
+            *payloads.items(),
+            (record_name, _render_record(payloads, record_name)),
+        ):
+            info = ZipInfo(name, (2020, 1, 1, 0, 0, 0))
+            info.compress_type = ZIP_DEFLATED
+            info.create_system = 3
+            info.external_attr = 0o100644 << 16
+            archive.writestr(info, data)
+    return payloads, record_name
 
 
 class ReleaseBuildTests(unittest.TestCase):
@@ -108,6 +152,46 @@ class ReleaseBuildTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "independently pinned"):
                 build_release(sdk_wheel=wheel, output_dir=output)
             self.assertFalse(output.exists())
+
+    def test_posix_wheel_normalizes_to_stable_windows_bytes_idempotently(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="yomihime-wheel-normalize-") as work:
+            wheel_path = Path(work) / "sdk.whl"
+            original_payloads, record_name = _write_posix_wheel(wheel_path)
+            self.assertTrue(normalize_wheel_archive(wheel_path))
+
+            normalized_payloads = {
+                **original_payloads,
+                "yomihime_module_sdk-1.1.0.dist-info/METADATA": (
+                    original_payloads["yomihime_module_sdk-1.1.0.dist-info/METADATA"]
+                    .replace(b"\r\n", b"\n")
+                    .replace(b"\n", b"\r\n")
+                ),
+            }
+            with ZipFile(wheel_path) as archive:
+                self.assertIsNone(archive.testzip())
+                self.assertEqual(
+                    tuple(archive.namelist()), (*normalized_payloads, record_name)
+                )
+                for info in archive.infolist():
+                    self.assertEqual(info.create_system, 0)
+                    mode = 0o100664 if info.filename == record_name else 0o100666
+                    self.assertEqual(info.external_attr, mode << 16)
+                self.assertEqual(
+                    archive.read("yomihime_module_sdk-1.1.0.dist-info/METADATA"),
+                    normalized_payloads["yomihime_module_sdk-1.1.0.dist-info/METADATA"],
+                )
+                self.assertEqual(
+                    archive.read("yomihime_module_sdk-1.1.0.dist-info/WHEEL"),
+                    original_payloads["yomihime_module_sdk-1.1.0.dist-info/WHEEL"],
+                )
+                self.assertEqual(
+                    archive.read(record_name),
+                    _render_record(normalized_payloads, record_name),
+                )
+
+            canonical_bytes = wheel_path.read_bytes()
+            self.assertFalse(normalize_wheel_archive(wheel_path))
+            self.assertEqual(wheel_path.read_bytes(), canonical_bytes)
 
 
 if __name__ == "__main__":

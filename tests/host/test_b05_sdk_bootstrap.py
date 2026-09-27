@@ -112,7 +112,7 @@ class SDKBootstrapTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.temp = tempfile.TemporaryDirectory(prefix="ygl-h-sdk-")
-        cls.temp_root = Path(cls.temp.name)
+        cls.temp_root = Path(cls.temp.name).resolve()
         cls.wheel_dir = cls.temp_root / "wheel"
         cls.wheel_dir.mkdir()
         env = os.environ.copy()
