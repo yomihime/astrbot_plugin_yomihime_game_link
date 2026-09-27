@@ -243,7 +243,7 @@ class InstalledArtifactTests(unittest.TestCase):
         self.assertEqual(version("setuptools"), "80.9.0")
         self.assertEqual(version("wheel"), "0.45.1")
         with tempfile.TemporaryDirectory(prefix="yomihime-sdk-build-") as work:
-            workdir = Path(work)
+            workdir = Path(work).resolve()
             source_root = workdir / "source"
             source_root.mkdir()
             for relative in ("LICENSE", "pyproject.toml", "setup.py"):

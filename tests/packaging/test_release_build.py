@@ -125,7 +125,7 @@ class ReleaseBuildTests(unittest.TestCase):
 
     def test_runtime_manifest_skips_cache_and_local_data_directories(self) -> None:
         with tempfile.TemporaryDirectory(prefix="yomihime-release-manifest-") as work:
-            root = Path(work)
+            root = Path(work).resolve()
             for filename in ROOT_FILES:
                 (root / filename).write_bytes(b"runtime root asset")
             for directory in RUNTIME_DIRS:
