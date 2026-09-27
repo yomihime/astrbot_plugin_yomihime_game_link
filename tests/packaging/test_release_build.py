@@ -9,7 +9,10 @@ import io
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
+
+from setuptools import build_meta
 
 from scripts.build_dashboard_zip import ROOT_FILES, RUNTIME_DIRS, included_files
 from scripts.build_release import (
@@ -18,7 +21,6 @@ from scripts.build_release import (
     validate_tag,
     write_checksums,
 )
-from setup import normalize_wheel_archive
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -60,6 +62,19 @@ def _write_posix_wheel(path: Path) -> tuple[dict[str, bytes], str]:
             info.external_attr = 0o100644 << 16
             archive.writestr(info, data)
     return payloads, record_name
+
+
+def _load_pep517_normalizer():
+    captured: dict[str, object] = {}
+
+    def capture_setup(**kwargs: object) -> None:
+        captured.update(kwargs)
+
+    with patch("setuptools.setup", side_effect=capture_setup):
+        build_meta._BuildMetaBackend().run_setup(str(ROOT / "setup.py"))
+
+    command = captured["cmdclass"]["bdist_wheel"]
+    return command.run.__globals__["normalize_wheel_archive"]
 
 
 class ReleaseBuildTests(unittest.TestCase):
@@ -157,6 +172,7 @@ class ReleaseBuildTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="yomihime-wheel-normalize-") as work:
             wheel_path = Path(work) / "sdk.whl"
             original_payloads, record_name = _write_posix_wheel(wheel_path)
+            normalize_wheel_archive = _load_pep517_normalizer()
             self.assertTrue(normalize_wheel_archive(wheel_path))
 
             normalized_payloads = {

@@ -30,7 +30,10 @@ def _wheel_payloads(
     metadata_name = metadata_names[0]
     record_name = record_names[0]
     payloads = {name: archive.read(name) for name in names if name != record_name}
-    metadata = payloads[metadata_name].replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")
+    # Keep the carriage-return byte value-constructed because setuptools' PEP 517
+    # backend rewrites a literal backslash-r/backslash-n sequence in setup.py.
+    crlf = bytes((13, 10))
+    metadata = payloads[metadata_name].replace(crlf, b"\n").replace(b"\n", crlf)
     payloads[metadata_name] = metadata
 
     output = io.StringIO(newline="")
