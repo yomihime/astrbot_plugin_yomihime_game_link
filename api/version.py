@@ -1,3 +1,14 @@
-"""Version of the initial, locally importable contract surface."""
+"""Compatibility re-exports for the canonical Yomihime SDK API."""
 
-CONTRACT_VERSION = "1.0.0"
+from yomihime_sdk.api.version import (
+    B02_CONTRACT_VERSION as B02_CONTRACT_VERSION,
+)
+from yomihime_sdk.api.version import (
+    COMPATIBLE_CONTRACT_VERSIONS as COMPATIBLE_CONTRACT_VERSIONS,
+)
+from yomihime_sdk.api.version import (
+    CONTRACT_REVISION as CONTRACT_REVISION,
+)
+from yomihime_sdk.api.version import (
+    CONTRACT_VERSION as CONTRACT_VERSION,
+)

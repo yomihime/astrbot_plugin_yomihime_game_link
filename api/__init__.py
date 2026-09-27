@@ -1,5 +1,10 @@
-"""Public contracts for Yomihime Game Link; import types from their modules."""
+"""Compatibility re-exports for the canonical Yomihime SDK API."""
 
-from .version import CONTRACT_VERSION
+from yomihime_sdk.api import (
+    CONTRACT_VERSION as CONTRACT_VERSION,
+)
+from yomihime_sdk.api import (
+    __all__ as __all__,
+)
 
-__all__ = ["CONTRACT_VERSION"]
+from . import version as version

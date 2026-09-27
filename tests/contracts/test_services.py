@@ -155,6 +155,8 @@ class ServicesContractTests(unittest.TestCase):
             OwnershipKind.PUBLIC,
             ScheduleTrigger.PERIODIC,
             60,
+            default_interval_seconds=60,
+            interval_config_key="prices_interval",
         )
         self.assertEqual(schedule.trigger, ScheduleTrigger.PERIODIC)
         with self.assertRaises(ValueError):
@@ -181,6 +183,8 @@ class ServicesContractTests(unittest.TestCase):
                 "public",
                 ScheduleTrigger.PERIODIC,
                 60,  # type: ignore[arg-type]
+                default_interval_seconds=60,
+                interval_config_key="prices_interval",
             )
 
     def test_health_and_message_status_are_typed(self):

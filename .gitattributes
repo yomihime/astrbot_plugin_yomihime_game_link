@@ -1,0 +1,7 @@
+# Preserve the exact reviewed bytes: SDK payload pins and archive SHA-256
+# manifests include files with both LF and CRLF. Do not normalize on add/checkout.
+* -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+
+# The existing license blob is LF in Git; the reviewed wheel includes CRLF.
+# Make that checkout representation deterministic without changing its text.
+/LICENSE text eol=crlf

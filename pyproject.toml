@@ -1,3 +1,42 @@
+[build-system]
+requires = ["setuptools==80.9.0", "wheel==0.45.1"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "yomihime-module-sdk"
+version = "1.1.0"
+description = "Host-independent public contracts and resources for Yomihime modules"
+readme = "docs/module-sdk.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Typing :: Typed",
+]
+dependencies = []
+
+[tool.setuptools]
+packages = [
+  "yomihime_sdk",
+  "yomihime_sdk.api",
+  "yomihime_sdk._examples.empty_module",
+  "yomihime_sdk._examples.offline_sample",
+]
+
+[tool.setuptools.package-dir]
+yomihime_sdk = "yomihime_sdk"
+"yomihime_sdk._examples.empty_module" = "examples/empty_module"
+"yomihime_sdk._examples.offline_sample" = "examples/offline_sample"
+
+[tool.setuptools.package-data]
+yomihime_sdk = ["py.typed"]
+"yomihime_sdk._examples.empty_module" = ["manifest.json", "module.py", "README.md"]
+"yomihime_sdk._examples.offline_sample" = ["manifest.json", "module.py", "README.md"]
+
 [tool.ruff]
 target-version = "py312"
 line-length = 88

@@ -1,0 +1,358 @@
+{
+  "schema_version": 1,
+  "package_id": "offline_sample",
+  "package_version": "1.0.0",
+  "contract_version": "1.1.0",
+  "author": "Yomihime SDK example",
+  "license": "MIT",
+  "source": "https://example.invalid/yomihime/offline-sample",
+  "modules": [
+    {
+      "module_id": "status",
+      "route": "sample",
+      "category": "platform",
+      "factory_entry": "module:Factory",
+      "module_version": "1.0.0",
+      "capabilities": [
+        {
+          "capability_id": "status",
+          "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+            "additionalProperties": false
+          },
+          "invocation_policy": "natural_language_allowed",
+          "effect": "read_only"
+        },
+        {
+          "capability_id": "from_source",
+          "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+            "additionalProperties": false
+          },
+          "invocation_policy": "natural_language_allowed",
+          "effect": "read_only",
+          "required_capabilities": [
+            {
+              "module_id": "offline_sample/source",
+              "capability_id": "read"
+            }
+          ]
+        },
+        {
+          "capability_id": "configured_status",
+          "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+            "additionalProperties": false
+          },
+          "invocation_policy": "natural_language_allowed",
+          "effect": "read_only",
+          "required_config": ["region"]
+        },
+        {
+          "capability_id": "account_bind",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "provider": {"type": "string"},
+              "subject": {"type": "string"}
+            },
+            "required": ["provider", "subject"],
+            "additionalProperties": false
+          },
+          "invocation_policy": "command_only",
+          "effect": "write"
+        },
+        {
+          "capability_id": "account_list",
+          "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+            "additionalProperties": false
+          },
+          "invocation_policy": "command_only",
+          "effect": "read_only"
+        },
+        {
+          "capability_id": "account_unbind",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "binding_id": {"type": "string"},
+              "expected_revision": {"type": "integer", "minimum": 1}
+            },
+            "required": ["binding_id", "expected_revision"],
+            "additionalProperties": false
+          },
+          "invocation_policy": "command_only",
+          "effect": "write"
+        },
+        {
+          "capability_id": "subscription_create",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "type_id": {
+                "type": "string",
+                "enum": ["public_watch", "private_watch"]
+              },
+              "region": {"type": "string"},
+              "minimum": {"type": "integer", "minimum": 0},
+              "mode": {"type": "string", "enum": ["instant", "digest"]},
+              "digest_time": {"type": "string"}
+            },
+            "required": ["type_id", "region", "minimum", "mode"],
+            "additionalProperties": false
+          },
+          "invocation_policy": "command_only",
+          "effect": "write"
+        },
+        {
+          "capability_id": "subscription_list",
+          "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+            "additionalProperties": false
+          },
+          "invocation_policy": "command_only",
+          "effect": "read_only"
+        },
+        {
+          "capability_id": "subscription_cancel",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "subscription_id": {"type": "string"},
+              "expected_revision": {"type": "integer", "minimum": 1}
+            },
+            "required": ["subscription_id", "expected_revision"],
+            "additionalProperties": false
+          },
+          "invocation_policy": "command_only",
+          "effect": "write"
+        },
+        {
+          "capability_id": "private_status",
+          "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+            "additionalProperties": false
+          },
+          "invocation_policy": "command_only",
+          "effect": "read_only",
+          "privacy_floor": "private"
+        }
+      ],
+      "commands": [
+        {
+          "operation_path": "status",
+          "capability_id": "status",
+          "parameter_mapping": {},
+          "help_text": "Show the offline sample status."
+        },
+        {
+          "operation_path": "from source",
+          "capability_id": "from_source",
+          "parameter_mapping": {},
+          "help_text": "Read a public capability through a declared dependency."
+        },
+        {
+          "operation_path": "configured",
+          "capability_id": "configured_status",
+          "parameter_mapping": {},
+          "help_text": "Show the sample after its required region is configured."
+        },
+        {
+          "operation_path": "account bind",
+          "capability_id": "account_bind",
+          "parameter_mapping": {"provider": "provider", "subject": "subject"},
+          "help_text": "Bind a default sample identity."
+        },
+        {
+          "operation_path": "account list",
+          "capability_id": "account_list",
+          "parameter_mapping": {},
+          "help_text": "List this user's sample bindings."
+        },
+        {
+          "operation_path": "account unbind",
+          "capability_id": "account_unbind",
+          "parameter_mapping": {
+            "binding_id": "binding_id",
+            "expected_revision": "expected_revision"
+          },
+          "help_text": "Remove one of this user's sample bindings."
+        },
+        {
+          "operation_path": "subscription create",
+          "capability_id": "subscription_create",
+          "parameter_mapping": {
+            "type_id": "type_id",
+            "region": "region",
+            "minimum": "minimum",
+            "mode": "mode",
+            "digest_time": "digest_time"
+          },
+          "help_text": "Create a public or authorized sample subscription."
+        },
+        {
+          "operation_path": "subscription list",
+          "capability_id": "subscription_list",
+          "parameter_mapping": {},
+          "help_text": "List this user's sample subscriptions."
+        },
+        {
+          "operation_path": "subscription cancel",
+          "capability_id": "subscription_cancel",
+          "parameter_mapping": {
+            "subscription_id": "subscription_id",
+            "expected_revision": "expected_revision"
+          },
+          "help_text": "Cancel one of this user's sample subscriptions."
+        },
+        {
+          "operation_path": "private status",
+          "capability_id": "private_status",
+          "parameter_mapping": {},
+          "help_text": "Check authorized private sample access."
+        }
+      ],
+      "tools": [
+        {
+          "name": "sample_status",
+          "capability_id": "status",
+          "parameter_mapping": {},
+          "description": "Return a fixed offline SDK sample status."
+        },
+        {
+          "name": "sample_from_source",
+          "capability_id": "from_source",
+          "parameter_mapping": {},
+          "description": "Return one public source capability through the declared dependency."
+        }
+      ],
+      "schedules": [
+        {
+          "collector_id": "public_catalog",
+          "key_version": 1,
+          "source_id": "offline",
+          "data_version": 1,
+          "input_schema": {
+            "type": "object",
+            "properties": {"region": {"type": "string"}},
+            "required": ["region"],
+            "additionalProperties": false
+          },
+          "shared_scope": "public",
+          "trigger": "periodic",
+          "minimum_interval_seconds": 60,
+          "default_interval_seconds": 60,
+          "interval_config_key": "sample_interval"
+        },
+        {
+          "collector_id": "private_catalog",
+          "key_version": 1,
+          "source_id": "offline",
+          "data_version": 1,
+          "input_schema": {
+            "type": "object",
+            "properties": {"region": {"type": "string"}},
+            "required": ["region"],
+            "additionalProperties": false
+          },
+          "shared_scope": "authorized",
+          "trigger": "periodic",
+          "minimum_interval_seconds": 60,
+          "default_interval_seconds": 60,
+          "interval_config_key": "sample_interval"
+        }
+      ],
+      "subscriptions": [
+        {
+          "type_id": "public_watch",
+          "collector_id": "public_catalog",
+          "matcher_id": "sample_matcher",
+          "filter_schema": {
+            "type": "object",
+            "properties": {"minimum": {"type": "integer", "minimum": 0}},
+            "required": ["minimum"],
+            "additionalProperties": false
+          },
+          "notification_modes": ["instant", "digest"]
+        },
+        {
+          "type_id": "private_watch",
+          "collector_id": "private_catalog",
+          "matcher_id": "sample_matcher",
+          "filter_schema": {
+            "type": "object",
+            "properties": {"minimum": {"type": "integer", "minimum": 0}},
+            "required": ["minimum"],
+            "additionalProperties": false
+          },
+          "notification_modes": ["instant", "digest"]
+        }
+      ],
+      "config_fields": [
+        {
+          "name": "region",
+          "sensitive": false,
+          "required": true,
+          "description": "Required to enable the configured sample capability."
+        },
+        {
+          "name": "sample_interval",
+          "sensitive": false,
+          "required": false,
+          "default": 60,
+          "description": "A bounded example collection interval in seconds."
+        }
+      ],
+      "sources": [
+        {
+          "source_id": "offline",
+          "host": "offline.invalid",
+          "timeout_seconds": 1,
+          "requests_per_minute": 60
+        }
+      ]
+    },
+    {
+      "module_id": "source",
+      "route": "source",
+      "category": "platform",
+      "factory_entry": "module:SourceFactory",
+      "module_version": "1.0.0",
+      "capabilities": [
+        {
+          "capability_id": "read",
+          "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+            "additionalProperties": false
+          },
+          "invocation_policy": "natural_language_allowed",
+          "effect": "read_only"
+        }
+      ],
+      "commands": [
+        {
+          "operation_path": "read",
+          "capability_id": "read",
+          "parameter_mapping": {},
+          "help_text": "Read the fixed offline source value."
+        }
+      ],
+      "tools": []
+    }
+  ]
+}
