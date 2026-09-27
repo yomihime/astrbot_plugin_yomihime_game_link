@@ -34,6 +34,13 @@ jobs:
           python -m pip install --disable-pip-version-check
           setuptools==80.9.0 wheel==0.45.1 ruff==0.12.0 tzdata==2025.2
 
+      - name: Build Linux SDK wheel for diagnostics
+        env:
+          SOURCE_DATE_EPOCH: "315532800"
+        run: >-
+          python -m pip wheel --no-index --no-deps --no-build-isolation
+          --no-cache-dir --wheel-dir dist .
+
       - name: Run unit tests
         run: python -m unittest discover -s tests -t . -v
 
@@ -42,6 +49,15 @@ jobs:
 
       - name: Check formatting
         run: ruff format --check .
+
+      - name: Upload Linux SDK wheel diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdk-build-diagnostics-${{ github.run_id }}
+          path: dist/*.whl
+          if-no-files-found: ignore
+          retention-days: 7
 
   build:
     needs: verify
