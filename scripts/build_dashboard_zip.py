@@ -45,16 +45,30 @@ EXPECTED_WHEEL_ENTRIES = {
 PACKAGE_ENTRY_NAMES = {
     name for name in EXPECTED_WHEEL_ENTRIES if name.startswith("yomihime_sdk/")
 }
-ROOT_FILES = ("main.py", "__init__.py", "metadata.yaml")
+ROOT_FILES = ("main.py", "__init__.py", "metadata.yaml", "logo.png", "LICENSE")
 RUNTIME_DIRS = (
     "adapters",
     "api",
     "core",
+    "extensions",
     "services",
     "infrastructure",
     "presentation",
 )
 ALLOWED_SUFFIXES = {".py", ".sql"}
+EXCLUDED_RUNTIME_DIRS = {
+    "__pycache__",
+    ".cache",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    "cache",
+    "caches",
+    "data",
+    "instance",
+    "local-data",
+    "local_data",
+}
 
 
 def _sha256(data: bytes) -> str:
@@ -211,7 +225,8 @@ def _runtime_files(directory: Path, repository_root: Path) -> list[Path]:
             resolved = validate_source_path(entry, repository_root, "Runtime source")
             metadata = resolved.stat()
             if stat.S_ISDIR(metadata.st_mode):
-                pending.append(resolved)
+                if entry.name not in EXCLUDED_RUNTIME_DIRS:
+                    pending.append(resolved)
             elif stat.S_ISREG(metadata.st_mode):
                 if resolved.suffix in ALLOWED_SUFFIXES:
                     found.append(resolved)

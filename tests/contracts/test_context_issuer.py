@@ -1,7 +1,8 @@
 """The invocation view itself is never proof of a trusted origin."""
 
+import math
 import unittest
-from dataclasses import replace
+from dataclasses import FrozenInstanceError, replace
 from typing import get_type_hints
 
 from ygl_test_subject.api.contexts import (
@@ -466,3 +467,51 @@ class ContextIssuerTests(unittest.TestCase):
                     "grant_revision": 1,
                 }
             )
+
+
+class InvocationViewContractTests(unittest.TestCase):
+    def test_valid_context_and_optional_references(self) -> None:
+        view = InvocationView(
+            "request.1",
+            InvocationOrigin.SCHEDULER,
+            None,
+            "conversation.1",
+            "yomihime/catalog",
+            2,
+            3,
+            12.5,
+            grant_id="grant.1",
+            grant_revision=4,
+            subscription_id="sub.1",
+            subscription_revision=5,
+        )
+        self.assertEqual(12.5, view.deadline)
+        with self.assertRaises(FrozenInstanceError):
+            view.origin = InvocationOrigin.COMMAND  # type: ignore[misc]
+
+    def test_context_rejects_forged_values_and_unpaired_references(self) -> None:
+        base = (
+            "5c2da6e2-1d19-4f08-ab24-62eff2810024",
+            InvocationOrigin.COMMAND,
+            "123456",
+            None,
+            "yomihime/catalog",
+            1,
+            1,
+        )
+        for deadline in (0, -1.0, math.inf, math.nan, True):
+            with self.subTest(deadline=deadline):
+                with self.assertRaises((TypeError, ValueError)):
+                    InvocationView(*base, deadline=deadline)
+        with self.assertRaises(TypeError):
+            InvocationView(*base, module_epoch=True)
+        with self.assertRaises(ValueError):
+            InvocationView(*base, grant_id="grant.1")
+        with self.assertRaises(ValueError):
+            InvocationView(*base, subscription_revision=1)
+        with self.assertRaises(ValueError):
+            InvocationView("bad\x00id", *base[1:])
+        for module_id in ("pkg./module", "pkg/module.", "pkg-/module"):
+            with self.subTest(module_id=module_id):
+                with self.assertRaises(ValueError):
+                    InvocationView(*base[:4], module_id, *base[5:])

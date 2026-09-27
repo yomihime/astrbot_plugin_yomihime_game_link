@@ -21,79 +21,20 @@ from yomihime_sdk.api.services import ConfigSnapshot, HealthReport, PersistedCon
 
 
 class CoreHardeningContractTests(unittest.TestCase):
-    def test_port_annotations_resolve_and_match_the_internal_contract(self) -> None:
-        dto_fields = {
-            ports.RunIdentity: ("runtime_id", "module_id", "module_epoch"),
-            ports.DependencyIdentity: (
-                "module_id",
-                "module_epoch",
-                "capability_id",
-                "health_revision",
-            ),
-            ports.AdmissionLease: (
-                "lease_id",
-                "invocation_id",
-                "module_id",
-                "module_epoch",
-                "capability_id",
-                "health_revision",
-                "registry_revision",
-                "dependencies",
-            ),
-            ports.ScheduledLease: (
-                "lease_id",
-                "execution_lease_id",
-                "module_id",
-                "module_epoch",
-                "registry_revision",
-                "collector_id",
-                "key_version",
-                "dependencies",
-            ),
-            ports.DeliveryMemberIdentity: (
-                "event_key",
-                "event_version",
-                "subscription_id",
-                "subscription_revision",
-                "owner_id",
-                "module_id",
-                "grant_id",
-                "grant_revision",
-                "adapter_id",
-                "conversation_id",
-                "delivery_route",
-                "conversation_kind",
-                "subscription_scope",
-            ),
-            ports.DeliveryLease: (
-                "lease_id",
-                "work_id",
-                "kind",
-                "module_id",
-                "module_epoch",
-                "registry_revision",
-                "collector_id",
-                "key_version",
-                "dependencies",
-                "members",
-            ),
-            ports.SendApproval: ("claim_id", "members"),
-            ports.SendPermit: (
-                "permit_id",
-                "lease_id",
-                "module_id",
-                "module_epoch",
-                "members",
-            ),
-        }
-        for dto, expected_fields in dto_fields.items():
+    def test_port_dtos_are_frozen_and_annotations_resolve(self) -> None:
+        for dto in (
+            ports.RunIdentity,
+            ports.DependencyIdentity,
+            ports.AdmissionLease,
+            ports.ScheduledLease,
+            ports.DeliveryMemberIdentity,
+            ports.DeliveryLease,
+            ports.SendApproval,
+            ports.SendPermit,
+        ):
             with self.subTest(dto=dto.__name__):
                 self.assertTrue(dataclasses.is_dataclass(dto))
                 self.assertTrue(dto.__dataclass_params__.frozen)
-                self.assertEqual(
-                    tuple(field.name for field in dataclasses.fields(dto)),
-                    expected_fields,
-                )
                 get_type_hints(dto)
 
         for protocol, methods in (

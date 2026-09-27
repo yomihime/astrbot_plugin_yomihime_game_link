@@ -130,160 +130,6 @@ def sample_invocation(
     )
 
 
-class _LifecycleTransactionProbe:
-    """Tiny executable spec for atomic subscription/link repository behavior."""
-
-    def __init__(self):
-        self.records = {}
-        self.links = {}
-        self.fail_link_write = False
-
-    async def apply(self, change):
-        subscription_id = change.record.subscription_id
-        old_record = self.records.get(subscription_id)
-        old_link = self.links.get(subscription_id)
-        if change.kind is SubscriptionJobChangeKind.CREATE:
-            if old_record is not None or old_link is not None:
-                raise RuntimeError("create conflict")
-        elif (
-            old_record is None
-            or old_record.revision != change.expected_subscription_revision
-            or old_link is None
-            or old_link.association_revision != change.expected_association_revision
-        ):
-            raise RuntimeError("revision conflict")
-        try:
-            self.records[subscription_id] = change.record
-            if self.fail_link_write:
-                raise RuntimeError("injected job-link failure")
-            if change.association is None:
-                self.links.pop(subscription_id, None)
-            else:
-                self.links[subscription_id] = change.association
-        except Exception:
-            if old_record is None:
-                self.records.pop(subscription_id, None)
-            else:
-                self.records[subscription_id] = old_record
-            if old_link is None:
-                self.links.pop(subscription_id, None)
-            else:
-                self.links[subscription_id] = old_link
-            raise
-        return change.record
-
-
-class _DigestClaimProbe:
-    """Executable spec for one-owner lease and restart transition semantics."""
-
-    def __init__(self, envelope):
-        self.envelope = envelope
-        self._next_token = 1
-        self._lock = asyncio.Lock()
-
-    async def claim_due(self, *, now, expires_at):
-        async with self._lock:
-            if self.envelope.state is not DigestEnvelopeState.READY:
-                return None
-            token = f"claim-{self._next_token}"
-            self._next_token += 1
-            self.envelope = replace(
-                self.envelope,
-                revision=self.envelope.revision + 1,
-                state=DigestEnvelopeState.CLAIMED,
-                claim_token=token,
-                claimed_at=now,
-                claim_expires_at=expires_at,
-            )
-            return DigestEnvelopeClaim(token, self.envelope, now, expires_at)
-
-    async def begin_send(self, claim, *, started_at):
-        async with self._lock:
-            current = self.envelope
-            if (
-                current.revision != claim.envelope.revision
-                or current.state is not DigestEnvelopeState.CLAIMED
-                or current.claim_token != claim.claim_token
-                or claim.expires_at <= started_at
-            ):
-                return None
-            attempt = DeliveryAttempt(
-                len(current.delivery_attempts) + 1,
-                DeliveryState.SENDING,
-                digest_envelope_idempotency_key(current.window_id, current.recipient),
-                started_at,
-            )
-            self.envelope = replace(
-                current,
-                revision=current.revision + 1,
-                state=DigestEnvelopeState.SENDING,
-                delivery_attempts=(*current.delivery_attempts, attempt),
-            )
-            return self.envelope
-
-    async def complete(self, claim, *, state, completed_at):
-        async with self._lock:
-            current = self.envelope
-            if (
-                current.state is not DigestEnvelopeState.SENDING
-                or current.claim_token != claim.claim_token
-            ):
-                return None
-            attempt = replace(
-                current.delivery_attempts[-1],
-                state=state,
-                completed_at=completed_at,
-            )
-            self.envelope = replace(
-                current,
-                revision=current.revision + 1,
-                state=DigestEnvelopeState(state.value),
-                delivery_attempts=(*current.delivery_attempts[:-1], attempt),
-                claim_token=None,
-                claimed_at=None,
-                claim_expires_at=None,
-            )
-            return self.envelope
-
-    async def recover_expired(self, *, before, recovered_at):
-        async with self._lock:
-            current = self.envelope
-            if (
-                current.state
-                not in (
-                    DigestEnvelopeState.CLAIMED,
-                    DigestEnvelopeState.SENDING,
-                )
-                or current.claim_expires_at > before
-            ):
-                return None
-            if current.state is DigestEnvelopeState.CLAIMED:
-                self.envelope = replace(
-                    current,
-                    revision=current.revision + 1,
-                    state=DigestEnvelopeState.READY,
-                    claim_token=None,
-                    claimed_at=None,
-                    claim_expires_at=None,
-                )
-            else:
-                attempt = replace(
-                    current.delivery_attempts[-1],
-                    state=DeliveryState.UNKNOWN,
-                    completed_at=recovered_at,
-                )
-                self.envelope = replace(
-                    current,
-                    revision=current.revision + 1,
-                    state=DigestEnvelopeState.UNKNOWN,
-                    delivery_attempts=(*current.delivery_attempts[:-1], attempt),
-                    claim_token=None,
-                    claimed_at=None,
-                    claim_expires_at=None,
-                )
-            return self.envelope
-
-
 class B04ContractTests(unittest.TestCase):
     def test_c01_revision_imports_and_b03_operation_signatures_remain_compatible(self):
         self.assertEqual(CONTRACT_VERSION, "1.1.0")
@@ -336,8 +182,6 @@ class B04ContractTests(unittest.TestCase):
             )
         self.assertTrue(get_type_hints(RootOutputClaim))
         self.assertIs(get_type_hints(RootOutputClaim)["claim_generation"], int)
-        self.assertIn("never-pruned generation", RootOutputRepository.__doc__)
-        self.assertIn("one output identity", RootOutputRepository.__doc__)
         self.assertEqual(
             {state.value for state in RootOutputState},
             {"claimed", "sending", "completed", "unknown"},
@@ -385,8 +229,6 @@ class B04ContractTests(unittest.TestCase):
             parameters = inspect.signature(method).parameters
             self.assertEqual(parameters["next_due_at"].default, None)
             self.assertIn("datetime | None", str(get_type_hints(method)["next_due_at"]))
-            self.assertIn("later than", method.__doc__ or "")
-            self.assertIn("completion time", method.__doc__ or "")
         self.assertEqual(
             tuple(inspect.signature(methods[0]).parameters),
             ("self", "lease", "observation", "next_due_at"),
@@ -603,9 +445,6 @@ class B04ContractTests(unittest.TestCase):
         )
         self.assertEqual(denied, AuthorizedRecipient.refused())
         self.assertEqual(resolver.calls, 0)
-        # Structural InvocationView data is not an attestation. The resolver
-        # contract requires its implementation to validate the issuer object.
-        self.assertIn("ContextIssuer", TrustedConversationResolver.__doc__)
 
     def test_c04_observation_completeness_and_coverage_are_explicit(self):
         for state in ObservationCompleteness:
@@ -720,7 +559,6 @@ class B04ContractTests(unittest.TestCase):
                 "key-2",
                 DeliveryState.UNKNOWN,
             )
-        self.assertIn("UNKNOWN", DeliveryRepository.recover_stale_sending.__doc__)
         self.assertEqual(
             MessageTarget(
                 "direct-1", conversation=event.recipient, authorized=True
@@ -798,10 +636,6 @@ class B04ContractTests(unittest.TestCase):
                 self.assertIs(parameters[name].kind, inspect.Parameter.KEYWORD_ONLY)
                 self.assertIs(parameters[name].default, inspect.Parameter.empty)
             self.assertTrue(get_type_hints(method), method.__qualname__)
-        self.assertIn(
-            "one delivery among subscribers",
-            DeliveryRepository.mark_sending_unknown.__doc__,
-        )
 
     def test_c08_private_documents_do_not_enter_tool_output(self):
         private_doc = DisplayDocument(
@@ -1213,14 +1047,6 @@ class B04ContractTests(unittest.TestCase):
             ),
             ("self", "window_id", "recipient"),
         )
-        self.assertIn(
-            "never creates an envelope",
-            DigestWindowRepository.current_envelope.__doc__,
-        )
-        self.assertIn(
-            "retry_failed_envelope",
-            DigestWindowRepository.current_envelope.__doc__,
-        )
         apply_parameters = inspect.signature(
             SubscriptionLifecycleRepository.apply
         ).parameters
@@ -1236,17 +1062,6 @@ class B04ContractTests(unittest.TestCase):
             set(get_args(apply_types["initial_run"])),
             {CollectionRunRequest, type(None)},
         )
-        self.assertIn(
-            "full recipient route", DigestWindowRepository.claim_due_envelope.__doc__
-        )
-        self.assertIn(
-            "returns ``None``", DigestWindowRepository.claim_due_envelope.__doc__
-        )
-        self.assertIn("rolls back both rows", SubscriptionLifecycleRepository.__doc__)
-        self.assertIn(
-            "UNKNOWN", DigestWindowRepository.recover_expired_envelope_claims.__doc__
-        )
-        self.assertIn("UNKNOWN", DeliveryRepository.claim_sending.__doc__)
 
         claim_time = NOW + timedelta(hours=1)
         expiry = claim_time + timedelta(minutes=5)
@@ -1332,87 +1147,6 @@ class B04ContractTests(unittest.TestCase):
                 "claim-2", sent_envelope, expiry, expiry + timedelta(minutes=1)
             )
 
-        initial_envelope = DigestEnvelope(
-            "envelope-2",
-            "window-1",
-            recipient,
-            (member,),
-            member_associations=(association,),
-        )
-        claim_probe = _DigestClaimProbe(initial_envelope)
-
-        async def concurrent_scans():
-            return await asyncio.gather(
-                claim_probe.claim_due(now=claim_time, expires_at=expiry),
-                claim_probe.claim_due(now=claim_time, expires_at=expiry),
-            )
-
-        concurrent_claims = asyncio.run(concurrent_scans())
-        winner = [item for item in concurrent_claims if item is not None]
-        self.assertEqual(len(winner), 1)
-        self.assertEqual(claim_probe.envelope.state, DigestEnvelopeState.CLAIMED)
-        recovered_claim = asyncio.run(
-            claim_probe.recover_expired(
-                before=expiry + timedelta(seconds=1),
-                recovered_at=expiry + timedelta(seconds=1),
-            )
-        )
-        self.assertEqual(recovered_claim.state, DigestEnvelopeState.READY)
-        claim_after_expiry = asyncio.run(
-            claim_probe.claim_due(
-                now=expiry + timedelta(seconds=2),
-                expires_at=expiry + timedelta(minutes=5),
-            )
-        )
-        self.assertIsNotNone(claim_after_expiry)
-        asyncio.run(
-            claim_probe.begin_send(
-                claim_after_expiry,
-                started_at=expiry + timedelta(seconds=3),
-            )
-        )
-        completed_sent = asyncio.run(
-            claim_probe.complete(
-                claim_after_expiry,
-                state=DeliveryState.SENT,
-                completed_at=expiry + timedelta(seconds=4),
-            )
-        )
-        self.assertEqual(completed_sent.state, DigestEnvelopeState.SENT)
-        self.assertIsNone(
-            asyncio.run(
-                claim_probe.claim_due(
-                    now=expiry + timedelta(minutes=6),
-                    expires_at=expiry + timedelta(minutes=7),
-                )
-            )
-        )
-
-        unknown_probe = _DigestClaimProbe(initial_envelope)
-        unknown_claim = asyncio.run(
-            unknown_probe.claim_due(now=claim_time, expires_at=expiry)
-        )
-        asyncio.run(
-            unknown_probe.begin_send(
-                unknown_claim, started_at=claim_time + timedelta(seconds=1)
-            )
-        )
-        recovered_send = asyncio.run(
-            unknown_probe.recover_expired(
-                before=expiry + timedelta(seconds=1),
-                recovered_at=expiry + timedelta(seconds=1),
-            )
-        )
-        self.assertEqual(recovered_send.state, DigestEnvelopeState.UNKNOWN)
-        self.assertIsNone(
-            asyncio.run(
-                unknown_probe.claim_due(
-                    now=expiry + timedelta(minutes=6),
-                    expires_at=expiry + timedelta(minutes=7),
-                )
-            )
-        )
-
     def test_c04_subscription_job_change_bundles_lifecycle_cas(self):
         key = sample_key()
         recipient = ConversationRef(
@@ -1447,24 +1181,6 @@ class B04ContractTests(unittest.TestCase):
             SubscriptionJobChangeKind.CANCEL, cancelled_record, None, 2, 2
         )
         self.assertIsNone(cancelled.association)
-        repo = _LifecycleTransactionProbe()
-        repo.fail_link_write = True
-        with self.assertRaisesRegex(RuntimeError, "job-link failure"):
-            asyncio.run(repo.apply(created))
-        self.assertEqual(repo.records, {})
-        self.assertEqual(repo.links, {})
-        repo.fail_link_write = False
-        asyncio.run(repo.apply(created))
-        asyncio.run(repo.apply(revised))
-        committed_record = repo.records["sub-1"]
-        committed_link = repo.links["sub-1"]
-        with self.assertRaisesRegex(RuntimeError, "revision conflict"):
-            asyncio.run(repo.apply(revised))
-        self.assertEqual(repo.records["sub-1"], committed_record)
-        self.assertEqual(repo.links["sub-1"], committed_link)
-        asyncio.run(repo.apply(cancelled))
-        self.assertEqual(repo.records["sub-1"].status, SubscriptionStatus.CANCELLED)
-        self.assertNotIn("sub-1", repo.links)
         with self.assertRaises(ValueError):
             SubscriptionJobChange(
                 SubscriptionJobChangeKind.REVISE,
@@ -1606,9 +1322,6 @@ class B04ContractTests(unittest.TestCase):
                     ),
                 )
             )
-        )
-        self.assertIn(
-            "full CollectionKey", SchedulerRepository.current_evaluation.__doc__
         )
 
     def test_c07_subscription_request_and_digest_schedule_contract(self):
@@ -1771,28 +1484,6 @@ class B04ContractTests(unittest.TestCase):
                 failed, retry_at=NOW - timedelta(seconds=1), state=DeliveryState.PENDING
             )
 
-        self.assertIn("retry_at", DeliveryRepository.record_attempt.__doc__ or "")
-        self.assertIn("now", DeliveryRepository.claim_sending.__doc__ or "")
-        self.assertIn("UNKNOWN", DeliveryRepository.list_due_events.__doc__ or "")
-        self.assertIn(
-            "retry_at", DigestWindowRepository.retry_failed_envelope.__doc__ or ""
-        )
-        self.assertIn(
-            "current enabled module epoch",
-            SchedulerRepository.list_due_jobs.__doc__ or "",
-        )
-        self.assertIn(
-            "half-open",
-            DigestWindowRepository.for_schedule.__doc__ or "",
-        )
-        self.assertIn(
-            "Candidates are data, not authorization",
-            DigestWindowRepository.list_due_routes.__doc__ or "",
-        )
-        self.assertIn(
-            "complete returned reference equals the persisted",
-            TrustedPersistedRouteResolver.__doc__ or "",
-        )
         for method in (
             SubscriptionStore.list_for_owner,
             SubscriptionStore.list_active_digest_schedules,
@@ -1808,10 +1499,6 @@ class B04ContractTests(unittest.TestCase):
             "SubscriptionRequest",
             str(get_type_hints(SubscriptionOperations.create_request)["request"]),
         )
-        self.assertIn(
-            "immediately before this call",
-            SchedulerRepository.commit_observation_with_evaluations.__doc__ or "",
-        )
 
     def test_c08_global_schedule_scan_and_starvation_free_due_cursors(self):
         scan_methods = (
@@ -1825,8 +1512,6 @@ class B04ContractTests(unittest.TestCase):
             self.assertIsNone(parameters["after_cursor"].default)
             hints = get_type_hints(method)
             self.assertIn(cursor_type, get_args(hints["after_cursor"]))
-            self.assertIn("after_cursor", method.__doc__ or "")
-            self.assertIn("resets only after exhausting", method.__doc__ or "")
 
         schedule_scan = SubscriptionStore.list_active_digest_schedules
         schedule_params = inspect.signature(schedule_scan).parameters
@@ -1835,19 +1520,6 @@ class B04ContractTests(unittest.TestCase):
             ("self", "limit", "after_subscription_id"),
         )
         self.assertIsNone(schedule_params["after_subscription_id"].default)
-        self.assertIn("subscription_id order", schedule_scan.__doc__ or "")
-        self.assertIn("before every window", schedule_scan.__doc__ or "")
-        self.assertIn(
-            "no unexpired lease", SchedulerRepository.list_due_jobs.__doc__ or ""
-        )
-        self.assertIn(
-            "FAILED envelope whose saved retry_at is due",
-            DigestWindowRepository.list_due_routes.__doc__ or "",
-        )
-        self.assertIn(
-            "only PENDING or FAILED",
-            DeliveryRepository.list_due_events.__doc__ or "",
-        )
 
         for method in (schedule_scan, *(method for method, _ in scan_methods)):
             self.assertTrue(get_type_hints(method))

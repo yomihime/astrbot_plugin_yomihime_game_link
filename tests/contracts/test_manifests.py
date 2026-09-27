@@ -7,7 +7,6 @@ import unittest
 from dataclasses import FrozenInstanceError
 from types import MappingProxyType
 
-from ygl_test_subject.api.contexts import InvocationOrigin, InvocationView
 from ygl_test_subject.api.manifests import (
     CapabilityDescriptor,
     CapabilityEffect,
@@ -19,7 +18,17 @@ from ygl_test_subject.api.manifests import (
     PrivacyFloor,
     ToolDescriptor,
 )
+from ygl_test_subject.api.schema import freeze_input_schema
+from ygl_test_subject.api.storage import OwnerScope, OwnershipKind
+from ygl_test_subject.api.subscriptions import (
+    CollectionKey,
+    NormalizedInput,
+    ScheduleDescriptor,
+    ScheduleTrigger,
+    SubscriptionDescriptor,
+)
 from ygl_test_subject.api.version import CONTRACT_VERSION
+from ygl_test_subject.examples.contracts import example_package
 
 
 def _capability(
@@ -193,49 +202,187 @@ class ManifestContractTests(unittest.TestCase):
             _capability(output_version="1.0.1")
 
 
-class InvocationViewContractTests(unittest.TestCase):
-    def test_valid_context_and_optional_references(self) -> None:
-        view = InvocationView(
-            "request.1",
-            InvocationOrigin.SCHEDULER,
-            None,
-            "conversation.1",
-            "yomihime/catalog",
-            2,
-            3,
-            12.5,
-            grant_id="grant.1",
-            grant_revision=4,
-            subscription_id="sub.1",
-            subscription_revision=5,
-        )
-        self.assertEqual(12.5, view.deadline)
-        with self.assertRaises(FrozenInstanceError):
-            view.origin = InvocationOrigin.COMMAND  # type: ignore[misc]
+def _schedule(
+    collector_id: str = "prices",
+    *,
+    trigger: ScheduleTrigger = ScheduleTrigger.PERIODIC,
+    minimum: float = 30,
+    default: float | None = 60,
+    config_key: str | None = "prices_interval",
+    input_schema: dict[str, object] | None = None,
+) -> ScheduleDescriptor:
+    return ScheduleDescriptor(
+        collector_id,
+        1,
+        "catalog",
+        1,
+        input_schema or {"type": "object", "properties": {}, "required": []},
+        OwnershipKind.PUBLIC,
+        trigger,
+        minimum,
+        default,
+        config_key,
+    )
 
-    def test_context_rejects_forged_values_and_unpaired_references(self) -> None:
-        base = (
-            "5c2da6e2-1d19-4f08-ab24-62eff2810024",
-            InvocationOrigin.COMMAND,
-            "123456",
-            None,
-            "yomihime/catalog",
-            1,
-            1,
-        )
-        for deadline in (0, -1.0, math.inf, math.nan, True):
-            with self.subTest(deadline=deadline):
-                with self.assertRaises((TypeError, ValueError)):
-                    InvocationView(*base, deadline=deadline)
+
+def _subscription(
+    type_id: str = "price_alert",
+    *,
+    collector_id: str = "prices",
+    filter_schema: dict[str, object] | None = None,
+    notification_modes: tuple[str, ...] = ("instant",),
+) -> SubscriptionDescriptor:
+    return SubscriptionDescriptor(
+        type_id,
+        collector_id,
+        "price_matcher",
+        filter_schema
+        or {
+            "type": "object",
+            "properties": {"threshold": {"type": "number"}},
+            "required": ["threshold"],
+        },
+        notification_modes,
+    )
+
+
+class ScheduleRegistrationTests(unittest.TestCase):
+    def test_sc01_old_manifest_and_nested_declarations_are_immutable(self) -> None:
+        old = _module()
+        self.assertEqual(old.schedules, ())
+        self.assertEqual(old.subscriptions, ())
+
+        source = {"type": "object", "properties": {}, "required": []}
+        schedule = _schedule(input_schema=source)
+        subscription = _subscription()
+        source["properties"] = {"changed": {"type": "string"}}
+        module = _module(schedules=(schedule,), subscriptions=(subscription,))
+        self.assertIsInstance(module.schedules[0].input_schema, MappingProxyType)
         with self.assertRaises(TypeError):
-            InvocationView(*base, module_epoch=True)
+            module.schedules[0].input_schema["type"] = "array"  # type: ignore[index]
+        with self.assertRaises(TypeError):
+            module.subscriptions[0].filter_schema["type"] = "array"  # type: ignore[index]
+
+    def test_sc02_rejects_duplicates_unknown_collectors_and_wrong_types(self) -> None:
+        with self.assertRaisesRegex(ValueError, "schedule collectors"):
+            _module(schedules=(_schedule(), _schedule()))
+        with self.assertRaisesRegex(ValueError, "subscriptions"):
+            _module(
+                schedules=(_schedule(),),
+                subscriptions=(_subscription(), _subscription()),
+            )
+        with self.assertRaisesRegex(ValueError, "undeclared collector"):
+            _module(
+                schedules=(_schedule(),),
+                subscriptions=(_subscription(collector_id="missing"),),
+            )
+        with self.assertRaises(TypeError):
+            _module(schedules=(object(),))  # type: ignore[arg-type]
+        with self.assertRaises(TypeError):
+            _module(subscriptions=(object(),))  # type: ignore[arg-type]
+
+    def test_sc03_periodic_defaults_are_finite_positive_and_not_below_minimum(
+        self,
+    ) -> None:
+        for changes in (
+            {"default": None},
+            {"default": 0},
+            {"default": math.inf},
+            {"default": 20, "minimum": 30},
+            {"config_key": None},
+        ):
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                _schedule(**changes)
+
+    def test_sc04_on_demand_has_no_periodic_configuration(self) -> None:
+        self.assertEqual(
+            _schedule(
+                trigger=ScheduleTrigger.ON_DEMAND,
+                default=None,
+                config_key=None,
+            ).trigger,
+            ScheduleTrigger.ON_DEMAND,
+        )
+        for changes in ({"default": 60}, {"config_key": "refresh_interval"}):
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                _schedule(
+                    trigger=ScheduleTrigger.ON_DEMAND,
+                    default=changes.get("default"),
+                    config_key=changes.get("config_key"),
+                )
+
+    def test_sc05_schedule_and_filter_schema_share_closed_object_rules(self) -> None:
         with self.assertRaises(ValueError):
-            InvocationView(*base, grant_id="grant.1")
+            _schedule(input_schema={"type": "array", "items": {"type": "string"}})
         with self.assertRaises(ValueError):
-            InvocationView(*base, subscription_revision=1)
+            _subscription(filter_schema={"type": "array", "items": {"type": "string"}})
         with self.assertRaises(ValueError):
-            InvocationView("bad\x00id", *base[1:])
-        for module_id in ("pkg./module", "pkg/module.", "pkg-/module"):
-            with self.subTest(module_id=module_id):
-                with self.assertRaises(ValueError):
-                    InvocationView(*base[:4], module_id, *base[5:])
+            _schedule(input_schema={"type": "object", "additionalProperties": True})
+        with self.assertRaises((TypeError, ValueError)):
+            _subscription(
+                filter_schema={
+                    "type": "object",
+                    "properties": {"mode": {"type": "string", "enum": [1]}},
+                }
+            )
+        with self.assertRaises(ValueError):
+            freeze_input_schema({"type": "string", "enum": ["a"], "minimum": 1})
+
+    def test_sc06_notification_filter_differences_do_not_change_public_key(
+        self,
+    ) -> None:
+        first = _subscription(notification_modes=("instant",))
+        second = _subscription(
+            type_id="price_digest",
+            filter_schema={
+                "type": "object",
+                "properties": {"threshold": {"type": "number", "minimum": 5}},
+                "required": ["threshold"],
+            },
+            notification_modes=("digest",),
+        )
+        self.assertNotEqual(first.filter_schema, second.filter_schema)
+        public_key_first = CollectionKey(
+            "example/steam",
+            "prices",
+            1,
+            "steam",
+            NormalizedInput({"app": 1}),
+            OwnerScope.public(),
+        )
+        public_key_second = CollectionKey(
+            "example/steam",
+            "prices",
+            1,
+            "steam",
+            NormalizedInput({"app": 1}),
+            OwnerScope.public(),
+        )
+        self.assertEqual(public_key_first, public_key_second)
+        private_key_first = CollectionKey(
+            "example/steam",
+            "prices",
+            1,
+            "steam",
+            NormalizedInput({"app": 1}),
+            OwnerScope.user("owner-1"),
+        )
+        private_key_second = CollectionKey(
+            "example/steam",
+            "prices",
+            1,
+            "steam",
+            NormalizedInput({"app": 1}),
+            OwnerScope.user("owner-2"),
+        )
+        self.assertNotEqual(private_key_first, private_key_second)
+
+
+class ExampleManifestContractTests(unittest.TestCase):
+    def test_example_package_resolves_its_scoped_capability(self):
+        package = example_package()
+        self.assertEqual(package.global_module_id("sample"), "example/sample")
+        module = package.modules[0]
+        self.assertEqual(
+            module.commands[0].capability_id, module.tools[0].capability_id
+        )
