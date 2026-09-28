@@ -104,6 +104,8 @@ class ReleaseBuildTests(unittest.TestCase):
                 "metadata.yaml",
                 "logo.png",
                 "LICENSE",
+                "README.md",
+                "CHANGELOG.md",
                 "extensions/disk_manifest.py",
                 "infrastructure/sqlite/migrations/0000_schema_migrations.sql",
             }

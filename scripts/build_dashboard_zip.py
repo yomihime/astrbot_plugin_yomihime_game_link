@@ -45,7 +45,15 @@ EXPECTED_WHEEL_ENTRIES = {
 PACKAGE_ENTRY_NAMES = {
     name for name in EXPECTED_WHEEL_ENTRIES if name.startswith("yomihime_sdk/")
 }
-ROOT_FILES = ("main.py", "__init__.py", "metadata.yaml", "logo.png", "LICENSE")
+ROOT_FILES = (
+    "main.py",
+    "__init__.py",
+    "metadata.yaml",
+    "logo.png",
+    "LICENSE",
+    "README.md",
+    "CHANGELOG.md",
+)
 RUNTIME_DIRS = (
     "adapters",
     "api",

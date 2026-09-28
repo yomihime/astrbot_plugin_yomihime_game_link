@@ -314,16 +314,45 @@ class SDKBootstrapTests(unittest.TestCase):
             self.assertEqual(archive.read("core/snapshot.py"), original)
         self.assertEqual(runtime_file.read_bytes(), b"changed after snapshot\n")
 
-    def test_zip_contains_exact_pinned_wheel_package_bytes(self) -> None:
+    def test_zip_contains_pinned_sdk_and_root_documents(self) -> None:
         package = validate_wheel(self.wheel)
         archive_path = self.temp_root / "assembled.zip"
         build(self.wheel, archive_path)
+        document_bytes = {
+            name: (ROOT / name).read_bytes() for name in ("README.md", "CHANGELOG.md")
+        }
+        document_text = {
+            name: data.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+            for name, data in document_bytes.items()
+        }
         with zipfile.ZipFile(archive_path) as archive:
             for name, data in package.items():
                 self.assertEqual(archive.read(name), data, name)
+            for name, data in document_bytes.items():
+                self.assertEqual(archive.read(name), data, name)
             extracted = self.temp_root / "dash-upload-arbitrary-name"
             archive.extractall(extracted)
+        for name, data in document_bytes.items():
+            document = extracted / name
+            self.assertEqual(document.read_bytes(), data, name)
+            self.assertEqual(document.read_text(encoding="utf-8"), document_text[name])
         self._run_bootstrap(extracted, "cold")
+
+        incomplete_repository = self.temp_root / "missing-readme-plugin-root"
+        incomplete_repository.mkdir()
+        for name in ROOT_FILES:
+            (incomplete_repository / name).write_bytes(b"fixture")
+        for name in RUNTIME_DIRS:
+            (incomplete_repository / name).mkdir()
+        (incomplete_repository / "README.md").unlink()
+        incomplete_archive = self.temp_root / "missing-readme.zip"
+        with self.assertRaises(FileNotFoundError):
+            build(
+                self.wheel,
+                incomplete_archive,
+                repository_root=incomplete_repository,
+            )
+        self.assertFalse(incomplete_archive.exists())
 
     def test_builder_rejects_modified_wheel_even_with_a_self_reported_digest(
         self,
