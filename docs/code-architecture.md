@@ -5,36 +5,38 @@
 
 ## 1. 文档导航
 
-**统筹 AI 从[阅读、分工与审查协议](code-architecture/orchestration.md)开始，再使用[工作包目录](code-architecture/work-packages.md)和[单任务模板](code-architecture/task-template.md)派发。** 实现者只需接收填写完整的任务卡、相关架构章节和实际公共契约，无需依赖历史聊天。
+实施顺序与当前批次见[开发计划](development-plan.md)。FF14 按用户最新决定，以模块用例驱动必要 Core 能力的逐片实现与联调；Steam/HBR 仍待整体 Core Ready Gate。各模块按[模块并行开发计划](module-development-plan.md)及其当前任务卡执行；本文保留架构职责与接口边界。
+
+**当前统筹从[内核收束总卡](../.coordination/tasks/core/CORE-HARDENING-01.md)和[看板](../.coordination/board.md)开始，按[协作协议](code-architecture/orchestration.md)执行。** [工作包导航](code-architecture/work-packages.md)与[子任务模板](code-architecture/task-template.md)用于明确职责，不再形成平行总计划。实现者接收实际接口、精确路径和验收，不依赖历史聊天。
 
 协作角色与审查要求见协作协议。主体按限定子任务开发，公共契约须先于依赖它的模块准备就绪。
 
 | 文档 | 负责内容 | 代码归属 |
 | --- | --- | --- |
 | [主体代码架构](code-architecture/core.md) | 公共 API、注册与权限、存储、展示、调度、投递、宿主和扩展包 | main.py、bootstrap.py、api/、core/、services/、presentation/、infrastructure/、integrations/、web/ |
-| [FF14 模块](code-architecture/ff14.md) | 角色、FFLogs、统计口径及可选公开资料 | modules/ff14/ |
-| [Dota 2 模块](code-architecture/dota2.md) | 玩家标识、公开资料、对局与可选赛后订阅 | modules/dota2/ |
+| [FF14 模块](code-architecture/ff14.md) | FFLogs、物品、活动日历查询与推送；按片联调补齐必要内核 | modules/ff14/ |
+| [Dota 2 模块](code-architecture/dota2.md) | 阻塞占位，等待参考插件完成后重新设计 | modules/dota2/（当前禁止创建） |
 | [Steam 平台模块](code-architecture/steam.md) | 公开身份、商品、价格与共享价格订阅 | modules/steam/ |
 | [HBR 模块](code-architecture/hbr.md) | 登录链路、账号资料、BOX、高分和公共目录 | modules/hbr/ |
 
-主体文档是公共技术契约的唯一来源。模块文档引用公共契约，只定义自己的模型、适配器、能力声明和语义，不复制主体服务接口。
+主体文档定义公共技术契约的目标语义；实际可导入声明以唯一的 `yomihime_sdk/api/` 为准，原 `api/` 是兼容转发。模块只定义自己的模型、适配器、能力声明和语义，不复制主体服务接口。
 
-当前已完成最小公共契约；文档中的目标目录与模块能力不代表已经实现。模块文件名、内部能力 ID 和集合名是建议，公共协议版本和部分来源能力仍待冻结或验证。
+当前已有大量 B02–B05 离线组件，但统一准入、实例装配与宿主链路仍需收束。文档中的目标目录与模块能力不代表全部实现；实际宿主代码在 `adapters/astrbot/`，SDK 声明在 `yomihime_sdk/api/`。模块文件名、内部能力 ID 和集合名仍为建议，来源能力与真实宿主接口需要验证。
 
 ## 2. 并行开发的文件归属
 
-各模块工作仅维护自身目录、局部 manifest.json 和自身验证材料。验证材料建议分别归属 tests/modules/<模块>/；主体公共契约验证归属 tests/contracts/，不能把模块专属样本加入共享测试配置。
+各模块工作仅维护自身目录、任务卡分配的 `yomihime.manifest.json` 和自身验证材料。验证材料建议分别归属 tests/modules/<模块>/；主体公共契约验证归属 tests/contracts/，不能把模块专属样本加入共享测试配置。
 
 下列共享文件由主体/集成维护者统一修改，模块只提出所需变更：
 
 - 公共 api/、主体服务和通用展示组件。
-- 内置包总清单 modules/manifest.json，及其他包的包级清单。
+- 安装包布局、共享包的 `yomihime.manifest.json` 及构建清单；具体路径由对应任务卡确定。
 - main.py、bootstrap.py、metadata.yaml、pyproject.toml、运行依赖文件。
 - 公共测试配置、README.md、需求文档、基本设计及主体文档。
 
 模块依赖在局部声明中记录，由集成维护者检查兼容性后汇总；不能由各模块独立修改共享依赖版本。每个模块只维护对应模块设计文档。
 
-包总清单引用模块局部清单，静态发现时主体按包根目录校验引用路径，再合并描述。局部清单不是独立安装入口，不改变“一个包可包含任意数量模块”的约束。
+当前磁盘 ABI 在每个扩展包根目录读取 `yomihime.manifest.json`，其中 `modules` 数组声明包内模块；不假定另有局部清单合并协议。FF14 源码清单到实际安装根的映射由其总卡 M0/K 任务验证，工作树路径不能替代可安装工件。
 
 ## 3. 对接方式
 

@@ -1,0 +1,715 @@
+# 如月怜的游戏连结：后续执行与验收计划（FF14/配置/页面）
+
+> 本文档是 W1 后续工作的唯一新入口和执行计划，不代表后续功能已经实施或验收。状态基线截至 2026-09-29，文档整理更新至 2026-09-30。实现前先复核本文列出的代码、宿主和来源事实；不要重开已验收的 W1 Astra 审查。
+
+**W2 当前状态：PLANNING / 待用户下达实施指令。** 用户已确认 §9.3 新模型分工，并授权提交推送已有代码及本文件等剩余文档改动。现有离线测试、静态检查和构建不构成 W2 实施/真实宿主验收；W2 页面、配置、用例和安装仍未执行，不创建 tag 或部署到用户实例。最新授权已覆盖任务计划、架构文档、看板和 C00 归档迁移；凭据、运行数据、临时产物与其它本地验收证据仍不提交。
+
+导航：[需求与 UX](#requirements-ux) · [配置设计](#config-design) · [页面设计](#page-design) · [测试设计](#test-design) · [阶段与调度](#execution-stages) · [协作协议](#collaboration-protocol) · [模型分工](#agent-models) · [文档接续](#document-inventory)。
+
+## 1. 目标与范围
+
+在现有 FF14-W1 本地实现基础上，按一个完整、可复核的真实宿主会话补齐长路径、物品、公开角色 FFLogs、日历与本人订阅的目标验收；解决由这些验收直接证明的缺陷。同步确定 AstrBot 插件配置项和插件页面的设计与可实现边界。
+
+本轮计划中的 FFLogs 产品范围只有公开角色 Logs：角色查找、公开战斗/副本排名，以及来源实际提供的 rDPS 数值与排名百分位。当前角色样本为国服 **如月怜 @ 潮风亭**。角色结果使用 FFLogs GraphQL/角色资料路径；不请求、不解析、不回退到 `statistics/table` 或统计 HTML 页面，也不开放人口统计 `output` 能力。截图中的绝本和零式排名用于确认展示类别；数值按目标查询时返回的新鲜数据核对，不要求跨时间快照数字不变。
+
+同一后续 wave 覆盖物品精确检索、活动日历查询、显式本人订阅 CRUD 与推送链路、真实 AstrBot 4.28.0 Windows 长路径安装/重启检查。UI 先冻结信息架构、字段、权限和实现路线；原生配置表单可以按确认后的宿主 schema 实施，专用管理页必须先通过 §6 所列的宿主 API 与授权门槛。
+
+<a id="requirements-ux"></a>
+
+### 1.1 需求与 UX 基线
+
+目标用户分为聊天查询/订阅用户、插件运维者和 Dashboard 浏览者；第三类身份不能自动获得前两类的个人数据或管理权限。核心任务是查公开角色、找物品、查看活动、管理本人订阅以及配置/诊断插件。§5–6 的具体布局与普通字段是设计建议，由 root 在既定范围内冻结，不冒充用户逐项批准的功能。
+
+以下编号稳定保留。P0 是主能力或安全验收前提，P1 是本轮配置/页面设计及后续交付要求；P1 不代表可以免验。所有新增/修订能力当前均为 **PLANNED / NOT RUN**，历史 W1 证据仍只覆盖原工件。§8 的 TC 是详细步骤，本表不另建重复测试体系。
+
+| 编号 / 优先级 | 来源与要求 | 依赖 / 验收条件 | 计划实现位置 → 验证 |
+| --- | --- | --- | --- |
+| REQ-01 / P0 | 用户要求：CN 公开角色 Logs，样例如月怜@潮风亭；统计网页不做 | 凭据经 Core 正式路径；显示来源实际提供的副本/职业/rDPS/排名口径和时间，缺值不编造；直连成功不能替代插件通过 | FF14 `features/fflogs.py`、Core 来源服务 → TC06–07 |
+| REQ-02 / P0 | 用户要求物品查询；ID 44091 来自给定样例。中文主源与 Garland 补充是现有来源合同 | 名称/ID 一致，多候选人工选择；主/补字段标来源，图标失败仍有文字；失败不显示成零结果 | FF14 `features/items.py`、`item_sources.py` → TC04–05 |
+| REQ-03 / P0 | 用户要求活动日历与推送；用户指出备用源不可靠 | 查询窗口/时区/采集时间明确；来源分别核验，无活动、部分、过期、失败可区分；未验证备用源不自动启用 | FF14 `features/calendar*.py`（职责描述，非扩大的写入白名单）→ TC08–09 |
+| REQ-04 / P0 | 日历推送功能来自用户需求；收件目标来自可信私聊 actor/conversation，页面不管理个人订阅沿用当前权限边界 | 可信 actor/owner、CAS、重启、去重、取消及 UNKNOWN 不重发；实收证据单列；不接受任意收件人 | FF14 `calendar_subscriptions.py`、既有 Core 调度/投递 → TC10–11 |
+| REQ-05 / P0 | 用户安装诉求与 LongPathsEnabled 报告；现有长根失败证据 | 新进程、历史长根、固定包完成安装/可信加载/重启/help；静默无模块应有明确诊断 | Windows scanner、AstrBot adapters → TC01–03 |
+| REQ-06 / P1 | 用户要求配置设计；唯一存储权威/加密引用是当前架构约束 | 普通配置走原生表单保存/重载；每区一个敏感 alias；授权与 CAS、KEEP/REPLACE/CLEAR、失败恢复有证据 | 拟议 schema/config adapter、既有 Core 配置服务 → TC12–13 |
+| REQ-07 / P1 | 用户要求页面方案；五页 IA 为本计划设计建议 | 正式 bridge、最小公共 DTO；网页查询/管理入口各自获准才启用。未接通时指引聊天，不计页面查询通过 | 拟议 `pages/ff14/`、宿主 page adapter → TC14，按 UI-A/B/C 分判 |
+| REQ-08 / P1 | 用户本轮协议要求状态、主题、窄屏、语言和键盘；文本优先为现有设计原则 | 简体中文、320px、亮暗主题、键盘焦点/label、长文本、图标失败文本降级；页面主题不改变聊天输出 | 页面组件、既有 Core presentation → TC14–15 |
+| REQ-09 / 可选边界 | Global 可选沿用当前范围，不阻断 CN；统计页、私人报告、其它游戏不做 | 未验证能力明确标注，不能以空结果表示已支持；不扩大数据/权限范围 | 清单、入口与页面能力状态 → TC07–10/14 |
+| REQ-10 / P0 准入 | 待验证假设登记：公开 Web 准入、管理 principal 映射、原生配置跳转、来源映射 | W2-0 逐项列现有接口/缺口/负例；缺失保持 BLOCKED 或指引，不伪造 COMMAND/owner/admin | Core/host 合同和 §12 → TC06-B/08/13/14 |
+
+信息架构沿用 §6 五页文字线框：概览回答“能否使用/下一步”；Logs、物品、日历各完成一个查询任务；设置区分普通项、受保护凭据与危险清除。首次进入只呈现已知状态和必要引导，不自动扫描外网。常用查询先于高级诊断，危险操作不与主按钮同等突出。
+
+关键流程：①入口→选区服/输入角色→必要时消歧→查询→看口径/来源→调整或重试；②名称/ID或日历窗口→候选/筛选→详情→明确空、部分或来源失败→调整参数/重试；③私聊本人订阅→查看当前 revision→变更/取消→回执，而运维在原生表单修改普通设置或经独立授权替换/清除凭据。凭据失败清空敏感输入，普通非敏感草稿可保留；冲突先读新 revision，绝不自动覆盖。
+
+最小假设：简体中文优先，UI 字体沿宿主，五页和布局可逆；无需逐项向用户确认。权限、隐私与迁移缺口不能用最小假设补齐。需求变更由 root 记录原因、REQ 编号、影响用例与切片版本，不为适配已有实现降低验收标准。
+
+## 2. 非目标
+
+- 不重开 W1 的 Astra 审查，也不因 FF14 后续验收把 Core Ready 标为 OPEN；全局状态继续由其正式合同单独管理。
+- 不做 FFLogs 统计网页 `output`、职业/副本人口分位对照、私人报告、用户 OAuth、角色绑定。
+- 不实现市场、招募、石之家、其它游戏或通用扩展更新/卸载能力。
+- 不把参考插件行为、静态检查、HTTP 200、插件 `activated=true`、模块目录存在或来源声明当作功能通过。
+- 不把页面权限等同于 AstrBot 管理员身份，不允许页面任意指定聊天接收人；本人订阅页面管理保持只读/不可用，直到主体提供经审查的可信 actor 与私有读写合同。
+- 用户已明确授权，root 已将 FFLogs Client ID/Secret 保存在未提交的 `.architecture-refactor/local-secrets/fflogs.credentials.json`；root 已核验 git ignore 与 Windows ACL。文件只作为本机测试输入，不属于插件配置，不随 ZIP/构建/测试归档复制，不提交、不打印、不回显，也不由插件自动发现或加载；本计划编写者不读取或修改该凭据文件，root 不得要求用户重复提供。
+- FFLogs access token、完整私人战绩或宿主登录资料不得写入仓库、普通配置、日志、测试 fixture、截图或提交。不得自动 commit、push、tag 或部署到用户目标。
+
+## 3. 已确认决策与执行不变量
+
+| 决策 | 对计划的约束 |
+| --- | --- |
+| Windows `LongPathsEnabled` 已由用户报告开启 | 这是用户报告，root 尚需在新进程/新 AstrBot 实例中复核。Windows 长路径能力还受进程 `longPathAware` manifest 影响；修改注册表或 manifest 后重启目标进程再测，见 [Microsoft 路径长度限制说明](https://learn.microsoft.com/en-us/windows/win32/fileio/maximum-file-path-limitation)。以历史失败过的 273/284 字符根验证，不因开关已开启就宣称修复；先区分 OS/进程能力、Python 文件访问、插件扫描与宿主静默信任降级。 |
+| W1 本地 Core/Module 和一次 Astra 审查已 PASS；W1 状态为 `accepted_local`，Core Ready 仍 CLOSED | 复用当前产物和证据；任何修复按新变更局部审查，不再次消耗一次整 W Astra，也不升级总体 Core Ready 状态。 |
+| 用 FFLogs 角色接口验证 `如月怜 @ 潮风亭`；角色 Logs 需要呈现截图可见的绝本/零式排名和 rDPS 语义 | 以来源响应中的字段和查询时间为准；界面标明 region、服务器、角色、指标、排名口径和来源。无数据、隐藏角色或不支持口径须清楚说明，不转换成统计页结论。 |
+| 统计网页 `output` 本期不做 | 禁止新增、调用或开放统计页查询；角色 GraphQL 成功和 HTML 403 分开记录。 |
+| item 样本以 ID `44091` 为准 | 中文名称取执行时同一已核验来源返回的规范名称，再与截图核对；截图“犎牛牛排”的字体转录歧义不阻塞 ID 验收，不要求复制截图背景或装饰。 |
+| 物品以 XIVAPI-compatible 中文来源为主；Garland Tools CN 仅作补充详情/交叉核验，用户给定页面为 `https://garlandtools.cn/db/#item/44091`，对应资料接口路径 `/db/doc/item/chs/3/44091.json`。它不是已验证的完整备用源 | W2-0 冻结具体 source map 前不把 Garland 标为自动 fallback。每个来源分别记录 URL/source ID、区域覆盖、字段范围、freshness、许可和状态；无法证明时返回明确 unavailable/partial，不用旧缓存伪装新鲜。日历备用源同样须独立核验。 |
+| 测试凭据文件与生产密钥存储分离 | root 已按授权创建 `.architecture-refactor/local-secrets/fflogs.credentials.json`，并核验 git ignore 与 Windows ACL；仅 root 的测试器显式读取。它不提交、不进 ZIP、无插件自动加载。产品运行时凭据仍经 Core `SourceCredentialService` 与 SecretStore 路径配置，页面写入需独立 AdminOperations 授权接线。 |
+| 插件配置项目和 Plugin Page UI 必须一起设计 | AstrBot 4.28.0 已核验原生 `_conf_schema.json` 和 Plugin Pages API。非秘密选项由 AstrBot 配置作为唯一权威；密钥不得用 `secret:true` 冒充加密，只能进 Core SecretStore。页面后端须验证 Core 授权，Dashboard 登录身份不等同调用者、owner 或 Core admin。 |
+| 角色/订阅权限按本人可信上下文 | 命令 CRUD 必须来源于 Core 解析的 actor/conversation；页面不得传入任意 platform、conversation、target 或 owner 字段。订阅操作只改本人记录并校验 `expected_revision`；`UNKNOWN` 投递按 Core receipt 处理，模块不自动重发。 |
+
+## 4. 当前状态、证据层与目标状态
+
+### 4.1 已有证据
+
+- W1 已有 FF14 模块、物品/日历/角色查询及订阅命令、本地 Core 能力和固定扩展工件；本地验收并不等于用户目标安装或 IM 推送通过。参见 [FF14-MVP-01](../.coordination/tasks/modules/ff14/FF14-MVP-01.md)、[W1 验收证据](../.architecture-refactor/ff14-w1-acceptance.md)及 [W1 执行记录](../.coordination/runs/FF14-W1-execution.md)。
+- 长根下曾出现 `bundled_extensions` 空目录、模块未受信任并静默降级成“无模块”；短根测试包则完成 AstrBot 4.28.0 安装、激活、重启、FF14 help/status。该差异指向长路径安装缺陷，不能由用户开启注册表选项的报告自动关闭。精确产物和过程见 [真实安装指挥记录](../.architecture-refactor/ff14-live-install-director.md)。
+- 短根真实 WebChat 中，item 与 calendar 查询都返回 `source temporarily unavailable`，尚未归因；无凭据 Logs 返回 `authentication required`；订阅清单为本人 0 条。此前未创建订阅、未做实际 source 数据校验和定时推送验收。
+- 此前获准的一次国服 FFLogs OAuth/GraphQL 角色 handler 成功，统计网页当前返回 403。塔塔露对照和另一轮角色 API 查询均证明这两条路径不能混为一谈。日志/角色样本来源和输出口径见 [FFLogs 对照记录](../.architecture-refactor/ff14-tataru-fflogs-comparison.md)。
+- 最初正式 ZIP 的 SHA-256 为 `582857923426fdfa1207a56e115b555c0610c3c4145302a30a1a4ee5d157d466`，不含两处 Windows 扫描器与 LLM 阶段修复；后续 live-test ZIP `dist/ff14-live-test/astrbot_plugin_yomihime_game_link-v0.1.2-live-test.zip` 的 SHA-256 为 `493a98ee6bae62bf3e021f114a65e7879657f9f8514f61a90d8487d7387552c0`。运行验收先确认选用当前工作树构建的包是否仍含必要修复，不复用旧正式包作为默认输入。测试包构建必须使用 allowlist，明确排除 `.architecture-refactor/local-secrets/**`。
+
+### 4.2 AstrBot 4.28.0 配置与页面事实
+
+以下内容已由 root 对照本机 AstrBot 4.28.0 官方文档与官方文档页核对。执行时若目标版本不同，重新核验。
+
+- 插件配置文档：[官方 plugin-config 指南](https://docs.astrbot.app/en/dev/star/guides/plugin-config.html)。插件根目录 `_conf_schema.json` 描述字段；AstrBot 自动生成并持久化 `data/config/<plugin_name>_config.json`，配置注入插件 constructor。字段类型包括 `string`、`text`、`int`、`float`、`bool`、`object`、`list` 等。`secret: true` 只遮罩 UI 输入，不提供加密存储，不能用于 FFLogs client secret。`ConfigItemRenderer.vue:327-332` 只实现遮罩；`astrbot_config.py:338-344` 负责 JSON 配置持久化。
+- Plugin Pages 文档：[官方 plugin-pages 指南](https://docs.astrbot.app/en/dev/star/guides/plugin-pages.html)，与本机 `docs/en/dev/star/guides/plugin-pages.md` 一致。`plugin_page_service.py:498-535` 自动发现插件根目录 `pages/<page_name>/index.html`，无需 `register_page`。AstrBot 插件详情页可打开受限 iframe；前端支持 `window.AstrBotPluginPage.ready()`、`apiGet()`、`apiPost()`、`onContext()`，相对静态资源和 hash 路由；前端不得读写 cookie、LocalStorage 或访问 parent DOM。
+- 后端可用 `context.register_web_api('/' + PLUGIN_NAME + '/...', handler, methods, desc)` 注册路由；推荐 `astrbot.api.web.request`、`json_response`、`error_response`。`context.py:705` 确有此方法。`plugins.py:166-221,379-419,866-909` 中的 plugin scope/auth 是页面/插件 API 范围校验，不等于 Core 管理权限、聊天 actor/owner 或订阅授权。
+- 配置保存路径已核验：`dashboard/services/config_service.py:998-1027` 执行 `validate_config → metadata.config.save_config → plugin_manager.reload`；没有通用热更新 hook 或配置 CAS。`plugins.py` API bridge 支持受控 GET/POST；不能假设存在 bridge PATCH。
+- 当前本插件仓库没有 `_conf_schema.json` 或 `pages/`。`main.py` 只将插件 config 交给父类，没有把它接入 CoreRuntime；目前 runtime 只读取宿主 `http_proxy`。新增 schema 字段仅会显示/保存，不会自动改变模块行为；W2-2 必须完成运行时 snapshot 接线和重载验收。
+
+### 4.3 分层验收状态
+
+| 层 | 当前判断 | 后续关闭证据 |
+| --- | --- | --- |
+| 包/依赖 | 曾有 CRC、137 entries、固定 SHA 的本地包检查 | 本轮构建包的成员、hash、依赖 pin、可加载 manifest 和文件路径长度报告 |
+| 宿主安装/注册 | 短根 4.28.0 安装激活通过；长根降级失败 | 长根新进程标准安装；插件数据中模块被信任；AstrBot 重启后模块仍注册 |
+| 命令/业务 | help/status 有真实 WebChat 回复；source 数据未通过 | item、角色、日历明确响应内容及来源/时间，不用只看 HTTP 层 |
+| 私人订阅/投递 | 仅测本人空列表；未建订阅 | 私聊本人 create/list/update/cancel、重启持久性、投递去重/UNKNOWN/拒绝越权 |
+| 自定义页面 | 未验收 | 宿主页面注册、可信读上下文、响应 DTO、错误/权限路径、可视布局与键盘检查；或按决策明确留在设计阶段 |
+| 远端用户实例 | 未验收 | 用户明确授权该目标后单独证明插件列表、模块、可见 UI/IM 回复、数据保护；隔离本机成功不代替该证据 |
+
+<a id="config-design"></a>
+
+## 5. 配置权威、配置字段与生效规则
+
+### 5.1 唯一权威与读写路径
+
+| 数据 | 唯一持久化权威 | 写入口 | Runtime 读路径 |
+| --- | --- | --- | --- |
+| 基础普通 FF14 配置 | AstrBot 生成的 `data/config/<plugin_name>_config.json` | AstrBot 原生插件配置表单；Plugin Page 不另存同一字段 | 插件 constructor 注入 config 经 adapter 做类型/范围校验后转成不可变 `FF14ConfigSnapshot`，交给 CoreRuntime/ModuleServices 只读配置视图；模块不直接读宿主 JSON |
+| Core FF14 feature gate 与生产 FFLogs credential fields | Core ConfigRepository 是普通 Core 字段权威，既有 `_ConfigurationCoordinator` 管理校验/revision；secret bytes 由 Core SecretStore 保存，`SourceCredentialService` 为模块凭据使用路径。`ConfigurationService` 仅作为模块读取 facade；不得另建协调器；普通 `_conf_schema.json` 不写这些字段 | Host adapter 经受支持 `AdminOperations.module_snapshot` / `update_config` / `set_enabled` 等操作调用；具体 `ConfigPatch`/revision 与授权上下文由 W2-0 对照现有 API 冻结 | 配置 revision 与 SecretTransition 由既有服务执行；模块只通过受限 SourceHttp/credential scope 请求，不读 secret bytes；不把私有 Core classes 暴露给页面或 SDK |
+| 本机真实验收输入 | 用户已授权且 root 已创建、检查 git ignore/Windows ACL 的 `.architecture-refactor/local-secrets/fflogs.credentials.json` | 仅 root 的受控 controller 显式读取一次；经 W2-0 已审查的管理操作写入隔离宿主 Core SecretStore | controller 的内存态仅用于同一隔离 root 的受控写入/重启/清理；正式插件查询必须自行经 `SourceCredentialService` 与 SourceHttp 使用宿主内凭据，不得直接注入 OAuth token |
+
+普通设置禁止复制进 Core ConfigRepository/SQLite 形成同字段双写。constructor config 是基础项的唯一权威；adapter 生成 `FF14ConfigSnapshot` 并向 CoreRuntime/ModuleServices 暴露只读视图。当前 `main.py` 未把父类 config 接入 Runtime，W2-2 修正此接线。配置保存已核验按 `validate_config → metadata.config.save_config → plugin_manager.reload` 生效，不设计热更新 hook。正在运行的 invocation 使用启动时快照，保存后的下一批 invocation 在宿主 reload 后用新快照。宿主保存接口没有 CAS；多标签/并发编辑可能以旧表单覆盖新值，因此要求编辑前刷新，只保留原生表单一个 writer；页面对普通项只读并跳转原生表单。
+
+原生配置表单保存普通设置并校验 schema 范围。当前确认的宿主 save 会 reload plugin；W2-2 应在 UI 明确提示保存后由 AstrBot 重载。配置切换不改写已有订阅、不改变在途调用，也不重发消息。invalid/corrupt snapshot 时 Runtime 保留当前健康快照并报告配置无效；新进程无法读取有效配置时只允许无害默认查询，订阅/秘密能力 fail closed。
+
+AstrBot config 更新没有 CAS，多标签旧表单可能覆盖新值。首版仅 native form 写基础字段，Plugin Page 显示只读 snapshot 与“保存会重载”提示，不为避免 CAS 问题而自行创建第二持久化副本。若未来页面需要写基础字段，必须调用 AstrBot 已支持的 save API，并增加 stale revision 检查；无法验证 revision 就维持页面只读。
+
+Core 已有 `services/configuration.py` 中的 `_ConfigurationCoordinator`、`ConfigurationService`，并已有 `services/source_credentials.py` 的 `SourceCredentialService`，以及 `services/admin_authorization.py`、`services/admin_facade.py`、`services/admin_operations.py`。W2 复用这些内部能力：Plugin Page 只调用经审查的宿主适配器/受支持 `AdminOperations` 合同；不能把私有服务类型直接暴露给页面或 SDK，也不能另建第二套配置协调器。W2-0 先锁定现有方法、CAS/revision、SecretStore transition、授权 principal 与错误合同；如果功能缺口确实需要扩展，必须围绕既有服务单点扩展并列明精确文件/事务语义。任何字段只能有一个持久化 authority，禁止同字段双写 AstrBot JSON 与 Core 表。跨存储逻辑无法原子提交时，拆成两个用户可见动作，或记录 pending/补偿状态，不宣称为原子事务。
+
+FFLogs 每个 region 使用一个既有敏感配置 alias：`credential_fflogs_cn` 或 `credential_fflogs_global`，各自指向一个 SecretRef。`client_id` / `client_secret` 是同一 JSON secret material 内的属性，也是页面成对输入的内容，不是两个独立的 Core 配置字段。复用 manifest、source policy 与 `SourceCredentialService` 的现有消费合同，协调 reference、revision 与 SecretStore secret bytes；任何字段迁移必须先在 W2-0 明确冻结。按既有 `SecretTransition`/receipt 合同检查跨存储事务；若不能原子完成，应使用其受支持的补偿状态表达，不自造并行 generation store。`REPLACE` 只有在完整新凭据可用且 revision 更新成功后才切换；失败保留原活动引用并补偿暂存 secret；`CLEAR` 先让 active reference 不可用，再按服务合同清理 secret，失败需报告待清理状态且不得继续用已清除凭据。
+
+宿主 Page route 使用单调递增 `config_revision`/credential revision 做 CAS；底层必须映射到 Core 既有 revision/SecretTransition 合同。API 草案如下（AstrBot bridge 支持 GET/POST，不依赖 PATCH）：
+
+```text
+GET  /<plugin_name>/ff14/admin-state
+     -> { module_enabled, subscription_gate_enabled,
+          module_revision, config_revision }
+POST /<plugin_name>/ff14/module-lifecycle
+     request: { enabled, expected_registry_revision }
+     -> { module_enabled, module_revision }
+POST /<plugin_name>/ff14/subscription-gate
+     request: { enabled, expected_config_revision }
+     -> { subscription_gate_enabled, config_revision }
+
+GET  /<plugin_name>/fflogs/credential-status
+     -> { configured, state, config_revision,
+          last_check_at?, last_error_code? }
+
+POST /<plugin_name>/fflogs/credential
+     request: { expected_revision, mode: "KEEP" | "REPLACE" | "CLEAR",
+                client_id?, client_secret? }
+     -> { configured, state, config_revision, reload_required }
+```
+
+上述 path/DTO 是本计划的 adapter 草案，不代表已经存在的插件 API。W2-0 必须将字段映射到已有 `AdminOperations`/health DTO；若当前 DTO 没有最近检查时间或错误类别，就省略相应 optional 字段，不新增平行 Core 状态表或未授权读口。
+
+路由以 `context.register_web_api('/' + PLUGIN_NAME + '/...', handler, methods, desc)` 注册。模块/订阅 gate 路由分别映射既有 `AdminOperations.module_snapshot`、`set_enabled` 和 `update_config`；credential GET 从 module snapshot/config summary 读无明文状态，POST 将 `KEEP`/`REPLACE`/`CLEAR` 转为 Core 现有 `ConfigPatch` 能表达的更新，经 `AdminOperations.update_config` + `AdminAuthorizationService` 执行并使用返回 revision。W2-0 必须核对现有接口是否覆盖敏感字段/清空/expected revision 语义，不能在 route 绕过服务直接读写数据库/SecretStore。AstrBot `require_plugin_scope` 只证明当前请求具备插件 API scope，不证明 Core admin、聊天 actor 或订阅 owner。Host adapter 必须从真实 Dashboard request/session 形成受审 principal mapping，并把每个写操作交给既有 `AdminAuthorizationService`/受支持 `AdminOperations` 检查；不得把 dashboard username、asset token、onContext 内容直接铸造成 Core 管理上下文。若 mapping 或现有 AdminOperations 无法提供本页所需的操作授权/revision 合同，页面可展示经许可的全局健康汇总，credential/gate mutation 与个人订阅详情端点必须拒绝。
+
+- `KEEP`：不带密钥正文，只读当前状态/保持当前 reference；用于未修改表单保存，不触发密钥轮换。
+- `REPLACE`：client ID/secret 只在一次受控 Dashboard POST 请求的内存中传输，不放 query、hash、cookie、LocalStorage、日志或页面状态恢复存储。既有 Core 配置/授权/凭据服务校验大小/格式后，以新 secret reference 暂存，revision 切换活动引用成功后才清理旧项。新 secret 写入或 revision 任一步失败，按既有 transition 补偿暂存项、保留旧 reference、返回脱敏错误。
+- `CLEAR`：二次确认后 CAS 移除 active reference；事务式 store 应原子移除，非事务 provider 先切换为无凭据状态、再清旧值并记录仅含 reference/generation 的清理工作。清除失败时维持可解释的 active state，不展示成功绿灯，不自动回退到旧密钥进行授权。
+- 冲突：`expected_revision` 过期返回 409 和当前 revision/state，不回显任何 secret；用户刷新后重新操作。
+- 页面关闭/请求中断：服务端按 request transaction 完成或回滚；前端清空输入框和内存字段。Core 既有凭据服务按 active reference 为后续调用提供凭据；若实现依赖 Runtime snapshot 刷新，响应须报告 `reload_required`，并由受支持的 AstrBot 流程显式 reload。不能假设存在配置热更新 hook。旧 OAuth access token 按短 TTL 作废/刷新，不持久进普通配置。
+
+### 5.2 配置字段目录
+
+下面的 internal key 是本阶段拟议名称，实际 schema JSON 形状按官方指南校验。不要增加任意 URL、鉴权 header、API endpoint 或收件人配置字段。
+
+| Key（拟议） | 中文标签 / AstrBot 类型 | 默认 / 校验 | 生效范围 | 持久化/写入口 |
+| --- | --- | --- | --- | --- |
+| `ff14_default_region` | 默认 FF14 区域 / `string` | `cn`；只接受 `cn`、`global`。国服角色是必验样本，国际服是可选测试 | 仅为省略区域时的查询提示；显式输入总是优先，且当前支持范围有限时不伪装 Global 已验收 | AstrBot plugin config；保存后按上节 reload 边界生效 |
+| `ff14_calendar_default_days` | 日历默认查询天数 / `int` | `7`；闭区间 1–30，非整数拒绝 | 只影响不带 days 的日历查询默认窗口，不改既有订阅窗口 | AstrBot plugin config |
+| `ff14_calendar_default_timezone` | 日历默认时区 / `string` | `Asia/Shanghai`；要求 `zoneinfo` 可解析的 IANA timezone | 新查询/新订阅的默认值；更新既有 subscription 必须本人执行 CAS update | AstrBot plugin config |
+| `ff14_calendar_default_delivery_time` | 新订阅每日摘要时间 / `string`/文本输入 | `08:00`；严格 `HH:MM`，24h，禁止无效分钟/小时 | 只在用户显式创建订阅时作为默认值，不自动创建或群发 | AstrBot plugin config |
+| `ff14_subscriptions_enabled` | FF14 Core module config field / `bool` | 初始 `true` 以保留 W1 已提供的本人订阅能力；Core migration 写入明确值后启用，缺失/损坏时 fail closed | `false` 时暂停所有本人订阅投递并拒绝新建；本人仍可 list/update/cancel，且不丢记录。重新启用只恢复之后的未来窗口，不补发暂停期积压 | Core ConfigRepository 是唯一 authority，既有 `_ConfigurationCoordinator` 校验/CAS、`AdminOperations.update_config` 写入、`ConfigurationService` 提供受限只读视图；不进 AstrBot普通 config。Settings 页未授权时只读，有管理授权才显示操作 |
+| FF14 模块启停 | 不建立 `_conf_schema.json` bool；读取现有 Core module lifecycle | 默认遵循当前已注册/启用状态；不额外写第二个 `ff14_module_enabled` | 仅经 Core 现有 `AdminOperations` lifecycle 操作启停。禁用停止该模块命令与调度，保留订阅记录并暂停发送；管理员重新启用后本人可继续管理，调度只恢复未来窗口、不重放过去窗口 | 现有 Core lifecycle/管理存储是唯一 authority；管理身份由 `AdminAuthorizationService` 授权；Settings 未授权时只读 |
+| 页面主题 | 不建立插件配置字段 | 优先跟随宿主注入的 `data-theme`/`isDark`，无宿主上下文时回退 `prefers-color-scheme` | 只改变受限 iframe 中的 CSS；不影响 QQ/AstrBot 聊天背景或消息输出 | 不持久化用户级主题偏好；首期无自定义主题开关 |
+| 消息输出策略 | 不建立插件配置字段 | 固定 text-first；仅在 Core renderer 与目标平台能力允许时附图 | 图片失败回退文本/链接；不承诺截图装饰或所有平台图片 | Core Renderer 能力与来源许可是唯一 authority；首期无全局强制图片选项 |
+| 物品/日历 source policy | 不建立用户可写字段 | 物品以已审核的 XIVAPI-compatible 中文主源为准；Garland 为补充详情/交叉核验；日历按 W2-0 冻结的 source map | 未审核来源不能作为自动 fallback；输出标来源、覆盖和 freshness | 受版本控制的来源 descriptor / Core 策略；不把 URL/endpoint 放入普通配置 |
+| HTTP 代理 | 不建立插件代理字段 | 沿用宿主当前 `http_proxy`；凭据部分始终脱敏 | 当前 Core transport 继承宿主代理；保存后按宿主 reload 规则生效 | 宿主配置唯一 authority；本插件只读，不另存、不回显代理 URL/凭据 |
+| 诊断/日志级别 | 不建立可切换 verbose 字段 | 固定脱敏的状态码/错误类别和必要计时，不记录 payload/secret/token | 只影响安全诊断输出；不因排障开关扩大个人数据日志 | Core 日志政策唯一 authority；首期不提供原始响应或 debug dump |
+| `credential_fflogs_cn` / `credential_fflogs_global` | 沿用 manifest 的每区一个 sensitive alias，各自绑定一个 SecretRef；`client_id` / `client_secret` 仅为同一 secret JSON 的输入属性，不新增两个 Core 字段，也不得加进 AstrBot `_conf_schema.json` | 未配置为缺失；CN 是本轮必验，Global 可选；replace 必须成对提交非空 ID/secret，长度与控制字符按既有凭据解析合同校验；密钥不回显 | 仅通过 Core `AdminOperations.update_config` 的授权配置路径写入该 alias 对应的 SecretStore 引用；`SourceCredentialService` 解析同一 blob 中的两个属性 | Core ConfigRepository 保存每区 alias 的敏感引用/元数据；Core SecretStore 保存完整 JSON material 的加密值。Plugin Page GET 只显示 `configured/state`，POST 按 revision 经 AdminOperations 更新 |
+| `ff14_source_urls` / `ff14_http_headers` / `ff14_target` / arbitrary timeout | 不向用户暴露 | 固定来源 descriptor、Core HTTP 安全上限与可信 invocation；禁止任意地址、header、recipient 或放宽 timeout | 由 Core/模块声明、宿主安全策略和可信 invocation 决定 | 不属于插件配置 |
+
+schema 字段缺失时不暗中以插件默认覆盖已保存值；可接受字段必须通过边界验证并产生安全诊断。范围错误应由原生表单拦截；即便宿主绕过前端，Runtime adapter 仍作相同拒绝/裁剪并使能力 fail closed。
+
+<a id="page-design"></a>
+
+## 6. 五页 Plugin Page 设计与用户工作流
+
+Plugin Page 是 restricted iframe 中“如月怜的游戏连结”的运行面板；页面顶栏和面包屑使用产品名，FF14 作为当前唯一已实现模块显示在模块导航/分组中。不得把未来可能添加的游戏或模块显示成已可用功能。AstrBot 原生配置表单仍是普通设置的编辑位置。五页使用中文文案、轻量信息层级和响应式卡片；不要把截图中的 QQ 聊天背景、聊天气泡、装饰或图片样式复制进 Dashboard，也不要让页面配色反向改变 AstrBot/QQ 聊天窗口。
+
+页面路由建议：`#/overview`、`#/logs`、`#/items`、`#/calendar`、`#/settings`。根目录按 `pages/<page_name>/index.html` 自动发现；可用页面 bundle 文件结构建议为 `pages/ff14/index.html`、`pages/ff14/app.js`、`pages/ff14/styles.css`（后两者为相对静态资源，不允许从本机绝对路径加载）。前端在 iframe ready 后调用 `window.AstrBotPluginPage.ready()`，读取 host context 使用 `onContext()`，API 通过 `apiGet/apiPost`；所有请求只进入同插件命名空间的 `context.register_web_api`。前端禁止 cookie/LocalStorage/parent DOM，secret 输入只留在当前组件内存并在提交/取消后清空。
+
+### 6.1 页面文字线框与状态
+
+**页一：概览（`#/overview`）**
+
+```text
+如月怜的游戏连结                             [刷新状态]
+模块：FF14（当前已实现）
+模块  已加载 / 未注册               配置  已生效 / 需重载
+FFLogs 凭据  未配置 / 可查询 / 验证失败 / 状态未知
+来源状态
+  物品：XIVAPI-compatible  最近成功 ... / 暂无记录
+  物品详情：Garland Tools CN  最近成功 ... / 未验证
+  国服日历：主源 ...   备用源 ...
+[查看活动日历]                 [查询角色 Logs]
+```
+
+状态字段包括 loading skeleton、首次访问“尚未检查”、健康“最近成功：时间/来源”、partial、“暂不可用：安全错误分类”、模块未装载/需重启、权限不足、unknown。刷新状态只读取脱敏 DTO，不触发大批量外部请求；“验证连接”若未来添加须 Core admin 授权，显示来源与 request time。
+
+**页二：角色 Logs（`#/logs`）**
+
+```text
+公开角色 Logs                                  来源：FFLogs
+区域 [国服 v] 服务器 [输入/选择] 角色 [输入角色名]
+指标 rDPS（本期固定）                         [查询]
+状态：请选择区域/服务器/角色 → 正在查询 → 结果
+角色：如月怜 @ 潮风亭（CN）     [打开 FFLogs 角色页]
+数据更新时间：...    查询指标：rDPS    公开战斗排名
+绝本  [副本名] [职业]  最佳 rDPS ...  排名百分位 ...
+零式  [副本名] [职业]  最佳 rDPS ...  排名百分位 ...
+无数据 / 角色隐藏 / 多个服务器候选 / 需要检查凭据 / 请求超时
+```
+
+服务器输入支持从已验证目录选择；存在同名歧义时出现带 region/world slug 的候选列表，必须点击一项才能查询。CN 是必验；Global 仅当当前日的目录、来源覆盖和查询都可验证时选做。错误状态分别包含参数缺失、候选待选、角色不存在/隐藏、无公开排名、认证失败、受限/限流和暂时不可用。结果逐条标注 source/更新时间/职业/指标；若排名 percentile 缺字段就显示“来源未提供”，不计算替代。角色名和报告详情仅呈现于当次响应，不写浏览历史。
+
+**页三：物品（`#/items`）**
+
+```text
+物品查询
+名称或 ID [搜索框：例 44091]                         [查找]
+候选（多项时手动选择）
+  名称 — ID — 地区/来源                               [查看]
+物品详情：来源规范名 / ID / 已知详情字段 / 来源时间
+主源：XIVAPI-compatible ...   补充详情/交叉核验：Garland Tools CN ...
+```
+
+本期稳定样本以 `44091` 为准；名称显示为 ID 同次、已核验来源返回的规范名称，并与截图核对。截图中的“犎牛牛排”字形可能受字体影响，不作为停止计划的前置，不把不确定的转录强行写入测试输入。中文查询主源为 XIVAPI-compatible；Garland Tools CN 参考 `https://garlandtools.cn/db/#item/44091` 与 `/db/doc/item/chs/3/44091.json` 仅供补充详情/交叉核验，不代表已接入整套 fallback。空输入提示、无结果、同名多候选、详情 partial、主源失败/补充字段缺失、超时/限速都有独立提示。图片图标仅为增强，图片失败不影响文本详情。
+
+**页四：活动日历与订阅入口（`#/calendar`）**
+
+```text
+活动日历
+区域 [国服 v] 日期范围 [7 天 v] 时区 [Asia/Shanghai v] [查询]
+来源：主源 ... / 备用源 ...       收集时间：...
+活动日期 | 时间 | 活动标题 | 活动区域 | 数据状态
+本人订阅：该页面无法证明当前 AstrBot Dashboard 用户就是订阅 owner。
+请在本人私聊使用：/ygl ff14 calendar subscriptions
+创建/修改/取消通过本人命令和 expected_revision 完成。
+```
+
+状态包括 loading、空窗“当前窗口暂无活动”、完整数据、partial 数据及受影响事件、stale、source A failed/source B succeeded（明确标签）、双源不可用、窗口/时区错误。页面不显示其他人的订阅，不提供订阅写按钮，不把 dashboard current user 假装成聊天 actor。本人私聊命令是本期订阅 CRUD 和推送验收入口。
+
+**页五：设置（`#/settings`）**
+
+```text
+查询默认值（由 AstrBot 插件配置表单编辑）         [打开插件设置]
+默认区域：国服       日历范围：7 天       时区：Asia/Shanghai
+新订阅默认时间：08:00
+FF14 模块：已启用 / 已禁用      [启用 / 禁用]
+本人订阅总开关：启用 / 暂停      [启用 / 暂停]
+AstrBot 保存状态：已保存 / 校验失败 / 重载后生效
+
+FFLogs 凭据（Core SecretStore；值不可读取）
+状态：未配置 / 已设置（不可读取） / 验证失败 / 状态未知
+Client ID [不回显]     Client Secret [提交替换值]
+[保留当前凭据] [替换凭据] [清除凭据]
+保存要求 Core 管理授权；Client Secret 只提交一次，之后不能读取。
+```
+
+模块禁用前显示确认：“FF14 命令与日历推送将暂停；订阅记录保留，重新启用后可由本人继续管理；暂停期间不补发。”订阅总开关的确认文案另说明：命令查询和本人 list/update/cancel 可用，仅新建与日历投递暂停。
+
+普通设置值在 Plugin Page 只读呈现，编辑跳转 AstrBot 原生配置 UI；不能为了做漂亮页面而另建表/自定义文件。只有受审 Host principal 映射并通过 `AdminAuthorizationService` 授权的管理员会看到 Core gate 写按钮：订阅 gate 经 `AdminOperations.update_config` + revision 修改，模块启停经 `AdminOperations.set_enabled` + registry revision 修改；其他页面身份只看脱敏状态。Credential card 也仅在授权与既有 Core config revision/SecretTransition 通过审查后加载表单，route 经宿主 adapter 调用受支持的 `AdminOperations`。默认操作 `KEEP`；用户选择 replace 时空输入不等于清空，需两字段有效并二次提交；clear 单独按钮与二次确认；每次提交带 `expected_revision`。成功时显示新状态、revision 和是否需重载，绝不回显或保存 secret；失败状态区分 401/403/409/5xx 且清空输入。
+
+### 6.2 中文、移动、暗色与图片
+
+- 页面所有标签/帮助/错误以简体中文优先，时间/地区/指标口径写全；小屏使用单列卡片，窗口 320px 时无横向滚动；tab/输入/候选/确认可仅用键盘完成，焦点可见，表单有 label、读屏名称，状态使用文字/图标并用颜色增强而非单独依赖颜色。
+- CSS 优先跟随宿主注入的 `data-theme`/`isDark`；无宿主上下文时才通过 `prefers-color-scheme` 适应系统暗色/亮色。主题只影响 restricted iframe 页面自己的 HTML/CSS。
+- Chat output 是另一条通道：查询结果仍由 `DisplayDocument` → Core renderer → MessagePort 输出。短信/聊天是否附图片仅由后端来源许可、Core renderer 与目标平台能力决定；图片不可用时降级成文本/链接。Plugin Page 中的图片输出设计和聊天背景/气泡主题无关，首阶段不要求复制截图装饰或保证所有平台都发送图片。
+- 图标/图片须有来源、再分发许可；未许可时用文字和可访问的 CSS/内置中性符号。图片缺失、格式不支持、消息平台不支持时保留文本查询结果。
+
+### 6.3 页面读写和错误边界
+
+只实现 UI fetch → AstrBotPluginPage.apiGet/apiPost → 插件 register_web_api → Host principal mapping → `AdminAuthorizationService`/受支持 `AdminOperations` → Core service → DTO。页面不触碰 ModuleServices、SQLite、业务 HTTP、SecretStore、AstrBot send API。Plugin scope 仅保证页面路由范围；全局健康汇总走显式 read policy，个人订阅详情不经 Dashboard 返回。Credential mutation 和 gate control 都需由 Core AdminAuthorizationService 对每次 operation 授权；Dashboard username、asset token、onContext 不能直接铸成 Core admin context。若现有合同不能安全映射 host principal，写操作保持不可用。页面 401/403 显示权限错误；409 提示刷新重试；request id 不含 query/name/secret。
+
+### 6.4 页面实现合同与 API 草案
+
+首版采用本地 HTML/CSS/ES modules，不引入前端框架、CDN、独立 Web 服务或新端口。所有静态资源随插件 ZIP 打包，路径相对；初始加载先 `bridge.ready()`，主题使用宿主注入的 `data-theme`/`isDark`，无宿主上下文时才回退系统主题。iframe 的五个 hash 路由共享导航、表单状态、错误横幅和结果组件。卸载时取消本页未完成请求/订阅；一份页面初始化不能注册多个刷新循环。
+
+以下为未来插件本地 endpoint 草案，通过 `bridge.apiGet/apiPost` 调用，不是已存在接口。具体业务方法在 W2-0 冻结后才能实现：
+
+| 方法 / 本地 endpoint | 输入与输出 | 权限、行为 |
+| --- | --- | --- |
+| GET `overview` | 模块版本/注册状态、配置生效状态、source 状态和最后检查时间 | 最小全局只读 DTO；无服务器路径、凭据内容、个人订阅、原始日志；普通刷新不访问外网 |
+| GET `settings` | 已生效普通配置、模块/gate 状态、配置存储归属、是否需重载 | 只读；默认表单写入交原生配置界面；不假造 SDK snapshot 字段 |
+| POST `queries/items` | `{query}` → 候选或物品 DTO、来源和数据状态 | 受控公开查询；不接受 source URL/header/actor/target |
+| POST `queries/character` | `{region,server,character}` → 角色/副本/职业/rDPS/排名 DTO | 只查询公开角色，禁用统计/私人接口；内容不写 URL、访问日志或持久浏览历史 |
+| POST `queries/calendar` | `{region,days,timezone}` → 活动 DTO、coverage/collected_at | 只读，不创建订阅；默认结果最多 30 天，仍受 Core 响应预算约束 |
+| GET/POST `fflogs/credential-status` / `fflogs/credential` | 使用 §5 的状态和 KEEP/REPLACE/CLEAR 合同 | 每次写入经 Core 管理授权和 CAS；GET 无密钥；仅 page scope 不足以写入 |
+| POST `modules/ff14/enabled`、`modules/ff14/subscriptions` | 显式 bool + 当前版本令牌 → 生效状态 | 拟议管理适配入口；复用 Core enable/config operation，不直接修改 DB 或广播消息 |
+
+页面公开查询需要单独冻结“Dashboard 只读入口→Core 准入/能力策略→FF14 handler→公共结果 DTO”的通路。不能伪造 `COMMAND`/聊天 actor，不能凭 `request.username` 生成聊天 OWNER，不能绕过 Core 直接调用 handler 或抓取来源。现有 `InvocationOrigin` 没有可假定的 `WEB` 类型；优先复用经过核对的既有入口模型，确需合同扩展时由唯一 Core owner 写明 ABI/兼容消费者及测试后才增加。页面查询的结果只返回当前浏览器，不能触发 MessagePort 对外发送。该入口未通过时，查询按钮禁用并给出可复制的聊天命令，不能声称页面查询已交付；已获许可的概览/配置只读页面仍可独立验收。
+
+非秘密普通设置的“打开插件设置”不硬编码一个未经验证的 Dashboard 路由。先验证受支持跳转方式；没有 bridge 导航能力时显示“返回插件详情 → 配置”的操作说明。所有 POST 校验请求格式、字段白名单、大小和请求来源；Core 授权在服务端做，不以按钮是否隐藏判断。不得把反向代理/桥接机制当作已证明防 CSRF，TC14 单独验证跨来源请求、会话过期与权限撤销。
+
+UI 默认禁止重复点击同一个未完成查询；切换输入或页签使旧响应失效，慢响应不能覆盖新查询。诊断性重试只针对明确可重试的只读失败，尊重服务端 Retry-After 与 Core 上限，不自行叠加无限重试。第一版不做定时自动外网轮询；概览刷新只读取 Core 最新状态。卡片状态统一为未检查、查询中、成功、部分结果、无数据、凭据缺失、受限、来源失败，不能以绿色“已配置”代替“连通成功”。
+
+### 6.5 UI 规格与可运行切片
+
+以下尺寸是可逆设计选择，不是宿主已有组件/API 的声明。复用 AstrBot 外壳、官方 bridge 和主题语义；iframe 内已有可复用页面组件尚不存在，只创建本切片需要的本地组件，不跨 iframe 导入宿主私有组件库，不增加框架/CDN/依赖。
+
+| 规格 | 指导与验收（REQ-06–08） |
+| --- | --- |
+| 布局 | 宽屏约 200px 左导航+内容区；小于 720px 改有 label 的原生页面选择器；320px 表单/卡片/按钮单列，长中文、URL、错误码可换行，不裁切关键结果 |
+| 主次 | 页标题、主要查询操作、结果为主；来源/口径/时间紧邻结果；诊断信息折叠；凭据清除单独危险区，二次确认。产品名使用“如月怜的游戏连结”，当前模块仅 FF14 |
+| 组件 | 导航、带 label 查询表单、候选列表、状态提示、结果卡、来源标签、确认框共用；Logs 按副本类别组织，物品候选后详情，日历按事件时间排列，设置普通只读与受保护区分开 |
+| 尺寸 | 间距 4/8/12/16/24/32px；区块间 24px，圆角 8px；标题 24/32px、分区 18/26px、正文 14/20px、辅助 12/18px；操作目标至少 40px，可见焦点，遵循宿主字体栈 |
+| 颜色/主题 | 仅在 iframe 定义背景/卡片/边框/主次文字/accent/成功/警告/错误/禁用语义变量；优先已核实宿主变量，否则按 data-theme 映射；状态必须配文字或图标，不只靠颜色 |
+| 交互 | 查询中防重复提交；换页/参数使旧请求失效；状态更新可被读屏获知，错误关联字段；确认框管理初始焦点、取消与返回焦点；不以动画承载必要信息 |
+
+| 状态 | 呈现与恢复 |
+| --- | --- |
+| 首次/尚未检查/未配置 | 说明尚无检查或缺少哪类配置，给普通设置指引；“已配置”不表示来源可达 |
+| 加载/保存中 | 文本+进度占位，禁用重复操作；界面其余导航仍可用；保存结果未确认前不显示成功 |
+| 空数据 | 仅在业务成功但无结果时出现，提供调整参数；不从来源失败推断角色不存在/私密 |
+| 部分/过期 | 标明缺字段/来源及时间；若保留旧结果必须显著标旧，不能作为本次查询成功 |
+| 失败/无权限 | 显示安全分类、可用的下一步和重试条件；服务端同样拒绝，无权限不只隐藏按钮 |
+| 保存完成/冲突 | 显示新状态与是否待重载；冲突刷新状态后显式重提。仅保留非敏感草稿，secret 在成功、失败、取消或离页后清空且不进持久存储 |
+| 尚未接通 | 查询禁用并提供确认过语法的聊天命令；剪贴板 API 受限时显示可选取文本。原生设置导航未核实时给文字步骤，不假造 URL |
+
+W2-5 分成依赖明确的三个小切片，不以整插件设计全部完成为开工前提：**UI-A** 概览/设置只读、五页导航和未接通指引；**UI-B** Core 公开 Web 入口通过后逐个启用 Logs/物品/日历；**UI-C** 可信 Core 管理授权通过后启用凭据与 gate。A 的页面可用不证明 B/C 已完成；B/C 缺前置必须列 BLOCKED。每片首版都要在稳定候选上检查实际浏览器渲染；当前全部为设计，**视觉 / 交互未验证**。
+
+## 7. 架构边界与隐私
+
+- 保持 Core 通用、FF14 领域留在 `modules/ff14/`。模块只通过唯一 `yomihime_sdk.api` 和受限 `ModuleServices` 使用 HTTP、凭据引用、持久记录、展示、订阅与投递。
+- 不在 FF14 模块直接导入 AstrBot、SQL/SQLite、文件系统 secret、requests/aiohttp 或宿主发送 API；不增加第二套 registry/runtime、后台 scheduler、来源任意 URL 输入或页面私有协议。
+- 主体接口缺口由 root 冻结公共 DTO/ABI 和白名单，交唯一 implementer 顺序完成 Core 与 FF14 切片；Core/Module 是职责边界，不是并行作者。`main.py`、共享 builder、manifest、SDK、schema 都由同一 implementer 修改。
+- OAuth 使用 client-credentials 并只查公开角色资料，不调用私人/用户端点、不请求 `includePrivateLogs`。授权材料仅由批准的秘密桥接提供；错误只给脱敏类别，不记录令牌、Authorization header、原始 OAuth 响应或含个人信息的完整响应。
+- 输入和展示限定在用户明确指定的服务器、角色、查询窗口和来源。角色查询结果应只保存必要的短期缓存；不要把用户示例角色、完整 ranking JSON 或私聊消息写入共享 fixture。
+- 页面及命令对权限拒绝、来源失败和部分结果分开处理。对本人 subscription 改动必须校验 owner + CAS revision；取消保留 delivery history；`UNKNOWN` 不自动重发。
+- 新建/更新测试宿主时只操作本轮建出的 workspace 隔离根和进程；先验证绝对根路径、进程树、端口与数据边界。远端安装、重启、凭据持久化或发 IM 需要单独按用户授权执行。
+
+<a id="test-design"></a>
+
+## 8. 详细测试设计
+
+这些是后续执行的设计，不代表本轮已运行测试。所有真实来源结果记录区域、来源 ID、请求时间、HTTP/业务状态、数据时间和结果类别；不保存响应全文或凭据。统一使用 `PASS`、`FAIL`、`NOT RUN`、`INCONCLUSIVE`、`BLOCKED`，并附证据路径和该证据能证明的层。
+
+| ID | 场景/目标 | 通过标准 | 不能据此声称 |
+| --- | --- | --- | --- |
+| T0 | 构建唯一测试工件 | manifest、模块、schema、依赖均在包内；记录 SHA-256、entry count、固定 SDK pin；两处既有修复在内；路径清单包含最长成员 | 文件打包成功不等于 AstrBot 信任/加载 |
+| T1 | 新进程长路径验证 | 记录新进程读到的 LongPathsEnabled 值、AstrBot 进程 manifest 是否 `longPathAware` 和 Python/OS 版本；用历史失败的 273/284 字符根完成安全扫描、目录操作、安装解包和资源访问；不能静默得到空 extension root；重启后模块仍信任并注册 | 用户报告注册表已开、短根安装、一个 mkdir 探针不能证明目标长根修复 |
+| T2 | AstrBot 标准安装与可见命令 | 隔离 AstrBot 4.28.0 的实际插件列表/日志、restart 后 activated 状态；新会话 `/ygl help` 和 `/ygl ff14 status` 得到业务成功 `plain` + 正常终结事件，正文列出 FF14 命令/真实模块状态；报告宿主版本、根路径、构建 hash | HTTP 200、JSON `status:error`、SSE `error`、activated 或 process readiness 均不能证明安装/命令成功；本地隔离实例不代表用户远端部署 |
+| T3 | 物品中文名和 ID | ID `44091` 为稳定验收键；显示执行时同一已核验来源返回的规范名，并与截图核对；精确截图转录不阻断 ID 验收 | 成功访问一个来源不证明另一个来源、价格或全部详情可信 |
+| T4 | 物品多候选/失败/降级 | 用一个可重复的歧义输入、ID miss、429/超时/部分字段受控情形；用户看到候选选择和明确 source error；XIVAPI-compatible 是中文主源，Garland 只提供经 W2-0 冻结字段范围内的补充/交叉核验，不启用整套自动 fallback | 缓存命中不能掩盖当前来源不可用；Garland 补充链接不能直接记为整套 fallback |
+| T5 | FFLogs 公开角色 Logs | 用 `cn / 潮风亭 / 如月怜` 经 OAuth client-credentials 后调用角色 GraphQL；显示同一角色的公开排名结果、绝本与零式类别（源有数据时）、rDPS 与 percentile 的真实来源字段、时间和 profile URL；明确区分“百分位排名”与“统计网页人口分位” | OAuth 200 不等于角色查询成功；GraphQL 角色成功不等于统计 HTML 可用，也不允许访问私有报告 |
+| T6 | FFLogs 失败边界 | 缺失/失效凭据、隐藏角色、角色/服务器歧义、空排名、unsupported metric、timeout、限流、GraphQL errors 均返回有区分的脱敏提示；确认未请求统计 HTML/table 和私人端点 | 不把所有失败统称“FFLogs 不通”；未提供凭据路径不能验证授权角色结果 |
+| T7 | 日历双来源 | CN 必验、Global 可选；记录各 region 主源与备用源身份、状态码、覆盖窗口、完整性和 collected_at；验证主源/备源/双失败/partial | 当前备用源不可靠；代码尝试 URL 或旧缓存不构成来源可用证明 |
+| T8 | 日历来源 freshness/recurrence | 验证活动窗口、时区与日期边界、取消/partial、重复规则、全天 DTEND；来源不完整不得推断活动取消；过期数据必须标 stale/unknown | 解析器单测不证明真实日历源新鲜、完整或许可可用 |
+| T9 | 本人订阅 CRUD | 可信本人私聊 create → list → update with current revision → stale-revision conflict → cancel；他人 ID、群聊或任意 target 拒绝 | PRIVATE 回执文案不单独证明 owner 判定；群消息中成功也不是本人权限证明 |
+| T10 | 重启/持久状态与推送 | AstrBot/插件重启后本人订阅保留且行为一致；测试日报时间窗口、重复事件 key、重复 collector、取消后不投递；对受控 send 结果包括 `UNKNOWN` 验证不自动重建/重发，并能由 Core receipt 作出可审计解释 | Scheduler fake time 通过不证明 AstrBot真实周期；排队不等于用户收到 |
+| T11 | 配置权威与 Runtime 注入 | Native settings validate/save/reload 已核验；测试默认值、边界、错误类型及 main.py 到 Runtime snapshot；并发旧表单覆盖风险单列 | schema form 已保存不等于模块已读取新值 |
+| T12 | Plugin Page UX 与权限 | 五 routes、loading/empty/error/partial、窄屏、键盘/焦点/暗亮模式；页面仅健康汇总，不显示个人订阅详情；secret editing 需独立 Core auth；API 成功须为 2xx 且业务 DTO 为成功状态 | onContext/Dashboard identity 不证明 owner/admin；HTTP 200 + JSON `status:error` 仍失败；截图美观不证明 API 安全 |
+| T13 | 统一的完整运行记录 | 一次 controller/单一长 root/固定包覆盖安装、restart 和能力验收；进程/端口退出；local secret 不在包、日志、交付或提交 | 拼接多个 root/hash/cohort 的局部 PASS 不能冒充一次端到端 PASS |
+
+执行详细用例前先冻结代码/package cohort、宿主版本、测试器和授权范围。控制器的 ready 必须确认 Popen 存活、listener 属于进程树、期望 root 生效、目标 AstrBot API 返回正确版本，不能只看任意 HTTP 200。用同一有效 controller 会话完成安装、重启和可归属该 root 的检查；不可恢复时封存当前 cohort 并另开新 cohort，不拼接证据。
+
+### 8.1 可执行测试用例卡
+
+所有用例记录 `run_id`、源码/worktree 摘要、ZIP SHA-256、AstrBot/Python/Windows 版本、进程树/listener、隔离根长度、实际请求命令、业务错误码和证据相对路径。真实响应只保留最小脱敏字段；任何凭据/token/header、完整 GraphQL 响应、无关聊天文本或完整私人资料都不记录。页面截图不得包含密码输入内容、真实会话列表或 QQ 背景。
+
+#### TC01：测试 ZIP 内容与秘密排除
+
+- 前置：冻结工作树与 builder 输入；授权凭据文件已由 root 创建，并核验 git ignore 与 ACL。该文件只由 root 显式读取，不进入 builder 输入目录。
+- 输入：唯一候选 W2 ZIP、SDK 固定 wheel、扩展 manifest。
+- 步骤：按 allowlist 构建；记录 ZIP hash/entries/pins/最长成员；对 archive 成员名与构建 staging 做只报告命中数的扫描；核实必要 Windows 修复在包内。
+- 预期：测试 ZIP 含模块、manifest、页面和已批准依赖；不含 `.architecture-refactor/local-secrets/`、`fflogs.credentials.json` 或 secret 值；成员顺序/数量/hash 可复现。
+- 证据与观测：build command、archive hash、成员清单、最大路径长度、secret-path 命中布尔值。不得输出被扫描的 secret 内容。
+- 失败定位：秘密路径出现在包中即停止安装、修 allowlist；必要文件缺失或 hash 不同则为新 cohort。
+
+#### TC02：新进程长路径扫描/安装
+
+- 前置：隔离 AstrBot 4.28.0 root 为空；本轮新启动测试子进程；根绝对路径在 workspace 内。
+- 输入：当前候选 ZIP、历史失败的 273/284 字符嵌套路径、用户报告已开启的 LongPathsEnabled。
+- 步骤：先复核 registry/system 值、新建 AstrBot/Python 进程是否生效、AstrBot executable manifest 的 `longPathAware` 标记与 Python/OS build，不先改代码；重启目标进程后走标准解压、native scanner、manifest 读取与模块路径打开/关闭；试验 junction/reparse point 越界被拒。
+- 预期：合法包被信任并列出 FF14 模块；系统/文件 API 错误不会静默转为空扩展根；错误路径有清楚诊断且 fail closed。
+- 证据与观测：有效系统值、AstrBot manifest 标记、解释器、OS/Python、位数/GIL、绝对根/最长路径、Win32 errno、scan/trust result、extension count。
+- 失败定位：注册表值没进入子进程为进程重启/环境问题；系统值有效且 manifest 缺标记时先定位宿主进程能力；两者有效但文件操作失败为 path abstraction；操作成功而 trust false 或静默空模块为验证规则/manifest/错误呈现问题；不可只凭开关值关闭缺陷。
+
+#### TC03：真实 AstrBot 安装、重启和消息路由
+
+- 前置：TC01–02 同一 cohort；controller 证明 AstrBot listener PID 属于它创建的进程树；安装前确认目标隔离 root、端口、版本和插件列表。
+- 输入：固定 ZIP 和新聊天会话。
+- 步骤：检查 AstrBot 4.28.0；只上传一次；分别检查 HTTP status 与安装 JSON 业务状态；重启同一 root；在 WebChat 发 `/ygl help` 与 `/ygl ff14 status`，核对 stream event sequence。
+- 预期：真实标准上传成功且安装 JSON 明确业务成功，插件激活且 extension trusted；重启后命令仍可见；帮助正文有 FF14 命令，status 对应真实模块/来源限制，两个流均有 `plain` 和终止 `end` 且无 `error`。
+- 证据与观测：上传 HTTP 与 JSON `status`/error code、插件 id/version/activated、trust id、日志异常类别、重启 PID tree、SSE event sequence、root/hash。
+- 失败定位：HTTP 200 但 JSON `status:error` 是安装失败；上传失败查安装栈；无模块查 scan/trust；模块已载入但 help 空查 manifest/factory；SSE `error`、缺少终止 `end` 或消息正文空均为命令失败，再查 ingress/renderer/MessagePort。
+
+#### TC04：物品 ID 44091 与规范名称
+
+- 前置：TC03 PASS；根统筹已冻结 XIVAPI-compatible 中文主源和 Garland Tools CN 补充详情的 source map、许可、区域覆盖与字段可信度。
+- 输入：命令查询 ID `44091`；Garland 用户给定参考页 `https://garlandtools.cn/db/#item/44091` 及资料接口 `/db/doc/item/chs/3/44091.json` 仅供补充交叉核验。名称输入取同一已核验来源返回的规范名称。截图“犎牛牛排”用于视觉比对，精确手工转录不是前置。
+- 步骤：先通过真实 chat command 查询 ID；比较 ID/name/来源/时间；再用规范名搜索并明确选中 44091。Plugin Page 对同 ID 的结果比较延后到 TC14/W2-5。
+- 预期：名称和 ID 在单个结果中一致；多候选由人选具体 ID；字段逐一注明来源；Garland 不可用时中文主源结果仍完整，或标出仅缺补充字段；不将该链接假定为完整自动 fallback。
+- 证据与观测：查询 ID、来源返回的规范名、结果 ID、source id、链接 host、时间/业务状态、字段缺失。
+- 失败定位：查询有 HTTP 响应但无模型为 parser/schema；结果 ID 错为搜索映射；页面和命令不一致分别定位 bridge/renderer；source map 未冻结时该 source 记 BLOCKED，不阻塞已验证 ID。
+
+#### TC05：物品错误、多候选与补充来源
+
+- 前置：TC04 有一条可重复查询；准备不含真实资料的受控错误响应。
+- 输入：空输入、无效 ID、可重复歧义名称、429/timeout/partial；XIVAPI-compatible 中文主源失败但 Garland 补充资料仍可访问的组合。
+- 步骤：依次触发参数错误、未命中、歧义和主源错误；在多候选场景选择第二项；单独观察 Garland 被配置为补充详情时的字段合并、来源标签及禁用缓存后的行为。
+- 预期：参数、候选、无结果、限流、超时和 partial 有不同状态；不自动选首项；主源失败不能用 Garland 页面伪装成完整查询成功；只有 source map 明确允许的补充字段可展示并标注 Garland 来源；旧 cache 不冒充 current。
+- 证据与观测：case id、candidate IDs、source attempt order/status、cache age、user-facing error/candidates、supplement-used/source attribution。
+- 失败定位：默认首选看 module selection；来源标签丢失看 ItemRecord/DisplayDocument；旧数据新鲜度错误看 cache invalidation；不得将 Garland 补充资料上升为全量 fallback；mock 不升级为 live source PASS。
+
+#### TC06：FFLogs 国服角色 Logs 与宿主凭据链路
+
+- 前置：TC03 PASS；root 已创建授权凭据文件，git ignore 与 Windows ACL 已核验。测试按 `TC06-A`/`TC06-B` 两层单独判定；controller 运行于同一隔离宿主工作流，并将凭据留在进程内存直到本 cohort 的 restart/清理结束。
+- 输入：CN、潮风亭、如月怜、公开角色 Logs、固定 rDPS；真实凭据只用于本机当前验收，不写入 fixture、日志或插件普通配置。
+- 步骤 `TC06-A`（协议连通，不算插件通过）：root controller 显式读取文件、字段校验但不打印值；在单次直接 API probe 中执行 OAuth client-credentials + 角色 GraphQL，记录脱敏状态。此步骤只证明 FFLogs 协议/授权链可达。
+- 步骤 `TC06-B`（产品路径，必须）：A 成功后，通过已审查的安全写入入口把 credential pair 写入隔离 AstrBot 对应的 Core ConfigRepository/SecretStore 加密引用；入口必须是 Windows ACL 约束并审查过的维护 CLI，或经独立 Core admin authorization 的 host `AdminOperations` bridge。启动插件后，经生产角色 handler → Core `SourceCredentialService` → SourceHttp 查询，再以真实 chat command 展示；同一 controller 重启该 root 后重复查询，最后用同一授权入口清除隔离 SecretStore credential 并确认状态变为未配置。插件不得读取本地文件，controller 不得把 OAuth access token 注入插件。
+- 预期：只有 `TC06-B` 才能 PASS 角色产品验收。CN 角色来源有数据时显示绝本/零式类别、rDPS 与 ranking percentile、职业/副本、数据时间和官方 profile URL；缺字段如实显示。Global 可选，不阻断 CN。若安全写入入口、secret reference 或插件 SourceCredentialService 链路未完成，`TC06-B` 标记 `BLOCKED`，`TC06-A` 的 PASS 不可替代。
+- 证据与观测：credential_loaded 布尔值、写入入口类型/授权结果、Core secret metadata state/reference generation（不记 value/hash/digest）、OAuth/GraphQL 分层状态、SourceCredentialService source id/status、CN/server/character、metric、字段 presence/列表数、time/link host、restart 前后 configured 状态和清理结果。禁止记录凭据 path 内容、secret 值/hash/token 或完整 rankings JSON。
+- 失败定位：`TC06-A` OAuth fail 查本地输入字段/token route；A 成功而 B 写入失败查 AdminOperations/ACL/SecretTransition；Core configured 但插件查询失败查 SourceCredentialService/credential declaration/SourceHttp；GraphQL OK 结果错查 mapper/render；B 链路未接好不能用 direct `requests`、mock 或 stub 标产品 PASS。
+
+#### TC07：FFLogs 凭据隔离、负例与 output 禁用
+
+- 前置：准备不含凭据的独立 profile 和 synthetic invalid credential；不复用 TC06 token cache。
+- 输入：无凭据、invalid synthetic credential、角色 Logs；网络观测器只记录脱敏 host/path/method。
+- 步骤：启动插件但不显式传入本地文件；分别发起无凭据与 invalid credential 查询；扫描构建包、页面 storage、日志类别及实际 source path。
+- 预期：无凭据显示 authentication required，invalid 显示脱敏认证失败；正常角色路径只走 OAuth + GraphQL；不请求 statistics/table、统计 HTML、私人/user endpoint；插件不自动发现本机凭据文件。
+- 证据与观测：HTTP/business status、脱敏 host/path category、访问本地 secret path 布尔值、secret scanner 命中布尔值、页面 storage 检查。
+- 失败定位：统计路径被调用查 capability/command registry；本地文件被打开为 secret-boundary bug；日志检测命中停止归档，执行泄露影响审查。
+
+#### TC08：日历主源与备用源实测
+
+- 前置：root 冻结 CN 主备 source ID、固定 URL、许可、区域覆盖和 freshness。CN 必验；Global 可选。测试没有外部接收人。
+- 输入：相同 region、窗口、timezone；一次只读 live 查询及 primary/fallback success/failure/partial 的受控响应。
+- 步骤：查询主源成功；分别触发主源失败+备源成功、双源失败、partial；重复相同窗口以检验缓存和版本；确认 UI/chat 输出来源字段。
+- 预期：结果注明来源、窗口、collected_at；备源成功显示备源标签；双失败/partial 清楚降级且不清空持久状态，不说“暂无活动”；不使用 stale cache 伪装实时。
+- 证据与观测：source ID、region/window/timezone、status、request/collect time、source version、coverage complete、event count、fallback used、错误码。
+- 失败定位：source list未冻结停止网络动作；fallback未标为备源查 aggregation；双失败误判取消查 completeness/cancellation； live不可达记 BLOCKED，错误路径单独验。
+
+#### TC09：日历 recurrence、时区与 partial
+
+- 前置：calendar collector/evaluator 可在受控离线运行；fixture 为合成数据，不含真实订阅或用户日历。
+- 输入：DST fold/gap、全天 exclusive DTEND、RRULE/RDATE/EXDATE/RECURRENCE-ID、partial fetch、取消和 stale 时间戳。
+- 步骤：按 fixture 分别运行 normalize/evaluate；先完整覆盖窗口，再注入 partial/failure；对比本地窗口和发生时间。
+- 预期：时区/全天窗口边界正确；只有覆盖窗口的完整 observation 可认定取消；partial/failure 不删除已有 occurrence；复杂度超过限制返回 partial/error；过期 cache 标 stale/unknown。
+- 证据与观测：fixture ID、timezone/window、occurrence count、source completeness/version、decision code、stale age。
+- 失败定位：纯时差错误看 timezone/DST；partial变取消看 evaluator predicate；合成通过不代表真实来源和许可通过。
+
+#### TC10：本人订阅 CRUD、CAS 与越权拒绝
+
+- 前置：可信本人私聊 invocation、目标 source可返回 observation；隔离数据已有备份，记录安全 test recipient。
+- 输入：CN、Asia/Shanghai、08:00 的订阅；current revision 和 stale revision；另一主体的订阅 ID；群聊命令。
+- 步骤：本人私聊 create/list/update/cancel；重复旧 revision；另一 actor 查询/修改同一 ID；在群聊执行管理操作；确认没有外发给任意指定 target。
+- 预期：本人操作成功且 revision 递增；stale revision 返回 conflict 且不变更；跨 owner/群聊/伪造 target fail closed；只有可信上下文决定记录 owner/recipient。
+- 证据与观测：actor 来源类别、private/direct 标志、operation、脱敏 subscription ID、before/after revision、错误码、外发次数。
+- 失败定位：仅文案说 PRIVATE 不算 owner proof；stale 可写查 CAS；群聊或伪 target 成功立即阻断并审权限服务。
+
+#### TC11：重启、日报投递和 UNKNOWN
+
+- 前置：TC10 有本人订阅；受控真实 Scheduler/MessagePort，非真实群 recipient；controller 可安全重启同一隔离 AstrBot。
+- 输入：完整 observation、重复 event key、due window、send SUCCESS/FAILED/UNKNOWN。
+- 步骤：推进一次有效窗口；核查 event key/receipt；模拟 UNKNOWN 后重启；重复投递相同 observation；取消订阅后再推进。
+- 预期：订阅跨重启保留；同 key 去重；UNKNOWN 仍按 Core receipt，不由模块创建新 event/盲重试；cancel 后不再出现在投递；真实用户收到消息是单独的可见性证据。
+- 证据与观测：revision、observation/source version、event key hash、receipt state、attempt count、重启前后 owner record、真实 receive acknowledgement。
+- 失败定位：重复发送查 idempotency/receipt；scheduler fake clock 不关真实宿主周期；queue accepted 不等于用户看见；未授权 recipient 不得测。
+
+#### TC12：原生配置字段、唯一 authority 与 reload
+
+- 前置：新 AstrBot 4.28.0 profile；拟议 schema/config adapter 已实现；没有同字段 Core DB 镜像。
+- 输入：schema defaults、合法 region/days/timezone/time、边界外数值、错误类型；配置保存请求。
+- 步骤：看原生表单默认和输入控件；保存有效项；测试 validation 拒绝非法项；按官方 service 路径确认保存触发 plugin reload；新 invocation、重启后检查 ModuleServices snapshot 和旧订阅。
+- 预期：普通项只保存在 AstrBot 生成的 JSON，constructor snapshot 实际影响查询；非法配置不进入 Runtime；保存后重载提示准确；旧订阅与在途 operation不变；不添加 config DB双写。
+- 证据与观测：schema hash/keys/types/default/range、redacted native values、save response、plugin reload generation、Runtime snapshot、existing subscription before/after。
+- 失败定位：表单保存但Runtime旧值为 main/bootstrap 接线；第二份同字段为 authority bug；用旧多标签表单覆盖时记录 host no-CAS 风险。
+
+#### TC13：既有 Core 配置、生命周期与凭据写入事务
+
+- 前置：复用既有 `_ConfigurationCoordinator`/`ConfigurationService`、`SourceCredentialService`、`AdminAuthorizationService`/`AdminOperations` 与 Core SecretStore；W2-0 冻结真实调用合同和 Core owner 文件边界。测试只用 synthetic credentials，和用户本地文件分开；Host principal mapping 已审查。
+- 输入：Core gate true/false、模块 lifecycle enable/disable、KEEP/REPLACE synthetic A→B/CLEAR、stale config revision、SecretStore transition fault；Dashboard plugin scope 与 Core `AdminAuthorizationService` grant 分别测试。
+- 步骤：走受支持 AdminOperations 路径读取 module snapshot；通过 revisioned config update 暂停订阅 gate，确认不接新 create、不发生投递但本人可 list/update/cancel；恢复 gate 并确认仅调度未来窗口；单独调用 lifecycle set_enabled false/true，确认保存订阅而停止/恢复模块调度。再保持 KEEP、替换 credential、注入既有 transition/config revision/cleanup 故障、发旧 revision、CLEAR，并重启后经服务检查状态。
+- 预期：API/页面/日志永不返回 secret；替换失败留住原 active pair，不激活半组值；stale返回409；CLEAR使凭据不可用；订阅 gate false 时无投递且查询/list/update/cancel 可用，重开不补发暂停期积压；模块 disabled 时命令/投递停、记录保留，管理员重新 enable 后本人可继续管理且不补发暂停期积压；Dashboard scope单独不足以 mutation。
+- 证据与观测：config revision、registry revision/module state、gate mode、subscription operation/result、mode、secret reference metadata state、phase/error、reload required、permission decision；不记录 value/hash/digest。
+- 失败定位：只遮罩 UI 不证明加密；半组激活查既有 transition/CAS 顺序；false gate 仍投递或无法本人 cancel 为功能缺陷；AdminOperations 或 principal 映射缺失就 BLOCKED，不绕过 AdminAuthorization 或放宽到 username/token。
+
+#### TC14：五页 Plugin Page API 和 UX
+
+- 前置：pages bundle入 ZIP；4.28.0官方接口与 route prefix经source冻结；测试账户能从插件详情页打开 restricted iframe。
+- 输入：overview/logs/items/calendar/settings五路由；items 样本 ID `44091`；Logs 样本国服如月怜@潮风亭；无 Core admin grant 与有效 Core admin grant 两种会话；loading/empty/success/partial/unavailable/401/403/409；HTTP 200 但 JSON `status:error`；320px、亮色/暗色、键盘路径。
+- 步骤：从插件详情打开页面；验证 ready/onContext/hash route/relative asset；item 页查询 44091 并检查 XIVAPI 主源/Garland 补充详情标签；Logs 页查询同一 CN 角色 DTO；逐页发 apiGet/apiPost 并分别核对 HTTP 与业务 DTO；将任一成功 HTTP 响应替换为 `status:error`、模拟慢网/断网/权限冲突；用键盘导航/移动窗口；尝试提交 actor/owner/target；检查无cookie/LocalStorage/parent DOM访问。
+- 预期：五页状态和 §6.1 文案一致；只有 2xx 且业务 DTO 为成功状态才是 API PASS，HTTP 200 + JSON `status:error` 必须显示错误并判该请求 FAIL；item 命令/页面 ID 与规范名及来源标签一致；健康概览只返回允许的最小DTO；无 Core admin grant 时写按钮隐藏或禁用且 mutation 返回 401/403、Core revision/registry revision 不变；有效授权时才执行 mutation；用户不能伪造 actor；个人订阅详情缺失；普通设置跳原生表单；窄屏和两种主题可用。
+- 证据与观测：AstrBot/plugin version、page route、API method/status、error code、响应 DTO keys、脱敏截图、viewport/theme/keyboard path、browser storage/parent access布尔检查。
+- 失败定位：没有入口查 pages discovery/ZIP；404查 API prefix；HTTP 200 但 DTO `status:error` 是业务失败；403先分 plugin scope/Core policy；onContext被当权限是 fail；视觉通过不等于授权通过。
+
+#### TC15：聊天图片输出与插件页主题隔离
+
+- 前置：真实聊天 text output已通过；若测图片只用许可图片或 synthetic renderer input；不登录真实 QQ。
+- 输入：同一 DisplayDocument 的 text-only 与可选 image block；Plugin Page亮/暗主题。
+- 步骤：先改 Plugin Page theme，再通过受控 test chat请求同一 item/角色输出；关闭 renderer image capability复验文本 fallback。
+- 预期：iframe theme只影响页面；聊天输出走 Core Renderer/MessagePort；无图仍有文本/链接；不复制截图的 QQ背景/气泡或装饰；页面截图不会转成聊天图片。
+- 证据与观测：脱敏页面图、Document block kinds、MessagePort result、media type/license/bytes、文本 fallback。
+- 失败定位：页面成功不等于 IM 图像送达；图片失败可按文本降级；样式污染聊天查 CSS/asset bundling 边界。
+
+#### TC16：单一 cohort 收尾和凭据隔离
+
+- 前置：TC01–TC15均通过或逐条标清状态；controller/run_id、root、ZIP hash、owner 已固定。
+- 输入：同一隔离长 root、单次上传和 restart、脱敏证据索引。
+- 步骤：关闭controller进程树；检查listener/child PID与端口退出；只清本轮建的root；生成最小脱敏记录；对照 builder、日志、临时目录和 git change 检查凭据文件排除规则。
+- 预期：所有 PASS 属于同包/同 root/cohort；测试无宿主残留；指定凭据文件仍留本机且未复制进交付、ZIP、日志或提交。唯一允许读取它的是 TC06 中 root 的显式内存加载；计划不授权删除或改写该文件。
+- 证据与观测：start/end PID/port、root/hash、evidence index、secret path exclusion布尔值。不得读取或记录 secret 文件内容。
+- 失败定位：secret进入包/日志/git立即停止并处理泄露；不同 root/hash的结果拆成不同 cohort；清理目标不是本轮创建则不删除。
+
+### 8.2 一次会话验收顺序
+
+1. 冻结源码 commit/worktree diff、测试包 hash、Python/AstrBot/Windows 版本、LongPathsEnabled 新进程值、测试根路径长度和源配置状态。
+2. 验证长根现场为空且位于 workspace 内，建立受控 AstrBot 进程树、唯一 listener 与日志/数据隔离；插件安装前读取版本和插件状态。
+3. 单次上传固定包，检索真实安装日志和模块信任状态；重启后依次完成 help/status、item、角色 Logs、calendar、订阅 CRUD、投递边界、配置和页面检查。
+4. 结束受控进程树，验证端口和子进程均退出；保留脱敏日志/摘要、最小 UI 截图与结果表，清理前逐项确认只删除本轮创建的隔离目录。不得删除原失败现场或用户数据。
+5. 如果必须重新构建修改包，只对新 SHA 开启新的验收 cohort；其结果不能覆盖旧包的失败，也不能复用旧 host 激活状态。
+
+### 8.3 来源诊断与塔塔露同环境对照
+
+用户提供的截图证明塔塔露在其环境能返回物品和角色结果，不能继续以历史一次失败断言来源整体不可用。未来先以同输入、同时间窗、同网络出口对照，定位差异后才修解析或来源策略。本轮不执行下列请求。
+
+| 来源 | 当前代码中的职责/定位 | 后续诊断重点 |
+| --- | --- | --- |
+| `xivapi_items` / `xivapi-v2.xivcdn.com` | 名称候选、ID 基础详情；请求构造见 `features/item_sources.py` 与来源文档 | 中文 language、fields、query 编码一次、直接 ID 是否绕开搜索、HTTP/JSON 字段形状、代理是否实际生效 |
+| `garland_items` / `garlandtools.cn` | 获取方式补充；44091 页面和 JSON 接口见 TC04 | 与同 ID 基础记录合并的字段来源；补充失败保留基础结果，绝不冒充完整回退 |
+| `ff14_calendar_primary` / `calendar.google.com` | CN/Global ICS 的固定 source variant，见 `features/calendar.py::_SOURCE_INFO` | 实际 region、日期窗口、HTTP 状态/content-type、ICS 完整性、新鲜度与解析层错误 |
+| `ff14_calendar_fallback` / `p66-caldav.icloud.com` | 日历备用 ICS，用户已指出可用性差 | 与主源同窗口独立验证；默认建议采用“仅启用通过当前覆盖检查的来源”，没有合格备用就明确无回退，不无限等待备用 |
+| FFLogs `cn.fflogs.com` | 客户端认证、国服公开角色 GraphQL | OAuth、GraphQL errors、服务器目录映射、角色映射和展示分层；不请求统计 HTML |
+
+诊断顺序：①确认宿主 HTTP proxy 的实际配置来源和健康，不假定 7890 存在；②冻结塔塔露版本/输入参数，优先源码构造或独立受控实例，不把参考插件装入用户实例；③对照请求 host/path、查询参数、请求头类别、HTTP 状态、响应类型/大小/脱敏 schema；④同请求经项目 SourceHttp，再经模块 mapper，再经真实 AstrBot；⑤首个产生差异的层是修复候选。协议直连成功、塔塔露成功、SourceHttp 成功、消息成功分别记证据，不能相互替代。
+
+只记录 `run_id,source_id,region,request_stage,proxy_mode,elapsed_ms,http_status,content_type,response_bytes,error_code,parser_stage,item_id/event_count,coverage,collected_at,cache_age` 等最小字段；密钥、header 值、代理口令、响应全文和私人数据不记录。DNS/TLS/连接/timeout/429/403/JSON/ICS/schema/映射/发送错误分别归类，不统一吞为 source unavailable 而失去内部诊断；用户只收到简洁中文与可重试建议。
+
+未来自动离线回归用合成 fixture 覆盖故障、权限、CAS、ICS 和并发；在线检查明确 opt-in，不进入普通 CI；真实 UI/IM 验收独立记录。每次修复先运行受影响的既有测试，契约/打包或跨模块变更才扩到对应集成/全量，不为单行文档修改重复 930 项历史测试。定时推送至少验证一次真实受控接收；现有采集间隔默认/最小 900 秒，应记录到期至实际采集/送达延迟，不承诺 08:00 分钟级准点。虚拟时钟用于边界回归，不能顶替这次实收。
+
+<a id="execution-stages"></a>
+
+## 9. 有界阶段与准入
+
+root 负责范围、依赖、基线和文档；按 §9.2 四角色顺序调度，正式源码由唯一 implementer 写入。用户已确认 §9.3 模型分工：主实现/技术指导/独立审查使用 GPT-6.1-Sol/High，UI 设计用 XHigh；可用性不足时不擅自回退。W2-0 至 W2-6 是同一个 W2 的阶段，不是七个各自终验的 W。最终候选冻结且必要问题关闭后，W2 仅安排一次独立 Astra/Medium 验收；finding 仅在 §9.2 剩余轮次内回 implementer 修复并由独立 reviewer 复核，预算已尽且仍有 Blocker/Important 时标 NOT ACCEPTED 并列阻塞，不重置轮次。W1 的 1/1 次数不变。本次只整理并提交已有工作，不调用 Astra 或派发 W2 实施。
+
+阶段之间只有公共合同、文件路径、依赖和验收状态明确后才推进。任何阶段可记录 `blocked_external`，但不得用后续阶段或离线通过掩盖；与阻断无关的已冻结合同工作可独立推进，不能把国际服或备用来源未通过变成国服全部功能的串行锁。
+
+| 阶段 | 目标和交付 | 验收/边界 | 进入下一阶段条件 |
+| --- | --- | --- | --- |
+| W2-0 接口分组与测试 cohort 冻结 | 核对 worktree、W1 证据与包；按 §4.2 冻结 AstrBot 普通 config、Core `ConfigurationService`/`SourceCredentialService`、`AdminAuthorizationService`/受支持 `AdminOperations` 的字段 authority、revision、事务和错误合同；root 冻结 calendar/item source map 与安全凭据写入路线（ACL 维护 CLI 或 Core-admin host operation），列明 owner/文件白名单 | 只读核对与任务卡；不重复研究 AstrBot schema/Pages；LongPathsEnabled 仍待新进程验证；本地授权文件已创建并由 root 管理，其他执行者不打开；不新建第二配置协调器 | 每字段唯一 authority；现有 Core 服务有明确接线和 revision合同；`TC06-B` 有经过审查的凭据导入/清理路由，否则角色产品验收保持 BLOCKED；ID 44091 可直接进入测试，不等截图字形 |
+| W2-1 Windows 长路径与 package registration | 先用 Microsoft 长路径前置和历史 273/284 根诊断，再决定是否改插件 path handling；单独补充“空模块/不信任”清楚错误提示。若需修改 AstrBot 宿主或其进程 manifest 而超出仓库授权，记录 BLOCKED，不改 sibling 源码 | 记录 registry、重启后的 AstrBot/Python 子进程、宿主 executable `longPathAware` manifest、Python 文件访问与 native scanner 的分层结果；安全扫描不得跟随越界 junction/reparse point；真实 package 安装、重启与 FF14 help/status 同根通过；短根只作诊断 | 历史长根标准安装、信任与重启注册通过；否则定位根因/明确外部阻塞，不把 LongPathsEnabled 单值当修复 |
+| W2-2 配置项与角色 Logs | 新增普通 `_conf_schema.json` 并将 constructor config 接入 Runtime snapshot；Core owner 复用既有 configuration/authorization/source credential services，通过安全 host `AdminOperations.update_config`/测试器路径写入隔离宿主 secret reference；root controller 显式读取已授权 credential file；CN 公开角色必须经实际插件 SourceCredentialService→SourceHttp→handler→chat 路径 | 普通基础项 AstrBot config 一处 authority；Core gate/secret 一处 Core authority；host 原生 save 后 reload；统计 output 保持关闭；`TC06-A` 仅协议验证、`TC06-B` 产品路径不可用直连 API 替代；Global 可选 | 普通设置实际影响 Runtime；CN 如月怜查询和 rDPS/排名含义经当前来源验证；同 root restart 后凭据仍由插件服务读取，最后安全清理；凭据不进普通 config/log/package |
+| W2-3 物品与日历来源验收 | 用 ID 44091 与同次来源规范名验证物品候选/详情；逐地区验证主/备日历、时间窗和 freshness | 不要求按截图字形手动输入物品名；逐 source attribution；未验证备用源显式降级，不用 stale cache 兜底 | ID 与来源数据一致；至少一个 calendar source 被当前窗口实际验证，失败路径可辨识 |
+| W2-4 本人订阅和真实推送 | 实测本人私聊 CRUD、CAS 冲突、重启恢复、采集摘要和 Core receipt/发送结果 | 不扩大到网页管理；不使用共享/PUBLIC 授权替本人可见性；目标推送收件人来自受信宿主上下文 | 本人回执、状态持久化、重复/UNKNOWN/取消行为有证据；接收端可见回复/推送单独记录 |
+| W2-5 五页 Plugin Page | 交付五个 hash routes、受限 iframe 静态资源、read-only health DTO；credential editor/gate control 仅在 Host principal mapping + Core management auth + 既有 `AdminOperations` config/secret mutation revision 合同审查后启用；无个人订阅详情 | 官方 Plugin Pages GET/POST 接口；plugin scope 不等 Core 权限；亮暗/窄屏/键盘验收；HTTP success 与业务 DTO 分层判定；图片/聊天 UI 分离 | 页面真实从插件详情可见并符合 §6；未完成管理授权时仍可交付无个人详情的健康页，但所有受保护写操作显示不可用/拒绝 |
+| W2-6 整片终检与用户试用 | 统一 controller 针对最终 SHA/单一长 root 完成 TC01–TC16；准备回滚包、脱敏证据索引和用户试用入口 | Sol 独立审查，root 对照真实宿主回包；用户试用后单列远端 UI/IM层 | 所有 required 项通过，或列明用户接受的 BLOCKED 边界；不改变 W1 Astra次数/全局 Core Ready |
+
+### 9.1 失败、回滚和阶段重入
+
+若安装器失败或功能回归，保留脱敏日志、数据库/插件配置的路径与摘要，先确认数据仍独立且可恢复，再使用 AstrBot 标准插件更新事务回到上一个可用包。不要通过手删 `sys.modules`、插件数据目录、secret 存储或另一个 AstrBot 进程规避错误。回滚后重启并证明模块/已有订阅未丢失；若状态不明，标为 `INCONCLUSIVE` 并停止可能覆盖的数据操作。
+
+如果真实来源不可达，source 验收可记 `BLOCKED`，但必须证明失败提示清楚、不会静默用 stale 数据；该状态不能变成来源能力 PASS。W2-5 若 Host principal/Core admin mapping 未实现，仍交付五页布局和只读健康页；仅 credential editor/个人数据 API 标不可用，不把已核验的 AstrBot Plugin Page API 写成未验证。
+
+<a id="collaboration-protocol"></a>
+
+### 9.2 需求 / UX / UI / 实现 / 审查执行协议
+
+本协议来自用户本轮明确指令，只改变协作与证据要求，不增加产品范围或实施权限。所有角色先读适用 AGENTS.md、本文相关 REQ/切片、项目地图 `docs/code-architecture/ff14.md` 与相关决策；root 派发精确源码/API/测试范围，避免四方重复扫描全仓。
+
+| 角色 | 唯一职责与交付 | 权限 |
+| --- | --- | --- |
+| requirements_ux | 用户任务、来源/优先级、REQ 验收、信息架构/流程/状态；变化分析和运行后的覆盖复核 | 只读源码，返回精简基线；不定配色/CSS，不把优化建议升级为需求 |
+| ui_designer | 基于已冻结 UX 给布局、视觉主次、组件、主题/窄屏/键盘和状态规格；首版运行后看实际渲染 | 可提前只读检查视觉资产；不另立产品流程，不修改正式源码 |
+| implementer | 早期只读可行性；获实施授权后按切片统一写正式源码、测试和开发控制器，验证并交付证据 | 唯一源码写入者；复用技术栈和明确白名单，不静默删需求或增加依赖 |
+| ui_reviewer | 对稳定候选独立核验需求、UX/UI、权限/数据/集成、回归与越界 | 不写源码，不替实现者修问题；必须给证据，不以完成声明作依据 |
+
+root 统一维护本文的需求/UX、UI、审查摘要和状态，汇总冲突后给一份修复清单，不与 implementer 同时改源码。原“Core owner / Module owner”改为 implementer 所处理的不同职责切片，不再代表多个写代码 Agent；技术指导可以由另一只读 Sol 角色承担，但该角色若参与某候选的方案指导，就不能兼任该候选的独立 ui_reviewer。四职责必须实际派发；工具不可用时如实说明并顺序履职，不冒充独立审查。
+
+执行顺序：
+
+1. **A 基线**：requirements_ux 先形成 REQ/UX；implementer 可并行查技术约束，ui_designer 可并行查主题/素材。root 等必要上游结果，裁决常规可逆选择并冻结当前切片；权限/隐私/迁移依据不足的部分记 BLOCKED，不影响其它已获授权工作。
+2. **B 设计/实现**：ui_designer 基于该 UX 提交规格；root 对齐后才交 implementer。实现中可研究下一片，不能静默改变正在实现的基线。当前仅完成设计/可行性，B 的代码步骤未授权。
+3. **C 稳定候选联合复核**：冻结工作树相关文件 hash/包 SHA、REQ 与规格 revision、宿主/浏览器版本、合成或真实环境、操作步骤、截图和测试结果；requirements_ux 查覆盖/流程，ui_designer 查真实渲染，ui_reviewer 独立查验收/风险，三者针对同一候选分别返回。无 commit 权限时用文件 hash，不为冻结候选自动提交。四槽包含 root：实现者交付后让出活动槽，三方可并行；不能四个子角色同时运行而超额。
+4. **D 修复收敛**：root 去重并裁决建议，只派发已接受问题；implementer 统一修复，重跑受影响 REQ/状态/流程。默认每切片最多两轮集中修复与复核；计数不因更换模型或候选号重置。第二轮后仍有 Blocker/Important，标 NOT ACCEPTED 并列阻塞；非必要 Polish 留后续。最终 W2 的跨片问题也最多两轮，某问题沿用原轮次，不能挪到整体验收重新计数。
+
+每个问题记录 `ID / Blocker|Important|Polish / REQ / 候选版本 / 证据或复现 / 影响 / 修复方向 / 裁决 / 轮次 / 状态`。Blocker 为核心不可用、严重错误或安全问题；Important 为明确违反验收或显著影响使用；Polish 不阻断本轮。不得用个人审美、降低验收或“文档写完”关闭功能问题。
+
+浏览器验收由 implementer 实测、三方据同一候选核验：进入真实 AstrBot 插件详情→打开 iframe→关键操作及恢复→检查控制台/网络错误，记录 viewport/theme/keyboard path，保存必要脱敏截图。合成 DOM/API、真实宿主集成、实际视觉/交互和真实聊天/IM 分开判定；没有浏览器/截图证据就明确“视觉 / 交互未验证”。评审者有工具时独立复现关键步骤，受限时注明证据审阅而非亲测。本轮不启动浏览器或运行产品。
+
+工作文档优先直接复用本文：§1.1 为 requirements-ux，§6 为 ui-spec，§13 为当期 review/status，不再建三份重复基线。未来截图/详细临时记录确需另存时，root 指定任务目录并在写入前加入 Git **本地 exclude**，如 `.codex/work/FF14-W2/`；不修改共享 `.gitignore`，不对已追踪文件取消追踪。目录写入/排除权限不可用时使用允许的既有本地位置或报告限制，不绕过权限。本轮未新建该目录、未修改 exclude，已有秘密文件及旧证据原样保留。未经用户另行授权不 stage/commit/push。
+
+最终切片报告只写：完成的用户能力与 UX/UI 决策；`REQ → 实际实现位置 → 验证证据/结果 → 状态`；修复/剩余问题；未验证/阻塞/范围外建议。模型能力或文档评审通过不替代产品验收。
+
+<a id="agent-models"></a>
+
+### 9.3 子 Agent 模型分工（用户已确认）
+
+**2026-09-30 用户同意，作为后续派发约束生效。** 下表保留原分工供辨识历史证据；新调用采用已批准列，已完成的旧模型工作不改写为新模型产出。未修改全局 Codex 配置；root 是主会话，不计子 Agent，不自动更改 root 模型。
+
+2026-09-30 已核对 [GPT-6.1 Sol 官方模型页](https://developers.openai.com/api/docs/models/gpt-6.1-sol)：支持 low/medium/high/xhigh/max；官方将其用于复杂编码、电脑操作与专业工作。[模型选择指南](https://developers.openai.com/api/docs/guides/model-selection) 建议按具体任务比较质量/成本，并将 Sol 6.1 Medium 用于可迭代复杂工作、XHigh 用于视觉体系和冲突证据决策。以下是本项目的选型建议，不是已做项目实测的性能结论；不推算 ChatGPT 订阅扣量或承诺延迟。
+
+| 子 Agent 类别 | 原约束 / 历史使用 | 已批准模型 |
+| --- | --- | --- |
+| requirements_ux：需求/信息架构 | 无单独长期指定；本轮复用主写 Luna/XHigh | **GPT-6.1-Sol / High**：处理需求来源、流程与权限冲突 |
+| ui_designer：UI 规格/渲染复核 | 无单独长期指定；本轮 Luna/XHigh | **GPT-6.1-Sol / XHigh**：统一组件、各状态与视觉体系 |
+| implementer：正式源码唯一作者 | **GPT-6-Luna / XHigh**，用户明确约束 | **GPT-6.1-Sol / High**：本轮含 Core/Host/UI/加密配置接线，建议统一由它实现 |
+| ui_reviewer：独立质量审查 | **GPT-6-Sol / High**，沿用阶段审查约束 | **GPT-6.1-Sol / High**：独立上下文、只读复核同一候选 |
+| 技术指挥/架构可行性（需要时） | **GPT-6-Sol / High** | **GPT-6.1-Sol / High**；root 仍负责最终调度，避免多层指挥 |
+| 安装/浏览器操作与复现 | 原要求 Luna/XHigh 在 Sol/High 指导下操作 | **GPT-6-Luna / XHigh** 用于已冻结步骤的只读复现；探索性排障交 implementer Sol 6.1/High，不成为第二源码作者 |
+| 定向资料整理/机械核对（按需） | 没有单独硬约束，原随主写 Luna/XHigh | **GPT-6-Luna / Medium**；复杂上下文整理才用 XHigh，不另开实现作者 |
+| 每 W 最终独立验收 | **GPT-6-Astra / Medium**，仅一次 | **保持 GPT-6-Astra / Medium**；独立新上下文，W1 不重开 |
+
+采用“Sol 6.1 负责核心设计/实现/审查，Luna 负责明确步骤与整理，Astra 保留单次终验”。不同角色可以同模型，但必须是独立职责和上下文，尤其 reviewer 不参与被审实现。实现者交接时先停旧 writer、传递同一冻结候选和白名单，不能增加并行作者；任何模型回退须由用户另行指定。
+
+**可用性边界**：当前 `spawn_agent` 可调用枚举尚无 `gpt-6.1-sol`；官方发布与用户批准不等于此会话能调度。需要该角色时先核对最新可用列表，未开放则报告限制，不暗中以 6-Sol 替代。此限制不阻断 root 整理文档/提交，以及已获批准的 Luna 机械核对；本次不试跑替代模型、不升级客户端、不重启 W2。
+
+本次提交前实测调用返回 `Unknown model gpt-6.1-sol`。用户另行明确允许 Luna/XHigh 作为临时唯一作者，仅修复 `tests/extensions/test_windows_fs.py` 的导入排序和 `tests/host/test_b05_sdk_bootstrap.py` 的 Ruff 排版；两项已完成并复查，不构成后续实现角色的长期回退授权。
+
+## 10. 文件边界、自审查与提交分组
+
+开始每个阶段前由 root 重新确认当前磁盘 ABI、SDK wheel 和任务卡路径。所有正式源码、测试和开发控制器由唯一 implementer 写入；root 只写工作文档并统筹获准的运行与凭据使用。默认模块切片限 `modules/ff14/` 与 `tests/modules/ff14/`；切换到 Core/Host/SDK 职责前必须冻结对应白名单，不因同一作者而放宽架构边界。W2-3/W2-4 重叠文件串行修改。测试夹具只能是合成/脱敏数据；真实响应只留下必要字段摘要。
+
+### 10.1 W2 文件白名单
+
+路径为该阶段的写入上限；标为“新增拟议”的文件目前尚不存在，创建前由 root 核对目录职责并把准确路径发给 owner。没有列出的共享 Core/SDK/host 文件一律不在授权白名单内。发现真实接口缺口时先暂停对应阶段、更新任务卡和唯一 writer，再实现。
+
+| 阶段/owner | 白名单 | 明确排除 |
+| --- | --- | --- |
+| W2-0 root 计划/合同 | `docs/next-stage-plan.md`；由 root 另建的精确单片任务卡/来源资产映射（由 root 自行列路径）；现有 Core contracts 的只读核对 | 不改产品实现；不重复研究已核验的 AstrBot `_conf_schema`/Pages API |
+| W2-1 Core Windows | `extensions/windows_fs.py`；`main.py`（只在模块信任失败诊断需宿主入口承载时，由 root 单独分配）；`tests/extensions/test_windows_fs.py`；`tests/extensions/test_discovery.py` | 不改 AstrBot sibling 源码、Python/AstrBot 二进制或其 manifest；不清理既有失败现场；不碰 module business logic。若根因超出仓库边界，记录 BLOCKED |
+| W2-2 FF14 config/Logs | `modules/ff14/features/fflogs.py`；`modules/ff14/module.py`；`main.py`；`_conf_schema.json`（新增拟议）；`modules/ff14/config.py`（新增拟议）；`adapters/astrbot/ff14_config_adapter.py`（新增拟议）；`tests/modules/ff14/test_fflogs.py`；`tests/modules/ff14/test_config.py`（新增拟议）；`tests/adapters/astrbot/test_ff14_config_adapter.py`（新增拟议）。Core owner 经 W2-0 精确派发，可修改既有 `services/configuration.py`、`services/source_credentials.py`、`services/admin_authorization.py`、`services/admin_facade.py`、`services/admin_operations.py` 与对应现存 `tests/services/test_config_records.py`、`test_source_credentials.py`、`test_admin_authorization.py`、`test_admin_operations.py`；只有确需接线时才新增一个精确宿主 adapter 文件，不新增平行 coordinator | Module owner 不改 `services/`/`infrastructure/`/SDK；生产 secret 不进 `_conf_schema.json`/插件普通 config；本地凭据文件只由 root controller 显式读取且不属于写入产物；任何 Core service 改动必须经 W2-0 单一 owner/合同批准 |
+| W2-3 Items/Calendar | `modules/ff14/features/items.py`；`modules/ff14/features/item_sources.py`；`modules/ff14/features/calendar.py`；`tests/modules/ff14/test_items.py`；`tests/modules/ff14/test_calendar.py`；`docs/modules/ff14-sources.md`（implementer 返回来源证据，root 更新文档） | 不改共享 HTTP/renderer/SDK；不把未经核验的 fallback URL加入生产清单 |
+| W2-4 本人订阅 | `modules/ff14/features/calendar_subscriptions.py`；`modules/ff14/features/calendar.py`（日历 domain 修订需单一 owner）；`tests/modules/ff14/test_integration.py`；`tests/modules/ff14/test_calendar.py`；仅当 Core 缺陷由证据定位时，Core owner 可改 `services/scheduler.py`/`services/delivery.py` 和现存 `tests/services/test_scheduler.py`、`tests/services/test_delivery.py` | 模块 owner 不改 scheduler/delivery；不增加 Plugin Page subscription CRUD |
+| W2-5 Plugin Page | `pages/ff14/index.html`（新增拟议）；`pages/ff14/app.js`（新增拟议）；`pages/ff14/styles.css`（新增拟议）；`adapters/astrbot/ff14_pages.py`（新增拟议）；`main.py`（只注册 adapter/routes）；`tests/adapters/astrbot/test_ff14_pages.py`（新增拟议）；`tests/pages/ff14/`（新增拟议，只放合成 DOM/API 状态测试） | 不访问数据库/业务 HTTP/secret bytes；不返回个人订阅清单；不写 `_conf_schema` 普通值；不使用跨域脚本/CDN或读取 parent DOM |
+| W2-6 acceptance evidence | `.architecture-refactor/ff14-w2-acceptance.md`（新增拟议，root 维护）；`.architecture-refactor/ff14-w2-controller.py`（新增拟议，仅在无法复用时由 implementer 编写，用合成输入验证；真实凭据读取和运行由 root 获准后统筹，经已审 host operation 写入/清理，不向文件/日志打印） | 不把凭据、access token、完整响应、个人聊天/排名历史写入证据；不上传/安装到用户远端 |
+
+表内 Core owner/Module owner 均指同一 implementer 在相应职责切片内的权限，不派发额外源码作者；文档项归 root。以下接线文件也由 root 冻结当前切片白名单后交 implementer：
+
+- **W2-1 宿主信任/失败诊断**：`adapters/astrbot/bundled.py`、`adapters/astrbot/runtime.py`、`tests/host/test_bundled_extensions.py`、`tests/host/test_astrbot_runtime.py`。已有长路径失败发生在内置安装器并被 Runtime 降级，这两层必须进入诊断范围；不能只改扫描器而漏掉无模块提示。
+- **W2-2 配置接线**：`adapters/astrbot/runtime.py`、`modules/ff14/yomihime.manifest.json`、`tests/host/test_astrbot_runtime.py`、`tests/contracts/test_manifests.py`。`ff14_config_adapter.py` 若保留，只能作为宿主的已知内置包装配，Core 不增加 FF14 字段分支；优先命名通用 `config_adapter.py` 并把模块字段说明留在模块清单。新增文件的最终名称在 W2-0 冻结。默认使用既有 `tests/host/` 布局，表中的 `tests/adapters/astrbot/` 属拟议，不为一个文件机械新建平行测试体系。
+- **W2-2 Windows 安全维护路线（若采用）**：`scripts/admin_credentials.py`、`scripts/configure_source_credentials.py`、`tests/host/test_source_credentials_cli.py`。先明确 ACL、秘密文件与父目录的身份/链接检查及外部 key 生命周期，再接入受支持 AdminOperations；这与本轮已保存的本地输入文件是两件事。页面替代路线需要同等授权证明，不能直接调用私有 coordinator 绕过入口。
+- **W2-5 打包/页面接线**：`scripts/build_dashboard_zip.py`、`scripts/build_release.py`、`tests/host/test_b05_sdk_bootstrap.py`、`tests/packaging/test_release_build.py`。当前 allowlist 没有 `_conf_schema.json`/`pages/`，未来必须显式列入已审页面文件并测试缺失/越界/密钥排除；不能笼统把全仓加入 ZIP。`_conf_schema.json` 由 W2-2 的同一 owner 持有；W2-5 不重复修改同一普通配置定义。
+
+若必须新增公开 SDK 合同，先由 root 明确具体 `yomihime_sdk/api/<file>.py`、合同测试、版本/兼容消费者及 wheel 重建/pin 路径，独立审查后再改；当前白名单没有默认授权任意 SDK 修改。未新增公共合同则不无故重建 SDK。UI 示例/测试、开发控制器和本地凭据都不是产品运行包内容。
+
+Core 配置 revision/SecretTransition 已由 `services/configuration.py` 提供协调层，生产来源凭据已由 `services/source_credentials.py` 提供读取服务；不得重建第二套配置协调器，也不得让 FF14 module 直接 SQL/SecretStore。所有宿主写操作须经既有 `AdminAuthorizationService`/受支持 `AdminOperations` 接线。若既有宿主管理合同缺少所需操作，先由 W2-0 定义安全最小 operation、单一 owner 与测试白名单，再扩展既有路径；不把 `_ConfigurationCoordinator` 等私有类暴露给 SDK 或页面。
+
+每个提交组结束前检查：模块是否只导入 SDK；宿主类/网络库/SQL/Secret bytes 是否泄漏进模块；本地临时 controller/data 和人工测试 helper 是否有责任人/后续清理点；新增配置是否有 default、范围、迁移/重载说明；普通/AstrBot 与 Core ConfigurationService 是否对同字段形成双权威；既有 secret transition 跨 store 失败语义是否诚实；错误和状态是否可区分；对其他模块/Core Ready 是否产生无意行为变化；公开 role rank 的百分位语义是否准确；证据是否只覆盖声明层级。
+
+提交分为四组，少于执行阶段数：
+
+1. **宿主/路径与构建合同**：W2-0/W2-1；建议 `fix(windows): preserve trusted extension scan on long paths`；附版本矩阵、扫描器实证和隔离安装报告。
+2. **配置与公开角色查询**：W2-2；建议 `feat(ff14): expose safe settings and public character logs`；附字段表、角色来源/时间和“无统计页请求”证据。
+3. **物品/日历/本人投递**：W2-3/W2-4；建议分别或成对提交，仅在 Core/Module 文件归属允许时组合；附来源分状态、CRUD CAS 与重启/receipt evidence。
+4. **页面/文档/验收材料**：W2-5/W2-6；建议 `feat(ui): add bounded FF14 plugin page` 或仅适用实际交付的文档提交；附宿主版本、授权调用路径和可访问性手工检查。
+
+每组只在用户授权提交时提交；提交前确认工作区只有预期文件。禁止自动 commit、push、tag、release 或把测试包上传到远端实例。
+
+## 11. 自审查、用户验收与结束条件
+
+执行者进入新阶段先读取本计划、[FF14 架构](code-architecture/ff14.md)、[主体 Core 架构](code-architecture/core.md)、[Core Ready 合同](../.coordination/contracts/core-ready.md)、[SDK 导航](module-sdk.md)、`docs/modules/ff14-sources.md`（由 W2-3 来源 owner 建立或更新）、现行任务卡和当前源码。先核对上游/外部接口当前状态，再冻结具体任务白名单；本文中的接口假设不能替代当前实现。
+
+阶段与候选冻结前审查由 §9.3 的 GPT-6.1-Sol/High 独立 reviewer 执行，核对模块边界、权限/秘密、Windows 长路径真实行为、来源 attribution/freshness、payload 大小/timeout、消息降级、日志和本地数据路径、测试器收尾、包 hash/依赖与用户可见文案。W2 最终候选只交一次独立 Astra/Medium，后续 finding 在剩余轮次内由 implementer 修复、reviewer 复核。缺少证据时降低状态，不引用 W1 PASS 推定通过。
+
+结束条件按层记录：长根安装与重启、item/角色/calendar 命令回复、本人订阅及推送、配置保存、页面 UX、用户远端实例各自独立。用户本机隔离 AstrBot 的 UI/API 证据只关闭隔离宿主层；用户试用后仍须处理已知 bug 和必要 UI 调整，再进入独立收尾。全局 Core Ready 是否 OPEN 由其自身所有条件判断，本计划没有授权自动变更。
+
+## 12. 待冻结的实现合同
+
+1. 日历每个 region 的 primary/fallback source map、许可、覆盖窗口和 freshness 由 root 在派发 W2-3 时写入单片合同；备用源当前不可靠，未独立通过前仅可显示 unavailable/unverified。
+2. W2-2 implementer 在源码修改前确认既有 `_ConfigurationCoordinator`、`ConfigurationService`、`SourceCredentialService` 与 `AdminAuthorizationService`/`AdminOperations` 的真实方法、revision/SecretTransition 行为和宿主写入入口；若 `AdminOperations` 缺少所需安全操作，按 W2-0 冻结的最小扩展路径补齐现有合同，不新建 coordinator、不使用泛路径派发。`TC06-B` 的本地凭据导入和清理入口未通过 ACL/权限审查前，角色产品验收保持 `BLOCKED`。
+3. Host principal mapping 的具体证据/实现路径由 W2-0 任务卡冻结。插件 scope 只保护宿主 API 路由；不能凭 dashboard identity、username、asset token 或 `onContext()` 得出 Core admin、chat actor、subscription owner。
+4. 公开角色、source 响应、FFLogs 当前 OAuth secret 是否有效会随时间变化；W2-2 当日分别记录 OAuth/GraphQL 结果。Global region 不是 CN 验收的阻断项。
+
+执行前将本文件与实际实现、宿主、当前外部来源核对；若用户改变范围，更新决策、配置目录、测试矩阵和里程碑的权威章节后再派发。
+
+<a id="document-inventory"></a>
+
+## 13. 文档接续与本轮交付状态
+
+本文件是唯一后续范围、决定、设计、测试和阶段状态入口。原件及 13 份整理前文档的 SHA-256 保存在 [归档索引](../.coordination/archive/2026-09-29-w2-plan/README.md) 和 [清单](../.coordination/archive/2026-09-29-w2-plan/manifest.json)，只归档明确列出的文档，没有复制凭据或运行数据。
+
+公开仓库包含当前设计/计划与 [C00 归档索引](../.coordination/archive/C00-index.md)。本文件引用的 `.architecture-refactor/` 和其它 `.coordination/` 验收/任务/原件链接是本地工作区证据，不随本次文档提交公开；远端读者可能无法打开。其历史结论在 §4/§13 摘要中保留，不因本地附件缺失升级验收状态；源码以 `1648565` 及后续提交为准。
+
+| 文档 | 整理后的定位 |
+| --- | --- |
+| `docs/development-execution.md`、`.coordination/board.md` | 导航到本文，不维护另一份当前状态 |
+| `docs/development-plan.md`、`.coordination/contracts/core-ready.md` | 全局架构范围/门禁与历史证据，Core Ready 保持 CLOSED |
+| `docs/module-development-plan.md`、`.coordination/tasks/modules/README.md` | 模块范围导航；Steam/HBR/Dota 未被本轮启动 |
+| `.coordination/tasks/modules/ff14/README.md`、`FF14-MVP-01.md` | W1 历史摘要与本文跳转；原完整总卡已留档 |
+| `.coordination/runs/FF14-W1-execution.md`、FF14 F01–F06 | 只作历史记录；旧中途状态、旧白名单不再派发 |
+| `docs/code-architecture/ff14.md`、`work-packages.md`、`orchestration.md` | 当前源码职责/通用协作边界，不与本文争夺执行权威 |
+| `docs/modules/ff14-sources.md` | 来源协议和分阶段证据；开头注明当期范围与旧基线边界 |
+| `.architecture-refactor/ff14-*-handoff/review/acceptance` 与旧归档 | 原始证据保留，不改写旧 PASS/FAIL；未来新 W 另建证据 |
+| 需求、基本设计、SDK、README/公开使用文档 | 稳定参考，不在规划时宣称页面/schema已实现；实际实现后同步用户文档和构建资源 |
+
+| 本轮事项 | 状态 |
+| --- | --- |
+| 新计划、配置目录、五页 UI、TC01–TC16、W2 阶段与文件责任 | 文档已形成，非功能实现 |
+| 旧执行入口与历史原件收束 | 已整理；原件哈希保留 |
+| 上一版规划文档审查与静态检查 | Luna/XHigh 主写，Sol/High 审查已收口；旧审查记录：`.architecture-refactor/next-stage-plan-sol.md`。当时 15 份文档、95 个本地链接检查通过，13 份原件哈希验证通过；这些是上一版证据，不替代本次协议修订审查 |
+| 本次四角色协议修订 | requirements_ux 复用 next_plan_writer（Luna/XHigh）；ui_designer、implementer（Luna/XHigh）分别完成 UI 规格与只读可行性；ui_reviewer（Sol/High）独立审查。root 整合本文；UX/UI 文档复核无实质问题，收件目标措辞已消歧。独立审查的 Important（Astra finding 与两轮预算关系）已修正并经 reviewer 关闭，无未关闭重要问题。本次两份修改文档的 21 个本地链接与 Git 空白检查通过。这是规格审查，不是实际页面联合验收 |
+| 子 Agent 模型再设计 | 用户已批准 §9.3 新分工；本会话 6.1-Sol 调度可用性仍未满足，未修改全局配置或冒用替代模型。旧审查记录保留原模型 |
+| `.architecture-refactor/local-secrets/fflogs.credentials.json` | 已按用户指令保存；Git 忽略已验证；ACL 限 workspace owner、SYSTEM 和本地执行账号；不写入文档、归档或构建输入。本轮只创建文件，未重新验证凭据有效性 |
+| W2-0–W2-6、TC01–TC16 | 全部 NOT RUN；需要用户后续明确开始实施的指令 |
+| 本次已有修改的提交/推送 | 已完成：`1648565` 推送至 `origin/master`，99 文件；本地任务卡/架构草稿/凭据/证据未提交。离线套件 932 项、14 skipped；全仓 Ruff check/format 通过；两处格式修复后的相关用例 38 项、1 skipped；构建通过且 ZIP 137 项内容/排除检查通过。不把这些结果当作 W2 真实宿主或页面验收 |
+| W2 实施/发布/部署 | NOT RUN；本次提交授权不包括 W2 实施、tag、Release 或部署 |
+
+后续每项测试填写下面的统一记录。无法满足某一前置时保留 NOT RUN/BLOCKED，明确阻断层，不把存在测试计划当作结果。
+
+```text
+case_id / run_id / wave / status:
+source_worktree_or_commit / package_sha256 / sdk_pin:
+AstrBot / Python / OS / target_root / process_identity:
+preconditions / fixture_mode (synthetic | live | host | visual):
+input (redacted) / observed_at / duration:
+transport_status / business_status / visible_result:
+expected / actual / evidence_path:
+failure_layer / next_owner / retest_trigger:
+```
+
+页面、图片和推送属于不同可见性证据；协议直连、模块结果、真实宿主、实际浏览器/IM分别记录。若同一候选包修订，生成新 cohort；旧失败保留，未受影响离线证据可引用但不冒充在新包上重跑。验收后才处理开发临时文件与版本发布；原失败现场、用户数据和用户指定的凭据文件不属于自动清理范围。

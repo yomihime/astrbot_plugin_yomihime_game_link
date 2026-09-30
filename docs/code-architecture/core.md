@@ -7,9 +7,9 @@
 
 ## 1. 文档边界
 
-本文负责主体代码与公共契约，是各模块对接的唯一技术契约来源。分工和模块入口见[架构索引](../code-architecture.md)。主体开发归属 `main.py`、`bootstrap.py`、`api/`、`core/`、`services/`、`presentation/`、`infrastructure/`、`integrations/` 和 `web/`；游戏专属行为由各模块文档定义。
+本文负责主体职责和公共契约的设计说明；公开类型的唯一声明在 `yomihime_sdk/api/`，内部执行边界以[当前合同](../../.coordination/contracts/CORE-HARDENING-01.md)及实际代码为准。分工和模块入口见[架构索引](../code-architecture.md)。主体开发归属 `main.py`、`bootstrap.py`、SDK 与兼容转发、`core/`、`services/`、`presentation/`、`infrastructure/`、`extensions/`、宿主适配与 `web/`；游戏专属行为由各模块文档定义。
 
-当前仓库只有 `main.py` 中的 `/ygl` 介绍入口；本文中的目录、类型、数据库表和服务均为目标设计，不表示已经存在。Python 代码片段为接口示意，省略部分类型定义，不应作为可运行实现直接复制。
+本文描述目标职责与行为，不能作为实际文件清单。当前已有 SDK、Registry/Gateway、生命周期、SQLite 和服务/调度/输出组件，并由 `services/core_runtime.py` 装配本地运行入口；各组合能力的验收状态以看板为准，宿主入口仍为 help-only。初审差距见[内核审查](../../.architecture-refactor/core-review-2026-09-27.md)，实施见[内核收束总卡](../../.coordination/tasks/core/CORE-HARDENING-01.md)。Python 代码片段仍为接口示意，准确签名以 canonical `yomihime_sdk/api/` 和当前代码为准。
 
 需求文档定义功能范围，基本设计定义系统行为，本文定义代码职责及协作契约。已确认的约束不因本文件细化而改变；数据库、依赖库、宿主接入及默认数值未最终确认的部分继续保留为设计建议。
 
@@ -35,7 +35,8 @@
 ```text
 main.py
 bootstrap.py
-api/                            模块可使用的版本化公共契约
+api/                            兼容转发，不定义第二套类型
+yomihime_sdk/api/               模块可使用的版本化公共契约
   __init__.py                   受控导出面，不导出内部实现
   manifests.py                  包、模块、能力与配置声明
   contexts.py                   上下文只读视图
@@ -121,18 +122,19 @@ flowchart TD
     Main --> Infra[infrastructure]
     Bridge --> Core
     Services --> Core
-    Infra --> Ports[core.ports / api 协议]
-    Core --> API[api]
+    Infra --> Ports[core.ports / SDK 协议]
+    Core --> API[yomihime_sdk.api]
     Services --> API
     Module[内置及第三方模块] --> API
     Present[presentation] --> API
 ```
 
-图中箭头表示代码依赖，不表示运行数据方向。主体调用模块依赖的是 `api` 中的协议，具体实例由装配层传入。
+图中箭头表示代码依赖，不表示运行数据方向。主体调用模块依赖的是 `yomihime_sdk.api` 中的协议，具体实例由装配层传入；旧相对 `api` import 只是同一类型的兼容转发。
 
 | 代码区域 | 可依赖 | 禁止直接依赖 |
 | --- | --- | --- |
-| api | 标准类型和协议定义 | core、services、AstrBot、数据库、具体模块 |
+| yomihime_sdk.api | 标准类型和协议定义 | core、services、AstrBot、数据库、具体模块 |
+| api 兼容转发 | 对应 SDK 声明 | 新 DTO、独立版本或复制实现 |
 | core | api、内部端口 | 具体游戏、AstrBot 事件类型、SQLite 实现 |
 | services | api、core 端口及明确注入的协作接口 | 具体游戏实现、其他服务的私有字段 |
 | presentation | api 展示模型、注入资源/渲染端口 | 模块模型、上游响应、业务数据库 |
@@ -143,6 +145,30 @@ flowchart TD
 `bootstrap.py` 是组合入口：选择后端、构造依赖并组装根对象，返回 `PluginRuntime` 给宿主入口。`PluginRuntime` 只暴露启动、关闭、调用和状态查询等入口，不同时实现数据库、渲染和业务服务。
 
 服务间依赖通过构造参数显式声明。模块取得的是按模块、权限和任务作用域绑定的 `ModuleServices`，不是可按字符串取得任何对象的全局容器。
+
+### 4.1 当前实现的责任边界
+
+上面的目录树是目标职责示意；当前内部实现采用以下落点。此表解释所有权，不代替[看板](../../.coordination/board.md)的验收状态，也不要求按示意目录重新拆分文件。
+
+| 责任 | 实际落点 | 唯一维护的事实与协作方式 |
+| --- | --- | --- |
+| 本地组合根 | `services/core_runtime.py` | 构造并注入真实组件，负责启动恢复、可信 host ingress、受管 pump 与有界关闭；不另存模块实例/epoch/启用真相 |
+| 管理消费者 | `services/admin_operations.py`、`services/admin_facade.py` | 每次实际核验管理凭据并调用同一 ExtensionRuntime/配置协调器；facade 只做接口适配 |
+| 静态注册目录 | `core/registry.py` | 声明、handlers 索引与目录 revision；运行状态仅为 Lifecycle 的投影，不分配执行 epoch |
+| 实例与运行代次 | `core/lifecycle.py`、`core/task_scope.py` | 实例、候选清理、epoch、Scope 及在途任务；未清理完成的工作仍有 owner，不假报停止 |
+| 调用与发送准入 | `core/admission.py`、`core/context_issuer.py` | 同一控制门、精确 lease、来源与父子调用关系；所有消费者使用同一组对象 |
+| 有效能力健康 | `core/health.py` | 组合实例报告、配置、来源和关联能力状态；Help、Gateway 与管理投影共用此结果 |
+| 模块服务及依赖调用 | `services/module_services.py`、`services/dependency_calls.py` | 候选构造可取得服务，实际调用必须绑定合法 view/lease；子调用结束释放其授权记录 |
+| 调用身份解析 | `services/identity.py::InvocationPrincipalResolver` | 将可信宿主 actor 解析为内部 principal，校验精确 invocation/lease；持久数据与授权使用 principal，消息收件人仍保留宿主身份 |
+| 管理配置 | `services/admin_authorization.py`、`services/configuration.py` | 逐次授权、真实 credential generation 与配置 CAS；敏感字段 receipt、提交与健康发布有明确恢复顺序 |
+| 授权撤销事务 | `services/authorization.py`、`infrastructure/sqlite/repositories_grant_revocation.py` | 业务入口持共同准入门，内部 coordinator 在同库事务内撤销 Grant 并收敛精确旧授权工作；不删除私人资产标记或发送历史，当前修复验收见看板 |
+| 订阅、采集及输出 | `services/subscriptions.py`、`services/scheduler.py`、`services/output.py`、`services/delivery.py` | 真实持久 claim 与订阅身份、最后发送许可、receipt/UNKNOWN；复用 Lifecycle 的任务归属，不自建启用状态 |
+| 异步事务 | `infrastructure/sqlite/executor.py` 及 repositories | 完整事务在同一 worker 线程执行；已接受的事务取消等待其确定结果，关闭保留未结束工作的责任 |
+| 扩展激活编排 | `services/extension_runtime.py` | catalog、包构建/模块操作 flight 与代码包 lease；实际实例归 Lifecycle，启用意图归 SQLite |
+
+`services/core_runtime.py` 是上述依赖表的显式装配边界，可以导入具体 SQLite、文件和扩展 source 实现以构造它们；普通业务服务仍通过注入端口协作。目标宿主的 `bootstrap.py`/PluginRuntime 后续复用这个本地组合根，不复制一套内部运行时。
+
+单次管理变更、调用、采集或发送可以经过多个服务，但不能因此产生第二份可写的 enabled、epoch、实例或授权真相。独立的 revision 仍有各自含义：目录 CAS、模块运行代次、配置版本、credential generation、Grant 和订阅版本不可互相替代。组件间遇到 await 后按操作需要重验相关身份，不用任意全局 revision 变更使无关模块失效。
 
 ## 5. 公共模块契约
 
@@ -185,7 +211,7 @@ class CapabilityHandler(Protocol):
 
 能力定义权限与输入结构，命令和 Tool 只定义入口映射，不能通过重复声明放宽权限。`effect` 区分只读和状态修改；`invocation_policy` 区分必须命令与允许自然语言，两者不可互相替代。
 
-注册表是校验后的不可变快照。更新时整体替换快照并增加 revision，帮助、页面和 Tool 使用同一 revision，执行时再检查当前状态。`help` 为保留路由，不允许模块覆盖。
+注册表是校验后的不可变目录快照。更新时整体替换快照并增加 revision，供目录查询与 CAS 使用。执行身份由 Lifecycle 的模块 epoch 和相关能力/依赖身份决定，Admission 统一签发并复核 lease；无关模块发布不使既有调用或 Scope 失效。帮助、Tool 与管理投影消费同一能力健康来源。`help` 为保留路由，不允许模块覆盖。
 
 ### 5.3 模块可见服务
 
@@ -238,7 +264,7 @@ class CapabilityHandler(Protocol):
 
 ## 7. 能力状态与模块生命周期
 
-`HealthIndex` 按 capability_id 记录 available/unavailable/unknown、原因、依赖和检查时间。`LifecycleController` 管理 enabled 意图、生命周期及单调增加的 epoch，两者不合并为一个布尔值。
+`LifecycleController` 是实例、Scope、生命周期与单调 epoch 的唯一 owner；Registry 保存目录投影，SQLite intent/journal 保存重启恢复依据。内部 `HealthResolver` 将实例基础健康与声明配置、来源、依赖按能力合并为 available/unavailable/unknown，模块启用不要求每项能力全部 available。实际签名与验证阶段见当前合同和看板，不以本设计说明替代实现验收。
 
 `AvailabilityResolver` 使用全局能力状态和请求级条件产生本次可调用结论。未登录属于用户条件；来源服务不可达属于全局能力状态。模块摘要从能力状态聚合，不反向覆盖能力状态。
 
@@ -253,7 +279,7 @@ ModuleRuntimeState
 
 启用涉及兼容检查、模块级依赖、迁移、实例创建、能力状态检查和原子发布。能力级配置缺失仅禁用该能力。失败清理已创建的作用域和注册项，保留可审查的失败状态。
 
-停用先关闭调用准入并使 epoch 失效，再撤下 Tool、暂停采集及待发记录，取消受管工作，最后释放实例。旧工作即使未能立即取消，也不能提交新的用户结果。
+停用先关闭调用准入并使 epoch 失效，再暂停该模块采集和新的发送批准，取消受管工作并调用实例 stop；未静止时保留 owner 和 cleanup pending。当前本地启停复用已安装实例，不将停用等同于卸载；首次激活失败另有精确内部 rollback。真实宿主 Tool 撤销由宿主接入阶段承接。旧工作即使未能立即取消，也不能提交新的用户结果。
 
 发送许可的最终检查与停用准入使用同一模块门控。已经提交到平台的网络发送不可撤回，因此“停用后不发送”指停用生效后不批准新的发送；此前在途发送应等待结束或标为未知，不承诺撤回已经被平台接收的消息。
 
@@ -500,7 +526,7 @@ assets[]: relative_path, media_type, source, license
 
 ### 11.2 公开 API 装载
 
-建议由主体发布一个唯一版本的契约命名空间，并由扩展加载器绑定；扩展不复制主体内部类，也不硬编码 AstrBot 的临时插件加载路径。具体可导入名称须随宿主安装方式验证后冻结，本文中的 `api/` 是源码落点，不承诺第三方能直接 `import api`。
+公开导入名为 `yomihime_sdk.api`，由唯一 SDK 工件提供；旧 `api/` 只转发同一类身份。扩展不复制主体内部类，也不硬编码 AstrBot 的临时插件加载路径。安装工件、Core 与扩展之间的 class identity 必须实际验证，目标宿主 Python/root/import 支持范围仍由宿主阶段验收。
 
 装载器在执行 factory 前提供已校验的 API 版本和 ModuleServices。相同协议模型在主体和扩展间必须使用同一实现或经明确序列化边界转换，避免两份类导致类型身份不一致。
 
@@ -522,7 +548,11 @@ assets[]: relative_path, media_type, source, license
 
 `HelpCatalog` 对总帮助按 command_only 筛选，对模块帮助列全部命令并附状态和必要权限说明；二者不维护单独手写列表。无模块时返回空状态。
 
-`AdminBridge` 在宿主鉴权后访问管理服务，输出配置结构、能力状态及计数 DTO。页面只展示 DTO，不判断游戏字段。配置更新使用 expected_revision 和敏感字段 keep/replace/clear，不回显原密钥。
+`AdminBridge` 只把 H 从实际可信 host request/session 派生的上下文交给 Core 管理服务。Core 对每个 mutation 核验独立管理凭据和 generation，对每个 read 按显式 read policy 授权；Dashboard/host administrator identity 不足以授权。服务输出配置结构、能力状态及计数 DTO；页面只展示 DTO，不判断游戏字段。配置更新使用 expected_revision 和敏感字段 keep/replace/clear，不回显原密钥。
+
+管理授权采用独立、可轮换的高熵管理能力凭据。Dashboard username、plugin scope、页面可见性、host administrator identity/role、JWT/API-key 身份、客户端 flag 均不等于 Core 管理权限。对每个管理 mutation，Core service 必须依据 H adapter 从实际可信 host request/session 转换出的上下文验证当前凭据与持久化 generation；不能由调用方提交身份字符串或布尔权限，也不能把验证只放在 adapter。`InvocationView` 仅描述调用，不构成授权。凭据缺失、无效、过期、已撤销、trusted binding 不可用或 verifier 存储失败时 fail closed。只读操作按显式 Core read policy 逐次核验；未配置或不可验证则拒绝。
+
+首次 bootstrap/recovery 由有部署主机文件及进程管理权限的操作者在本地交互式 maintenance CLI 完成；操作者在可信本地环境生成至少 256-bit credential，通过不回显输入录入，不提供 Dashboard/API bootstrap route，也不由服务器向响应交付明文。持久化单例只允许 `UNINITIALIZED(generation=0)`、`ACTIVE(generation=n)`、`REVOKED(generation=n)`：新库 migration 创建 UNINITIALIZED；bootstrap 只允许 UNINITIALIZED→ACTIVE(1)，rotation 只允许 ACTIVE(n)→ACTIVE(n+1)，revoke 清 digest 并进入 REVOKED(n+1)，recovery 只允许本地 OS-authorized CLI 从健康 REVOKED(n) 安装新 digest 为 ACTIVE(n+1)。ACTIVE credential 丢失须先本地 revoke 再 recovery。正常 rotation 要求当前 credential 加上新的至少 256-bit credential，Core 原子更新 verifier 和 generation，使旧值与旧 generation 会话失效。旧 credential 值不可恢复或显示；若 ACTIVE credential 遗失，具备相同本地 OS 权限的操作者先 revoke 至持久化 REVOKED，再用新 credential recover；不可把该流程当作首次 bootstrap。H 以 SHA-256 digest 形式仅保存 verifier 于独立管理 credential repository，不复用 module/principal/operation-owned `SecretStore`。SQLite 仓库和 schema 必须保证原子替换及 generation 单调递增；读取/写入错误、digest 格式损坏或缺状态行均使管理操作 fail closed；不得隐式重建 UNINITIALIZED，out-of-band repair 必须保留 generation history。具体 CLI 读取方式、可信 session binding、credential/session lifetime、browser storage/transport、CSRF 防护与 host route 行为仍须 H 根据真实部署证据冻结；不得臆造 AstrBot API。
 
 采集周期通过 ScheduleDescriptor 自动生成管理字段，显示配置值、受限后的目标周期、下次执行和延迟原因。个人订阅管理不增加网页旁路。
 

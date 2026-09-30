@@ -19,7 +19,7 @@
 
 本文不自动覆盖需求文档。两份文档发生冲突时，记录到第 13 节；冻结设计前应同步消除冲突。未经确认，不得把设计建议升级为需求承诺。
 
-当前仓库仅实现 `/ygl` 插件介绍入口。以下目录、服务、页面和数据结构均为目标设计。
+本文起草时仓库仅有 `/ygl` 插件介绍入口。当前本地 CoreRuntime、SDK、服务、SQLite、扩展激活及 installed 样例已通过 W4 本地验收；目标宿主仍为有限 help-only 入口，完整路由、页面和生产后端由[主计划](development-plan.md)承接。以下目录和接口仍是目标设计，不能当作实际文件清单；实际职责见[主体架构](code-architecture/core.md)，验收状态见[看板](../.coordination/board.md)。
 
 ## 2. 设计目标与边界
 
@@ -283,7 +283,7 @@ Dota 2 独立绑定优先于 Steam 派生身份。建议将派生关系保存为
 
 调用来源为 command、llm_tool、scheduler、admin。来源由宿主对接或主体调度器创建，不能接受模型或模块传入的字符串作为授权证明。内部调用继承最初来源，不能借调用其他能力把 llm_tool 提升成 command。
 
-命令操作以真实消息身份为执行者；管理操作以宿主管理员身份为执行者；共享公开采集以受管系统任务为执行者，不伪造聊天用户。订阅匹配和投递再分别带入订阅创建者、订阅 ID/revision、目标会话和所需 Grant/revision，检查订阅及权限仍有效。
+命令操作以真实消息身份为执行者；管理写操作要求独立管理凭据和可信 host request/session context，并由 Core 每次核验；Dashboard username、host administrator identity/role、plugin scope 或 `InvocationView` 本身都不授予权限。管理读取须符合单独冻结且逐次验证的 read policy，缺少 policy 时拒绝。共享公开采集以受管系统任务为执行者，不伪造聊天用户。订阅匹配和投递再分别带入订阅创建者、订阅 ID/revision、目标会话和所需 Grant/revision，检查订阅及权限仍有效。
 
 `command_only` 约束用户触发的能力入口。模块注册的采集器是独立内部入口，只接受主体调度授权，不调用命令处理器来模拟用户操作。普通查询需要读取默认绑定时通过受控身份解析服务完成，不等于开放“查看绑定”管理能力给 Tool。
 
@@ -477,6 +477,10 @@ Tool 的模型事实使用协议允许的字段、值、单位和来源，不返
 页面分为主体设置和模块管理。模块详情从清单、配置结构、能力描述和运行状态生成，不要求模块注入任意页面代码。
 
 管理接口按读取总览、读取模块、更新配置、切换模块、检查连接、读取数据摘要、清理数据划分。本文不冻结 URL 路径；所有接口与受保护资源必须沿用宿主管理端鉴权，前端隐藏按钮不等于权限校验。
+
+**B05 管理授权决策：** Dashboard 登录用户名、插件 scope、Page 可见性、JWT wildcard scope、host administrator identity/role 或客户端提供的管理员标志都不授予 Core 管理权限。所有管理写入必须携带独立管理能力凭据并绑定可信 host request/session context；Core 每次验证当前 credential generation、有效期及撤销状态。缺失、无效、过期、撤销或不可绑定凭据一律拒绝，不得接受用户自报身份/权限、API key 作为绕过路径，或只在 Web adapter/UI 校验。`InvocationView` 是描述数据，不是授权证明。读操作按 H 冻结的显式读取策略逐次授权；策略缺失或上下文不可信时 fail closed。
+
+操作者在受信本地环境用密码学安全随机源自行生成至少 256-bit 凭据；从不由服务端生成并返回。首次 bootstrap 与遗失后的 recovery 要求具备部署主机文件和进程管理权限的操作者，在本地交互式 maintenance CLI 的不回显输入中录入凭据；该 CLI 不是 Dashboard/API route。CLI 只校验强度并提交 Core，随后清除输入，不打印或保存明文。持久化状态仅为 `UNINITIALIZED(generation=0)`、`ACTIVE(generation=n)`、`REVOKED(generation=n)`：新库 migration 必须建立唯一 UNINITIALIZED 行，bootstrap 只允许 UNINITIALIZED→ACTIVE(1)，rotation 只允许 ACTIVE(n)→ACTIVE(n+1)，revoke 变为 REVOKED(n+1) 并清 verifier，恢复只允许本地 OS-authorized CLI 从健康持久化 REVOKED(n) 安装新 verifier 为 ACTIVE(n+1)。ACTIVE 凭据遗失时须先本地 revoke 再 recover。正常 rotation 要求提交当前凭据与新生成的至少 256-bit 凭据，Core 校验当前值后以单个持久化事务替换 verifier 并增加 generation；旧值及绑定旧 generation 的会话在提交后立即失效。旧凭据不可恢复或显示。缺少状态行、verifier 存储损坏/不可用或 generation 无法可信恢复时，所有管理读写 fail closed；须经保留 generation history 的 out-of-band repair，不得隐式重建 UNINITIALIZED；不回退明文。禁止个人订阅网页旁路。凭据 verifier 只存密码学哈希，不复用现有 module/principal `SecretStore`。浏览器/API 的 credential transport、host session binding、CSRF 与 route policy 仍须 H 按实际目标 AstrBot 证据冻结；本机 v4.28.0 只作源码参考。
 
 设计建议：配置只有一个权威存储来源。页面使用配置版本提交，检测并发修改；敏感字段使用“保持原值、替换、清除”语义，不返回完整值。保存成功、校验成功、启用成功和连接正常分别反馈。
 

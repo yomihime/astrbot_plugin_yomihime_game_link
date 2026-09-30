@@ -5,6 +5,8 @@
 
 > AI 协作入口：[统筹协议](orchestration.md)、[工作包目录](work-packages.md)、[任务卡模板](task-template.md)。实现者只执行已填写任务卡中的范围；本文全篇不是一次性开发任务。
 
+> 执行状态：首批公开能力任务卡已设计但受 Core Ready Gate 阻塞；账号订阅仍有独立条件，见 [Steam 任务卡](../../.coordination/tasks/modules/steam/README.md)。
+
 ## 1. 归属与范围
 
 独占目录为 `modules/steam/`，维护模块清单和验证材料。`/ygl steam` 为建议路由；公开资料绑定、商品识别和价格是主体能力。历史价格、比较及愿望单的首版范围仍按需求待确认项处理。

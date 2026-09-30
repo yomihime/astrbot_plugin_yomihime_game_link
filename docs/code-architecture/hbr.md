@@ -5,6 +5,8 @@
 
 > AI 协作入口：[统筹协议](orchestration.md)、[工作包目录](work-packages.md)、[任务卡模板](task-template.md)。实现者只执行已填写任务卡中的范围；本文全篇不是一次性开发任务。
 
+> 执行状态：公共目录任务卡已设计但受 Core Ready Gate 阻塞；账号、BOX 与高分继续受真实授权证据阻塞，见 [HBR 任务卡](../../.coordination/tasks/modules/hbr/README.md)。
+
 ## 1. 归属与范围
 
 独占目录为 `modules/hbr/`，维护模块清单与验证材料。`/ygl hbr` 是建议路由，不另设中文独立触发命令。
