@@ -11,7 +11,7 @@ from typing import Protocol
 
 from ..api.contexts import InvocationOrigin, InvocationView
 from ..api.display import DigestMember
-from ..api.manifests import InvocationPolicy, ModuleManifest
+from ..api.manifests import InvocationPolicy, ModuleManifest, PrivacyFloor
 from ..api.services import (
     Grant,
     GrantStatus,
@@ -65,6 +65,7 @@ from .identity import (
     PrincipalResolutionDenied,
     PrincipalResolutionUnavailable,
 )
+from .owner_authority import OwnerRouteProofAuthority
 
 
 class SubscriptionOperationError(PermissionError):
@@ -169,6 +170,7 @@ class SubscriptionOperationsService(SubscriptionOperations):
         digest_windows: DigestWindowRepository,
         grants: GrantStore,
         principal_resolver: InvocationPrincipalResolver,
+        owner_authority: OwnerRouteProofAuthority | None = None,
         now: Callable[[], datetime],
         max_subscriptions_per_owner: int,
     ) -> None:
@@ -208,6 +210,11 @@ class SubscriptionOperationsService(SubscriptionOperations):
         if not callable(getattr(principal_resolver, "principal_id", None)):
             raise TypeError("principal resolver is not usable")
         self._principal_resolver = principal_resolver
+        if owner_authority is not None and not callable(
+            getattr(owner_authority, "require_current", None)
+        ):
+            raise TypeError("owner authority is not usable")
+        self._owner_authority = owner_authority
         self._now = now
         self._max_subscriptions = max_subscriptions_per_owner
 
@@ -259,6 +266,12 @@ class SubscriptionOperationsService(SubscriptionOperations):
         if (
             capability is None
             or capability.invocation_policy is not InvocationPolicy.COMMAND_ONLY
+        ):
+            raise SubscriptionOperationError()
+        if capability.privacy_floor is PrivacyFloor.OWNER and (
+            self._owner_authority is None
+            or view.grant_id is not None
+            or view.grant_revision is not None
         ):
             raise SubscriptionOperationError()
         try:
@@ -362,6 +375,22 @@ class SubscriptionOperationsService(SubscriptionOperations):
     async def _principal_id(self, invocation: InvocationView) -> str:
         self._check_command_current(invocation)
         try:
+            module = self._registry.snapshot().module(invocation.module_id)
+            capability = next(
+                item
+                for item in module.manifest.capabilities
+                if item.capability_id == invocation.capability_id
+            )
+        except Exception:
+            raise SubscriptionOperationError() from None
+        if capability.privacy_floor is PrivacyFloor.OWNER:
+            try:
+                principal_id = await self._owner_authority.require_current(invocation)
+            except Exception:
+                raise SubscriptionOperationError() from None
+            self._check_command_current(invocation)
+            return principal_id
+        try:
             principal_id = await self._principal_resolver.principal_id(invocation)
         except (PrincipalResolutionDenied, PrincipalResolutionUnavailable):
             raise SubscriptionOperationError() from None
@@ -369,6 +398,24 @@ class SubscriptionOperationsService(SubscriptionOperations):
             raise SubscriptionOperationError() from None
         self._check_command_current(invocation)
         return principal_id
+
+    async def _owner_proof_current(self, invocation: InvocationView) -> str:
+        try:
+            if self._owner_authority is None:
+                raise SubscriptionOperationError()
+            principal_id = await self._owner_authority.require_current(invocation)
+        except Exception:
+            raise SubscriptionOperationError() from None
+        self._check_command_current(invocation)
+        return principal_id
+
+    @staticmethod
+    def _owner_floor(module: RegisteredModule, invocation: InvocationView) -> bool:
+        return any(
+            item.capability_id == invocation.capability_id
+            and item.privacy_floor is PrivacyFloor.OWNER
+            for item in module.manifest.capabilities
+        )
 
     async def _require_record_grant(self, record: SubscriptionRecord) -> None:
         if record.grant is None:
@@ -417,6 +464,10 @@ class SubscriptionOperationsService(SubscriptionOperations):
     ) -> tuple[SubscriptionRecord, SubscriptionJobAssociation]:
         owner = await self._principal_id(invocation)
         descriptor, schedule = self._declarations(module, request.type_id)
+        if self._owner_floor(module, invocation) and (
+            schedule.shared_scope is OwnershipKind.AUTHORIZED
+        ):
+            raise SubscriptionOperationError()
         if (
             request.notification_mode not in ("instant", "digest")
             or request.notification_mode not in descriptor.notification_modes
@@ -528,6 +579,7 @@ class SubscriptionOperationsService(SubscriptionOperations):
             raise TypeError("request must be a SubscriptionRequest")
         if request.subscription_id is not None:
             raise ValueError("create request cannot contain a subscription ID")
+        owner_floor = self._owner_floor(module, view)
         owner_id = await self._principal_id(view)
         current = await self._subscriptions.list_for_owner(
             owner_id, limit=self._max_subscriptions + 1
@@ -563,6 +615,8 @@ class SubscriptionOperationsService(SubscriptionOperations):
             self._check_command_current(view)
             if current_recipient != record.recipient:
                 raise PrivateRecipientRequired()
+            if owner_floor:
+                await self._owner_proof_current(view)
             module_snapshot = self._registry.snapshot()
             live_module = module_snapshot.module(view.module_id)
             if not live_module.enabled or live_module.epoch != view.module_epoch:
@@ -586,6 +640,8 @@ class SubscriptionOperationsService(SubscriptionOperations):
                 initial_run=initial_run,
             )
             self._check_command_current(view)
+            if owner_floor:
+                await self._owner_proof_current(view)
         return self._view(saved)
 
     async def revise_request(
@@ -598,10 +654,11 @@ class SubscriptionOperationsService(SubscriptionOperations):
             or request.expected_revision is None
         ):
             raise ValueError("revise request requires a subscription ID and revision")
+        owner_floor = self._owner_floor(module, view)
         current = await self._subscriptions.current(request.subscription_id)
         self._check_command_current(view)
         principal_id = await self._principal_id(view)
-        if not self._owns(view, current, principal_id):
+        if not self._owns(view, current, principal_id, owner_floor=owner_floor):
             raise SubscriptionOperationError()
         assert current is not None
         await self._require_record_grant(current)
@@ -638,7 +695,7 @@ class SubscriptionOperationsService(SubscriptionOperations):
                 raise SubscriptionOperationError("identity changed")
             latest = await self._subscriptions.current(request.subscription_id)
             self._check_command_current(view)
-            if not self._owns(view, latest, principal_id):
+            if not self._owns(view, latest, principal_id, owner_floor=owner_floor):
                 raise SubscriptionOperationError()
             assert latest is not None
             if latest.revision != request.expected_revision:
@@ -667,6 +724,8 @@ class SubscriptionOperationsService(SubscriptionOperations):
             self._check_command_current(view)
             if current_recipient != record.recipient:
                 raise PrivateRecipientRequired()
+            if owner_floor:
+                await self._owner_proof_current(view)
             module_snapshot = self._registry.snapshot()
             live_module = module_snapshot.module(view.module_id)
             if not live_module.enabled or live_module.epoch != view.module_epoch:
@@ -690,14 +749,19 @@ class SubscriptionOperationsService(SubscriptionOperations):
                 initial_run=initial_run,
             )
             self._check_command_current(view)
+            if owner_floor:
+                await self._owner_proof_current(view)
         return self._view(saved)
 
     async def list_current(
         self, invocation: InvocationView
     ) -> tuple[SubscriptionView, ...]:
-        view, _ = self._command(invocation)
+        view, module = self._command(invocation)
+        owner_floor = self._owner_floor(module, view)
         owner_id = await self._principal_id(view)
-        recipient = await self._recipient(view, OwnershipKind.PUBLIC)
+        recipient = (
+            None if owner_floor else await self._recipient(view, OwnershipKind.PUBLIC)
+        )
         self._check_command_current(view)
         records = await self._subscriptions.list_for_owner(
             owner_id, limit=self._max_subscriptions
@@ -707,9 +771,18 @@ class SubscriptionOperationsService(SubscriptionOperations):
         for record in records:
             if (
                 record.module_id != view.module_id
-                or record.recipient != recipient
+                or (not owner_floor and record.recipient != recipient)
                 or record.status is not SubscriptionStatus.ACTIVE
                 or record.collection_key.scope.user_id not in (None, owner_id)
+                or (
+                    owner_floor
+                    and (
+                        record.owner_id != owner_id
+                        or record.collection_key.scope.kind
+                        not in (OwnershipKind.PUBLIC, OwnershipKind.USER)
+                        or record.grant is not None
+                    )
+                )
             ):
                 continue
             try:
@@ -719,6 +792,8 @@ class SubscriptionOperationsService(SubscriptionOperations):
                 continue
             output.append(self._view(record))
         self._check_command_current(view)
+        if owner_floor:
+            await self._owner_proof_current(view)
         return tuple(output)
 
     def _owns(
@@ -726,13 +801,26 @@ class SubscriptionOperationsService(SubscriptionOperations):
         invocation: InvocationView,
         record: SubscriptionRecord | None,
         principal_id: str,
+        *,
+        owner_floor: bool = False,
     ) -> bool:
-        return bool(
+        base = bool(
             record is not None
             and record.status is SubscriptionStatus.ACTIVE
             and record.owner_id == principal_id
             and record.module_id == invocation.module_id
-            and record.recipient.adapter_id == invocation.adapter_id
+        )
+        if not base or record is None:
+            return False
+        if owner_floor:
+            return (
+                record.collection_key.scope.kind
+                in (OwnershipKind.PUBLIC, OwnershipKind.USER)
+                and record.grant is None
+                and record.collection_key.scope.user_id in (None, principal_id)
+            )
+        return (
+            record.recipient.adapter_id == invocation.adapter_id
             and record.recipient.conversation_id == invocation.conversation_id
         )
 
@@ -751,11 +839,12 @@ class SubscriptionOperationsService(SubscriptionOperations):
         *,
         expected_revision: int,
     ) -> None:
-        view, _ = self._command(invocation)
+        view, module = self._command(invocation)
+        owner_floor = self._owner_floor(module, view)
         current = await self._subscriptions.current(subscription_id)
         self._check_command_current(view)
         principal_id = await self._principal_id(view)
-        if not self._owns(view, current, principal_id):
+        if not self._owns(view, current, principal_id, owner_floor=owner_floor):
             raise SubscriptionOperationError()
         assert current is not None
         await self._require_record_grant(current)
@@ -792,7 +881,7 @@ class SubscriptionOperationsService(SubscriptionOperations):
                 raise SubscriptionOperationError("identity changed")
             latest = await self._subscriptions.current(subscription_id)
             self._check_command_current(view)
-            if not self._owns(view, latest, principal_id):
+            if not self._owns(view, latest, principal_id, owner_floor=owner_floor):
                 raise SubscriptionOperationError()
             assert latest is not None
             if latest != current:
@@ -813,6 +902,8 @@ class SubscriptionOperationsService(SubscriptionOperations):
                 or latest_link.subscription_revision != latest.revision
             ):
                 raise SubscriptionOperationError("subscription job is unavailable")
+            if owner_floor:
+                await self._owner_proof_current(view)
             await self._lifecycle.apply(
                 SubscriptionJobChange(
                     SubscriptionJobChangeKind.CANCEL,
@@ -823,6 +914,8 @@ class SubscriptionOperationsService(SubscriptionOperations):
                 )
             )
             self._check_command_current(view)
+            if owner_floor:
+                await self._owner_proof_current(view)
 
     async def create(
         self, invocation: InvocationView, subscription: SubscriptionView

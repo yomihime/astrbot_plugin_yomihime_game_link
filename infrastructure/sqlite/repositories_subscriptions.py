@@ -16,7 +16,7 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from enum import Enum
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from ...api.display import (
     CommandsBlock,
@@ -909,6 +909,23 @@ class SQLiteSubscriptionLifecycleRepository(_Repository):
 
 
 class SQLiteSchedulerRepository(_Repository):
+    def __init__(
+        self,
+        database: SQLiteDatabase | str | Path,
+        *,
+        utc_clock: Callable[[], datetime] | None = None,
+    ) -> None:
+        super().__init__(database)
+        if utc_clock is None:
+
+            def current_utc_time() -> datetime:
+                return datetime.now(UTC)
+
+            utc_clock = current_utc_time
+        if not callable(utc_clock):
+            raise TypeError("utc_clock must be callable")
+        self._utc_clock = utc_clock
+
     async def claim_due(
         self, request: CollectionRunRequest, *, now: datetime
     ) -> ExecutionLease | None:
@@ -1104,7 +1121,7 @@ class SQLiteSchedulerRepository(_Repository):
                 row = unit.execute(
                     "SELECT * FROM b04_collection_jobs WHERE job_key=?", (job,)
                 ).fetchone()
-                committed_at = datetime.now(UTC)
+                committed_at = _utc_instant(self._utc_clock(), "utc_clock")
                 if (
                     row is None
                     or row["key_json"] != _key_json(lease.key)

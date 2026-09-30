@@ -8,10 +8,13 @@ import unittest
 from ygl_test_subject.api.manifests import SourceDeclaration
 from ygl_test_subject.api.services import HttpRequest, HttpResponse
 from ygl_test_subject.infrastructure.http import (
+    CredentialLease,
     SourceHttpError,
     SourceHttpService,
     TransportRequest,
 )
+
+from yomihime_sdk.api.services import SourceHttpError as SdkSourceHttpError
 
 
 class _FakeTransport:
@@ -54,11 +57,42 @@ class _TwoRequestTransport:
         return HttpResponse(200, {}, b"ok")
 
 
+class _CredentialAuthorizer:
+    def __init__(self) -> None:
+        self.authorizations: list[CredentialLease] = []
+        self.invalidated: list[CredentialLease] = []
+
+    async def authorize(self, module_id, declaration, request, deadline):
+        lease = CredentialLease(
+            f"Bearer lease-{len(self.authorizations) + 1}",
+            len(self.authorizations) + 1,
+            f"opaque-token-{len(self.authorizations) + 1}",
+        )
+        self.authorizations.append(lease)
+        return lease
+
+    async def invalidate(self, module_id, declaration, lease):
+        self.invalidated.append(lease)
+
+
+class _CredentialResponseTransport:
+    def __init__(self, responses: tuple[HttpResponse, ...]) -> None:
+        self._credential_channel = object()
+        self.responses = list(responses)
+        self.calls: list[TransportRequest] = []
+
+    async def request(self, request: TransportRequest) -> HttpResponse:
+        self.calls.append(request)
+        if not self.responses:
+            raise AssertionError("unexpected resource replay")
+        return self.responses.pop(0)
+
+
 def _source(**changes: object) -> SourceDeclaration:
     values: dict[str, object] = {
         "source_id": "steam",
         "host": "api.example.test",
-        "credential_ref": "credential_steam",
+        "credential_ref": None,
         "timeout_seconds": 0.05,
         "requests_per_minute": 60,
     }
@@ -67,6 +101,9 @@ def _source(**changes: object) -> SourceDeclaration:
 
 
 class SourceHttpServiceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_error_type_is_shared_with_the_sdk(self) -> None:
+        self.assertIs(SourceHttpError, SdkSourceHttpError)
+
     async def test_declared_relative_requests_use_fake_transport(self) -> None:
         fake = _FakeTransport()
         service = SourceHttpService((_source(),), fake)
@@ -77,7 +114,7 @@ class SourceHttpServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(fake.calls[0].url, "https://api.example.test/v1/items")
-        self.assertEqual(fake.calls[0].credential_ref, "credential_steam")
+        self.assertIsNone(fake.calls[0].credential_ref)
         self.assertEqual(fake.calls[0].body, b"{}")
 
     async def test_undeclared_and_unsafe_requests_are_rejected(self) -> None:
@@ -152,6 +189,7 @@ class SourceHttpServiceTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(SourceHttpError) as timeout:
             await service.fetch(HttpRequest("steam", "/timeout"))
         self.assertEqual(timeout.exception.code, "timeout")
+        self.assertIsNone(timeout.exception.status_code)
 
         fake.block = False
         service = SourceHttpService((_source(timeout_seconds=0.05),), fake)
@@ -160,6 +198,20 @@ class SourceHttpServiceTests(unittest.IsolatedAsyncioTestCase):
             await service.fetch(HttpRequest("steam", "/status"))
         self.assertEqual(status.exception.code, "upstream_error")
         self.assertNotIn("secret", str(status.exception))
+
+        fake.response = HttpResponse(429, {}, b"private quota details")
+        with self.assertRaises(SourceHttpError) as upstream_limited:
+            await service.fetch(HttpRequest("steam", "/limited"))
+        self.assertEqual(upstream_limited.exception.code, "upstream_error")
+        self.assertEqual(upstream_limited.exception.status_code, 429)
+        self.assertNotIn("private", str(upstream_limited.exception))
+
+        fake.response = HttpResponse(404, {}, b"private not found details")
+        with self.assertRaises(SourceHttpError) as not_found:
+            await service.fetch(HttpRequest("steam", "/missing"))
+        self.assertEqual(not_found.exception.code, "upstream_error")
+        self.assertEqual(not_found.exception.status_code, 404)
+        self.assertNotIn("private", str(not_found.exception))
 
         fake.response = object()  # type: ignore[assignment]
         with self.assertRaises(SourceHttpError) as invalid:
@@ -182,6 +234,68 @@ class SourceHttpServiceTests(unittest.IsolatedAsyncioTestCase):
             await service.fetch(HttpRequest("steam", "/redirect"))
         self.assertEqual(caught.exception.code, "redirect_disallowed")
         self.assertEqual(len(fake.calls), 1)
+
+    async def test_get_401_refreshes_and_replays_once_with_quota_charge(self) -> None:
+        declaration = _source(credential_ref="credential_fflogs")
+        transport = _CredentialResponseTransport(
+            (HttpResponse(401, {}, b"private body"), HttpResponse(200, {}, b"ok"))
+        )
+        authorizer = _CredentialAuthorizer()
+        service = SourceHttpService(
+            (declaration,),
+            transport,
+            module_id="sample_pkg/status",
+            credential_service=authorizer,
+        )
+
+        response = await service.fetch(HttpRequest("steam", "/v1/items"))
+
+        self.assertEqual(response.body, b"ok")
+        self.assertEqual(len(transport.calls), 2)
+        self.assertEqual(len(authorizer.authorizations), 2)
+        self.assertEqual(len(authorizer.invalidated), 1)
+        self.assertEqual(
+            [call.headers["Authorization"] for call in transport.calls],
+            ["Bearer lease-1", "Bearer lease-2"],
+        )
+
+    async def test_post_401_invalidates_but_does_not_replay(self) -> None:
+        declaration = _source(credential_ref="credential_fflogs")
+        transport = _CredentialResponseTransport((HttpResponse(401, {}, b"private"),))
+        authorizer = _CredentialAuthorizer()
+        service = SourceHttpService(
+            (declaration,),
+            transport,
+            module_id="sample_pkg/status",
+            credential_service=authorizer,
+        )
+
+        with self.assertRaises(SourceHttpError) as caught:
+            await service.fetch(HttpRequest("steam", "/v1/graphql", "POST", body=b"{}"))
+
+        self.assertEqual(caught.exception.code, "upstream_error")
+        self.assertEqual(caught.exception.status_code, 401)
+        self.assertEqual(len(transport.calls), 1)
+        self.assertEqual(len(authorizer.authorizations), 1)
+        self.assertEqual(authorizer.invalidated, [authorizer.authorizations[0]])
+
+        transport.responses.append(HttpResponse(401, {}, b"still private"))
+        with self.assertRaises(SourceHttpError):
+            await service.fetch(HttpRequest("steam", "/v1/graphql", "POST", body=b"{}"))
+        self.assertEqual(len(transport.calls), 2)
+        self.assertEqual(len(authorizer.authorizations), 2)
+        self.assertEqual(len(authorizer.invalidated), 2)
+
+    async def test_credential_declaration_without_internal_authorizer_fails_closed(
+        self,
+    ) -> None:
+        declaration = _source(credential_ref="credential_fflogs")
+        fake = _FakeTransport()
+        service = SourceHttpService((declaration,), fake, module_id="sample_pkg/status")
+        with self.assertRaises(SourceHttpError) as caught:
+            await service.fetch(HttpRequest("steam", "/v1/items"))
+        self.assertEqual(caught.exception.code, "credentials_unavailable")
+        self.assertEqual(fake.calls, [])
 
 
 if __name__ == "__main__":

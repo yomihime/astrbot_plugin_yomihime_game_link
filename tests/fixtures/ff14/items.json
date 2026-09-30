@@ -1,0 +1,100 @@
+{
+  "fixture": {
+    "synthetic": true,
+    "purpose": "Exercise bounded item-source parsing without copying upstream records or assets.",
+    "note": "Every identifier, label, description, cursor, and route below is invented."
+  },
+  "xivcdn": {
+    "search_first_page": {
+      "schema": "synthetic-item-schema",
+      "version": "synthetic-game-version",
+      "next": "synthetic-opaque-cursor-page-2",
+      "results": [
+        { "row_id": 90001, "fields": { "Name": "Sample Ore Alpha" } },
+        { "row_id": 90002, "fields": { "Name": "Sample Ore Beta" } }
+      ]
+    },
+    "search_second_page": {
+      "schema": "synthetic-item-schema",
+      "version": "synthetic-game-version",
+      "results": [
+        { "row_id": 90003, "fields": { "Name": "Sample Ore Gamma" } }
+      ]
+    },
+    "item_detail": {
+      "schema": "synthetic-item-schema",
+      "version": "synthetic-game-version",
+      "row_id": 90001,
+      "fields": {
+        "Name": "Sample Ore Alpha",
+        "Description": "Synthetic description only.",
+        "LevelEquip": 2,
+        "LevelItem": {
+          "value": 7,
+          "sheet": "ItemLevel",
+          "row_id": 7,
+          "fields": { "Gathering": 3 }
+        }
+      }
+    },
+    "upstream_error": {
+      "http_status": 503,
+      "body": { "message": "synthetic unavailable" }
+    }
+  },
+  "garland": {
+    "linked_item_detail": {
+      "item": {
+        "id": 90001,
+        "name": "Sample Ore Alpha",
+        "description": "Synthetic Garland detail.",
+        "nodes": [7001],
+        "fishingSpots": [7002],
+        "craft": [
+          {
+            "job": 8,
+            "lvl": 12,
+            "ingredients": [{ "id": 90002, "amount": 2 }]
+          }
+        ],
+        "vendors": [7003],
+        "tradeCurrency": [
+          {
+            "shop": "SyntheticCurrencyShop",
+            "listings": [{ "currency": [{ "id": 90002, "amount": 3 }] }]
+          }
+        ],
+        "tradeShops": [
+          {
+            "shop": "SyntheticItemShop",
+            "listings": [{ "currency": [{ "id": 90003, "amount": 1 }] }]
+          }
+        ],
+        "drops": [7004, 7999],
+        "instances": [7005],
+        "quests": [7006]
+      },
+      "partials": [
+        { "type": "node", "id": 7001, "obj": { "n": "Sample node", "z": "zone-a", "l": 20, "c": [1, 2] } },
+        { "type": "fishing", "id": 7002, "obj": { "n": "Sample fishing spot", "z": "zone-a" } },
+        { "type": "npc", "id": 7003, "obj": { "n": "Sample vendor", "l": "zone-a", "c": [3, 4] } },
+        { "type": "mob", "id": 7004, "obj": { "n": "Sample mob", "z": "zone-a" } },
+        { "type": "instance", "id": 7005, "obj": { "n": "Sample duty", "min_lvl": 10 } },
+        { "type": "quest", "id": 7006, "obj": { "n": "Sample quest" } },
+        { "type": "item", "id": 90002, "obj": { "n": "Sample token" } }
+      ]
+    },
+    "item_without_route_fields": {
+      "item": {
+        "id": 90004,
+        "name": "Sample Item With No Recorded Routes",
+        "description": "Synthetic record; missing route fields do not prove unobtainable."
+      },
+      "partials": []
+    },
+    "upstream_error": {
+      "http_status": 429,
+      "body": { "message": "synthetic rate limited" }
+    }
+  }
+}

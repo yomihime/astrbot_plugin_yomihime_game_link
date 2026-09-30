@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import tempfile
 import unittest
 from pathlib import Path
@@ -106,6 +107,73 @@ class RuntimeRepositoryTests(unittest.IsolatedAsyncioTestCase):
         result = await reopened.commit_intent("operation-disable", grant)
         self.assertFalse(result.desired_enabled)
         self.assertEqual(result.intent_revision, 2)
+
+    async def test_default_enable_is_atomic_idempotent_and_journaled(self) -> None:
+        seeded = await self.repository.seed_default_enabled_if_absent(
+            "ff14", "ff14", expected_registry_revision=3
+        )
+        self.assertIsNotNone(seeded)
+        self.assertTrue(seeded.desired_enabled)
+        self.assertEqual(seeded.intent_revision, 1)
+        journal = await self.repository.current_journal(seeded.operation_id)
+        self.assertEqual(journal.phase, RuntimeJournalPhase.COMMITTED)
+        self.assertIsNone(journal.admin_generation)
+        self.assertEqual(journal.expected_registry_revision, 3)
+
+        repeated = await self.repository.seed_default_enabled_if_absent(
+            "ff14", "ff14", expected_registry_revision=99
+        )
+        self.assertEqual(repeated, seeded)
+
+        grant = await self._grant()
+        await self.repository.prepare(
+            "disable-bundle",
+            "ff14",
+            "ff14",
+            False,
+            expected_intent_revision=1,
+            expected_registry_revision=4,
+            grant=grant,
+        )
+        disabled = await self.repository.commit_intent("disable-bundle", grant)
+        preserved = await self.repository.seed_default_enabled_if_absent(
+            "ff14", "ff14", expected_registry_revision=5
+        )
+        self.assertEqual(preserved, disabled)
+        self.assertFalse(preserved.desired_enabled)
+        self.assertEqual(preserved.intent_revision, 2)
+
+    async def test_concurrent_default_enable_calls_create_one_intent(self) -> None:
+        first, second = await asyncio.gather(
+            self.repository.seed_default_enabled_if_absent(
+                "ff14", "ff14", expected_registry_revision=0
+            ),
+            self.repository.seed_default_enabled_if_absent(
+                "ff14", "ff14", expected_registry_revision=0
+            ),
+        )
+        self.assertIsNotNone(first)
+        self.assertEqual(first, second)
+        intents = await self.repository.list_intents()
+        self.assertEqual(len(intents), 1)
+        self.assertEqual(intents[0].operation_id, first.operation_id)
+
+    async def test_unresolved_journal_prevents_default_enable_seed(self) -> None:
+        prepared = await self.repository.prepare(
+            "incomplete-enable",
+            "ff14",
+            "ff14",
+            True,
+            expected_intent_revision=0,
+            expected_registry_revision=1,
+        )
+        self.assertEqual(prepared.phase, RuntimeJournalPhase.PREPARED)
+        self.assertIsNone(
+            await self.repository.seed_default_enabled_if_absent(
+                "ff14", "ff14", expected_registry_revision=2
+            )
+        )
+        self.assertIsNone(await self.repository.current_intent("ff14", "ff14"))
 
     async def test_commit_checks_live_generation_and_intent_cas_atomically(
         self,

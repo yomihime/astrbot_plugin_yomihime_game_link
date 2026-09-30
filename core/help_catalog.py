@@ -123,11 +123,11 @@ class HelpCatalog:
                 if capability.invocation_policy is InvocationPolicy.COMMAND_ONLY
                 else "允许自然语言"
             )
-            privacy = (
-                "需要个人授权"
-                if capability.privacy_floor is PrivacyFloor.PRIVATE
-                else "公开能力"
-            )
+            privacy = {
+                PrivacyFloor.PRIVATE: "需要个人授权",
+                PrivacyFloor.OWNER: "仅本人私聊可用",
+                PrivacyFloor.PUBLIC: "公开能力",
+            }[capability.privacy_floor]
             status = "模块未启用" if not module.enabled else "可用性由执行时状态校验"
             if health_query is not None:
                 status = HelpCatalog._health_label(

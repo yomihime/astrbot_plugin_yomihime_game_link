@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from typing import Final
+from uuid import uuid4
 
 from ..api.contexts import InvocationOrigin, InvocationView
 from ..api.services import (
@@ -17,6 +18,7 @@ from ..api.services import (
     BindingView,
     ConversationKey,
     IdentityResolver,
+    Principal,
     ResolvedIdentity,
 )
 from ..api.subscriptions import ConversationRef
@@ -57,6 +59,77 @@ class PrincipalResolutionDenied(PermissionError):
 
 class PrincipalResolutionUnavailable(RuntimeError):
     """The core identity repository could not resolve a durable principal."""
+
+
+class TrustedIngressPrincipalProvisioner:
+    """Idempotently persist a host-verified actor mapping.
+
+    CoreRuntime calls this only after its host ingress evidence validator has
+    accepted the exact ingress. The actor key is supplied by that host and is
+    expected to include its adapter namespace where platform identities can
+    otherwise collide.
+    """
+
+    __slots__ = ("_identities", "_namespace")
+
+    def __init__(self, identity_repository, *, identity_namespace: str) -> None:
+        if not callable(
+            getattr(identity_repository, "find_principal", None)
+        ) or not callable(getattr(identity_repository, "save_principal", None)):
+            raise TypeError("principal provisioner requires an identity repository")
+        try:
+            namespace = _stable_text(identity_namespace, "identity_namespace")
+        except ValueError:
+            raise ValueError("identity namespace is invalid") from None
+        self._identities = identity_repository
+        self._namespace = namespace
+
+    async def ensure(self, actor_id: str) -> Principal:
+        """Return the existing mapping or create one without replacing it."""
+
+        try:
+            actor = _stable_text(actor_id, "actor_id")
+        except ValueError:
+            raise PrincipalResolutionDenied() from None
+        existing = await self._find(actor)
+        if existing is not None:
+            return existing
+
+        candidate = Principal(uuid4().hex, self._namespace, actor)
+        try:
+            saved = await self._identities.save_principal(candidate)
+        except UniqueConstraintViolation:
+            # Another accepted ingress may have won the unique
+            # (namespace, external actor) insert. Re-read and return that exact
+            # mapping; never retry with a new principal or overwrite it.
+            raced = await self._find(actor)
+            if raced is None:
+                raise PrincipalResolutionUnavailable() from None
+            return raced
+        except Exception:
+            raise PrincipalResolutionUnavailable() from None
+        if not self._matches(saved, actor):
+            raise PrincipalResolutionUnavailable()
+        return saved
+
+    async def _find(self, actor_id: str) -> Principal | None:
+        try:
+            existing = await self._identities.find_principal(self._namespace, actor_id)
+        except Exception:
+            raise PrincipalResolutionUnavailable() from None
+        if existing is None:
+            return None
+        if not self._matches(existing, actor_id):
+            raise PrincipalResolutionUnavailable()
+        return existing
+
+    def _matches(self, principal: object, actor_id: str) -> bool:
+        return (
+            isinstance(principal, Principal)
+            and principal.identity_namespace == self._namespace
+            and principal.external_user_id == actor_id
+            and bool(principal.principal_id)
+        )
 
 
 class InvocationPrincipalResolver:

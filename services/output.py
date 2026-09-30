@@ -66,6 +66,7 @@ from .identity import (
     PrincipalResolutionDenied,
     PrincipalResolutionUnavailable,
 )
+from .owner_authority import OwnerRouteProofAuthority
 
 OutputRequest: TypeAlias = (
     CommandOutput | CapabilityResult | ToolOutput | SubscriptionOutput
@@ -182,6 +183,7 @@ class OutputService:
         root_outputs: RootOutputRepository,
         resource_visibility: ResourceVisibilityProbe,
         principal_resolver: InvocationPrincipalResolver,
+        owner_authority: OwnerRouteProofAuthority | None = None,
         claim_lease: timedelta,
         send_timeout: float,
         now: Callable[[], datetime] | None = None,
@@ -202,6 +204,11 @@ class OutputService:
         if not callable(getattr(principal_resolver, "principal_id", None)):
             raise TypeError("output service requires a principal resolver")
         self._principal_resolver = principal_resolver
+        if owner_authority is not None and not callable(
+            getattr(owner_authority, "require_current", None)
+        ):
+            raise TypeError("output owner authority is invalid")
+        self._owner_authority = owner_authority
         if claim_lease.total_seconds() <= 0:
             raise ValueError("root output claim lease must be positive")
         if send_timeout <= 0:
@@ -429,8 +436,13 @@ class OutputService:
 
                 approval = SendApproval(sending.owner_token, ())
                 state["sending"] = sending
-                # begin_sending is the final await on the successful path.
+                # Recheck owner identity after the durable SENDING transition;
+                # no await follows the final owner proof check on success.
                 try:
+                    if capability.privacy_floor is PrivacyFloor.OWNER:
+                        if self._owner_authority is None:
+                            raise _OutputFailure("owner_proof_unavailable")
+                        await self._owner_authority.require_current(invocation)
                     self._issuer.require(invocation)
                     self._require_current_module(invocation)
                     self._admission.check(lease)
@@ -555,6 +567,13 @@ class OutputService:
         current_target = await self._target(invocation, result.privacy)
         if current_target != expected_target:
             raise _OutputFailure("route_changed")
+        if capability.privacy_floor is PrivacyFloor.OWNER:
+            if self._owner_authority is None:
+                raise _OutputFailure("owner_proof_unavailable")
+            try:
+                await self._owner_authority.require_current(invocation)
+            except Exception:
+                raise _OutputFailure("owner_proof_unavailable") from None
         # Keep the issuer and registry check as the final synchronous authority
         # read after awaited Grant and route lookups.
         try:
@@ -641,7 +660,20 @@ class OutputService:
     ) -> datetime | None:
         if not isinstance(result, CapabilityResult):
             raise _OutputFailure("invalid_result")
-        if result.privacy is Privacy.PRIVATE and invocation.grant_id is None:
+        owner_floor = capability.privacy_floor is PrivacyFloor.OWNER
+        if owner_floor:
+            if (
+                self._owner_authority is None
+                or invocation.grant_id is not None
+                or invocation.grant_revision is not None
+                or result.privacy is not Privacy.PRIVATE
+            ):
+                raise _OutputFailure("owner_proof_unavailable")
+            try:
+                await self._owner_authority.require_current(invocation)
+            except Exception:
+                raise _OutputFailure("owner_proof_unavailable") from None
+        elif result.privacy is Privacy.PRIVATE and invocation.grant_id is None:
             raise _OutputFailure("grant_required")
         if (
             capability.privacy_floor is PrivacyFloor.PRIVATE

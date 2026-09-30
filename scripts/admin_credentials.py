@@ -1,14 +1,43 @@
 """Local hidden-input maintenance CLI for Core admin credentials."""
 
+# Imports below the bootstrap deliberately follow the plugin-local SDK check.
+# ruff: noqa: E402
+
 from __future__ import annotations
 
 import argparse
 import asyncio
 import getpass
+import importlib
 import os
 import stat
 import sys
 from pathlib import Path
+
+# Package execution starts at the install parent's path, not the plugin root.
+# Pin the SDK import to this installed package before importing Core-facing APIs,
+# while keeping this small maintenance CLI independent of AstrBot main.py.
+_PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+_SDK_VERSION = "1.3.0"
+_SDK_CONTRACT_REVISION = "FF14-W1-P1"
+_SDK_COMPATIBLE_CONTRACT_VERSIONS = ("1.0.0", "1.1.0", "1.2.0", "1.3.0")
+if str(_PLUGIN_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PLUGIN_ROOT))
+try:
+    _sdk = importlib.import_module("yomihime_sdk")
+    _sdk_version = importlib.import_module("yomihime_sdk.api.version")
+    _sdk_root = Path(_sdk.__file__).resolve().parent
+    if (
+        _sdk_root != (_PLUGIN_ROOT / "yomihime_sdk").resolve()
+        or _sdk.__version__ != _SDK_VERSION
+        or _sdk_version.CONTRACT_VERSION != _SDK_VERSION
+        or _sdk_version.CONTRACT_REVISION != _SDK_CONTRACT_REVISION
+        or tuple(_sdk_version.COMPATIBLE_CONTRACT_VERSIONS)
+        != _SDK_COMPATIBLE_CONTRACT_VERSIONS
+    ):
+        raise RuntimeError("unsupported plugin-local SDK")
+except Exception:
+    raise RuntimeError("the pinned plugin-local SDK is unavailable") from None
 
 from ..infrastructure.sqlite.repositories_admin_credentials import (
     AdminCredentialStateError,

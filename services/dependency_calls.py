@@ -418,6 +418,10 @@ class DependencyInvoker:
 
     @staticmethod
     def _check_policy(parent: InvocationView, target: CapabilityDescriptor) -> None:
+        if target.privacy_floor is PrivacyFloor.OWNER:
+            raise DependencyCallError(
+                "owner capability cannot be invoked as a dependency"
+            )
         if parent.origin in (InvocationOrigin.LLM_TOOL, InvocationOrigin.SCHEDULER):
             if not tool_allowed(target):
                 raise DependencyCallError("target is outside the public Tool surface")

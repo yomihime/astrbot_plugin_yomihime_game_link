@@ -166,6 +166,47 @@ _CREDENTIAL_HEADER_MARKERS = (
     "password",
     "token",
 )
+_TRANSPORT_CONTROLLED_REQUEST_HEADERS = frozenset(
+    {
+        "accept-encoding",
+        "connection",
+        "content-length",
+        "host",
+        "keep-alive",
+        "proxy-connection",
+        "te",
+        "trailer",
+        "transfer-encoding",
+        "upgrade",
+    }
+)
+
+
+class SourceHttpError(RuntimeError):
+    """Stable, sanitized failure from the source HTTP boundary."""
+
+    _MESSAGES = {
+        "source_not_declared": "HTTP source is not declared",
+        "request_rejected": "HTTP request is outside the declared source policy",
+        "request_too_large": "HTTP request exceeds the source policy limit",
+        "response_too_large": "HTTP response exceeds the source policy limit",
+        "rate_limited": "HTTP source quota exceeded",
+        "concurrency_limited": "HTTP source concurrency limit exceeded",
+        "timeout": "HTTP source request timed out",
+        "cancelled": "HTTP source request was cancelled",
+        "credentials_unavailable": "HTTP source credentials are unavailable",
+        "transport_failed": "HTTP source transport failed",
+        "invalid_response": "HTTP source returned an invalid response",
+        "upstream_error": "HTTP source returned an upstream error",
+        "redirect_disallowed": "HTTP source redirect is not allowed",
+    }
+
+    def __init__(self, code: str, *, status_code: int | None = None) -> None:
+        if code not in self._MESSAGES:
+            code = "transport_failed"
+        self.code = code
+        self.status_code = status_code
+        super().__init__(self._MESSAGES[code])
 
 
 def _inspect_http_headers(headers: Mapping[str, str]):
@@ -244,6 +285,8 @@ class HttpRequest:
             or "://" in path
             or path.startswith("//")
             or "\\" in path
+            or "?" in path
+            or "#" in path
             or any(segment in {".", ".."} for segment in path.split("/"))
             or "%" in path
             or any(
@@ -272,18 +315,12 @@ class HttpRequest:
             or not isinstance(value, str)
             or not key
             or not value
-            or "%" in key
-            or "%" in value
             or any(
-                character.isspace()
-                or ord(character) < 32
-                or 0x7F <= ord(character) <= 0x9F
+                ord(character) < 32 or 0x7F <= ord(character) <= 0x9F
                 for character in key
             )
             or any(
-                character.isspace()
-                or ord(character) < 32
-                or 0x7F <= ord(character) <= 0x9F
+                ord(character) < 32 or 0x7F <= ord(character) <= 0x9F
                 for character in value
             )
             for key, value in frozen_query
@@ -293,7 +330,12 @@ class HttpRequest:
         headers = {} if self.headers is None else self.headers
         if not isinstance(headers, Mapping):
             raise TypeError("HTTP headers must be a mapping")
-        object.__setattr__(self, "headers", _safe_http_headers(headers))
+        safe_headers = _safe_http_headers(headers)
+        if any(
+            key.lower() in _TRANSPORT_CONTROLLED_REQUEST_HEADERS for key in safe_headers
+        ):
+            raise ValueError("HTTP request contains a transport-controlled header")
+        object.__setattr__(self, "headers", safe_headers)
 
 
 @dataclass(frozen=True, slots=True)

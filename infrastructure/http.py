@@ -8,42 +8,21 @@ making a test fake look like a successful production connection.
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
 import inspect
 from collections import deque
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from time import monotonic
 from types import MappingProxyType
 from typing import Protocol
+from urllib.parse import quote_plus, urlencode
+
+from yomihime_sdk.api.services import SourceHttpError
 
 from ..api.manifests import SourceDeclaration
 from ..api.services import HttpRequest, HttpResponse, SourceHttp
-
-
-class SourceHttpError(RuntimeError):
-    """Stable, sanitized failure from the source HTTP boundary."""
-
-    _MESSAGES = {
-        "source_not_declared": "HTTP source is not declared",
-        "request_rejected": "HTTP request is outside the declared source policy",
-        "request_too_large": "HTTP request exceeds the source policy limit",
-        "response_too_large": "HTTP response exceeds the source policy limit",
-        "rate_limited": "HTTP source quota exceeded",
-        "concurrency_limited": "HTTP source concurrency limit exceeded",
-        "timeout": "HTTP source request timed out",
-        "cancelled": "HTTP source request was cancelled",
-        "transport_failed": "HTTP source transport failed",
-        "invalid_response": "HTTP source returned an invalid response",
-        "upstream_error": "HTTP source returned an upstream error",
-        "redirect_disallowed": "HTTP source redirect is not allowed",
-    }
-
-    def __init__(self, code: str, *, status_code: int | None = None) -> None:
-        if code not in self._MESSAGES:
-            code = "transport_failed"
-        self.code = code
-        self.status_code = status_code
-        super().__init__(self._MESSAGES[code])
 
 
 class HttpTransport(Protocol):
@@ -56,6 +35,10 @@ class HttpTransport(Protocol):
 
     async def request(self, request: "TransportRequest") -> HttpResponse: ...
 
+    async def request_credential_exchange(
+        self, request: "CredentialExchangeRequest"
+    ) -> HttpResponse: ...
+
 
 @dataclass(frozen=True, slots=True)
 class TransportRequest:
@@ -67,13 +50,283 @@ class TransportRequest:
     path: str
     method: str
     query: tuple[tuple[str, str], ...]
-    body: bytes | None
-    headers: Mapping[str, str]
+    body: bytes | None = field(repr=False)
+    headers: Mapping[str, str] = field(repr=False)
     credential_ref: str | None
     timeout_seconds: float
+    max_response_bytes: int = 4_194_304
+    module_id: str | None = None
+    _credential_proof: object | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "headers", MappingProxyType(dict(self.headers)))
+
+    def __repr__(self) -> str:
+        return (
+            "TransportRequest("
+            f"module_id={self.module_id!r}, source_id={self.source_id!r}, "
+            f"host={self.host!r}, path={self.path!r}, "
+            f"method={self.method!r}, credentialed={self.credential_ref is not None}, "
+            f"body_bytes={len(self.body) if self.body is not None else 0})"
+        )
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class CredentialLease:
+    """Core-only short-lived authorization; never returned through the SDK."""
+
+    authorization: str = field(repr=False)
+    generation: int
+    secret_token: str = field(repr=False)
+
+    def __repr__(self) -> str:
+        return f"CredentialLease(generation={self.generation})"
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class CredentialExchangeRequest:
+    """Internal, proof-bearing request for the fixed OAuth token endpoint."""
+
+    module_id: str
+    source_id: str
+    credential_ref: str
+    host: str
+    path: str
+    body: bytes = field(repr=False)
+    headers: Mapping[str, str] = field(repr=False)
+    timeout_seconds: float
+    max_response_bytes: int
+    _proof: object = field(default=None, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "headers", MappingProxyType(dict(self.headers)))
+
+    def __repr__(self) -> str:
+        return "CredentialExchangeRequest(<redacted>)"
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class _AuthenticatedRequestProof:
+    """Per-request capability bound to one transport and exact request fields."""
+
+    channel: object = field(repr=False, compare=False)
+    kind: str
+    module_id: str
+    source_id: str
+    credential_ref: str
+    host: str
+    path: str
+    method: str
+    query: tuple[tuple[str, str], ...]
+    body_digest: bytes = field(repr=False)
+    headers_digest: bytes = field(repr=False)
+    authorization_digest: bytes = field(repr=False)
+    timeout_seconds: float
+    max_response_bytes: int
+
+    def __repr__(self) -> str:
+        return f"_AuthenticatedRequestProof(kind={self.kind!r})"
+
+    def matches_resource(
+        self, channel: object, request: TransportRequest, authorization: str
+    ) -> bool:
+        return (
+            self.channel is channel
+            and self.kind == "resource"
+            and self.module_id == request.module_id
+            and self.source_id == request.source_id
+            and self.credential_ref == request.credential_ref
+            and self.host == request.host
+            and self.path == request.path
+            and self.method == request.method
+            and self.query == request.query
+            and self.body_digest == _body_digest(request.body)
+            and self.headers_digest == _headers_digest(request.headers)
+            and self.authorization_digest == _text_digest(authorization)
+            and self.timeout_seconds == request.timeout_seconds
+            and self.max_response_bytes == request.max_response_bytes
+        )
+
+    def matches_exchange(
+        self, channel: object, request: CredentialExchangeRequest
+    ) -> bool:
+        authorization = request.headers.get("Authorization")
+        return (
+            self.channel is channel
+            and self.kind == "oauth"
+            and self.module_id == request.module_id
+            and self.source_id == request.source_id
+            and self.credential_ref == request.credential_ref
+            and self.host == request.host
+            and self.path == request.path
+            and self.method == "POST"
+            and self.query == ()
+            and self.body_digest == _body_digest(request.body)
+            and self.headers_digest == _headers_digest(request.headers)
+            and type(authorization) is str
+            and self.authorization_digest == _text_digest(authorization)
+            and self.timeout_seconds == request.timeout_seconds
+            and self.max_response_bytes == request.max_response_bytes
+        )
+
+
+def _body_digest(body: bytes | None) -> bytes:
+    if body is None:
+        return hashlib.sha256(b"\x00").digest()
+    return hashlib.sha256(b"\x01" + body).digest()
+
+
+def _text_digest(value: str) -> bytes:
+    return hashlib.sha256(value.encode("utf-8")).digest()
+
+
+def _headers_digest(headers: Mapping[str, str]) -> bytes:
+    digest = hashlib.sha256()
+    pairs = []
+    for key, value in headers.items():
+        if type(key) is not str or type(value) is not str:
+            raise ValueError("HTTP headers must be text")
+        pairs.append((key.lower().encode("ascii"), value.encode("utf-8")))
+    for key, value in sorted(pairs):
+        digest.update(len(key).to_bytes(4, "big"))
+        digest.update(key)
+        digest.update(len(value).to_bytes(4, "big"))
+        digest.update(value)
+    return digest.digest()
+
+
+def _make_authenticated_request_proof(
+    channel: object,
+    *,
+    kind: str,
+    module_id: str,
+    source_id: str,
+    credential_ref: str,
+    host: str,
+    path: str,
+    method: str,
+    query: tuple[tuple[str, str], ...],
+    body: bytes | None,
+    headers: Mapping[str, str],
+    authorization: str,
+    timeout_seconds: float,
+    max_response_bytes: int,
+) -> _AuthenticatedRequestProof:
+    if channel is None:
+        raise SourceHttpError("credentials_unavailable") from None
+    return _AuthenticatedRequestProof(
+        channel,
+        kind,
+        module_id,
+        source_id,
+        credential_ref,
+        host,
+        path,
+        method,
+        query,
+        _body_digest(body),
+        _headers_digest(headers),
+        _text_digest(authorization),
+        timeout_seconds,
+        max_response_bytes,
+    )
+
+
+def _create_credential_exchange_request(
+    channel: object,
+    module_id: str,
+    source_id: str,
+    credential_ref: str,
+    host: str,
+    path: str,
+    client_id: str,
+    client_secret: str,
+    scope: str | None,
+    timeout_seconds: float,
+) -> CredentialExchangeRequest:
+    """Build the only supported internal Basic-auth request shape."""
+
+    try:
+        declaration = SourceDeclaration("oauth_token", host)
+        if (
+            type(module_id) is not str
+            or not module_id.strip()
+            or type(source_id) is not str
+            or not source_id.strip()
+            or type(credential_ref) is not str
+            or not credential_ref.startswith("credential_")
+        ):
+            raise ValueError
+        if (
+            type(client_id) is not str
+            or not client_id
+            or len(client_id) > 512
+            or type(client_secret) is not str
+            or not client_secret
+            or len(client_secret) > 512
+            or any(ord(char) < 32 or 0x7F <= ord(char) <= 0x9F for char in client_id)
+            or any(
+                ord(char) < 32 or 0x7F <= ord(char) <= 0x9F for char in client_secret
+            )
+            or isinstance(timeout_seconds, bool)
+            or not isinstance(timeout_seconds, (int, float))
+            or timeout_seconds <= 0
+        ):
+            raise ValueError
+        body_fields = {"grant_type": "client_credentials"}
+        if scope is not None:
+            if (
+                type(scope) is not str
+                or not scope
+                or len(scope) > 512
+                or any(ord(char) < 32 or 0x7F <= ord(char) <= 0x9F for char in scope)
+            ):
+                raise ValueError
+            body_fields["scope"] = scope
+        body = urlencode(body_fields).encode("ascii")
+        # RFC 6749 requires form-encoding the client id and secret before HTTP
+        # Basic authentication. Neither value is included in the request repr.
+        encoded_id = quote_plus(client_id, safe="~")
+        encoded_secret = quote_plus(client_secret, safe="~")
+        basic = base64.b64encode(
+            f"{encoded_id}:{encoded_secret}".encode("utf-8")
+        ).decode("ascii")
+        HttpRequest("oauth_token", path, "POST", body=body)
+        headers = {
+            "Authorization": f"Basic {basic}",
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Accept": "application/json",
+        }
+        proof = _make_authenticated_request_proof(
+            channel,
+            kind="oauth",
+            module_id=module_id,
+            source_id=source_id,
+            credential_ref=credential_ref,
+            host=declaration.host,
+            path=path,
+            method="POST",
+            query=(),
+            body=body,
+            headers=headers,
+            authorization=headers["Authorization"],
+            timeout_seconds=float(timeout_seconds),
+            max_response_bytes=64 * 1024,
+        )
+        return CredentialExchangeRequest(
+            module_id,
+            source_id,
+            credential_ref,
+            declaration.host,
+            path,
+            body,
+            headers,
+            float(timeout_seconds),
+            64 * 1024,
+            proof,
+        )
+    except Exception:
+        raise SourceHttpError("request_rejected") from None
 
 
 @dataclass(slots=True)
@@ -85,6 +338,23 @@ class _SourceState:
 
 
 TransportCallable = Callable[[TransportRequest], Awaitable[HttpResponse]]
+
+
+class SourceCredentialAuthorizer(Protocol):
+    async def authorize(
+        self,
+        module_id: str,
+        declaration: SourceDeclaration,
+        request: HttpRequest,
+        deadline: float,
+    ) -> CredentialLease: ...
+
+    async def invalidate(
+        self,
+        module_id: str,
+        declaration: SourceDeclaration,
+        lease: CredentialLease,
+    ) -> None: ...
 
 
 class SourceHttpService(SourceHttp):
@@ -108,6 +378,8 @@ class SourceHttpService(SourceHttp):
         max_query_items: int = 32,
         max_query_value_length: int = 512,
         clock: Callable[[], float] = monotonic,
+        module_id: str | None = None,
+        credential_service: SourceCredentialAuthorizer | None = None,
     ) -> None:
         if isinstance(declarations, Mapping):
             if any(type(key) is not str for key in declarations):
@@ -127,6 +399,12 @@ class SourceHttpService(SourceHttp):
             raise ValueError("HTTP source declarations must be unique")
         if not callable(clock):
             raise TypeError("HTTP clock must be callable")
+        if module_id is not None and (
+            type(module_id) is not str or not module_id.strip()
+        ):
+            raise ValueError("HTTP module ID must be non-empty text")
+        if credential_service is not None and module_id is None:
+            raise ValueError("credential HTTP requires a trusted module ID")
         for name, value in (
             ("max_concurrency", max_concurrency),
             ("max_source_concurrency", max_source_concurrency),
@@ -147,6 +425,9 @@ class SourceHttpService(SourceHttp):
 
         self._transport = transport
         self._clock = clock
+        self._module_id = module_id
+        self._credential_service = credential_service
+        self._credential_channel = getattr(transport, "_credential_channel", None)
         self._max_body_bytes = max_body_bytes
         self._max_response_bytes = max_response_bytes
         self._max_path_length = max_path_length
@@ -162,6 +443,14 @@ class SourceHttpService(SourceHttp):
             )
             for declaration in values
         }
+
+    async def close_credentials(self) -> None:
+        """Clear this HTTP binding's token cache without closing shared transport."""
+
+        service = self._credential_service
+        close = getattr(service, "close", None)
+        if callable(close):
+            await close()
 
     async def fetch(self, request: HttpRequest) -> HttpResponse:
         """Fetch one request after enforcing the declared source policy."""
@@ -186,30 +475,29 @@ class SourceHttpService(SourceHttp):
             await self._wait_for_deadline(source.semaphore.acquire(), deadline)
             source_acquired = True
             await self._reserve_quota(source, deadline)
-            transport_request = TransportRequest(
-                source.declaration.source_id,
-                source.declaration.host,
-                f"https://{source.declaration.host}{checked.path}",
-                checked.path,
-                checked.method,
-                checked.query,
-                checked.body,
-                checked.headers,
-                source.declaration.credential_ref,
-                float(source.declaration.timeout_seconds),
+            lease = await self._credential_lease(source.declaration, checked, deadline)
+            result = await self._perform_resource_request(
+                source.declaration, checked, lease, deadline
             )
-            try:
-                result = await self._wait_for_deadline(
-                    self._invoke_transport(transport_request), deadline
-                )
-            except asyncio.CancelledError:
-                raise
-            except SourceHttpError:
-                raise
-            except Exception:
-                raise SourceHttpError("transport_failed") from None
             response = self._validate_response(result)
             self._ensure_remaining(deadline)
+            if response.status_code == 401 and lease is not None:
+                await self._invalidate_credential(source.declaration, lease, deadline)
+                if checked.method == "GET":
+                    await self._reserve_quota(source, deadline)
+                    refreshed = await self._credential_lease(
+                        source.declaration, checked, deadline
+                    )
+                    response = self._validate_response(
+                        await self._perform_resource_request(
+                            source.declaration, checked, refreshed, deadline
+                        )
+                    )
+                    if response.status_code == 401:
+                        await self._invalidate_credential(
+                            source.declaration, refreshed, deadline
+                        )
+                    self._ensure_remaining(deadline)
             if 300 <= response.status_code <= 399:
                 raise SourceHttpError(
                     "redirect_disallowed", status_code=response.status_code
@@ -231,6 +519,108 @@ class SourceHttpService(SourceHttp):
                 source.semaphore.release()
             if global_acquired:
                 self._global_semaphore.release()
+
+    async def _credential_lease(
+        self,
+        declaration: SourceDeclaration,
+        request: HttpRequest,
+        deadline: float,
+    ) -> CredentialLease | None:
+        if declaration.credential_ref is None:
+            return None
+        service = self._credential_service
+        module_id = self._module_id
+        if service is None or module_id is None:
+            raise SourceHttpError("credentials_unavailable") from None
+        try:
+            return await self._wait_for_deadline(
+                service.authorize(module_id, declaration, request, deadline), deadline
+            )
+        except asyncio.CancelledError:
+            raise
+        except SourceHttpError:
+            raise
+        except Exception:
+            raise SourceHttpError("credentials_unavailable") from None
+
+    async def _invalidate_credential(
+        self,
+        declaration: SourceDeclaration,
+        lease: CredentialLease,
+        deadline: float,
+    ) -> None:
+        service = self._credential_service
+        module_id = self._module_id
+        if service is None or module_id is None:
+            raise SourceHttpError("credentials_unavailable") from None
+        try:
+            await self._wait_for_deadline(
+                service.invalidate(module_id, declaration, lease), deadline
+            )
+        except asyncio.CancelledError:
+            raise
+        except SourceHttpError:
+            raise
+        except Exception:
+            raise SourceHttpError("credentials_unavailable") from None
+
+    async def _perform_resource_request(
+        self,
+        declaration: SourceDeclaration,
+        checked: HttpRequest,
+        lease: CredentialLease | None,
+        deadline: float,
+    ) -> HttpResponse:
+        headers = dict(checked.headers)
+        proof = None
+        if lease is not None:
+            module_id = self._module_id
+            if declaration.credential_ref is None or module_id is None:
+                raise SourceHttpError("credentials_unavailable") from None
+            headers["Authorization"] = lease.authorization
+            proof = _make_authenticated_request_proof(
+                self._credential_channel,
+                kind="resource",
+                module_id=module_id,
+                source_id=declaration.source_id,
+                credential_ref=declaration.credential_ref,
+                host=declaration.host,
+                path=checked.path,
+                method=checked.method,
+                query=checked.query,
+                body=checked.body,
+                headers=headers,
+                authorization=lease.authorization,
+                timeout_seconds=float(declaration.timeout_seconds),
+                max_response_bytes=self._max_response_bytes,
+            )
+        transport_request = TransportRequest(
+            declaration.source_id,
+            declaration.host,
+            f"https://{declaration.host}{checked.path}",
+            checked.path,
+            checked.method,
+            checked.query,
+            checked.body,
+            headers,
+            declaration.credential_ref,
+            float(declaration.timeout_seconds),
+            self._max_response_bytes,
+            self._module_id,
+            proof,
+        )
+        try:
+            return self._validate_response(
+                await self._wait_for_deadline(
+                    self._invoke_transport(transport_request), deadline
+                )
+            )
+        except asyncio.CancelledError:
+            raise
+        except SourceHttpError:
+            raise
+        except Exception:
+            raise SourceHttpError("transport_failed") from None
 
     async def _invoke_transport(self, request: TransportRequest) -> HttpResponse:
         method = getattr(self._transport, "request", None)

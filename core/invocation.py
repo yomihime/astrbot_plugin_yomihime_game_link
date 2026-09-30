@@ -59,12 +59,13 @@ _MESSAGES = {
 }
 
 
-def _error(code: ErrorCode) -> CapabilityResult:
+def _error(code: ErrorCode, *, privacy: Privacy = Privacy.PUBLIC) -> CapabilityResult:
     """Construct an error without copying input or exception text into output."""
 
     return CapabilityResult(
         result_id="gateway-error",
         status=ResultStatus.ERROR,
+        privacy=privacy,
         error=ErrorDetail(code, _MESSAGES[code]),
     )
 
@@ -80,6 +81,7 @@ class Gateway:
         admission: AdmissionPort | None = None,
         lifecycle: LifecycleController | None = None,
         private_authorizer: Callable[[InvocationView], Awaitable[object]] | None = None,
+        owner_authority: object | None = None,
         handler_timeout: float = 30.0,
         clock: Callable[[], float] = monotonic,
     ) -> None:
@@ -102,6 +104,11 @@ class Gateway:
             raise TypeError("Gateway must use the shared CoreRuntime authorities")
         if private_authorizer is not None and not callable(private_authorizer):
             raise TypeError("private_authorizer must be callable")
+        if owner_authority is not None and any(
+            not callable(getattr(owner_authority, name, None))
+            for name in ("capture", "require_current")
+        ):
+            raise TypeError("owner authority must support proof capture and checks")
         if (
             isinstance(handler_timeout, bool)
             or not isinstance(handler_timeout, (int, float))
@@ -115,6 +122,7 @@ class Gateway:
         self._admission = admission
         self._lifecycle = lifecycle
         self._private_authorizer = private_authorizer
+        self._owner_authority = owner_authority
         self._handler_timeout = float(handler_timeout)
         self._clock = clock
 
@@ -202,16 +210,29 @@ class Gateway:
         if tool and not tool_allowed(capability):
             return _error(ErrorCode.UNSUPPORTED)
 
+        owner = capability.privacy_floor is PrivacyFloor.OWNER
+        private = capability.privacy_floor in (
+            PrivacyFloor.PRIVATE,
+            PrivacyFloor.OWNER,
+        )
+
+        def denied(code: ErrorCode) -> CapabilityResult:
+            # PRIVATE commands need a Grant before producing private data, but
+            # their fixed authorization failure is safe to report publicly.
+            # OWNER errors remain private so a failed identity/route proof can
+            # never become a group-visible result.
+            return _error(code, privacy=Privacy.PRIVATE if owner else Privacy.PUBLIC)
+
         try:
             mapped = self._map_parameters(descriptor.parameter_mapping, parameters)
             validated = validate_parameters(capability, mapped)
         except Exception:
-            return _error(ErrorCode.PARAMETER_ERROR)
+            return denied(ErrorCode.PARAMETER_ERROR)
 
         try:
             handler = module.handlers.capabilities[capability_id]
         except (KeyError, TypeError):
-            return _error(ErrorCode.UNKNOWN)
+            return denied(ErrorCode.UNKNOWN)
 
         try:
             existing_lease = self._issuer.lease_for(trusted)
@@ -229,15 +250,29 @@ class Gateway:
             else:
                 raise ValueError("invocation has an unrelated lease")
         except Exception:
-            return _error(ErrorCode.MODULE_UNAVAILABLE)
+            return denied(ErrorCode.MODULE_UNAVAILABLE)
 
-        private = capability.privacy_floor is PrivacyFloor.PRIVATE
-        if private:
+        if owner:
+            if (
+                expected_origin is not InvocationOrigin.COMMAND
+                or self._owner_authority is None
+                or trusted.grant_id is not None
+                or trusted.grant_revision is not None
+            ):
+                return denied(ErrorCode.MODULE_UNAVAILABLE)
+            try:
+                await self._owner_authority.capture(trusted, lease)
+                self._require_current(trusted, lease)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                return denied(ErrorCode.MODULE_UNAVAILABLE)
+        elif capability.privacy_floor is PrivacyFloor.PRIVATE:
             if (
                 expected_origin is not InvocationOrigin.COMMAND
                 or self._private_authorizer is None
             ):
-                return _error(ErrorCode.MODULE_UNAVAILABLE)
+                return denied(ErrorCode.MODULE_UNAVAILABLE)
             try:
                 grant = await self._private_authorizer(trusted)
                 self._require_private_grant(grant, trusted)
@@ -245,7 +280,7 @@ class Gateway:
             except asyncio.CancelledError:
                 raise
             except Exception:
-                return _error(ErrorCode.MODULE_UNAVAILABLE)
+                return denied(ErrorCode.MODULE_UNAVAILABLE)
 
         try:
             deadline = self._clock() + self._handler_timeout
@@ -260,26 +295,31 @@ class Gateway:
         except asyncio.CancelledError:
             raise
         except (ScopeCancelled, ScopeDeadlineExceeded, ScopeStaleError, LifecycleError):
-            return _error(ErrorCode.MODULE_UNAVAILABLE)
+            return denied(ErrorCode.MODULE_UNAVAILABLE)
         except Exception:
-            return _error(ErrorCode.UNKNOWN)
+            return denied(ErrorCode.UNKNOWN)
 
         # Re-check both authority and static state after an await.  This closes
         # the release/disable race for handlers that complete late.
         try:
             self._require_current(trusted, lease)
-            if private:
+            if owner:
+                if self._owner_authority is None:
+                    raise ValueError("owner proof authority is unavailable")
+                await self._owner_authority.require_current(trusted)
+                self._require_current(trusted, lease)
+            elif capability.privacy_floor is PrivacyFloor.PRIVATE:
                 grant = await self._private_authorizer(trusted)
                 self._require_private_grant(grant, trusted)
                 self._require_current(trusted, lease)
         except Exception:
-            return _error(ErrorCode.MODULE_UNAVAILABLE)
+            return denied(ErrorCode.MODULE_UNAVAILABLE)
 
         try:
             privacy = Privacy.PRIVATE if private else Privacy.PUBLIC
             return self._valid_result(result, expected_privacy=privacy)
         except Exception:
-            return _error(ErrorCode.UNKNOWN)
+            return denied(ErrorCode.UNKNOWN)
 
     def _require_current(self, view: InvocationView, lease: object) -> None:
         assert self._admission is not None and self._lifecycle is not None

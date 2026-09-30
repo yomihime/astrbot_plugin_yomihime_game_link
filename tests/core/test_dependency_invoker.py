@@ -442,6 +442,22 @@ class DependencyInvokerTests(IsolatedAsyncioTestCase):
         )
         self.assertEqual(result.error.code, ErrorCode.PARAMETER_ERROR)
 
+    async def test_owner_floor_is_never_invocable_as_a_dependency(self):
+        target_ref = CapabilityReference("dependency-tests/target", "target.query")
+        invocation, handler, caller = await self._ready(
+            (_capability("source.query", required=(target_ref,)),),
+            _capability(
+                "target.query",
+                policy=InvocationPolicy.COMMAND_ONLY,
+                privacy=PrivacyFloor.OWNER,
+            ),
+        )
+
+        result = await self._invoker(caller).invoke(invocation, target_ref, {})
+
+        self.assertEqual(result.error.code, ErrorCode.MODULE_UNAVAILABLE)
+        self.assertEqual(handler.contexts, [])
+
     async def test_bound_caller_selects_only_its_declared_dependencies(self):
         target_ref = CapabilityReference("dependency-tests/target", "target.query")
         invocation, handler, caller = await self._ready(

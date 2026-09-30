@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-from collections.abc import Awaitable, Callable
+import re
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from math import isfinite
@@ -14,7 +15,14 @@ from typing import Protocol
 
 from ..api.contexts import InvocationOrigin, InvocationView
 from ..api.display import DisplayLimits, DisplayRenderer, Privacy
-from ..api.manifests import CommandDescriptor, ToolDescriptor
+from ..api.manifests import (
+    CapabilityEffect,
+    CommandDescriptor,
+    InvocationPolicy,
+    ModuleManifest,
+    PrivacyFloor,
+    ToolDescriptor,
+)
 from ..api.results import CapabilityResult
 from ..api.services import CapabilityHealth, ConfigTarget
 from ..api.storage import GrantReference
@@ -25,6 +33,7 @@ from ..core.invocation import Gateway
 from ..core.lifecycle import LifecycleController
 from ..core.policy import tool_allowed
 from ..core.registry import RegisteredModule, Registry
+from ..extensions.loader import ExtensionCandidate
 from ..infrastructure.files import LocalSafeFileStore
 from ..infrastructure.secret_store import SecretCodec, SQLiteSecretStore
 from ..infrastructure.sqlite.database import SQLiteDatabase
@@ -48,7 +57,11 @@ from ..services.extension_runtime import (
     ExtensionRuntime,
     FactorySourcePort,
 )
-from ..services.identity import InvocationPrincipalResolver, TrustedRoutePublisher
+from ..services.identity import (
+    InvocationPrincipalResolver,
+    TrustedIngressPrincipalProvisioner,
+    TrustedRoutePublisher,
+)
 from ..services.module_services import ModuleServicesFactory, RegistryRegistrationLookup
 from ..services.output import (
     LifecycleApprovedSendScheduler,
@@ -56,18 +69,21 @@ from ..services.output import (
     OutputService,
     OutputStatus,
 )
+from ..services.owner_authority import OwnerRouteProofAuthority
 from ..services.scheduler import (
     ExecutionClaimProofRegistry,
     RescheduleConfiguration,
     SchedulerQuotas,
     SharedCollectionScheduler,
 )
+from ..services.source_credentials import SourceCredentialPolicy
 from ..services.subscriptions import SubscriptionOperationsService
 
-DEFAULT_CADENCE_CONFIGURATION = CadenceConfiguration((60.0, 300.0, 3600.0))
+DEFAULT_CADENCE_CONFIGURATION = CadenceConfiguration((60.0, 300.0, 900.0, 3600.0))
 DEFAULT_CADENCE_REVISION = 1
 DEFAULT_SCHEDULER_QUOTAS = SchedulerQuotas(4, 2, 2, 20, 10.0, 1.0, 30)
 DEFAULT_RESCHEDULE_CONFIGURATION = RescheduleConfiguration(120.0, 0.05, 0.1, 0.0)
+_MODULE_IDENTIFIER = re.compile(r"[a-z][a-z0-9_]*(?:[.-][a-z0-9_]+)*\Z")
 
 
 class HostIngressValidator(Protocol):
@@ -233,6 +249,9 @@ class CoreRuntime:
         host_ingress_validator: HostIngressValidator,
         config_principal_id: str,
         identity_namespace: str,
+        trusted_bundled_defaults: Mapping[str, tuple[str, ...]] | None = None,
+        trusted_bundled_manifests: Mapping[str, ModuleManifest] | None = None,
+        source_credential_policies: Sequence[SourceCredentialPolicy] = (),
         factory_source: FactorySourcePort | None = None,
         source_health: Callable[[str, str], Awaitable[CapabilityHealth]] | None = None,
         utc_clock: Callable[[], datetime] = lambda: datetime.now(UTC),
@@ -254,6 +273,8 @@ class CoreRuntime:
             raise ValueError("config_principal_id is required")
         if type(identity_namespace) is not str or not identity_namespace.strip():
             raise ValueError("identity_namespace is required")
+        bundled_defaults = _normalize_bundled_defaults(trusted_bundled_defaults)
+        bundled_manifests = _normalize_bundled_manifests(trusted_bundled_manifests)
         for name, callback in (
             ("admin_context_validator", admin_context_validator),
             ("host_ingress_validator", host_ingress_validator),
@@ -287,6 +308,8 @@ class CoreRuntime:
 
         self.database = database
         self.extension_root = Path(extension_root)
+        self._trusted_bundled_defaults = bundled_defaults
+        self._trusted_bundled_manifests = bundled_manifests
         self.file_store = LocalSafeFileStore(file_root)
         self.secret_store = SQLiteSecretStore(database, secret_root, codec=secret_codec)
         self.registry = Registry()
@@ -299,7 +322,7 @@ class CoreRuntime:
             file_store=self.file_store,
             secret_store=self.secret_store,
         )
-        self.b04_repositories = B04Repositories(database)
+        self.b04_repositories = B04Repositories(database, utc_clock=utc_clock)
         self.config_repository: SQLiteConfigRepository = self.repositories.config
         self.runtime_repository = SQLiteModuleRuntimeRepository(database)
         self.admin_credential_repository = SQLiteAdminCredentialRepository(database)
@@ -327,8 +350,18 @@ class CoreRuntime:
             identity_namespace=identity_namespace,
             admission=self.lifecycle.admission,
         )
+        self._ingress_principal_provisioner = TrustedIngressPrincipalProvisioner(
+            self.repositories.identities,
+            identity_namespace=identity_namespace,
+        )
         self._conversation_resolver = _CoreConversationResolver(
             self.issuer, self.repositories.conversations
+        )
+        self.owner_authority = OwnerRouteProofAuthority(
+            self.issuer,
+            self.lifecycle.admission,
+            self.principal_resolver,
+            self._conversation_resolver,
         )
         self._persisted_routes = _CorePersistedRouteResolver(
             self.repositories.conversations
@@ -346,6 +379,7 @@ class CoreRuntime:
             digest_windows=self.b04_repositories.windows,
             grants=self.repositories.authorization,
             principal_resolver=self.principal_resolver,
+            owner_authority=self.owner_authority,
             now=utc_clock,
             max_subscriptions_per_owner=max_subscriptions_per_owner,
         )
@@ -360,6 +394,8 @@ class CoreRuntime:
             identity_namespace=identity_namespace,
             subscriptions=self.subscription_operations,
             principal_resolver=self.principal_resolver,
+            owner_authority=self.owner_authority,
+            source_credential_policies=source_credential_policies,
             clock=monotonic_clock,
             utc_clock=utc_clock,
         )
@@ -381,6 +417,7 @@ class CoreRuntime:
             root_outputs=self.root_output_repository,
             resource_visibility=self.resource_visibility,
             principal_resolver=self.principal_resolver,
+            owner_authority=self.owner_authority,
             claim_lease=claim_lease,
             send_timeout=send_timeout,
             now=utc_clock,
@@ -474,6 +511,7 @@ class CoreRuntime:
             admission=self.lifecycle.admission,
             lifecycle=self.lifecycle,
             private_authorizer=self.module_services.authorize_private,
+            owner_authority=self.owner_authority,
             handler_timeout=handler_timeout,
             clock=monotonic_clock,
         )
@@ -551,7 +589,17 @@ class CoreRuntime:
             )
             if self._closing:
                 raise asyncio.CancelledError
-            self.extension_runtime.scan(self.extension_root)
+            candidates = self.extension_runtime.scan(self.extension_root)
+            if self._closing:
+                raise asyncio.CancelledError
+            if self._trusted_bundled_manifests:
+                await self._seed_trusted_bundled_manifests(candidates)
+            if self._closing:
+                raise asyncio.CancelledError
+            if self._trusted_bundled_defaults:
+                await self._seed_trusted_bundled_defaults(candidates)
+            if self._closing:
+                raise asyncio.CancelledError
             config_failures = (
                 await self.admin_operations.recover_discovered_configuration()
             )
@@ -595,6 +643,77 @@ class CoreRuntime:
         finally:
             self._starting = False
             self._startup_done.set()
+
+    async def _seed_trusted_bundled_defaults(
+        self, candidates: tuple[ExtensionCandidate, ...]
+    ) -> None:
+        """Seed requested safe modules without replacing persisted user intent."""
+        for (
+            global_module_id,
+            expected_capabilities,
+        ) in self._trusted_bundled_defaults.items():
+            package_id, local_module_id = global_module_id.split("/", 1)
+            matches = tuple(
+                candidate
+                for candidate in candidates
+                if candidate.package.package_id == package_id
+            )
+            if len(matches) != 1:
+                continue
+            package = matches[0].package
+            manifest = package.manifest
+            if not package.valid or manifest is None:
+                continue
+            modules = tuple(
+                module
+                for module in manifest.modules
+                if module.module_id == local_module_id
+            )
+            if len(modules) != 1 or not _is_safe_bundled_default(
+                modules[0], expected_capabilities
+            ):
+                continue
+            await self.runtime_repository.seed_default_enabled_if_absent(
+                package_id,
+                local_module_id,
+                expected_registry_revision=self.registry.snapshot().revision,
+            )
+
+    async def _seed_trusted_bundled_manifests(
+        self, candidates: tuple[ExtensionCandidate, ...]
+    ) -> None:
+        """Seed exact host-reviewed module declarations without replacing intent.
+
+        The mapping is a host-composition input built only from a byte-exact
+        bundled installation. Candidate manifests are inertly parsed by the
+        extension scanner. Equality covers every descriptor, including
+        capabilities, privacy/effects, sources, config, schedules and
+        subscriptions; Core additionally refuses raw disk credential aliases.
+        """
+        for module_id, expected in self._trusted_bundled_manifests.items():
+            package_id, local_module_id = module_id.split("/", 1)
+            matches = tuple(
+                item for item in candidates if item.package.package_id == package_id
+            )
+            if len(matches) != 1:
+                continue
+            package = matches[0].package
+            if not package.valid or package.manifest is None:
+                continue
+            modules = tuple(
+                item
+                for item in package.manifest.modules
+                if item.module_id == local_module_id
+            )
+            if len(modules) != 1 or not _matches_trusted_bundled_manifest(
+                modules[0], expected
+            ):
+                continue
+            await self.runtime_repository.seed_default_enabled_if_absent(
+                package_id,
+                local_module_id,
+                expected_registry_revision=self.registry.snapshot().revision,
+            )
 
     async def _pump_loop(self) -> None:
         while self._accepting:
@@ -732,6 +851,12 @@ class CoreRuntime:
             module, capability_id = self._active_module(
                 module_id, origin=origin, target=target
             )
+            if origin is InvocationOrigin.COMMAND:
+                # The ingress validator above is the authority boundary. Keep
+                # principal creation after it and after command declaration
+                # validation so forged or unsupported events never persist an
+                # actor mapping.
+                await self._ingress_principal_provisioner.ensure(ingress.actor_id)
             if (
                 origin is InvocationOrigin.LLM_TOOL
                 and ingress.grant_reference is not None
@@ -804,6 +929,7 @@ class CoreRuntime:
                     )
                 return CoreInvocationOutcome(exposed_result, routed)
             finally:
+                self.owner_authority.release(view)
                 self.issuer.release(view)
         finally:
             self._host_flights.discard(task)
@@ -921,6 +1047,16 @@ class CoreRuntime:
         remaining = max(0.0, deadline - loop.time())
         if remaining <= 0:
             self._cleanup_pending = True
+            raise CoreRuntimeCleanupPending("credential_services")
+        try:
+            await self.module_services.close_credentials()
+        except Exception as exc:
+            self._cleanup_pending = True
+            raise CoreRuntimeCleanupPending("credential_services") from exc
+
+        remaining = max(0.0, deadline - loop.time())
+        if remaining <= 0:
+            self._cleanup_pending = True
             raise CoreRuntimeCleanupPending("sqlite_executor")
         try:
             await self.database.executor.close(timeout=remaining)
@@ -950,6 +1086,126 @@ class CoreRuntime:
                     )
                     if state.scope is not None:
                         state.scope.cancel()
+
+
+def _normalize_bundled_defaults(
+    requested: Mapping[str, tuple[str, ...]] | None,
+) -> Mapping[str, frozenset[str]]:
+    if requested is None:
+        return {}
+    if not isinstance(requested, Mapping):
+        raise TypeError("trusted_bundled_defaults must be a mapping")
+    normalized: dict[str, frozenset[str]] = {}
+    for module_id, capability_ids in requested.items():
+        if (
+            type(module_id) is not str
+            or module_id.count("/") != 1
+            or any(
+                _MODULE_IDENTIFIER.fullmatch(part) is None
+                for part in module_id.split("/")
+            )
+        ):
+            raise ValueError("trusted bundled module id is invalid")
+        if not isinstance(capability_ids, tuple) or not capability_ids:
+            raise ValueError("trusted bundled capabilities must be a non-empty tuple")
+        if any(
+            type(capability_id) is not str
+            or _MODULE_IDENTIFIER.fullmatch(capability_id) is None
+            for capability_id in capability_ids
+        ):
+            raise ValueError("trusted bundled capability id is invalid")
+        frozen = frozenset(capability_ids)
+        if len(frozen) != len(capability_ids):
+            raise ValueError("trusted bundled capabilities contain duplicates")
+        normalized[module_id] = frozen
+    return normalized
+
+
+def _normalize_bundled_manifests(
+    requested: Mapping[str, ModuleManifest] | None,
+) -> Mapping[str, ModuleManifest]:
+    """Copy exact expected declarations supplied by trusted host composition."""
+    if requested is None:
+        return {}
+    if not isinstance(requested, Mapping):
+        raise TypeError("trusted_bundled_manifests must be a mapping")
+    normalized: dict[str, ModuleManifest] = {}
+    for module_id, manifest in requested.items():
+        if (
+            type(module_id) is not str
+            or module_id.count("/") != 1
+            or any(
+                _MODULE_IDENTIFIER.fullmatch(part) is None
+                for part in module_id.split("/")
+            )
+        ):
+            raise ValueError("trusted bundled module id is invalid")
+        if not isinstance(manifest, ModuleManifest):
+            raise TypeError("trusted bundled declarations must be ModuleManifest")
+        if module_id.split("/", 1)[1] != manifest.module_id:
+            raise ValueError("trusted bundled manifest id does not match its key")
+        normalized[module_id] = manifest
+    return normalized
+
+
+def _matches_trusted_bundled_manifest(
+    candidate: object, expected: ModuleManifest
+) -> bool:
+    """Match the complete host-reviewed declaration and reject disk aliases."""
+    try:
+        return (
+            isinstance(candidate, ModuleManifest)
+            and candidate == expected
+            and all(source.credential_ref is None for source in candidate.sources)
+        )
+    except (AttributeError, TypeError, ValueError):
+        return False
+
+
+def _is_safe_bundled_default(
+    module: object, expected_capabilities: frozenset[str]
+) -> bool:
+    """Require a side-effect-free module with exactly allowlisted capabilities."""
+    try:
+        if (
+            not module.capabilities
+            or frozenset(item.capability_id for item in module.capabilities)
+            != expected_capabilities
+            or module.tools
+            or module.schedules
+            or module.subscriptions
+            or module.config_fields
+            or module.collections
+        ):
+            return False
+        # Source declarations are read-only transport policy. Bundled trust is
+        # granted by the host only for a byte-exact reviewed package; Core
+        # still rejects credentials and leaves undeclared/missing required
+        # sources in HealthResolver's capability-level UNKNOWN state.
+        if any(source.credential_ref is not None for source in module.sources):
+            return False
+        if not module.commands:
+            return False
+        if any(
+            command.capability_id not in expected_capabilities
+            for command in module.commands
+        ):
+            return False
+        for capability in module.capabilities:
+            schema = capability.input_schema
+            if (
+                capability.invocation_policy is not InvocationPolicy.COMMAND_ONLY
+                or capability.effect is not CapabilityEffect.READ_ONLY
+                or capability.privacy_floor is not PrivacyFloor.PUBLIC
+                or capability.required_config
+                or capability.required_capabilities
+                or schema["type"] != "object"
+                or schema["additionalProperties"] is not False
+            ):
+                return False
+        return True
+    except (AttributeError, IndexError, KeyError, TypeError, ValueError):
+        return False
 
 
 def _positive_finite(value: object, field: str) -> None:

@@ -167,8 +167,30 @@ class ServicesContractTests(unittest.TestCase):
             HttpRequest("steam\nsource", "/path")
         with self.assertRaises(ValueError):
             HttpRequest("steam", "/safe/../secret")
+        for path in ("/search?host=evil.example", "/search#fragment"):
+            with self.subTest(path=path), self.assertRaises(ValueError):
+                HttpRequest("steam", path)
         with self.assertRaises(ValueError):
             HttpRequest("steam", "/path", headers={"Authorization": "secret"})
+        for header in (
+            "Host",
+            "Accept-Encoding",
+            "Content-Length",
+            "Transfer-Encoding",
+            "Connection",
+            "Upgrade",
+        ):
+            with self.subTest(header=header), self.assertRaises(ValueError):
+                HttpRequest("steam", "/path", headers={header: "controlled"})
+        query = HttpRequest(
+            "steam",
+            "/search",
+            query=(("q", 'Iron ore 50% +#&"铁矿"'),),
+        )
+        self.assertEqual(query.query[0][1], 'Iron ore 50% +#&"铁矿"')
+        for value in ("line\nbreak", "tab\there", "del\x7f"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                HttpRequest("steam", "/search", query=(("q", value),))
         request = HttpRequest("steam", "/graphql", "POST", body=b"{}")
         self.assertEqual(request.method, "POST")
         with self.assertRaises(TypeError):

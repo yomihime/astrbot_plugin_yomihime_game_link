@@ -7,8 +7,9 @@ a compatibility forwarding surface whose exported objects retain identity
 with the canonical declarations. The SDK does not import Core runtime
 implementations or AstrBot objects.
 
-The current artifact is `yomihime-module-sdk` version `1.1.0`, carrying contract
-`1.1.0` (`B04-C-13`) and compatible contract versions `1.0.0` and `1.1.0`.
+The current artifact is `yomihime-module-sdk` version `1.3.0`, carrying contract
+`1.3.0` (`FF14-W1-P1`) and compatible contract versions `1.0.0`, `1.1.0`,
+`1.2.0`, and `1.3.0`.
 Extension declarations use manifest schema v1 and factory ABI v1. The declared
 minimum is Python 3.11 because the public API uses `StrEnum`. A local
 installed-wheel check proves the bundled SDK imports from the installed site
@@ -16,13 +17,28 @@ directory and that compatibility exports share object identity; it does not
 prove activation inside the target AstrBot environment. Host Python selection,
 installation location, and import precedence remain W0-H evidence.
 
+Contract 1.2.0 added `SourceHttpError` in the canonical
+`yomihime_sdk.api.services` module and the top-level package. It exposes stable,
+sanitized `code` and optional `status_code` fields for source HTTP failures.
+`HttpRequest.query` remains an ordered tuple of string key/value pairs; raw
+spaces, Unicode, and percent characters are accepted as data and are encoded
+once by the transport. Control characters remain rejected.
+
+Contract 1.3.0 adds `PrivacyFloor.OWNER` to capability declarations. Owner-floor
+capabilities must use `InvocationPolicy.COMMAND_ONLY`, and the manifest rejects
+exposing them through a Tool. This restriction is validated when descriptors
+and manifests are constructed; host Core authorization remains responsible for
+proving the current principal before an owner-scoped operation is dispatched.
+
 ## Offline build and isolated install
 
 The build backend is setuptools `80.9.0` with wheel `0.45.1`, pinned in
 `pyproject.toml`. The checked local build machine already has both versions.
 Build with `--no-build-isolation` and `--no-index` so no build helper is
 downloaded. A different build machine must provide those exact build tools
-before running this command; the project has no runtime dependencies.
+before running this command. The standalone SDK wheel has no runtime
+dependencies. The AstrBot Core plugin separately declares its HTTP runtime
+dependencies in the repository-root `requirements.txt`.
 
 The focused artifact test builds from a temporary source copy, installs with
 `--target` into a temporary site directory, and runs its identity probe with
@@ -46,8 +62,8 @@ New-Item -ItemType Directory -Force (Join-Path $source 'examples') | Out-Null
 Copy-Item -LiteralPath examples/empty_module, examples/offline_sample -Destination (Join-Path $source 'examples') -Recurse
 $env:SOURCE_DATE_EPOCH = '315532800'
 python -m pip wheel --no-index --no-deps --no-build-isolation --wheel-dir $wheelhouse $source
-python -m pip install --no-index --no-deps --target $site (Join-Path $wheelhouse 'yomihime_module_sdk-1.1.0-py3-none-any.whl')
-python -I -c "import sys; sys.path.insert(0, r'$site'); import importlib.metadata, yomihime_sdk; assert importlib.metadata.version('yomihime-module-sdk') == '1.1.0'; assert yomihime_sdk.CONTRACT_VERSION == '1.1.0'; print(yomihime_sdk.__version__)"
+python -m pip install --no-index --no-deps --target $site (Join-Path $wheelhouse 'yomihime_module_sdk-1.3.0-py3-none-any.whl')
+python -I -c "import sys; sys.path.insert(0, r'$site'); import importlib.metadata, yomihime_sdk; assert importlib.metadata.version('yomihime-module-sdk') == '1.3.0'; assert yomihime_sdk.CONTRACT_VERSION == '1.3.0'; assert yomihime_sdk.CONTRACT_REVISION == 'FF14-W1-P1'; print(yomihime_sdk.__version__)"
 ```
 
 The artifact test performs two builds with the fixed `SOURCE_DATE_EPOCH` and

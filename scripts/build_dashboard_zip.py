@@ -13,14 +13,14 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 ARCHIVE = ROOT / "dist" / "astrbot_plugin_yomihime_game_link-local.zip"
 EXPECTED_WHEEL_SHA256 = (
-    "8fd73fa756b5f2a077b9fb95cd483594d75894ef76ff17f3d90a89caad7e607c"
+    "e9b9543ac158533df6ce50e3430f4705614d1b1681b72610cebbab7b1e1b40e2"
 )
 EXPECTED_WHEEL_ENTRIES = {
-    "yomihime_module_sdk-1.1.0.dist-info/licenses/LICENSE",
-    "yomihime_module_sdk-1.1.0.dist-info/METADATA",
-    "yomihime_module_sdk-1.1.0.dist-info/WHEEL",
-    "yomihime_module_sdk-1.1.0.dist-info/top_level.txt",
-    "yomihime_module_sdk-1.1.0.dist-info/RECORD",
+    "yomihime_module_sdk-1.3.0.dist-info/licenses/LICENSE",
+    "yomihime_module_sdk-1.3.0.dist-info/METADATA",
+    "yomihime_module_sdk-1.3.0.dist-info/WHEEL",
+    "yomihime_module_sdk-1.3.0.dist-info/top_level.txt",
+    "yomihime_module_sdk-1.3.0.dist-info/RECORD",
     "yomihime_sdk/__init__.py",
     "yomihime_sdk/py.typed",
     "yomihime_sdk/_examples/empty_module/README.md",
@@ -53,7 +53,31 @@ ROOT_FILES = (
     "LICENSE",
     "README.md",
     "CHANGELOG.md",
+    "requirements.txt",
 )
+OPERATOR_SCRIPT_FILES = (
+    "scripts/__init__.py",
+    "scripts/admin_credentials.py",
+    "scripts/configure_source_credentials.py",
+)
+FF14_BUNDLE_ROOT = Path("modules") / "ff14"
+FF14_BUNDLE_REQUIRED_FILES = {
+    "__init__.py",
+    "module.py",
+    "models.py",
+    "yomihime.manifest.json",
+    "README.md",
+    "features/__init__.py",
+}
+FF14_BUNDLE_ROOT_FILES = FF14_BUNDLE_REQUIRED_FILES - {"features/__init__.py"}
+FF14_BUNDLE_ALLOWED_DIRS = {Path("features")}
+FF14_BUNDLE_CACHE_DIRS = {
+    "__pycache__",
+    ".cache",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+}
 RUNTIME_DIRS = (
     "adapters",
     "api",
@@ -214,11 +238,11 @@ def validate_wheel(path: Path) -> dict[str, bytes]:
                 "SDK wheel entry manifest differs from the reviewed artifact"
             )
         metadata_lines = set(
-            wheel.read("yomihime_module_sdk-1.1.0.dist-info/METADATA")
+            wheel.read("yomihime_module_sdk-1.3.0.dist-info/METADATA")
             .decode("utf-8")
             .splitlines()
         )
-        if not {"Name: yomihime-module-sdk", "Version: 1.1.0"} <= metadata_lines:
+        if not {"Name: yomihime-module-sdk", "Version: 1.3.0"} <= metadata_lines:
             raise ValueError("SDK wheel distribution metadata is unsupported")
         package = {name: wheel.read(name) for name in sorted(PACKAGE_ENTRY_NAMES)}
     return package
@@ -245,6 +269,55 @@ def _runtime_files(directory: Path, repository_root: Path) -> list[Path]:
     return found
 
 
+def _ff14_bundle_files(repository_root: Path) -> list[Path]:
+    """Include the reviewed FF14 package through a separate, closed input root."""
+    package_root = validate_source_path(
+        repository_root / FF14_BUNDLE_ROOT, repository_root, "FF14 bundle root"
+    )
+    if not package_root.is_dir():
+        raise ValueError("FF14 bundle root must be a directory")
+
+    found: list[Path] = []
+    pending = [package_root]
+    while pending:
+        current = pending.pop()
+        for entry in sorted(current.iterdir(), key=lambda item: item.name):
+            resolved = validate_source_path(entry, repository_root, "FF14 bundle")
+            metadata = resolved.stat()
+            if stat.S_ISDIR(metadata.st_mode):
+                relative_directory = resolved.relative_to(package_root)
+                if entry.name in FF14_BUNDLE_CACHE_DIRS:
+                    continue
+                if relative_directory not in FF14_BUNDLE_ALLOWED_DIRS:
+                    raise ValueError(
+                        f"Unsupported FF14 bundle directory: {relative_directory}"
+                    )
+                pending.append(resolved)
+                continue
+            if not stat.S_ISREG(metadata.st_mode):
+                raise ValueError(f"FF14 bundle entry is not a regular file: {entry}")
+
+            relative = resolved.relative_to(package_root).as_posix()
+            is_root_file = len(Path(relative).parts) == 1 and relative in (
+                FF14_BUNDLE_ROOT_FILES
+            )
+            is_feature_file = (
+                len(Path(relative).parts) == 2
+                and Path(relative).parts[0] == "features"
+                and resolved.suffix == ".py"
+            )
+            if is_root_file or is_feature_file:
+                found.append(resolved)
+            else:
+                raise ValueError(f"Unsupported FF14 bundle file: {relative}")
+
+    found_names = {path.relative_to(package_root).as_posix() for path in found}
+    missing = FF14_BUNDLE_REQUIRED_FILES - found_names
+    if missing:
+        raise ValueError(f"FF14 bundle is missing required files: {sorted(missing)}")
+    return found
+
+
 def included_files(root: Path = ROOT) -> list[Path]:
     repository_root = Path(root).resolve(strict=True)
     files = [
@@ -253,11 +326,16 @@ def included_files(root: Path = ROOT) -> list[Path]:
         )
         for name in ROOT_FILES
     ]
+    files.extend(
+        validate_source_path(repository_root / name, repository_root, "Operator script")
+        for name in OPERATOR_SCRIPT_FILES
+    )
     for directory in RUNTIME_DIRS:
         runtime_root = validate_source_path(
             repository_root / directory, repository_root, "Runtime directory"
         )
         files.extend(_runtime_files(runtime_root, repository_root))
+    files.extend(_ff14_bundle_files(repository_root))
     return sorted(
         set(files), key=lambda path: path.relative_to(repository_root).as_posix()
     )

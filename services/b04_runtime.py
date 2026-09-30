@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Callable
+from datetime import datetime
 
 from ..infrastructure.sqlite.database import (
     SQLiteDatabase,
@@ -88,12 +90,17 @@ class SQLiteResourceVisibilityProbe:
 class B04Repositories:
     """All B04 stores sharing the host's initialized SQLite database."""
 
-    def __init__(self, database: SQLiteDatabase) -> None:
+    def __init__(
+        self,
+        database: SQLiteDatabase,
+        *,
+        utc_clock: Callable[[], datetime] | None = None,
+    ) -> None:
         self.database = database
         self.subscriptions = SQLiteSubscriptionStore(database)
         self.jobs = SQLiteSubscriptionJobRepository(database)
         self.lifecycle = SQLiteSubscriptionLifecycleRepository(database)
-        self.scheduler = SQLiteSchedulerRepository(database)
+        self.scheduler = SQLiteSchedulerRepository(database, utc_clock=utc_clock)
         self.windows = SQLiteDigestWindowRepository(database)
         self.deliveries = SQLiteDeliveryRepository(database)
 

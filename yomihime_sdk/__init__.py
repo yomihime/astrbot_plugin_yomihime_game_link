@@ -156,6 +156,7 @@ from .api.services import (
     ResourceReference,
     SecretMaterial,
     SourceHttp,
+    SourceHttpError,
     SubscriptionOperations,
     SubscriptionOutput,
     SubscriptionUnavailable,
@@ -259,7 +260,7 @@ from .api.version import (
     CONTRACT_VERSION,
 )
 
-__version__ = "1.1.0"
+__version__ = "1.3.0"
 
 __all__ = [
     "__version__",
@@ -464,6 +465,7 @@ __all__ = [
     "SourceDeclaration",
     "SourceDescriptor",
     "SourceHttp",
+    "SourceHttpError",
     "SourceSpec",
     "SubscriptionDescriptor",
     "SubscriptionEvaluationCommit",

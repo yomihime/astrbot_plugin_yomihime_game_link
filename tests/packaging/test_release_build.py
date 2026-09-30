@@ -6,6 +6,7 @@ import base64
 import csv
 import hashlib
 import io
+import stat
 import tempfile
 import unittest
 from pathlib import Path
@@ -14,15 +15,30 @@ from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
 from setuptools import build_meta
 
-from scripts.build_dashboard_zip import ROOT_FILES, RUNTIME_DIRS, included_files
+from scripts.build_dashboard_zip import (
+    FF14_BUNDLE_REQUIRED_FILES,
+    FF14_BUNDLE_ROOT,
+    OPERATOR_SCRIPT_FILES,
+    ROOT_FILES,
+    RUNTIME_DIRS,
+    included_files,
+)
 from scripts.build_release import (
     build_release,
+    build_sdk_wheel,
     plugin_metadata,
     validate_tag,
     write_checksums,
 )
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def _write_operator_script_fixtures(root: Path) -> None:
+    for filename in OPERATOR_SCRIPT_FILES:
+        path = root / filename
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"operator script fixture")
 
 
 def _render_record(payloads: dict[str, bytes], record_name: str) -> bytes:
@@ -38,18 +54,18 @@ def _render_record(payloads: dict[str, bytes], record_name: str) -> bytes:
 
 
 def _write_posix_wheel(path: Path) -> tuple[dict[str, bytes], str]:
-    record_name = "yomihime_module_sdk-1.1.0.dist-info/RECORD"
+    record_name = "yomihime_module_sdk-1.3.0.dist-info/RECORD"
     payloads = {
         "yomihime_sdk/__init__.py": b"SDK_VALUE = 1\n",
-        "yomihime_module_sdk-1.1.0.dist-info/METADATA": (
-            b"Metadata-Version: 2.4\nName: yomihime-module-sdk\nVersion: 1.1.0\n"
+        "yomihime_module_sdk-1.3.0.dist-info/METADATA": (
+            b"Metadata-Version: 2.4\nName: yomihime-module-sdk\nVersion: 1.3.0\n"
         ),
-        "yomihime_module_sdk-1.1.0.dist-info/WHEEL": (
+        "yomihime_module_sdk-1.3.0.dist-info/WHEEL": (
             b"Wheel-Version: 1.0\nGenerator: fixture\n"
             b"Root-Is-Purelib: true\nTag: py3-none-any\n"
         ),
-        "yomihime_module_sdk-1.1.0.dist-info/top_level.txt": b"yomihime_sdk\n",
-        "yomihime_module_sdk-1.1.0.dist-info/licenses/LICENSE": b"MIT\n",
+        "yomihime_module_sdk-1.3.0.dist-info/top_level.txt": b"yomihime_sdk\n",
+        "yomihime_module_sdk-1.3.0.dist-info/licenses/LICENSE": b"MIT\n",
     }
     with ZipFile(path, "w", compression=ZIP_DEFLATED) as archive:
         for name, data in (
@@ -106,10 +122,21 @@ class ReleaseBuildTests(unittest.TestCase):
                 "LICENSE",
                 "README.md",
                 "CHANGELOG.md",
+                "requirements.txt",
+                *OPERATOR_SCRIPT_FILES,
                 "extensions/disk_manifest.py",
                 "infrastructure/sqlite/migrations/0000_schema_migrations.sql",
+                "modules/ff14/__init__.py",
+                "modules/ff14/module.py",
+                "modules/ff14/yomihime.manifest.json",
+                "modules/ff14/README.md",
             }
             <= names
+        )
+        ff14_names = {name for name in names if name.startswith("modules/ff14/")}
+        self.assertTrue(
+            {f"modules/ff14/{relative}" for relative in FF14_BUNDLE_REQUIRED_FILES}
+            <= ff14_names
         )
         excluded_parts = {
             ".architecture-refactor",
@@ -123,6 +150,8 @@ class ReleaseBuildTests(unittest.TestCase):
         self.assertFalse(
             any(excluded_parts.intersection(Path(name).parts) for name in names)
         )
+        self.assertNotIn("scripts/build_dashboard_zip.py", names)
+        self.assertNotIn("scripts/build_release.py", names)
         self.assertFalse(any(Path(name).suffix in {".pyc", ".pyo"} for name in names))
 
     def test_runtime_manifest_skips_cache_and_local_data_directories(self) -> None:
@@ -132,6 +161,13 @@ class ReleaseBuildTests(unittest.TestCase):
                 (root / filename).write_bytes(b"runtime root asset")
             for directory in RUNTIME_DIRS:
                 (root / directory).mkdir()
+            _write_operator_script_fixtures(root)
+            ff14_root = root / FF14_BUNDLE_ROOT
+            ff14_root.mkdir(parents=True)
+            for filename in FF14_BUNDLE_REQUIRED_FILES:
+                package_file = ff14_root / filename
+                package_file.parent.mkdir(parents=True, exist_ok=True)
+                package_file.write_bytes(b"FF14 package input")
             (root / "core" / "module.py").write_bytes(b"runtime source")
             for directory in (".cache", "cache", "data", "local_data"):
                 local = root / "extensions" / directory
@@ -142,6 +178,85 @@ class ReleaseBuildTests(unittest.TestCase):
 
             self.assertIn("core/module.py", names)
             self.assertFalse(any("private.py" in name for name in names))
+
+    def test_ff14_bundle_rejects_unreviewed_files(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="yomihime-release-bundle-") as work:
+            root = Path(work).resolve()
+            for filename in ROOT_FILES:
+                (root / filename).write_bytes(b"runtime root asset")
+            for directory in RUNTIME_DIRS:
+                (root / directory).mkdir()
+            _write_operator_script_fixtures(root)
+            ff14_root = root / FF14_BUNDLE_ROOT
+            ff14_root.mkdir(parents=True)
+            for filename in FF14_BUNDLE_REQUIRED_FILES:
+                package_file = ff14_root / filename
+                package_file.parent.mkdir(parents=True, exist_ok=True)
+                package_file.write_bytes(b"FF14 package input")
+            (ff14_root / "unexpected.json").write_bytes(b"must not ship")
+
+            with self.assertRaisesRegex(ValueError, "Unsupported FF14 bundle file"):
+                included_files(root)
+
+    def test_ff14_bundle_rejects_unreviewed_source_directories(self) -> None:
+        for unreviewed_path in (
+            "fixtures/sample.py",
+            "tests/private.py",
+            "sample/helper.py",
+        ):
+            with (
+                self.subTest(path=unreviewed_path),
+                tempfile.TemporaryDirectory(
+                    prefix="yomihime-release-bundle-source-"
+                ) as work,
+            ):
+                root = Path(work).resolve()
+                for filename in ROOT_FILES:
+                    (root / filename).write_bytes(b"runtime root asset")
+                for directory in RUNTIME_DIRS:
+                    (root / directory).mkdir()
+                _write_operator_script_fixtures(root)
+                ff14_root = root / FF14_BUNDLE_ROOT
+                ff14_root.mkdir(parents=True)
+                for filename in FF14_BUNDLE_REQUIRED_FILES:
+                    package_file = ff14_root / filename
+                    package_file.parent.mkdir(parents=True, exist_ok=True)
+                    package_file.write_bytes(b"FF14 package input")
+                unexpected = ff14_root / unreviewed_path
+                unexpected.parent.mkdir(parents=True)
+                unexpected.write_bytes(b"must not ship")
+
+                with self.assertRaisesRegex(
+                    ValueError, "Unsupported FF14 bundle directory"
+                ):
+                    included_files(root)
+
+    def test_ff14_bundle_rejects_external_links(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="yomihime-release-link-") as work:
+            root = Path(work).resolve()
+            for filename in ROOT_FILES:
+                (root / filename).write_bytes(b"runtime root asset")
+            for directory in RUNTIME_DIRS:
+                (root / directory).mkdir()
+            _write_operator_script_fixtures(root)
+            ff14_root = root / FF14_BUNDLE_ROOT
+            ff14_root.mkdir(parents=True)
+            for filename in FF14_BUNDLE_REQUIRED_FILES:
+                package_file = ff14_root / filename
+                package_file.parent.mkdir(parents=True, exist_ok=True)
+                package_file.write_bytes(b"FF14 package input")
+            outside = root.parent / f"{root.name}-outside.py"
+            outside.write_bytes(b"external source")
+            try:
+                (ff14_root / "external.py").symlink_to(outside)
+            except (NotImplementedError, OSError) as exc:
+                self.skipTest(f"symlink creation is unavailable: {exc}")
+
+            try:
+                with self.assertRaisesRegex(ValueError, "symlink|reparse point"):
+                    included_files(root)
+            finally:
+                outside.unlink(missing_ok=True)
 
     def test_sha256sums_lists_artifact_names_and_digests_in_order(self) -> None:
         with tempfile.TemporaryDirectory(prefix="yomihime-release-sums-") as work:
@@ -162,13 +277,83 @@ class ReleaseBuildTests(unittest.TestCase):
     def test_reused_sdk_wheel_still_requires_the_independent_pin(self) -> None:
         with tempfile.TemporaryDirectory(prefix="yomihime-release-wheel-") as work:
             root = Path(work)
-            wheel = root / "yomihime_module_sdk-1.1.0-py3-none-any.whl"
+            wheel = root / "yomihime_module_sdk-1.3.0-py3-none-any.whl"
             wheel.write_bytes(b"not the reviewed wheel")
             output = root / "artifacts"
 
             with self.assertRaisesRegex(ValueError, "independently pinned"):
                 build_release(sdk_wheel=wheel, output_dir=output)
             self.assertFalse(output.exists())
+
+    def test_built_release_zip_contains_the_closed_ff14_bundle(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="yomihime-release-ff14-") as work:
+            work_root = Path(work)
+            sdk_build_root = work_root / "sdk-build"
+            sdk_build_root.mkdir()
+            sdk_wheel = build_sdk_wheel(sdk_build_root, ROOT)
+            archive_path, _, _ = build_release(
+                sdk_wheel=sdk_wheel,
+                output_dir=work_root / "artifacts",
+                repository_root=ROOT,
+            )
+
+            with ZipFile(archive_path) as archive:
+                self.assertIsNone(archive.testzip())
+                names = set(archive.namelist())
+                self.assertIn("requirements.txt", names)
+                self.assertEqual(
+                    archive.read("requirements.txt"),
+                    (ROOT / "requirements.txt").read_bytes(),
+                )
+                for filename in (
+                    "README.md",
+                    "modules/ff14/README.md",
+                    *OPERATOR_SCRIPT_FILES,
+                ):
+                    self.assertEqual(
+                        archive.read(filename), (ROOT / filename).read_bytes()
+                    )
+                self.assertEqual(
+                    {name for name in names if name.startswith("scripts/")},
+                    set(OPERATOR_SCRIPT_FILES),
+                )
+                actual_ff14 = {
+                    name for name in names if name.startswith("modules/ff14/")
+                }
+                expected_ff14 = {
+                    path.relative_to(ROOT).as_posix()
+                    for path in included_files(ROOT)
+                    if path.relative_to(ROOT).parts[:2] == ("modules", "ff14")
+                }
+                self.assertEqual(actual_ff14, expected_ff14)
+                actual_operator_scripts = {
+                    name for name in names if name.startswith("scripts/")
+                }
+                self.assertEqual(actual_operator_scripts, set(OPERATOR_SCRIPT_FILES))
+                self.assertTrue(
+                    {
+                        "modules/ff14/__init__.py",
+                        "modules/ff14/module.py",
+                        "modules/ff14/yomihime.manifest.json",
+                        "modules/ff14/README.md",
+                    }
+                    <= actual_ff14
+                )
+                self.assertFalse(
+                    any(
+                        any(
+                            part in {"tests", "fixtures", "sample", "samples"}
+                            for part in Path(name).parts
+                        )
+                        for name in actual_ff14
+                    )
+                )
+                self.assertFalse(
+                    any(
+                        stat.S_ISLNK(info.external_attr >> 16)
+                        for info in archive.infolist()
+                    )
+                )
 
     def test_posix_wheel_normalizes_to_stable_windows_bytes_idempotently(self) -> None:
         with tempfile.TemporaryDirectory(prefix="yomihime-wheel-normalize-") as work:
@@ -179,8 +364,8 @@ class ReleaseBuildTests(unittest.TestCase):
 
             normalized_payloads = {
                 **original_payloads,
-                "yomihime_module_sdk-1.1.0.dist-info/METADATA": (
-                    original_payloads["yomihime_module_sdk-1.1.0.dist-info/METADATA"]
+                "yomihime_module_sdk-1.3.0.dist-info/METADATA": (
+                    original_payloads["yomihime_module_sdk-1.3.0.dist-info/METADATA"]
                     .replace(b"\r\n", b"\n")
                     .replace(b"\n", b"\r\n")
                 ),
@@ -195,12 +380,12 @@ class ReleaseBuildTests(unittest.TestCase):
                     mode = 0o100664 if info.filename == record_name else 0o100666
                     self.assertEqual(info.external_attr, mode << 16)
                 self.assertEqual(
-                    archive.read("yomihime_module_sdk-1.1.0.dist-info/METADATA"),
-                    normalized_payloads["yomihime_module_sdk-1.1.0.dist-info/METADATA"],
+                    archive.read("yomihime_module_sdk-1.3.0.dist-info/METADATA"),
+                    normalized_payloads["yomihime_module_sdk-1.3.0.dist-info/METADATA"],
                 )
                 self.assertEqual(
-                    archive.read("yomihime_module_sdk-1.1.0.dist-info/WHEEL"),
-                    original_payloads["yomihime_module_sdk-1.1.0.dist-info/WHEEL"],
+                    archive.read("yomihime_module_sdk-1.3.0.dist-info/WHEEL"),
+                    original_payloads["yomihime_module_sdk-1.3.0.dist-info/WHEEL"],
                 )
                 self.assertEqual(
                     archive.read(record_name),

@@ -7,7 +7,7 @@ invocation around asynchronous service calls.
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from time import monotonic
@@ -61,6 +61,11 @@ from .dependency_calls import DependencyInvoker
 from .identity import IdentityResolverService, InvocationPrincipalResolver
 from .records import ModuleRecordsService
 from .resources import ResourceAccessService
+from .source_credentials import (
+    SourceCredentialPolicy,
+    SourceCredentialService,
+    bind_source_credential_declarations,
+)
 
 
 class InvocationBindingError(PermissionError):
@@ -257,7 +262,14 @@ def _require_command_only_entry(
 class _BoundSubscriptionOperations(SubscriptionOperations):
     """Bind the shared SDK Protocol service to one module and root command."""
 
-    __slots__ = ("_issuer", "_registry", "_lifecycle", "_module_id", "_delegate")
+    __slots__ = (
+        "_issuer",
+        "_registry",
+        "_lifecycle",
+        "_module_id",
+        "_delegate",
+        "_owner_authority",
+    )
 
     def __init__(
         self,
@@ -266,15 +278,17 @@ class _BoundSubscriptionOperations(SubscriptionOperations):
         lifecycle: LifecycleController,
         module_id: str,
         delegate: SubscriptionOperations,
+        owner_authority: object | None,
     ) -> None:
         self._issuer = issuer
         self._registry = registry
         self._lifecycle = lifecycle
         self._module_id = module_id
         self._delegate = delegate
+        self._owner_authority = owner_authority
 
-    def _command(self, invocation: InvocationView) -> None:
-        _require_command_only_entry(
+    def _command(self, invocation: InvocationView) -> RegisteredModule:
+        return _require_command_only_entry(
             self._issuer,
             self._registry,
             self._lifecycle,
@@ -282,44 +296,68 @@ class _BoundSubscriptionOperations(SubscriptionOperations):
             invocation,
         )
 
+    async def _owner_check(self, invocation: InvocationView) -> None:
+        module = self._command(invocation)
+        capability = next(
+            (
+                item
+                for item in module.manifest.capabilities
+                if item.capability_id == invocation.capability_id
+            ),
+            None,
+        )
+        if capability is None or capability.privacy_floor is not PrivacyFloor.OWNER:
+            return
+        if (
+            invocation.grant_id is not None
+            or invocation.grant_revision is not None
+            or self._owner_authority is None
+        ):
+            raise InvocationBindingError()
+        try:
+            await self._owner_authority.require_current(invocation)
+        except Exception:
+            raise InvocationBindingError() from None
+        self._command(invocation)
+
     async def create(
         self, invocation: InvocationView, subscription: SubscriptionView
     ) -> SubscriptionView:
-        self._command(invocation)
+        await self._owner_check(invocation)
         result = await self._delegate.create(invocation, subscription)
-        self._command(invocation)
+        await self._owner_check(invocation)
         return result
 
     async def revise(
         self, invocation: InvocationView, subscription: SubscriptionView
     ) -> SubscriptionView:
-        self._command(invocation)
+        await self._owner_check(invocation)
         result = await self._delegate.revise(invocation, subscription)
-        self._command(invocation)
+        await self._owner_check(invocation)
         return result
 
     async def create_request(
         self, invocation: InvocationView, request: SubscriptionRequest
     ) -> SubscriptionView:
-        self._command(invocation)
+        await self._owner_check(invocation)
         result = await self._delegate.create_request(invocation, request)
-        self._command(invocation)
+        await self._owner_check(invocation)
         return result
 
     async def revise_request(
         self, invocation: InvocationView, request: SubscriptionRequest
     ) -> SubscriptionView:
-        self._command(invocation)
+        await self._owner_check(invocation)
         result = await self._delegate.revise_request(invocation, request)
-        self._command(invocation)
+        await self._owner_check(invocation)
         return result
 
     async def list_current(
         self, invocation: InvocationView
     ) -> tuple[SubscriptionView, ...]:
-        self._command(invocation)
+        await self._owner_check(invocation)
         result = await self._delegate.list_current(invocation)
-        self._command(invocation)
+        await self._owner_check(invocation)
         return result
 
     async def cancel(
@@ -329,11 +367,11 @@ class _BoundSubscriptionOperations(SubscriptionOperations):
         *,
         expected_revision: int,
     ) -> None:
-        self._command(invocation)
+        await self._owner_check(invocation)
         await self._delegate.cancel(
             invocation, subscription_id, expected_revision=expected_revision
         )
-        self._command(invocation)
+        await self._owner_check(invocation)
 
 
 class _AccountOperations(AccountOperations):
@@ -684,6 +722,7 @@ class InvocationServiceBinder:
         "_repositories",
         "_authorization",
         "_principal_resolver",
+        "_owner_authority",
         "_caller_issuer",
         "_http",
         "_clock",
@@ -702,6 +741,7 @@ class InvocationServiceBinder:
         http: SourceHttpService,
         *,
         principal_resolver: InvocationPrincipalResolver,
+        owner_authority: object | None = None,
         clock: Callable[[], float] = monotonic,
         utc_clock: Callable[[], datetime] | None = None,
     ) -> None:
@@ -714,6 +754,11 @@ class InvocationServiceBinder:
         if not callable(getattr(principal_resolver, "principal_id", None)):
             raise TypeError("module binder requires a principal resolver")
         self._principal_resolver = principal_resolver
+        if owner_authority is not None and not callable(
+            getattr(owner_authority, "require_current", None)
+        ):
+            raise TypeError("module binder owner authority is invalid")
+        self._owner_authority = owner_authority
         self._caller_issuer = caller_issuer
         self._http = http
         self._clock = clock
@@ -826,6 +871,29 @@ class InvocationServiceBinder:
     async def bind(self, invocation: InvocationView) -> _InvocationServices:
         module = await self._admit(invocation)
         caller_id = invocation.capability_id
+        owner_capability = next(
+            (
+                item
+                for item in module.manifest.capabilities
+                if item.capability_id == caller_id
+            ),
+            None,
+        )
+        is_owner = (
+            owner_capability is not None
+            and owner_capability.privacy_floor is PrivacyFloor.OWNER
+        )
+        if is_owner:
+            if (
+                invocation.grant_id is not None
+                or invocation.grant_revision is not None
+                or self._owner_authority is None
+            ):
+                raise InvocationBindingError()
+            try:
+                await self._owner_authority.require_current(invocation)
+            except Exception:
+                raise InvocationBindingError() from None
         is_scheduler = invocation.origin is InvocationOrigin.SCHEDULER
         if is_scheduler:
             caller_capability = None
@@ -855,6 +923,12 @@ class InvocationServiceBinder:
 
         async def check() -> None:
             check_sync()
+            if is_owner:
+                try:
+                    await self._owner_authority.require_current(invocation)
+                except Exception:
+                    raise InvocationBindingError() from None
+                check_sync()
             if invocation.grant_id is not None:
                 await self._admit(invocation)
                 check_sync()
@@ -953,12 +1027,15 @@ class ModuleServicesFactory:
         "_repositories",
         "_lookup",
         "_principal_resolver",
+        "_owner_authority",
         "_config_principal_id",
         "_identity_namespace",
         "_http_transport",
+        "_source_credential_policies",
         "_exchange_verifier",
         "_caller_issuer",
         "_http_by_module",
+        "_credential_services",
         "_subscriptions",
         "_secret_available",
         "_clock",
@@ -977,6 +1054,8 @@ class ModuleServicesFactory:
         identity_namespace: str,
         subscriptions: SubscriptionOperations | None = None,
         principal_resolver: InvocationPrincipalResolver | None = None,
+        owner_authority: object | None = None,
+        source_credential_policies: Sequence[SourceCredentialPolicy] = (),
         secret_available: SecretAvailability | None = None,
         exchange_verifier: Callable[..., object] | None = None,
         clock: Callable[[], float] = monotonic,
@@ -1000,6 +1079,19 @@ class ModuleServicesFactory:
             raise ValueError("config principal is required")
         if type(identity_namespace) is not str or not identity_namespace.strip():
             raise ValueError("identity namespace is required")
+        credential_policies = tuple(source_credential_policies)
+        if any(
+            not isinstance(item, SourceCredentialPolicy) for item in credential_policies
+        ):
+            raise TypeError("source credential policies must be validated values")
+        if len(
+            {(item.module_id, item.source_id) for item in credential_policies}
+        ) != len(credential_policies):
+            raise ValueError("source credential policies must be unique")
+        if len(
+            {(item.module_id, item.credential_ref) for item in credential_policies}
+        ) != len(credential_policies):
+            raise ValueError("source credential aliases must be unique per module")
         if exchange_verifier is not None and not callable(exchange_verifier):
             raise TypeError("exchange verifier must be callable")
         if secret_available is not None and not callable(secret_available):
@@ -1029,18 +1121,27 @@ class ModuleServicesFactory:
             )
         if not callable(getattr(principal_resolver, "principal_id", None)):
             raise TypeError("module services require a principal resolver")
+        if owner_authority is not None and not callable(
+            getattr(owner_authority, "require_current", None)
+        ):
+            raise TypeError("module services owner authority is invalid")
         self._registry = registry
         self._issuer = issuer
         self._lifecycle = lifecycle
         self._repositories = repositories
         self._lookup = repositories.registration_lookup
         self._principal_resolver = principal_resolver
+        self._owner_authority = owner_authority
         self._config_principal_id = config_principal_id
         self._identity_namespace = identity_namespace
         self._http_transport = http_transport
+        self._source_credential_policies = credential_policies
         self._exchange_verifier = exchange_verifier
         self._caller_issuer = _IssuerCallerCapabilityIssuer(issuer, registry)
         self._http_by_module: dict[str, tuple[ModuleManifest, SourceHttpService]] = {}
+        self._credential_services: list[
+            tuple[str, ModuleManifest, SourceCredentialService]
+        ] = []
         self._subscriptions = subscriptions
         self._secret_available = secret_available
         self._clock = clock
@@ -1096,6 +1197,38 @@ class ModuleServicesFactory:
         authorization = self._new_authorization()
         return await authorization.require_current_grant(invocation)
 
+    async def close_credentials(self) -> None:
+        """Clear every token cache before Core closes the secret store/database.
+
+        This method never closes the shared HTTP transport; its runtime owner
+        closes that separately after module work has stopped.
+        """
+
+        services = tuple(self._credential_services)
+        for _, _, service in services:
+            await service.close()
+        self._credential_services.clear()
+
+    async def retire_module_credentials(
+        self, module_id: str, *, manifest: ModuleManifest
+    ) -> None:
+        """Retire one stopped manifest binding after a module replacement."""
+
+        if type(module_id) is not str or not module_id.strip():
+            raise ValueError("module ID is required to retire credentials")
+        if not isinstance(manifest, ModuleManifest):
+            raise TypeError("manifest is required to retire credentials")
+        retained: list[tuple[str, ModuleManifest, SourceCredentialService]] = []
+        for owner_id, owner_manifest, service in self._credential_services:
+            if owner_id == module_id and owner_manifest == manifest:
+                await service.close()
+            else:
+                retained.append((owner_id, owner_manifest, service))
+        self._credential_services = retained
+        cached = self._http_by_module.get(module_id)
+        if cached is not None and cached[0] == manifest:
+            self._http_by_module.pop(module_id, None)
+
     def _build_module(self, module_id: str, manifest: ModuleManifest) -> ModuleServices:
         fields: tuple[ConfigField, ...] = manifest.config_fields
         if fields:
@@ -1131,8 +1264,36 @@ class ModuleServicesFactory:
         authorization = self._new_authorization()
         cached_http = self._http_by_module.get(module_id)
         if cached_http is None or cached_http[0] != manifest:
+            credential_policies = tuple(
+                policy
+                for policy in self._source_credential_policies
+                if policy.module_id == module_id
+            )
+            effective_sources = bind_source_credential_declarations(
+                module_id, manifest.sources, fields, credential_policies
+            )
+            credential_service = None
+            if any(source.credential_ref is not None for source in effective_sources):
+                credential_service = SourceCredentialService(
+                    module_id,
+                    effective_sources,
+                    fields,
+                    credential_policies,
+                    self._repositories.config,
+                    self._repositories.secret_store,
+                    self._http_transport,
+                    config_principal_id=self._config_principal_id,
+                    clock=self._clock,
+                )
+                self._credential_services.append(
+                    (module_id, manifest, credential_service)
+                )
             http = SourceHttpService(
-                manifest.sources, self._http_transport, clock=self._clock
+                effective_sources,
+                self._http_transport,
+                module_id=module_id,
+                credential_service=credential_service,
+                clock=self._clock,
             )
             self._http_by_module[module_id] = (manifest, http)
         else:
@@ -1147,6 +1308,7 @@ class ModuleServicesFactory:
             self._caller_issuer,
             http,
             principal_resolver=self._principal_resolver,
+            owner_authority=self._owner_authority,
             clock=self._clock,
             utc_clock=self._utc_clock,
         )
@@ -1161,6 +1323,7 @@ class ModuleServicesFactory:
             self._lifecycle,
             module_id,
             subscription_delegate,
+            self._owner_authority,
         )
         return ModuleServices(
             config=config,

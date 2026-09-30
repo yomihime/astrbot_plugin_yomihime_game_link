@@ -18,6 +18,7 @@ from unittest import mock
 import scripts.build_dashboard_zip as zip_builder
 from scripts.build_dashboard_zip import (
     EXPECTED_WHEEL_SHA256,
+    OPERATOR_SCRIPT_FILES,
     ROOT_FILES,
     RUNTIME_DIRS,
     _reject_link,
@@ -28,12 +29,23 @@ from scripts.build_dashboard_zip import (
 )
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def _write_operator_script_fixtures(root: Path) -> None:
+    for filename in OPERATOR_SCRIPT_FILES:
+        path = root / filename
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"operator script fixture")
+
+
 BOOTSTRAP_CASE = r"""
 import importlib
 import importlib.util
 import sys
 import types
+import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 
 plugin_root = Path(sys.argv[1]).resolve()
 mode = sys.argv[2]
@@ -41,7 +53,13 @@ astrbot = types.ModuleType("astrbot")
 api = types.ModuleType("astrbot.api")
 event = types.ModuleType("astrbot.api.event")
 star = types.ModuleType("astrbot.api.star")
-class Event: pass
+class Event:
+    def __init__(self):
+        self.llm_flags = []
+    def should_call_llm(self, value):
+        self.llm_flags.append(value)
+    def plain_result(self, text):
+        return text
 class Star: pass
 class Filter:
     @staticmethod
@@ -93,7 +111,7 @@ try:
 except module.SDKBootstrapError:
     assert mode in {"different", "partial", "unsupported", "mixed", "root-escape"}, mode
 else:
-    assert mode in {"cold", "same", "root-check"}, mode
+    assert mode in {"cold", "same", "root-check", "entry-text", "entry-none"}, mode
     if mode == "root-check":
         try:
             module._require_contained(Path(sys.argv[3]).resolve(), plugin_root, "test SDK root")
@@ -104,6 +122,21 @@ else:
     assert module.bootstrap_sdk(plugin_root) is sys.modules["yomihime_sdk"]
     sdk_root = Path(sys.modules["yomihime_sdk"].__file__).resolve().parent
     assert sdk_root == plugin_root / "yomihime_sdk"
+    if mode in {"entry-text", "entry-none"}:
+        result = "help text" if mode == "entry-text" else None
+        class Runtime:
+            async def handle_event(self, event):
+                return result
+        event_instance = Event()
+        subject = SimpleNamespace(_runtime=Runtime())
+        async def collect():
+            return [
+                item async for item in module.YomihimeGameLink.game_link(
+                    subject, event_instance
+                )
+            ]
+        assert asyncio.run(collect()) == ([] if result is None else [result])
+        assert event_instance.llm_flags == [True]
 assert sys.path == before, (before, sys.path)
 """
 
@@ -165,6 +198,12 @@ class SDKBootstrapTests(unittest.TestCase):
         self._run_bootstrap(self._plugin("another_arbitrary_plugin"), "cold")
         self._run_bootstrap(self._plugin("same-preload"), "same")
 
+    def test_matched_command_disables_default_llm_and_preserves_text_yield(
+        self,
+    ) -> None:
+        self._run_bootstrap(self._plugin("entry-text"), "entry-text")
+        self._run_bootstrap(self._plugin("entry-none"), "entry-none")
+
     def test_different_partial_mixed_and_unsupported_preloads_fail_closed(self) -> None:
         target = self._plugin("target-plugin")
         foreign = self._plugin("foreign-plugin")
@@ -198,6 +237,7 @@ class SDKBootstrapTests(unittest.TestCase):
             (repository / name).write_text("fixture", encoding="utf-8")
         for name in RUNTIME_DIRS:
             (repository / name).mkdir()
+        _write_operator_script_fixtures(repository)
 
         outside = self.temp_root / "outside.py"
         outside.write_text("private sentinel", encoding="utf-8")
@@ -291,6 +331,12 @@ class SDKBootstrapTests(unittest.TestCase):
             (repository / name).write_text("fixture", encoding="utf-8")
         for name in RUNTIME_DIRS:
             (repository / name).mkdir()
+        _write_operator_script_fixtures(repository)
+        shutil.copytree(
+            ROOT / "modules" / "ff14",
+            repository / "modules" / "ff14",
+            ignore=shutil.ignore_patterns("__pycache__"),
+        )
         runtime_file = repository / "core" / "snapshot.py"
         original = b"trusted snapshot bytes\n"
         runtime_file.write_bytes(original)

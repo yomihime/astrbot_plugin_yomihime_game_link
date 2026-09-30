@@ -21,6 +21,14 @@ from ygl_test_subject.api.display import (
     Privacy,
     TextBlock,
 )
+from ygl_test_subject.api.manifests import (
+    CommandDescriptor,
+    InvocationPolicy,
+    ModuleCategory,
+    ModuleManifest,
+    PackageManifest,
+    PrivacyFloor,
+)
 from ygl_test_subject.api.results import (
     CapabilityResult,
     FactDocument,
@@ -75,6 +83,7 @@ from ygl_test_subject.services.output import (
     OutputService,
     OutputStatus,
 )
+from ygl_test_subject.services.owner_authority import OwnerRouteProofAuthority
 
 from tests.fixtures.b04_runtime import _run_async_from_sync
 from tests.fixtures.minimal_module import build_package
@@ -154,6 +163,14 @@ class _Grants:
     async def current_grant(self, grant_id):
         self.calls.append(grant_id)
         return self.grant
+
+
+class _MutablePrincipalResolver:
+    def __init__(self, principal_id: str):
+        self.value = principal_id
+
+    async def principal_id(self, invocation):
+        return self.value
 
 
 class _ResourceVisibility:
@@ -312,6 +329,69 @@ class OutputServiceTests(unittest.IsolatedAsyncioTestCase):
         }
         dependencies.update(changes)
         return OutputService(**dependencies)
+
+    async def _owner_output(self, *, root_outputs=None):
+        package, handlers = build_package()
+        original = package.modules[0]
+        owner_lookup = replace(
+            original.capabilities[0],
+            invocation_policy=InvocationPolicy.COMMAND_ONLY,
+            privacy_floor=PrivacyFloor.OWNER,
+        )
+        owner_module = ModuleManifest(
+            original.module_id,
+            original.route,
+            ModuleCategory.GAME,
+            original.factory_entry,
+            original.module_version,
+            (owner_lookup, original.capabilities[1]),
+            commands=(CommandDescriptor("read", "lookup", {"item": "item"}, "Read"),),
+        )
+        owner_package = PackageManifest(
+            package.package_id,
+            package.package_version,
+            package.contract_version,
+            (owner_module,),
+            package.author,
+            package.license,
+            package.source,
+        )
+        registry = Registry()
+        registry.register_package(owner_package, {"demo": handlers})
+        issuer = ContextIssuer()
+        lifecycle = LifecycleController(registry, issuer=issuer)
+        self._install_and_activate(registry, owner_package, handlers, lifecycle)
+        snapshot = registry.snapshot()
+        module = snapshot.modules["sample/demo"]
+        route = self.route
+        conversations = _Conversations(route)
+        principals = _MutablePrincipalResolver("principal-offline")
+        authority = OwnerRouteProofAuthority(
+            issuer, lifecycle.admission, principals, conversations
+        )
+        view = issuer.issue(
+            origin=InvocationOrigin.COMMAND,
+            module_id="sample/demo",
+            module_epoch=module.epoch,
+            registry_revision=snapshot.revision,
+            actor_id="offline-actor",
+            adapter_id=route.adapter_id,
+            conversation_id=route.conversation_id,
+            capability_id="lookup",
+        )
+        lease = lifecycle.admission.admit(view, "lookup")
+        await authority.capture(view, lease)
+        service = self._service(
+            registry=registry,
+            issuer=issuer,
+            admission=lifecycle.admission,
+            send_scheduler=LifecycleApprovedSendScheduler(lifecycle),
+            conversations=conversations,
+            principal_resolver=principals,
+            owner_authority=authority,
+            root_outputs=root_outputs or self.root_outputs,
+        )
+        return service, view, principals, conversations, authority
 
     async def _assert_controlled_claim(self, gate, code):
         claim = gate.claim_snapshot
@@ -755,6 +835,76 @@ class OutputServiceTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(persisted.state.value, "completed")
         self.assertEqual(persisted.error_code, "invocation_unavailable")
+
+    async def test_owner_private_output_sends_only_to_exact_direct_route(self):
+        service, view, _, _, _ = await self._owner_output()
+
+        result = await service.route(
+            view, CommandOutput(self._result(privacy=Privacy.PRIVATE, facts=False))
+        )
+
+        self.assertEqual(result.status, OutputStatus.SENT)
+        self.assertEqual(len(self.message_port.calls), 1)
+        target, _ = self.message_port.calls[0]
+        self.assertEqual(target.conversation, self.route)
+        self.assertEqual(target.recipient_id, "offline-actor")
+
+    async def test_owner_principal_or_route_drift_before_claim_never_sends(self):
+        principal_service, principal_view, principals, _, _ = await self._owner_output()
+        principals.value = "principal-b"
+        principal_result = await principal_service.route(
+            principal_view,
+            CommandOutput(self._result(privacy=Privacy.PRIVATE, facts=False)),
+        )
+        self.assertEqual(principal_result.status, OutputStatus.FAILED)
+        self.assertEqual(self.message_port.calls, [])
+
+        route_service, route_view, _, conversations, _ = await self._owner_output()
+        conversations.route = replace(self.route, delivery_route="direct:changed")
+        route_result = await route_service.route(
+            route_view,
+            CommandOutput(self._result(privacy=Privacy.PRIVATE, facts=False)),
+        )
+        self.assertEqual(route_result.status, OutputStatus.FAILED)
+        self.assertEqual(self.message_port.calls, [])
+
+    async def test_owner_principal_change_after_sending_cas_aborts_before_host_send(
+        self,
+    ):
+        gate = _GatedBeginRootOutputs(self.root_outputs)
+        service, view, principals, _, _ = await self._owner_output(root_outputs=gate)
+        sending = asyncio.create_task(
+            service.route(
+                view, CommandOutput(self._result(privacy=Privacy.PRIVATE, facts=False))
+            )
+        )
+        await gate.committed.wait()
+        principals.value = "principal-b"
+        gate.release.set()
+
+        result = await sending
+
+        self.assertEqual(result.status, OutputStatus.FAILED)
+        self.assertEqual(result.error_code, "invocation_unavailable")
+        self.assertEqual(self.message_port.calls, [])
+
+    async def test_owner_route_change_after_sending_cas_aborts_before_host_send(self):
+        gate = _GatedBeginRootOutputs(self.root_outputs)
+        service, view, _, conversations, _ = await self._owner_output(root_outputs=gate)
+        sending = asyncio.create_task(
+            service.route(
+                view, CommandOutput(self._result(privacy=Privacy.PRIVATE, facts=False))
+            )
+        )
+        await gate.committed.wait()
+        conversations.route = replace(self.route, delivery_route="direct:changed")
+        gate.release.set()
+
+        result = await sending
+
+        self.assertEqual(result.status, OutputStatus.FAILED)
+        self.assertEqual(result.error_code, "invocation_unavailable")
+        self.assertEqual(self.message_port.calls, [])
 
     async def test_root_send_claim_expiring_after_sending_cas_aborts(self):
         gate = _GatedBeginRootOutputs(self.root_outputs)

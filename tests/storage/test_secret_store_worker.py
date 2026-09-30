@@ -15,6 +15,7 @@ from ygl_test_subject.api.storage import (
     SecretTarget,
 )
 from ygl_test_subject.core.ports import SecretCompensationState, SecretOwner
+from ygl_test_subject.infrastructure.secret_codec import AESGCMSecretCodec
 from ygl_test_subject.infrastructure.secret_store import SQLiteSecretStore
 from ygl_test_subject.infrastructure.sqlite.database import SQLiteDatabase
 from ygl_test_subject.infrastructure.sqlite.executor import SQLiteExecutorClosedError
@@ -36,6 +37,16 @@ class _Codec:
         if not value.startswith(b"envelope:"):
             raise ValueError("invalid envelope")
         return value[len(b"envelope:") :][::-1]
+
+
+class _MutableKeyProvider:
+    def __init__(self, key: bytes | None) -> None:
+        self.key = key
+
+    def get_key(self) -> bytes:
+        if self.key is None:
+            raise RuntimeError("private deployment key is unavailable")
+        return self.key
 
 
 class _RegistrationLookup:
@@ -72,6 +83,31 @@ class SQLiteSecretStoreWorkerTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self) -> None:
         await self.database.executor.close(timeout=2)
         self.temp.cleanup()
+
+    async def test_aes_gcm_codec_roundtrip_nonce_tamper_and_key_fail_closed(self):
+        provider = _MutableKeyProvider(b"a" * 32)
+        codec = AESGCMSecretCodec(provider)
+        plaintext = b'{"schema":1,"client_secret":"never-on-disk"}'
+        first = codec.encrypt(plaintext)
+        second = codec.encrypt(plaintext)
+        self.assertNotEqual(first, second)
+        self.assertNotIn(b"never-on-disk", first)
+        self.assertEqual(codec.decrypt(first), plaintext)
+        self.assertEqual(codec.decrypt(second), plaintext)
+
+        tampered = bytearray(first)
+        tampered[-1] ^= 1
+        with self.assertRaisesRegex(ValueError, "unavailable") as changed:
+            codec.decrypt(bytes(tampered))
+        self.assertNotIn("private", str(changed.exception))
+
+        provider.key = b"b" * 32
+        with self.assertRaisesRegex(ValueError, "unavailable"):
+            codec.decrypt(first)
+        provider.key = None
+        with self.assertRaisesRegex(ValueError, "unavailable") as missing:
+            codec.encrypt(plaintext)
+        self.assertNotIn("private", str(missing.exception))
 
     async def test_composition_is_io_free_until_async_database_initialization(self):
         B04Repositories(self.database)

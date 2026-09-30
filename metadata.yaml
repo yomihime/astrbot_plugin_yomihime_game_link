@@ -1,6 +1,6 @@
 name: astrbot_plugin_yomihime_game_link
 display_name: 如月怜的游戏连结
-desc: 连接你的游戏世界，在聊天中查询角色、战绩与游戏资讯。当前为开发骨架，游戏查询与绑定尚未实现。
+desc: 开发版：支持 FF14 物品、公开战绩与活动日历查询，以及主动订阅每日活动摘要。
 version: v0.1.2
 author: yomihime
 repo: https://github.com/yomihime/astrbot_plugin_yomihime_game_link

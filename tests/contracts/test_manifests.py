@@ -154,6 +154,38 @@ class ManifestContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "command_only"):
             _capability(privacy_floor=PrivacyFloor.PRIVATE)
 
+    def test_owner_floor_is_command_only_and_cannot_be_a_tool(self) -> None:
+        owner = _capability(
+            "owner_read",
+            invocation_policy=InvocationPolicy.COMMAND_ONLY,
+            privacy_floor=PrivacyFloor.OWNER,
+        )
+        module = _module(
+            capabilities=(owner,),
+            commands=(
+                CommandDescriptor("read", "owner_read", {"query": "query"}, "Read"),
+            ),
+        )
+        package = PackageManifest(
+            "owner-tests",
+            "1.0.0",
+            CONTRACT_VERSION,
+            (module,),
+            "Tests",
+            "MIT",
+            "offline",
+        )
+        self.assertIs(
+            package.modules[0].capabilities[0].privacy_floor, PrivacyFloor.OWNER
+        )
+
+        with self.assertRaisesRegex(ValueError, "command_only"):
+            _capability("owner_read", privacy_floor=PrivacyFloor.OWNER)
+
+        tool = ToolDescriptor("owner_read", "owner_read", {"query": "query"}, "Read")
+        with self.assertRaisesRegex(ValueError, "owner"):
+            _module(capabilities=(owner,), tools=(tool,))
+
     def test_parameter_mappings_cover_required_fields_once_and_in_direction(
         self,
     ) -> None:

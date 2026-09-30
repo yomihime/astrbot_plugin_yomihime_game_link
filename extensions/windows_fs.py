@@ -45,10 +45,12 @@ ENUM_BUFFER_SIZE = 64 * 1024
 COMPONENT_LOOKUP_LIMIT = 4096
 MAX_WINDOWS_PATH_UNITS = 32767
 
-# The design qualification target, not a claim that other targets are unsafe
-# in general. Any expansion needs its own matrix and review.
+# The exact local qualification matrix, not a claim that other targets are
+# unsafe in general. Any expansion needs its own matrix and review.
 SUPPORTED_WINDOWS_BUILD = "10.0.26200"
 SUPPORTED_PYTHON = (3, 13, 9)
+SUPPORTED_CLASSIC_GIL_PYTHON = (3, 12, 10)
+SUPPORTED_PYTHON_VERSIONS = (SUPPORTED_PYTHON, SUPPORTED_CLASSIC_GIL_PYTHON)
 
 
 class WindowsScanError(ValueError):
@@ -352,14 +354,21 @@ def _parse_root(root: str | os.PathLike[str]) -> _PathSpec:
 def _check_runtime() -> None:
     if os.name != "nt" or platform.version() != SUPPORTED_WINDOWS_BUILD:
         raise WindowsScanError("unsupported_environment")
+    python_version = sys.version_info[:3]
     if (
         platform.python_implementation() != "CPython"
-        or sys.version_info[:3] != SUPPORTED_PYTHON
+        or python_version not in SUPPORTED_PYTHON_VERSIONS
     ):
         raise WindowsScanError("unsupported_environment")
     if platform.machine().upper() not in {"AMD64", "X86_64"}:
         raise WindowsScanError("unsupported_environment")
-    if getattr(sys, "_is_gil_enabled", lambda: False)() is not True:
+    # CPython 3.12 has no free-threaded build. For 3.13, require the runtime
+    # probe because free-threaded builds are available in that release line.
+    if python_version == SUPPORTED_PYTHON:
+        gil_probe = getattr(sys, "_is_gil_enabled", None)
+        if gil_probe is None or gil_probe() is not True:
+            raise WindowsScanError("unsupported_environment")
+    elif python_version != SUPPORTED_CLASSIC_GIL_PYTHON:
         raise WindowsScanError("unsupported_environment")
     _assert_x64_layout()
 

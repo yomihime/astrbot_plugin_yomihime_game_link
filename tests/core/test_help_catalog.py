@@ -13,6 +13,7 @@ from ygl_test_subject.api.manifests import (
     ModuleCategory,
     ModuleManifest,
     PackageManifest,
+    PrivacyFloor,
 )
 from ygl_test_subject.api.services import ModuleHandlers
 from ygl_test_subject.api.version import CONTRACT_VERSION
@@ -173,6 +174,35 @@ class HelpCatalogTests(unittest.TestCase):
         )
         self.assertIn("已启用", new_document.ordered_blocks[0].text)
         self.assertIn("未启用", document.ordered_blocks[0].text)
+        self.assertEqual(handler.calls, 0)
+
+    def test_hp06_owner_floor_is_described_as_private_direct_use(self) -> None:
+        owner = CapabilityDescriptor(
+            "owner_read",
+            {"type": "object", "additionalProperties": False},
+            InvocationPolicy.COMMAND_ONLY,
+            CapabilityEffect.READ_ONLY,
+            privacy_floor=PrivacyFloor.OWNER,
+        )
+        handler = _Handler()
+        module = ModuleManifest(
+            "owner",
+            "owner",
+            ModuleCategory.PLATFORM,
+            "test.module:Factory",
+            "1.0.0",
+            (owner,),
+            (CommandDescriptor("list", "owner_read", {}, "List mine"),),
+        )
+        registry = Registry()
+        registry.register_package(
+            _package("owner-tests", module),
+            {"owner": ModuleHandlers({"owner_read": handler}, {}, {})},
+        )
+
+        document = HelpCatalog().module(registry.snapshot(), "owner")
+
+        self.assertIn("仅本人私聊可用", document.ordered_blocks[1].commands[0])
         self.assertEqual(handler.calls, 0)
 
 

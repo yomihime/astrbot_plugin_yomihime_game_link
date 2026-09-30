@@ -1,0 +1,74 @@
+{
+  "fixture": {
+    "synthetic": true,
+    "note": "All identities and IDs are invented contract examples, not captured FFLogs responses.",
+    "contains_live_response": false,
+    "contains_credentials": false,
+    "contains_report_code": false
+  },
+  "documented_query_projection": {
+    "character_lookup": {
+      "field": "characterData.character",
+      "requires": ["name", "serverSlug", "serverRegion"],
+      "ranking_field": "zoneRankings",
+      "ranking_return_type": "JSON",
+      "private_fields_requested": false
+    },
+    "character": {
+      "id": -71001,
+      "canonicalID": -71001,
+      "name": "Synthetic Aster",
+      "hidden": false,
+      "server": {
+        "id": -71002,
+        "name": "Invented World",
+        "normalizedName": "InventedWorld",
+        "slug": "invented-world",
+        "region": {
+          "id": -71003,
+          "name": "Invented Region",
+          "compactName": "XR",
+          "slug": "invented-region"
+        },
+        "subregion": {
+          "id": -71004,
+          "name": "Invented Subregion",
+          "slug": "invented-subregion"
+        }
+      },
+      "zoneRankings": {
+        "_opaque_synthetic_json_placeholder": true
+      }
+    }
+  },
+  "schema_index_excerpt": {
+    "evidence_class": "official_search_index_only_direct_docs_403",
+    "character_page_metrics_seen": ["rdps", "ndps", "cdps", "dps", "hps"],
+    "ff_zone_difficulty_job_response_fields": "NOT_VERIFIED",
+    "server_pagination_fields": "NOT_VERIFIED"
+  },
+  "directory_projection": {
+    "synthetic_regions": [
+      {
+        "id": -72001,
+        "name": "Invented International",
+        "compactName": "XI",
+        "slug": "invented-international",
+        "server_pages": {
+          "documented_arguments": {"limit": 5000, "page": 1},
+          "response_members": null,
+          "status": "NOT_VERIFIED"
+        }
+      }
+    ],
+    "china_host_and_region_support": "NOT_VERIFIED"
+  },
+  "statistics_page": {
+    "source_kind": "public_html_separate_from_graphql",
+    "reference_path_template": "/zone/statistics/{encounter_key}",
+    "reference_percentile_datasets": [10, 25, 50, 75, 95, 99, 100],
+    "live_markup": null,
+    "live_markup_status": "NOT_VERIFIED",
+    "synthetic_percentile_values": null
+  }
+}

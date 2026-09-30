@@ -32,7 +32,10 @@ jobs:
       - name: Install build and test dependencies
         run: >-
           python -m pip install --disable-pip-version-check
-          setuptools==80.9.0 wheel==0.45.1 ruff==0.12.0 tzdata==2025.2
+          setuptools==80.9.0 wheel==0.45.1 ruff==0.12.0
+
+      - name: Install plugin runtime dependencies
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
 
       - name: Build Linux SDK wheel for diagnostics
         env:
@@ -74,7 +77,10 @@ jobs:
       - name: Install build and test dependencies
         run: >-
           python -m pip install --disable-pip-version-check
-          setuptools==80.9.0 wheel==0.45.1 ruff==0.12.0 tzdata==2025.2
+          setuptools==80.9.0 wheel==0.45.1 ruff==0.12.0
+
+      - name: Install plugin runtime dependencies
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
 
       - name: Run Windows host and packaging tests
         run: >-

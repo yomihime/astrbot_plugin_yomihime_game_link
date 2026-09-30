@@ -13,6 +13,7 @@ import threading
 import unittest
 from ctypes import wintypes
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from api.manifests import EXTENSION_MANIFEST_ABI
@@ -34,6 +35,7 @@ from extensions.windows_fs import (
     WindowsScanError,
     _assert_x64_layout,
     _ByHandleFileInformation,
+    _check_runtime,
     _Handle,
     _parse_root,
     capture_python_sources,
@@ -135,6 +137,41 @@ class WindowsAbiTests(unittest.TestCase):
         )
         self.assertEqual(windows_fs._FileIdBothDirectoryInfo.FileId.offset, 96)
         self.assertEqual(windows_fs._FileIdBothDirectoryInfo.FileName.offset, 104)
+
+    def test_exact_python_matrix_and_gil_guards(self) -> None:
+        platform_stub = SimpleNamespace(
+            version=lambda: windows_fs.SUPPORTED_WINDOWS_BUILD,
+            python_implementation=lambda: "CPython",
+            machine=lambda: "AMD64",
+        )
+        cases = (
+            ((3, 12, 10), None, True),
+            ((3, 13, 9), True, True),
+            ((3, 13, 9), False, False),
+            ((3, 13, 9), None, False),
+            ((3, 12, 9), True, False),
+        )
+        for version, gil_enabled, supported in cases:
+            with self.subTest(version=version, gil_enabled=gil_enabled):
+                system_stub = SimpleNamespace(version_info=version)
+                if gil_enabled is not None:
+                    system_stub._is_gil_enabled = lambda value=gil_enabled: value
+                with (
+                    patch.object(windows_fs, "os", SimpleNamespace(name="nt")),
+                    patch.object(windows_fs, "platform", platform_stub),
+                    patch.object(windows_fs, "sys", system_stub),
+                    patch.object(windows_fs, "_assert_x64_layout") as layout_check,
+                ):
+                    if supported:
+                        _check_runtime()
+                        layout_check.assert_called_once_with()
+                    else:
+                        with self.assertRaises(WindowsScanError) as raised:
+                            _check_runtime()
+                        self.assertEqual(
+                            raised.exception.code, "unsupported_environment"
+                        )
+                        layout_check.assert_not_called()
 
     def test_single_owner_closes_exactly_once(self) -> None:
         class FakeNative:

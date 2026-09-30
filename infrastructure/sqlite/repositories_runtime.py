@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
+from uuid import uuid4
 
 from ...api.administration import (
     AdminAuthorizationDenied,
@@ -221,6 +222,81 @@ class SQLiteModuleRuntimeRepository:
             return values  # type: ignore[return-value]
 
         return await self.database.executor.run_read(read)
+
+    async def seed_default_enabled_if_absent(
+        self,
+        package_id: str,
+        module_id: str,
+        *,
+        expected_registry_revision: int,
+    ) -> ModuleRuntimeIntent | None:
+        """Atomically seed a host-approved default without replacing user intent.
+
+        This operation is intentionally not an admin operation. Its caller must
+        first verify the exact bundled package and module contract. Existing
+        enabled or disabled intent always wins; an unresolved journal without
+        a committed intent also prevents seeding until normal recovery runs.
+        """
+        package_id = _package_id(package_id)
+        module_id = _module(module_id)
+        expected_registry_revision = _revision(
+            expected_registry_revision, "expected_registry_revision"
+        )
+
+        def seed(unit: SQLiteUnitOfWork) -> ModuleRuntimeIntent | None:
+            current = _intent(
+                unit.execute(
+                    "SELECT * FROM module_runtime_intents "
+                    "WHERE package_id=? AND module_id=?",
+                    (package_id, module_id),
+                ).fetchone()
+            )
+            if current is not None:
+                return current
+
+            pending = unit.execute(
+                "SELECT 1 FROM module_runtime_journal "
+                "WHERE package_id=? AND module_id=? "
+                "AND phase IN ('prepared','committed','recovery_required') LIMIT 1",
+                (package_id, module_id),
+            ).fetchone()
+            if pending is not None:
+                return None
+
+            operation_id = f"host-default-{uuid4().hex}"
+            now = _utc_now()
+            unit.execute(
+                "INSERT INTO module_runtime_journal "
+                "(operation_id,package_id,module_id,kind,phase,old_enabled,new_enabled,"
+                "old_intent_revision,expected_intent_revision,expected_registry_revision,"
+                "admin_generation,failure_code,created_at,updated_at) "
+                "VALUES (?,?,?,'enable','committed',0,1,0,0,?,NULL,NULL,?,?)",
+                (
+                    operation_id,
+                    package_id,
+                    module_id,
+                    expected_registry_revision,
+                    now,
+                    now,
+                ),
+            )
+            unit.execute(
+                "INSERT INTO module_runtime_intents "
+                "(package_id,module_id,desired_enabled,intent_revision,operation_id,updated_at) "
+                "VALUES (?,?,1,1,?,?)",
+                (package_id, module_id, operation_id, now),
+            )
+            return _intent(
+                unit.execute(
+                    "SELECT * FROM module_runtime_intents "
+                    "WHERE package_id=? AND module_id=?",
+                    (package_id, module_id),
+                ).fetchone()
+            )
+
+        return await self.database.executor.run_transaction(
+            seed, begin_mode="IMMEDIATE"
+        )
 
     async def prepare(
         self,

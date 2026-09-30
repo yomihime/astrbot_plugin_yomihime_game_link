@@ -14,10 +14,11 @@ from importlib.metadata import version
 from pathlib import Path
 
 from extensions.disk_manifest import parse_manifest
+from scripts.build_release import build_release
 
 ROOT = Path(__file__).resolve().parents[2]
 EXPECTED_WHEEL_SHA256 = (
-    "8fd73fa756b5f2a077b9fb95cd483594d75894ef76ff17f3d90a89caad7e607c"
+    "e9b9543ac158533df6ce50e3430f4705614d1b1681b72610cebbab7b1e1b40e2"
 )
 EXPECTED_RESOURCES = {
     f"yomihime_sdk/_examples/{example}/{filename}"
@@ -42,7 +43,6 @@ from pathlib import Path
 
 site_root, extraction_root, repository_root = map(Path, sys.argv[1:4])
 sys.path.insert(0, str(site_root))
-sys.path.insert(1, str(repository_root))
 
 main_tree = ast.parse((repository_root / "main.py").read_text(encoding="utf-8"))
 sdk_manifest = next(
@@ -89,6 +89,7 @@ from yomihime_sdk.api.services import ModuleHandlers as CanonicalModuleHandlers
 from yomihime_sdk.api.services import ModuleServices as CanonicalModuleServices
 from yomihime_sdk.api.display import TextBlock as CanonicalTextBlock
 from yomihime_sdk.api.services import HealthStatus as CanonicalHealthStatus
+from yomihime_sdk.api.services import SourceHttpError as CanonicalSourceHttpError
 
 from ygl_artifact_subject.api.display import TextBlock as ShimTextBlock
 from ygl_artifact_subject.api.results import CapabilityResult as ShimCapabilityResult
@@ -112,20 +113,47 @@ assert sdk.TextBlock is CanonicalTextBlock is ShimTextBlock
 assert sdk.FactDocument is CanonicalFactDocument is ShimFactDocument
 assert sdk.ResultStatus is CanonicalResultStatus is ShimResultStatus
 assert sdk.HealthStatus is CanonicalHealthStatus is ShimHealthStatus
+assert sdk.SourceHttpError is CanonicalSourceHttpError
 assert GatewayResultType is sdk.CapabilityResult
 assert OutputResultType is sdk.CapabilityResult
 
-assert sdk.__version__ == "1.1.0"
-assert sdk.CONTRACT_VERSION == "1.1.0"
-assert sdk.COMPATIBLE_CONTRACT_VERSIONS == ("1.0.0", "1.1.0")
+assert sdk.__version__ == "1.3.0"
+assert sdk.CONTRACT_VERSION == "1.3.0"
+assert sdk.CONTRACT_REVISION == "FF14-W1-P1"
+assert sdk.COMPATIBLE_CONTRACT_VERSIONS == (
+    "1.0.0", "1.1.0", "1.2.0", "1.3.0"
+)
+assert all(
+    sdk.is_compatible_contract_version(version)
+    for version in ("1.0.0", "1.1.0", "1.2.0", "1.3.0")
+)
+assert sdk.PrivacyFloor.OWNER.value == "owner"
+owner_capability = sdk.CapabilityDescriptor(
+    "owner_read",
+    {"type": "object"},
+    sdk.InvocationPolicy.COMMAND_ONLY,
+    sdk.CapabilityEffect.READ_ONLY,
+    privacy_floor=sdk.PrivacyFloor.OWNER,
+)
+assert owner_capability.privacy_floor is sdk.PrivacyFloor.OWNER
+try:
+    sdk.CapabilityDescriptor(
+        "owner_read",
+        {"type": "object"},
+        sdk.InvocationPolicy.NATURAL_LANGUAGE_ALLOWED,
+        sdk.CapabilityEffect.READ_ONLY,
+        privacy_floor=sdk.PrivacyFloor.OWNER,
+    )
+except ValueError as exc:
+    assert "command_only" in str(exc)
+else:
+    raise AssertionError("OWNER capability accepted a non-command invocation")
 assert len(sdk.__all__) == len(set(sdk.__all__))
 assert all(hasattr(sdk, name) for name in sdk.__all__)
 assert inspect.iscoroutinefunction(sdk.ModuleFactory.create)
 assert tuple(sdk.ModuleServices.__annotations__) == (
     "config", "identities", "accounts", "subscriptions", "scopes"
 )
-assert not Path(site_root, "api").exists()
-
 before_threads = {thread.ident for thread in threading.enumerate()}
 
 class _ConfigDouble:
@@ -296,7 +324,7 @@ class InstalledArtifactTests(unittest.TestCase):
             wheel = build_wheel(wheelhouse)
             wheel_digest = hashlib.sha256(wheel.read_bytes()).hexdigest()
             self.assertEqual(wheel_digest, EXPECTED_WHEEL_SHA256)
-            self.assertEqual(wheel.name, "yomihime_module_sdk-1.1.0-py3-none-any.whl")
+            self.assertEqual(wheel.name, "yomihime_module_sdk-1.3.0-py3-none-any.whl")
             with zipfile.ZipFile(wheel) as archive:
                 entries = set(archive.namelist())
                 self.assertFalse(
@@ -346,11 +374,23 @@ class InstalledArtifactTests(unittest.TestCase):
                 )
             wheel = compiled_wheel
 
-            site_root = workdir / "isolated-site"
             extension_root = workdir / "extensions"
-            site_root.mkdir()
             extension_root.mkdir()
-            subprocess.run(
+            release_root = workdir / "release"
+            plugin_root = workdir / "astrbot_plugin_yomihime_game_link"
+            plugin_root.mkdir()
+            archive_path, _, _ = build_release(
+                sdk_wheel=wheel,
+                output_dir=release_root,
+                repository_root=ROOT,
+            )
+            with zipfile.ZipFile(archive_path) as archive:
+                archive.extractall(plugin_root)
+
+            # Install the reviewed wheel into the extracted plugin root, the
+            # same location from which the host bootstrap loads its pinned SDK.
+            shutil.rmtree(plugin_root / "yomihime_sdk")
+            install_result = subprocess.run(
                 [
                     sys.executable,
                     "-m",
@@ -360,29 +400,142 @@ class InstalledArtifactTests(unittest.TestCase):
                     "--no-deps",
                     "--no-cache-dir",
                     "--target",
-                    str(site_root),
+                    str(plugin_root),
                     str(wheel),
                 ],
-                check=True,
+                check=False,
                 cwd=workdir,
                 capture_output=True,
                 text=True,
             )
-            subprocess.run(
+            self.assertEqual(
+                install_result.returncode,
+                0,
+                f"SDK wheel installation failed:\n{install_result.stdout}\n{install_result.stderr}",
+            )
+            probe = subprocess.run(
                 [
                     sys.executable,
                     "-I",
                     "-c",
                     VERIFY_INSTALLED_ARTIFACT,
-                    str(site_root),
+                    str(plugin_root),
                     str(extension_root),
-                    str(ROOT),
+                    str(plugin_root),
                 ],
-                check=True,
+                check=False,
                 cwd=workdir,
                 capture_output=True,
                 text=True,
             )
+            self.assertEqual(
+                probe.returncode,
+                0,
+                f"installed release probe failed:\n{probe.stdout}\n{probe.stderr}",
+            )
+
+            environment = os.environ.copy()
+            environment.pop("PYTHONPATH", None)
+            installed_package = plugin_root.name
+            entrypoints = (
+                f"{installed_package}.scripts.configure_source_credentials",
+                f"{installed_package}.scripts.admin_credentials",
+            )
+            sdk_origin_probe = """
+import pathlib, runpy, sys
+parent = pathlib.Path(sys.argv[1]).resolve()
+module_name = sys.argv[2]
+sys.path.insert(0, str(parent))
+sys.argv = [module_name, "--help"]
+try:
+    runpy.run_module(module_name, run_name="__main__")
+except SystemExit as exc:
+    assert exc.code in (None, 0), exc.code
+else:
+    raise AssertionError("--help did not exit")
+plugin_root = parent / module_name.split(".", 1)[0]
+import yomihime_sdk
+assert pathlib.Path(yomihime_sdk.__file__).resolve() == plugin_root / "yomihime_sdk" / "__init__.py"
+assert "astrbot_plugin_yomihime_game_link.main" not in sys.modules
+"""
+            external_sdk_probe = """
+import pathlib, runpy, sys
+parent = pathlib.Path(sys.argv[1]).resolve()
+module_name = sys.argv[2]
+external_root = pathlib.Path(sys.argv[3]).resolve()
+sys.path.insert(0, str(parent))
+sys.path.insert(0, str(external_root))
+import yomihime_sdk
+assert pathlib.Path(yomihime_sdk.__file__).resolve().is_relative_to(external_root)
+sys.argv = [module_name, "--help"]
+try:
+    runpy.run_module(module_name, run_name="__main__")
+except RuntimeError as exc:
+    assert "pinned plugin-local SDK" in str(exc)
+else:
+    raise AssertionError("a preloaded external SDK was accepted")
+assert "astrbot_plugin_yomihime_game_link.main" not in sys.modules
+"""
+            for module_name in entrypoints:
+                help_result = subprocess.run(
+                    [sys.executable, "-m", module_name, "--help"],
+                    cwd=workdir,
+                    env=environment,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(
+                    help_result.returncode,
+                    0,
+                    f"installed CLI help failed: {module_name}\n"
+                    f"{help_result.stdout}\n{help_result.stderr}",
+                )
+                origin_result = subprocess.run(
+                    [
+                        sys.executable,
+                        "-c",
+                        sdk_origin_probe,
+                        str(workdir),
+                        module_name,
+                    ],
+                    cwd=workdir,
+                    env=environment,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(
+                    origin_result.returncode,
+                    0,
+                    f"installed SDK origin failed: {module_name}\n"
+                    f"{origin_result.stdout}\n{origin_result.stderr}",
+                )
+                external_root = workdir / f"external-{module_name.rsplit('.', 1)[-1]}"
+                shutil.copytree(
+                    plugin_root / "yomihime_sdk", external_root / "yomihime_sdk"
+                )
+                external_result = subprocess.run(
+                    [
+                        sys.executable,
+                        "-c",
+                        external_sdk_probe,
+                        str(workdir),
+                        module_name,
+                        str(external_root),
+                    ],
+                    cwd=workdir,
+                    env=environment,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(
+                    external_result.returncode,
+                    0,
+                    f"external SDK was not rejected: {module_name}\n"
+                    f"{external_result.stdout}\n{external_result.stderr}",
+                )
 
             empty = parse_manifest(
                 (extension_root / "empty_module/yomihime.manifest.json").read_bytes()

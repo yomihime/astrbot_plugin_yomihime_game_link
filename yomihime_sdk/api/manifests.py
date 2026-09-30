@@ -143,6 +143,7 @@ class CapabilityEffect(StrEnum):
 class PrivacyFloor(StrEnum):
     PUBLIC = "public"
     PRIVATE = "private"
+    OWNER = "owner"
 
 
 class ModuleCategory(StrEnum):
@@ -285,10 +286,10 @@ class CapabilityDescriptor:
         if not isinstance(self.privacy_floor, PrivacyFloor):
             raise TypeError("privacy_floor must be a PrivacyFloor")
         if (
-            self.privacy_floor is PrivacyFloor.PRIVATE
+            self.privacy_floor in (PrivacyFloor.PRIVATE, PrivacyFloor.OWNER)
             and self.invocation_policy is not InvocationPolicy.COMMAND_ONLY
         ):
-            raise ValueError("private capabilities must be command_only")
+            raise ValueError("private and owner capabilities must be command_only")
         if self.output_version not in COMPATIBLE_CONTRACT_VERSIONS:
             raise ValueError("output_version is not compatible with this runtime")
         input_schema = freeze_input_schema(self.input_schema)
@@ -396,8 +397,11 @@ class ModuleManifest:
             capability = capabilities.get(tool.capability_id)
             if capability is None:
                 raise ValueError("tool references an undeclared capability")
-            if capability.privacy_floor is PrivacyFloor.PRIVATE:
-                raise ValueError("tool cannot expose a private capability")
+            if capability.privacy_floor in (
+                PrivacyFloor.PRIVATE,
+                PrivacyFloor.OWNER,
+            ):
+                raise ValueError("tool cannot expose a private or owner capability")
             if capability.invocation_policy is InvocationPolicy.COMMAND_ONLY:
                 raise ValueError("tool cannot expose a command_only capability")
             if capability.effect is CapabilityEffect.WRITE:

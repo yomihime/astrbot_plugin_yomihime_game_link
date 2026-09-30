@@ -53,6 +53,24 @@ class PublicExportTests(unittest.TestCase):
                     )
         self.assertEqual(set(exports) - {"__version__"}, declared)
 
+    def test_owner_floor_and_contract_compatibility_are_public(self) -> None:
+        import yomihime_sdk as sdk
+
+        self.assertEqual(sdk.__version__, "1.3.0")
+        self.assertEqual(sdk.CONTRACT_VERSION, "1.3.0")
+        self.assertEqual(sdk.CONTRACT_REVISION, "FF14-W1-P1")
+        self.assertEqual(
+            sdk.COMPATIBLE_CONTRACT_VERSIONS,
+            ("1.0.0", "1.1.0", "1.2.0", "1.3.0"),
+        )
+        self.assertIs(sdk.PrivacyFloor.OWNER, sdk.PrivacyFloor("owner"))
+        self.assertTrue(
+            all(
+                sdk.is_compatible_contract_version(version)
+                for version in ("1.0.0", "1.1.0", "1.2.0", "1.3.0")
+            )
+        )
+
     def test_sdk_source_uses_only_the_canonical_api_package(self) -> None:
         source = (ROOT / "yomihime_sdk/__init__.py").read_text(encoding="utf-8")
         tree = ast.parse(source)
@@ -186,13 +204,18 @@ class CanonicalAPIIdentityTests(unittest.TestCase):
 
         from yomihime_sdk import CapabilityResult as FacadeCapabilityResult
         from yomihime_sdk import ModuleServices as FacadeModuleServices
+        from yomihime_sdk import SourceHttpError as FacadeSourceHttpError
+        from yomihime_sdk.api import SourceHttpError as PackageSourceHttpError
         from yomihime_sdk.api.results import CapabilityResult
-        from yomihime_sdk.api.services import ModuleServices
+        from yomihime_sdk.api.services import ModuleServices, SourceHttpError
 
         self.assertIs(FacadeCapabilityResult, CapabilityResult)
         self.assertIs(FacadeModuleServices, ModuleServices)
+        self.assertIs(FacadeSourceHttpError, SourceHttpError)
+        self.assertIs(PackageSourceHttpError, SourceHttpError)
         self.assertEqual(CapabilityResult.__module__, "yomihime_sdk.api.results")
         self.assertEqual(ModuleServices.__module__, "yomihime_sdk.api.services")
+        self.assertEqual(SourceHttpError.__module__, "yomihime_sdk.api.services")
 
 
 if __name__ == "__main__":

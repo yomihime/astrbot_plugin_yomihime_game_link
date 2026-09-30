@@ -4,6 +4,7 @@ import asyncio
 import json
 import tempfile
 import unittest
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from secrets import token_urlsafe
@@ -16,6 +17,16 @@ from ygl_test_subject.api.display import (
     DisplayOutput,
     Privacy,
     TextBlock,
+)
+from ygl_test_subject.api.manifests import (
+    CapabilityDescriptor,
+    CapabilityEffect,
+    CommandDescriptor,
+    InvocationPolicy,
+    ModuleCategory,
+    ModuleManifest,
+    PrivacyFloor,
+    SourceDeclaration,
 )
 from ygl_test_subject.api.results import CapabilityResult, ResultStatus
 from ygl_test_subject.api.services import (
@@ -46,8 +57,11 @@ from ygl_test_subject.services.core_runtime import (
     CoreRuntime,
     CoreRuntimeCleanupPending,
     HostIngress,
+    _is_safe_bundled_default,
+    _matches_trusted_bundled_manifest,
 )
 from ygl_test_subject.services.extension_runtime import ExtensionCleanupPending
+from ygl_test_subject.services.source_credentials import SourceCredentialPolicy
 
 
 class _Renderer:
@@ -131,6 +145,23 @@ class _Factory:
         return instance
 
 
+class _OwnerHandler(_Handler):
+    def __init__(self) -> None:
+        super().__init__()
+        self.services = None
+        self.owner_rows = None
+
+    async def invoke(self, context, parameters):
+        self.owner_rows = await self.services.subscriptions.list_current(context)
+        return await super().invoke(context, parameters)
+
+
+class _OwnerFactory(_Factory):
+    async def create(self, services):
+        self.handler.services = services
+        return await super().create(services)
+
+
 class _FactoryBundle:
     def __init__(self, factory: _Factory) -> None:
         self.factory = factory
@@ -178,6 +209,155 @@ class _TestCodec:
 
 
 class CoreRuntimeTests(unittest.IsolatedAsyncioTestCase):
+    def test_exact_trusted_bundle_match_covers_every_manifest_surface(self) -> None:
+        from ygl_test_subject.extensions.discovery import discover_packages
+
+        package_root = Path(__file__).resolve().parents[2] / "modules"
+        packages = tuple(
+            item
+            for item in discover_packages(package_root)
+            if item.package_id == "ff14"
+        )
+        self.assertEqual(len(packages), 1)
+        self.assertTrue(packages[0].valid)
+        expected = packages[0].manifest.modules[0]
+
+        self.assertTrue(_matches_trusted_bundled_manifest(expected, expected))
+        added_capability = CapabilityDescriptor(
+            "unreviewed.operation",
+            {
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": False,
+            },
+            InvocationPolicy.COMMAND_ONLY,
+            CapabilityEffect.READ_ONLY,
+        )
+        cases = (
+            replace(expected, capabilities=expected.capabilities + (added_capability,)),
+            replace(
+                expected,
+                capabilities=(
+                    replace(expected.capabilities[0], effect=CapabilityEffect.WRITE),
+                    *expected.capabilities[1:],
+                ),
+            ),
+            replace(
+                expected,
+                capabilities=(
+                    replace(
+                        expected.capabilities[0],
+                        privacy_floor=PrivacyFloor.PRIVATE,
+                    ),
+                    *expected.capabilities[1:],
+                ),
+            ),
+            replace(
+                expected,
+                sources=(replace(expected.sources[0], host="changed.invalid"),)
+                + expected.sources[1:],
+            ),
+            replace(
+                expected,
+                config_fields=(replace(expected.config_fields[0], required=True),)
+                + expected.config_fields[1:],
+            ),
+            replace(
+                expected,
+                schedules=(
+                    replace(
+                        expected.schedules[0],
+                        default_interval_seconds=(
+                            expected.schedules[0].default_interval_seconds + 60
+                        ),
+                    ),
+                ),
+            ),
+            replace(
+                expected,
+                subscriptions=(
+                    replace(
+                        expected.subscriptions[0],
+                        notification_modes=(
+                            *expected.subscriptions[0].notification_modes,
+                            "digest",
+                        ),
+                    ),
+                ),
+            ),
+        )
+        for candidate in cases:
+            with self.subTest(candidate=candidate):
+                self.assertFalse(_matches_trusted_bundled_manifest(candidate, expected))
+
+        raw_credential = replace(
+            expected,
+            sources=(
+                replace(expected.sources[0], credential_ref="credential_unreviewed"),
+                *expected.sources[1:],
+            ),
+        )
+        self.assertFalse(
+            _matches_trusted_bundled_manifest(raw_credential, raw_credential)
+        )
+
+    def test_trusted_defaults_allow_public_read_only_sources_without_credentials(
+        self,
+    ) -> None:
+        capability = CapabilityDescriptor(
+            "lookup",
+            {
+                "type": "object",
+                "properties": {"query": {"type": "string"}},
+                "required": ["query"],
+                "additionalProperties": False,
+            },
+            InvocationPolicy.COMMAND_ONLY,
+            CapabilityEffect.READ_ONLY,
+            required_sources=("items",),
+        )
+
+        def manifest(sources: tuple[SourceDeclaration, ...]) -> ModuleManifest:
+            return ModuleManifest(
+                "items",
+                "items",
+                ModuleCategory.GAME,
+                "module:Factory",
+                "1.0.0",
+                (capability,),
+                commands=(
+                    CommandDescriptor(
+                        "lookup", "lookup", {"query": "query"}, "Look up item"
+                    ),
+                ),
+                sources=sources,
+            )
+
+        self.assertTrue(
+            _is_safe_bundled_default(
+                manifest((SourceDeclaration("items", "example.invalid"),)),
+                frozenset({"lookup"}),
+            )
+        )
+        # A missing declaration remains a capability-level UNKNOWN readiness
+        # fact; it does not make the public module itself ineligible to start.
+        self.assertTrue(_is_safe_bundled_default(manifest(()), frozenset({"lookup"})))
+        self.assertFalse(
+            _is_safe_bundled_default(
+                manifest(
+                    (
+                        SourceDeclaration(
+                            "items",
+                            "example.invalid",
+                            credential_ref="credential_example",
+                        ),
+                    )
+                ),
+                frozenset({"lookup"}),
+            )
+        )
+
     def setUp(self) -> None:
         # The Windows discovery backend qualifies the checked-out local volume.
         self.temp = tempfile.TemporaryDirectory(dir=Path.cwd())
@@ -192,6 +372,7 @@ class CoreRuntimeTests(unittest.IsolatedAsyncioTestCase):
         source: _FactorySource | None = None,
         ingress_validator=None,
         renderer=None,
+        source_credential_policies=(),
         pump_interval: float = 3600,
         utc_clock=None,
     ) -> CoreRuntime:
@@ -210,6 +391,7 @@ class CoreRuntimeTests(unittest.IsolatedAsyncioTestCase):
             host_ingress_validator=ingress_validator or (lambda *_args: True),
             config_principal_id="host-config",
             identity_namespace="test-namespace",
+            source_credential_policies=source_credential_policies,
             factory_source=source,
             utc_clock=utc_clock or (lambda: datetime.now(UTC)),
             pump_interval=pump_interval,
@@ -225,6 +407,50 @@ class CoreRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await runtime.close(timeout=0.5))
         self.assertTrue(runtime.closed)
         self.assertEqual(source.capture_calls, 0)
+
+    async def test_source_credential_policies_are_passed_to_module_services(self):
+        policies = (
+            SourceCredentialPolicy(
+                "ff14/ff14",
+                "fflogs_public_global",
+                "credential_fflogs_global",
+                "www.fflogs.com",
+                ("/api/v2/client",),
+                "www.fflogs.com",
+                "/oauth/token",
+            ),
+        )
+        runtime = self._runtime(source_credential_policies=policies)
+        self.assertEqual(runtime.module_services._source_credential_policies, policies)
+        await runtime.start()
+        self.assertTrue(await runtime.close(timeout=0.5))
+
+    async def test_close_retires_module_credentials_before_sqlite_executor(self):
+        runtime = self._runtime()
+        events = []
+        service_type = type(runtime.module_services)
+        original_credentials_close = service_type.close_credentials
+
+        async def close_credentials(factory):
+            events.append("credentials")
+            await original_credentials_close(factory)
+
+        executor = runtime.database.executor
+        executor_type = type(executor)
+        original_executor_close = executor_type.close
+
+        async def close_executor(worker, **kwargs):
+            events.append("sqlite")
+            await original_executor_close(worker, **kwargs)
+
+        with (
+            patch.object(service_type, "close_credentials", close_credentials),
+            patch.object(executor_type, "close", close_executor),
+        ):
+            await runtime.start()
+            self.assertTrue(await runtime.close(timeout=0.5))
+
+        self.assertLess(events.index("credentials"), events.index("sqlite"))
 
     async def test_core_close_deadline_retains_candidate_owner_for_retry(self) -> None:
         entered = asyncio.Event()
@@ -331,6 +557,100 @@ class CoreRuntimeTests(unittest.IsolatedAsyncioTestCase):
             await runtime.invoke_tool(
                 "private/mod", "private_tool", {}, ingress=ingress
             )
+        self.assertTrue(await runtime.close(timeout=0.5))
+
+    async def test_owner_command_uses_shared_proof_and_releases_it_after_output(self):
+        handler = _OwnerHandler()
+        runtime = self._runtime(source=_FactorySource(_OwnerFactory(handler)))
+        manifest = _private_manifest()
+        manifest["modules"][0]["capabilities"][0]["privacy_floor"] = "owner"
+        package_root = self.root / "extensions" / "private"
+        package_root.mkdir(parents=True, exist_ok=True)
+        (package_root / "yomihime.manifest.json").write_text(
+            json.dumps(manifest), encoding="utf-8"
+        )
+        await runtime.start()
+        await runtime.admin_credential_repository.bootstrap(_digest(token_urlsafe(32)))
+        enabled = await runtime.admin_operations.set_enabled(
+            None,
+            "private/mod",
+            True,
+            expected_registry_revision=runtime.registry.snapshot().revision,
+            authorization=_AdminContext(),
+        )
+        self.assertTrue(enabled.enabled)
+        await runtime.repositories.identities.save_principal(
+            Principal("principal-alice", "test-namespace", "adapter-one:alice")
+        )
+        ingress = HostIngress(
+            "adapter-one",
+            "adapter-one:alice",
+            "conversation-one",
+            "route-one",
+            ConversationKind.DIRECT,
+            object(),
+        )
+
+        outcome = await runtime.invoke_command(
+            "private/mod", "read", {}, ingress=ingress
+        )
+
+        self.assertEqual(handler.grant, (None, None))
+        self.assertEqual(handler.owner_rows, ())
+        self.assertIs(outcome.result.privacy, Privacy.PRIVATE)
+        self.assertEqual(outcome.output.status.value, "sent")
+        self.assertEqual(len(runtime.output._message_port.calls), 1)
+        self.assertEqual(
+            runtime.output._message_port.calls[0][0].recipient_id,
+            "adapter-one:alice",
+        )
+        self.assertEqual(runtime.owner_authority._proofs, {})
+        self.assertTrue(await runtime.close(timeout=0.5))
+
+    async def test_owner_command_trusted_ingress_provisions_principal_before_handler(
+        self,
+    ):
+        handler = _OwnerHandler()
+        runtime = self._runtime(source=_FactorySource(_OwnerFactory(handler)))
+        manifest = _private_manifest()
+        manifest["modules"][0]["capabilities"][0]["privacy_floor"] = "owner"
+        package_root = self.root / "extensions" / "private"
+        package_root.mkdir(parents=True, exist_ok=True)
+        (package_root / "yomihime.manifest.json").write_text(
+            json.dumps(manifest), encoding="utf-8"
+        )
+        await runtime.start()
+        await runtime.admin_credential_repository.bootstrap(_digest(token_urlsafe(32)))
+        enabled = await runtime.admin_operations.set_enabled(
+            None,
+            "private/mod",
+            True,
+            expected_registry_revision=runtime.registry.snapshot().revision,
+            authorization=_AdminContext(),
+        )
+        self.assertTrue(enabled.enabled)
+        ingress = HostIngress(
+            "adapter-one",
+            "adapter-one:new-user",
+            "conversation-new-user",
+            "route-new-user",
+            ConversationKind.DIRECT,
+            object(),
+        )
+
+        outcome = await runtime.invoke_command(
+            "private/mod", "read", {}, ingress=ingress
+        )
+
+        self.assertEqual(handler.owner_rows, ())
+        self.assertIsNotNone(outcome.result)
+        self.assertEqual(outcome.output.status.value, "sent")
+        principal = await runtime.repositories.identities.find_principal(
+            "test-namespace", "adapter-one:new-user"
+        )
+        self.assertIsNotNone(principal)
+        self.assertEqual(len(runtime.output._message_port.calls), 1)
+        self.assertEqual(runtime.owner_authority._proofs, {})
         self.assertTrue(await runtime.close(timeout=0.5))
 
     async def test_private_result_is_hidden_when_grant_is_revoked_during_render(self):

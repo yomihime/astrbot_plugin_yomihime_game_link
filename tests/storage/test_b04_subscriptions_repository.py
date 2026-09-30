@@ -1120,6 +1120,57 @@ class B04SubscriptionRepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(count, 0)
         self.assertEqual(due_at, before_due)
 
+    async def test_r07_commit_uses_injected_clock_and_rechecks_after_lock_wait(
+        self,
+    ) -> None:
+        started_at = datetime(2026, 1, 15, 8, tzinfo=UTC)
+        current = [started_at]
+        self.now = started_at
+        self.scheduler = SQLiteSchedulerRepository(
+            self.db, utc_clock=lambda: current[0]
+        )
+
+        await self._create()
+        live_lease = await self._lease()
+        self.now = started_at + timedelta(seconds=1)
+        current[0] = self.now
+        self.assertTrue(
+            await self.scheduler.commit_observation(
+                live_lease, self._observation(identity="obs-injected-clock")
+            )
+        )
+
+        delayed_key = self._key(OwnerScope.user("u2"))
+        self.now = started_at + timedelta(minutes=1)
+        current[0] = self.now
+        delayed_record = self._record("sub-delayed-commit", owner="u2", key=delayed_key)
+        await self._create(delayed_record)
+        delayed_lease = await self._lease(delayed_key)
+        delayed_observation = self._observation(
+            delayed_key, identity="obs-expired-after-lock-wait"
+        )
+
+        connection = self.db.connect()
+        commit_task = None
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            commit_task = asyncio.create_task(
+                self.scheduler.commit_observation(delayed_lease, delayed_observation)
+            )
+            await asyncio.sleep(0.05)
+            self.assertFalse(commit_task.done())
+            current[0] = delayed_lease.expires_at
+            connection.rollback()
+        finally:
+            connection.close()
+        self.assertIsNotNone(commit_task)
+        self.assertFalse(await commit_task)
+        async with self.db.unit_of_work() as unit:
+            observations = unit.execute(
+                "SELECT observation_id FROM b04_observations ORDER BY observation_id"
+            ).fetchall()
+        self.assertEqual([row[0] for row in observations], ["obs-injected-clock"])
+
     async def test_r18_explicit_next_due_is_atomic_outcome_specific_and_survives_restart(
         self,
     ) -> None:

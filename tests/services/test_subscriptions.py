@@ -21,6 +21,7 @@ from ygl_test_subject.api.manifests import (
     ModuleCategory,
     ModuleManifest,
     PackageManifest,
+    PrivacyFloor,
 )
 from ygl_test_subject.api.services import (
     CapabilityHealth,
@@ -48,6 +49,7 @@ from ygl_test_subject.api.subscriptions import (
     ScheduleDescriptor,
     ScheduleTrigger,
     SubscriptionDescriptor,
+    SubscriptionRecord,
     SubscriptionRequest,
     SubscriptionStatus,
     SubscriptionView,
@@ -72,6 +74,7 @@ from ygl_test_subject.infrastructure.sqlite.repositories_subscriptions import (
     SQLiteSubscriptionStore,
 )
 from ygl_test_subject.services.identity import InvocationPrincipalResolver
+from ygl_test_subject.services.owner_authority import OwnerRouteProofAuthority
 from ygl_test_subject.services.subscriptions import (
     DigestWindowUnavailable,
     PrivateRecipientRequired,
@@ -171,6 +174,14 @@ class _Resolver:
         if self.after_resolve is not None:
             await self.after_resolve(invocation, resolved)
         return resolved
+
+
+class _MutablePrincipalResolver:
+    def __init__(self, principal_id: str) -> None:
+        self.value = principal_id
+
+    async def principal_id(self, invocation) -> str:
+        return self.value
 
 
 class _Cadence:
@@ -517,6 +528,84 @@ class B04SubscriptionServiceTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
 
+    async def _owner_service(self, actor="u1", conversation=None):
+        owner_issuer = ContextIssuer()
+        owner_registry = Registry()
+        owner_module = replace(
+            self.module.manifest,
+            capabilities=(
+                replace(
+                    self.module.manifest.capabilities[0],
+                    privacy_floor=PrivacyFloor.OWNER,
+                ),
+            ),
+        )
+        owner_package = PackageManifest(
+            "sample",
+            "0.1.0",
+            CONTRACT_VERSION,
+            (owner_module,),
+            "Tests",
+            "AGPL-3.0",
+            "local",
+        )
+        owner_handlers = self.module.handlers
+        owner_registry.register_package(owner_package, {"game": owner_handlers})
+        owner_lifecycle = LifecycleController(owner_registry, issuer=owner_issuer)
+        registered = owner_registry.snapshot().module("sample/game")
+        instance = _SubscriptionModuleInstance(registered.handlers)
+        install_id = "owner-subscription-install"
+        handlers = owner_lifecycle.adopt_candidate(
+            "sample", registered.manifest, install_id, instance
+        )
+        owner_lifecycle.install_dormant(
+            "sample", "sample/game", install_id, instance, handlers
+        )
+        run_id = "owner-subscription-start"
+        identity, _ = await owner_lifecycle.start_candidate("sample/game", run_id)
+        owner_lifecycle.publish_committed_intent(
+            "sample/game", run_id, identity, True, owner_registry.snapshot().revision
+        )
+        principals = _MutablePrincipalResolver(actor)
+        routes = _Resolver(owner_issuer)
+        authority = OwnerRouteProofAuthority(
+            owner_issuer,
+            owner_lifecycle.admission,
+            principals,
+            routes,
+        )
+        snapshot = owner_registry.snapshot()
+        view = owner_issuer.issue(
+            origin=InvocationOrigin.COMMAND,
+            module_id="sample/game",
+            module_epoch=snapshot.modules["sample/game"].epoch,
+            registry_revision=snapshot.revision,
+            actor_id=actor,
+            conversation_id=conversation or f"direct-{actor}",
+            adapter_id="adapter",
+            capability_id="query",
+        )
+        lease = owner_lifecycle.admission.admit(view, "query")
+        await authority.capture(view, lease)
+        service = SubscriptionOperationsService(
+            issuer=owner_issuer,
+            admission=owner_lifecycle.admission,
+            registry=owner_registry,
+            resolver=routes,
+            cadence=_Cadence(),
+            subscriptions=self.store,
+            lifecycle=self.lifecycle,
+            jobs=self.jobs,
+            scheduler=self.scheduler,
+            digest_windows=self.windows,
+            grants=self.grants,
+            principal_resolver=principals,
+            owner_authority=authority,
+            now=lambda: self.now,
+            max_subscriptions_per_owner=8,
+        )
+        return service, view, principals, authority
+
     async def record_for(self, view):
         return await self.store.current(view.subscription_id)
 
@@ -590,6 +679,110 @@ class B04SubscriptionServiceTests(unittest.IsolatedAsyncioTestCase):
             self.invocation(), created.subscription_id, expected_revision=2
         )
         self.assertEqual(await self.service.list_current(self.invocation()), ())
+
+    async def test_owner_management_lists_public_and_user_but_excludes_authorized(self):
+        shared = await self.create(type_id="public-alert")
+        personal = await self.create(type_id="user-alert")
+        authorized = await self.create(
+            type_id="private-alert", grant=GrantReference("owner-grant", 1)
+        )
+        service, view, _, _ = await self._owner_service()
+
+        listed = await service.list_current(view)
+
+        self.assertEqual(
+            {item.subscription_id for item in listed},
+            {shared.subscription_id, personal.subscription_id},
+        )
+        self.assertNotIn(
+            authorized.subscription_id, {item.subscription_id for item in listed}
+        )
+        revised = await service.revise_request(
+            view,
+            self.request(
+                threshold=8,
+                subscription_id=shared.subscription_id,
+                expected_revision=1,
+            ),
+        )
+        self.assertEqual(revised.revision, 2)
+        with self.assertRaises(RevisionConflict):
+            await service.revise_request(
+                view,
+                self.request(
+                    threshold=9,
+                    subscription_id=shared.subscription_id,
+                    expected_revision=1,
+                ),
+            )
+        with self.assertRaises(SubscriptionOperationError):
+            await service.cancel(view, authorized.subscription_id, expected_revision=1)
+
+    async def test_owner_principal_drift_refuses_mutation(self):
+        created = await self.create()
+        service, view, principals, _ = await self._owner_service()
+        principals.value = "principal-b"
+
+        with self.assertRaises(SubscriptionOperationError):
+            await service.cancel(view, created.subscription_id, expected_revision=1)
+
+        self.assertEqual(
+            (await self.store.current(created.subscription_id)).revision, 1
+        )
+
+    async def test_owner_cannot_cancel_foreign_or_cross_module_rows(self):
+        route = ConversationRef(
+            "adapter", ConversationKind.DIRECT, "direct-u1", "route-direct-u1"
+        )
+        rows = (
+            SubscriptionRecord(
+                "foreign-owner",
+                1,
+                "sample/game",
+                CollectionKey(
+                    "sample/game",
+                    "public-data",
+                    1,
+                    "source",
+                    NormalizedInput({"region": "US"}),
+                    OwnerScope.public(),
+                ),
+                "u2",
+                None,
+                route,
+                "instant",
+                {"threshold": 5},
+                SubscriptionStatus.ACTIVE,
+            ),
+            SubscriptionRecord(
+                "cross-module",
+                1,
+                "other/game",
+                CollectionKey(
+                    "other/game",
+                    "public-data",
+                    1,
+                    "source",
+                    NormalizedInput({"region": "US"}),
+                    OwnerScope.public(),
+                ),
+                "u1",
+                None,
+                route,
+                "instant",
+                {"threshold": 5},
+                SubscriptionStatus.ACTIVE,
+            ),
+        )
+        for row in rows:
+            await self.store.create(row)
+        service, view, _, _ = await self._owner_service()
+
+        for row in rows:
+            with self.subTest(subscription_id=row.subscription_id):
+                with self.assertRaises(SubscriptionOperationError):
+                    await service.cancel(view, row.subscription_id, expected_revision=1)
+                self.assertEqual(await self.store.current(row.subscription_id), row)
 
     async def test_m01_concurrent_revision_race_reports_revision_conflict(self):
         created = await self.create()
