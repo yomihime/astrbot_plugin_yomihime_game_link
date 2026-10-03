@@ -18,7 +18,7 @@ from scripts.build_release import build_release
 
 ROOT = Path(__file__).resolve().parents[2]
 EXPECTED_WHEEL_SHA256 = (
-    "e9b9543ac158533df6ce50e3430f4705614d1b1681b72610cebbab7b1e1b40e2"
+    "1db47997219e80919020a233a58189e105500705718cd196e854f5183266735d"
 )
 EXPECTED_RESOURCES = {
     f"yomihime_sdk/_examples/{example}/{filename}"
@@ -117,17 +117,40 @@ assert sdk.SourceHttpError is CanonicalSourceHttpError
 assert GatewayResultType is sdk.CapabilityResult
 assert OutputResultType is sdk.CapabilityResult
 
-assert sdk.__version__ == "1.3.0"
-assert sdk.CONTRACT_VERSION == "1.3.0"
-assert sdk.CONTRACT_REVISION == "FF14-W1-P1"
+assert sdk.__version__ == "1.4.0"
+assert sdk.CONTRACT_VERSION == "1.4.0"
+assert sdk.CONTRACT_REVISION == "UI-B0-PUBLIC-WEB"
 assert sdk.COMPATIBLE_CONTRACT_VERSIONS == (
-    "1.0.0", "1.1.0", "1.2.0", "1.3.0"
+    "1.0.0", "1.1.0", "1.2.0", "1.3.0", "1.4.0"
 )
 assert all(
     sdk.is_compatible_contract_version(version)
     for version in ("1.0.0", "1.1.0", "1.2.0", "1.3.0")
 )
 assert sdk.PrivacyFloor.OWNER.value == "owner"
+assert sdk.InvocationOrigin("web_public") is sdk.InvocationOrigin.WEB_PUBLIC
+assert sdk.InvocationPolicy("command_and_public_web") is sdk.InvocationPolicy.COMMAND_AND_PUBLIC_WEB
+web_capability = sdk.CapabilityDescriptor(
+    "public_web_read", {"type": "object"},
+    sdk.InvocationPolicy.COMMAND_AND_PUBLIC_WEB,
+    sdk.CapabilityEffect.READ_ONLY,
+)
+assert web_capability.privacy_floor is sdk.PrivacyFloor.PUBLIC
+for privacy, effect in (
+    (sdk.PrivacyFloor.PRIVATE, sdk.CapabilityEffect.READ_ONLY),
+    (sdk.PrivacyFloor.OWNER, sdk.CapabilityEffect.READ_ONLY),
+    (sdk.PrivacyFloor.PUBLIC, sdk.CapabilityEffect.WRITE),
+):
+    try:
+        sdk.CapabilityDescriptor(
+            "rejected_web", {"type": "object"},
+            sdk.InvocationPolicy.COMMAND_AND_PUBLIC_WEB,
+            effect, privacy_floor=privacy,
+        )
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("installed wheel widened public web permissions")
 owner_capability = sdk.CapabilityDescriptor(
     "owner_read",
     {"type": "object"},
@@ -235,7 +258,7 @@ for example in ("empty_module", "offline_sample"):
         source = declared["source"]
         assert (len(status.commands), len(status.tools)) == (10, 2)
         assert (len(status.schedules), len(status.subscriptions)) == (2, 2)
-        assert len(status.config_fields) == 2
+        assert len(status.config_fields) == 3
         assert (len(source.commands), len(source.tools)) == (1, 0)
         assert (len(source.schedules), len(source.subscriptions)) == (0, 0)
         assert len(source.config_fields) == 0
@@ -324,7 +347,7 @@ class InstalledArtifactTests(unittest.TestCase):
             wheel = build_wheel(wheelhouse)
             wheel_digest = hashlib.sha256(wheel.read_bytes()).hexdigest()
             self.assertEqual(wheel_digest, EXPECTED_WHEEL_SHA256)
-            self.assertEqual(wheel.name, "yomihime_module_sdk-1.3.0-py3-none-any.whl")
+            self.assertEqual(wheel.name, "yomihime_module_sdk-1.4.0-py3-none-any.whl")
             with zipfile.ZipFile(wheel) as archive:
                 entries = set(archive.namelist())
                 self.assertFalse(
@@ -576,7 +599,7 @@ assert "astrbot_plugin_yomihime_game_link.main" not in sys.modules
                     len(status.schedules),
                     len(status.subscriptions),
                 ),
-                (10, 10, 2, 2, 2, 2),
+                (10, 10, 2, 3, 2, 2),
             )
             self.assertEqual(
                 (

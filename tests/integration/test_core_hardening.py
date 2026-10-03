@@ -40,6 +40,7 @@ class CoreHardeningInstalledSampleTests(unittest.TestCase):
 
     def test_gateway_account_subscription_and_three_output_routes(self) -> None:
         result = self.workspace.run("subscriptions")
+        self.assertTrue(result["subscription_gate_admitted"])
 
         self.assertEqual(result["alice_principal"], "principal-alice")
         self.assertEqual(result["bob_principal"], "principal-bob")
@@ -75,6 +76,8 @@ class CoreHardeningInstalledSampleTests(unittest.TestCase):
         self,
     ) -> None:
         result = self.workspace.run("reopen")
+        self.assertTrue(result["subscription_gate_admitted"])
+        self.assertTrue(result["subscription_gate_after_reopen"])
 
         self.assertTrue(result["stale_admin_denied"])
         self.assertTrue(result["epoch_advanced"])

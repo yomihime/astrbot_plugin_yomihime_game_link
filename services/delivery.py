@@ -393,7 +393,37 @@ class DeliveryService:
             claimed = state.get("sending")
             if not isinstance(claimed, DeliveryEvent):
                 raise RuntimeError("delivery has no persisted SENDING attempt")
-            return await self._send_event(claimed, target, payload)
+            grant_expires_at = None
+
+            async def eligible() -> bool:
+                nonlocal grant_expires_at
+                check = await self._eligibility(
+                    claimed.subscription_id,
+                    claimed.subscription_revision,
+                    claimed.owner_id,
+                    claimed.grant,
+                    claimed.recipient,
+                    claimed.display_data.privacy,
+                    self._utc_now(),
+                    expected_epoch=first.module_epoch,
+                )
+                current = await self._deliveries.is_current_for_send(claimed)
+                grant_expires_at = check.grant_expires_at
+                return (
+                    current
+                    and check.allowed
+                    and (
+                        check.grant_expires_at is None
+                        or check.grant_expires_at > self._utc_now()
+                    )
+                )
+
+            def deadlines_current() -> bool:
+                return grant_expires_at is None or grant_expires_at > self._utc_now()
+
+            return await self._send_event(
+                claimed, target, payload, lease, state, eligible, deadlines_current
+            )
 
         result = await self._approve_and_wait(
             lease,
@@ -827,8 +857,56 @@ class DeliveryService:
                     sending = state.get("sending")
                     if not isinstance(sending, DigestEnvelope):
                         raise RuntimeError("digest has no persisted SENDING attempt")
+                    grant_expiries = ()
+
+                    async def eligible() -> bool:
+                        nonlocal grant_expiries
+                        checks = []
+                        for _, event, prior in stable:
+                            checks.append(
+                                await self._eligibility(
+                                    event.subscription_id,
+                                    event.subscription_revision,
+                                    event.owner_id,
+                                    event.grant,
+                                    event.recipient,
+                                    event.display_data.privacy,
+                                    self._utc_now(),
+                                    expected_epoch=prior.module_epoch,
+                                )
+                            )
+                        current = await self._windows.is_current_for_send(
+                            claim, sending, now=self._utc_now()
+                        )
+                        grant_expiries = tuple(item.grant_expires_at for item in checks)
+                        return (
+                            current
+                            and claim.expires_at > self._utc_now()
+                            and all(
+                                item.allowed
+                                and (
+                                    item.grant_expires_at is None
+                                    or item.grant_expires_at > self._utc_now()
+                                )
+                                for item in checks
+                            )
+                        )
+
+                    def deadlines_current() -> bool:
+                        now = self._utc_now()
+                        return claim.expires_at > now and all(
+                            expiry is None or expiry > now for expiry in grant_expiries
+                        )
+
                     return await self._send_digest(
-                        claim, sending, target, rendered, current_time
+                        claim,
+                        sending,
+                        target,
+                        rendered,
+                        lease,
+                        state,
+                        eligible,
+                        deadlines_current,
                     )
 
                 try:
@@ -1143,17 +1221,61 @@ class DeliveryService:
         ):
             self._admission.release(lease)
             raise TypeError("delivery requires the Lifecycle-owned send scheduler")
-        observe(task_name, lambda _task: self._admission.release(lease))
+
+        async def complete_unstarted() -> None:
+            approval = SendApproval(str(state["abort_token"]), lease.members)
+            try:
+                await abort_before_dispatch(approval, "cancelled_before_dispatch")
+                result = DeliveryResult(
+                    DeliveryState.CANCELLED, "cancelled_before_dispatch"
+                )
+            except BaseException:
+                result = DeliveryResult(DeliveryState.UNKNOWN, "storage_finish_failed")
+            finally:
+                self._admission.release(lease)
+            if not result_future.done():
+                result_future.set_result(result)
+
+        def completed(_task) -> None:
+            if not result_future.done() and not state.get("sender_started"):
+                # A Lifecycle-owned task can be cancelled before its first instruction.
+                state["completion_cleanup"] = asyncio.create_task(complete_unstarted())
+            else:
+                self._admission.release(lease)
+
+        observe(task_name, completed)
 
         async def run_sender(permit: SendPermit) -> object:
+            state["sender_started"] = True
+            work = asyncio.create_task(sender(permit))
+            state["send_work"] = work
             try:
-                result = await sender(permit)
+                result = await asyncio.shield(work)
                 if not isinstance(result, DeliveryResult):
                     result = DeliveryResult(
                         DeliveryState.UNKNOWN, "storage_finish_failed"
                     )
             except asyncio.CancelledError:
-                result = DeliveryResult(DeliveryState.UNKNOWN, "host_send_cancelled")
+                work.cancel()
+                result = await _wait_protected(work)
+                if not state.get("entered"):
+                    await _drain_cleanup(
+                        abort_before_dispatch(
+                            SendApproval(str(state["abort_token"]), lease.members),
+                            "cancelled_before_dispatch",
+                        )
+                    )
+                if not isinstance(result, DeliveryResult):
+                    result = state.get("result")
+                if not isinstance(result, DeliveryResult):
+                    result = DeliveryResult(
+                        DeliveryState.UNKNOWN
+                        if state.get("entered")
+                        else DeliveryState.CANCELLED,
+                        "host_send_cancelled"
+                        if state.get("entered")
+                        else "cancelled_before_dispatch",
+                    )
                 if not result_future.done():
                     result_future.set_result(result)
                 raise
@@ -1189,7 +1311,18 @@ class DeliveryService:
                 asyncio.shield(result_future), timeout=self._send_timeout
             )
         except TimeoutError:
-            return DeliveryResult(DeliveryState.UNKNOWN, "host_send_timeout")
+            state["stop"] = True
+            child = state.get("io_child")
+            if isinstance(child, asyncio.Task):
+                child.cancel()
+            return await _wait_protected(result_future)
+        except asyncio.CancelledError:
+            state["stop"] = True
+            child = state.get("io_child")
+            if isinstance(child, asyncio.Task):
+                child.cancel()
+            await _wait_protected(result_future)
+            raise
 
     async def _finish_without_send(
         self, event: DeliveryEvent, code: str, completed_at: datetime
@@ -1361,24 +1494,110 @@ class DeliveryService:
             None,
         )
 
+    async def _start_io(
+        self,
+        lease: DeliveryLease,
+        state: dict[str, object],
+        eligible,
+        deadlines_current,
+        abort,
+        target: MessageTarget,
+        payload: RenderedMessage,
+    ) -> asyncio.Task | None:
+        """Hold mutation only through proof and the real MessagePort entry handshake."""
+        async with self._admission.mutation("subscription-send-start"):
+            try:
+                self._admission.check(lease)
+                allowed = await eligible()
+                self._admission.check(lease)
+            except asyncio.CancelledError:
+                await _drain_cleanup(abort())
+                raise
+            except Exception:
+                allowed = False
+            if not allowed or state.get("stop"):
+                await _drain_cleanup(abort())
+                return None
+            entered = asyncio.get_running_loop().create_future()
+
+            async def io():
+                # This is the child's first instruction: natural expiry and
+                # cancellation may advance after task creation while it queues.
+                try:
+                    self._admission.check(lease)
+                    if state.get("stop") or not deadlines_current():
+                        return None
+                except Exception:
+                    return None
+                state["entered"] = True
+                entered.set_result(None)
+                return await self._message_port.send(target, payload)
+
+            child = asyncio.create_task(io())
+            state["io_child"] = child
+            try:
+                await asyncio.wait(
+                    (entered, child), return_when=asyncio.FIRST_COMPLETED
+                )
+            except asyncio.CancelledError:
+                if not state.get("entered"):
+                    child.cancel()
+                    await _wait_protected(child)
+                    await _drain_cleanup(abort())
+                raise
+            if not state.get("entered"):
+                await _wait_protected(child)
+                await _drain_cleanup(abort())
+                return None
+            return child
+
     async def _send_event(
-        self, event: DeliveryEvent, target: MessageTarget, payload: RenderedMessage
+        self,
+        event: DeliveryEvent,
+        target: MessageTarget,
+        payload: RenderedMessage,
+        lease: DeliveryLease,
+        state: dict[str, object],
+        eligible,
+        deadlines_current,
     ) -> DeliveryResult:
         try:
-            async with asyncio.timeout(self._send_timeout):
-                receipt = await self._message_port.send(target, payload)
-        except asyncio.CancelledError:
-            await asyncio.shield(
-                self._finish_event_receipt(
-                    event, MessageStatus.UNKNOWN, "host_send_cancelled", None
+            child = await self._start_io(
+                lease,
+                state,
+                eligible,
+                deadlines_current,
+                lambda: _abort_event_send(event, self._deliveries, self._utc_now()),
+                target,
+                payload,
+            )
+            if child is None:
+                return DeliveryResult(
+                    DeliveryState.CANCELLED, "cancelled_before_dispatch"
                 )
+            async with asyncio.timeout(self._send_timeout):
+                receipt = await asyncio.shield(child)
+        except asyncio.CancelledError:
+            child = state.get("io_child")
+            receipt = None
+            if isinstance(child, asyncio.Task):
+                child.cancel()
+                receipt = await _wait_protected(child)
+            if not state.get("entered"):
+                await _drain_cleanup(
+                    _abort_event_send(event, self._deliveries, self._utc_now())
+                )
+                raise
+            status, code, message_id = _receipt_fields(receipt, "host_send_cancelled")
+            state["result"] = await _drain_cleanup(
+                self._finish_event_receipt(event, status, code, message_id)
             )
             raise
         except TimeoutError:
-            await self._finish_event_receipt(
-                event, MessageStatus.UNKNOWN, "host_send_timeout", None
-            )
-            return DeliveryResult(DeliveryState.UNKNOWN, "host_send_timeout")
+            child.cancel()
+            receipt = await _wait_protected(child)
+            status, code, message_id = _receipt_fields(receipt, "host_send_timeout")
+            return await self._finish_event_receipt(event, status, code, message_id)
         except Exception:
             _LOG.warning("delivery send unresolved code=host_send_unknown")
             await self._finish_event_receipt(
@@ -1401,6 +1620,19 @@ class DeliveryService:
         )
 
     async def _finish_event_receipt(
+        self,
+        event: DeliveryEvent,
+        status: MessageStatus,
+        code: str | None,
+        message_id: str | None,
+    ) -> DeliveryResult:
+        return await _wait_protected(
+            asyncio.create_task(
+                self._commit_event_receipt(event, status, code, message_id)
+            )
+        )
+
+    async def _commit_event_receipt(
         self,
         event: DeliveryEvent,
         status: MessageStatus,
@@ -1490,13 +1722,31 @@ class DeliveryService:
         envelope: DigestEnvelope,
         target: MessageTarget,
         output: DisplayOutput,
-        now: datetime,
+        lease: DeliveryLease,
+        state: dict[str, object],
+        eligible,
+        deadlines_current,
     ) -> DeliveryResult:
         message = RenderedMessage(output.text, output.resource_ids)
         attempt = envelope.delivery_attempts[-1]
         try:
+            child = await self._start_io(
+                lease,
+                state,
+                eligible,
+                deadlines_current,
+                lambda: self._abort_digest_send(
+                    claim, envelope, "cancelled_before_dispatch"
+                ),
+                target,
+                message,
+            )
+            if child is None:
+                return DeliveryResult(
+                    DeliveryState.CANCELLED, "cancelled_before_dispatch"
+                )
             async with asyncio.timeout(self._send_timeout):
-                receipt = await self._message_port.send(target, message)
+                receipt = await asyncio.shield(child)
             if not isinstance(receipt, MessageReceipt):
                 status, code, message_id = (
                     MessageStatus.UNKNOWN,
@@ -1514,25 +1764,41 @@ class DeliveryService:
                 )
                 message_id = receipt.platform_message_id
         except asyncio.CancelledError:
-            await asyncio.shield(
+            child = state.get("io_child")
+            receipt = None
+            if isinstance(child, asyncio.Task):
+                child.cancel()
+                receipt = await _wait_protected(child)
+            if not state.get("entered"):
+                await _drain_cleanup(
+                    self._abort_digest_send(
+                        claim, envelope, "cancelled_before_dispatch"
+                    )
+                )
+                raise
+            status, code, message_id = _receipt_fields(receipt, "host_send_cancelled")
+            state["result"] = await _drain_cleanup(
                 self._finish_digest_receipt(
                     claim,
                     envelope,
                     attempt,
-                    MessageStatus.UNKNOWN,
-                    "host_send_cancelled",
-                    None,
+                    status,
+                    code,
+                    message_id,
                 )
             )
             raise
         except TimeoutError:
+            child.cancel()
+            receipt = await _wait_protected(child)
+            status, code, message_id = _receipt_fields(receipt, "host_send_timeout")
             return await self._finish_digest_receipt(
                 claim,
                 envelope,
                 attempt,
-                MessageStatus.UNKNOWN,
-                "host_send_timeout",
-                None,
+                status,
+                code,
+                message_id,
             )
         except Exception:
             _LOG.warning("delivery send unresolved code=host_send_unknown")
@@ -1549,6 +1815,23 @@ class DeliveryService:
         )
 
     async def _finish_digest_receipt(
+        self,
+        claim: DigestEnvelopeClaim,
+        envelope: DigestEnvelope,
+        prior: DeliveryAttempt,
+        status: MessageStatus,
+        code: str | None,
+        message_id: str | None,
+    ) -> DeliveryResult:
+        return await _wait_protected(
+            asyncio.create_task(
+                self._commit_digest_receipt(
+                    claim, envelope, prior, status, code, message_id
+                )
+            )
+        )
+
+    async def _commit_digest_receipt(
         self,
         claim: DigestEnvelopeClaim,
         envelope: DigestEnvelope,
@@ -1660,6 +1943,20 @@ async def _abort_event_send(
     )
 
 
+def _receipt_fields(receipt, unknown_code: str):
+    if not isinstance(receipt, MessageReceipt):
+        return MessageStatus.UNKNOWN, unknown_code, None
+    return (
+        receipt.status,
+        None
+        if receipt.status is MessageStatus.ACCEPTED
+        else "host_send_failed"
+        if receipt.status is MessageStatus.FAILED
+        else "host_send_unknown",
+        receipt.platform_message_id,
+    )
+
+
 async def _drain_cleanup(work) -> object | None:
     try:
         task = asyncio.create_task(work)
@@ -1668,6 +1965,21 @@ async def _drain_cleanup(work) -> object | None:
         if callable(close):
             close()
         return None
+    while True:
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if task.done():
+                try:
+                    return task.result()
+                except BaseException:
+                    return None
+        except Exception:
+            return None
+
+
+async def _wait_protected(task) -> object | None:
+    """Keep an already-owned task alive through repeated cancellation until done."""
     while True:
         try:
             return await asyncio.shield(task)

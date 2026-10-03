@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 from zipfile import ZipFile
 
 from ygl_test_subject.adapters.astrbot.bundled import (
@@ -50,6 +52,53 @@ class BundledExtensionTests(unittest.IsolatedAsyncioTestCase):
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
+
+    async def test_public_web_manifest_change_installs_new_slot_without_old_slot_mutation(
+        self,
+    ):
+        manifest_path = self.plugin_root / "modules" / "ff14" / "yomihime.manifest.json"
+        current_bytes = manifest_path.read_bytes()
+        current = json.loads(current_bytes)
+        old = json.loads(current_bytes)
+        old["contract_version"] = "1.3.0"
+        public_ids = {"item.lookup", "ff14.logs.character", "ff14.calendar.query"}
+        for capability in old["modules"][0]["capabilities"]:
+            if capability["capability_id"] in public_ids:
+                capability["invocation_policy"] = "command_only"
+        manifest_path.write_text(
+            json.dumps(old, ensure_ascii=False, indent=2), encoding="utf8"
+        )
+        previous = install_bundled_ff14(self.plugin_root, self.data_root)
+        before = {
+            str(path.relative_to(previous.extension_root)): path.read_bytes()
+            for path in previous.extension_root.rglob("*")
+            if path.is_file()
+        }
+        manifest_path.write_bytes(current_bytes)
+        replacement = install_bundled_ff14(self.plugin_root, self.data_root)
+        self.assertNotEqual(previous.extension_root, replacement.extension_root)
+        self.assertEqual(
+            before,
+            {
+                str(path.relative_to(previous.extension_root)): path.read_bytes()
+                for path in previous.extension_root.rglob("*")
+                if path.is_file()
+            },
+        )
+        self.assertEqual(current["contract_version"], "1.4.0")
+        self.assertEqual(
+            {
+                capability["capability_id"]
+                for capability in current["modules"][0]["capabilities"]
+                if capability["invocation_policy"] == "command_and_public_web"
+            },
+            public_ids,
+        )
+        for capability in old["modules"][0]["capabilities"]:
+            if capability["capability_id"] in public_ids:
+                capability["invocation_policy"] = "command_and_public_web"
+        old["contract_version"] = "1.4.0"
+        self.assertEqual(old, current)
 
     def assert_ff14_factory_contract(self, instance, health) -> None:
         handlers = instance.handlers()
@@ -215,6 +264,27 @@ class BundledExtensionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(legacy_file.read_text(encoding="utf-8"), "keep this")
         self.assertEqual(database.read_bytes(), b"existing runtime state")
 
+    async def test_historical_long_staging_and_source_paths_are_trusted(self) -> None:
+        parent = self.root / "long-data"
+        parent.mkdir()
+        suffix = "/bundled_extensions"
+        component_length = 179 - len(str(parent)) - len(suffix) - 1
+        self.assertGreater(component_length, 0)
+        data_dir = parent / ("d" * component_length)
+        data_dir.mkdir()
+        first = install_bundled_ff14(self.plugin_root, data_dir)
+        self.assertTrue(first.trusted, first.reason)
+        self.assertEqual(len(str(data_dir / "bundled_extensions")), 179)
+        self.assertEqual(
+            len(str(first.package_dir / "features" / "calendar_subscriptions.py")),
+            284,
+        )
+        self.assertEqual(len(discover_packages(first.extension_root)), 1)
+        second = install_bundled_ff14(self.plugin_root, data_dir)
+        self.assertTrue(second.trusted, second.reason)
+        self.assertFalse(second.installed)
+        self.assertEqual(second.extension_root, first.extension_root)
+
     async def test_fingerprint_slot_with_extra_data_is_fail_closed(self) -> None:
         first = install_bundled_ff14(self.plugin_root, self.data_root)
         extra = first.extension_root / "unexpected.txt"
@@ -226,6 +296,40 @@ class BundledExtensionTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(second.trusted)
         self.assertEqual(second.reason, "existing_bundle_slot_mismatch")
         self.assertEqual(extra.read_text(encoding="utf-8"), "unknown slot content")
+
+    async def test_staging_creation_permission_and_io_failures_are_distinct(
+        self,
+    ) -> None:
+        original_mkdir = Path.mkdir
+        for failure, reason in (
+            (PermissionError("private details"), "package_permission_denied"),
+            (FileNotFoundError("private details"), "package_root_unavailable"),
+        ):
+
+            def fail_staging(path, *args, **kwargs):
+                if path.name.startswith(".ff14-") and path.name.endswith(".stage"):
+                    raise failure
+                return original_mkdir(path, *args, **kwargs)
+
+            with self.subTest(reason=reason), patch.object(Path, "mkdir", fail_staging):
+                outcome = install_bundled_ff14(self.plugin_root, self.data_root)
+            self.assertFalse(outcome.trusted)
+            self.assertEqual(outcome.reason, reason)
+
+    async def test_unsupported_native_environment_keeps_the_safe_reason(self) -> None:
+        from ygl_test_subject.extensions.windows_fs import WindowsScanError
+
+        with (
+            patch("ygl_test_subject.adapters.astrbot.bundled.os.name", "nt"),
+            patch(
+                "ygl_test_subject.extensions.windows_fs._check_runtime",
+                side_effect=WindowsScanError("unsupported_environment"),
+            ),
+        ):
+            with self.assertRaises(BundledExtensionError) as raised:
+                install_bundled_ff14(self.plugin_root, self.data_root)
+        self.assertEqual(raised.exception.code, "unsupported_environment")
+        self.assertFalse((self.data_root / "bundled_extensions").exists())
 
     async def test_bundle_source_link_is_rejected_without_installing(self) -> None:
         external = self.root / "outside.py"

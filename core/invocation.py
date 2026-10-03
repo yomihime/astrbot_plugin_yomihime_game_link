@@ -43,12 +43,17 @@ from ..api.results import (
     ResultStatus,
 )
 from ..api.validation import ParameterError, validate_parameters
-from .context_issuer import ContextIssuer
+from .context_issuer import ContextIssuer, InvalidInvocation
 from .lifecycle import LifecycleController, LifecycleError
 from .policy import origin_allowed, tool_allowed
 from .ports import AdmissionLease, AdmissionPort
 from .registry import RegisteredModule, Registry
-from .task_scope import ScopeCancelled, ScopeDeadlineExceeded, ScopeStaleError
+from .task_scope import (
+    ScopeCancelled,
+    ScopeDeadlineExceeded,
+    ScopeStaleError,
+    observe_tasks,
+)
 
 _MESSAGES = {
     ErrorCode.PARAMETER_ERROR: "invalid parameters",
@@ -56,6 +61,7 @@ _MESSAGES = {
     ErrorCode.UNSUPPORTED: "invocation is unsupported",
     ErrorCode.MODULE_UNAVAILABLE: "module is unavailable",
     ErrorCode.UNKNOWN: "invocation failed",
+    ErrorCode.RATE_LIMITED: "public web busy",
 }
 
 
@@ -68,6 +74,79 @@ def _error(code: ErrorCode, *, privacy: Privacy = Privacy.PUBLIC) -> CapabilityR
         privacy=privacy,
         error=ErrorDetail(code, _MESSAGES[code]),
     )
+
+
+class _PublicWebFlight:
+    """Own supported task descendants until their actual completion.
+
+    Sealing revokes authority immediately. A cancelled await does not prove
+    external IO or a cancellation-suppressing coroutine has finished.
+    """
+
+    def __init__(self, gateway: "Gateway", view: InvocationView, bearer_key: str):
+        self.gateway, self.view, self.bearer_key = gateway, view, bearer_key
+        self.root: asyncio.Task | None = None
+        self.tasks: set[asyncio.Task] = set()
+        self.sealed = False
+        self.work_finished = False
+        self.timer: asyncio.TimerHandle | None = None
+
+    def check(self) -> None:
+        if self.sealed or self.work_finished or self.gateway._web_closed:
+            raise ScopeCancelled("public web request is sealed")
+        try:
+            self.gateway._issuer.require(self.view)
+        except Exception:
+            self.seal()
+            raise ScopeCancelled("public web authority is no longer current") from None
+
+    def register(self, task: asyncio.Task) -> None:
+        self.tasks.add(task)  # Keep the exact task even if the seal check fails.
+        task.add_done_callback(self._done)
+        try:
+            self.check()
+        except BaseException:
+            task.cancel()
+            raise
+
+    def seal(self) -> None:
+        if not self.sealed:
+            self.sealed = True
+            try:
+                self.gateway._issuer.release(self.view)
+            except InvalidInvocation:
+                pass
+        for task in tuple(self.tasks):
+            if not task.done():
+                task.cancel()
+        self._release_if_done()
+
+    def _done(self, task: asyncio.Task) -> None:
+        # Retrieve exceptions without retaining traceback/result diagnostics.
+        failed = task.cancelled() or task.exception() is not None
+        if task is self.root:
+            if failed:
+                self.seal()
+            else:
+                # Stop supported descendants/spawns, but retain unpublished
+                # proof and flight so close and the publisher can still fence it.
+                self.work_finished = True
+                for child in tuple(self.tasks):
+                    if not child.done():
+                        child.cancel()
+        self._release_if_done()
+
+    def _release_if_done(self) -> None:
+        if (
+            self.sealed
+            and self.root is not None
+            and self.root.done()
+            and all(task.done() for task in self.tasks)
+        ):
+            if self.timer is not None:
+                self.timer.cancel()
+            self.gateway._web_flights.pop(self.view.invocation_id, None)
+            self.tasks.clear()
 
 
 class Gateway:
@@ -125,6 +204,199 @@ class Gateway:
         self._owner_authority = owner_authority
         self._handler_timeout = float(handler_timeout)
         self._clock = clock
+        self._web_generation = 1
+        self._web_closed = False
+        self._web_flights: dict[str, _PublicWebFlight] = {}
+
+    @property
+    def public_web_pending(self) -> bool:
+        return bool(self._web_flights)
+
+    def fence_public_web(self) -> None:
+        """Synchronously revoke/seal all web authority before close suspends."""
+        if not self._web_closed:
+            self._web_closed = True
+            self._web_generation += 1
+        for flight in tuple(self._web_flights.values()):
+            flight.seal()
+
+    async def drain_public_web(self, timeout: float) -> bool:
+        pending = {
+            task
+            for flight in self._web_flights.values()
+            for task in flight.tasks
+            if not task.done()
+        }
+        if pending:
+            _, pending = await asyncio.wait(pending, timeout=max(0.0, timeout))
+        for flight in tuple(self._web_flights.values()):
+            flight._release_if_done()
+        return not pending and not self._web_flights
+
+    async def invoke_public_web(
+        self, proof: object, module_id: str, capability_id: str, parameters: object
+    ) -> CapabilityResult:
+        """Consume trusted Host proof and return data without any chat output."""
+        if self._web_closed or self._lifecycle is None or self._admission is None:
+            return _error(ErrorCode.MODULE_UNAVAILABLE)
+        view = None
+        try:
+            snapshot = self._registry.snapshot()
+            module = snapshot.module(module_id)
+            capability = next(
+                (
+                    item
+                    for item in module.manifest.capabilities
+                    if item.capability_id == capability_id
+                ),
+                None,
+            )
+            if not self._issuer.allows_public_web(module_id, capability):
+                return _error(ErrorCode.UNSUPPORTED)
+            view = self._issuer.issue_public_web(
+                proof,
+                module_id=module_id,
+                capability_id=capability_id,
+                module_epoch=module.epoch,
+                registry_revision=snapshot.revision,
+                generation=self._web_generation,
+                deadline=self._clock() + min(30.0, self._handler_timeout),
+            )
+            binding = self._issuer.public_web_binding(view)
+        except Exception:
+            if view is not None:
+                self._issuer.release(view)
+            return _error(ErrorCode.MODULE_UNAVAILABLE)
+        if (
+            len(self._web_flights) >= 4
+            or sum(
+                flight.bearer_key == binding.bearer_key
+                for flight in self._web_flights.values()
+            )
+            >= 2
+        ):
+            self._issuer.release(view)
+            return _error(ErrorCode.RATE_LIMITED)
+        flight = _PublicWebFlight(self, view, binding.bearer_key)
+        self._web_flights[view.invocation_id] = flight
+
+        async def execute() -> CapabilityResult:
+            with observe_tasks(flight):
+                flight.check()
+                return await self._invoke_web_view(view, parameters)
+
+        work = execute()
+        result = _error(ErrorCode.MODULE_UNAVAILABLE)
+        try:
+            task = asyncio.create_task(work, name="gateway:public_web")
+            flight.root = task
+            flight.register(task)
+            flight.timer = asyncio.get_running_loop().call_later(
+                max(0.0, view.deadline - self._clock()), flight.seal
+            )
+            done, _ = await asyncio.wait(
+                {task}, timeout=max(0.0, view.deadline - self._clock())
+            )
+            if done and not task.cancelled():
+                result = task.result()
+                if result.status in (
+                    ResultStatus.SUCCESS,
+                    ResultStatus.PARTIAL_SUCCESS,
+                    ResultStatus.NEEDS_SELECTION,
+                ):
+                    self._require_web_publication(
+                        flight, binding.generation, active=True
+                    )
+        except asyncio.CancelledError:
+            flight.seal()
+            raise
+        except Exception:
+            result = _error(ErrorCode.MODULE_UNAVAILABLE)
+        finally:
+            flight.seal()
+            if flight.root is None:
+                work.close()
+                self._web_flights.pop(view.invocation_id, None)
+        if result.status in (
+            ResultStatus.SUCCESS,
+            ResultStatus.PARTIAL_SUCCESS,
+            ResultStatus.NEEDS_SELECTION,
+        ):
+            try:
+                # Synchronous cleanup hooks can consume the remaining deadline
+                # or close the gateway. Recheck after intentional proof release.
+                self._require_web_publication(flight, binding.generation, active=False)
+            except Exception:
+                return _error(ErrorCode.MODULE_UNAVAILABLE)
+        return result
+
+    def _require_web_publication(
+        self, flight: _PublicWebFlight, generation: int, *, active: bool
+    ) -> None:
+        view = flight.view
+        if self._web_closed or self._web_generation != generation:
+            raise ScopeCancelled("public web gateway is closed")
+        if active:
+            if flight.sealed:
+                raise ScopeCancelled("public web request is sealed")
+            self._require_current(view, self._issuer.lease_for(view))
+        module = self._registry.snapshot().module(view.module_id)
+        descriptor = next(
+            item
+            for item in module.manifest.capabilities
+            if item.capability_id == view.capability_id
+        )
+        if not self._current_view(
+            None, module, view
+        ) or not self._issuer.allows_public_web(view.module_id, descriptor):
+            raise ScopeStaleError("public web target is no longer current")
+        self._lifecycle.guard(view.module_id, epoch=view.module_epoch)
+        if view.deadline is None or self._clock() >= view.deadline:
+            raise ScopeDeadlineExceeded("public web publication deadline has expired")
+
+    async def _invoke_web_view(
+        self, view: InvocationView, parameters: object
+    ) -> CapabilityResult:
+        try:
+            self._issuer.require(view)
+            module = self._registry.snapshot().module(view.module_id)
+            capability = next(
+                item
+                for item in module.manifest.capabilities
+                if item.capability_id == view.capability_id
+            )
+            if not self._current_view(
+                None, module, view
+            ) or not self._issuer.allows_public_web(view.module_id, capability):
+                return _error(ErrorCode.UNSUPPORTED)
+            try:
+                validated = validate_parameters(capability, parameters)
+            except Exception:
+                return _error(ErrorCode.PARAMETER_ERROR)
+            lease = self._admission.admit(view, view.capability_id)
+            self._require_current(view, lease)
+            scope = self._lifecycle.scope(view.module_id)
+            result = await scope.run(
+                module.handlers.capabilities[view.capability_id].invoke(
+                    view, validated
+                ),
+                name=f"gateway:web:{view.capability_id}",
+                deadline_monotonic=view.deadline,
+            )
+            self._require_current(view, lease)
+            current = self._registry.snapshot().module(view.module_id)
+            descriptor = next(
+                item
+                for item in current.manifest.capabilities
+                if item.capability_id == view.capability_id
+            )
+            if not self._issuer.allows_public_web(view.module_id, descriptor):
+                return _error(ErrorCode.UNSUPPORTED)
+            return self._valid_public_result(result)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return _error(ErrorCode.MODULE_UNAVAILABLE)
 
     async def invoke_command(
         self, view: InvocationView, operation_path: str, parameters: object

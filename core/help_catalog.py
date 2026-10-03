@@ -109,20 +109,20 @@ class HelpCatalog:
         lines: list[str] = []
         for command in manifest.commands:
             capability = capabilities[command.capability_id]
-            if (
-                command_only
-                and capability.invocation_policy is not InvocationPolicy.COMMAND_ONLY
+            if command_only and capability.invocation_policy not in (
+                InvocationPolicy.COMMAND_ONLY,
+                InvocationPolicy.COMMAND_AND_PUBLIC_WEB,
             ):
                 continue
             command_text = f"/ygl {manifest.route} {command.operation_path}"
             if command_only:
                 lines.append(command_text)
                 continue
-            policy = (
-                "必须通过命令"
-                if capability.invocation_policy is InvocationPolicy.COMMAND_ONLY
-                else "允许自然语言"
-            )
+            policy = {
+                InvocationPolicy.COMMAND_ONLY: "必须通过命令",
+                InvocationPolicy.COMMAND_AND_PUBLIC_WEB: "命令或已授权的公开网页入口",
+                InvocationPolicy.NATURAL_LANGUAGE_ALLOWED: "允许自然语言",
+            }[capability.invocation_policy]
             privacy = {
                 PrivacyFloor.PRIVATE: "需要个人授权",
                 PrivacyFloor.OWNER: "仅本人私聊可用",

@@ -13,14 +13,14 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 ARCHIVE = ROOT / "dist" / "astrbot_plugin_yomihime_game_link-local.zip"
 EXPECTED_WHEEL_SHA256 = (
-    "e9b9543ac158533df6ce50e3430f4705614d1b1681b72610cebbab7b1e1b40e2"
+    "1db47997219e80919020a233a58189e105500705718cd196e854f5183266735d"
 )
 EXPECTED_WHEEL_ENTRIES = {
-    "yomihime_module_sdk-1.3.0.dist-info/licenses/LICENSE",
-    "yomihime_module_sdk-1.3.0.dist-info/METADATA",
-    "yomihime_module_sdk-1.3.0.dist-info/WHEEL",
-    "yomihime_module_sdk-1.3.0.dist-info/top_level.txt",
-    "yomihime_module_sdk-1.3.0.dist-info/RECORD",
+    "yomihime_module_sdk-1.4.0.dist-info/licenses/LICENSE",
+    "yomihime_module_sdk-1.4.0.dist-info/METADATA",
+    "yomihime_module_sdk-1.4.0.dist-info/WHEEL",
+    "yomihime_module_sdk-1.4.0.dist-info/top_level.txt",
+    "yomihime_module_sdk-1.4.0.dist-info/RECORD",
     "yomihime_sdk/__init__.py",
     "yomihime_sdk/py.typed",
     "yomihime_sdk/_examples/empty_module/README.md",
@@ -47,6 +47,7 @@ PACKAGE_ENTRY_NAMES = {
 }
 ROOT_FILES = (
     "main.py",
+    "_conf_schema.json",
     "__init__.py",
     "metadata.yaml",
     "logo.png",
@@ -60,9 +61,16 @@ OPERATOR_SCRIPT_FILES = (
     "scripts/admin_credentials.py",
     "scripts/configure_source_credentials.py",
 )
+MAINTENANCE_HELPER_FILES = ("extensions/windows_maintenance.py",)
+PAGE_FILES = (
+    "pages/ff14/index.html",
+    "pages/ff14/app.js",
+    "pages/ff14/styles.css",
+)
 FF14_BUNDLE_ROOT = Path("modules") / "ff14"
 FF14_BUNDLE_REQUIRED_FILES = {
     "__init__.py",
+    "config.py",
     "module.py",
     "models.py",
     "yomihime.manifest.json",
@@ -238,11 +246,11 @@ def validate_wheel(path: Path) -> dict[str, bytes]:
                 "SDK wheel entry manifest differs from the reviewed artifact"
             )
         metadata_lines = set(
-            wheel.read("yomihime_module_sdk-1.3.0.dist-info/METADATA")
+            wheel.read("yomihime_module_sdk-1.4.0.dist-info/METADATA")
             .decode("utf-8")
             .splitlines()
         )
-        if not {"Name: yomihime-module-sdk", "Version: 1.3.0"} <= metadata_lines:
+        if not {"Name: yomihime-module-sdk", "Version: 1.4.0"} <= metadata_lines:
             raise ValueError("SDK wheel distribution metadata is unsupported")
         package = {name: wheel.read(name) for name in sorted(PACKAGE_ENTRY_NAMES)}
     return package
@@ -329,6 +337,16 @@ def included_files(root: Path = ROOT) -> list[Path]:
     files.extend(
         validate_source_path(repository_root / name, repository_root, "Operator script")
         for name in OPERATOR_SCRIPT_FILES
+    )
+    files.extend(
+        validate_source_path(repository_root / name, repository_root, "Page asset")
+        for name in PAGE_FILES
+    )
+    files.extend(
+        validate_source_path(
+            repository_root / name, repository_root, "Maintenance helper"
+        )
+        for name in MAINTENANCE_HELPER_FILES
     )
     for directory in RUNTIME_DIRS:
         runtime_root = validate_source_path(

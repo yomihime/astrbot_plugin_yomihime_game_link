@@ -8,6 +8,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from secrets import token_urlsafe
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from ygl_test_subject.api.administration import AdminOperation
@@ -22,6 +23,7 @@ from ygl_test_subject.api.manifests import (
     CapabilityDescriptor,
     CapabilityEffect,
     CommandDescriptor,
+    ConfigField,
     InvocationPolicy,
     ModuleCategory,
     ModuleManifest,
@@ -31,11 +33,15 @@ from ygl_test_subject.api.manifests import (
 from ygl_test_subject.api.results import CapabilityResult, ResultStatus
 from ygl_test_subject.api.services import (
     CapabilityHealth,
+    ConfigFieldUpdate,
+    ConfigPatchMode,
+    ConfigTarget,
     Grant,
     GrantStatus,
     HealthReport,
     HealthStatus,
     ModuleHandlers,
+    PersistedConfigPatch,
     Principal,
 )
 from ygl_test_subject.api.storage import GrantReference, OwnerScope
@@ -51,17 +57,22 @@ from ygl_test_subject.core.ports import (
     MessageStatus,
     SecretOwner,
 )
+from ygl_test_subject.extensions.discovery import discover_packages
+from ygl_test_subject.extensions.loader import CandidateState, ExtensionCandidate
 from ygl_test_subject.infrastructure.sqlite.database import SQLiteDatabase
 from ygl_test_subject.services.admin_authorization import _digest
 from ygl_test_subject.services.core_runtime import (
     CoreRuntime,
     CoreRuntimeCleanupPending,
     HostIngress,
+    TrustedSubscriptionGate,
     _is_safe_bundled_default,
     _matches_trusted_bundled_manifest,
 )
 from ygl_test_subject.services.extension_runtime import ExtensionCleanupPending
 from ygl_test_subject.services.source_credentials import SourceCredentialPolicy
+
+from tests.contracts.test_context_issuer import _PublicWebProofs
 
 
 class _Renderer:
@@ -375,6 +386,11 @@ class CoreRuntimeTests(unittest.IsolatedAsyncioTestCase):
         source_credential_policies=(),
         pump_interval: float = 3600,
         utc_clock=None,
+        module_host_config_snapshots=None,
+        trusted_bundled_manifests=None,
+        trusted_subscription_gates=None,
+        public_web_validator=None,
+        public_web_capabilities=frozenset(),
     ) -> CoreRuntime:
         (self.root / "extensions").mkdir(exist_ok=True)
         return CoreRuntime(
@@ -396,7 +412,928 @@ class CoreRuntimeTests(unittest.IsolatedAsyncioTestCase):
             utc_clock=utc_clock or (lambda: datetime.now(UTC)),
             pump_interval=pump_interval,
             cleanup_timeout=0.2,
+            module_host_config_snapshots=module_host_config_snapshots,
+            trusted_bundled_manifests=trusted_bundled_manifests,
+            trusted_subscription_gates=trusted_subscription_gates,
+            public_web_validator=public_web_validator,
+            public_web_capabilities=public_web_capabilities,
         )
+
+    async def _public_web_runtime(self, *, detached=False, block_root=False):
+        from ygl_test_subject.services.module_services import InvocationBindingError
+
+        class WebHandler:
+            services = None
+
+            def __init__(inner):
+                inner.views = []
+                inner.entered, inner.release = asyncio.Event(), asyncio.Event()
+                inner.late_rejected = False
+
+            async def invoke(inner, view, parameters):
+                inner.views.append(view)
+                bound = await inner.services.scopes.bind(view)
+                if block_root:
+                    inner.entered.set()
+                    while not inner.release.is_set():
+                        try:
+                            await inner.release.wait()
+                        except asyncio.CancelledError:
+                            pass
+                if detached:
+
+                    async def late():
+                        raise AssertionError("sealed work ran")
+
+                    async def work():
+                        inner.entered.set()
+                        while not inner.release.is_set():
+                            try:
+                                await inner.release.wait()
+                            except asyncio.CancelledError:
+                                pass
+                        try:
+                            bound.tasks.create_task(late(), name="late-after-close")
+                        except InvocationBindingError:
+                            inner.late_rejected = True
+
+                    bound.tasks.create_task(work(), name="web-detached")
+                    await inner.entered.wait()
+                return CapabilityResult(
+                    "web-result",
+                    ResultStatus.SUCCESS,
+                    document=DisplayDocument("Public", "Web", (TextBlock("ok"),)),
+                )
+
+        class WebFactory(_Factory):
+            async def create(inner, services):
+                inner.handler.services = services
+                return await super().create(services)
+
+        handler, proofs = WebHandler(), _PublicWebProofs()
+        runtime = self._runtime(
+            source=_FactorySource(WebFactory(handler)),
+            public_web_validator=proofs,
+            public_web_capabilities=frozenset({("private/mod", "private")}),
+        )
+        manifest = _private_manifest()
+        manifest["contract_version"] = "1.4.0"
+        manifest["modules"][0]["capabilities"][0].update(
+            invocation_policy="command_and_public_web", privacy_floor="public"
+        )
+        package_root = self.root / "extensions/private"
+        package_root.mkdir(parents=True)
+        (package_root / "yomihime.manifest.json").write_text(
+            json.dumps(manifest), encoding="utf-8"
+        )
+        await runtime.start()
+        await runtime.admin_credential_repository.bootstrap(_digest(token_urlsafe(32)))
+        await runtime.admin_operations.set_enabled(
+            None,
+            "private/mod",
+            True,
+            expected_registry_revision=runtime.registry.snapshot().revision,
+            authorization=_AdminContext(),
+        )
+        return runtime, handler, proofs
+
+    async def test_public_web_real_composition_has_no_chat_principal_route_or_output(
+        self,
+    ):
+        runtime, handler, proofs = await self._public_web_runtime()
+        try:
+            with (
+                patch.object(
+                    type(runtime.trusted_route_publisher),
+                    "publish",
+                    side_effect=AssertionError("chat route"),
+                ),
+                patch.object(
+                    type(runtime.output),
+                    "route",
+                    side_effect=AssertionError("chat output"),
+                ),
+                patch.object(
+                    type(runtime._ingress_principal_provisioner),
+                    "ensure",
+                    side_effect=AssertionError("chat principal"),
+                ),
+            ):
+                result = await runtime.invoke_public_web(
+                    "private/mod",
+                    "private",
+                    {},
+                    proof=proofs.new("private/mod", "private"),
+                )
+            self.assertEqual(result.status, ResultStatus.SUCCESS)
+            self.assertEqual(runtime.output._message_port.calls, [])
+            self.assertIsNone(handler.views[0].actor_id)
+            self.assertFalse(runtime.issuer._issued)
+            self.assertFalse(proofs.active)
+        finally:
+            self.assertTrue(await runtime.close(timeout=0.5))
+
+    async def test_public_web_close_fences_before_acquiring_shared_close_lock(self):
+        runtime, handler, proofs = await self._public_web_runtime(block_root=True)
+        request = asyncio.create_task(
+            runtime.invoke_public_web(
+                "private/mod", "private", {}, proof=proofs.new("private/mod", "private")
+            )
+        )
+        await asyncio.wait_for(handler.entered.wait(), 1)
+        self.assertTrue(proofs.active)
+        await runtime._close_lock.acquire()
+        closing = asyncio.create_task(runtime.close(timeout=0.5))
+        try:
+            await asyncio.sleep(0)
+            self.assertTrue(runtime.gateway._web_closed)
+            self.assertTrue(runtime.accepting)  # Preserve original chat lock ordering.
+            self.assertFalse(proofs.active)
+            self.assertFalse(runtime.issuer._issued)
+            self.assertTrue(runtime.gateway.public_web_pending)
+        finally:
+            handler.release.set()
+            runtime._close_lock.release()
+            self.assertTrue(await closing)
+            await request
+
+    async def test_public_web_close_timeout_retains_owned_tasks_and_can_retry(self):
+        runtime, handler, proofs = await self._public_web_runtime(detached=True)
+        await runtime.invoke_public_web(
+            "private/mod", "private", {}, proof=proofs.new("private/mod", "private")
+        )
+        try:
+            with self.assertRaises(CoreRuntimeCleanupPending) as caught:
+                await runtime.close(timeout=0.01)
+            self.assertEqual(caught.exception.component, "public_web")
+            self.assertTrue(runtime.cleanup_pending)
+            self.assertFalse(runtime.closed)
+            self.assertTrue(runtime.gateway.public_web_pending)
+            self.assertEqual(runtime.database.executor.state, "OPEN")
+        finally:
+            handler.release.set()
+            self.assertTrue(await runtime.close(timeout=0.5))
+        self.assertFalse(runtime.gateway.public_web_pending)
+        self.assertTrue(handler.late_rejected)
+
+    async def test_public_gate_reason_priorities_and_live_readiness(self):
+        from ygl_test_subject.core.ports import PersistedSubscriptionGateRead
+
+        expected, gates, _ = self._gate_packages()
+        runtime = self._runtime(
+            source=_FactorySource(_Factory(_Handler())),
+            trusted_bundled_manifests=expected,
+            trusted_subscription_gates=gates,
+        )
+        with patch.object(
+            runtime.b04_repositories.lifecycle,
+            "read_subscription_gate_state",
+            side_effect=AssertionError("read would initialize"),
+        ) as read:
+            self.assertEqual(
+                (await runtime.subscription_gate_state("private/mod")).reason,
+                "state_unknown",
+            )
+            read.assert_not_called()
+            self.assertFalse(runtime.database.path.exists())
+        await runtime.start()
+        try:
+            self.assertEqual(
+                (await runtime.subscription_gate_state("unknown/mod")).reason,
+                "unsupported",
+            )
+            cases = (
+                (
+                    PersistedSubscriptionGateRead(
+                        True, None, None, "initialization_invalid"
+                    ),
+                    None,
+                    False,
+                    "initialization_invalid",
+                ),
+                (
+                    PersistedSubscriptionGateRead(True, False, False, None),
+                    False,
+                    False,
+                    "gate_disabled",
+                ),
+                (
+                    PersistedSubscriptionGateRead(True, True, False, None),
+                    True,
+                    False,
+                    "module_disabled",
+                ),
+                (
+                    PersistedSubscriptionGateRead(True, True, True, None),
+                    True,
+                    True,
+                    None,
+                ),
+            )
+            for persisted, enabled, can_run, reason in cases:
+                with (
+                    self.subTest(reason=reason),
+                    patch.object(
+                        runtime.b04_repositories.lifecycle,
+                        "read_subscription_gate_state",
+                        return_value=persisted,
+                    ),
+                ):
+                    result = await runtime.subscription_gate_state("private/mod")
+                    self.assertEqual(
+                        (result.enabled, result.can_run, result.reason),
+                        (enabled, can_run, reason),
+                    )
+            with patch.object(
+                runtime.b04_repositories.lifecycle,
+                "read_subscription_gate_state",
+                side_effect=RuntimeError("private detail"),
+            ):
+                result = await runtime.subscription_gate_state("private/mod")
+                self.assertEqual(
+                    (result.enabled, result.can_run, result.reason),
+                    (None, None, "state_unknown"),
+                )
+            with (
+                patch.object(runtime, "_accepting", False),
+                patch.object(
+                    runtime.b04_repositories.lifecycle,
+                    "read_subscription_gate_state",
+                    return_value=PersistedSubscriptionGateRead(True, True, True, None),
+                ),
+            ):
+                self.assertEqual(
+                    (await runtime.subscription_gate_state("private/mod")).reason,
+                    "runtime_not_ready",
+                )
+        finally:
+            await runtime.close(timeout=0.5)
+
+    async def test_public_gate_read_uses_shared_mutation_and_rechecks_close(self):
+        from ygl_test_subject.core.ports import PersistedSubscriptionGateRead
+
+        expected, gates, _ = self._gate_packages()
+        runtime = self._runtime(
+            source=_FactorySource(_Factory(_Handler())),
+            trusted_bundled_manifests=expected,
+            trusted_subscription_gates=gates,
+        )
+        await runtime.start()
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def blocked(_):
+            entered.set()
+            await release.wait()
+            return PersistedSubscriptionGateRead(True, True, True, None)
+
+        try:
+            with patch.object(
+                runtime.b04_repositories.lifecycle,
+                "read_subscription_gate_state",
+                side_effect=blocked,
+            ):
+                task = asyncio.create_task(
+                    runtime.subscription_gate_state("private/mod")
+                )
+                await entered.wait()
+                mutation_entered = asyncio.Event()
+
+                async def contender():
+                    async with runtime.lifecycle.admission.mutation("test-contender"):
+                        mutation_entered.set()
+
+                contender_task = asyncio.create_task(contender())
+                await asyncio.sleep(0)
+                self.assertFalse(mutation_entered.is_set())
+                runtime._closing = True
+                release.set()
+                self.assertEqual((await task).reason, "runtime_not_ready")
+                await contender_task
+                runtime._closing = False
+        finally:
+            release.set()
+            await runtime.close(timeout=0.5)
+
+    def _gate_packages(self):
+        extension_root = self.root / "extensions"
+        extension_root.mkdir(exist_ok=True)
+        for package_id in ("private", "second"):
+            package_root = extension_root / package_id
+            package_root.mkdir()
+            manifest = _private_manifest()
+            manifest["package_id"] = package_id
+            manifest["modules"][0]["route"] = package_id
+            manifest["modules"][0]["config_fields"] = [
+                {"name": "gate", "default": True}
+            ]
+            (package_root / "yomihime.manifest.json").write_text(
+                json.dumps(manifest), encoding="utf-8"
+            )
+            discovered = discover_packages(self.root / "extensions")
+            self.assertTrue(all(item.valid for item in discovered), repr(discovered))
+        packages = discover_packages(extension_root)
+        self.assertEqual(len(packages), 2)
+        expected = {
+            f"{item.package_id}/mod": item.manifest.modules[0] for item in packages
+        }
+        gates = {
+            module_id: TrustedSubscriptionGate(
+                expected[module_id], "gate", item._provenance.manifest_sha256
+            )
+            for item in packages
+            for module_id in (f"{item.package_id}/mod",)
+        }
+        candidates = tuple(
+            ExtensionCandidate(item, CandidateState.DISABLED) for item in packages
+        )
+        return expected, gates, candidates
+
+    def _gate_sql(self, runtime, sql):
+        connection = runtime.database.connect()
+        try:
+            rows = [tuple(row) for row in connection.execute(sql).fetchall()]
+            connection.commit()
+            return rows
+        finally:
+            connection.close()
+
+    async def test_complete_trusted_gate_map_consumes_one_batch_and_never_repairs_after_complete(
+        self,
+    ):
+        expected, requested, _ = self._gate_packages()
+        now = datetime(2026, 10, 2, 12, tzinfo=UTC)
+        runtime = self._runtime(
+            source=_FactorySource(_Factory(_Handler())),
+            utc_clock=lambda: now,
+            trusted_bundled_manifests=expected,
+            trusted_subscription_gates=requested,
+        )
+        immutable = dict(requested)
+        requested.clear()
+        self.assertIs(runtime.config_repository, runtime.repositories.config)
+        self.assertIs(
+            runtime.admin_operations._config_repository, runtime.config_repository
+        )
+        with self.assertRaises(TypeError):
+            runtime._trusted_subscription_gates["other/mod"] = immutable["private/mod"]
+        initialize = runtime.config_repository.initialize_subscription_gates
+        with patch.object(
+            runtime.config_repository, "initialize_subscription_gates", wraps=initialize
+        ) as called:
+            await runtime.start()
+            called.assert_awaited_once()
+        self.assertEqual(
+            self._gate_sql(
+                runtime, "SELECT COUNT(*) FROM subscription_gate_initializations"
+            ),
+            [(2,)],
+        )
+        self.assertEqual(
+            self._gate_sql(
+                runtime,
+                "SELECT value_json,subscription_transition_at FROM config_entries ORDER BY module_id",
+            ),
+            [("true", now.isoformat()), ("true", now.isoformat())],
+        )
+        for module_id in immutable:
+            binding = runtime.b04_repositories.lifecycle._subscription_gate_bindings[
+                module_id
+            ]
+            self.assertEqual(binding.target, ConfigTarget("host-config", module_id))
+            self.assertEqual(
+                (binding.package_id, binding.module_id), tuple(module_id.split("/", 1))
+            )
+            self.assertEqual(binding.field, immutable[module_id].field)
+            self.assertIsNotNone(
+                await runtime.b04_repositories.lifecycle.current_fence(module_id)
+            )
+            self.assertEqual(
+                runtime.b04_repositories.scheduler._subscription_gate_bindings[
+                    module_id
+                ],
+                binding,
+            )
+        with self.assertRaises(TypeError):
+            runtime.b04_repositories.lifecycle._subscription_gate_bindings[
+                "other/mod"
+            ] = binding
+        target = ConfigTarget("host-config", "private/mod")
+        await runtime.config_repository.update(
+            target,
+            PersistedConfigPatch(
+                1,
+                (ConfigFieldUpdate("gate", ConfigPatchMode.REPLACE, value=False),),
+                (ConfigField("gate", default=True),),
+                "pause",
+                target,
+            ),
+        )
+        before = self._gate_sql(
+            runtime, "SELECT * FROM config_entries ORDER BY module_id"
+        )
+        await runtime.close(timeout=0.5)
+        reopened = self._runtime(
+            source=_FactorySource(_Factory(_Handler())),
+            trusted_bundled_manifests=expected,
+            trusted_subscription_gates=immutable,
+        )
+        await reopened.start()
+        self.assertEqual(
+            self._gate_sql(reopened, "SELECT * FROM config_entries ORDER BY module_id"),
+            before,
+        )
+        self._gate_sql(
+            reopened, "DELETE FROM config_entries WHERE module_id='second/mod'"
+        )
+        await reopened.close(timeout=0.5)
+        missing = self._runtime(
+            source=_FactorySource(_Factory(_Handler())),
+            trusted_bundled_manifests=expected,
+            trusted_subscription_gates=immutable,
+        )
+        await missing.start()
+        self.assertEqual(
+            self._gate_sql(
+                missing, "SELECT value_json FROM config_entries ORDER BY module_id"
+            ),
+            [("false",)],
+        )
+        self.assertEqual(
+            self._gate_sql(
+                missing, "SELECT COUNT(*) FROM subscription_gate_initializations"
+            ),
+            [(2,)],
+        )
+        await missing.close(timeout=0.5)
+
+    async def test_any_untrusted_or_unmatched_candidate_keeps_entire_gate_bootstrap_pending(
+        self,
+    ):
+        expected, gates, candidates = self._gate_packages()
+        first = candidates[0]
+        provenance = first.package._provenance
+        variants = (
+            candidates[:1],
+            candidates + (first,),
+            (
+                replace(first, package=replace(first.package, _provenance=None)),
+                candidates[1],
+            ),
+            (
+                replace(
+                    first,
+                    package=replace(
+                        first.package, _provenance=replace(provenance, _seal=None)
+                    ),
+                ),
+                candidates[1],
+            ),
+            (
+                replace(
+                    first,
+                    package=replace(
+                        first.package,
+                        _provenance=SimpleNamespace(
+                            trusted=True,
+                            package_id=first.package.package_id,
+                            manifest_sha256=provenance.manifest_sha256,
+                        ),
+                    ),
+                ),
+                candidates[1],
+            ),
+            (
+                replace(
+                    first,
+                    package=replace(
+                        first.package,
+                        _provenance=replace(provenance, manifest_sha256=b"x" * 32),
+                    ),
+                ),
+                candidates[1],
+            ),
+            (
+                replace(
+                    first,
+                    package=replace(
+                        first.package,
+                        _provenance=replace(provenance, package_id="outsider"),
+                    ),
+                ),
+                candidates[1],
+            ),
+            (
+                replace(
+                    first,
+                    package=replace(
+                        first.package,
+                        manifest=replace(
+                            first.package.manifest,
+                            modules=(
+                                replace(
+                                    first.package.manifest.modules[0], module_id="other"
+                                ),
+                            ),
+                        ),
+                    ),
+                ),
+                candidates[1],
+            ),
+            (
+                replace(
+                    first,
+                    package=replace(
+                        first.package,
+                        manifest=replace(
+                            first.package.manifest,
+                            modules=(
+                                replace(
+                                    first.package.manifest.modules[0],
+                                    config_fields=(ConfigField("gate", default=1),),
+                                ),
+                            ),
+                        ),
+                    ),
+                ),
+                candidates[1],
+            ),
+        )
+        for index, mutated in enumerate(variants):
+            with self.subTest(index=index):
+                runtime = self._runtime(
+                    source=_FactorySource(_Factory(_Handler())),
+                    trusted_bundled_manifests=expected,
+                    trusted_subscription_gates=gates,
+                )
+                with (
+                    patch.object(
+                        runtime.extension_runtime, "scan", return_value=mutated
+                    ),
+                    patch.object(
+                        runtime.config_repository,
+                        "initialize_subscription_gates",
+                        side_effect=AssertionError("partial bootstrap"),
+                    ) as initialize,
+                ):
+                    await runtime.start()
+                    initialize.assert_not_called()
+                self.assertEqual(
+                    self._gate_sql(
+                        runtime, "SELECT phase FROM subscription_gate_bootstrap"
+                    ),
+                    [("pending",)],
+                )
+                self.assertEqual(
+                    self._gate_sql(
+                        runtime, "SELECT * FROM subscription_gate_initializations"
+                    ),
+                    [],
+                )
+                self.assertEqual(
+                    self._gate_sql(runtime, "SELECT * FROM config_entries"), []
+                )
+                await runtime.close(timeout=0.5)
+
+    async def test_descriptor_equal_but_changed_manifest_bytes_do_not_initialize_gates(
+        self,
+    ):
+        expected, gates, _ = self._gate_packages()
+        path = self.root / "extensions/private/yomihime.manifest.json"
+        path.write_text(path.read_text("utf-8") + "\n", encoding="utf-8")
+        runtime = self._runtime(
+            source=_FactorySource(_Factory(_Handler())),
+            trusted_bundled_manifests=expected,
+            trusted_subscription_gates=gates,
+        )
+        await runtime.start()
+        self.assertEqual(
+            self._gate_sql(runtime, "SELECT phase FROM subscription_gate_bootstrap"),
+            [("pending",)],
+        )
+        self.assertEqual(self._gate_sql(runtime, "SELECT * FROM config_entries"), [])
+        await runtime.close(timeout=0.5)
+
+    async def test_empty_partial_and_invalid_gate_composition_cannot_consume_pending(
+        self,
+    ):
+        expected, gates, _ = self._gate_packages()
+        runtime = self._runtime(
+            source=_FactorySource(_Factory(_Handler())),
+            trusted_bundled_manifests=expected,
+            trusted_subscription_gates={},
+        )
+        # No gate request still permits the existing manifest lifecycle contract.
+        await runtime.start()
+        self.assertEqual(
+            self._gate_sql(runtime, "SELECT phase FROM subscription_gate_bootstrap"),
+            [("pending",)],
+        )
+        await runtime.close(timeout=0.5)
+        for invalid in (
+            {"private/mod": gates["private/mod"]},
+            {**gates, "other/mod": gates["private/mod"]},
+            {**gates, "private/mod": replace(gates["private/mod"], field="unknown")},
+            {
+                **gates,
+                "private/mod": replace(gates["private/mod"], manifest_sha256=b"short"),
+            },
+        ):
+            with self.subTest(keys=tuple(invalid)), self.assertRaises(ValueError):
+                self._runtime(
+                    trusted_bundled_manifests=expected,
+                    trusted_subscription_gates=invalid,
+                )
+        for declaration in (
+            ConfigField("gate", default=1),
+            ConfigField("gate", default=False),
+            ConfigField("gate", sensitive=True),
+        ):
+            invalid_manifest = replace(
+                expected["private/mod"], config_fields=(declaration,)
+            )
+            invalid_expected = {**expected, "private/mod": invalid_manifest}
+            invalid_gates = {
+                **gates,
+                "private/mod": replace(gates["private/mod"], manifest=invalid_manifest),
+            }
+            with self.subTest(declaration=declaration), self.assertRaises(ValueError):
+                self._runtime(
+                    trusted_bundled_manifests=invalid_expected,
+                    trusted_subscription_gates=invalid_gates,
+                )
+
+    async def test_host_config_mapping_is_copied_frozen_and_forwarded(self):
+        requested = {"sample/alpha": {"host_only": {"days": [2, 3]}}}
+        runtime = self._runtime(module_host_config_snapshots=requested)
+        requested["sample/alpha"]["host_only"]["days"].append(4)
+        requested["other/module"] = {}
+        self.assertEqual(
+            runtime.module_host_config_snapshots["sample/alpha"]["host_only"]["days"],
+            (2, 3),
+        )
+        self.assertNotIn("other/module", runtime.module_host_config_snapshots)
+        with self.assertRaises(TypeError):
+            runtime.module_host_config_snapshots["sample/alpha"]["host_only"][
+                "days"
+            ] = ()
+        self.assertEqual(
+            runtime.module_services._module_host_config_snapshots,
+            runtime.module_host_config_snapshots,
+        )
+        await runtime.start()
+        self.assertTrue(await runtime.close())
+
+    def test_host_config_mapping_rejects_invalid_module_or_values(self):
+        for snapshots in (
+            {"../module": {}},
+            {"sample/alpha": []},
+            {"sample/alpha": {"nan": float("nan")}},
+        ):
+            with self.subTest(snapshots_type=type(snapshots).__name__):
+                with self.assertRaises((ValueError, TypeError)):
+                    self._runtime(module_host_config_snapshots=snapshots)
+
+    async def test_catalog_real_zero_one_two_modules_and_lifecycle(self):
+        capability_ids = (
+            "private",
+            "public_read",
+            "public_web",
+            "public_write",
+            "owner",
+        )
+
+        class Instance(_Instance):
+            def handlers(self):
+                return ModuleHandlers(
+                    {key: self._handler for key in capability_ids}, {}, {}
+                )
+
+            async def check_health(self):
+                return HealthReport(
+                    {
+                        key: CapabilityHealth(HealthStatus.AVAILABLE)
+                        for key in capability_ids
+                    }
+                )
+
+        class Factory(_Factory):
+            async def create(self, services):
+                self.assert_services = services
+                instance = Instance(self.handler)
+                self.instances.append(instance)
+                return instance
+
+        factory = Factory(_Handler())
+        runtime = self._runtime(source=_FactorySource(factory))
+        await runtime.start()
+        await runtime.admin_credential_repository.bootstrap(_digest(token_urlsafe(32)))
+        self.assertEqual(runtime.public_module_catalog()["modules"], [])
+        self.assertEqual(runtime.public_module_catalog()["runtime"], {"state": "ready"})
+        self.assertTrue(await runtime.close())
+        self.assertEqual(
+            runtime.public_module_catalog()["runtime"], {"state": "closed"}
+        )
+
+        for count, package_id in enumerate(("zeta", "alpha"), start=1):
+            manifest = _private_manifest()
+            manifest["package_id"] = package_id
+            module = manifest["modules"][0]
+            module["route"] = package_id
+            base = module["capabilities"][0]
+            module["capabilities"] = [
+                {
+                    **base,
+                    "capability_id": key,
+                    "privacy_floor": privacy,
+                    "invocation_policy": policy,
+                    "effect": effect,
+                }
+                for key, privacy, policy, effect in (
+                    ("private", "private", "command_only", "read_only"),
+                    ("public_read", "public", "command_only", "read_only"),
+                    ("public_web", "public", "command_and_public_web", "read_only"),
+                    ("public_write", "public", "command_only", "write"),
+                    ("owner", "owner", "command_only", "read_only"),
+                )
+            ]
+            module["config_fields"] = [
+                {
+                    "name": "ordinary",
+                    "required": True,
+                    "default": "SENTINEL_DEFAULT",
+                    "description": "SENTINEL_DESCRIPTION",
+                },
+                {
+                    "name": "SENTINEL_SECRET_FIELD",
+                    "sensitive": True,
+                    "description": "SENTINEL_SECRET_DESCRIPTION",
+                },
+            ]
+            package_root = self.root / "extensions" / package_id
+            package_root.mkdir()
+            (package_root / "yomihime.manifest.json").write_text(
+                json.dumps(manifest), encoding="utf-8"
+            )
+            runtime = self._runtime(
+                source=_FactorySource(factory),
+                module_host_config_snapshots={
+                    f"{package_id}/mod": {"host_only": "SENTINEL_CURRENT_VALUE"}
+                },
+            )
+            try:
+                await runtime.start()
+                for known in ("zeta", "alpha")[:count]:
+                    await runtime.admin_operations.set_enabled(
+                        None,
+                        f"{known}/mod",
+                        True,
+                        expected_registry_revision=runtime.registry.snapshot().revision,
+                        authorization=_AdminContext(),
+                    )
+                catalog = runtime.public_module_catalog()
+                self.assertEqual(len(catalog["modules"]), count)
+                self.assertEqual(
+                    [item["module_id"] for item in catalog["modules"]],
+                    sorted(item["module_id"] for item in catalog["modules"]),
+                )
+                selected = next(
+                    item
+                    for item in catalog["modules"]
+                    if item["module_id"] == f"{package_id}/mod"
+                )
+                self.assertEqual(selected["state"], "loaded")
+                with (
+                    patch.object(
+                        type(runtime.repositories.config),
+                        "current",
+                        side_effect=AssertionError("catalog read configuration"),
+                    ),
+                    patch.object(
+                        type(runtime.module_services),
+                        "for_module",
+                        side_effect=AssertionError("catalog called module services"),
+                    ),
+                ):
+                    catalog = runtime.public_module_catalog()
+                self.assertNotIn("SENTINEL", json.dumps(catalog))
+                selected = next(
+                    item
+                    for item in catalog["modules"]
+                    if item["module_id"] == f"{package_id}/mod"
+                )
+                self.assertEqual(selected["state"], "loaded")
+                self.assertEqual(
+                    selected["config_fields"], [{"name": "ordinary", "required": True}]
+                )
+                self.assertEqual(
+                    selected["capabilities"],
+                    [
+                        {
+                            "capability_id": "public_read",
+                            "invocation_policy": "command_only",
+                            "web_declared": False,
+                        },
+                        {
+                            "capability_id": "public_web",
+                            "invocation_policy": "command_and_public_web",
+                            "web_declared": True,
+                        },
+                    ],
+                )
+                self.assertNotIn("can_invoke", json.dumps(catalog))
+                with patch.object(runtime, "_closing", True):
+                    closing = runtime.public_module_catalog()
+                self.assertEqual(closing["runtime"], {"state": "closing"})
+                self.assertTrue(
+                    all(item["state"] == "unavailable" for item in closing["modules"])
+                )
+                state = runtime.lifecycle.state(f"{package_id}/mod")
+                original_state = runtime.lifecycle.state
+                for changes, reason in (
+                    ({"cleanup_pending": True}, "cleanup_pending"),
+                    ({"epoch": state.epoch + 1}, "identity_mismatch"),
+                    ({"identity": replace(state.identity)}, "identity_mismatch"),
+                ):
+                    with patch.object(
+                        runtime.lifecycle,
+                        "state",
+                        side_effect=lambda key, changes=changes: (
+                            replace(state, **changes)
+                            if key == state.module_id
+                            else original_state(key)
+                        ),
+                    ):
+                        observed = runtime.public_module_catalog()
+                    changed = next(
+                        item
+                        for item in observed["modules"]
+                        if item["module_id"] == state.module_id
+                    )
+                    self.assertEqual(
+                        (changed["state"], changed["reason"]), ("unavailable", reason)
+                    )
+                with patch.object(
+                    runtime.lifecycle,
+                    "state",
+                    side_effect=RuntimeError("SENTINEL_PRIVATE_REASON"),
+                ):
+                    with self.assertRaises(RuntimeError):
+                        runtime.public_module_catalog()
+                with patch.object(
+                    runtime.lifecycle,
+                    "state",
+                    side_effect=lambda key: replace(
+                        original_state(key), registry_revision=0
+                    ),
+                ):
+                    with self.assertRaises(RuntimeError):
+                        runtime.public_module_catalog()
+                await runtime.admin_operations.set_enabled(
+                    None,
+                    state.module_id,
+                    False,
+                    expected_registry_revision=runtime.registry.snapshot().revision,
+                    authorization=_AdminContext(),
+                )
+                self.assertEqual(
+                    next(
+                        item
+                        for item in runtime.public_module_catalog()["modules"]
+                        if item["module_id"] == state.module_id
+                    )["state"],
+                    "disabled",
+                )
+            finally:
+                self.assertTrue(await runtime.close())
+        self.assertEqual(runtime.output._message_port.calls, [])
+
+    async def test_catalog_failures_are_not_empty_success(self):
+        runtime = self._runtime()
+        await runtime.start()
+        try:
+            with patch.object(
+                runtime.registry, "snapshot", side_effect=RuntimeError("SENTINEL_ERROR")
+            ):
+                with self.assertRaises(RuntimeError):
+                    runtime.public_module_catalog()
+            from ygl_test_subject.core.registry import RegistrySnapshot
+            from ygl_test_subject.services.module_catalog import (
+                ModuleCatalogUnavailable,
+                project_module_catalog,
+            )
+
+            snapshot = RegistrySnapshot(
+                1, {f"sample/m{i}": None for i in range(65)}, {}, {}
+            )
+            with self.assertRaises(ModuleCatalogUnavailable):
+                project_module_catalog(
+                    snapshot,
+                    dict.fromkeys(snapshot.modules),
+                    dict.fromkeys(snapshot.modules),
+                    runtime_state="ready",
+                )
+        finally:
+            self.assertTrue(await runtime.close())
 
     async def test_zero_module_runtime_starts_and_closes(self) -> None:
         source = _FactorySource()

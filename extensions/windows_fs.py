@@ -48,9 +48,11 @@ MAX_WINDOWS_PATH_UNITS = 32767
 # The exact local qualification matrix, not a claim that other targets are
 # unsafe in general. Any expansion needs its own matrix and review.
 SUPPORTED_WINDOWS_BUILD = "10.0.26200"
+SUPPORTED_WINDOWS_BUILDS = (SUPPORTED_WINDOWS_BUILD, "10.0.26300")
 SUPPORTED_PYTHON = (3, 13, 9)
 SUPPORTED_CLASSIC_GIL_PYTHON = (3, 12, 10)
-SUPPORTED_PYTHON_VERSIONS = (SUPPORTED_PYTHON, SUPPORTED_CLASSIC_GIL_PYTHON)
+SUPPORTED_CLASSIC_GIL_PYTHONS = (SUPPORTED_CLASSIC_GIL_PYTHON, (3, 12, 14))
+SUPPORTED_PYTHON_VERSIONS = (SUPPORTED_PYTHON, *SUPPORTED_CLASSIC_GIL_PYTHONS)
 
 
 class WindowsScanError(ValueError):
@@ -351,8 +353,52 @@ def _parse_root(root: str | os.PathLike[str]) -> _PathSpec:
     return _PathSpec(drive, components, display_root)
 
 
+class _OsVersionInfoW(ctypes.Structure):
+    _fields_ = [
+        ("dwOSVersionInfoSize", wintypes.DWORD),
+        ("dwMajorVersion", wintypes.DWORD),
+        ("dwMinorVersion", wintypes.DWORD),
+        ("dwBuildNumber", wintypes.DWORD),
+        ("dwPlatformId", wintypes.DWORD),
+        ("szCSDVersion", wintypes.WCHAR * 128),
+    ]
+
+
+def _native_windows_version() -> tuple[int, int, int]:
+    """Read the running NT version without shell or DLL-version fallbacks."""
+    if (
+        os.name != "nt"
+        or ctypes.sizeof(wintypes.DWORD) != 4
+        or ctypes.sizeof(wintypes.LONG) != 4
+        or ctypes.sizeof(wintypes.WCHAR) != 2
+        or ctypes.sizeof(_OsVersionInfoW) != 276
+        or _OsVersionInfoW.szCSDVersion.offset != 20
+    ):
+        raise WindowsScanError("unsupported_environment")
+    try:
+        get_version = ctypes.WinDLL("ntdll").RtlGetVersion
+        get_version.argtypes = [ctypes.POINTER(_OsVersionInfoW)]
+        get_version.restype = wintypes.LONG
+        info = _OsVersionInfoW()
+        info.dwOSVersionInfoSize = ctypes.sizeof(info)
+        status = get_version(ctypes.byref(info))
+    except Exception:
+        raise WindowsScanError("unsupported_environment") from None
+    if (
+        type(status) is not int
+        or status != 0
+        or info.dwOSVersionInfoSize != ctypes.sizeof(info)
+        or info.dwPlatformId != 2
+    ):
+        raise WindowsScanError("unsupported_environment")
+    return int(info.dwMajorVersion), int(info.dwMinorVersion), int(info.dwBuildNumber)
+
+
 def _check_runtime() -> None:
-    if os.name != "nt" or platform.version() != SUPPORTED_WINDOWS_BUILD:
+    if os.name != "nt":
+        raise WindowsScanError("unsupported_environment")
+    native_version = ".".join(str(part) for part in _native_windows_version())
+    if native_version not in SUPPORTED_WINDOWS_BUILDS:
         raise WindowsScanError("unsupported_environment")
     python_version = sys.version_info[:3]
     if (
@@ -368,7 +414,7 @@ def _check_runtime() -> None:
         gil_probe = getattr(sys, "_is_gil_enabled", None)
         if gil_probe is None or gil_probe() is not True:
             raise WindowsScanError("unsupported_environment")
-    elif python_version != SUPPORTED_CLASSIC_GIL_PYTHON:
+    elif python_version not in SUPPORTED_CLASSIC_GIL_PYTHONS:
         raise WindowsScanError("unsupported_environment")
     _assert_x64_layout()
 
@@ -394,6 +440,8 @@ def _open_file_by_id(
     file_id: int,
     *,
     directory: bool,
+    access: int | None = None,
+    share_mode: int = FILE_SHARE_READ,
 ) -> _Handle:
     if not file_id or not 0 <= file_id <= 0xFFFFFFFFFFFFFFFF:
         raise WindowsScanError("identity_changed")
@@ -403,11 +451,12 @@ def _open_file_by_id(
     # Preserve the exact 64-bit bit pattern when LARGE_INTEGER is signed.
     signed_file_id = file_id if file_id < (1 << 63) else file_id - (1 << 64)
     descriptor.FileId = signed_file_id
-    access = (
-        (FILE_LIST_DIRECTORY if directory else FILE_READ_DATA)
-        | FILE_READ_ATTRIBUTES
-        | SYNCHRONIZE
-    )
+    if access is None:
+        access = (
+            (FILE_LIST_DIRECTORY if directory else FILE_READ_DATA)
+            | FILE_READ_ATTRIBUTES
+            | SYNCHRONIZE
+        )
     flags = FILE_FLAG_OPEN_REPARSE_POINT
     if directory:
         flags |= FILE_FLAG_BACKUP_SEMANTICS
@@ -416,7 +465,7 @@ def _open_file_by_id(
             wintypes.HANDLE(volume_hint.value),
             ctypes.byref(descriptor),
             access,
-            FILE_SHARE_READ,
+            share_mode,
             None,
             flags,
         )
@@ -538,14 +587,19 @@ def _volume_name(native: _Native, drive_root: str) -> str:
     return value
 
 
-def _open_volume_root(native: _Native, volume_path: str) -> _Handle:
-    access = FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | SYNCHRONIZE
+def _open_volume_root(
+    native: _Native,
+    volume_path: str,
+    *,
+    access: int = FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+    share_mode: int = FILE_SHARE_READ,
+) -> _Handle:
     flags = FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT
     value = _handle_value(
         native.CreateFileW(
             volume_path,
             access,
-            FILE_SHARE_READ,
+            share_mode,
             None,
             OPEN_EXISTING,
             flags,

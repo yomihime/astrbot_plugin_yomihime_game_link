@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import unittest
+from dataclasses import replace
 
 from ygl_test_subject.api.display import CommandsBlock, TextBlock
 from ygl_test_subject.api.manifests import (
@@ -88,6 +89,54 @@ def _package(package_id: str, *modules: ModuleManifest) -> PackageManifest:
 
 
 class HelpCatalogTests(unittest.TestCase):
+    def test_public_web_opt_in_stays_in_command_help_without_natural_language_label(
+        self,
+    ) -> None:
+        module, _, handler = _module("catalog", "catalog")
+        web = CapabilityDescriptor(
+            "web_read",
+            {"type": "object", "additionalProperties": False},
+            InvocationPolicy.COMMAND_AND_PUBLIC_WEB,
+            CapabilityEffect.READ_ONLY,
+        )
+        module = replace(
+            module,
+            capabilities=module.capabilities + (web,),
+            commands=module.commands
+            + (CommandDescriptor("web", "web_read", {}, "Read"),),
+        )
+        registry = Registry()
+        registry.register_package(
+            _package("web-tests", module),
+            {
+                "catalog": ModuleHandlers(
+                    {item.capability_id: handler for item in module.capabilities},
+                    {},
+                    {},
+                )
+            },
+        )
+        catalog = HelpCatalog()
+        total = catalog.total(registry.snapshot()).ordered_blocks[1].commands
+        self.assertIn("/ygl catalog web", total)
+        self.assertIn("/ygl catalog 绑定", total)
+        self.assertNotIn("/ygl catalog 查询", total)
+        lines = (
+            catalog.module(registry.snapshot(), "catalog").ordered_blocks[1].commands
+        )
+        web_line = next(line for line in lines if line.startswith("/ygl catalog web "))
+        self.assertIn("命令或已授权的公开网页入口", web_line)
+        self.assertNotIn("允许自然语言", web_line)
+        self.assertIn(
+            "必须通过命令",
+            next(line for line in lines if line.startswith("/ygl catalog 绑定 ")),
+        )
+        self.assertIn(
+            "允许自然语言",
+            next(line for line in lines if line.startswith("/ygl catalog 查询 ")),
+        )
+        self.assertEqual(handler.calls, 0)
+
     def test_hp01_zero_modules_has_explicit_empty_state_and_help_prompt(self) -> None:
         document = HelpCatalog().total(Registry().snapshot())
 

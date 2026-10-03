@@ -4,9 +4,10 @@ import asyncio
 import json
 import tempfile
 import unittest
+from contextlib import ExitStack
 from pathlib import Path
 from secrets import token_urlsafe
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from ygl_test_subject.api.administration import AdminAuthorizationDenied
 from ygl_test_subject.api.display import DisplayLimits, DisplayOutput
@@ -20,11 +21,13 @@ from ygl_test_subject.api.services import (
 )
 from ygl_test_subject.api.storage import SecretReceiptState, SecretTarget
 from ygl_test_subject.core.ports import MessageReceipt, MessageStatus
+from ygl_test_subject.extensions.discovery import discover_packages
 from ygl_test_subject.infrastructure.sqlite.database import SQLiteDatabase
 from ygl_test_subject.services.admin_authorization import _digest
 from ygl_test_subject.services.core_runtime import (
     CoreRuntime,
     CoreRuntimeCleanupPending,
+    TrustedSubscriptionGate,
 )
 
 
@@ -75,7 +78,13 @@ class AdminOperationsRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 pass
         self.temp.cleanup()
 
-    def _runtime(self, *, context_validator=None) -> CoreRuntime:
+    def _runtime(
+        self,
+        *,
+        context_validator=None,
+        trusted_bundled_manifests=None,
+        trusted_subscription_gates=None,
+    ) -> CoreRuntime:
         extension_root = self.root / "extensions"
         extension_root.mkdir(exist_ok=True)
         self.runtime = CoreRuntime(
@@ -94,6 +103,8 @@ class AdminOperationsRuntimeTests(unittest.IsolatedAsyncioTestCase):
             identity_namespace="test-namespace",
             pump_interval=3600,
             cleanup_timeout=0.5,
+            trusted_bundled_manifests=trusted_bundled_manifests,
+            trusted_subscription_gates=trusted_subscription_gates,
         )
         return self.runtime
 
@@ -113,6 +124,112 @@ class AdminOperationsRuntimeTests(unittest.IsolatedAsyncioTestCase):
         credential = token_urlsafe(32)
         await runtime.admin_credential_repository.bootstrap(_digest(credential))
         return credential, _AdminContext()
+
+    async def test_real_admin_gate_policy_rejects_mixed_invalid_patch_before_secret_stage(
+        self,
+    ):
+        package_root = self.root / "extensions/admin"
+        package_root.mkdir(parents=True)
+        manifest = _config_manifest()
+        manifest["modules"][0]["config_fields"].extend(
+            [{"name": "gate", "default": True}, {"name": "token", "sensitive": True}]
+        )
+        (package_root / "yomihime.manifest.json").write_text(
+            json.dumps(manifest), encoding="utf-8"
+        )
+        (package_root / "module.py").write_text(
+            "raise RuntimeError('offline fixture')\n", encoding="utf-8"
+        )
+        package = discover_packages(package_root.parent)[0]
+        expected = package.manifest.modules[0]
+        runtime = self._runtime(
+            trusted_bundled_manifests={"admin/mod": expected},
+            trusted_subscription_gates={
+                "admin/mod": TrustedSubscriptionGate(
+                    expected, "gate", package._provenance.manifest_sha256
+                )
+            },
+        )
+        await runtime.start()
+        _, context = await self._bootstrap(runtime)
+        fields = expected.config_fields
+        for mode, value in (
+            (ConfigPatchMode.CLEAR, None),
+            (ConfigPatchMode.REPLACE, "true"),
+        ):
+            for gate_first in (True, False):
+                with (
+                    self.subTest(mode=mode, gate_first=gate_first),
+                    ExitStack() as stack,
+                ):
+                    spies = [
+                        stack.enter_context(
+                            patch.object(
+                                runtime.secret_store, method, new_callable=AsyncMock
+                            )
+                        )
+                        for method in (
+                            "stage",
+                            "claim_for_config",
+                            "finalize_active",
+                            "mark_cas_conflict",
+                            "pending",
+                        )
+                    ]
+                    spies += [
+                        stack.enter_context(
+                            patch.object(
+                                runtime.config_repository,
+                                method,
+                                new_callable=AsyncMock,
+                            )
+                        )
+                        for method in ("current", "update_authorized")
+                    ]
+                    publish = stack.enter_context(
+                        patch.object(runtime.health_resolver, "publish_config")
+                    )
+                    gate = ConfigFieldUpdate("gate", mode, value=value)
+                    secret = ConfigFieldUpdate(
+                        "token",
+                        ConfigPatchMode.REPLACE,
+                        secret=SecretMaterial(b"synthetic-never-staged"),
+                    )
+                    updates = (gate, secret) if gate_first else (secret, gate)
+                    with self.assertRaises(ValueError):
+                        await runtime.admin_facade.update_config(
+                            None,
+                            "admin/mod",
+                            ConfigPatch(1, updates, fields),
+                            authorization=context,
+                        )
+                    for spy in spies:
+                        spy.assert_not_called()
+                    publish.assert_not_called()
+        updated = await runtime.admin_facade.update_config(
+            None,
+            "admin/mod",
+            ConfigPatch(
+                1,
+                (
+                    ConfigFieldUpdate("gate", ConfigPatchMode.REPLACE, value=False),
+                    ConfigFieldUpdate(
+                        "token",
+                        ConfigPatchMode.REPLACE,
+                        secret=SecretMaterial(b"synthetic-configured"),
+                    ),
+                ),
+                fields,
+            ),
+            authorization=context,
+        )
+        self.assertEqual(updated.revision, 2)
+        self.assertEqual(updated.fields["token"], "configured")
+        persisted = await runtime.config_repository.current(
+            ConfigTarget("host-config", "admin/mod")
+        )
+        self.assertIs(persisted.values["gate"], False)
+        await runtime.close(timeout=0.5)
 
     async def test_real_facade_reads_catalog_and_updates_exact_config(self) -> None:
         runtime = self._runtime()

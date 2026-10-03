@@ -63,6 +63,31 @@ def _module(**changes: object) -> ModuleManifest:
 
 
 class ManifestContractTests(unittest.TestCase):
+    def test_public_web_opt_in_is_read_only_public_and_not_a_tool(self) -> None:
+        policy = InvocationPolicy.COMMAND_AND_PUBLIC_WEB
+        self.assertIs(InvocationPolicy(policy.value), policy)
+        capability = _capability(invocation_policy=policy)
+        command = CommandDescriptor("search", "lookup", {"query": "query"}, "Search")
+        module = _module(capabilities=(capability,), commands=(command,))
+        self.assertIs(module.capabilities[0].invocation_policy, policy)
+        for privacy, effect in (
+            (PrivacyFloor.PRIVATE, CapabilityEffect.READ_ONLY),
+            (PrivacyFloor.OWNER, CapabilityEffect.READ_ONLY),
+            (PrivacyFloor.PUBLIC, CapabilityEffect.WRITE),
+        ):
+            with self.subTest(privacy=privacy, effect=effect):
+                with self.assertRaises(ValueError):
+                    _capability(
+                        invocation_policy=policy, privacy_floor=privacy, effect=effect
+                    )
+        tool = ToolDescriptor("lookup", "lookup", {"query": "query"}, "Search")
+        with self.assertRaisesRegex(ValueError, "natural_language_allowed"):
+            _module(capabilities=(capability,), tools=(tool,))
+        self.assertIs(
+            _module(tools=(tool,)).capabilities[0].invocation_policy,
+            InvocationPolicy.NATURAL_LANGUAGE_ALLOWED,
+        )
+
     def test_valid_package_is_frozen_and_uses_immutable_mappings(self) -> None:
         parameters = {"query": "query"}
         module = _module(

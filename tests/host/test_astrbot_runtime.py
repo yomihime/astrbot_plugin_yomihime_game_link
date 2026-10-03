@@ -7,9 +7,20 @@ import json
 import shutil
 import tempfile
 import unittest
+from collections import deque
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from unittest.mock import patch
 
+from ygl_test_subject.adapters.astrbot.bundled import (
+    BundledExtensionError,
+    BundledExtensionInstallation,
+)
+from ygl_test_subject.adapters.astrbot.command_bridge import (
+    AstrBotCommandBridge,
+    CommandInvocation,
+)
 from ygl_test_subject.adapters.astrbot.message_port import AstrBotMessagePort
 from ygl_test_subject.adapters.astrbot.runtime import PLUGIN_NAME, AstrBotRuntime
 from ygl_test_subject.api.administration import AdminAuthorizationGrant, AdminOperation
@@ -23,7 +34,16 @@ from ygl_test_subject.api.manifests import (
     PackageManifest,
     PrivacyFloor,
 )
-from ygl_test_subject.api.services import HealthStatus, HttpResponse, ModuleHandlers
+from ygl_test_subject.api.services import (
+    ConfigFieldUpdate,
+    ConfigPatch,
+    ConfigPatchMode,
+    ConfigTarget,
+    HealthStatus,
+    HttpResponse,
+    ModuleHandlers,
+    SecretMaterial,
+)
 from ygl_test_subject.api.subscriptions import ConversationKind, ConversationRef
 from ygl_test_subject.api.version import CONTRACT_VERSION
 from ygl_test_subject.core.ports import (
@@ -43,8 +63,10 @@ from ygl_test_subject.infrastructure.sqlite.repositories_runtime import (
     SQLiteModuleRuntimeRepository,
 )
 from ygl_test_subject.services.core_runtime import (
+    CoreRuntime,
     CoreRuntimeCleanupPending,
     HostIngress,
+    TrustedSubscriptionGate,
 )
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -226,6 +248,8 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
         context: _Context,
         *,
         http_transport_factory=None,
+        config=None,
+        core_factory=CoreRuntime,
     ) -> AstrBotRuntime:
         return AstrBotRuntime(
             context,
@@ -234,7 +258,679 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
             plain_factory=_Plain,
             chain_factory=lambda components: _MessageChain(list(components)),
             http_transport_factory=http_transport_factory,
+            config=config,
+            core_factory=core_factory,
         )
+
+    async def test_public_web_real_core_and_bundled_three_queries_are_offline(self):
+        from tests.host.test_ff14_pages import _host_contracts, _request
+        from tests.modules.ff14.test_calendar import _event, _ics
+        from tests.modules.ff14.test_fflogs import _character_responses
+
+        class Transport(_ItemReplyTransport):
+            def __init__(self):
+                super().__init__()
+                self.logs = deque(_character_responses())
+                self.exchanges = 0
+                self._credential_channel = object()
+
+            async def request(self, request):
+                if request.source_id == "fflogs_public_global":
+                    self.requests.append(request)
+                    return HttpResponse(
+                        200, {}, json.dumps(self.logs.popleft()).encode()
+                    )
+                if request.source_id.startswith("ff14_calendar"):
+                    self.requests.append(request)
+                    tomorrow = datetime.now(UTC) + timedelta(days=1)
+                    raw = _ics(
+                        _event(
+                            "synthetic",
+                            "DTSTART:" + tomorrow.strftime("%Y%m%dT%H%M%SZ"),
+                            "DTEND:"
+                            + (tomorrow + timedelta(hours=1)).strftime(
+                                "%Y%m%dT%H%M%SZ"
+                            ),
+                            "SUMMARY:Synthetic event",
+                        )
+                    )
+                    return HttpResponse(200, {"Content-Type": "text/calendar"}, raw)
+                return await super().request(request)
+
+            async def request_credential_exchange(self, request):
+                self.exchanges += 1
+                return HttpResponse(
+                    200,
+                    {},
+                    b'{"access_token":"synthetic-token","token_type":"Bearer","expires_in":3600}',
+                )
+
+        class Admin:
+            adapter_id, request_id, session_id = "synthetic", "synthetic", "synthetic"
+
+        admin = Admin()
+
+        def core_factory(**kwargs):
+            kwargs["admin_context_validator"] = lambda _op, _inv, context, _gen: (
+                context is admin
+            )
+            return CoreRuntime(**kwargs)
+
+        context, transport = _Context(), Transport()
+        runtime = self._runtime(
+            context,
+            config={"web_public_origin": "https://ui.test"},
+            http_transport_factory=lambda: transport,
+            core_factory=core_factory,
+        )
+        web, _ = _host_contracts()
+        with patch(
+            "ygl_test_subject.adapters.astrbot.runtime.EnvironmentKeyProvider.get_key",
+            return_value=bytes(range(32)),
+        ):
+            try:
+                await runtime.initialize()
+                core = runtime.core_runtime
+                await core.admin_credential_repository.bootstrap(bytes(range(32)))
+                snapshot = await core.config_repository.current(
+                    ConfigTarget(PLUGIN_NAME, "ff14/ff14")
+                )
+                fields = (
+                    core.extension_runtime.candidate("ff14")
+                    .package.manifest.modules[0]
+                    .config_fields
+                )
+                await core.admin_operations.update_config(
+                    None,
+                    "ff14/ff14",
+                    ConfigPatch(
+                        snapshot.revision,
+                        (
+                            ConfigFieldUpdate(
+                                "credential_fflogs_global",
+                                ConfigPatchMode.REPLACE,
+                                secret=SecretMaterial(
+                                    b'{"schema":1,"client_id":"synthetic-id","client_secret":"synthetic-secret"}'
+                                ),
+                            ),
+                        ),
+                        declared_fields=fields,
+                    ),
+                    authorization=admin,
+                )
+                for endpoint, body in (
+                    ("items", {"query": "100"}),
+                    (
+                        "character",
+                        {
+                            "region": "global",
+                            "server": "Cerberus",
+                            "character": "Synthetic Hero",
+                        },
+                    ),
+                    ("calendar", {"region": "global", "days": 7, "timezone": "UTC"}),
+                ):
+                    with self.subTest(endpoint=endpoint):
+                        request = _request(web, endpoint, body=body)
+                        state = runtime.begin_public_web(
+                            request, endpoint, request.path
+                        )
+                        try:
+                            from ygl_test_subject.adapters.astrbot.web_public import (
+                                query_parameters,
+                            )
+
+                            result = await runtime.invoke_public_web(
+                                state,
+                                endpoint,
+                                query_parameters(endpoint, json.dumps(body).encode()),
+                            )
+                        finally:
+                            runtime.finish_public_web(state)
+                        self.assertIn(
+                            result["status"],
+                            ("success", "partial_success", "needs_selection"),
+                            result,
+                        )
+                        self.assertIsNotNone(result["document"])
+                self.assertEqual(transport.exchanges, 1)
+                self.assertEqual(context.calls, [])
+                self.assertFalse(runtime._web_validator._requests)
+                counts = await core.database.executor.run_read(
+                    lambda connection: tuple(
+                        connection.execute("SELECT COUNT(*) FROM " + name).fetchone()[0]
+                        for name in ("b04_subscriptions", "b04_delivery_events")
+                    )
+                )
+                self.assertEqual(counts, (0, 0))
+            finally:
+                await runtime.terminate()
+
+    async def test_public_web_same_bearer_budget_and_terminate_revoke_before_lock(self):
+        from tests.host.test_ff14_pages import _host_contracts, _request, _token
+
+        web, _ = _host_contracts()
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        class Transport(_ItemReplyTransport):
+            async def request(self, request):
+                entered.set()
+                await release.wait()
+                return await super().request(request)
+
+        runtime = self._runtime(
+            _Context(),
+            config={"web_public_origin": "https://ui.test"},
+            http_transport_factory=Transport,
+        )
+        states, tasks = [], []
+        try:
+            await runtime.initialize()
+            token = _token()
+            for _ in range(3):
+                request = _request(web, token=token)
+                states.append(runtime.begin_public_web(request, "items", request.path))
+            keys = [state[0]._requests[state[1]].key for state in states]
+            self.assertEqual(len(set(keys)), 1)
+            tasks = [
+                asyncio.create_task(
+                    runtime.invoke_public_web(state, "items", {"query": "100"})
+                )
+                for state in states[:2]
+            ]
+            await entered.wait()
+            await asyncio.sleep(0)
+            rejected = await runtime.invoke_public_web(
+                states[2], "items", {"query": "100"}
+            )
+            self.assertEqual(rejected["status"], "error")
+            self.assertEqual(rejected["error"]["code"], "rate_limited")
+            release.set()
+            results = await asyncio.gather(*tasks)
+            self.assertTrue(
+                all(
+                    result["status"]
+                    in ("success", "partial_success", "needs_selection")
+                    for result in results
+                ),
+                results,
+            )
+            old_validator, old_core = runtime._web_validator, runtime.core_runtime
+            request = _request(web, token=token)
+            state = runtime.begin_public_web(request, "items", request.path)
+            states.append(state)
+            proof = old_validator.mint(state[1])
+            binding = old_validator.consume(
+                proof, module_id="ff14/ff14", capability_id="item.lookup", generation=7
+            )
+            await runtime._lock.acquire()
+            stopping = asyncio.create_task(runtime.terminate())
+            await asyncio.sleep(0)
+            self.assertFalse(old_validator.is_current(proof, binding))
+            self.assertFalse(runtime.ready)
+            runtime._lock.release()
+            await stopping
+            await runtime.initialize()
+            self.assertIsNot(runtime.core_runtime, old_core)
+            request = _request(web, token=token)
+            new_state = runtime.begin_public_web(request, "items", request.path)
+            states.append(new_state)
+            self.assertNotEqual(
+                runtime._web_validator._requests[new_state[1]].key, keys[0]
+            )
+            self.assertFalse(runtime._web_validator.is_current(proof, binding))
+        finally:
+            release.set()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            for state in states:
+                runtime.finish_public_web(state)
+            await runtime.terminate()
+
+    async def test_trusted_gate_binding_comes_from_one_scan_and_initializes_installed_sha(
+        self,
+    ):
+        with patch(
+            "ygl_test_subject.adapters.astrbot.runtime.discover_packages",
+            wraps=discover_packages,
+        ) as scan:
+            expected, gates = AstrBotRuntime._bundled_manifest_expectations(
+                self.plugin_root
+            )
+            scan.assert_called_once()
+        gate = gates["ff14/ff14"]
+        self.assertIsInstance(gate, TrustedSubscriptionGate)
+        self.assertIs(gate.manifest, expected["ff14/ff14"])
+        self.assertEqual(gate.field, "ff14_subscriptions_enabled")
+        with self.assertRaises(TypeError):
+            gates["other/mod"] = gate
+        runtime = self._runtime(_Context(), http_transport_factory=_IdleTransport)
+        try:
+            await runtime.initialize()
+            core = runtime.core_runtime
+            candidate = core.extension_runtime.candidate("ff14").package
+            packaged = discover_packages(self.plugin_root / "modules")[0]
+            self.assertNotEqual(
+                packaged._provenance.root_locator, candidate._provenance.root_locator
+            )
+            self.assertEqual(
+                candidate._provenance.manifest_sha256, gate.manifest_sha256
+            )
+            snapshot = await core.config_repository.current(
+                ConfigTarget(PLUGIN_NAME, "ff14/ff14")
+            )
+            self.assertIs(snapshot.values[gate.field], True)
+            connection = core.database.connect()
+            try:
+                self.assertEqual(
+                    connection.execute(
+                        "SELECT phase FROM subscription_gate_bootstrap"
+                    ).fetchone()[0],
+                    "complete",
+                )
+            finally:
+                connection.close()
+            self.assertTrue(
+                (await runtime.public_ff14_page_state())["subscription_gate"][
+                    "supported"
+                ]
+            )
+        finally:
+            await runtime.terminate()
+
+    async def test_untrusted_bundle_never_initializes_gate_bootstrap(self):
+        runtime = self._runtime(_Context(), http_transport_factory=_IdleTransport)
+        installation = BundledExtensionInstallation(
+            self.data_dir / "untrusted",
+            self.data_dir / "untrusted/ff14",
+            False,
+            False,
+            "existing_manifest_mismatch",
+        )
+        with patch(
+            "ygl_test_subject.adapters.astrbot.runtime.install_bundled_ff14",
+            return_value=installation,
+        ):
+            try:
+                await runtime.initialize()
+                connection = runtime.core_runtime.database.connect()
+                try:
+                    self.assertEqual(
+                        connection.execute(
+                            "SELECT phase FROM subscription_gate_bootstrap"
+                        ).fetchone()[0],
+                        "pending",
+                    )
+                    self.assertEqual(
+                        connection.execute(
+                            "SELECT COUNT(*) FROM config_entries"
+                        ).fetchone()[0],
+                        0,
+                    )
+                finally:
+                    connection.close()
+            finally:
+                await runtime.terminate()
+
+    async def test_invalid_config_starts_no_install_core_transport_or_background(self):
+        context = _Context()
+        for config in (
+            {"ff14_calendar_default_days": 31},
+            {"ff14_calendar_default_timezone": "private-invalid-zone"},
+        ):
+            with self.subTest(config_key=next(iter(config))):
+                with patch(
+                    "ygl_test_subject.adapters.astrbot.runtime.install_bundled_ff14"
+                ) as install:
+                    runtime = self._runtime(
+                        context,
+                        config=config,
+                        http_transport_factory=lambda: self.fail("transport created"),
+                    )
+                    await runtime.initialize()
+                    install.assert_not_called()
+                    self.assertFalse(runtime.ready)
+                    self.assertIsNone(runtime.core_runtime)
+                    for command in (
+                        "/ygl help",
+                        "/ygl ff14 status",
+                        "/ygl ff14 item cn 100",
+                    ):
+                        event = _Event()
+                        event.message = command
+                        text = await runtime.handle_event(event)
+                        self.assertIn("原生配置表单", text)
+                        self.assertIn("尚未启动", text)
+                        self.assertNotIn("private-invalid-zone", text)
+                    await runtime.terminate()
+        self.assertEqual(context.calls, [])
+        self.assertEqual(list(self.data_dir.iterdir()), [])
+
+    async def test_constructor_snapshot_flows_to_sdk_without_core_double_write(self):
+        config = {
+            "ff14_default_region": "global",
+            "ff14_calendar_default_days": 3,
+            "ff14_calendar_default_timezone": "UTC",
+            "ff14_calendar_default_delivery_time": "13:25",
+        }
+        runtime = self._runtime(
+            _Context(), config=config, http_transport_factory=_IdleTransport
+        )
+        # A later host mutation cannot alter this instance or prevent startup.
+        config["ff14_calendar_default_days"] = 31
+        await runtime.initialize()
+        try:
+            core = runtime.core_runtime
+            services = core.module_services.for_module("ff14/ff14")
+            snapshot = await services.config.current()
+            self.assertEqual(snapshot.values["ff14_calendar_default_days"], 3)
+            module = core.registry.snapshot().module("ff14/ff14")
+            query = module.handlers.capabilities["ff14.calendar.query"]
+            subscribe = module.handlers.capabilities[
+                "ff14.calendar.subscription.create"
+            ]
+            self.assertEqual(query._config.calendar_default_days, 3)
+            self.assertEqual(subscribe._config.calendar_default_delivery_time, "13:25")
+            stored = await core.repositories.config.current(snapshot.target)
+            self.assertFalse(set(stored.values) & set(config))
+            event = _Event()
+            event.message = "/ygl ff14 calendar"
+            help_text = await runtime.handle_event(event)
+            self.assertIn("默认区域提示：global", help_text)
+            self.assertIn("明确填写区域", help_text)
+        finally:
+            await runtime.terminate()
+
+    async def test_reload_rejects_invalid_config_and_preserves_existing_subscription(
+        self,
+    ):
+        context = _Context()
+        config = {
+            "ff14_calendar_default_timezone": "UTC",
+            "ff14_calendar_default_delivery_time": "13:25",
+        }
+        runtime = self._runtime(
+            context, config=config, http_transport_factory=_IdleTransport
+        )
+        await runtime.initialize()
+        event = _Event("FriendMessage")
+        event.message = "/ygl ff14 calendar subscribe cn"
+        try:
+            await runtime.handle_event(event)
+            self.assertTrue(context.calls)
+            self.assertIn("13:25", context.calls[-1][1].chain[0].text)
+        finally:
+            await runtime.terminate()
+        database = self.data_dir / "runtime.sqlite3"
+        before = database.read_bytes()
+        rejected = self._runtime(
+            context,
+            config={"ff14_calendar_default_days": 31},
+            http_transport_factory=lambda: self.fail(
+                "invalid reload created transport"
+            ),
+        )
+        await rejected.initialize()
+        self.assertFalse(rejected.ready)
+        self.assertEqual(database.read_bytes(), before)
+        await rejected.terminate()
+        restored = self._runtime(
+            context,
+            config={
+                "ff14_calendar_default_timezone": "Asia/Tokyo",
+                "ff14_calendar_default_delivery_time": "18:00",
+            },
+            http_transport_factory=_IdleTransport,
+        )
+        await restored.initialize()
+        event.message = "/ygl ff14 calendar subscriptions"
+        try:
+            await restored.handle_event(event)
+            text = context.calls[-1][1].chain[0].text
+            self.assertIn("UTC", text)
+            self.assertIn("13:25", text)
+            self.assertNotIn("18:00", text)
+        finally:
+            await restored.terminate()
+
+    async def test_old_initialize_cannot_publish_after_terminate_starts(self):
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        class Core:
+            registry = Registry()
+
+            async def start(self):
+                entered.set()
+                await release.wait()
+
+            async def close(self):
+                return True
+
+        runtime = self._runtime(
+            _Context(),
+            http_transport_factory=_IdleTransport,
+        )
+        runtime._core_factory = lambda **_: Core()
+        start = asyncio.create_task(runtime.initialize())
+        await entered.wait()
+        close = asyncio.create_task(runtime.terminate())
+        await asyncio.sleep(0)
+        self.assertFalse(runtime.ready)
+        release.set()
+        await start
+        self.assertFalse(runtime.ready)
+        self.assertIsNone(runtime._bridge)
+        await close
+        self.assertIsNone(runtime.core_runtime)
+
+    async def test_public_projection_fences_core_replacement_readiness_and_close(self):
+        from types import SimpleNamespace
+
+        from ygl_test_subject.core.ports import SubscriptionGateState
+
+        for change in ("replace", "ready", "close"):
+            with self.subTest(change=change):
+                entered, release = asyncio.Event(), asyncio.Event()
+
+                async def blocked(_):
+                    entered.set()
+                    await release.wait()
+                    return SubscriptionGateState(True, True, True, None)
+
+                runtime = self._runtime(_Context())
+                runtime._core = SimpleNamespace(subscription_gate_state=blocked)
+                runtime._ready = True
+                task = asyncio.create_task(runtime.public_ff14_page_state())
+                await entered.wait()
+                if change == "replace":
+                    runtime._core = None
+                elif change == "ready":
+                    runtime._ready = False
+                else:
+                    runtime._generation += 1
+                    runtime._closing = True
+                release.set()
+                with self.assertRaisesRegex(RuntimeError, "generation changed"):
+                    await task
+
+    async def test_public_page_projection_ready_uses_registry_but_never_secrets(self):
+        runtime = self._runtime(_Context(), http_transport_factory=_IdleTransport)
+        await runtime.initialize()
+        try:
+            core = runtime.core_runtime
+            with patch.object(
+                type(core.module_services),
+                "for_module",
+                side_effect=AssertionError("page read module services"),
+            ):
+                overview = await runtime.public_ff14_page_state()
+                settings = await runtime.public_ff14_page_state(include_values=True)
+            self.assertEqual(overview["runtime"], {"state": "ready", "reason": None})
+            self.assertEqual(overview["module"], {"registered": True, "enabled": True})
+            self.assertNotIn("values", overview["ordinary_config"])
+            self.assertEqual(
+                settings["ordinary_config"]["values"],
+                dict(runtime._config_snapshot.as_values()),
+            )
+            for item in overview["credentials"].values():
+                self.assertEqual(item, {"configured": None, "state": "unknown"})
+            self.assertEqual(
+                overview["subscription_gate"],
+                {"supported": True, "enabled": True, "can_run": True, "reason": None},
+            )
+            self.assertEqual(len(overview["sources"]), 6)
+            self.assertTrue(
+                all(
+                    item["declared"] is True
+                    and item["freshness"] == "unknown"
+                    and item["last_success_at"] is None
+                    for item in overview["sources"]
+                )
+            )
+            self.assertEqual(
+                set(overview),
+                {
+                    "schema_version",
+                    "runtime",
+                    "module",
+                    "ordinary_config",
+                    "credentials",
+                    "subscription_gate",
+                    "sources",
+                },
+            )
+            settings["ordinary_config"]["values"]["ff14_calendar_default_days"] = 20
+            self.assertEqual(
+                (await runtime.public_ff14_page_state(include_values=True))[
+                    "ordinary_config"
+                ]["values"]["ff14_calendar_default_days"],
+                7,
+            )
+        finally:
+            await runtime.terminate()
+
+    async def test_catalog_real_ff14_is_metadata_only_and_never_invokes(self):
+        context = _Context()
+        runtime = self._runtime(context, http_transport_factory=_IdleTransport)
+        self.assertIsNone(runtime.public_module_catalog()["modules"])
+        await runtime.initialize()
+        try:
+            core = runtime.core_runtime
+            with (
+                patch.object(
+                    type(core.repositories.config),
+                    "current",
+                    side_effect=AssertionError("catalog read config values"),
+                ),
+                patch.object(
+                    type(core.module_services),
+                    "for_module",
+                    side_effect=AssertionError("catalog invoked module"),
+                ),
+            ):
+                catalog = runtime.public_module_catalog()
+            self.assertEqual(catalog["runtime"], {"state": "ready"})
+            self.assertEqual(len(catalog["modules"]), 1)
+            module = catalog["modules"][0]
+            self.assertEqual(module["module_id"], "ff14/ff14")
+            self.assertEqual(module["state"], "loaded")
+            self.assertEqual(
+                set(module),
+                {
+                    "module_id",
+                    "route",
+                    "category",
+                    "version",
+                    "enabled",
+                    "lifecycle",
+                    "state",
+                    "reason",
+                    "capabilities",
+                    "config_fields",
+                },
+            )
+            self.assertTrue(
+                all(
+                    set(item) == {"name", "required"}
+                    for item in module["config_fields"]
+                )
+            )
+            self.assertNotIn("can_invoke", json.dumps(catalog))
+            catalog["modules"].clear()
+            self.assertEqual(len(runtime.public_module_catalog()["modules"]), 1)
+            self.assertEqual(context.calls, [])
+            project = core.public_module_catalog
+
+            def changes_generation():
+                data = project()
+                runtime._generation += 1
+                return data
+
+            with patch.object(core, "public_module_catalog", changes_generation):
+                with self.assertRaisesRegex(RuntimeError, "generation changed"):
+                    runtime.public_module_catalog()
+        finally:
+            await runtime.terminate()
+        self.assertEqual(
+            runtime.public_module_catalog()["runtime"], {"state": "not_ready"}
+        )
+        self.assertIsNone(runtime.public_module_catalog()["modules"])
+
+    async def test_catalog_invalid_configuration_is_unknown_directory(self):
+        runtime = self._runtime(_Context(), config={"ff14_calendar_default_days": 0})
+        await runtime.initialize()
+        self.assertEqual(
+            runtime.public_module_catalog(),
+            {
+                "schema_version": 1,
+                "catalog_revision": None,
+                "runtime": {"state": "invalid_config"},
+                "modules": None,
+            },
+        )
+        await runtime.terminate()
+
+    async def test_public_page_projection_invalid_config_is_recoverable_without_core(
+        self,
+    ):
+        runtime = self._runtime(_Context(), config={"ff14_calendar_default_days": 0})
+        await runtime.initialize()
+        data = await runtime.public_ff14_page_state(include_values=True)
+        self.assertEqual(
+            data["runtime"],
+            {"state": "invalid_config", "reason": "ordinary_config_invalid"},
+        )
+        self.assertEqual(
+            data["ordinary_config"],
+            {
+                "state": "invalid",
+                "invalid_field": "ff14_calendar_default_days",
+                "values": None,
+            },
+        )
+        self.assertEqual(data["module"], {"registered": None, "enabled": None})
+        self.assertTrue(all(item["declared"] is None for item in data["sources"]))
+        self.assertIsNone(runtime.core_runtime)
+
+    async def test_public_projection_registry_failure_is_unknown_not_missing(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+
+        runtime = self._runtime(_Context())
+        self.assertEqual(
+            (await runtime.public_ff14_page_state())["ordinary_config"]["state"],
+            "valid_not_ready",
+        )
+        registry = Mock()
+        registry.snapshot.side_effect = RuntimeError("private runtime path")
+        runtime._core = SimpleNamespace(registry=registry)
+        data = await runtime.public_ff14_page_state()
+        self.assertEqual(data["module"], {"registered": None, "enabled": None})
+        self.assertTrue(all(item["declared"] is None for item in data["sources"]))
+        registry.snapshot.side_effect = None
+        registry.snapshot.return_value = SimpleNamespace(modules={})
+        data = await runtime.public_ff14_page_state()
+        self.assertEqual(data["module"], {"registered": False, "enabled": False})
+        self.assertTrue(all(item["declared"] is False for item in data["sources"]))
 
     async def test_initialize_is_single_and_real_core_command_reaches_message_chain(
         self,
@@ -378,6 +1074,69 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(persisted)
         self.assertTrue(persisted.desired_enabled)
         self.assertEqual(manifest_path.read_bytes(), changed_manifest)
+        self.assertEqual(runtime.bundle_failure_reason, "existing_manifest_mismatch")
+        for message in ("/ygl help", "/ygl ff14 status"):
+            event = _Event()
+            event.message = message
+            diagnostic = await runtime.handle_event(event)
+            self.assertIn("FF14 内置模块未能安全加载", diagnostic)
+            self.assertIn("[existing_manifest_mismatch]", diagnostic)
+            self.assertIn("清单与发行包不一致", diagnostic)
+            self.assertIn("重载插件", diagnostic)
+            self.assertNotIn(str(self.data_dir), diagnostic)
+        await runtime.terminate()
+
+    async def test_bundle_failure_reasons_have_safe_distinct_recovery_actions(self):
+        cases = (
+            ("package_root_unavailable", "暂存目录", "长路径支持"),
+            ("package_permission_denied", "访问被拒绝", "目录权限"),
+            ("extension_root_permission_denied", "访问被拒绝", "目录权限"),
+            ("unknown-private-path-and-secret", "未能安全确认", "宿主安装日志"),
+        )
+        for reason, category, action in cases:
+            with self.subTest(reason=reason):
+                context = _Context()
+                runtime = self._runtime(context, http_transport_factory=_IdleTransport)
+                outcome = BundledExtensionInstallation(
+                    self.data_dir / "untrusted",
+                    self.data_dir / "untrusted" / "ff14",
+                    False,
+                    False,
+                    reason,
+                )
+                with patch(
+                    "ygl_test_subject.adapters.astrbot.runtime.install_bundled_ff14",
+                    return_value=outcome,
+                ):
+                    await runtime.initialize()
+                try:
+                    reply = await runtime.handle_event(_Event())
+                    self.assertIn(category, reply)
+                    self.assertIn(action, reply)
+                    self.assertNotIn("当前没有已注册模块", reply)
+                    self.assertNotIn(str(self.data_dir), reply)
+                    self.assertNotIn("unknown-private-path-and-secret", reply)
+                    self.assertEqual(context.calls, [])
+                finally:
+                    await runtime.terminate()
+
+    async def test_unsupported_bundle_environment_is_visible_on_startup_and_help(self):
+        runtime = self._runtime(_Context(), http_transport_factory=_IdleTransport)
+        with patch(
+            "ygl_test_subject.adapters.astrbot.runtime.install_bundled_ff14",
+            side_effect=BundledExtensionError("unsupported_environment"),
+        ):
+            with self.assertRaises(RuntimeError) as raised:
+                await runtime.initialize()
+        self.assertIn("[unsupported_environment]", str(raised.exception))
+        self.assertIn("Windows/Python", str(raised.exception))
+        self.assertIn("重启宿主", str(raised.exception))
+        self.assertNotIn(str(self.plugin_root), str(raised.exception))
+        self.assertFalse(runtime.ready)
+        self.assertIsNone(runtime.core_runtime)
+        event = _Event()
+        event.message = "/ygl help"
+        self.assertEqual(await runtime.handle_event(event), str(raised.exception))
         await runtime.terminate()
 
     async def test_other_message_and_changed_event_facts_are_rejected(self):
@@ -580,6 +1339,20 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
         without_config = self._runtime(_Context())
         self.assertIsNone(without_config._configured_http_proxy())
+
+    async def test_page_item_copy_command_parses_the_exact_item_query(self):
+        runtime = self._runtime(_Context(), http_transport_factory=_IdleTransport)
+        await runtime.initialize()
+        try:
+            event = _Event()
+            event.message = "/ygl ff14 item 44091"
+            action = AstrBotCommandBridge(runtime.core_runtime.registry).parse(event)
+            self.assertIsInstance(action, CommandInvocation)
+            self.assertEqual(action.module_id, "ff14/ff14")
+            self.assertEqual(action.operation_path, "item")
+            self.assertEqual(dict(action.parameters), {"query": "44091"})
+        finally:
+            await runtime.terminate()
 
     async def test_item_command_uses_core_sources_and_public_output(self):
         context = _Context()

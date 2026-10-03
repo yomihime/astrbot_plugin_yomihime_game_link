@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import tempfile
 import unittest
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from secrets import token_urlsafe
@@ -13,6 +14,7 @@ from ygl_test_subject.api.contexts import InvocationOrigin
 from ygl_test_subject.api.display import DisplayDocument, Privacy, TextBlock
 from ygl_test_subject.api.manifests import (
     CapabilityReference,
+    InvocationPolicy,
     ModuleCategory,
     ModuleManifest,
     PackageManifest,
@@ -42,8 +44,10 @@ from ygl_test_subject.api.storage import (
 )
 from ygl_test_subject.api.subscriptions import CollectionKey, NormalizedInput
 from ygl_test_subject.api.version import CONTRACT_VERSION
+from ygl_test_subject.core.context_issuer import ContextIssuer
 from ygl_test_subject.core.invocation import Gateway
 from ygl_test_subject.core.ports import CollectionRunRequest, SecretOwner
+from ygl_test_subject.core.registry import Registry
 from ygl_test_subject.infrastructure.http import SourceHttpError
 from ygl_test_subject.infrastructure.secret_store import SQLiteSecretStore
 from ygl_test_subject.infrastructure.sqlite.database import SQLiteDatabase
@@ -67,10 +71,102 @@ from ygl_test_subject.services.module_services import (
     UnavailableSubscriptionOperations,
 )
 
+from tests.contracts.test_context_issuer import _PublicWebProofs
 from tests.fixtures.b03_runtime import build_runtime
 
 
 class B03ServiceAssemblyTests(unittest.IsolatedAsyncioTestCase):
+    async def test_web_binder_real_services_dependencies_and_revoked_late_access(self):
+        from tests.fixtures.b03_runtime import _Collector, _Handler, _manifest
+
+        proofs = _PublicWebProofs()
+        issuer = ContextIssuer(
+            public_web_validator=proofs,
+            public_web_capabilities=frozenset(
+                {("sample/alpha", "read"), ("sample/beta", "read")}
+            ),
+        )
+        registry = Registry()
+        alpha = _manifest(
+            "alpha",
+            (
+                CapabilityReference("sample/beta", "read"),
+                CapabilityReference("sample/alpha", "private.read"),
+            ),
+        )
+        beta = _manifest("beta")
+        modules = tuple(
+            replace(
+                module,
+                capabilities=tuple(
+                    replace(
+                        capability,
+                        invocation_policy=InvocationPolicy.COMMAND_AND_PUBLIC_WEB,
+                    )
+                    if capability.capability_id == "read"
+                    else capability
+                    for capability in module.capabilities
+                ),
+            )
+            for module in (alpha, beta)
+        )
+        handler = _Handler()
+        registry.register_package(
+            PackageManifest(
+                "sample", "1.0.0", CONTRACT_VERSION, modules, "tests", "MIT", "offline"
+            ),
+            {
+                "alpha": ModuleHandlers(
+                    {"read": handler, "private.read": _Handler("private.read")},
+                    {"account-collector": _Collector()},
+                    {},
+                ),
+                "beta": ModuleHandlers({"read": handler}, {}, {}),
+            },
+        )
+        runtime = await build_runtime(
+            self.root / "web", registry=registry, issuer=issuer
+        )
+        try:
+            module = registry.snapshot().module("sample/alpha")
+            proof = proofs.new("sample/alpha", "read")
+            view = issuer.issue_public_web(
+                proof,
+                module_id=module.module_id,
+                capability_id="read",
+                module_epoch=module.epoch,
+                registry_revision=registry.snapshot().revision,
+                generation=1,
+                deadline=asyncio.get_running_loop().time() + 30,
+            )
+            runtime.lifecycle.admission.admit(view, "read")
+            bound = await runtime.services.for_module(module.module_id).scopes.bind(
+                view
+            )
+            response = await bound.http.fetch(HttpRequest("catalog", "/items"))
+            self.assertEqual(response.status_code, 200)
+            result = await bound.dependencies.invoke(
+                view, CapabilityReference("sample/beta", "read"), {}
+            )
+            self.assertEqual(result.status, ResultStatus.SUCCESS)
+            denied = await bound.dependencies.invoke(
+                view, CapabilityReference("sample/alpha", "private.read"), {}
+            )
+            self.assertEqual(denied.status, ResultStatus.ERROR)
+            self.assertIsNone(handler.calls[-1][0].actor_id)
+            with self.assertRaises(InvocationBindingError):
+                await runtime.services.for_module(module.module_id).scopes.bind(
+                    replace(view)
+                )
+            issuer.release(view)
+            self.assertIn(proof, proofs.revoked)
+            with self.assertRaises(SourceHttpError):
+                await bound.http.fetch(HttpRequest("catalog", "/items"))
+            self.assertEqual(len(runtime.transport.requests), 1)
+        finally:
+            await runtime.services.close_credentials()
+            await runtime.database.executor.close(timeout=1)
+
     async def asyncSetUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
@@ -151,7 +247,9 @@ class B03ServiceAssemblyTests(unittest.IsolatedAsyncioTestCase):
         )
         return grant
 
-    def _factory(self, *, secret_available=None) -> ModuleServicesFactory:
+    def _factory(
+        self, *, secret_available=None, module_host_config_snapshots=None
+    ) -> ModuleServicesFactory:
         return ModuleServicesFactory(
             self.runtime.registry,
             self.runtime.issuer,
@@ -162,7 +260,44 @@ class B03ServiceAssemblyTests(unittest.IsolatedAsyncioTestCase):
             identity_namespace="test-users",
             secret_available=secret_available,
             utc_clock=lambda: datetime.now(UTC),
+            module_host_config_snapshots=module_host_config_snapshots,
         )
+
+    async def test_host_defaults_compose_without_changing_core_revision_or_storage(
+        self,
+    ):
+        core = await self.runtime.services.for_module("sample/alpha").config.current()
+        requested = {"sample/alpha": {"host_days": 3}, "sample/beta": {"host_days": 10}}
+        factory = self._factory(module_host_config_snapshots=requested)
+        requested["sample/alpha"]["host_days"] = 20
+        view = await factory.for_module("sample/alpha").config.current()
+        self.assertEqual(view.values, {**core.values, "host_days": 3})
+        self.assertEqual(view.revision, core.revision)
+        self.assertEqual(view.secret_metadata, core.secret_metadata)
+        self.assertEqual(view.target, core.target)
+        self.assertEqual(
+            (await factory.for_module("sample/beta").config.current()).values,
+            {"host_days": 10},
+        )
+        with self.assertRaises(TypeError):
+            view.values["host_days"] = 40
+        self.assertEqual(
+            await self.runtime.services.for_module("sample/alpha").config.current(),
+            core,
+        )
+        self.assertNotIn(
+            "host_days",
+            (await self.runtime.repositories.config.current(core.target)).values,
+        )
+
+    async def test_host_config_collision_rejected_before_secret_service_or_module(self):
+        factory = self._factory(
+            module_host_config_snapshots={"sample/alpha": {"region": "cn"}}
+        )
+        with self.assertRaisesRegex(ValueError, "conflicts"):
+            factory.for_module("sample/alpha")
+        self.assertEqual(factory._credential_services, [])
+        self.assertEqual(factory._http_by_module, {})
 
     async def _grant_with_secret(
         self,

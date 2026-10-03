@@ -82,15 +82,17 @@ def _isolated_probe_main() -> None:
     import asyncio
     import importlib
     import importlib.metadata
+    import importlib.resources
     import importlib.util
     import threading
     from dataclasses import dataclass
     from datetime import UTC, datetime, timedelta
+    from types import MappingProxyType
 
     sdk = importlib.import_module("yomihime_sdk")
     if not Path(sdk.__file__).resolve().is_relative_to(site_root.resolve()):
         raise AssertionError("canonical SDK did not load from the installed site")
-    if importlib.metadata.version("yomihime-module-sdk") != "1.3.0":
+    if importlib.metadata.version("yomihime-module-sdk") != "1.4.0":
         raise AssertionError("installed SDK version changed")
 
     sys.path.insert(1, str(repository_root))
@@ -133,6 +135,8 @@ def _isolated_probe_main() -> None:
         MessageStatus,
         SecretOwner,
     )
+    from ygl_core_hardening_subject.extensions.discovery import discover_packages
+    from ygl_core_hardening_subject.extensions.source_snapshot import PackageProvenance
     from ygl_core_hardening_subject.infrastructure.sqlite.database import (
         SQLiteDatabase,
     )
@@ -150,6 +154,7 @@ def _isolated_probe_main() -> None:
     from ygl_core_hardening_subject.services.core_runtime import (
         CoreRuntime,
         HostIngress,
+        TrustedSubscriptionGate,
     )
 
     from yomihime_sdk.api import contexts as sdk_contexts
@@ -230,6 +235,57 @@ def _isolated_probe_main() -> None:
         clock = _Clock()
         message_port = _MessagePort()
         trusted_sessions: dict[str, int] = {}
+        trusted_deployment = False
+        manifests = MappingProxyType({})
+        gates = MappingProxyType({})
+        if scenario in {"subscriptions", "reopen"}:
+            resource = (
+                importlib.resources.files("yomihime_sdk._examples.offline_sample")
+                .joinpath("manifest.json")
+                .read_bytes()
+            )
+            if (
+                extension_root / "offline_sample" / "yomihime.manifest.json"
+            ).read_bytes() != resource:
+                raise AssertionError("installed sample manifest bytes changed")
+            packages = discover_packages(extension_root)
+            matching = tuple(p for p in packages if p.package_id == "offline_sample")
+            if len(packages) != 2 or len(matching) != 1:
+                raise AssertionError("installed sample discovery is not unique")
+            package = matching[0]
+            provenance = package._provenance
+            if (
+                not all(p.valid for p in packages)
+                or package.manifest is None
+                or type(provenance) is not PackageProvenance
+                or not provenance.trusted
+                or provenance.package_id != "offline_sample"
+            ):
+                raise AssertionError("installed sample provenance is not sealed")
+            import hashlib
+
+            if provenance.manifest_sha256 != hashlib.sha256(resource).digest():
+                raise AssertionError("installed sample discovery bytes changed")
+            modules = tuple(
+                m for m in package.manifest.modules if m.module_id == "status"
+            )
+            if len(modules) != 1:
+                raise AssertionError("installed sample status module is not unique")
+            fields = tuple(
+                f
+                for f in modules[0].config_fields
+                if f.name == "sample_subscriptions_enabled"
+            )
+            if len(fields) != 1 or fields[0].sensitive or fields[0].default is not True:
+                raise AssertionError("installed sample gate declaration is invalid")
+            manifests = MappingProxyType({"offline_sample/status": modules[0]})
+            gates = MappingProxyType(
+                {
+                    "offline_sample/status": TrustedSubscriptionGate(
+                        modules[0], fields[0].name, provenance.manifest_sha256
+                    )
+                }
+            )
 
         def admin_validator(operation, invocation, context, generation):
             del invocation
@@ -275,6 +331,8 @@ def _isolated_probe_main() -> None:
                 utc_clock=clock,
                 pump_interval=3600,
                 cleanup_timeout=1.0,
+                trusted_bundled_manifests=manifests if trusted_deployment else None,
+                trusted_subscription_gates=gates if trusted_deployment else None,
             )
 
         runtime = create_runtime()
@@ -372,6 +430,53 @@ def _isolated_probe_main() -> None:
             )
             trusted_sessions[admin.session_id] = 1
 
+            if scenario in {"subscriptions", "reopen"}:
+                # Preserve the original inert/unauthorized checks above, then
+                # persist disabled intent through the real admin coordinator.
+                # False with no persisted intent is a production no-op. A real
+                # enable/disable transition establishes intent without SQL seeds.
+                for enabled in (True, False):
+                    await runtime.admin_operations.set_enabled(
+                        None,
+                        "offline_sample/status",
+                        enabled,
+                        expected_registry_revision=runtime.registry.snapshot().revision,
+                        authorization=admin,
+                    )
+                await runtime.close(timeout=1.0)
+                trusted_deployment = True
+                runtime = create_runtime()
+                await runtime.start()
+                gate_state = await runtime.subscription_gate_state(
+                    "offline_sample/status"
+                )
+                if (
+                    not gate_state.supported
+                    or gate_state.enabled is not True
+                    or gate_state.can_run is not False
+                    or gate_state.reason != "module_disabled"
+                ):
+                    raise AssertionError(
+                        f"trusted gate changed persisted disabled intent: {gate_state!r}"
+                    )
+                before = runtime.registry.snapshot()
+                try:
+                    await runtime.admin_operations.set_enabled(
+                        None,
+                        "offline_sample/status",
+                        True,
+                        expected_registry_revision=before.revision,
+                        authorization=untrusted,
+                    )
+                except AdminAuthorizationDenied:
+                    pass
+                else:
+                    raise AssertionError("trusted deployment bypassed admin proof")
+                if runtime.registry.snapshot() is not before:
+                    raise AssertionError(
+                        "unauthorized trusted activation changed Registry"
+                    )
+
             principals = (
                 Principal("principal-alice", "host-bridge", "external-alice"),
                 Principal("principal-bob", "host-bridge", "external-bob"),
@@ -411,6 +516,16 @@ def _isolated_probe_main() -> None:
 
             await enable("offline_sample/source")
             await enable("offline_sample/status")
+            admitted_gate = await runtime.subscription_gate_state(
+                "offline_sample/status"
+            )
+            if trusted_deployment and (
+                not admitted_gate.supported
+                or admitted_gate.enabled is not True
+                or admitted_gate.can_run is not True
+                or admitted_gate.reason is not None
+            ):
+                raise AssertionError("trusted sample subscription gate is not admitted")
 
             status = await runtime.invoke_command(
                 "offline_sample/status", "status", {}, ingress=ingress("alice")
@@ -550,6 +665,7 @@ def _isolated_probe_main() -> None:
                 )
 
             activation_result = {
+                "subscription_gate_admitted": admitted_gate.can_run is True,
                 "installed_sdk_origin": str(Path(sdk.__file__).resolve()),
                 "package_ids": sorted(candidates),
                 "status_command_sent": status.output.status.value,
@@ -823,6 +939,16 @@ def _isolated_probe_main() -> None:
                     await runtime.admin_credential_repository.current()
                 )
                 recovered_module = runtime.registry.snapshot().module(module_id)
+                reopened_gate = await runtime.subscription_gate_state(module_id)
+                if (
+                    not reopened_gate.supported
+                    or reopened_gate.enabled is not True
+                    or reopened_gate.can_run is not True
+                    or reopened_gate.reason is not None
+                ):
+                    raise AssertionError(
+                        "Core reopen lost the trusted subscription gate"
+                    )
                 recovered_config = await runtime.admin_operations.module_snapshot(
                     None, module_id, authorization=rotated_admin
                 )
@@ -861,6 +987,7 @@ def _isolated_probe_main() -> None:
                 return {
                     **activation_result,
                     "stale_admin_denied": stale_admin_denied,
+                    "subscription_gate_after_reopen": reopened_gate.can_run,
                     "epoch_advanced": reenabled.epoch > before_disable.epoch,
                     "old_epoch_rejected": stale_error_code,
                     "credential_generation_after_reopen": recovered_admin_state.generation,

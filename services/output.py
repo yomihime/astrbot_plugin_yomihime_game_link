@@ -1317,8 +1317,8 @@ async def _require_public_fact_resources(
 _ERROR_MESSAGES = {
     ErrorCode.PARAMETER_ERROR: "invalid parameters",
     ErrorCode.UNBOUND: "account binding required",
-    ErrorCode.AUTH_REQUIRED: "authentication required",
-    ErrorCode.AUTH_EXPIRED: "authentication expired",
+    ErrorCode.AUTH_REQUIRED: "此来源需要授权。请联系管理员配置对应来源的凭据后重试；请勿在聊天中发送凭据。",
+    ErrorCode.AUTH_EXPIRED: "此来源授权已失效。请联系管理员更新对应来源的凭据后重试；请勿在聊天中发送凭据。",
     ErrorCode.NOT_FOUND: "not found",
     ErrorCode.NOT_PUBLIC: "result is not public",
     ErrorCode.NO_RECORDS: "no records found",

@@ -30,10 +30,13 @@ from yomihime_sdk.api.subscriptions import (
     ObservationCompleteness,
 )
 
+from ..config import FF14ConfigSnapshot
 from .calendar_evaluator import (
     DAILY_WINDOW_DAYS,
-    DEFAULT_TIMEZONE,
+    CalendarSourceSpec,
     build_calendar_document,
+    calendar_source_spec,
+    calendar_warning_messages,
     load_timezone,
 )
 from .calendar_ics import MAX_WINDOW, parse_ics
@@ -51,43 +54,6 @@ MAX_STORED_OCCURRENCES = 2_000
 MAX_STORED_SUMMARY = 240
 
 _REGIONS = {"cn": "国服", "global": "国际服"}
-_SOURCE_INFO = {
-    ("cn", "primary"): (
-        SCHEDULE_SOURCE_ID,
-        "cn_google",
-        "https://calendar.google.com/calendar/ical/up88drvlnnh2t77hbpqq8v33i2cngfh7%40import.calendar.google.com/public/basic.ics",
-        "/calendar/ical/up88drvlnnh2t77hbpqq8v33i2cngfh7@import.calendar.google.com/public/basic.ics",
-    ),
-    ("cn", "fallback"): (
-        FALLBACK_SOURCE_ID,
-        "cn_icloud",
-        "https://p66-caldav.icloud.com/published/2/MTAyMTk3MTMxMjExMDIxOXsjasy7WUO0EcKVz7qGEuVjjTlRkgd6WOZM171uxP_u-QM51M24lHzRlAQir-oodDRRTzZeusSLbw0snkZoqI4",
-        "/published/2/MTAyMTk3MTMxMjExMDIxOXsjasy7WUO0EcKVz7qGEuVjjTlRkgd6WOZM171uxP_u-QM51M24lHzRlAQir-oodDRRTzZeusSLbw0snkZoqI4",
-    ),
-    ("global", "primary"): (
-        SCHEDULE_SOURCE_ID,
-        "global_google",
-        "https://calendar.google.com/calendar/ical/1gpnler51bgs1ajti10ao946ou367bf6%40import.calendar.google.com/public/basic.ics",
-        "/calendar/ical/1gpnler51bgs1ajti10ao946ou367bf6@import.calendar.google.com/public/basic.ics",
-    ),
-    ("global", "fallback"): (
-        FALLBACK_SOURCE_ID,
-        "global_icloud",
-        "https://p66-caldav.icloud.com/published/2/MTAyMTk3MTMxMjExMDIxOXsjasy7WUO0EcKVz7qGEuVzSK8L9ZRQYf1sxUFeH1A1a22GJLf6nfk2-CZNYMv5iOxCNlUR-umbJKFWWAUVRp8",
-        "/published/2/MTAyMTk3MTMxMjExMDIxOXsjasy7WUO0EcKVz7qGEuVzSK8L9ZRQYf1sxUFeH1A1a22GJLf6nfk2-CZNYMv5iOxCNlUR-umbJKFWWAUVRp8",
-    ),
-}
-_WARNING_TEXT = {
-    "primary_source_failed": "主日历源暂不可用，已尝试备用源。",
-    "fallback_source_failed": "备用日历源暂不可用。",
-    "primary_source_partial": "主日历源未能完整解析，已尝试备用源。",
-    "fallback_source_partial": "备用日历源内容不完整。",
-    "source_rate_limited": "日历源请求频率受限。",
-    "source_timeout": "日历源请求超时。",
-    "source_unavailable": "日历源暂不可用。",
-    "source_partial": "日历源内容不完整，自动摘要暂不可用。",
-    "stored_occurrence_limit": "日历内容超过自动摘要存储上限。",
-}
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,11 +87,19 @@ class CalendarSourceReader:
     ) -> CalendarSourceSnapshot:
         region = normalize_region(region)
         failures: list[str] = []
-        attempts: list[tuple[str, bytes, CalendarParseResult]] = []
-        for kind in ("primary", "fallback"):
-            source_id, source_variant, source_url, path = _SOURCE_INFO[(region, kind)]
+        attempts: list[tuple[CalendarSourceSpec, bytes, CalendarParseResult]] = []
+        for kind, source_id in (
+            ("primary", SCHEDULE_SOURCE_ID),
+            ("fallback", FALLBACK_SOURCE_ID),
+        ):
+            spec = calendar_source_spec(region, source_id)
+            if spec is None:
+                failures.append(f"{kind}_source_unqualified")
+                continue
             try:
-                response = await self._http.fetch(HttpRequest(source_id, path))
+                response = await self._http.fetch(
+                    HttpRequest(spec.source_id, spec.path)
+                )
                 if response.status_code < 200 or response.status_code >= 300:
                     raise SourceHttpError(
                         "upstream_error", status_code=response.status_code
@@ -138,7 +112,7 @@ class CalendarSourceReader:
                     source_id=source_id,
                     reject_floating=reject_floating,
                 )
-                attempts.append((kind, response.body, parsed))
+                attempts.append((spec, response.body, parsed))
             except SourceHttpError as exc:
                 if exc.code == "cancelled":
                     raise
@@ -146,10 +120,10 @@ class CalendarSourceReader:
                 continue
 
             if parsed.completeness is Completeness.COMPLETE:
-                warnings = _attempt_warnings(kind, parsed.warnings, failures)
+                warnings = _attempt_warnings(parsed.warnings, failures)
                 return _snapshot_from_attempt(
                     region,
-                    kind,
+                    spec,
                     response.body,
                     parsed,
                     window_start,
@@ -162,19 +136,21 @@ class CalendarSourceReader:
                 else "fallback_source_partial"
             )
 
-        for kind, raw, parsed in attempts:
-            if parsed.occurrences:
-                warnings = _attempt_warnings(kind, parsed.warnings, failures)
-                return _snapshot_from_attempt(
-                    region,
-                    kind,
-                    raw,
-                    parsed,
-                    window_start,
-                    window_end,
-                    warnings,
-                    completeness=ObservationCompleteness.PARTIAL,
-                )
+        # Full feeds win above; partial feeds with events precede partial empty windows.
+        if attempts:
+            spec, raw, parsed = next(
+                (attempt for attempt in attempts if attempt[2].occurrences), attempts[0]
+            )
+            return _snapshot_from_attempt(
+                region,
+                spec,
+                raw,
+                parsed,
+                window_start,
+                window_end,
+                _attempt_warnings(parsed.warnings, failures),
+                completeness=ObservationCompleteness.PARTIAL,
+            )
         return CalendarSourceSnapshot(
             region=region,
             completeness=ObservationCompleteness.FAILED,
@@ -288,14 +264,16 @@ class CalendarQuery:
         services: ModuleServices,
         *,
         clock: Callable[[], datetime] | None = None,
+        config: FF14ConfigSnapshot | None = None,
     ) -> None:
         self._services = services
         self._clock = clock or _utc_now
+        self._config = config or FF14ConfigSnapshot()
 
     async def invoke(
         self, context: InvocationView, parameters: JsonObject
     ) -> CapabilityResult:
-        normalized = _normalize_query(parameters)
+        normalized = _normalize_query(parameters, self._config)
         if isinstance(normalized, CapabilityResult):
             return normalized
         region, days, timezone_name = normalized
@@ -335,9 +313,11 @@ class CalendarQuery:
             source_variant=snapshot.source_variant or "",
             source_url=snapshot.source_url,
             interpretation_timezone=timezone_name,
+            completeness=snapshot.completeness,
+            warning_codes=snapshot.warning_codes,
             privacy=Privacy.PUBLIC,
         )
-        warnings = tuple(_warning_text(code) for code in snapshot.warning_codes)
+        warnings = calendar_warning_messages(snapshot.warning_codes)
         return CapabilityResult(
             result_id=f"ff14-calendar-{region}-{local_date.isoformat()}",
             status=ResultStatus.PARTIAL_SUCCESS
@@ -366,7 +346,9 @@ def normalize_region(value: object) -> str:
 
 def _normalize_query(
     parameters: JsonObject,
+    config: FF14ConfigSnapshot | None = None,
 ) -> tuple[str, int, str] | CapabilityResult:
+    config = config or FF14ConfigSnapshot()
     if not isinstance(parameters, Mapping):
         return _error(ErrorCode.PARAMETER_ERROR, "请提供日历区域。")
     allowed = {"region", "days", "timezone"}
@@ -376,10 +358,10 @@ def _normalize_query(
         region = normalize_region(parameters["region"])
     except ValueError:
         return _error(ErrorCode.PARAMETER_ERROR, "区域仅支持国服或国际服。")
-    days = parameters.get("days", DEFAULT_QUERY_DAYS)
+    days = parameters.get("days", config.calendar_default_days)
     if type(days) is not int or not 1 <= days <= MAX_QUERY_DAYS:
         return _error(ErrorCode.PARAMETER_ERROR, "查询天数需为 1 到 30 天。")
-    timezone_name = parameters.get("timezone", DEFAULT_TIMEZONE)
+    timezone_name = parameters.get("timezone", config.calendar_default_timezone)
     try:
         load_timezone(timezone_name)
     except ValueError:
@@ -389,7 +371,7 @@ def _normalize_query(
 
 def _snapshot_from_attempt(
     region: str,
-    kind: str,
+    spec: CalendarSourceSpec,
     raw: bytes,
     parsed: CalendarParseResult,
     window_start: datetime,
@@ -398,7 +380,6 @@ def _snapshot_from_attempt(
     *,
     completeness: ObservationCompleteness | None = None,
 ) -> CalendarSourceSnapshot:
-    source_id, source_variant, source_url, _path = _SOURCE_INFO[(region, kind)]
     status = completeness or (
         ObservationCompleteness.COMPLETE
         if parsed.completeness is Completeness.COMPLETE
@@ -409,9 +390,9 @@ def _snapshot_from_attempt(
         completeness=status,
         window_start=window_start,
         window_end=window_end,
-        source_id=source_id,
-        source_variant=source_variant,
-        source_url=source_url,
+        source_id=spec.source_id,
+        source_variant=spec.variant,
+        source_url=spec.url,
         source_version=hashlib.sha256(raw).hexdigest(),
         occurrences=parsed.occurrences,
         warning_codes=warnings,
@@ -419,13 +400,9 @@ def _snapshot_from_attempt(
 
 
 def _attempt_warnings(
-    kind: str, parser_warnings: tuple[object, ...], failures: list[str]
+    parser_warnings: tuple[object, ...], failures: list[str]
 ) -> tuple[str, ...]:
     warnings = list(failures)
-    if kind == "fallback" and not any(
-        code in warnings for code in ("primary_source_failed", "primary_source_partial")
-    ):
-        warnings.append("primary_source_partial")
     warnings.extend(
         f"parser:{getattr(item, 'code', 'partial')}" for item in parser_warnings
     )
@@ -461,13 +438,6 @@ def _occurrence_id(source_id: str, occurrence: CalendarOccurrence) -> str:
         (source_id, occurrence.uid, occurrence.recurrence_identity)
     ).encode("utf-8")
     return hashlib.sha256(material).hexdigest()
-
-
-def _warning_text(code: str) -> str:
-    if code.startswith("parser:"):
-        parser_code = code.partition(":")[2]
-        return f"日历部分内容不支持自动处理（{parser_code}）。"
-    return _WARNING_TEXT.get(code, "日历内容不完整。")
 
 
 def _error(code: ErrorCode, message: str) -> CapabilityResult:

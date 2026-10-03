@@ -11,6 +11,7 @@ from datetime import UTC, datetime, timedelta
 from math import isfinite
 from pathlib import Path
 from time import monotonic
+from types import MappingProxyType
 from typing import Protocol
 
 from ..api.contexts import InvocationOrigin, InvocationView
@@ -32,8 +33,15 @@ from ..core.health import HealthResolver
 from ..core.invocation import Gateway
 from ..core.lifecycle import LifecycleController
 from ..core.policy import tool_allowed
+from ..core.ports import (
+    PublicWebProofValidator,
+    SubscriptionGateBinding,
+    SubscriptionGateState,
+)
 from ..core.registry import RegisteredModule, Registry
+from ..extensions.discovery import DiscoveredPackage
 from ..extensions.loader import ExtensionCandidate
+from ..extensions.source_snapshot import PackageProvenance
 from ..infrastructure.files import LocalSafeFileStore
 from ..infrastructure.secret_store import SecretCodec, SQLiteSecretStore
 from ..infrastructure.sqlite.database import SQLiteDatabase
@@ -62,7 +70,12 @@ from ..services.identity import (
     TrustedIngressPrincipalProvisioner,
     TrustedRoutePublisher,
 )
-from ..services.module_services import ModuleServicesFactory, RegistryRegistrationLookup
+from ..services.module_catalog import project_module_catalog
+from ..services.module_services import (
+    ModuleServicesFactory,
+    RegistryRegistrationLookup,
+    _freeze_host_config_snapshots,
+)
 from ..services.output import (
     LifecycleApprovedSendScheduler,
     OutputResult,
@@ -90,6 +103,15 @@ class HostIngressValidator(Protocol):
     def __call__(
         self, origin: InvocationOrigin, ingress: "HostIngress"
     ) -> bool | Awaitable[bool]: ...
+
+
+@dataclass(frozen=True, slots=True)
+class TrustedSubscriptionGate:
+    """Immutable host-composition declaration from one sealed bundle scan."""
+
+    manifest: ModuleManifest
+    field: str
+    manifest_sha256: bytes
 
 
 @dataclass(frozen=True, slots=True)
@@ -251,6 +273,10 @@ class CoreRuntime:
         identity_namespace: str,
         trusted_bundled_defaults: Mapping[str, tuple[str, ...]] | None = None,
         trusted_bundled_manifests: Mapping[str, ModuleManifest] | None = None,
+        trusted_subscription_gates: Mapping[str, TrustedSubscriptionGate] | None = None,
+        module_host_config_snapshots: Mapping[str, Mapping[str, object]] | None = None,
+        public_web_validator: PublicWebProofValidator | None = None,
+        public_web_capabilities: frozenset[tuple[str, str]] = frozenset(),
         source_credential_policies: Sequence[SourceCredentialPolicy] = (),
         factory_source: FactorySourcePort | None = None,
         source_health: Callable[[str, str], Awaitable[CapabilityHealth]] | None = None,
@@ -275,6 +301,18 @@ class CoreRuntime:
             raise ValueError("identity_namespace is required")
         bundled_defaults = _normalize_bundled_defaults(trusted_bundled_defaults)
         bundled_manifests = _normalize_bundled_manifests(trusted_bundled_manifests)
+        subscription_gates = _normalize_subscription_gates(
+            trusted_subscription_gates, bundled_manifests
+        )
+        gate_fields = MappingProxyType(
+            {
+                ConfigTarget(config_principal_id, module_id): (gate.field,)
+                for module_id, gate in subscription_gates.items()
+            }
+        )
+        host_config_snapshots = _freeze_host_config_snapshots(
+            module_host_config_snapshots
+        )
         for name, callback in (
             ("admin_context_validator", admin_context_validator),
             ("host_ingress_validator", host_ingress_validator),
@@ -307,13 +345,19 @@ class CoreRuntime:
         )
 
         self.database = database
+        self.module_host_config_snapshots = host_config_snapshots
         self.extension_root = Path(extension_root)
         self._trusted_bundled_defaults = bundled_defaults
         self._trusted_bundled_manifests = bundled_manifests
+        self._trusted_subscription_gates = subscription_gates
         self.file_store = LocalSafeFileStore(file_root)
         self.secret_store = SQLiteSecretStore(database, secret_root, codec=secret_codec)
         self.registry = Registry()
-        self.issuer = ContextIssuer(clock=monotonic_clock)
+        self.issuer = ContextIssuer(
+            clock=monotonic_clock,
+            public_web_validator=public_web_validator,
+            public_web_capabilities=public_web_capabilities,
+        )
         self.execution_claim_proofs = ExecutionClaimProofRegistry(now=utc_clock)
         lookup = RegistryRegistrationLookup(self.registry)
         self.repositories = SQLiteRepositories(
@@ -321,8 +365,24 @@ class CoreRuntime:
             lookup,
             file_store=self.file_store,
             secret_store=self.secret_store,
+            subscription_gate_fields=gate_fields,
+            config_clock=utc_clock,
         )
-        self.b04_repositories = B04Repositories(database, utc_clock=utc_clock)
+        execution_gate_bindings = MappingProxyType(
+            {
+                module_id: SubscriptionGateBinding(
+                    ConfigTarget(config_principal_id, module_id),
+                    gate.field,
+                    *module_id.split("/", 1),
+                )
+                for module_id, gate in subscription_gates.items()
+            }
+        )
+        self.b04_repositories = B04Repositories(
+            database,
+            utc_clock=utc_clock,
+            subscription_gate_bindings=execution_gate_bindings,
+        )
         self.config_repository: SQLiteConfigRepository = self.repositories.config
         self.runtime_repository = SQLiteModuleRuntimeRepository(database)
         self.admin_credential_repository = SQLiteAdminCredentialRepository(database)
@@ -398,6 +458,7 @@ class CoreRuntime:
             source_credential_policies=source_credential_policies,
             clock=monotonic_clock,
             utc_clock=utc_clock,
+            module_host_config_snapshots=host_config_snapshots,
         )
         self.send_scheduler = LifecycleApprovedSendScheduler(self.lifecycle)
         self.root_output_repository = SQLiteRootOutputRepository(database)
@@ -444,9 +505,9 @@ class CoreRuntime:
             lifecycle=self.lifecycle,
             admission=self.lifecycle.admission,
             execution_claim_proofs=self.execution_claim_proofs,
-            binder_for=lambda module_id: self.module_services.for_module(
-                module_id
-            ).scopes,
+            binder_for=lambda module_id: (
+                self.module_services.for_module(module_id).scopes
+            ),
             repository=self.b04_repositories.scheduler,
             subscriptions=self.b04_repositories.subscriptions,
             job_links=self.b04_repositories.jobs,
@@ -503,6 +564,7 @@ class CoreRuntime:
             config_repository=self.config_repository,
             secret_store=self.secret_store,
             config_principal_id=config_principal_id,
+            subscription_gate_fields=gate_fields,
         )
         self.admin_facade = AdminFacade(self.admin_operations, self.admin_authorization)
         self.gateway = Gateway(
@@ -567,6 +629,71 @@ class CoreRuntime:
     def pump_failures(self) -> tuple[CoreRuntimeFailure, ...]:
         return self._pump_failures
 
+    def public_module_catalog(self) -> dict:
+        """Read registered modules through the fixed metadata-only projection."""
+        snapshot = self.registry.snapshot()
+        states = {
+            module_id: self.lifecycle.state(module_id) for module_id in snapshot.modules
+        }
+        identities = {
+            module_id: self.lifecycle.current_identity(module_id)
+            for module_id in snapshot.modules
+        }
+        runtime_state = (
+            "closed"
+            if self._closed
+            else "closing"
+            if self._closing
+            else "ready"
+            if self._started and self._accepting and not self._cleanup_pending
+            else "not_ready"
+        )
+        return project_module_catalog(
+            snapshot, states, identities, runtime_state=runtime_state
+        )
+
+    async def subscription_gate_state(self, module_id: str) -> SubscriptionGateState:
+        """Read exact persistent eligibility and live state under the original gate."""
+        if module_id not in self._trusted_subscription_gates:
+            return SubscriptionGateState(False, None, None, "unsupported")
+        try:
+            async with self.lifecycle.admission.mutation("subscription-gate-read"):
+                # run_read lazily initializes a fresh executor. Page reads must
+                # never become a startup/migration authority.
+                if not self._started:
+                    return SubscriptionGateState(True, None, None, "state_unknown")
+                persisted = (
+                    await self.b04_repositories.lifecycle.read_subscription_gate_state(
+                        module_id
+                    )
+                )
+                if persisted.reason is not None:
+                    return SubscriptionGateState(
+                        persisted.supported, None, False, persisted.reason
+                    )
+                if persisted.enabled is False:
+                    return SubscriptionGateState(True, False, False, "gate_disabled")
+                if persisted.intent_enabled is False:
+                    return SubscriptionGateState(True, True, False, "module_disabled")
+                module = self.registry.snapshot().modules.get(module_id)
+                state = self.lifecycle.state(module_id) if module is not None else None
+                if (
+                    not self._started
+                    or not self._accepting
+                    or self._closing
+                    or self._closed
+                    or module is None
+                    or not module.enabled
+                    or state is None
+                    or state.lifecycle.value != "active"
+                    or state.identity is None
+                    or state.identity.module_epoch != module.epoch
+                ):
+                    return SubscriptionGateState(True, True, False, "runtime_not_ready")
+                return SubscriptionGateState(True, True, True, None)
+        except Exception:
+            return SubscriptionGateState(True, None, None, "state_unknown")
+
     async def start(self) -> CoreStartupReport:
         if self._closed or self._closing:
             raise RuntimeError("CoreRuntime is closing or closed")
@@ -590,6 +717,10 @@ class CoreRuntime:
             if self._closing:
                 raise asyncio.CancelledError
             candidates = self.extension_runtime.scan(self.extension_root)
+            if self._closing:
+                raise asyncio.CancelledError
+            if self._subscription_gate_candidates_match(candidates):
+                await self.config_repository.initialize_subscription_gates()
             if self._closing:
                 raise asyncio.CancelledError
             if self._trusted_bundled_manifests:
@@ -643,6 +774,42 @@ class CoreRuntime:
         finally:
             self._starting = False
             self._startup_done.set()
+
+    def _subscription_gate_candidates_match(
+        self, candidates: tuple[ExtensionCandidate, ...]
+    ) -> bool:
+        """Validate every requested binding before any bootstrap mutation."""
+        if not self._trusted_subscription_gates:
+            return False
+        for module_id, gate in self._trusted_subscription_gates.items():
+            package_id, local_module_id = module_id.split("/", 1)
+            matches = tuple(
+                item for item in candidates if item.package.package_id == package_id
+            )
+            if len(matches) != 1:
+                return False
+            package = matches[0].package
+            if not isinstance(package, DiscoveredPackage) or not package.valid:
+                return False
+            manifest = package.manifest
+            if manifest is None or manifest.package_id != package_id:
+                return False
+            modules = tuple(
+                item for item in manifest.modules if item.module_id == local_module_id
+            )
+            provenance = package._provenance
+            if (
+                len(modules) != 1
+                or not _matches_trusted_bundled_manifest(modules[0], gate.manifest)
+                or not _is_subscription_gate_field(modules[0], gate.field)
+                or type(provenance) is not PackageProvenance
+                or not provenance.trusted
+                or provenance.package_id != package_id
+                or type(provenance.manifest_sha256) is not bytes
+                or provenance.manifest_sha256 != gate.manifest_sha256
+            ):
+                return False
+        return True
 
     async def _seed_trusted_bundled_defaults(
         self, candidates: tuple[ExtensionCandidate, ...]
@@ -816,6 +983,15 @@ class CoreRuntime:
             ingress=ingress,
         )
 
+    async def invoke_public_web(
+        self, module_id: str, capability_id: str, parameters: object, *, proof: object
+    ) -> CapabilityResult:
+        """Standalone data ingress: no principal, trusted route or OutputService."""
+        self._require_accepting_ingress()
+        return await self.gateway.invoke_public_web(
+            proof, module_id, capability_id, parameters
+        )
+
     async def invoke_tool(
         self,
         module_id: str,
@@ -937,6 +1113,7 @@ class CoreRuntime:
     async def close(self, *, timeout: float | None = None) -> bool:
         bound = self._cleanup_timeout if timeout is None else timeout
         _positive_finite(bound, "timeout")
+        self.gateway.fence_public_web()  # Web-only synchronous fence before first await.
         loop = asyncio.get_running_loop()
         deadline = loop.time() + float(bound)
         try:
@@ -959,6 +1136,9 @@ class CoreRuntime:
         self.extension_runtime.stop_accepting()
         admin_flights = self.admin_operations.stop_accepting(cancel_inflight=True)
         loop = asyncio.get_running_loop()
+        if not await self.gateway.drain_public_web(max(0.0, deadline - loop.time())):
+            self._cleanup_pending = True
+            raise CoreRuntimeCleanupPending("public_web")
         if self._starting:
             try:
                 await asyncio.wait_for(
@@ -1126,7 +1306,7 @@ def _normalize_bundled_manifests(
 ) -> Mapping[str, ModuleManifest]:
     """Copy exact expected declarations supplied by trusted host composition."""
     if requested is None:
-        return {}
+        return MappingProxyType({})
     if not isinstance(requested, Mapping):
         raise TypeError("trusted_bundled_manifests must be a mapping")
     normalized: dict[str, ModuleManifest] = {}
@@ -1145,7 +1325,40 @@ def _normalize_bundled_manifests(
         if module_id.split("/", 1)[1] != manifest.module_id:
             raise ValueError("trusted bundled manifest id does not match its key")
         normalized[module_id] = manifest
-    return normalized
+    return MappingProxyType(normalized)
+
+
+def _is_subscription_gate_field(manifest: ModuleManifest, field: str) -> bool:
+    declarations = tuple(item for item in manifest.config_fields if item.name == field)
+    return (
+        len(declarations) == 1
+        and not declarations[0].sensitive
+        and declarations[0].default is True
+    )
+
+
+def _normalize_subscription_gates(
+    requested: Mapping[str, TrustedSubscriptionGate] | None,
+    manifests: Mapping[str, ModuleManifest],
+) -> Mapping[str, TrustedSubscriptionGate]:
+    if requested is None:
+        return MappingProxyType({})
+    if not isinstance(requested, Mapping):
+        raise TypeError("trusted subscription gates must be a mapping")
+    normalized = dict(requested)
+    if normalized and set(normalized) != set(manifests):
+        raise ValueError("trusted subscription gates require the complete manifest map")
+    for module_id, gate in normalized.items():
+        if (
+            type(gate) is not TrustedSubscriptionGate
+            or gate.manifest != manifests[module_id]
+            or type(gate.field) is not str
+            or not _is_subscription_gate_field(gate.manifest, gate.field)
+            or type(gate.manifest_sha256) is not bytes
+            or len(gate.manifest_sha256) != 32
+        ):
+            raise ValueError("trusted subscription gate declaration is invalid")
+    return MappingProxyType(normalized)
 
 
 def _matches_trusted_bundled_manifest(

@@ -32,6 +32,107 @@ from ygl_test_subject.core.ports import CallerCapabilityIssuer
 from ygl_test_subject.core.registry import Registry
 from ygl_test_subject.services.dependency_calls import DependencyInvoker
 
+from tests.contracts.test_context_issuer import _PublicWebProofs
+
+
+class PublicWebDependencyTests(IsolatedAsyncioTestCase):
+    async def _ready_web(
+        self,
+        *,
+        target_policy=InvocationPolicy.COMMAND_AND_PUBLIC_WEB,
+        deploy_target=True,
+        target_handler=None,
+    ):
+        fixture = DependencyInvokerTests()
+        fixture.setUp()
+        fixture.registry = Registry()
+        proofs = _PublicWebProofs(fixture.clock)
+        deployment = {("dependency-tests/source", "source.query")}
+        if deploy_target:
+            deployment.add(("dependency-tests/target", "target.query"))
+        fixture.issuer = ContextIssuer(
+            clock=fixture.clock,
+            public_web_validator=proofs,
+            public_web_capabilities=frozenset(deployment),
+        )
+        fixture.lifecycle = LifecycleController(
+            fixture.registry, issuer=fixture.issuer, clock=fixture.clock
+        )
+        source = _capability(
+            "source.query",
+            policy=InvocationPolicy.COMMAND_AND_PUBLIC_WEB,
+            required=(CapabilityReference("dependency-tests/target", "target.query"),),
+        )
+        old, handler, _ = await fixture._ready(
+            (source,), _capability("target.query", policy=target_policy), target_handler
+        )
+        fixture.issuer.release(old)
+        module = fixture.registry.snapshot().module("dependency-tests/source")
+        proof = proofs.new(module.module_id, "source.query", deadline=1.0)
+        parent = fixture.issuer.issue_public_web(
+            proof,
+            module_id=module.module_id,
+            capability_id="source.query",
+            module_epoch=module.epoch,
+            registry_revision=fixture.registry.snapshot().revision,
+            generation=1,
+            deadline=30.0,
+        )
+        fixture.lifecycle.admission.admit(parent, "source.query")
+        caller = fixture.caller_issuer.issue(parent, "source.query")
+        self.fixture, self.parent = fixture, parent
+        return fixture._invoker(caller), handler
+
+    async def test_both_web_deployment_and_explicit_dependency_policy_are_required(
+        self,
+    ):
+        invoker, handler = await self._ready_web()
+        result = await invoker.invoke(
+            self.parent,
+            CapabilityReference("dependency-tests/target", "target.query"),
+            {},
+        )
+        self.assertEqual(result.status, ResultStatus.SUCCESS)
+        child = handler.contexts[0][0]
+        self.assertEqual(child.origin, InvocationOrigin.WEB_PUBLIC)
+        self.assertIsNone(child.actor_id)
+        self.assertEqual(child.deadline, self.parent.deadline)
+        self.fixture.issuer.release(self.parent)
+        for policy, deployed in (
+            (InvocationPolicy.COMMAND_ONLY, True),
+            (InvocationPolicy.NATURAL_LANGUAGE_ALLOWED, True),
+            (InvocationPolicy.COMMAND_AND_PUBLIC_WEB, False),
+        ):
+            invoker, handler = await self._ready_web(
+                target_policy=policy, deploy_target=deployed
+            )
+            result = await invoker.invoke(
+                self.parent,
+                CapabilityReference("dependency-tests/target", "target.query"),
+                {},
+            )
+            self.assertEqual(result.status, ResultStatus.ERROR)
+            self.assertEqual(handler.contexts, [])
+            self.fixture.issuer.release(self.parent)
+
+    async def test_web_dependency_rechecks_expiry_after_await(self):
+        entered, release = asyncio.Event(), asyncio.Event()
+        handler = _Handler(_result(), started=entered, release=release)
+        invoker, _ = await self._ready_web(target_handler=handler)
+        pending = asyncio.create_task(
+            invoker.invoke(
+                self.parent,
+                CapabilityReference("dependency-tests/target", "target.query"),
+                {},
+            )
+        )
+        await asyncio.wait_for(entered.wait(), 1)
+        self.fixture.clock.value = 2.0
+        release.set()
+        result = await pending
+        self.assertEqual(result.status, ResultStatus.ERROR)
+        self.fixture.issuer.release(self.parent)
+
 
 def _result(label: str = "ok") -> CapabilityResult:
     return CapabilityResult(

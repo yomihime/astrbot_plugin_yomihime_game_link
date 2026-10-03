@@ -6,6 +6,7 @@ import base64
 import csv
 import hashlib
 import io
+import os
 import stat
 import tempfile
 import unittest
@@ -18,7 +19,9 @@ from setuptools import build_meta
 from scripts.build_dashboard_zip import (
     FF14_BUNDLE_REQUIRED_FILES,
     FF14_BUNDLE_ROOT,
+    MAINTENANCE_HELPER_FILES,
     OPERATOR_SCRIPT_FILES,
+    PAGE_FILES,
     ROOT_FILES,
     RUNTIME_DIRS,
     included_files,
@@ -35,7 +38,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def _write_operator_script_fixtures(root: Path) -> None:
-    for filename in OPERATOR_SCRIPT_FILES:
+    for filename in (*OPERATOR_SCRIPT_FILES, *PAGE_FILES, *MAINTENANCE_HELPER_FILES):
         path = root / filename
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(b"operator script fixture")
@@ -54,18 +57,18 @@ def _render_record(payloads: dict[str, bytes], record_name: str) -> bytes:
 
 
 def _write_posix_wheel(path: Path) -> tuple[dict[str, bytes], str]:
-    record_name = "yomihime_module_sdk-1.3.0.dist-info/RECORD"
+    record_name = "yomihime_module_sdk-1.4.0.dist-info/RECORD"
     payloads = {
         "yomihime_sdk/__init__.py": b"SDK_VALUE = 1\n",
-        "yomihime_module_sdk-1.3.0.dist-info/METADATA": (
-            b"Metadata-Version: 2.4\nName: yomihime-module-sdk\nVersion: 1.3.0\n"
+        "yomihime_module_sdk-1.4.0.dist-info/METADATA": (
+            b"Metadata-Version: 2.4\nName: yomihime-module-sdk\nVersion: 1.4.0\n"
         ),
-        "yomihime_module_sdk-1.3.0.dist-info/WHEEL": (
+        "yomihime_module_sdk-1.4.0.dist-info/WHEEL": (
             b"Wheel-Version: 1.0\nGenerator: fixture\n"
             b"Root-Is-Purelib: true\nTag: py3-none-any\n"
         ),
-        "yomihime_module_sdk-1.3.0.dist-info/top_level.txt": b"yomihime_sdk\n",
-        "yomihime_module_sdk-1.3.0.dist-info/licenses/LICENSE": b"MIT\n",
+        "yomihime_module_sdk-1.4.0.dist-info/top_level.txt": b"yomihime_sdk\n",
+        "yomihime_module_sdk-1.4.0.dist-info/licenses/LICENSE": b"MIT\n",
     }
     with ZipFile(path, "w", compression=ZIP_DEFLATED) as archive:
         for name, data in (
@@ -116,6 +119,7 @@ class ReleaseBuildTests(unittest.TestCase):
         self.assertTrue(
             {
                 "main.py",
+                "_conf_schema.json",
                 "__init__.py",
                 "metadata.yaml",
                 "logo.png",
@@ -124,10 +128,13 @@ class ReleaseBuildTests(unittest.TestCase):
                 "CHANGELOG.md",
                 "requirements.txt",
                 *OPERATOR_SCRIPT_FILES,
+                *MAINTENANCE_HELPER_FILES,
+                *PAGE_FILES,
                 "extensions/disk_manifest.py",
                 "infrastructure/sqlite/migrations/0000_schema_migrations.sql",
                 "modules/ff14/__init__.py",
                 "modules/ff14/module.py",
+                "modules/ff14/config.py",
                 "modules/ff14/yomihime.manifest.json",
                 "modules/ff14/README.md",
             }
@@ -178,6 +185,46 @@ class ReleaseBuildTests(unittest.TestCase):
 
             self.assertIn("core/module.py", names)
             self.assertFalse(any("private.py" in name for name in names))
+
+    def test_pages_are_exact_required_assets_and_reject_hard_links(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="yomihime-release-pages-") as work:
+            root = Path(work).resolve()
+            for filename in ROOT_FILES:
+                (root / filename).write_bytes(b"runtime root asset")
+            for directory in RUNTIME_DIRS:
+                (root / directory).mkdir()
+            _write_operator_script_fixtures(root)
+            ff14_root = root / FF14_BUNDLE_ROOT
+            for filename in FF14_BUNDLE_REQUIRED_FILES:
+                path = ff14_root / filename
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"FF14 package input")
+            (root / "pages/ff14/private.json").write_bytes(b"must not ship")
+            (root / "pages/unreviewed").mkdir()
+            (root / "pages/unreviewed/index.html").write_bytes(b"must not ship")
+            names = {path.relative_to(root).as_posix() for path in included_files(root)}
+            self.assertEqual(
+                {name for name in names if name.startswith("pages/")}, set(PAGE_FILES)
+            )
+            sentinel = root / "private-sentinel"
+            sentinel.write_bytes(b"private")
+            for filename, label in (
+                (PAGE_FILES[0], "Page asset"),
+                (MAINTENANCE_HELPER_FILES[0], "Maintenance helper"),
+            ):
+                with self.subTest(filename=filename):
+                    asset = root / filename
+                    original = asset.read_bytes()
+                    asset.unlink()
+                    with self.assertRaises(FileNotFoundError):
+                        included_files(root)
+                    os.link(sentinel, asset)
+                    with self.assertRaisesRegex(
+                        ValueError, label + " must not be a hard link"
+                    ):
+                        included_files(root)
+                    asset.unlink()
+                    asset.write_bytes(original)
 
     def test_ff14_bundle_rejects_unreviewed_files(self) -> None:
         with tempfile.TemporaryDirectory(prefix="yomihime-release-bundle-") as work:
@@ -277,7 +324,7 @@ class ReleaseBuildTests(unittest.TestCase):
     def test_reused_sdk_wheel_still_requires_the_independent_pin(self) -> None:
         with tempfile.TemporaryDirectory(prefix="yomihime-release-wheel-") as work:
             root = Path(work)
-            wheel = root / "yomihime_module_sdk-1.3.0-py3-none-any.whl"
+            wheel = root / "yomihime_module_sdk-1.4.0-py3-none-any.whl"
             wheel.write_bytes(b"not the reviewed wheel")
             output = root / "artifacts"
 
@@ -364,8 +411,8 @@ class ReleaseBuildTests(unittest.TestCase):
 
             normalized_payloads = {
                 **original_payloads,
-                "yomihime_module_sdk-1.3.0.dist-info/METADATA": (
-                    original_payloads["yomihime_module_sdk-1.3.0.dist-info/METADATA"]
+                "yomihime_module_sdk-1.4.0.dist-info/METADATA": (
+                    original_payloads["yomihime_module_sdk-1.4.0.dist-info/METADATA"]
                     .replace(b"\r\n", b"\n")
                     .replace(b"\n", b"\r\n")
                 ),
@@ -380,12 +427,12 @@ class ReleaseBuildTests(unittest.TestCase):
                     mode = 0o100664 if info.filename == record_name else 0o100666
                     self.assertEqual(info.external_attr, mode << 16)
                 self.assertEqual(
-                    archive.read("yomihime_module_sdk-1.3.0.dist-info/METADATA"),
-                    normalized_payloads["yomihime_module_sdk-1.3.0.dist-info/METADATA"],
+                    archive.read("yomihime_module_sdk-1.4.0.dist-info/METADATA"),
+                    normalized_payloads["yomihime_module_sdk-1.4.0.dist-info/METADATA"],
                 )
                 self.assertEqual(
-                    archive.read("yomihime_module_sdk-1.3.0.dist-info/WHEEL"),
-                    original_payloads["yomihime_module_sdk-1.3.0.dist-info/WHEEL"],
+                    archive.read("yomihime_module_sdk-1.4.0.dist-info/WHEEL"),
+                    original_payloads["yomihime_module_sdk-1.4.0.dist-info/WHEEL"],
                 )
                 self.assertEqual(
                     archive.read(record_name),

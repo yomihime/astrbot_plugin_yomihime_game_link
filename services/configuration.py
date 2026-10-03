@@ -131,6 +131,7 @@ class _ConfigurationCoordinator:
         "__admission",
         "__validate_admin_grant",
         "__publish_config",
+        "__subscription_gate_fields",
     )
 
     def __init__(
@@ -144,9 +145,29 @@ class _ConfigurationCoordinator:
         admission: AdmissionPort | None = None,
         validate_admin_grant: AdminGrantValidator | None = None,
         publish_config: ConfigPublisher | None = None,
+        subscription_gate_fields: tuple[str, ...] = (),
     ) -> None:
         target = ConfigTarget.validate(target)
         fields = _fields(fields)
+        declarations = {field.name: field for field in fields}
+        if (
+            type(subscription_gate_fields) is not tuple
+            or len(set(subscription_gate_fields)) != len(subscription_gate_fields)
+            or any(
+                field not in declarations
+                or declarations[field].sensitive
+                or declarations[field].default is not True
+                for field in subscription_gate_fields
+            )
+        ):
+            raise ValueError(
+                "subscription gate fields require ordinary true declarations"
+            )
+        object.__setattr__(
+            self,
+            "_ConfigurationCoordinator__subscription_gate_fields",
+            frozenset(subscription_gate_fields),
+        )
         if not callable(getattr(repository, "current", None)) or not callable(
             getattr(repository, "update_authorized", None)
         ):
@@ -596,6 +617,14 @@ class _ConfigurationCoordinator:
             declaration = declarations.get(update.field)
             if declaration is None:
                 raise ValueError("config field is not declared by this module")
+            if update.field in self.__subscription_gate_fields:
+                if update.mode is ConfigPatchMode.CLEAR or (
+                    update.mode is ConfigPatchMode.REPLACE
+                    and type(update.value) is not bool
+                ):
+                    raise ValueError(
+                        "subscription gate requires KEEP or strict bool REPLACE"
+                    )
             if declaration.sensitive and update.mode is ConfigPatchMode.REPLACE:
                 if update.secret is None:
                     raise ValueError(

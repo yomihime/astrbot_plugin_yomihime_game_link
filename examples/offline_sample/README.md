@@ -9,6 +9,16 @@ available. `configured` requires the module's `region` setting; instance
 health reports its declared capabilities as available and the Core health
 resolver applies configuration availability per capability.
 
+The ordinary `sample_subscriptions_enabled` configuration field defaults to
+the boolean `true` and controls subscription eligibility only when the host
+explicitly binds it to the verified `offline_sample/status` deployment.
+The field is non-sensitive and does not grant administrator or owner rights.
+An ordinary discovery without a trusted host mapping cannot create or deliver
+subscriptions. An explicitly trusted deployment also applies the Core's
+normal module-intent initialization; tests must distinguish that deployment
+from an inert discovery. Gate changes and disable/enable cycles follow the
+Core's persistent revision and cutoff rules, with no replay of old events.
+
 The `status` route also declares command-only account and subscription
 operations:
 

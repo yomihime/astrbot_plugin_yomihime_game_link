@@ -9,7 +9,8 @@ CI 使用 Python 3.13.9，并固定以下构建与检查工具：
 - setuptools 80.9.0
 - wheel 0.45.1
 - Ruff 0.12.0
-- 运行依赖按 `requirements.txt` 固定（含 tzdata）
+- 运行依赖按 `requirements.txt` 的范围或固定版本安装（含 tzdata）；新旧依赖端点的实测不代表区间每个版本均已验证
+- Node.js 24 仅用于 FF14 页面状态/DOM 合成测试，无 npm 依赖，不是插件运行依赖
 
 本地可安装相同版本：
 
@@ -29,7 +30,7 @@ python scripts/build_release.py
 脚本要求 Python 3.13 和固定版本的 setuptools、wheel。它从临时 SDK 源码副本构建并验证固定的 SDK wheel，然后生成：
 
 - `dist/astrbot_plugin_yomihime_game_link-v0.1.2.zip`：上传到 AstrBot WebUI 的插件包；
-- `dist/yomihime_module_sdk-1.3.0-py3-none-any.whl`：独立 SDK 工件，不是插件 ZIP；
+- `dist/yomihime_module_sdk-1.4.0-py3-none-any.whl`：独立 SDK 工件，不是插件 ZIP；
 - `dist/SHA256SUMS`：上述工件的摘要。
 
 可用 `--tag v0.1.2` 校验 tag 必须与 `metadata.yaml` 中的版本相同。该参数只做版本校验，不创建 tag。发布工件的下载和安装步骤见[README](https://github.com/yomihime/astrbot_plugin_yomihime_game_link/blob/master/README.md)。
@@ -46,9 +47,11 @@ ruff check .
 ruff format --check .
 ```
 
+FF14 页面还需运行 `node tests/pages/ff14/test_ui_a.mjs`。它验证合成 DOM、状态和 bridge 交互边界，不替代在真实 AstrBot 页面中的亮暗主题、窄屏、键盘和截图验收。
+
 依赖验证通过后，Windows job 运行宿主 bootstrap 与打包回归测试（`tests.host.test_b05_sdk_bootstrap`、`tests.packaging.test_sdk_artifact_install`、`tests.packaging.test_release_build`），然后构建并上传工件。Windows job 是限定的宿主与打包检查，不代表在生产 AstrBot 实例中的完整验收；本地测试、静态检查和安装包构建也不能替代目标 AstrBot 环境中的加载与消息收发验证。
 
-原生 Windows 文件系统扫描器目前只在 Windows 10 build 26200 与 CPython 3.12.10、3.13.9 的 x64 本地资格环境验证；Windows CI 子集不代表完整内核扫描器或其他 Windows 版本的支持。
+原生 Windows 文件系统扫描器的精确候选包含 Windows 10 build 26200/26300 与 CPython 3.12.10、3.12.14、3.13.9 的 x64 环境。新增 26300/3.12.14 已有本地 E 盘原生资格测试；C 盘沙箱夹具的祖先枚举拒绝不计通过，真实用户实例的安装/模块加载另有验证。不要把这些记录外推为所有系统/解释器组合、目录 ACL 或 Windows CI 均已通过。
 
 ## 文档与许可
 

@@ -65,6 +65,13 @@ def install_bundled_ff14(
     directory are never modified; only a slot matching the current bytes is
     trusted.
     """
+    if os.name == "nt":
+        from ...extensions.windows_fs import WindowsScanError, _check_runtime
+
+        try:
+            _check_runtime()
+        except WindowsScanError as exc:
+            raise BundledExtensionError(exc.code) from None
     plugin_root_path = _require_directory(Path(plugin_root), "plugin_root")
     source_root = _require_directory(plugin_root_path / "modules", "bundle_root")
     data_root = _require_directory(Path(data_dir), "data_root")
@@ -95,6 +102,14 @@ def install_bundled_ff14(
             break
         except FileExistsError:
             continue
+        except PermissionError:
+            return BundledExtensionInstallation(
+                extension_root=extension_root,
+                package_dir=package_dir,
+                installed=False,
+                trusted=False,
+                reason="package_permission_denied",
+            )
         except OSError:
             return BundledExtensionInstallation(
                 extension_root=extension_root,
@@ -151,6 +166,14 @@ def install_bundled_ff14(
                 trusted=matches,
                 reason=None if matches else reason,
             )
+    except PermissionError:
+        return BundledExtensionInstallation(
+            extension_root=extension_root,
+            package_dir=package_dir,
+            installed=False,
+            trusted=False,
+            reason="package_permission_denied",
+        )
     except (OSError, ValueError):
         return BundledExtensionInstallation(
             extension_root=extension_root,
@@ -468,6 +491,8 @@ def _ensure_directory(path: Path, allowed_parent: Path) -> None:
         path.mkdir()
     except FileExistsError:
         pass
+    except PermissionError:
+        raise BundledExtensionError("extension_root_permission_denied") from None
     except OSError:
         raise BundledExtensionError("extension_root_unavailable") from None
     try:

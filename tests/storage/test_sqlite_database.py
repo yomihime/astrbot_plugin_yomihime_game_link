@@ -82,6 +82,113 @@ class SQLiteDatabaseTests(unittest.IsolatedAsyncioTestCase):
         finally:
             connection.close()
 
+    def test_subscription_fence_migration_preserves_v80_rows_and_null_stamps(
+        self,
+    ) -> None:
+        path = self.root / "v80.sqlite3"
+        migrations = self.root / "v80-migrations"
+        migrations.mkdir()
+        source = SQLiteDatabase(path).migrations_dir
+        for migration in discover_migrations(source):
+            if migration.version <= 80:
+                shutil.copyfile(migration.path, migrations / migration.path.name)
+        old = SQLiteDatabase(path, migrations_dir=migrations)
+        self.assertEqual(old.initialize(), 80)
+        connection = old.connect()
+        try:
+            connection.execute(
+                "INSERT INTO config_state VALUES ('system','ff14/ff14',7)"
+            )
+            connection.execute(
+                "INSERT INTO config_entries(principal_id,module_id,field,value_json,revision) "
+                "VALUES ('system','ff14/ff14','gate','malformed-json',7)"
+            )
+            connection.execute(
+                "INSERT INTO b04_collection_jobs(job_key,key_json,scope_kind,config_revision) "
+                "VALUES ('old-job','{}','public',7)"
+            )
+            connection.execute(
+                "INSERT INTO b04_subscriptions(subscription_id,revision,owner_id,scope_kind,status,record_json) "
+                "VALUES ('old-sub',1,'owner','public','active','{}')"
+            )
+            connection.execute(
+                "INSERT INTO b04_evaluation_states VALUES ('old-sub',3,'{}','{}')"
+            )
+            connection.execute(
+                "INSERT INTO b04_delivery_events(event_key,event_version,subscription_id,"
+                "subscription_revision,owner_id,idempotency_key,state,event_json) "
+                "VALUES ('old-event',1,'old-sub',1,'owner','old-key','pending','{}')"
+            )
+            connection.commit()
+            tables = (
+                "config_entries",
+                "b04_collection_jobs",
+                "b04_delivery_events",
+                "b04_evaluation_states",
+            )
+            before = {
+                table: tuple(connection.execute(f"SELECT * FROM {table}").fetchone())
+                for table in tables
+            }
+        finally:
+            connection.close()
+        upgraded = SQLiteDatabase(path)
+        self.assertEqual(upgraded.initialize(), 90)
+        connection = upgraded.connect()
+        try:
+            for table in tables:
+                row = tuple(connection.execute(f"SELECT * FROM {table}").fetchone())
+                with self.subTest(table=table):
+                    self.assertEqual(row[: len(before[table])], before[table])
+                    self.assertEqual(
+                        row[len(before[table]) :],
+                        (None,) if table == "config_entries" else (None, None),
+                    )
+            self.assertEqual(
+                tuple(
+                    connection.execute(
+                        "SELECT * FROM subscription_gate_bootstrap"
+                    ).fetchone()
+                ),
+                (1, "pending"),
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM subscription_gate_initializations"
+                ).fetchone()[0],
+                0,
+            )
+        finally:
+            connection.close()
+        # Reapplying migration does not reset a consumed singleton or add stamps.
+        connection = upgraded.connect()
+        try:
+            connection.execute(
+                "UPDATE subscription_gate_bootstrap SET phase='complete'"
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        self.assertEqual(upgraded.initialize(), 90)
+        connection = upgraded.connect()
+        try:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT phase FROM subscription_gate_bootstrap"
+                ).fetchone()[0],
+                "complete",
+            )
+            self.assertEqual(
+                tuple(
+                    connection.execute(
+                        "SELECT gate_revision,intent_revision FROM b04_collection_jobs"
+                    ).fetchone()
+                ),
+                (None, None),
+            )
+        finally:
+            connection.close()
+
     def test_uow_exception_rolls_back_and_close_is_idempotent(self) -> None:
         path = self.root / "rollback.sqlite3"
         database = SQLiteDatabase(path)

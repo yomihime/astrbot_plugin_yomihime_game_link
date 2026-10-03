@@ -13,6 +13,7 @@ from extensions import disk_manifest as e_disk_manifest
 from extensions.disk_manifest import ManifestError, parse_manifest
 from yomihime_sdk.api.manifests import (
     CapabilityReference,
+    InvocationPolicy,
     ModuleManifest,
     PackageManifest,
 )
@@ -61,6 +62,59 @@ def valid_document() -> dict[str, object]:
 
 
 class DiskManifestTests(unittest.TestCase):
+    def test_public_web_disk_opt_in_round_trips_and_rejects_tools_and_private_write(
+        self,
+    ) -> None:
+        document = valid_document()
+        document["contract_version"] = "1.4.0"
+        module = document["modules"][0]
+        capability = module["capabilities"][0]
+        capability["invocation_policy"] = "command_and_public_web"
+        capability["output_version"] = "1.4.0"
+        tools = module.pop("tools")
+        package = parse_manifest(json.dumps(document).encode())
+        self.assertIs(
+            package.modules[0].capabilities[0].invocation_policy,
+            InvocationPolicy.COMMAND_AND_PUBLIC_WEB,
+        )
+        self.assertEqual(
+            package.modules[0].capabilities[0].invocation_policy.value,
+            capability["invocation_policy"],
+        )
+        module["tools"] = tools
+        with self.assertRaises(ManifestError):
+            parse_manifest(json.dumps(document).encode())
+        module.pop("tools")
+        for changes in (
+            {"privacy_floor": "private"},
+            {"privacy_floor": "owner"},
+            {"effect": "write"},
+        ):
+            with self.subTest(changes=changes):
+                candidate = json.loads(json.dumps(document))
+                candidate["modules"][0]["capabilities"][0].update(changes)
+                with self.assertRaises(ManifestError):
+                    parse_manifest(json.dumps(candidate).encode())
+
+    def test_all_previous_contracts_and_command_only_policy_remain_compatible(
+        self,
+    ) -> None:
+        for version in ("1.0.0", "1.1.0", "1.2.0", "1.3.0"):
+            with self.subTest(version=version):
+                document = valid_document()
+                document["contract_version"] = version
+                module = document["modules"][0]
+                module.pop("tools")
+                capability = module["capabilities"][0]
+                capability["invocation_policy"] = "command_only"
+                capability["output_version"] = version
+                package = parse_manifest(json.dumps(document).encode())
+                self.assertEqual(package.contract_version, version)
+                self.assertIs(
+                    package.modules[0].capabilities[0].invocation_policy,
+                    InvocationPolicy.COMMAND_ONLY,
+                )
+
     def test_e_core_and_sdk_use_identical_manifest_factory_and_service_types(
         self,
     ) -> None:

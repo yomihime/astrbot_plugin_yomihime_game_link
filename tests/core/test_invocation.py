@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import Mapping
 from dataclasses import replace
 from types import MappingProxyType
 from unittest import IsolatedAsyncioTestCase
+from unittest.mock import patch
 from uuid import uuid4
 
 from ygl_test_subject.api.contexts import InvocationOrigin
@@ -44,6 +46,412 @@ from ygl_test_subject.core.health import HealthResolver
 from ygl_test_subject.core.invocation import Gateway
 from ygl_test_subject.core.lifecycle import LifecycleController
 from ygl_test_subject.core.registry import Registry
+
+from tests.contracts.test_context_issuer import _PublicWebProofs
+
+
+class PublicWebGatewayTests(IsolatedAsyncioTestCase):
+    async def _ready_web(self, handler=None, capability=None, *, deployment=True):
+        fixture = GatewayTests()
+        fixture.setUp()
+        proofs = _PublicWebProofs()
+        fixture.issuer = ContextIssuer(
+            public_web_validator=proofs,
+            public_web_capabilities=frozenset({("testpkg/records", "record.query")})
+            if deployment
+            else frozenset(),
+        )
+        handler, command_view = await fixture._ready(
+            capability or _capability(policy=InvocationPolicy.COMMAND_AND_PUBLIC_WEB),
+            handler,
+            tool=False,
+        )
+        fixture.issuer.release(command_view)
+        gateway = fixture._gateway()
+        self.fixture, self.proofs, self.gateway = fixture, proofs, gateway
+        return handler
+
+    async def _invoke(self, *, key="bearer-one", proof=None):
+        proof = (
+            proof
+            if proof is not None
+            else self.proofs.new("testpkg/records", "record.query", key=key)
+        )
+        return await self.gateway.invoke_public_web(
+            proof, "testpkg/records", "record.query", {"record_id": "one"}
+        )
+
+    async def test_web_success_exact_proof_and_parameter_privacy_boundaries(self):
+        handler = await self._ready_web()
+        result = await self._invoke()
+        self.assertEqual(result.status, ResultStatus.SUCCESS)
+        view = handler.calls[0][0]
+        self.assertEqual(view.origin, InvocationOrigin.WEB_PUBLIC)
+        self.assertIsNone(view.actor_id)
+        self.assertIsNone(view.conversation_id)
+        self.assertIsNone(view.adapter_id)
+        self.assertFalse(self.proofs.active)
+        self.assertFalse(self.gateway.public_web_pending)
+        self.assertEqual(
+            (await self._invoke(proof=object())).error.code,
+            ErrorCode.MODULE_UNAVAILABLE,
+        )
+        proof = self.proofs.new("testpkg/records", "record.query")
+        bad = await self.gateway.invoke_public_web(
+            proof, "testpkg/records", "record.query", {"id": "one"}
+        )
+        self.assertEqual(bad.error.code, ErrorCode.PARAMETER_ERROR)
+        self.assertEqual(len(handler.calls), 1)
+        handler.result = _result(privacy=Privacy.PRIVATE)
+        self.assertEqual((await self._invoke()).status, ResultStatus.ERROR)
+
+    async def test_all_data_statuses_return_valid_documents_while_current(self):
+        for status in (
+            ResultStatus.SUCCESS,
+            ResultStatus.PARTIAL_SUCCESS,
+            ResultStatus.NEEDS_SELECTION,
+        ):
+            with self.subTest(status=status):
+                await self._ready_web(_Handler(replace(_result(), status=status)))
+                result = await self._invoke()
+                self.assertIs(result.status, status)
+                self.assertIsNotNone(result.document)
+                self.assertIsNone(result.error)
+                self.assertFalse(self.proofs.active)
+                self.assertFalse(self.gateway.public_web_pending)
+
+    async def test_all_data_statuses_are_fenced_in_every_publication_window(self):
+        for status in (
+            ResultStatus.SUCCESS,
+            ResultStatus.PARTIAL_SUCCESS,
+            ResultStatus.NEEDS_SELECTION,
+        ):
+            for mode in ("fake_deadline", "real_deadline", "close_fence"):
+                with self.subTest(status=status, mode=mode):
+                    await self._ready_web(_Handler(replace(_result(), status=status)))
+                    if mode == "fake_deadline":
+                        tick = [1000.0]
+                        self.gateway._clock = lambda: tick[0]
+                        self.fixture.issuer._clock = lambda: tick[0]
+                        revoke = self.proofs.revoke
+
+                        def release_and_expire(proof):
+                            revoke(proof)
+                            tick[0] = 1031.0
+
+                        self.proofs.revoke = release_and_expire
+                        result = await self._invoke()
+                    else:
+                        create = asyncio.create_task
+                        if mode == "real_deadline":
+                            self.gateway._handler_timeout = 0.02
+
+                        def create_with_publication_callback(
+                            work, *, name=None, **kwargs
+                        ):
+                            task = create(work, name=name, **kwargs)
+                            if name == "gateway:public_web":
+                                if mode == "real_deadline":
+                                    task.add_done_callback(lambda _: time.sleep(0.04))
+                                else:
+                                    task.add_done_callback(
+                                        lambda _: self.gateway.fence_public_web()
+                                    )
+                            return task
+
+                        with patch(
+                            "asyncio.create_task", create_with_publication_callback
+                        ):
+                            result = await self._invoke()
+                    self.assertIs(result.status, ResultStatus.ERROR)
+                    self.assertEqual(result.error.code, ErrorCode.MODULE_UNAVAILABLE)
+                    self.assertIsNone(result.document)
+                    self.assertIsNone(result.model_facts)
+                    self.assertFalse(self.proofs.active)
+                    self.assertTrue(await self.gateway.drain_public_web(0.5))
+
+    async def test_no_map_and_non_opted_in_private_owner_write_are_rejected(self):
+        for options in (
+            {"policy": InvocationPolicy.COMMAND_ONLY},
+            {"policy": InvocationPolicy.NATURAL_LANGUAGE_ALLOWED},
+            {"privacy": PrivacyFloor.PRIVATE, "policy": InvocationPolicy.COMMAND_ONLY},
+            {"privacy": PrivacyFloor.OWNER, "policy": InvocationPolicy.COMMAND_ONLY},
+            {"effect": CapabilityEffect.WRITE},
+        ):
+            with self.subTest(options=options):
+                handler = await self._ready_web(capability=_capability(**options))
+                self.assertEqual(
+                    (await self._invoke()).error.code, ErrorCode.UNSUPPORTED
+                )
+                self.assertEqual(handler.calls, [])
+        handler = await self._ready_web(deployment=False)
+        self.assertEqual((await self._invoke()).error.code, ErrorCode.UNSUPPORTED)
+        self.assertEqual(handler.calls, [])
+
+    async def test_root_creation_and_pre_yield_expiry_release_authority(self):
+        await self._ready_web()
+        proof = self.proofs.new("testpkg/records", "record.query")
+        with patch("asyncio.create_task", side_effect=RuntimeError("synthetic")):
+            self.assertEqual(
+                (await self._invoke(proof=proof)).error.code,
+                ErrorCode.MODULE_UNAVAILABLE,
+            )
+        self.assertIn(proof, self.proofs.revoked)
+        self.assertFalse(self.gateway.public_web_pending)
+
+        check = self.proofs.is_current
+        checks = 0
+
+        def expired_before_register(proof, binding):
+            nonlocal checks
+            checks += 1
+            return check(proof, binding) if checks < 3 else False
+
+        proof = self.proofs.new("testpkg/records", "record.query")
+        with patch.object(self.proofs, "is_current", expired_before_register):
+            self.assertEqual(
+                (await self._invoke(proof=proof)).error.code,
+                ErrorCode.MODULE_UNAVAILABLE,
+            )
+        self.assertIn(proof, self.proofs.revoked)
+        self.assertTrue(await self.gateway.drain_public_web(0.5))
+        self.assertFalse(self.fixture.issuer._issued)
+
+    async def test_publication_rechecks_fake_deadline_after_release_hook(self):
+        await self._ready_web()
+        tick = [1000.0]
+        self.gateway._clock = lambda: tick[0]
+        self.fixture.issuer._clock = lambda: tick[0]
+        revoke = self.proofs.revoke
+
+        def release_and_expire(proof):
+            revoke(proof)
+            tick[0] = 1031.0
+
+        self.proofs.revoke = release_and_expire
+        self.assertEqual(
+            (await self._invoke()).error.code, ErrorCode.MODULE_UNAVAILABLE
+        )
+        self.assertFalse(self.proofs.active)
+        self.assertTrue(await self.gateway.drain_public_web(0.5))
+
+    async def test_publication_rechecks_real_deadline_after_root_callback(self):
+        await self._ready_web()
+        self.gateway._handler_timeout = 0.02
+        create = asyncio.create_task
+
+        def delay_root_completion(work, *, name=None, **kwargs):
+            task = create(work, name=name, **kwargs)
+            if name == "gateway:public_web":
+                task.add_done_callback(lambda _: time.sleep(0.04))
+            return task
+
+        with patch("asyncio.create_task", delay_root_completion):
+            result = await self._invoke()
+        self.assertEqual(result.error.code, ErrorCode.MODULE_UNAVAILABLE)
+        self.assertFalse(self.proofs.active)
+        self.assertTrue(await self.gateway.drain_public_web(0.5))
+
+    async def test_unpublished_completed_flight_is_owned_and_close_revokes_it(self):
+        await self._ready_web()
+        proof = self.proofs.new("testpkg/records", "record.query")
+        create = asyncio.create_task
+        observations = []
+
+        def close_before_publication(task):
+            flight = next(iter(self.gateway._web_flights.values()))
+            observations.append(
+                (
+                    task.done(),
+                    flight.work_finished,
+                    not flight.sealed,
+                    proof in self.proofs.active,
+                )
+            )
+            self.gateway.fence_public_web()
+            observations.append((flight.sealed, proof not in self.proofs.active))
+
+        def root_callback_after_flight_callback(work, *, name=None, **kwargs):
+            task = create(work, name=name, **kwargs)
+            if name == "gateway:public_web":
+                # Flight registers synchronously; this appends after its _done,
+                # so the completed-but-unpublished ownership window is tested.
+                asyncio.get_running_loop().call_soon(
+                    task.add_done_callback, close_before_publication
+                )
+            return task
+
+        with patch("asyncio.create_task", root_callback_after_flight_callback):
+            result = await self._invoke(proof=proof)
+        self.assertEqual(observations, [(True, True, True, True), (True, True)])
+        self.assertEqual(result.error.code, ErrorCode.MODULE_UNAVAILABLE)
+        self.assertEqual(self.gateway._web_generation, 2)
+        self.assertTrue(await self.gateway.drain_public_web(0.5))
+
+    async def test_publication_rechecks_proof_admission_generation_epoch_and_policy(
+        self,
+    ):
+        for mode in ("proof", "admission", "generation", "epoch", "policy"):
+            with self.subTest(mode=mode):
+                handler = await self._ready_web()
+                proof = self.proofs.new("testpkg/records", "record.query")
+                create = asyncio.create_task
+
+                def invalidate_before_publication(_task):
+                    view = handler.calls[0][0]
+                    if mode == "proof":
+                        self.proofs.revoke(proof)
+                    elif mode == "admission":
+                        self.fixture.lifecycle.admission.release(
+                            self.fixture.issuer.lease_for(view)
+                        )
+                    elif mode == "generation":
+                        self.gateway._web_generation += 1
+                    elif mode == "epoch":
+                        snapshot = self.fixture.registry.snapshot()
+                        modules = dict(snapshot.modules)
+                        modules[view.module_id] = replace(
+                            modules[view.module_id], epoch=view.module_epoch + 1
+                        )
+                        self.fixture.registry._snapshot = replace(
+                            snapshot, modules=modules
+                        )
+                    else:
+                        descriptor = (
+                            self.fixture.registry.snapshot()
+                            .module(view.module_id)
+                            .manifest.capabilities[0]
+                        )
+                        object.__setattr__(
+                            descriptor,
+                            "invocation_policy",
+                            InvocationPolicy.COMMAND_ONLY,
+                        )
+
+                def changed_root_callback(work, *, name=None, **kwargs):
+                    task = create(work, name=name, **kwargs)
+                    if name == "gateway:public_web":
+                        task.add_done_callback(invalidate_before_publication)
+                    return task
+
+                with patch("asyncio.create_task", changed_root_callback):
+                    result = await self._invoke(proof=proof)
+                self.assertEqual(result.error.code, ErrorCode.MODULE_UNAVAILABLE)
+                self.assertFalse(self.proofs.active)
+                self.assertTrue(await self.gateway.drain_public_web(0.5))
+
+    async def test_four_global_two_same_bearer_and_actual_done_release(self):
+        started, release = asyncio.Event(), asyncio.Event()
+        handler = await self._ready_web(_Handler(started=started, release=release))
+        calls = [
+            asyncio.create_task(self._invoke(key=key)) for key in ("a", "a", "b", "b")
+        ]
+        try:
+
+            async def all_started():
+                while len(handler.calls) < 4:
+                    await asyncio.sleep(0)
+
+            await asyncio.wait_for(all_started(), 1)
+            self.assertEqual(
+                (await self._invoke(key="c")).error.code, ErrorCode.RATE_LIMITED
+            )
+            calls[0].cancel()
+            calls[0].cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await calls[0]
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            self.assertEqual(
+                (await self._invoke(key="b")).error.code, ErrorCode.RATE_LIMITED
+            )
+        finally:
+            release.set()
+            await asyncio.gather(*calls, return_exceptions=True)
+            self.assertTrue(await self.gateway.drain_public_web(0.5))
+        self.assertEqual((await self._invoke(key="a")).status, ResultStatus.SUCCESS)
+
+    async def test_detached_work_holds_budget_and_late_scope_spawn_is_closed(self):
+        release, started, cancelled = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        late_called = []
+
+        class Detached(_Handler):
+            scope = None
+            late_rejected = False
+
+            async def invoke(inner, context, parameters):
+                child_started = asyncio.Event()
+
+                async def late():
+                    late_called.append(True)
+
+                async def detached():
+                    started.set()
+                    child_started.set()
+                    while not release.is_set():
+                        try:
+                            await release.wait()
+                        except asyncio.CancelledError:
+                            cancelled.set()
+                    from ygl_test_subject.core.task_scope import ScopeCancelled
+
+                    try:
+                        inner.scope.create_task(late(), name="late-scope-spawn")
+                    except ScopeCancelled:
+                        inner.late_rejected = True
+
+                inner.scope.create_task(detached(), name="detached-web-work")
+                await child_started.wait()
+                return _result()
+
+        handler = await self._ready_web(Detached())
+        handler.scope = self.fixture.lifecycle.scope("testpkg/records")
+        self.assertEqual((await self._invoke()).status, ResultStatus.SUCCESS)
+        await asyncio.wait_for(cancelled.wait(), 1)
+        self.assertTrue(self.gateway.public_web_pending)
+        self.assertFalse(self.proofs.active)
+        self.assertEqual((await self._invoke()).status, ResultStatus.SUCCESS)
+        self.assertEqual((await self._invoke()).error.code, ErrorCode.RATE_LIMITED)
+        self.assertFalse(await self.gateway.drain_public_web(0.01))
+        release.set()
+        self.assertTrue(await self.gateway.drain_public_web(0.5))
+        self.assertTrue(handler.late_rejected)
+        self.assertEqual(late_called, [])
+
+    async def test_deadline_and_synchronous_fence_revoke_before_drain(self):
+        entered, release = asyncio.Event(), asyncio.Event()
+        await self._ready_web(_Handler(started=entered, release=release))
+        proof = self.proofs.new(
+            "testpkg/records",
+            "record.query",
+            deadline=asyncio.get_running_loop().time() + 0.02,
+        )
+        self.assertEqual(
+            (await self._invoke(proof=proof)).error.code, ErrorCode.MODULE_UNAVAILABLE
+        )
+        self.assertIn(proof, self.proofs.revoked)
+        self.assertTrue(await self.gateway.drain_public_web(0.5))
+        request = asyncio.create_task(self._invoke())
+        while (
+            len(
+                self.fixture.registry.snapshot()
+                .module("testpkg/records")
+                .handlers.capabilities["record.query"]
+                .calls
+            )
+            < 2
+        ):
+            await asyncio.sleep(0)
+        self.gateway.fence_public_web()
+        self.assertFalse(self.proofs.active)
+        self.assertTrue(
+            all(flight.sealed for flight in self.gateway._web_flights.values())
+        )
+        self.assertEqual(
+            (await self._invoke()).error.code, ErrorCode.MODULE_UNAVAILABLE
+        )
+        await request
+        self.assertTrue(await self.gateway.drain_public_web(0.5))
 
 
 def _result(*, privacy: Privacy = Privacy.PUBLIC) -> CapabilityResult:

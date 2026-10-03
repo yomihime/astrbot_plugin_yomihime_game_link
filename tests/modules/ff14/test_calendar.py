@@ -4,7 +4,14 @@ import hashlib
 import unittest
 from collections import deque
 from datetime import UTC, datetime
+from unittest import mock
 
+from ygl_test_subject.presentation.rendering import (
+    GenericDisplayRenderer,
+    RenderingBounds,
+)
+
+from modules.ff14.config import FF14ConfigSnapshot
 from modules.ff14.features.calendar import (
     COLLECTOR_ID,
     DATA_VERSION,
@@ -13,6 +20,7 @@ from modules.ff14.features.calendar import (
     SCHEDULE_SOURCE_ID,
     CalendarCollector,
     CalendarQuery,
+    CalendarSourceReader,
     normalize_region,
 )
 from modules.ff14.features.calendar_evaluator import (
@@ -20,13 +28,14 @@ from modules.ff14.features.calendar_evaluator import (
     DEFAULT_TIMEZONE,
     FILTER_KIND,
     SUMMARY_TYPE_ID,
+    calendar_source_spec,
 )
 from modules.ff14.features.calendar_subscriptions import CalendarSubscriptionHandler
 from yomihime_sdk.api.contexts import (
     InvocationOrigin,
     InvocationView,
 )
-from yomihime_sdk.api.display import LinksBlock, Privacy, TableBlock
+from yomihime_sdk.api.display import DisplayLimits, LinksBlock, Privacy, TableBlock
 from yomihime_sdk.api.results import ErrorCode, ResultStatus
 from yomihime_sdk.api.services import HttpRequest, HttpResponse, SourceHttpError
 from yomihime_sdk.api.storage import OwnerScope
@@ -170,6 +179,174 @@ def _invocation(
 
 
 class CalendarCollectorAndQueryTests(unittest.IsolatedAsyncioTestCase):
+    async def _render(self, document):
+        renderer = GenericDisplayRenderer(
+            RenderingBounds(8000, 100, 10, 20, 32, 128, 8, 64, 32)
+        )
+        return (
+            await renderer.render(
+                document, limits=DisplayLimits(max_pages=2, max_image_bytes=16)
+            )
+        ).text
+
+    async def test_shared_reviewed_sources_keep_exact_region_identity_and_unknown_disabled(
+        self,
+    ):
+        for region in ("cn", "global"):
+            for selected in (SCHEDULE_SOURCE_ID, FALLBACK_SOURCE_ID):
+                with self.subTest(region=region, selected=selected):
+                    http = _FakeHttp(
+                        [_ics()]
+                        if selected == SCHEDULE_SOURCE_ID
+                        else [SourceHttpError("upstream_error"), _ics()]
+                    )
+                    snapshot = await CalendarSourceReader(http).read(
+                        region,
+                        window_start=datetime(2026, 9, 30, tzinfo=UTC),
+                        window_end=datetime(2026, 10, 7, tzinfo=UTC),
+                        display_timezone="UTC",
+                        reject_floating=True,
+                    )
+                    spec = calendar_source_spec(region, selected)
+                    self.assertEqual(
+                        (
+                            snapshot.source_id,
+                            snapshot.source_variant,
+                            snapshot.source_url,
+                        ),
+                        (spec.source_id, spec.variant, spec.url),
+                    )
+                    self.assertEqual(http.requests[-1].path, spec.path)
+        http = _FakeHttp([_ics()])
+        services = type("Services", (), {"scopes": _Scopes(http)})()
+        with mock.patch(
+            "modules.ff14.features.calendar.calendar_source_spec",
+            side_effect=lambda region, source: None
+            if source == SCHEDULE_SOURCE_ID
+            else calendar_source_spec(region, source),
+        ):
+            result = await CalendarQuery(
+                services, clock=lambda: datetime(2026, 9, 30, tzinfo=UTC)
+            ).invoke(_invocation(), {"region": "cn"})
+        text = await self._render(result.document)
+        self.assertEqual(
+            [request.source_id for request in http.requests], [FALLBACK_SOURCE_ID]
+        )
+        self.assertIn("主日历源未获资格，未启用。", text)
+        self.assertNotIn("主日历源未能完整解析", text)
+        self.assertIsNone(calendar_source_spec("cn", "unknown"))
+
+    async def test_complete_empty_fallback_wins_over_partial_primary_events(self):
+        partial = _ics(
+            _event("safe", "SUMMARY:Primary-only", "DTSTART:20261001T120000Z"),
+            _event(
+                "unsupported", "DTSTART:20261001T120000Z", "RRULE:FREQ=YEARLY;COUNT=2"
+            ),
+        )
+        http = _FakeHttp([partial, _ics()])
+        services = type("Services", (), {"scopes": _Scopes(http)})()
+        result = await CalendarQuery(
+            services, clock=lambda: datetime(2026, 9, 30, tzinfo=UTC)
+        ).invoke(_invocation(), {"region": "cn"})
+        text = await self._render(result.document)
+        self.assertIs(result.status, ResultStatus.SUCCESS)
+        self.assertIn("已使用合格备用日历来源。", text)
+        self.assertIn("主日历源未能完整解析，已尝试备用源。", text)
+        self.assertIn("该公开来源在当前窗口未返回活动", text)
+        self.assertNotIn("Primary-only", text)
+        self.assertNotIn("主日历源暂不可用", text)
+        self.assertLess(text.index("获取时间"), text.index("主日历源未能完整解析"))
+
+    async def test_partial_empty_query_remains_partial_and_total_failure_is_error(self):
+        partial = _ics(
+            _event(
+                "unsupported", "DTSTART:20261001T120000Z", "RRULE:FREQ=YEARLY;COUNT=2"
+            )
+        )
+        for responses, status in (
+            ([partial, SourceHttpError("timeout")], ResultStatus.PARTIAL_SUCCESS),
+            (
+                [SourceHttpError("timeout"), SourceHttpError("upstream_error")],
+                ResultStatus.ERROR,
+            ),
+        ):
+            with self.subTest(status=status):
+                http = _FakeHttp(responses)
+                services = type("Services", (), {"scopes": _Scopes(http)})()
+                result = await CalendarQuery(
+                    services, clock=lambda: datetime(2026, 9, 30, tzinfo=UTC)
+                ).invoke(_invocation(), {"region": "cn"})
+                self.assertIs(result.status, status)
+                if status is ResultStatus.ERROR:
+                    self.assertIsNone(result.document)
+                    continue
+                text = await self._render(result.document)
+                self.assertIn("来源未完整解析，无法确认当前窗口是否无活动", text)
+                self.assertIn("自动摘要暂不可用", text)
+                self.assertIn("备用日历源暂不可用", text)
+                self.assertIn("来源更新时间未知", text)
+                self.assertIn("不保证覆盖全部活动", text)
+                self.assertNotIn("当前窗口未返回活动", text)
+                self.assertNotIn("暂无活动", text)
+
+    async def test_partial_with_events_precedes_partial_empty_primary(self):
+        empty = _ics(
+            _event(
+                "unsupported", "DTSTART:20261001T120000Z", "RRULE:FREQ=YEARLY;COUNT=2"
+            )
+        )
+        with_events = _ics(
+            _event("covered", "SUMMARY:Fallback-covered", "DTSTART:20261001T120000Z"),
+            _event(
+                "unsupported", "DTSTART:20261001T120000Z", "RRULE:FREQ=YEARLY;COUNT=2"
+            ),
+        )
+        http = _FakeHttp([empty, with_events])
+        services = type("Services", (), {"scopes": _Scopes(http)})()
+        result = await CalendarQuery(
+            services, clock=lambda: datetime(2026, 9, 30, tzinfo=UTC)
+        ).invoke(_invocation(), {"region": "cn"})
+        text = await self._render(result.document)
+        self.assertIs(result.status, ResultStatus.PARTIAL_SUCCESS)
+        self.assertIn("Fallback-covered", text)
+        self.assertIn("已使用合格备用日历来源", text)
+        self.assertLess(text.index("自动摘要暂不可用"), text.index("Fallback-covered"))
+
+    async def test_host_defaults_change_query_window_and_explicit_parameters_win(self):
+        raw = _ics(
+            _event(
+                "day-two",
+                "SUMMARY:Second day",
+                "DTSTART:20261001T120000Z",
+                "DTEND:20261001T130000Z",
+            )
+        )
+        config = FF14ConfigSnapshot(
+            calendar_default_days=1, calendar_default_timezone="UTC"
+        )
+        for parameters, expected_zone, visible in (
+            ({"region": "cn"}, "UTC", False),
+            ({"region": "cn", "days": 3, "timezone": "Asia/Tokyo"}, "Asia/Tokyo", True),
+        ):
+            with self.subTest(parameters=parameters):
+                http = _FakeHttp([raw])
+                services = type("Services", (), {"scopes": _Scopes(http)})()
+                result = await CalendarQuery(
+                    services,
+                    config=config,
+                    clock=lambda: datetime(2026, 9, 30, 12, tzinfo=UTC),
+                ).invoke(_invocation(), parameters)
+                self.assertIs(result.status, ResultStatus.SUCCESS)
+                self.assertEqual(
+                    result.document.timestamps[0].timezone_name, expected_zone
+                )
+                tables = [
+                    block
+                    for block in result.document.ordered_blocks
+                    if isinstance(block, TableBlock)
+                ]
+                self.assertEqual("Second day" in repr(tables), visible)
+
     def _collector(self, http: _FakeHttp, now: datetime) -> CalendarCollector:
         services = type("Services", (), {"scopes": _Scopes(http)})()
         return CalendarCollector(services, clock=lambda: now)
@@ -338,6 +515,13 @@ class CalendarCollectorAndQueryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(DEFAULT_TIMEZONE, text)
         self.assertIn("发布者时区", text)
         self.assertEqual(len(result.warnings), 1)
+        rendered = await self._render(result.document)
+        self.assertIn("主日历源暂不可用，已尝试备用源。", rendered)
+        self.assertIn("已使用合格备用日历来源。", rendered)
+        self.assertLess(rendered.index("获取时间"), rendered.index("主日历源暂不可用"))
+        self.assertLess(
+            rendered.index("主日历源暂不可用"), rendered.index("Floating event")
+        )
 
     async def test_query_rejects_invalid_region_without_network(self) -> None:
         http = _FakeHttp([])
@@ -356,6 +540,57 @@ class CalendarCollectorAndQueryTests(unittest.IsolatedAsyncioTestCase):
 
 
 class CalendarSubscriptionHandlerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_new_subscriptions_take_host_defaults_and_explicit_values_win(self):
+        config = FF14ConfigSnapshot(
+            calendar_default_timezone="UTC", calendar_default_delivery_time="13:25"
+        )
+        for parameters, zone, local_time in (
+            ({"region": "cn"}, "UTC", "13:25"),
+            (
+                {"region": "cn", "timezone": "Asia/Tokyo", "time": "09:15"},
+                "Asia/Tokyo",
+                "09:15",
+            ),
+        ):
+            operations = _Operations()
+            services = type("Services", (), {"subscriptions": operations})()
+            result = await CalendarSubscriptionHandler(
+                services, "subscribe", config=config
+            ).invoke(_invocation(), parameters)
+            self.assertIs(result.status, ResultStatus.SUCCESS)
+            self.assertEqual(operations.created[0].filters["timezone"], zone)
+            self.assertEqual(operations.created[0].filters["time"], local_time)
+
+    async def test_reloaded_defaults_never_rewrite_existing_subscription_on_update(
+        self,
+    ):
+        operations = _Operations()
+        filters = {
+            "kind": FILTER_KIND,
+            "region": "cn",
+            "timezone": "Asia/Tokyo",
+            "time": "09:15",
+        }
+        operations.views = (_view("existing", 2, filters),)
+        services = type("Services", (), {"subscriptions": operations})()
+        config = FF14ConfigSnapshot(
+            calendar_default_timezone="UTC", calendar_default_delivery_time="13:25"
+        )
+        listed = await CalendarSubscriptionHandler(
+            services, "list", config=config
+        ).invoke(_invocation(), {})
+        self.assertIs(listed.status, ResultStatus.SUCCESS)
+        self.assertEqual(dict(operations.views[0].filters), filters)
+        result = await CalendarSubscriptionHandler(
+            services, "update", config=config
+        ).invoke(
+            _invocation(),
+            {"subscription_id": "existing", "expected_revision": 2, "time": "10:00"},
+        )
+        self.assertIs(result.status, ResultStatus.SUCCESS)
+        self.assertEqual(operations.revised[0].filters["timezone"], "Asia/Tokyo")
+        self.assertEqual(operations.revised[0].filters["time"], "10:00")
+
     def _handler(
         self, operations: _Operations, action: str
     ) -> CalendarSubscriptionHandler:

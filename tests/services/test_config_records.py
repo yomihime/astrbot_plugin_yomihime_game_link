@@ -3,8 +3,10 @@ from __future__ import annotations
 import asyncio
 import tempfile
 import unittest
+from contextlib import ExitStack
 from pathlib import Path
 from secrets import token_urlsafe
+from unittest.mock import AsyncMock, patch
 
 from ygl_test_subject.api.administration import AdminAuthorizationDenied, AdminOperation
 from ygl_test_subject.api.manifests import (
@@ -280,6 +282,7 @@ class ConfigRecordsServiceTests(unittest.IsolatedAsyncioTestCase):
         repository=None,
         secret_store=None,
         ledger=None,
+        subscription_gate_fields=(),
     ):
         return ConfigurationCoordinator(
             target,
@@ -292,7 +295,103 @@ class ConfigRecordsServiceTests(unittest.IsolatedAsyncioTestCase):
                 grant, operation=AdminOperation.UPDATE_CONFIG
             ),
             publish_config=self._publish_config,
+            subscription_gate_fields=subscription_gate_fields,
         )
+
+    async def test_mixed_invalid_gate_and_secret_patch_rejects_before_all_staging(self):
+        target = ConfigTarget("principal-a", "module-a")
+        fields = (
+            ConfigField("gate", default=True),
+            ConfigField("token", sensitive=True),
+        )
+        grant = await self.admin_auth.authorize(
+            AdminOperation.UPDATE_CONFIG, invocation=None, context=self.admin_context
+        )
+        for mode, value in (
+            (ConfigPatchMode.CLEAR, None),
+            (ConfigPatchMode.REPLACE, 0),
+            (ConfigPatchMode.REPLACE, 1),
+            (ConfigPatchMode.REPLACE, "true"),
+            (ConfigPatchMode.REPLACE, {}),
+        ):
+            for gate_first in (True, False):
+                with (
+                    self.subTest(mode=mode, value=value, gate_first=gate_first),
+                    ExitStack() as stack,
+                ):
+                    spies = [
+                        stack.enter_context(
+                            patch.object(
+                                self.secret_store, method, new_callable=AsyncMock
+                            )
+                        )
+                        for method in (
+                            "stage",
+                            "claim_for_config",
+                            "finalize_active",
+                            "mark_cas_conflict",
+                            "pending",
+                        )
+                    ]
+                    spies += [
+                        stack.enter_context(
+                            patch.object(
+                                self.config_repository, method, new_callable=AsyncMock
+                            )
+                        )
+                        for method in ("current", "update_authorized")
+                    ]
+                    publish = stack.enter_context(patch.object(self, "_publish_config"))
+                    coordinator = self._coordinator(
+                        target, fields, subscription_gate_fields=("gate",)
+                    )
+                    gate = ConfigFieldUpdate("gate", mode, value=value)
+                    secret = ConfigFieldUpdate(
+                        "token",
+                        ConfigPatchMode.REPLACE,
+                        secret=SecretMaterial(b"synthetic-never-staged"),
+                    )
+                    updates = (gate, secret) if gate_first else (secret, gate)
+                    with self.assertRaises(ValueError):
+                        await coordinator.update_admin(
+                            target, ConfigPatch(1, updates, fields), grant
+                        )
+                    for spy in spies:
+                        spy.assert_not_called()
+                    publish.assert_not_called()
+        self.assertEqual(
+            await self.secret_store.pending(
+                SecretTarget(target.principal_id, target.module_id, "token")
+            ),
+            (),
+        )
+
+    async def test_gate_keeps_existing_bool_and_allows_strict_bool_update(self):
+        target = ConfigTarget("principal-a", "module-a")
+        fields = (ConfigField("gate", default=True),)
+        coordinator = self._coordinator(
+            target, fields, subscription_gate_fields=("gate",)
+        )
+        grant = await self.admin_auth.authorize(
+            AdminOperation.UPDATE_CONFIG, invocation=None, context=self.admin_context
+        )
+        replaced = await coordinator.update_admin(
+            target,
+            ConfigPatch(
+                1,
+                (ConfigFieldUpdate("gate", ConfigPatchMode.REPLACE, value=False),),
+                fields,
+            ),
+            grant,
+        )
+        kept = await coordinator.update_admin(
+            target,
+            ConfigPatch(2, (ConfigFieldUpdate("gate", ConfigPatchMode.KEEP),), fields),
+            grant,
+        )
+        self.assertIs(replaced.values["gate"], False)
+        self.assertIs(kept.values["gate"], False)
+        self.assertEqual(kept.revision, 3)
 
     def _publish_config(
         self, module_id, snapshot, *, changed_fields: frozenset[str]

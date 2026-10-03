@@ -82,7 +82,12 @@ from ygl_test_subject.services.subscriptions import (
     SubscriptionOperationsService,
 )
 
-from tests.fixtures.b04_runtime import _run_async_from_sync
+from tests.fixtures.b04_runtime import (
+    _run_async_from_sync,
+    initialize_subscription_gate_fixture,
+    replace_subscription_gate_fixture,
+    synthetic_subscription_gate_bindings,
+)
 
 
 class _Collector:
@@ -269,10 +274,16 @@ class B04SubscriptionServiceTests(unittest.IsolatedAsyncioTestCase):
         await self.identities.save_principal(
             Principal("principal-u1", "test-users", "external-u1")
         )
+        self.bindings = synthetic_subscription_gate_bindings(("sample/game",))
+        await initialize_subscription_gate_fixture(self.db, self.bindings, self.now)
         self.store = SQLiteSubscriptionStore(self.db)
-        self.lifecycle = SQLiteSubscriptionLifecycleRepository(self.db)
+        self.lifecycle = SQLiteSubscriptionLifecycleRepository(
+            self.db, subscription_gate_bindings=self.bindings
+        )
         self.jobs = SQLiteSubscriptionJobRepository(self.db)
-        self.scheduler = SQLiteSchedulerRepository(self.db)
+        self.scheduler = SQLiteSchedulerRepository(
+            self.db, subscription_gate_bindings=self.bindings
+        )
         self.windows = SQLiteDigestWindowRepository(self.db)
         self.delivery = SQLiteDeliveryRepository(self.db)
         self.issuer = ContextIssuer()
@@ -651,6 +662,100 @@ class B04SubscriptionServiceTests(unittest.IsolatedAsyncioTestCase):
             )
         finally:
             await self.scheduler.release(lease)
+
+    async def test_paused_owner_can_list_revise_cancel_but_cannot_create(self):
+        created = await self.create()
+        await replace_subscription_gate_fixture(
+            self.db, self.bindings, "sample/game", False, self.now
+        )
+        self.assertEqual(await self.service.list_current(self.invocation()), (created,))
+        with self.assertRaises(SubscriptionOperationError):
+            await self.create()
+        revised = await self.service.revise_request(
+            self.invocation(),
+            self.request(
+                threshold=7,
+                subscription_id=created.subscription_id,
+                expected_revision=1,
+            ),
+        )
+        self.assertEqual(revised.revision, 2)
+        await self.service.cancel(
+            self.invocation(), created.subscription_id, expected_revision=2
+        )
+        self.assertEqual(await self.service.list_current(self.invocation()), ())
+
+    async def test_old_checkpoint_gets_module_none_but_retains_real_cas_and_next_revision(
+        self,
+    ):
+        created = await self.create()
+        baseline = await self.observation_for(created, identity="baseline", score=0)
+        self.assertTrue(await self.evaluate(baseline))
+        await replace_subscription_gate_fixture(
+            self.db, self.bindings, "sample/game", False, self.now
+        )
+        await replace_subscription_gate_fixture(
+            self.db, self.bindings, "sample/game", True, self.now
+        )
+        previous_inputs = []
+
+        def evaluator(subscription, observation, previous_state):
+            previous_inputs.append(previous_state)
+            return EvaluationDecision(
+                {"baseline": observation.data_version}, False, None, None, None
+            )
+
+        for version, old_null in ((2, False), (3, True)):
+            if old_null:
+                await self.db.executor.run_transaction(
+                    lambda u: u.execute(
+                        "UPDATE b04_evaluation_states SET gate_revision=NULL,intent_revision=NULL"
+                    ).rowcount,
+                    begin_mode="IMMEDIATE",
+                )
+            old = await self.scheduler.current_checkpoint(
+                created.subscription_id, baseline.key
+            )
+            observed = await self.observation_for(
+                created, identity=f"fresh-{version}", version=version
+            )
+            with patch.object(self.public_evaluator, "evaluate", side_effect=evaluator):
+                self.assertTrue(await self.evaluate(observed))
+            self.assertIsNone(previous_inputs[-1])
+            saved = await self.scheduler.current_checkpoint(
+                created.subscription_id, baseline.key
+            )
+            self.assertEqual(
+                saved.expected_state_revision, old.expected_state_revision + 1
+            )
+            self.assertEqual(saved.snapshot.state.value, {"baseline": version})
+            self.assertEqual(saved.fence.gate_revision, 3)
+        self.assertEqual(
+            await self.delivery.list_due_events(now=self.now, limit=10), ()
+        )
+
+    async def test_pause_during_jobs_await_stops_evaluation_before_module_call(self):
+        created = await self.create()
+        observation = await self.observation_for(created)
+        original = self.jobs.for_collection
+
+        async def paused_read(key):
+            links = await original(key)
+            await replace_subscription_gate_fixture(
+                self.db, self.bindings, "sample/game", False, self.now
+            )
+            return links
+
+        with (
+            patch.object(self.jobs, "for_collection", side_effect=paused_read),
+            self.assertRaises(SubscriptionOperationError),
+        ):
+            await self.evaluate(observation)
+        self.assertEqual(self.public_evaluator.calls, 0)
+        snapshot = await self.scheduler.current_evaluation(
+            created.subscription_id, observation.key
+        )
+        self.assertIsNone(snapshot.state)
 
     async def test_m01_command_create_revise_list_cancel_and_revision_cas(self):
         created = await self.create()

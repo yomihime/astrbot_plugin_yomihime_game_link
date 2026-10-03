@@ -20,6 +20,7 @@ from yomihime_sdk.api.services import ModuleServices
 from yomihime_sdk.api.storage import JsonObject
 from yomihime_sdk.api.subscriptions import SubscriptionRequest, SubscriptionView
 
+from ..config import FF14ConfigSnapshot
 from .calendar import normalize_region
 from .calendar_evaluator import (
     DEFAULT_LOCAL_TIME,
@@ -40,7 +41,14 @@ _MAX_LIST_ROWS = 100
 class CalendarSubscriptionHandler:
     """One command action wrapper; authority is enforced by SDK operations."""
 
-    def __init__(self, services: ModuleServices, action: str) -> None:
+    def __init__(
+        self,
+        services: ModuleServices,
+        action: str,
+        *,
+        config: FF14ConfigSnapshot | None = None,
+    ) -> None:
+        self._config = config or FF14ConfigSnapshot()
         if action not in _ACTIONS:
             raise ValueError("unknown calendar subscription action")
         self._services = services
@@ -71,8 +79,12 @@ class CalendarSubscriptionHandler:
             return _error(ErrorCode.PARAMETER_ERROR, "请提供日历区域及可选时区、时间。")
         try:
             region = normalize_region(parameters["region"])
-            timezone_name = _timezone(parameters.get("timezone", DEFAULT_TIMEZONE))
-            local_time = _local_time(parameters.get("time", DEFAULT_LOCAL_TIME))
+            timezone_name = _timezone(
+                parameters.get("timezone", self._config.calendar_default_timezone)
+            )
+            local_time = _local_time(
+                parameters.get("time", self._config.calendar_default_delivery_time)
+            )
         except ValueError:
             return _error(
                 ErrorCode.PARAMETER_ERROR,

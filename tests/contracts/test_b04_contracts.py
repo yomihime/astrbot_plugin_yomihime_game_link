@@ -132,11 +132,11 @@ def sample_invocation(
 
 class B04ContractTests(unittest.TestCase):
     def test_c01_revision_imports_and_b03_operation_signatures_remain_compatible(self):
-        self.assertEqual(CONTRACT_VERSION, "1.3.0")
-        self.assertEqual(CONTRACT_REVISION, "FF14-W1-P1")
+        self.assertEqual(CONTRACT_VERSION, "1.4.0")
+        self.assertEqual(CONTRACT_REVISION, "UI-B0-PUBLIC-WEB")
         self.assertEqual(
             COMPATIBLE_CONTRACT_VERSIONS,
-            (B02_CONTRACT_VERSION, "1.1.0", "1.2.0", "1.3.0"),
+            (B02_CONTRACT_VERSION, "1.1.0", "1.2.0", "1.3.0", "1.4.0"),
         )
         self.assertIn("1.1.0", COMPATIBLE_CONTRACT_VERSIONS)
         expected = {

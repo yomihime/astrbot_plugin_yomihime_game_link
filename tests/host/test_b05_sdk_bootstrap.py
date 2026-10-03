@@ -18,7 +18,9 @@ from unittest import mock
 import scripts.build_dashboard_zip as zip_builder
 from scripts.build_dashboard_zip import (
     EXPECTED_WHEEL_SHA256,
+    MAINTENANCE_HELPER_FILES,
     OPERATOR_SCRIPT_FILES,
+    PAGE_FILES,
     ROOT_FILES,
     RUNTIME_DIRS,
     _reject_link,
@@ -32,7 +34,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def _write_operator_script_fixtures(root: Path) -> None:
-    for filename in OPERATOR_SCRIPT_FILES:
+    for filename in (*OPERATOR_SCRIPT_FILES, *PAGE_FILES, *MAINTENANCE_HELPER_FILES):
         path = root / filename
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(b"operator script fixture")
@@ -60,7 +62,10 @@ class Event:
         self.llm_flags.append(value)
     def plain_result(self, text):
         return text
-class Star: pass
+lifecycle_events = []
+class Star:
+    async def initialize(self): lifecycle_events.append("super_initialize")
+    async def terminate(self): lifecycle_events.append("super_terminate")
 class Filter:
     @staticmethod
     def command(*args, **kwargs):
@@ -111,7 +116,7 @@ try:
 except module.SDKBootstrapError:
     assert mode in {"different", "partial", "unsupported", "mixed", "root-escape"}, mode
 else:
-    assert mode in {"cold", "same", "root-check", "entry-text", "entry-none"}, mode
+    assert mode in {"cold", "same", "root-check", "entry-text", "entry-none", "lifecycle"}, mode
     if mode == "root-check":
         try:
             module._require_contained(Path(sys.argv[3]).resolve(), plugin_root, "test SDK root")
@@ -122,6 +127,37 @@ else:
     assert module.bootstrap_sdk(plugin_root) is sys.modules["yomihime_sdk"]
     sdk_root = Path(sys.modules["yomihime_sdk"].__file__).resolve().parent
     assert sdk_root == plugin_root / "yomihime_sdk"
+    if mode == "lifecycle":
+        class Pages:
+            def register(self): lifecycle_events.append("register")
+            def close(self): lifecycle_events.append("page_close")
+        class LifecycleRuntime:
+            def __init__(self, fail_start=False, fail_close=False):
+                self.fail_start, self.fail_close = fail_start, fail_close
+            async def initialize(self):
+                lifecycle_events.append("runtime_initialize")
+                if self.fail_start: raise RuntimeError("start failure")
+            async def terminate(self):
+                lifecycle_events.append("runtime_terminate")
+                if self.fail_close: raise RuntimeError("close failure")
+        async def exercise():
+            for fail_start, fail_close in ((False, False), (True, False), (False, True)):
+                lifecycle_events.clear()
+                subject = object.__new__(module.YomihimeGameLink)
+                subject._pages = Pages()
+                subject._runtime = LifecycleRuntime(fail_start, fail_close)
+                try: await subject.initialize()
+                except RuntimeError:
+                    assert fail_start
+                if fail_start:
+                    assert lifecycle_events == ["super_initialize", "register", "runtime_initialize", "page_close"]
+                    continue
+                assert lifecycle_events == ["super_initialize", "register", "runtime_initialize"]
+                try: await subject.terminate()
+                except RuntimeError:
+                    assert fail_close
+                assert lifecycle_events[-3:] == ["page_close", "runtime_terminate", "super_terminate"]
+        asyncio.run(exercise())
     if mode in {"entry-text", "entry-none"}:
         result = "help text" if mode == "entry-text" else None
         class Runtime:
@@ -192,6 +228,9 @@ class SDKBootstrapTests(unittest.TestCase):
         result = subprocess.run(command, cwd=ROOT, capture_output=True, text=True)
         if result.returncode:
             raise AssertionError(result.stderr)
+
+    def test_page_registration_and_cleanup_surround_runtime_lifecycle(self) -> None:
+        self._run_bootstrap(self._plugin("page-lifecycle"), "lifecycle")
 
     def test_cold_and_identical_preload_work_under_arbitrary_plugin_names(self) -> None:
         self._run_bootstrap(self._plugin("plugin-one"), "cold")
@@ -364,6 +403,17 @@ class SDKBootstrapTests(unittest.TestCase):
         package = validate_wheel(self.wheel)
         archive_path = self.temp_root / "assembled.zip"
         build(self.wheel, archive_path)
+        with zipfile.ZipFile(archive_path) as schema_archive:
+            for config_asset in (
+                "_conf_schema.json",
+                "modules/ff14/config.py",
+                *PAGE_FILES,
+                *MAINTENANCE_HELPER_FILES,
+            ):
+                self.assertEqual(
+                    schema_archive.read(config_asset),
+                    (ROOT / config_asset).read_bytes(),
+                )
         document_bytes = {
             name: (ROOT / name).read_bytes() for name in ("README.md", "CHANGELOG.md")
         }

@@ -31,6 +31,8 @@ from ygl_test_subject.api.manifests import (
 )
 from ygl_test_subject.api.results import (
     CapabilityResult,
+    ErrorCode,
+    ErrorDetail,
     FactDocument,
     ResultStatus,
 )
@@ -485,6 +487,24 @@ class OutputServiceTests(unittest.IsolatedAsyncioTestCase):
             model_facts=(FactDocument({"value": "public"}) if facts else None),
             privacy=privacy,
         )
+
+    async def test_auth_errors_use_fixed_chinese_recovery_without_raw_details(self):
+        for code, expected in (
+            (ErrorCode.AUTH_REQUIRED, "此来源需要授权。"),
+            (ErrorCode.AUTH_EXPIRED, "此来源授权已失效。"),
+        ):
+            result = CapabilityResult(
+                "auth-error",
+                ResultStatus.ERROR,
+                error=ErrorDetail(code, "private upstream payload must never render"),
+            )
+            rendered = await self.output._render(result)
+            self.assertTrue(rendered.text.startswith(expected))
+            self.assertIn("管理员", rendered.text)
+            self.assertIn("对应来源", rendered.text)
+            self.assertIn("请勿在聊天中发送凭据", rendered.text)
+            self.assertNotIn("private", rendered.text)
+            self.assertNotIn("FFLogs", rendered.text)
 
     async def test_o01_command_sends_once_and_preserves_accepted_receipt(self):
         view = self._view()

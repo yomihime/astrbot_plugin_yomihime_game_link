@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import contextlib
+import getpass
 import io
 import json
 import os
@@ -11,7 +13,9 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import textwrap
 import unittest
+import warnings
 from dataclasses import replace
 from pathlib import Path
 from secrets import token_urlsafe
@@ -58,6 +62,13 @@ class SourceCredentialCliTests(unittest.IsolatedAsyncioTestCase):
             ignore=shutil.ignore_patterns("__pycache__"),
         )
         self.key = base64.b64encode(bytes(range(32))).decode("ascii")
+        # These are Core/configuration tests, not OS qualification. Their
+        # shared-workspace fixtures deliberately lack private Windows ACLs.
+        self.guard_patch = patch.object(
+            cli, "local_maintenance_guard", return_value=contextlib.nullcontext()
+        )
+        self.guard_patch.start()
+        self.addCleanup(self.guard_patch.stop)
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
@@ -297,6 +308,48 @@ class SourceCredentialCliTests(unittest.IsolatedAsyncioTestCase):
                 await self._read_config_state("credential_fflogs_cn"), before
             )
 
+    async def test_real_set_rotation_removes_old_ciphertext_and_clear_removes_new(self):
+        await self._seed_database()
+        alias = "credential_fflogs_global"
+        with patch.dict(os.environ, {"YGL_SECRET_KEY": self.key}):
+            first = await cli._configure(
+                self.data_dir,
+                "set",
+                "global",
+                current_credential=_ADMIN,
+                client_id=_CLIENT_ID,
+                client_secret=_CLIENT_SECRET,
+                plugin_root=self.plugin_root,
+            )
+            old_paths = {name for name, _ in self._secret_storage_snapshot()}
+            self.assertTrue(old_paths)
+            rotated = await cli._configure(
+                self.data_dir,
+                "set",
+                "global",
+                current_credential=_ADMIN,
+                client_id="synthetic-rotated-id",
+                client_secret="synthetic-rotated-secret",
+                plugin_root=self.plugin_root,
+            )
+            new_paths = {name for name, _ in self._secret_storage_snapshot()}
+            self.assertGreater(rotated.revision, first.revision)
+            self.assertTrue(new_paths)
+            self.assertTrue(old_paths.isdisjoint(new_paths))
+            self.assertEqual(
+                json.loads(await self._read_secret_payload(alias))["client_secret"],
+                "synthetic-rotated-secret",
+            )
+            await cli._configure(
+                self.data_dir,
+                "clear",
+                "global",
+                current_credential=_ADMIN,
+                clear_confirmation="CLEAR",
+                plugin_root=self.plugin_root,
+            )
+            self.assertEqual(self._secret_storage_snapshot(), ())
+
     async def test_oversized_secret_fails_without_config_or_secret_store_change(
         self,
     ) -> None:
@@ -317,6 +370,434 @@ class SourceCredentialCliTests(unittest.IsolatedAsyncioTestCase):
                 )
             self.assertEqual(await self._read_config_state(alias), before_config)
             self.assertEqual(self._secret_storage_snapshot(), before_secrets)
+
+    async def test_guard_rejects_before_install_or_core_io(self) -> None:
+        with (
+            patch.object(
+                cli,
+                "local_maintenance_guard",
+                side_effect=PermissionError("OS proof rejected"),
+            ),
+            patch.object(cli, "install_bundled_ff14") as install,
+            patch.object(cli, "_new_core") as factory,
+            self.assertRaises(PermissionError),
+        ):
+            await cli._configure(
+                self.data_dir, "set", "cn", plugin_root=self.plugin_root
+            )
+        install.assert_not_called()
+        factory.assert_not_called()
+
+    async def test_guard_stays_held_through_cancelled_core_and_transport_close(
+        self,
+    ) -> None:
+        await self._seed_database()
+        events = []
+
+        @contextlib.contextmanager
+        def held(*_args, **_kwargs):
+            events.append("guard_enter")
+            try:
+                yield
+            finally:
+                events.append("guard_exit")
+
+        class Core:
+            close_attempts = 0
+            closed = False
+            database = SimpleNamespace(
+                executor=SimpleNamespace(
+                    initialize=AsyncMock(side_effect=asyncio.CancelledError())
+                )
+            )
+
+            async def close(self):
+                self.close_attempts += 1
+                if self.close_attempts == 1:
+                    events.append("core_pending")
+                    raise cli.CoreRuntimeCleanupPending("sqlite_executor")
+                events.append("core_close")
+                self.closed = True
+                return True
+
+        class Transport:
+            closed = False
+
+            async def close(self):
+                events.append("transport_close")
+                self.closed = True
+
+        with (
+            patch.object(cli, "local_maintenance_guard", held),
+            patch.object(cli, "_new_core", return_value=(Core(), Transport())),
+            self.assertRaises(asyncio.CancelledError),
+        ):
+            await cli._configure(
+                self.data_dir, "clear", "cn", plugin_root=self.plugin_root
+            )
+        self.assertEqual(
+            events,
+            [
+                "guard_enter",
+                "core_pending",
+                "core_close",
+                "transport_close",
+                "guard_exit",
+            ],
+        )
+
+    def test_hidden_input_warning_never_falls_back_to_echo(self) -> None:
+        fallback = []
+
+        def unsafe_prompt(_label):
+            warnings.warn("synthetic unavailable console", getpass.GetPassWarning)
+            fallback.append(True)
+            return "would-have-been-echoed"
+
+        with self.assertRaises(getpass.GetPassWarning):
+            admin_credentials._read_hidden("hidden: ", prompt=unsafe_prompt)
+        self.assertEqual(fallback, [])
+
+    async def test_admin_guard_precedes_repository_and_survives_cancelled_action(self):
+        events = []
+
+        @contextlib.contextmanager
+        def held(*_args, **_kwargs):
+            events.append("guard_enter")
+            try:
+                yield
+            finally:
+                events.append("guard_exit")
+
+        class Executor:
+            state = "CLOSING"
+
+            async def close(self):
+                events.append("repository_close")
+                self.state = "CLOSED"
+
+        class Repository:
+            def __init__(self, _database):
+                events.append("repository_open")
+                self.database = SimpleNamespace(executor=Executor())
+
+            async def bootstrap(self, _digest):
+                raise asyncio.CancelledError()
+
+        with (
+            patch.object(admin_credentials, "local_maintenance_guard", held),
+            patch.object(
+                admin_credentials, "SQLiteAdminCredentialRepository", Repository
+            ),
+            patch.object(admin_credentials, "_read", return_value=_ADMIN),
+            self.assertRaises(asyncio.CancelledError),
+        ):
+            await admin_credentials._run(self.data_dir / "runtime.sqlite3", "bootstrap")
+        self.assertEqual(
+            events,
+            ["guard_enter", "repository_open", "repository_close", "guard_exit"],
+        )
+        with (
+            patch.object(
+                admin_credentials,
+                "local_maintenance_guard",
+                side_effect=PermissionError("OS proof rejected"),
+            ),
+            patch.object(
+                admin_credentials, "SQLiteAdminCredentialRepository"
+            ) as factory,
+            self.assertRaises(PermissionError),
+        ):
+            await admin_credentials._run(self.data_dir / "runtime.sqlite3", "bootstrap")
+        factory.assert_not_called()
+
+    def test_loaded_code_root_cannot_be_substituted(self) -> None:
+        with self.assertRaises(admin_credentials.LocalMaintenanceAuthorizationError):
+            with admin_credentials.local_maintenance_guard(
+                self.data_dir / "runtime.sqlite3", plugin_root=self.plugin_root
+            ):
+                self.fail("an arbitrary code root authorized maintenance")
+
+    async def test_admin_pending_close_and_repeated_cancel_keep_guard_until_drained(
+        self,
+    ):
+        events = []
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        @contextlib.contextmanager
+        def held(*_args, **_kwargs):
+            events.append("guard_enter")
+            try:
+                yield
+            finally:
+                events.append("guard_exit")
+
+        class Executor:
+            attempts = 0
+            state = "CLOSING"
+
+            async def close(self):
+                self.attempts += 1
+                if self.attempts == 1:
+                    events.append("sqlite_pending")
+                    raise admin_credentials.SQLiteExecutorCloseTimeout(
+                        "synthetic pending"
+                    )
+                entered.set()
+                await release.wait()
+                events.append("repository_close")
+                self.state = "CLOSED"
+
+        class Repository:
+            def __init__(self, _database):
+                self.database = SimpleNamespace(executor=Executor())
+
+            async def bootstrap(self, _digest):
+                raise asyncio.CancelledError()
+
+        with (
+            patch.object(admin_credentials, "local_maintenance_guard", held),
+            patch.object(
+                admin_credentials, "SQLiteAdminCredentialRepository", Repository
+            ),
+            patch.object(admin_credentials, "_read", return_value=_ADMIN),
+        ):
+            operation = asyncio.create_task(
+                admin_credentials._run(self.data_dir / "runtime.sqlite3", "bootstrap")
+            )
+            await asyncio.wait_for(entered.wait(), 2)
+            for _ in range(2):
+                operation.cancel()
+                await asyncio.sleep(0)
+                self.assertFalse(operation.done())
+                self.assertNotIn("guard_exit", events)
+            release.set()
+            with self.assertRaises(asyncio.CancelledError):
+                await operation
+        self.assertEqual(
+            events, ["guard_enter", "sqlite_pending", "repository_close", "guard_exit"]
+        )
+
+    async def test_unexpected_cleanup_failure_is_not_retried_or_hidden(self):
+        # A generic resource can independently report a completed close after
+        # an earlier error. This is not a failed transport.close recovery.
+        for failure_in in ("close",):
+            with self.subTest(failure_in=failure_in):
+                entered = asyncio.Event()
+                closed = [False]
+                guard_held = []
+                error = ValueError("synthetic cleanup error")
+                close = AsyncMock(side_effect=error if failure_in == "close" else None)
+
+                async def after_close():
+                    entered.set()
+                    if failure_in == "after":
+                        raise error
+
+                after = AsyncMock(side_effect=after_close)
+                stderr = io.StringIO()
+
+                async def operation():
+                    with contextlib.ExitStack() as stack:
+                        guard_held.append(True)
+                        stack.callback(guard_held.clear)
+                        await admin_credentials._finish_cleanup(
+                            close,
+                            confirmed_closed=lambda: closed[0],
+                            pending=(admin_credentials.SQLiteExecutorCloseTimeout,),
+                            after=after,
+                        )
+
+                with contextlib.redirect_stderr(stderr):
+                    task = asyncio.create_task(operation())
+                    await asyncio.wait_for(entered.wait(), 2)
+                    await asyncio.sleep(0.1)
+                    self.assertFalse(task.done())
+                    self.assertEqual(guard_held, [True])
+                    closed[0] = True
+                    with self.assertRaises(ValueError) as failure:
+                        await task
+                    self.assertIs(failure.exception, error)
+                self.assertEqual(guard_held, [])
+                close.assert_awaited_once()
+                after.assert_awaited_once()
+                self.assertEqual(stderr.getvalue().count("cleanup is unconfirmed"), 1)
+                self.assertNotIn("synthetic cleanup error", stderr.getvalue())
+
+    async def test_cleanup_own_cancellation_and_proof_failures_hold_until_confirmed(
+        self,
+    ):
+        for source, error in (
+            ("close", asyncio.CancelledError("synthetic close cancellation")),
+            ("after", asyncio.CancelledError("synthetic after cancellation")),
+            ("proof", RuntimeError("synthetic proof failure")),
+            ("proof", asyncio.CancelledError("synthetic proof cancellation")),
+        ):
+            with self.subTest(source=source, error=type(error).__name__):
+                entered = asyncio.Event()
+                actual_closed = [False]
+                guard_held = []
+                proof_calls = []
+
+                async def close_resource():
+                    if source == "close":
+                        raise error
+
+                async def after_resource():
+                    entered.set()
+                    if source == "after":
+                        raise error
+
+                def proof():
+                    proof_calls.append(True)
+                    if source == "proof" and not actual_closed[0]:
+                        raise error
+                    return actual_closed[0]
+
+                close, after = (
+                    AsyncMock(side_effect=close_resource),
+                    AsyncMock(side_effect=after_resource),
+                )
+
+                async def operation():
+                    with contextlib.ExitStack() as stack:
+                        guard_held.append(True)
+                        stack.callback(guard_held.clear)
+                        await admin_credentials._finish_cleanup(
+                            close, confirmed_closed=proof, after=after
+                        )
+
+                stderr = io.StringIO()
+                with contextlib.redirect_stderr(stderr):
+                    task = asyncio.create_task(operation())
+                    await asyncio.wait_for(entered.wait(), 2)
+                    await asyncio.sleep(0.12)
+                    self.assertFalse(task.done())
+                    self.assertEqual(guard_held, [True])
+                    self.assertGreaterEqual(len(proof_calls), 2)
+                    close.assert_awaited_once()
+                    after.assert_awaited_once()
+                    actual_closed[0] = True
+                    with self.assertRaises(type(error)) as failure:
+                        await task
+                    self.assertIs(failure.exception, error)
+                self.assertEqual(guard_held, [])
+                self.assertEqual(stderr.getvalue().count("cleanup is unconfirmed"), 1)
+                self.assertNotIn("synthetic", stderr.getvalue())
+
+    async def test_transport_failed_after_early_closed_flag_stays_in_owned_child(self):
+        await self._seed_database()
+        code = textwrap.dedent(
+            """
+            import asyncio, contextlib, sys
+            from pathlib import Path
+            from types import SimpleNamespace
+            from unittest.mock import AsyncMock, patch
+            import tests
+            from ygl_test_subject.scripts import configure_source_credentials as cli
+
+            @contextlib.contextmanager
+            def guard(*args, **kwargs):
+                print('GUARD_ENTER', flush=True)
+                try:
+                    yield
+                finally:
+                    print('GUARD_EXIT', flush=True)
+
+            class Core:
+                closed = False
+                database = SimpleNamespace(executor=SimpleNamespace(
+                    initialize=AsyncMock(side_effect=asyncio.CancelledError())))
+                async def close(self):
+                    self.closed = True
+                    return True
+
+            class Transport:
+                closed = False
+                async def close(self):
+                    self.closed = True
+                    print('TRANSPORT_FAILED', flush=True)
+                    raise RuntimeError('synthetic transport cleanup failure')
+
+            async def run():
+                with patch.object(cli, 'local_maintenance_guard', guard), \
+                     patch.object(cli, '_new_core', return_value=(Core(), Transport())):
+                    await cli._configure(Path(sys.argv[2]), 'clear', 'cn',
+                                         plugin_root=Path(sys.argv[1]))
+            asyncio.run(run())
+            """
+        )
+        # This is a synthetic CLI fault in an explicitly owned child, not a
+        # native OS qualification. Never flip the transport flag to recover.
+        await self._assert_owned_fault_child_waits(
+            code,
+            "TRANSPORT_FAILED",
+            ["GUARD_ENTER", "TRANSPORT_FAILED"],
+            str(self.plugin_root),
+            str(self.data_dir),
+        )
+
+    async def test_permanently_unknown_proof_keeps_owned_child_protected(self):
+        code = textwrap.dedent(
+            """
+            import asyncio, contextlib
+            import tests
+            from ygl_test_subject.scripts import admin_credentials as cli
+            async def close(): print('CLOSE_ONCE', flush=True)
+            async def after(): print('AFTER_ONCE', flush=True)
+            queried = False
+            def proof():
+                global queried
+                if not queried:
+                    print('PROOF_FAILED', flush=True)
+                    queried = True
+                raise asyncio.CancelledError('synthetic permanent proof failure')
+            async def run():
+                print('GUARD_ENTER', flush=True)
+                try:
+                    await cli._finish_cleanup(close, confirmed_closed=proof, after=after)
+                finally:
+                    print('GUARD_EXIT', flush=True)
+            asyncio.run(run())
+            """
+        )
+        # There is no test recovery flag: only terminating this owned process
+        # can end a persistently unverifiable close, just as in the CLI contract.
+        await self._assert_owned_fault_child_waits(
+            code,
+            "PROOF_FAILED",
+            ["GUARD_ENTER", "CLOSE_ONCE", "AFTER_ONCE", "PROOF_FAILED"],
+        )
+
+    async def _assert_owned_fault_child_waits(self, code, ready, expected, *arguments):
+        process = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-X",
+            "utf8",
+            "-c",
+            code,
+            *arguments,
+            cwd=ROOT,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        observed = []
+        try:
+            while ready not in observed:
+                line = await asyncio.wait_for(process.stdout.readline(), 5)
+                self.assertTrue(line, "owned fault child exited before close failure")
+                observed.append(line.decode().strip())
+            await asyncio.sleep(0.15)
+            self.assertIsNone(process.returncode)
+            self.assertEqual(observed, expected)
+        finally:
+            if process.returncode is None:
+                process.terminate()
+            stdout, stderr = await asyncio.wait_for(process.communicate(), 5)
+        self.assertEqual(stdout, b"")
+        self.assertEqual(stderr.decode().count("cleanup is unconfirmed"), 1)
+        self.assertNotIn("synthetic transport cleanup failure", stderr.decode())
 
     async def test_real_admin_facade_rejects_stale_config_revision(self) -> None:
         await self._seed_database()
@@ -397,7 +878,6 @@ class SourceCredentialCliTests(unittest.IsolatedAsyncioTestCase):
     def test_main_only_reports_safe_result(self) -> None:
         stdout = io.StringIO()
         with (
-            patch.object(cli, "authorize_local_maintenance") as authorize,
             patch.object(
                 cli,
                 "_configure",
@@ -409,7 +889,6 @@ class SourceCredentialCliTests(unittest.IsolatedAsyncioTestCase):
                 ["--data-dir", str(self.data_dir), "--realm", "global", "set"]
             )
         self.assertEqual(result, 0)
-        authorize.assert_called_once_with(self.data_dir / "runtime.sqlite3")
         self.assertIn("国际服", stdout.getvalue())
         self.assertNotIn(_CLIENT_ID, stdout.getvalue())
         self.assertNotIn(_CLIENT_SECRET, stdout.getvalue())

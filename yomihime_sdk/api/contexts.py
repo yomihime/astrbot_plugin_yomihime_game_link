@@ -21,6 +21,7 @@ class InvocationOrigin(StrEnum):
     """The trusted bridge that created an invocation."""
 
     COMMAND = "command"
+    WEB_PUBLIC = "web_public"
     LLM_TOOL = "llm_tool"
     SCHEDULER = "scheduler"
     SUBSCRIPTION = "subscription"

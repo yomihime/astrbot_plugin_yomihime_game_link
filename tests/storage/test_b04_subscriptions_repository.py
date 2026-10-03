@@ -21,6 +21,7 @@ from ygl_test_subject.api.subscriptions import (
     DeliveryAttempt,
     DeliveryEvent,
     DeliveryState,
+    DigestEnvelope,
     DigestEnvelopeState,
     DigestMember,
     DigestMemberAssociation,
@@ -65,6 +66,14 @@ from ygl_test_subject.infrastructure.sqlite.repositories_subscriptions import (
     SQLiteSubscriptionStore,
 )
 
+from tests.fixtures.b04_runtime import (
+    create_digest_envelope_fixture,
+    create_subscription_event_fixture,
+    initialize_subscription_gate_fixture,
+    replace_subscription_gate_fixture,
+    synthetic_subscription_gate_bindings,
+)
+
 
 class _RepositoryClockMeta(type):
     def __instancecheck__(cls, instance):
@@ -92,12 +101,366 @@ class B04SubscriptionRepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.path = self.root / "runtime.sqlite3"
         self.db = SQLiteDatabase(self.path)
         self.now = datetime(2026, 9, 25, 12, tzinfo=UTC)
-        self.lifecycle = SQLiteSubscriptionLifecycleRepository(self.db)
+        self.bindings = synthetic_subscription_gate_bindings(("sample/game",))
+        self.lifecycle = SQLiteSubscriptionLifecycleRepository(
+            self.db, subscription_gate_bindings=self.bindings
+        )
         self.jobs = SQLiteSubscriptionJobRepository(self.db)
         self.subscriptions = SQLiteSubscriptionStore(self.db)
-        self.scheduler = SQLiteSchedulerRepository(self.db)
-        self.windows = SQLiteDigestWindowRepository(self.db)
-        self.delivery = SQLiteDeliveryRepository(self.db)
+        self.scheduler = SQLiteSchedulerRepository(
+            self.db, subscription_gate_bindings=self.bindings
+        )
+        self.windows = SQLiteDigestWindowRepository(
+            self.db, subscription_gate_bindings=self.bindings
+        )
+        self.delivery = SQLiteDeliveryRepository(
+            self.db, subscription_gate_bindings=self.bindings
+        )
+
+    async def asyncSetUp(self) -> None:
+        await initialize_subscription_gate_fixture(
+            self.db, self.bindings, self.now - timedelta(days=2)
+        )
+
+    async def test_gate_projection_is_one_read_transaction_without_private_or_write_access(
+        self,
+    ):
+        import sqlite3
+
+        allowed = {
+            "subscription_gate_bootstrap",
+            "subscription_gate_initializations",
+            "config_entries",
+            "module_runtime_intents",
+        }
+        statements = []
+        original = self.db.executor.run_read
+
+        async def guarded(callback):
+            def read(unit):
+                changes = unit.connection.total_changes
+
+                def authorize(action, table, column, *_):
+                    if action == sqlite3.SQLITE_READ:
+                        self.assertIn(table, allowed)
+                        self.assertNotIn("secret", column)
+                    if action in (
+                        sqlite3.SQLITE_INSERT,
+                        sqlite3.SQLITE_UPDATE,
+                        sqlite3.SQLITE_DELETE,
+                    ):
+                        return sqlite3.SQLITE_DENY
+                    return sqlite3.SQLITE_OK
+
+                unit.connection.set_authorizer(authorize)
+                unit.connection.set_trace_callback(statements.append)
+                try:
+                    result = callback(unit)
+                    self.assertEqual(unit.connection.total_changes, changes)
+                    return result
+                finally:
+                    unit.connection.set_authorizer(None)
+                    unit.connection.set_trace_callback(None)
+
+            return await original(read)
+
+        with patch.object(self.db.executor, "run_read", side_effect=guarded) as reads:
+            result = await self.lifecycle.read_subscription_gate_state("sample/game")
+        self.assertTrue(result.supported)
+        self.assertTrue(result.enabled)
+        self.assertTrue(result.intent_enabled)
+        self.assertIsNone(result.reason)
+        self.assertEqual(reads.call_count, 1)
+        self.assertEqual(sum(s.startswith("SELECT") for s in statements), 4)
+        self.assertEqual(
+            (
+                await SQLiteSubscriptionLifecycleRepository(
+                    self.db
+                ).read_subscription_gate_state("sample/game")
+            ).reason,
+            "unsupported",
+        )
+
+    async def test_gate_projection_preserves_false_but_prioritizes_corruption(self):
+        tables = (
+            "subscription_gate_bootstrap",
+            "subscription_gate_initializations",
+            "config_entries",
+            "module_runtime_intents",
+        )
+
+        def backup(unit):
+            return {
+                table: [dict(row) for row in unit.execute("SELECT * FROM " + table)]
+                for table in tables
+            }
+
+        saved = await self.db.executor.run_read(backup)
+        cases = (
+            (
+                "UPDATE config_entries SET value_json='false',subscription_transition_at=NULL",
+                False,
+                None,
+            ),
+            (
+                "UPDATE config_entries SET value_json='true',subscription_transition_at=NULL",
+                None,
+                "fence_invalid",
+            ),
+            ("UPDATE config_entries SET value_json='1'", None, "config_invalid"),
+            ("UPDATE config_entries SET value_json='broken'", None, "config_invalid"),
+            ("DELETE FROM config_entries", None, "config_missing"),
+            (
+                "UPDATE subscription_gate_bootstrap SET phase='pending'",
+                None,
+                "initialization_invalid",
+            ),
+            (
+                "DELETE FROM subscription_gate_initializations",
+                None,
+                "initialization_invalid",
+            ),
+            (
+                "UPDATE config_entries SET value_json='false',revision=0",
+                None,
+                "fence_invalid",
+            ),
+            (
+                "UPDATE config_entries SET value_json='false'; DELETE FROM module_runtime_intents",
+                None,
+                "fence_invalid",
+            ),
+            (
+                "UPDATE config_entries SET value_json='false'; UPDATE module_runtime_intents SET desired_enabled=2",
+                None,
+                "fence_invalid",
+            ),
+            (
+                "UPDATE config_entries SET value_json='false'; UPDATE module_runtime_intents SET intent_revision=0",
+                None,
+                "fence_invalid",
+            ),
+            (
+                "UPDATE config_entries SET value_json='false'; UPDATE module_runtime_intents SET updated_at='broken'",
+                None,
+                "fence_invalid",
+            ),
+            (
+                "UPDATE config_entries SET value_json='false',subscription_transition_at=NULL; UPDATE module_runtime_intents SET desired_enabled=0,updated_at='broken'",
+                False,
+                None,
+            ),
+        )
+        for sql, enabled, reason in cases:
+            with self.subTest(sql=sql):
+
+                def mutate(unit):
+                    unit.execute("PRAGMA ignore_check_constraints=ON")
+                    for statement in sql.split(";"):
+                        unit.execute(statement)
+                    unit.execute("PRAGMA ignore_check_constraints=OFF")
+
+                await self.db.executor.run_transaction(mutate, begin_mode="IMMEDIATE")
+                result = await self.lifecycle.read_subscription_gate_state(
+                    "sample/game"
+                )
+                self.assertEqual(result.enabled, enabled)
+                self.assertEqual(result.reason, reason)
+
+                def restore(unit):
+                    for table in tables:
+                        unit.execute("DELETE FROM " + table)
+                        for row in saved[table]:
+                            columns = ",".join(row)
+                            unit.execute(
+                                f"INSERT INTO {table}({columns}) VALUES ({','.join('?' for _ in row)})",
+                                tuple(row.values()),
+                            )
+
+                await self.db.executor.run_transaction(restore, begin_mode="IMMEDIATE")
+
+    async def test_delivery_null_or_old_fences_and_missing_policy_never_reopen(self):
+        record = await self._create()
+        legacy = await self.delivery.create_event(
+            self._event(record, event_key="legacy-null")
+        )
+        fresh = await create_subscription_event_fixture(
+            self.delivery, self.bindings, self._event(record, event_key="fresh")
+        )
+
+        async def claim(repository, event, state=DeliveryState.PENDING, number=1):
+            return await repository.claim_sending(
+                event.event_key,
+                event.event_version,
+                subscription_id=event.subscription_id,
+                subscription_revision=event.subscription_revision,
+                expected_state=state,
+                attempt_number=number,
+                started_at=self.now,
+                now=self.now,
+            )
+
+        self.assertIsNone(await claim(self.delivery, legacy))
+        self.assertIsNone(await claim(SQLiteDeliveryRepository(self.db), fresh))
+        sending = await claim(self.delivery, fresh)
+        self.assertTrue(await self.delivery.is_current_for_send(sending))
+        self.assertFalse(
+            await self.delivery.is_current_for_send(
+                replace(
+                    sending,
+                    attempt=replace(
+                        sending.attempt, started_at=self.now - timedelta(seconds=1)
+                    ),
+                )
+            )
+        )
+        failed = await self.delivery.record_attempt(
+            fresh.event_key,
+            fresh.event_version,
+            DeliveryAttempt(
+                1,
+                DeliveryState.FAILED,
+                fresh.idempotency_key,
+                self.now,
+                self.now,
+                "temporary",
+            ),
+            subscription_id=fresh.subscription_id,
+            subscription_revision=fresh.subscription_revision,
+            expected_state=DeliveryState.SENDING,
+            retry_at=self.now,
+        )
+        await replace_subscription_gate_fixture(
+            self.db, self.bindings, "sample/game", False, self.now
+        )
+        await replace_subscription_gate_fixture(
+            self.db, self.bindings, "sample/game", True, self.now
+        )
+        self.assertIsNone(await claim(self.delivery, failed, DeliveryState.FAILED, 2))
+        self.assertEqual(
+            await self.delivery.current_event(
+                fresh.event_key,
+                1,
+                subscription_id=record.subscription_id,
+                subscription_revision=1,
+            ),
+            failed,
+        )
+        stamps = await self.db.executor.run_read(
+            lambda unit: tuple(
+                tuple(row)
+                for row in unit.execute(
+                    "SELECT event_key,gate_revision,intent_revision FROM b04_delivery_events ORDER BY event_key"
+                ).fetchall()
+            )
+        )
+        self.assertEqual(stamps, (("fresh", 1, 1), ("legacy-null", None, None)))
+
+    async def test_digest_due_must_exceed_both_cutoffs_and_stale_failed_stays_failed(
+        self,
+    ):
+        record = await self._create()
+        intent_cutoff = self.now - timedelta(hours=1)
+        await self.db.executor.run_transaction(
+            lambda unit: unit.execute(
+                "UPDATE module_runtime_intents SET intent_revision=2,updated_at=? WHERE package_id='sample' AND module_id='game'",
+                (intent_cutoff.isoformat(),),
+            ).rowcount,
+            begin_mode="IMMEDIATE",
+        )
+        for label, due in (
+            ("equal", intent_cutoff),
+            ("before", intent_cutoff - timedelta(microseconds=1)),
+            ("after", intent_cutoff + timedelta(microseconds=1)),
+        ):
+            with self.subTest(label=label):
+                event = self._event(record, event_key="boundary-" + label)
+                member = DigestMember(record.subscription_id, 1, event.event_key, 1)
+                window = DigestWindow(
+                    "boundary-" + label,
+                    "UTC",
+                    "daily",
+                    intent_cutoff - timedelta(hours=2),
+                    intent_cutoff - timedelta(hours=1),
+                    due,
+                    DstFoldPolicy.FIRST_OCCURRENCE,
+                    DstGapPolicy.SKIP,
+                    (member,),
+                )
+                await self.windows.create(window)
+                envelope = DigestEnvelope(
+                    "envelope-" + label,
+                    window.window_id,
+                    record.recipient,
+                    (member,),
+                    member_associations=(
+                        DigestMemberAssociation(
+                            window.window_id, record.recipient, member, event
+                        ),
+                    ),
+                )
+                await create_digest_envelope_fixture(
+                    self.delivery, self.bindings, envelope
+                )
+                claim = await self.windows.claim_due_envelope(
+                    window.window_id,
+                    record.recipient,
+                    now=self.now,
+                    lease_expires_at=self.now + timedelta(minutes=1),
+                )
+                if label != "after":
+                    self.assertIsNone(claim)
+                    self.assertEqual(
+                        await self.windows.current_envelope(
+                            window.window_id, record.recipient
+                        ),
+                        envelope,
+                    )
+                    continue
+                sending = await self.windows.begin_envelope_send(
+                    claim,
+                    expected_revision=claim.envelope.revision,
+                    attempt_number=1,
+                    started_at=self.now,
+                )
+                self.assertTrue(
+                    await self.windows.is_current_for_send(claim, sending, now=self.now)
+                )
+                attempt = DeliveryAttempt(
+                    1,
+                    DeliveryState.FAILED,
+                    sending.delivery_attempts[-1].idempotency_key,
+                    self.now,
+                    claim.expires_at + timedelta(seconds=1),
+                    "temporary",
+                )
+                failed = await self.windows.complete_envelope_send(
+                    claim,
+                    attempt,
+                    expected_revision=sending.revision,
+                    retry_at=claim.expires_at + timedelta(seconds=2),
+                )
+                self.assertEqual(failed.state, DigestEnvelopeState.FAILED)
+                self.now = claim.expires_at + timedelta(seconds=3)
+                await replace_subscription_gate_fixture(
+                    self.db, self.bindings, "sample/game", False, self.now
+                )
+                await replace_subscription_gate_fixture(
+                    self.db, self.bindings, "sample/game", True, self.now
+                )
+                self.assertIsNone(
+                    await self.windows.retry_failed_envelope(
+                        failed.envelope_id,
+                        expected_revision=failed.revision,
+                        now=self.now,
+                    )
+                )
+                self.assertEqual(
+                    await self.windows.current_envelope(
+                        window.window_id, record.recipient
+                    ),
+                    failed,
+                )
 
     def tearDown(self) -> None:
         self.temp.cleanup()
@@ -389,12 +752,176 @@ class B04SubscriptionRepositoryTests(unittest.IsolatedAsyncioTestCase):
             )
         return record, window, event, member, claim
 
-    async def test_r01_real_full_migration_reopens_at_0080(self) -> None:
-        self.assertEqual(self.db.initialize(), 80)
-        self.assertEqual(self.db.initialize(), 80)
-        self.assertEqual(self.db.schema_version(), 80)
+    async def test_unmapped_execution_is_closed_even_with_valid_persisted_gate(self):
+        record = await self._create()
+        lease = await self._lease()
+        unbound_lifecycle = SQLiteSubscriptionLifecycleRepository(self.db)
+        unbound_scheduler = SQLiteSchedulerRepository(self.db)
+        self.assertIsNone(await unbound_lifecycle.current_fence(record.module_id))
+        with self.assertRaises(PermissionError):
+            await unbound_lifecycle.apply(
+                SubscriptionJobChange(
+                    SubscriptionJobChangeKind.CREATE,
+                    self._record("unmapped"),
+                    self._association(self._record("unmapped")),
+                    None,
+                    None,
+                ),
+                initial_run=self._run(),
+            )
+        self.assertIsNone(await unbound_scheduler.claim_due(self._run(), now=self.now))
+        self.assertFalse(await unbound_scheduler.is_current(lease, now=self.now))
+        self.assertFalse(
+            await unbound_scheduler.commit_observation(lease, self._observation())
+        )
+        self.assertIsNone(await self.subscriptions.current("unmapped"))
+
+    async def test_pause_resume_and_intent_toggle_invalidate_old_lease_but_reclaim_recurring_job(
+        self,
+    ):
+        record = await self._create()
+        before = await self.db.executor.run_read(
+            lambda u: tuple(
+                u.execute(
+                    "SELECT gate_revision,intent_revision FROM b04_collection_jobs"
+                ).fetchone()
+            )
+        )
+        self.assertEqual(before, (None, None))
+        lease = await self._lease()
+        self.assertIsNotNone(lease.subscription_fence)
+        await replace_subscription_gate_fixture(
+            self.db, self.bindings, record.module_id, False, self.now
+        )
+        self.assertFalse(await self.scheduler.is_current(lease, now=self.now))
+        self.assertFalse(
+            await self.scheduler.commit_observation(lease, self._observation())
+        )
+        await self.scheduler.release(lease)
+        self.assertIsNone(await self.scheduler.claim_due(self._run(), now=self.now))
+        await replace_subscription_gate_fixture(
+            self.db, self.bindings, record.module_id, True, self.now
+        )
+        renewed = await self._lease()
+        self.assertNotEqual(renewed.subscription_fence, lease.subscription_fence)
+        self.assertFalse(
+            await self.scheduler.commit_observation(lease, self._observation())
+        )
+        await replace_subscription_gate_fixture(
+            self.db, self.bindings, record.module_id, True, self.now
+        )
+        self.assertTrue(await self.scheduler.is_current(renewed, now=self.now))
+        await self.db.executor.run_transaction(
+            lambda u: u.execute(
+                "UPDATE module_runtime_intents SET desired_enabled=0,intent_revision=2"
+            ).rowcount,
+            begin_mode="IMMEDIATE",
+        )
+        self.assertFalse(await self.scheduler.is_current(renewed, now=self.now))
+        await self.db.executor.run_transaction(
+            lambda u: u.execute(
+                "UPDATE module_runtime_intents SET desired_enabled=1,intent_revision=3"
+            ).rowcount,
+            begin_mode="IMMEDIATE",
+        )
+        self.assertFalse(await self.scheduler.is_current(renewed, now=self.now))
+        await self.scheduler.release(renewed)
+        fresh = await self._lease()
+        self.assertEqual(fresh.subscription_fence.intent_revision, 3)
+        self.assertTrue(await self.scheduler.is_current(fresh, now=self.now))
+        self.assertFalse(
+            await self.scheduler.is_current(
+                replace(fresh, subscription_fence=None), now=self.now
+            )
+        )
+
+    async def test_old_null_or_different_event_stamp_rolls_back_checkpoint_cursor_and_observation(
+        self,
+    ):
+        record = await self._create()
+        first = self._observation(identity="baseline")
+        lease = await self._lease()
+        initial = SubscriptionEvaluationCommit(
+            record.subscription_id,
+            1,
+            None,
+            EvaluationState(1, {"seen": "baseline"}),
+            ObservationCursor(
+                first.observation_id,
+                first.data_version,
+                first.completeness,
+                first.covered_ids,
+            ),
+        )
+        self.assertTrue(
+            await self.scheduler.commit_observation_with_evaluations(
+                lease, ObservationEvaluationCommit(first, (initial,))
+            )
+        )
+        event = self._event(record)
+        await self.delivery.create_event(event)
+        self.now += timedelta(seconds=31)
+        lease = await self._lease()
+        observation = self._observation(identity="must-rollback")
+        candidate = SubscriptionEvaluationCommit(
+            record.subscription_id,
+            1,
+            1,
+            EvaluationState(2, {"seen": "new"}),
+            ObservationCursor(
+                observation.observation_id,
+                observation.data_version,
+                observation.completeness,
+                observation.covered_ids,
+            ),
+            (event,),
+        )
+
+        def snapshot(unit):
+            return (
+                tuple(unit.execute("SELECT * FROM b04_evaluation_states").fetchone()),
+                tuple(
+                    unit.execute(
+                        "SELECT observation_id FROM b04_collection_jobs"
+                    ).fetchone()
+                ),
+                tuple(
+                    tuple(row) for row in unit.execute("SELECT * FROM b04_observations")
+                ),
+            )
+
+        before = await self.db.executor.run_read(snapshot)
+        for stamp in ((None, None), (99, 99)):
+            with self.subTest(stamp=stamp):
+                await self.db.executor.run_transaction(
+                    lambda u: u.execute(
+                        "UPDATE b04_delivery_events SET gate_revision=?,intent_revision=?",
+                        stamp,
+                    ).rowcount,
+                    begin_mode="IMMEDIATE",
+                )
+                self.assertFalse(
+                    await self.scheduler.commit_observation_with_evaluations(
+                        lease, ObservationEvaluationCommit(observation, (candidate,))
+                    )
+                )
+                self.assertEqual(await self.db.executor.run_read(snapshot), before)
+                actual = await self.db.executor.run_read(
+                    lambda u: tuple(
+                        u.execute(
+                            "SELECT gate_revision,intent_revision FROM b04_delivery_events"
+                        ).fetchone()
+                    )
+                )
+                self.assertEqual(actual, stamp)
+                self.assertTrue(await self.scheduler.is_current(lease, now=self.now))
+
+    async def test_r01_real_full_migration_reopens_at_0090(self) -> None:
+        self.assertEqual(self.db.initialize(), 90)
+        self.assertEqual(self.db.initialize(), 90)
+        self.assertEqual(self.db.schema_version(), 90)
         reopened = SQLiteDatabase(self.path)
-        self.assertEqual(reopened.schema_version(), 80)
+        self.assertEqual(reopened.schema_version(), 90)
 
     async def test_repository_sql_callbacks_run_on_worker_thread(self) -> None:
         caller_thread = threading.get_ident()
@@ -513,7 +1040,9 @@ class B04SubscriptionRepositoryTests(unittest.IsolatedAsyncioTestCase):
         selector = DigestWindowSelector(
             profile, recipient, datetime(2026, 9, 25, 10, 30, tzinfo=UTC)
         )
-        reopened = SQLiteDigestWindowRepository(SQLiteDatabase(self.path))
+        reopened = SQLiteDigestWindowRepository(
+            SQLiteDatabase(self.path), subscription_gate_bindings=self.bindings
+        )
         found = await reopened.for_schedule(selector)
         self.assertEqual(found, window)
         self.assertIsNone(
@@ -624,7 +1153,9 @@ class B04SubscriptionRepositoryTests(unittest.IsolatedAsyncioTestCase):
             (self.now.isoformat(), 45.0, 1, 7, 9, None, None),
         )
 
-        reopened = SQLiteSchedulerRepository(SQLiteDatabase(self.path))
+        reopened = SQLiteSchedulerRepository(
+            SQLiteDatabase(self.path), subscription_gate_bindings=self.bindings
+        )
         restored = await reopened.list_due_jobs(now=self.now, limit=5)
         self.assertEqual(restored, due)
 
@@ -1127,7 +1658,9 @@ class B04SubscriptionRepositoryTests(unittest.IsolatedAsyncioTestCase):
         current = [started_at]
         self.now = started_at
         self.scheduler = SQLiteSchedulerRepository(
-            self.db, utc_clock=lambda: current[0]
+            self.db,
+            subscription_gate_bindings=self.bindings,
+            utc_clock=lambda: current[0],
         )
 
         await self._create()
@@ -1214,7 +1747,9 @@ class B04SubscriptionRepositoryTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-        reopened_scheduler = SQLiteSchedulerRepository(SQLiteDatabase(self.path))
+        reopened_scheduler = SQLiteSchedulerRepository(
+            SQLiteDatabase(self.path), subscription_gate_bindings=self.bindings
+        )
         due = await reopened_scheduler.list_due_jobs(now=success_due, limit=10)
         self.assertEqual(len(due), 1)
         self.assertEqual(due[0].due_at, success_due)
@@ -1252,8 +1787,18 @@ class B04SubscriptionRepositoryTests(unittest.IsolatedAsyncioTestCase):
     async def test_r08_delivery_idempotency_and_attempt_ledger(self) -> None:
         record = await self._create()
         event = self._event(record)
-        self.assertEqual(await self.delivery.create_event(event), event)
-        self.assertEqual(await self.delivery.create_event(event), event)
+        self.assertEqual(
+            await create_subscription_event_fixture(
+                self.delivery, self.bindings, event
+            ),
+            event,
+        )
+        self.assertEqual(
+            await create_subscription_event_fixture(
+                self.delivery, self.bindings, event
+            ),
+            event,
+        )
         sending = await self.delivery.claim_sending(
             event.event_key,
             event.event_version,
@@ -1283,7 +1828,9 @@ class B04SubscriptionRepositoryTests(unittest.IsolatedAsyncioTestCase):
             retry_at=self.now + timedelta(seconds=2),
         )
         self.assertEqual(failed.state, DeliveryState.FAILED)
-        reopened = SQLiteDeliveryRepository(SQLiteDatabase(self.path))
+        reopened = SQLiteDeliveryRepository(
+            SQLiteDatabase(self.path), subscription_gate_bindings=self.bindings
+        )
         sending_again = await reopened.claim_sending(
             event.event_key,
             event.event_version,
@@ -1337,8 +1884,10 @@ class B04SubscriptionRepositoryTests(unittest.IsolatedAsyncioTestCase):
         record = await self._create()
         events = tuple(
             [
-                await self.delivery.create_event(
-                    self._event(record, event_key=f"paged-{letter}")
+                await create_subscription_event_fixture(
+                    self.delivery,
+                    self.bindings,
+                    self._event(record, event_key=f"paged-{letter}"),
                 )
                 for letter in ("a", "b", "c")
             ]
@@ -1379,7 +1928,9 @@ class B04SubscriptionRepositoryTests(unittest.IsolatedAsyncioTestCase):
             expected_state=DeliveryState.SENDING,
             retry_at=retry_at,
         )
-        reopened = SQLiteDeliveryRepository(SQLiteDatabase(self.path))
+        reopened = SQLiteDeliveryRepository(
+            SQLiteDatabase(self.path), subscription_gate_bindings=self.bindings
+        )
         self.assertEqual(
             (
                 await reopened.current_event(
@@ -1465,7 +2016,9 @@ class B04SubscriptionRepositoryTests(unittest.IsolatedAsyncioTestCase):
             (stale, "d-stale-revision"),
             (instant, "z-instant"),
         ):
-            await self.delivery.create_event(self._event(record, event_key=event_key))
+            await create_subscription_event_fixture(
+                self.delivery, self.bindings, self._event(record, event_key=event_key)
+            )
 
         keys = []
         cursor = None
@@ -1487,8 +2040,8 @@ class B04SubscriptionRepositoryTests(unittest.IsolatedAsyncioTestCase):
         digest = await self._create(
             self._record("sub-claim-digest", notification_mode="digest")
         )
-        event = await self.delivery.create_event(
-            self._event(digest, event_key="claim-digest")
+        event = await create_subscription_event_fixture(
+            self.delivery, self.bindings, self._event(digest, event_key="claim-digest")
         )
         failed = DeliveryAttempt(
             1,
@@ -1548,8 +2101,8 @@ class B04SubscriptionRepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(current.state, DeliveryState.FAILED)
         self.assertEqual(current.attempt.attempt_number, 1)
 
-        current_event = await self.delivery.create_event(
-            self._event(revised, event_key="claim-digest")
+        current_event = await create_subscription_event_fixture(
+            self.delivery, self.bindings, self._event(revised, event_key="claim-digest")
         )
         claimed = await self.delivery.claim_sending(
             current_event.event_key,
@@ -1683,8 +2236,10 @@ class B04SubscriptionRepositoryTests(unittest.IsolatedAsyncioTestCase):
         stale_record = await self._create(
             self._record("sub-unrelated-stale", key=stale_key)
         )
-        stale_event = await self.delivery.create_event(
-            self._event(stale_record, event_key="event-unrelated-stale")
+        stale_event = await create_subscription_event_fixture(
+            self.delivery,
+            self.bindings,
+            self._event(stale_record, event_key="event-unrelated-stale"),
         )
         await self.subscriptions.cancel(
             stale_record.subscription_id, expected_revision=stale_record.revision
@@ -1860,8 +2415,14 @@ class B04SubscriptionRepositoryTests(unittest.IsolatedAsyncioTestCase):
         for record in records:
             await self._create(record)
             event = self._event(record, event_key="shared-event")
-            events.append(await self.delivery.create_event(event))
-        reopened = SQLiteDeliveryRepository(SQLiteDatabase(self.path))
+            events.append(
+                await create_subscription_event_fixture(
+                    self.delivery, self.bindings, event
+                )
+            )
+        reopened = SQLiteDeliveryRepository(
+            SQLiteDatabase(self.path), subscription_gate_bindings=self.bindings
+        )
         for index, event in enumerate(events, start=1):
             self.assertEqual(
                 await reopened.current_event(
@@ -1960,8 +2521,10 @@ class B04SubscriptionRepositoryTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_r08_revised_subscription_can_store_same_event_version(self) -> None:
         original = await self._create(self._record("sub-revision"))
-        old_event = await self.delivery.create_event(
-            self._event(original, event_key="stable-event")
+        old_event = await create_subscription_event_fixture(
+            self.delivery,
+            self.bindings,
+            self._event(original, event_key="stable-event"),
         )
         revised = self._record("sub-revision", revision=2)
         await self.lifecycle.apply(
@@ -1974,8 +2537,8 @@ class B04SubscriptionRepositoryTests(unittest.IsolatedAsyncioTestCase):
             ),
             initial_run=self._run(revised.collection_key),
         )
-        new_event = await self.delivery.create_event(
-            self._event(revised, event_key="stable-event")
+        new_event = await create_subscription_event_fixture(
+            self.delivery, self.bindings, self._event(revised, event_key="stable-event")
         )
         self.assertEqual(
             (old_event.event_key, old_event.event_version),
@@ -2014,7 +2577,9 @@ class B04SubscriptionRepositoryTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_r08_completion_must_match_claimed_start_time(self) -> None:
         record = await self._create()
-        event = await self.delivery.create_event(self._event(record))
+        event = await create_subscription_event_fixture(
+            self.delivery, self.bindings, self._event(record)
+        )
         await self.delivery.claim_sending(
             event.event_key,
             event.event_version,
@@ -2077,7 +2642,9 @@ class B04SubscriptionRepositoryTests(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         record = await self._create()
-        event = await self.delivery.create_event(self._event(record))
+        event = await create_subscription_event_fixture(
+            self.delivery, self.bindings, self._event(record)
+        )
         await self.delivery.claim_sending(
             event.event_key,
             1,
@@ -2088,7 +2655,9 @@ class B04SubscriptionRepositoryTests(unittest.IsolatedAsyncioTestCase):
             started_at=self.now,
             now=self.now,
         )
-        reopened = SQLiteDeliveryRepository(SQLiteDatabase(self.path))
+        reopened = SQLiteDeliveryRepository(
+            SQLiteDatabase(self.path), subscription_gate_bindings=self.bindings
+        )
         recovered = await reopened.recover_stale_sending(
             before=self.now + timedelta(minutes=1)
         )
@@ -2111,7 +2680,9 @@ class B04SubscriptionRepositoryTests(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         record = await self._create()
-        event = await self.delivery.create_event(self._event(record))
+        event = await create_subscription_event_fixture(
+            self.delivery, self.bindings, self._event(record)
+        )
         await self.delivery.claim_sending(
             event.event_key,
             event.event_version,
@@ -2144,7 +2715,9 @@ class B04SubscriptionRepositoryTests(unittest.IsolatedAsyncioTestCase):
             **kwargs,
         )
         self.assertEqual(unknown.state, DeliveryState.UNKNOWN)
-        reopened = SQLiteDeliveryRepository(SQLiteDatabase(self.path))
+        reopened = SQLiteDeliveryRepository(
+            SQLiteDatabase(self.path), subscription_gate_bindings=self.bindings
+        )
         recovered = await reopened.current_event(
             event.event_key,
             event.event_version,
@@ -2330,7 +2903,9 @@ class B04SubscriptionRepositoryTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(failed.retry_at, retry_at)
 
-        reopened = SQLiteDigestWindowRepository(SQLiteDatabase(self.path))
+        reopened = SQLiteDigestWindowRepository(
+            SQLiteDatabase(self.path), subscription_gate_bindings=self.bindings
+        )
         self.assertEqual(
             await reopened.current_envelope(window.window_id, record.recipient), failed
         )
@@ -2757,7 +3332,9 @@ class B04SubscriptionRepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(reconciled.member_receipts, (receipt,))
 
         recovery_time = claim.expires_at + timedelta(seconds=1)
-        reopened = SQLiteDigestWindowRepository(SQLiteDatabase(self.path))
+        reopened = SQLiteDigestWindowRepository(
+            SQLiteDatabase(self.path), subscription_gate_bindings=self.bindings
+        )
         recovered = await reopened.recover_expired_envelope_claims(
             before=recovery_time, recovered_at=recovery_time
         )
@@ -2810,7 +3387,9 @@ class B04SubscriptionRepositoryTests(unittest.IsolatedAsyncioTestCase):
             retry_at=retry_at,
         )
 
-        reopened = SQLiteDigestWindowRepository(SQLiteDatabase(self.path))
+        reopened = SQLiteDigestWindowRepository(
+            SQLiteDatabase(self.path), subscription_gate_bindings=self.bindings
+        )
         ready = await reopened.retry_failed_envelope(
             failed.envelope_id, expected_revision=failed.revision, now=retry_at
         )
@@ -2873,7 +3452,9 @@ class B04SubscriptionRepositoryTests(unittest.IsolatedAsyncioTestCase):
         await self.scheduler.commit_observation_with_evaluations(
             lease, ObservationEvaluationCommit(obs, (item,))
         )
-        reopened = SQLiteDigestWindowRepository(SQLiteDatabase(self.path))
+        reopened = SQLiteDigestWindowRepository(
+            SQLiteDatabase(self.path), subscription_gate_bindings=self.bindings
+        )
         recovered = await reopened.get(window.window_id)
         self.assertEqual(
             (recovered.utc_start, recovered.utc_end, recovered.due_at),
@@ -3101,9 +3682,9 @@ class B04SubscriptionRepositoryTests(unittest.IsolatedAsyncioTestCase):
             policy_revision=7,
         )
         await self.windows.create(window)
-        actual = await SQLiteDigestWindowRepository(SQLiteDatabase(self.path)).get(
-            window.window_id
-        )
+        actual = await SQLiteDigestWindowRepository(
+            SQLiteDatabase(self.path), subscription_gate_bindings=self.bindings
+        ).get(window.window_id)
         self.assertEqual(actual, window)
         with self.assertRaises(UniqueConstraintViolation):
             await self.windows.create(

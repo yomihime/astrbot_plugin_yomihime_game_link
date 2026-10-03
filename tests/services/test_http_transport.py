@@ -104,6 +104,29 @@ def _request(
     )
 
 
+class AioHttpRealSessionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_real_session_constructs_reuses_and_closes_without_network(self):
+        import aiohttp
+
+        transport = AioHttpTransport()
+        session = None
+        try:
+            session = await transport._get_session()
+            self.assertIsInstance(session, aiohttp.ClientSession)
+            self.assertIs(await transport._get_session(), session)
+            self.assertIsInstance(session.cookie_jar, aiohttp.DummyCookieJar)
+            self.assertFalse(session.trust_env)
+            self.assertFalse(session.auto_decompress)
+            self.assertEqual(session.connector.limit, 16)
+        finally:
+            await transport.close()
+        self.assertTrue(session.closed)
+        await transport.close()
+        with self.assertRaises(SourceHttpError) as rejected:
+            await transport._get_session()
+        self.assertEqual(rejected.exception.code, "transport_failed")
+
+
 class AioHttpTransportTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.context = _ResponseContext()

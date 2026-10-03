@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from time import monotonic
+from types import MappingProxyType
 from typing import Callable
 
 from ygl_test_subject.api.contexts import InvocationOrigin, InvocationView
@@ -21,6 +22,7 @@ from ygl_test_subject.api.manifests import (
     CapabilityDescriptor,
     CapabilityEffect,
     CommandDescriptor,
+    ConfigField,
     InvocationPolicy,
     ModuleCategory,
     ModuleManifest,
@@ -31,12 +33,16 @@ from ygl_test_subject.api.manifests import (
 from ygl_test_subject.api.results import CapabilityResult, ResultStatus
 from ygl_test_subject.api.services import (
     CapabilityHealth,
+    ConfigFieldUpdate,
+    ConfigPatchMode,
+    ConfigTarget,
     ConversationKind,
     ConversationRef,
     Grant,
     HealthReport,
     HealthStatus,
     ModuleHandlers,
+    PersistedConfigPatch,
 )
 from ygl_test_subject.api.storage import OwnershipKind
 from ygl_test_subject.api.subscriptions import (
@@ -62,6 +68,7 @@ from ygl_test_subject.core.ports import (
     MessageStatus,
     MessageTarget,
     RenderedMessage,
+    SubscriptionGateBinding,
 )
 from ygl_test_subject.core.registry import Registry
 from ygl_test_subject.infrastructure.files import LocalSafeFileStore
@@ -69,6 +76,9 @@ from ygl_test_subject.infrastructure.http import HttpTransport, TransportRequest
 from ygl_test_subject.infrastructure.secret_store import SQLiteSecretStore
 from ygl_test_subject.infrastructure.sqlite.database import SQLiteDatabase
 from ygl_test_subject.infrastructure.sqlite.repositories import SQLiteRepositories
+from ygl_test_subject.infrastructure.sqlite.repositories_config import (
+    SQLiteConfigRepository,
+)
 from ygl_test_subject.infrastructure.sqlite.repositories_output import (
     SQLiteRootOutputRepository,
 )
@@ -110,6 +120,132 @@ class DeterministicClock:
 
     def advance(self, delta: timedelta) -> None:
         self.current += delta
+
+
+def synthetic_subscription_gate_bindings(module_ids):
+    """Explicit test-only composition; callers enumerate every fixture module."""
+    return MappingProxyType(
+        {
+            module_id: SubscriptionGateBinding(
+                ConfigTarget("b04-fixture", module_id),
+                "subscriptions_enabled",
+                *module_id.split("/", 1),
+            )
+            for module_id in module_ids
+        }
+    )
+
+
+async def initialize_subscription_gate_fixture(database, bindings, now):
+    """Use real gate bootstrap and explicit synthetic persisted runtime intents."""
+    fixture_database = SQLiteDatabase(database.path)
+    config = SQLiteConfigRepository(
+        fixture_database,
+        subscription_gate_fields={
+            item.target: (item.field,) for item in bindings.values()
+        },
+        clock=lambda: now,
+    )
+
+    def seed(unit):
+        for item in bindings.values():
+            unit.execute(
+                "INSERT INTO module_runtime_intents(package_id,module_id,desired_enabled,intent_revision,operation_id,updated_at) VALUES (?,?,1,1,'b04-explicit-fixture',?) ON CONFLICT(package_id,module_id) DO NOTHING",
+                (item.package_id, item.module_id, now.isoformat()),
+            )
+
+    try:
+        if not await config.initialize_subscription_gates():
+            raise RuntimeError("synthetic subscription gate initialization failed")
+        await fixture_database.executor.run_transaction(seed, begin_mode="IMMEDIATE")
+    finally:
+        await fixture_database.executor.close()
+
+
+async def replace_subscription_gate_fixture(database, bindings, module_id, value, now):
+    """Apply a synthetic gate change through the existing real config CAS."""
+    binding = bindings[module_id]
+    config = SQLiteConfigRepository(
+        database,
+        subscription_gate_fields={
+            item.target: (item.field,) for item in bindings.values()
+        },
+        clock=lambda: now,
+    )
+    snapshot = await config.current(binding.target)
+    return await config.update(
+        binding.target,
+        PersistedConfigPatch(
+            snapshot.revision,
+            (ConfigFieldUpdate(binding.field, ConfigPatchMode.REPLACE, value=value),),
+            (ConfigField(binding.field, default=True),),
+            "b04-gate-test-change",
+            binding.target,
+        ),
+    )
+
+
+async def create_subscription_event_fixture(repository, bindings, event):
+    """Explicitly stamp only a newly created synthetic test event; never heal history."""
+    from ygl_test_subject.infrastructure.sqlite.repositories_subscriptions import (
+        _read_subscription_fence,
+    )
+
+    existing = await repository.current_event(
+        event.event_key,
+        event.event_version,
+        subscription_id=event.subscription_id,
+        subscription_revision=event.subscription_revision,
+    )
+    saved = await repository.create_event(event)
+    if existing is not None:
+        return saved
+
+    def stamp(unit):
+        row = unit.execute(
+            "SELECT record_json FROM b04_subscriptions WHERE subscription_id=?",
+            (event.subscription_id,),
+        ).fetchone()
+        from ygl_test_subject.infrastructure.sqlite.repositories_subscriptions import (
+            _load,
+        )
+
+        record = _load(row[0])
+        fence = _read_subscription_fence(unit, bindings.get(record.module_id))
+        if fence is None:
+            raise AssertionError(
+                "synthetic event requires explicit current gate and intent"
+            )
+        updated = unit.execute(
+            "UPDATE b04_delivery_events SET gate_revision=?,intent_revision=? WHERE event_key=? AND event_version=? AND subscription_id=? AND subscription_revision=? AND gate_revision IS NULL AND intent_revision IS NULL",
+            (
+                fence.gate_revision,
+                fence.intent_revision,
+                event.event_key,
+                event.event_version,
+                event.subscription_id,
+                event.subscription_revision,
+            ),
+        )
+        if updated.rowcount != 1:
+            raise AssertionError("synthetic fixture may stamp only its new event")
+
+    await repository.database.executor.run_transaction(stamp, begin_mode="IMMEDIATE")
+    return saved
+
+
+async def create_digest_envelope_fixture(repository, bindings, envelope):
+    """Materialize synthetic member events before their immutable test associations."""
+    from ygl_test_subject.infrastructure.sqlite.repositories_subscriptions import (
+        SQLiteDeliveryRepository,
+    )
+
+    events = SQLiteDeliveryRepository(
+        repository.database, subscription_gate_bindings=bindings
+    )
+    for association in envelope.member_associations:
+        await create_subscription_event_fixture(events, bindings, association.event)
+    return await repository.create_envelope(envelope)
 
 
 class _TestCodec:
@@ -231,6 +367,7 @@ class _FakeCollector:
     def __init__(self, clock: DeterministicClock) -> None:
         self.clock = clock
         self.calls = 0
+        self.previous_inputs = []
         self.next_completeness = ObservationCompleteness.COMPLETE
         self.block = False
         self.started = asyncio.Event()
@@ -241,6 +378,7 @@ class _FakeCollector:
 
     async def collect(self, context: CollectionView, parameters, previous):
         self.calls += 1
+        self.previous_inputs.append(previous)
         if self.block:
             self.started.set()
             await self.release.wait()
@@ -538,6 +676,7 @@ def build_runtime(
         schedules=(schedule, private_schedule, user_schedule),
         subscriptions=(subscription, private_subscription, user_subscription),
         sources=(SourceDeclaration("feed", "example.test", requests_per_minute=60),),
+        config_fields=(ConfigField("subscriptions_enabled", default=True),),
     )
     package = PackageManifest(
         "sample", "1.0.0", CONTRACT_VERSION, (manifest,), "tests", "MIT", "fixture"
@@ -635,7 +774,15 @@ def build_runtime(
         identity_namespace="b04-tests",
         admission=lifecycle.admission,
     )
-    b04 = B04Repositories(database)
+    bindings = synthetic_subscription_gate_bindings(("sample/feed",))
+    _run_async_from_sync(
+        initialize_subscription_gate_fixture(
+            database, bindings, clock() - timedelta(days=2)
+        )
+    )
+    b04 = B04Repositories(
+        database, utc_clock=clock, subscription_gate_bindings=bindings
+    )
     resolver = TrustedConversationResolver(issuer, host_repositories.conversations)
     routes = PersistedRouteResolver(host_repositories.conversations)
     cadence = CadenceConfiguration((60.0,))

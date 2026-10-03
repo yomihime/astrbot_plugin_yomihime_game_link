@@ -1,0 +1,36 @@
+{
+  "ff14_default_region": {
+    "description": "默认 FF14 区域",
+    "type": "string",
+    "default": "cn",
+    "options": [
+      "cn",
+      "global"
+    ],
+    "hint": "仅用于帮助和缺参提示；命令仍需明确填写区域。保存后 AstrBot 会重载插件；编辑前请刷新表单，避免旧表单覆盖新值。"
+  },
+  "ff14_calendar_default_days": {
+    "description": "日历默认查询天数",
+    "type": "int",
+    "default": 7,
+    "hint": "整数 1–30，仅用于省略 days 的新查询。保存后 AstrBot 会重载插件；无效配置会暂停整个插件，请修正后保存重载。"
+  },
+  "ff14_calendar_default_timezone": {
+    "description": "日历默认时区",
+    "type": "string",
+    "default": "Asia/Shanghai",
+    "hint": "可解析的 IANA 时区，例如 Asia/Shanghai 或 UTC；用于新查询和新订阅。显式参数优先，已有订阅保持原值。保存后 AstrBot 会重载插件。"
+  },
+  "ff14_calendar_default_delivery_time": {
+    "description": "新订阅每日摘要时间",
+    "type": "string",
+    "default": "08:00",
+    "hint": "严格 24 小时制 HH:MM，仅用于本人显式新建订阅时省略 time 的默认值，不自动创建订阅。保存后 AstrBot 会重载插件。"
+  },
+  "web_public_origin": {
+    "description": "网页访问地址（可选）",
+    "type": "string",
+    "default": "",
+    "hint": "仅填写一个 http(s) origin，不含账号密码、业务路径或查询参数。留空或格式无效仅关闭网页查询，不影响聊天与后台；保存后重载插件并重新打开页面。"
+  }
+}

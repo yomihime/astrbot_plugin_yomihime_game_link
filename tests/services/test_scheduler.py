@@ -55,7 +55,12 @@ from ygl_test_subject.api.subscriptions import (
 from ygl_test_subject.core.admission import AdmissionController
 from ygl_test_subject.core.context_issuer import ContextIssuer
 from ygl_test_subject.core.lifecycle import LifecycleController
-from ygl_test_subject.core.ports import CollectionRunRequest, ExecutionLease
+from ygl_test_subject.core.ports import (
+    CollectionRunRequest,
+    EvaluationCheckpoint,
+    ExecutionLease,
+    SubscriptionFence,
+)
 from ygl_test_subject.core.registry import Registry
 from ygl_test_subject.infrastructure.sqlite.database import SQLiteDatabase
 from ygl_test_subject.infrastructure.sqlite.repositories_subscriptions import (
@@ -73,7 +78,11 @@ from ygl_test_subject.services.scheduler import (
     digest_window_for_date,
 )
 
-from tests.fixtures.b04_runtime import _run_async_from_sync
+from tests.fixtures.b04_runtime import (
+    _run_async_from_sync,
+    initialize_subscription_gate_fixture,
+    synthetic_subscription_gate_bindings,
+)
 
 
 class _Collector:
@@ -167,6 +176,7 @@ class _Repo:
             request.module_epoch,
             request.registry_revision,
             now + timedelta(seconds=request.cadence_seconds),
+            SubscriptionFence(1, 1),
         )
 
         self.active[lease.token] = lease
@@ -177,6 +187,16 @@ class _Repo:
 
     async def current_evaluation(self, subscription_id, collection_key):
         return self.evaluation
+
+    async def current_checkpoint(self, subscription_id, collection_key):
+        if self.evaluation is None:
+            return None
+        state = self.evaluation.state
+        return EvaluationCheckpoint(
+            self.evaluation,
+            None if state is None else state.revision,
+            SubscriptionFence(1, 1),
+        )
 
     async def commit_observation(self, lease, observation):
         self.commits.append((lease, observation))
@@ -830,10 +850,16 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as temporary:
             db = SQLiteDatabase(Path(temporary) / "scheduler.sqlite3")
             db.initialize()
-            repository = SQLiteSchedulerRepository(db)
+            bindings = synthetic_subscription_gate_bindings(("pkg/pricing",))
+            await initialize_subscription_gate_fixture(db, bindings, datetime.now(UTC))
+            repository = SQLiteSchedulerRepository(
+                db, subscription_gate_bindings=bindings
+            )
             subscriptions = SQLiteSubscriptionStore(db)
             job_links = SQLiteSubscriptionJobRepository(db)
-            lifecycle = SQLiteSubscriptionLifecycleRepository(db)
+            lifecycle = SQLiteSubscriptionLifecycleRepository(
+                db, subscription_gate_bindings=bindings
+            )
             record = _record()
             association = SubscriptionJobAssociation(
                 record.subscription_id, record.revision, record.collection_key, 60, 1

@@ -759,13 +759,18 @@ class SharedCollectionScheduler:
                 require_collection_context(
                     self.issuer, context, clock=self.monotonic_clock
                 )
-                snapshot = await self.repository.current_evaluation(
+                checkpoint = await self.repository.current_checkpoint(
                     principal.subscription_id, candidate.key
                 )
                 await self._require_current_execution(
                     candidate.key, principal, lease, scheduled_lease
                 )
-                previous = None if snapshot is None else snapshot.observation
+                previous = (
+                    None
+                    if checkpoint is None
+                    or checkpoint.fence != lease.subscription_fence
+                    else checkpoint.snapshot.observation
+                )
                 handlers = self.lifecycle.handlers(module.module_id)
                 work = bound.tasks.await_result(
                     handlers.collectors[schedule.collector_id].collect(
@@ -970,6 +975,8 @@ class SharedCollectionScheduler:
                 raise ScopeStaleError("authorization grant changed")
         if await self._principal_for(key) != principal:
             raise ScopeStaleError("subscription owner or grant changed")
+        if not await self.repository.is_current(lease, now=_utc_now(self.now())):
+            raise ScopeStaleError("persistent execution claim changed")
         if scheduled_lease is not None:
             self.admission.check(scheduled_lease)
 

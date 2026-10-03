@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 from dataclasses import dataclass
 from functools import wraps
 from math import isfinite
+from types import MappingProxyType
 
 from ..api.administration import (
     AdminAuthorizationContext,
@@ -90,6 +92,7 @@ class AdminOperationsService(AdminOperations):
         config_repository: SQLiteConfigRepository,
         secret_store: SQLiteSecretStore,
         config_principal_id: str,
+        subscription_gate_fields: Mapping[ConfigTarget, tuple[str, ...]] | None = None,
     ) -> None:
         if not isinstance(authorization, AdminAuthorizationService):
             raise TypeError("authorization must be AdminAuthorizationService")
@@ -118,6 +121,9 @@ class AdminOperationsService(AdminOperations):
         self._config_repository = config_repository
         self.secret_store = secret_store
         self.config_principal_id = config_principal_id
+        self._subscription_gate_fields = MappingProxyType(
+            dict(subscription_gate_fields or {})
+        )
         self._accepting = True
         self._inflight: set[asyncio.Task[object]] = set()
 
@@ -206,6 +212,7 @@ class AdminOperationsService(AdminOperations):
             admission=self.lifecycle.admission,
             validate_admin_grant=validate,
             publish_config=publish_config,
+            subscription_gate_fields=self._subscription_gate_fields.get(target, ()),
         )
 
     def _selection(

@@ -303,6 +303,13 @@
       ],
       "config_fields": [
         {
+          "name": "sample_subscriptions_enabled",
+          "sensitive": false,
+          "required": false,
+          "default": true,
+          "description": "Allow future sample subscription collection and delivery when the host explicitly binds this gate."
+        },
+        {
           "name": "region",
           "sensitive": false,
           "required": true,

@@ -5,10 +5,34 @@ from __future__ import annotations
 import asyncio
 from collections import deque
 from collections.abc import Awaitable, Callable
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from math import isfinite
 from time import monotonic
-from typing import Any
+from typing import Any, Protocol
+
+
+class TaskObserver(Protocol):
+    """Cooperative ownership hook for supported scope spawns, not raw asyncio."""
+
+    def check(self) -> None: ...
+
+    def register(self, task: asyncio.Task[Any]) -> None: ...
+
+
+_TASK_OBSERVER: ContextVar[TaskObserver | None] = ContextVar(
+    "task_observer", default=None
+)
+
+
+@contextmanager
+def observe_tasks(observer: TaskObserver):
+    token = _TASK_OBSERVER.set(observer)
+    try:
+        yield
+    finally:
+        _TASK_OBSERVER.reset(token)
 
 
 class TaskScopeError(RuntimeError):
@@ -248,7 +272,11 @@ class TaskScope:
             started = True
             return await self.run(work, name=name, deadline_monotonic=self._deadline)
 
-        task = self._spawn(supervise(), f"{name}:scope")
+        try:
+            task = self._spawn(supervise(), f"{name}:scope")
+        except BaseException:
+            _close_awaitable(work)
+            raise
         task.add_done_callback(lambda completed: _close_if_never_started(work, started))
         return task
 
@@ -306,11 +334,22 @@ class TaskScope:
 
     def _spawn(self, work: Awaitable[Any], name: str) -> asyncio.Task[Any]:
         started = False
+        observer = _TASK_OBSERVER.get()
+        try:
+            if observer is not None:
+                observer.check()
+        except BaseException:
+            _close_awaitable(work)
+            raise
 
         async def runner() -> Any:
             nonlocal started
-            started = True
+            # Inherited contexts can outlive the request that created them.
+            # Recheck sealing before touching the supplied module awaitable.
+            if observer is not None:
+                observer.check()
             self.check_before_await()
+            started = True
             result = await work
             self.check_after_await()
             return result
@@ -319,6 +358,12 @@ class TaskScope:
         self._pending[task] = name
         task.add_done_callback(lambda completed: _close_if_never_started(work, started))
         task.add_done_callback(self._record_done)
+        if observer is not None:
+            try:
+                observer.register(task)  # Synchronous, before the caller yields.
+            except BaseException:
+                task.cancel()
+                raise
         return task
 
     async def _wait_for_cleanup(self, task: asyncio.Task[Any]) -> bool:

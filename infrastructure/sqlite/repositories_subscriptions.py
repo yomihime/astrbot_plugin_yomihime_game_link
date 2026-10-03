@@ -16,6 +16,7 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from enum import Enum
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Callable, Mapping
 
 from ...api.display import (
@@ -80,8 +81,12 @@ from ...api.subscriptions import (
 )
 from ...core.ports import (
     CollectionRunRequest,
+    EvaluationCheckpoint,
     ExecutionLease,
+    PersistedSubscriptionGateRead,
     RevisionConflict,
+    SubscriptionFence,
+    SubscriptionGateBinding,
     UniqueConstraintViolation,
 )
 from .database import SQLiteDatabase, SQLiteUnitOfWork
@@ -274,8 +279,83 @@ def _db(value: SQLiteDatabase | str | Path) -> SQLiteDatabase:
 
 
 class _Repository:
-    def __init__(self, database: SQLiteDatabase | str | Path) -> None:
+    def __init__(
+        self,
+        database: SQLiteDatabase | str | Path,
+        *,
+        subscription_gate_bindings: Mapping[str, SubscriptionGateBinding] | None = None,
+    ) -> None:
         self.database = _db(database)
+        bindings = dict(subscription_gate_bindings or {})
+        if any(
+            type(value) is not SubscriptionGateBinding or key != value.target.module_id
+            for key, value in bindings.items()
+        ):
+            raise ValueError("subscription gate binding map is invalid")
+        self._subscription_gate_bindings = MappingProxyType(bindings)
+
+
+def _row_fence(row: sqlite3.Row | None) -> SubscriptionFence | None:
+    if row is None:
+        return None
+    try:
+        return SubscriptionFence(row["gate_revision"], row["intent_revision"])
+    except (TypeError, ValueError):
+        return None
+
+
+def _read_subscription_admission(
+    unit: SQLiteUnitOfWork, binding: SubscriptionGateBinding | None
+) -> tuple[SubscriptionFence, datetime] | None:
+    """Read only the exact ordinary gate and intent in the caller's transaction."""
+    if binding is None:
+        return None
+    phase = unit.execute(
+        "SELECT phase FROM subscription_gate_bootstrap WHERE singleton=1"
+    ).fetchone()
+    if phase is None or phase[0] != "complete":
+        return None
+    marker = unit.execute(
+        "SELECT 1 FROM subscription_gate_initializations WHERE principal_id=? AND module_id=? AND field=?",
+        (binding.target.principal_id, binding.target.module_id, binding.field),
+    ).fetchone()
+    gate = unit.execute(
+        "SELECT value_json,revision,subscription_transition_at FROM config_entries WHERE principal_id=? AND module_id=? AND field=?",
+        (binding.target.principal_id, binding.target.module_id, binding.field),
+    ).fetchone()
+    intent = unit.execute(
+        "SELECT desired_enabled,intent_revision,updated_at FROM module_runtime_intents WHERE package_id=? AND module_id=?",
+        (binding.package_id, binding.module_id),
+    ).fetchone()
+    if marker is None or gate is None or intent is None:
+        return None
+    try:
+        if (
+            json.loads(gate["value_json"]) is not True
+            or type(intent["desired_enabled"]) is not int
+            or intent["desired_enabled"] != 1
+        ):
+            return None
+        gate_cutoff = _utc_instant(
+            _StoredDateTime.fromisoformat(gate["subscription_transition_at"]),
+            "gate cutoff",
+        )
+        intent_cutoff = _utc_instant(
+            _StoredDateTime.fromisoformat(intent["updated_at"]), "intent cutoff"
+        )
+        return (
+            SubscriptionFence(gate["revision"], intent["intent_revision"]),
+            max(gate_cutoff, intent_cutoff),
+        )
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _read_subscription_fence(
+    unit: SQLiteUnitOfWork, binding: SubscriptionGateBinding | None
+) -> SubscriptionFence | None:
+    admission = _read_subscription_admission(unit, binding)
+    return None if admission is None else admission[0]
 
 
 def _scope_values(
@@ -385,10 +465,27 @@ def _read_event(row: sqlite3.Row | None) -> DeliveryEvent | None:
     return None if row is None else _load(row["event_json"])
 
 
-def _upsert_event(unit: SQLiteUnitOfWork, event: DeliveryEvent) -> DeliveryEvent:
+def _upsert_event(
+    unit: SQLiteUnitOfWork,
+    event: DeliveryEvent,
+    *,
+    fence: SubscriptionFence | None = None,
+) -> DeliveryEvent:
+    if fence is not None:
+        old = unit.execute(
+            "SELECT gate_revision,intent_revision FROM b04_delivery_events WHERE event_key=? AND event_version=? AND subscription_id=? AND subscription_revision=?",
+            (
+                event.event_key,
+                event.event_version,
+                event.subscription_id,
+                event.subscription_revision,
+            ),
+        ).fetchone()
+        if old is not None and _row_fence(old) != fence:
+            raise _StaleEvaluationCommit
     try:
         unit.execute(
-            "INSERT INTO b04_delivery_events(event_key,event_version,subscription_id,subscription_revision,owner_id,grant_id,grant_revision,idempotency_key,state,attempt_number,retry_at,event_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO b04_delivery_events(event_key,event_version,subscription_id,subscription_revision,owner_id,grant_id,grant_revision,idempotency_key,state,attempt_number,retry_at,event_json,gate_revision,intent_revision) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 event.event_key,
                 event.event_version,
@@ -402,13 +499,15 @@ def _upsert_event(unit: SQLiteUnitOfWork, event: DeliveryEvent) -> DeliveryEvent
                 0 if event.attempt is None else event.attempt.attempt_number,
                 None if event.retry_at is None else _iso(event.retry_at),
                 _dump(event),
+                None if fence is None else fence.gate_revision,
+                None if fence is None else fence.intent_revision,
             ),
         )
     except Exception as exc:
         if isinstance(exc, UniqueConstraintViolation):
             raise
         row = unit.execute(
-            "SELECT event_json FROM b04_delivery_events WHERE event_key=? AND event_version=? AND subscription_id=? AND subscription_revision=?",
+            "SELECT event_json,gate_revision,intent_revision FROM b04_delivery_events WHERE event_key=? AND event_version=? AND subscription_id=? AND subscription_revision=?",
             (
                 event.event_key,
                 event.event_version,
@@ -417,6 +516,8 @@ def _upsert_event(unit: SQLiteUnitOfWork, event: DeliveryEvent) -> DeliveryEvent
             ),
         ).fetchone()
         existing = _read_event(row)
+        if row is not None and fence is not None and _row_fence(row) != fence:
+            raise _StaleEvaluationCommit from None
         if existing == event:
             return existing
         raise
@@ -724,6 +825,76 @@ class SQLiteSubscriptionJobRepository(_Repository):
 
 
 class SQLiteSubscriptionLifecycleRepository(_Repository):
+    async def read_subscription_gate_state(
+        self, module_id: str
+    ) -> PersistedSubscriptionGateRead:
+        binding = self._subscription_gate_bindings.get(module_id)
+        if binding is None:
+            return PersistedSubscriptionGateRead(False, None, None, "unsupported")
+
+        def read(unit: SQLiteUnitOfWork) -> PersistedSubscriptionGateRead:
+            def invalid(reason: str) -> PersistedSubscriptionGateRead:
+                return PersistedSubscriptionGateRead(True, None, None, reason)
+
+            phase = unit.execute(
+                "SELECT phase FROM subscription_gate_bootstrap WHERE singleton=1"
+            ).fetchone()
+            marker = unit.execute(
+                "SELECT 1 FROM subscription_gate_initializations WHERE principal_id=? AND module_id=? AND field=?",
+                (binding.target.principal_id, binding.target.module_id, binding.field),
+            ).fetchone()
+            if phase is None or phase[0] != "complete" or marker is None:
+                return invalid("initialization_invalid")
+            gate = unit.execute(
+                "SELECT value_json,revision,subscription_transition_at FROM config_entries WHERE principal_id=? AND module_id=? AND field=?",
+                (binding.target.principal_id, binding.target.module_id, binding.field),
+            ).fetchone()
+            if gate is None:
+                return invalid("config_missing")
+            try:
+                enabled = json.loads(gate["value_json"])
+            except (TypeError, ValueError):
+                return invalid("config_invalid")
+            if type(enabled) is not bool:
+                return invalid("config_invalid")
+            intent = unit.execute(
+                "SELECT desired_enabled,intent_revision,updated_at FROM module_runtime_intents WHERE package_id=? AND module_id=?",
+                (binding.package_id, binding.module_id),
+            ).fetchone()
+            try:
+                if (
+                    intent is None
+                    or type(intent["desired_enabled"]) is not int
+                    or intent["desired_enabled"] not in (0, 1)
+                ):
+                    return invalid("fence_invalid")
+                SubscriptionFence(gate["revision"], intent["intent_revision"])
+                intent_enabled = intent["desired_enabled"] == 1
+                if enabled:
+                    _utc_instant(
+                        _StoredDateTime.fromisoformat(
+                            gate["subscription_transition_at"]
+                        ),
+                        "gate cutoff",
+                    )
+                if intent_enabled:
+                    _utc_instant(
+                        _StoredDateTime.fromisoformat(intent["updated_at"]),
+                        "intent cutoff",
+                    )
+            except (TypeError, ValueError, OverflowError):
+                return invalid("fence_invalid")
+            return PersistedSubscriptionGateRead(True, enabled, intent_enabled, None)
+
+        return await self.database.executor.run_read(read)
+
+    async def current_fence(self, module_id: str) -> SubscriptionFence | None:
+        return await self.database.executor.run_read(
+            lambda unit: _read_subscription_fence(
+                unit, self._subscription_gate_bindings.get(module_id)
+            )
+        )
+
     async def apply(
         self,
         change: SubscriptionJobChange,
@@ -758,6 +929,13 @@ class SQLiteSubscriptionLifecycleRepository(_Repository):
 
         def _run(unit: SQLiteUnitOfWork) -> Any:
             if change.kind is SubscriptionJobChangeKind.CREATE:
+                if (
+                    _read_subscription_fence(
+                        unit, self._subscription_gate_bindings.get(record.module_id)
+                    )
+                    is None
+                ):
+                    raise PermissionError("subscription admission is unavailable")
                 assert assoc is not None
                 job = _put_job(unit, assoc.collection_key, initial_run)
                 _record_row(unit, record)
@@ -914,8 +1092,11 @@ class SQLiteSchedulerRepository(_Repository):
         database: SQLiteDatabase | str | Path,
         *,
         utc_clock: Callable[[], datetime] | None = None,
+        subscription_gate_bindings: Mapping[str, SubscriptionGateBinding] | None = None,
     ) -> None:
-        super().__init__(database)
+        super().__init__(
+            database, subscription_gate_bindings=subscription_gate_bindings
+        )
         if utc_clock is None:
 
             def current_utc_time() -> datetime:
@@ -932,6 +1113,11 @@ class SQLiteSchedulerRepository(_Repository):
         now = now.astimezone(UTC)
 
         def _run(unit: SQLiteUnitOfWork) -> Any:
+            fence = _read_subscription_fence(
+                unit, self._subscription_gate_bindings.get(request.key.module_id)
+            )
+            if fence is None:
+                return None
             job = _put_job(unit, request.key)
             row = unit.execute(
                 "SELECT due_at,lease_token,lease_expires_at FROM b04_collection_jobs WHERE job_key=?",
@@ -953,7 +1139,7 @@ class SQLiteSchedulerRepository(_Repository):
             token = secrets.token_urlsafe(24).replace("/", "_")
             expires = now + timedelta(seconds=request.cadence_seconds)
             unit.execute(
-                "UPDATE b04_collection_jobs SET due_at=?,cadence_seconds=?,config_revision=?,module_epoch=?,registry_revision=?,lease_token=?,lease_expires_at=? WHERE job_key=?",
+                "UPDATE b04_collection_jobs SET due_at=?,cadence_seconds=?,config_revision=?,module_epoch=?,registry_revision=?,lease_token=?,lease_expires_at=?,gate_revision=?,intent_revision=? WHERE job_key=?",
                 (
                     _iso(request.due_at),
                     request.cadence_seconds,
@@ -962,6 +1148,8 @@ class SQLiteSchedulerRepository(_Repository):
                     request.registry_revision,
                     token,
                     _iso(expires),
+                    fence.gate_revision,
+                    fence.intent_revision,
                     job,
                 ),
             )
@@ -972,6 +1160,7 @@ class SQLiteSchedulerRepository(_Repository):
                 request.module_epoch,
                 request.registry_revision,
                 expires,
+                fence,
             )
 
         return await self.database.executor.run_transaction(
@@ -986,10 +1175,19 @@ class SQLiteSchedulerRepository(_Repository):
         def _run(unit: SQLiteUnitOfWork) -> bool:
             row = unit.execute(
                 "SELECT key_json,config_revision,module_epoch,registry_revision,"
-                "lease_token,lease_expires_at FROM b04_collection_jobs WHERE job_key=?",
+                "lease_token,lease_expires_at,gate_revision,intent_revision FROM b04_collection_jobs WHERE job_key=?",
                 (job,),
             ).fetchone()
             if row is None or row["key_json"] != key_json:
+                return False
+            current = _read_subscription_fence(
+                unit, self._subscription_gate_bindings.get(lease.key.module_id)
+            )
+            if (
+                current is None
+                or lease.subscription_fence != current
+                or _row_fence(row) != current
+            ):
                 return False
             expires_at = row["lease_expires_at"]
             if expires_at is None:
@@ -1060,6 +1258,12 @@ class SQLiteSchedulerRepository(_Repository):
     async def current_evaluation(
         self, subscription_id: str, collection_key: CollectionKey
     ) -> SubscriptionEvaluationSnapshot | None:
+        checkpoint = await self.current_checkpoint(subscription_id, collection_key)
+        return None if checkpoint is None else checkpoint.snapshot
+
+    async def current_checkpoint(
+        self, subscription_id: str, collection_key: CollectionKey
+    ) -> EvaluationCheckpoint | None:
         def _run(unit: SQLiteUnitOfWork) -> Any:
             row = unit.execute(
                 "SELECT record_json FROM b04_subscriptions WHERE subscription_id=?",
@@ -1069,11 +1273,13 @@ class SQLiteSchedulerRepository(_Repository):
             if record is None or record.collection_key != collection_key:
                 return None
             state_row = unit.execute(
-                "SELECT state_json,cursor_json FROM b04_evaluation_states WHERE subscription_id=?",
+                "SELECT state_json,cursor_json,revision,gate_revision,intent_revision FROM b04_evaluation_states WHERE subscription_id=?",
                 (subscription_id,),
             ).fetchone()
             if state_row is None:
-                return SubscriptionEvaluationSnapshot(record, None, None, None)
+                return EvaluationCheckpoint(
+                    SubscriptionEvaluationSnapshot(record, None, None, None), None, None
+                )
             state = _load(state_row[0])
             cursor = _load(state_row[1])
             observation_row = unit.execute(
@@ -1083,7 +1289,11 @@ class SQLiteSchedulerRepository(_Repository):
             if observation_row is None:
                 raise ValueError("stored evaluation observation is unavailable")
             observation = _load(observation_row[0])
-            return SubscriptionEvaluationSnapshot(record, state, cursor, observation)
+            return EvaluationCheckpoint(
+                SubscriptionEvaluationSnapshot(record, state, cursor, observation),
+                state_row["revision"],
+                _row_fence(state_row),
+            )
 
         return await self.database.executor.run_read(_run)
 
@@ -1122,8 +1332,14 @@ class SQLiteSchedulerRepository(_Repository):
                     "SELECT * FROM b04_collection_jobs WHERE job_key=?", (job,)
                 ).fetchone()
                 committed_at = _utc_instant(self._utc_clock(), "utc_clock")
+                current = _read_subscription_fence(
+                    unit, self._subscription_gate_bindings.get(lease.key.module_id)
+                )
                 if (
                     row is None
+                    or current is None
+                    or lease.subscription_fence != current
+                    or _row_fence(row) != current
                     or row["key_json"] != _key_json(lease.key)
                     or row["lease_token"] != lease.token
                     or int(row["config_revision"] or 0) != lease.config_revision
@@ -1185,21 +1401,26 @@ class SQLiteSchedulerRepository(_Repository):
                         state_json, cursor_json = _dump(item.state), _dump(item.cursor)
                         if item.expected_state_revision is None:
                             unit.execute(
-                                "INSERT INTO b04_evaluation_states VALUES (?,?,?,?)",
+                                "INSERT INTO b04_evaluation_states "
+                                "(subscription_id,revision,state_json,cursor_json,gate_revision,intent_revision) VALUES (?,?,?,?,?,?)",
                                 (
                                     item.subscription_id,
                                     item.state.revision,
                                     state_json,
                                     cursor_json,
+                                    current.gate_revision,
+                                    current.intent_revision,
                                 ),
                             )
                         else:
                             cur = unit.execute(
-                                "UPDATE b04_evaluation_states SET revision=?,state_json=?,cursor_json=? WHERE subscription_id=? AND revision=?",
+                                "UPDATE b04_evaluation_states SET revision=?,state_json=?,cursor_json=?,gate_revision=?,intent_revision=? WHERE subscription_id=? AND revision=?",
                                 (
                                     item.state.revision,
                                     state_json,
                                     cursor_json,
+                                    current.gate_revision,
+                                    current.intent_revision,
                                     item.subscription_id,
                                     item.expected_state_revision,
                                 ),
@@ -1207,7 +1428,7 @@ class SQLiteSchedulerRepository(_Repository):
                             if cur.rowcount != 1:
                                 raise _StaleEvaluationCommit
                         for event in item.delivery_events:
-                            _upsert_event(unit, event)
+                            _upsert_event(unit, event, fence=current)
                         for assoc in item.digest_members:
                             _insert_digest_member(unit, assoc)
                     unit.execute(
@@ -1570,6 +1791,12 @@ class SQLiteDigestWindowRepository(_Repository):
                 if not associations:
                     return None
                 members = tuple(item.member for item in associations)
+                if not any(
+                    self._current_member_disposition(unit, member, recipient, window_id)
+                    is DigestMemberDisposition.INCLUDED
+                    for member in members
+                ):
+                    return None
                 eid = (
                     "digest-"
                     + hashlib.sha256(f"{window_id}:{route}".encode()).hexdigest()[:40]
@@ -1583,6 +1810,14 @@ class SQLiteDigestWindowRepository(_Repository):
                 ).fetchone()
             envelope = _read_envelope(row)
             if envelope is None or envelope.state is not DigestEnvelopeState.READY:
+                return None
+            if not any(
+                self._current_member_disposition(
+                    unit, member, envelope.recipient, envelope.window_id
+                )
+                is DigestMemberDisposition.INCLUDED
+                for member in envelope.members
+            ):
                 return None
             token = secrets.token_urlsafe(24).replace("/", "_")
             claimed = DigestEnvelope(
@@ -1623,11 +1858,12 @@ class SQLiteDigestWindowRepository(_Repository):
             return None
         return current
 
-    @staticmethod
     def _current_member_disposition(
+        self,
         unit: SQLiteUnitOfWork,
         member: DigestMember,
         recipient: ConversationRef,
+        window_id: str,
     ) -> DigestMemberDisposition:
         row = unit.execute(
             "SELECT revision,status,record_json FROM b04_subscriptions WHERE subscription_id=?",
@@ -1641,6 +1877,34 @@ class SQLiteDigestWindowRepository(_Repository):
         if record.status is not SubscriptionStatus.ACTIVE:
             return DigestMemberDisposition.CANCELLED
         if record.recipient != recipient:
+            return DigestMemberDisposition.UNAUTHORIZED
+        admission = _read_subscription_admission(
+            unit, self._subscription_gate_bindings.get(record.module_id)
+        )
+        event = unit.execute(
+            "SELECT gate_revision,intent_revision,event_json FROM b04_delivery_events WHERE event_key=? AND event_version=? AND subscription_id=? AND subscription_revision=?",
+            (
+                member.event_key,
+                member.event_version,
+                member.subscription_id,
+                member.subscription_revision,
+            ),
+        ).fetchone()
+        window = unit.execute(
+            "SELECT due_at FROM b04_digest_windows WHERE window_id=?", (window_id,)
+        ).fetchone()
+        if admission is None or _row_fence(event) != admission[0] or window is None:
+            return DigestMemberDisposition.UNAUTHORIZED
+        saved_event = _read_event(event)
+        if saved_event is None or saved_event.recipient != recipient:
+            return DigestMemberDisposition.UNAUTHORIZED
+        try:
+            due = _utc_instant(
+                _StoredDateTime.fromisoformat(window["due_at"]), "digest due"
+            )
+        except (TypeError, ValueError, OverflowError):
+            return DigestMemberDisposition.UNAUTHORIZED
+        if due <= admission[1]:
             return DigestMemberDisposition.UNAUTHORIZED
         return DigestMemberDisposition.INCLUDED
 
@@ -1667,7 +1931,7 @@ class SQLiteDigestWindowRepository(_Repository):
             for receipt in receipts:
                 if receipt.disposition is DigestMemberDisposition.INCLUDED:
                     disposition = self._current_member_disposition(
-                        unit, receipt.member, current.recipient
+                        unit, receipt.member, current.recipient, current.window_id
                     )
                     if disposition is not DigestMemberDisposition.INCLUDED:
                         receipt = DigestMemberReceipt(receipt.member, disposition)
@@ -1747,7 +2011,9 @@ class SQLiteDigestWindowRepository(_Repository):
             ):
                 return None
             if any(
-                self._current_member_disposition(unit, member, current.recipient)
+                self._current_member_disposition(
+                    unit, member, current.recipient, current.window_id
+                )
                 is not DigestMemberDisposition.INCLUDED
                 for member in current.members
             ):
@@ -1780,6 +2046,31 @@ class SQLiteDigestWindowRepository(_Repository):
             _run, begin_mode="IMMEDIATE"
         )
 
+    async def is_current_for_send(
+        self, claim: DigestEnvelopeClaim, envelope: DigestEnvelope, *, now: datetime
+    ) -> bool:
+        now = _utc_instant(now, "now")
+
+        def _run(unit: SQLiteUnitOfWork) -> bool:
+            current = self._claim_current(unit, claim, envelope.revision)
+            return (
+                current == envelope
+                and envelope.state is DigestEnvelopeState.SENDING
+                and envelope.claimed_at == claim.claimed_at
+                and envelope.claim_expires_at == claim.expires_at
+                and now < claim.expires_at
+                and bool(envelope.members)
+                and all(
+                    self._current_member_disposition(
+                        unit, member, envelope.recipient, envelope.window_id
+                    )
+                    is DigestMemberDisposition.INCLUDED
+                    for member in envelope.members
+                )
+            )
+
+        return await self.database.executor.run_read(_run)
+
     async def complete_envelope_send(
         self,
         claim: DigestEnvelopeClaim,
@@ -1798,6 +2089,8 @@ class SQLiteDigestWindowRepository(_Repository):
             if (
                 current is None
                 or current.state is not DigestEnvelopeState.SENDING
+                or current.claimed_at != claim.claimed_at
+                or current.claim_expires_at != claim.expires_at
                 or not current.delivery_attempts
             ):
                 return None
@@ -1809,7 +2102,7 @@ class SQLiteDigestWindowRepository(_Repository):
                 or attempt.idempotency_key != prior.idempotency_key
                 or attempt.started_at != prior.started_at
                 or attempt.completed_at is None
-                or attempt.completed_at > claim.expires_at
+                or attempt.completed_at < attempt.started_at
             ):
                 return None
             state = {
@@ -1978,6 +2271,14 @@ class SQLiteDigestWindowRepository(_Repository):
                 or _StoredDateTime.fromisoformat(row["retry_at"]) > now
             ):
                 return None
+            if not any(
+                self._current_member_disposition(
+                    unit, member, current.recipient, current.window_id
+                )
+                is DigestMemberDisposition.INCLUDED
+                for member in current.members
+            ):
+                return None
             updated = DigestEnvelope(
                 current.envelope_id,
                 current.window_id,
@@ -1998,6 +2299,46 @@ class SQLiteDigestWindowRepository(_Repository):
 
 
 class SQLiteDeliveryRepository(_Repository):
+    def _event_qualified(
+        self, unit: SQLiteUnitOfWork, row: sqlite3.Row, event: DeliveryEvent
+    ) -> bool:
+        subscription_row = unit.execute(
+            "SELECT record_json FROM b04_subscriptions WHERE subscription_id=?",
+            (event.subscription_id,),
+        ).fetchone()
+        subscription = _read_record(subscription_row)
+        if (
+            subscription is None
+            or subscription.revision != event.subscription_revision
+            or subscription.status is not SubscriptionStatus.ACTIVE
+            or subscription.notification_mode != "instant"
+            or subscription.recipient != event.recipient
+        ):
+            return False
+        current = _read_subscription_fence(
+            unit, self._subscription_gate_bindings.get(subscription.module_id)
+        )
+        return current is not None and _row_fence(row) == current
+
+    async def is_current_for_send(self, event: DeliveryEvent) -> bool:
+        def _run(unit: SQLiteUnitOfWork) -> bool:
+            result = self._event_for_update(
+                unit,
+                event.event_key,
+                event.event_version,
+                event.subscription_id,
+                event.subscription_revision,
+            )
+            return (
+                result is not None
+                and result[1] == event
+                and event.state is DeliveryState.SENDING
+                and self._event_qualified(unit, result[0], event)
+                and not self._has_immutable_digest_association(unit, event)
+            )
+
+        return await self.database.executor.run_read(_run)
+
     async def create_event(self, event: DeliveryEvent) -> DeliveryEvent:
         def _run(unit: SQLiteUnitOfWork) -> Any:
             existing = unit.execute(
@@ -2274,6 +2615,8 @@ class SQLiteDeliveryRepository(_Repository):
             if result is None:
                 return None
             row, event = result
+            if not self._event_qualified(unit, row, event):
+                return None
             if self._has_immutable_digest_association(unit, event):
                 return None
             subscription_row = unit.execute(

@@ -36,10 +36,50 @@ from ygl_test_subject.core.lifecycle import (
 )
 from ygl_test_subject.core.registry import Registry, RegistryError
 from ygl_test_subject.core.task_scope import (
+    ScopeCancelled,
     ScopeDeadlineExceeded,
     ScopeStopTimeout,
     TaskScope,
+    observe_tasks,
 )
+
+
+class TaskObserverTests(unittest.IsolatedAsyncioTestCase):
+    async def test_register_is_synchronous_and_runner_rechecks_seal(self):
+        class Observer:
+            sealed = False
+            tasks = set()
+
+            def check(self):
+                if self.sealed:
+                    raise ScopeCancelled("test seal")
+
+            def register(self, task):
+                self.tasks.add(task)
+                self.check()
+
+        observer = Observer()
+        scope = TaskScope("pkg/mod", 1)
+        called = []
+
+        async def work():
+            called.append(True)
+
+        original = work()
+        with observe_tasks(observer):
+            task = scope._spawn(original, "observed")
+        self.assertIn(task, observer.tasks)  # No yield has happened.
+        observer.sealed = True
+        with self.assertRaises(ScopeCancelled):
+            await task
+        await asyncio.sleep(0)
+        self.assertEqual(called, [])
+        self.assertIsNone(original.cr_frame)
+        late = work()
+        with observe_tasks(observer):
+            with self.assertRaises(ScopeCancelled):
+                scope.create_task(late, name="late")
+        self.assertIsNone(late.cr_frame)
 
 
 class _Handler:

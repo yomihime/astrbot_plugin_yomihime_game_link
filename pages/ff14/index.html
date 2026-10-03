@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>如月怜的游戏连结</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <button class="skip-button" id="skip-content" type="button">跳至正文</button>
+  <div class="shell">
+    <aside class="sidebar" aria-label="模块导航">
+      <p class="brand">如月怜的游戏连结</p>
+      <p class="module-label">已注册模块 · 只读目录</p>
+      <label for="module-select">模块</label>
+      <select id="module-select" disabled><option value="">正在读取模块目录</option></select>
+      <nav aria-label="模块页面">
+        <a data-route="overview" hidden>概览</a>
+        <a data-route="logs" hidden>公开角色 Logs</a>
+        <a data-route="items" hidden>物品查询</a>
+        <a data-route="calendar" hidden>活动日历</a>
+        <a data-route="settings" hidden>普通配置</a>
+      </nav>
+      <p class="sidebar-note">模块声明来自本次运行。<br>FF14 支持三项手动公开查询；管理入口尚未接通。</p>
+    </aside>
+    <div class="content">
+      <div class="mobile-nav">
+        <p class="brand">如月怜的游戏连结</p>
+        <div class="field"><label for="module-select-mobile">模块</label>
+          <select id="module-select-mobile" disabled><option value="">正在读取模块目录</option></select></div>
+        <div class="field"><label for="page-select">页面</label>
+          <select id="page-select" disabled><option value="">请先选择模块</option></select></div>
+      </div>
+      <main id="page-root" tabindex="-1" aria-labelledby="page-title">
+        <h1 id="page-title">游戏连结</h1>
+        <p role="status">页面正在准备。若未能加载，请重新打开插件页面。</p>
+      </main>
+      <noscript>本页面需要 JavaScript；可在聊天中使用 /ygl help 查看已注册模块。</noscript>
+      <footer>只读状态与手动公开查询 · 入口以本次状态为准 · 查询不会自动执行</footer>
+    </div>
+  </div>
+  <script src="/api/plugin/page/bridge-sdk.js"></script>
+  <script type="module" src="./app.js"></script>
+</body>
+</html>

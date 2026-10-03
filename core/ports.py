@@ -97,6 +97,52 @@ def _positive_int(value: int, field: str) -> None:
         raise ValueError(f"{field} must be a positive integer")
 
 
+@dataclass(frozen=True, slots=True)
+class PublicWebBinding:
+    """Validated request facts; constructing this DTO grants no authority.
+
+    bearer_key is an opaque deployment-local grouping key, never the raw token.
+    The injected validator must own both the exact proof and this exact binding.
+    """
+
+    module_id: str
+    capability_id: str
+    generation: int
+    bearer_key: str
+    deadline_monotonic: float
+
+    def __post_init__(self) -> None:
+        for value in (self.module_id, self.capability_id, self.bearer_key):
+            if type(value) is not str or not value or len(value) > 256:
+                raise ValueError("invalid public web binding")
+        if type(self.generation) is not int or self.generation < 1:
+            raise ValueError("invalid public web generation")
+        if (
+            isinstance(self.deadline_monotonic, bool)
+            or not isinstance(self.deadline_monotonic, (int, float))
+            or not isfinite(self.deadline_monotonic)
+            or self.deadline_monotonic <= 0
+        ):
+            raise ValueError("invalid public web deadline")
+
+
+class PublicWebProofValidator(Protocol):
+    """Trusted composition seam. B0c alone establishes/mints host proofs.
+
+    consume must reject foreign, equal/copied, reused and expired proofs.
+    is_current must check exact ownership and return the literal True, or deny.
+    Core never authorizes by decoding caller-supplied DTOs or token claims.
+    """
+
+    def consume(
+        self, proof: object, *, module_id: str, capability_id: str, generation: int
+    ) -> PublicWebBinding: ...
+
+    def is_current(self, proof: object, binding: PublicWebBinding) -> bool: ...
+
+    def revoke(self, proof: object) -> None: ...
+
+
 def _non_negative_int(value: int, field: str) -> None:
     if type(value) is not int or value < 0:
         raise ValueError(f"{field} must be a non-negative integer")
@@ -917,6 +963,12 @@ class SubscriptionLifecycleRepository(Protocol):
     for reads and non-lifecycle operations only.
     """
 
+    async def read_subscription_gate_state(
+        self, module_id: str
+    ) -> PersistedSubscriptionGateRead: ...
+
+    async def current_fence(self, module_id: str) -> SubscriptionFence | None: ...
+
     async def apply(
         self,
         change: SubscriptionJobChange,
@@ -944,6 +996,69 @@ class CollectionRunRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class SubscriptionGateBinding:
+    target: ConfigTarget
+    field: str
+    package_id: str
+    module_id: str
+
+    def __post_init__(self) -> None:
+        ConfigTarget.validate(self.target)
+        for name in ("field", "package_id", "module_id"):
+            _bounded_identifier(getattr(self, name), name)
+        if self.target.module_id != f"{self.package_id}/{self.module_id}":
+            raise ValueError("subscription binding module identity differs")
+
+
+@dataclass(frozen=True, slots=True)
+class PersistedSubscriptionGateRead:
+    """Internal pure-read result; no revision, cutoff or secret payload."""
+
+    supported: bool
+    enabled: bool | None
+    intent_enabled: bool | None
+    reason: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class SubscriptionGateState:
+    """Public four-field projection, with no new configuration authority."""
+
+    supported: bool
+    enabled: bool | None
+    can_run: bool | None
+    reason: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class SubscriptionFence:
+    gate_revision: int
+    intent_revision: int
+
+    def __post_init__(self) -> None:
+        _positive_int(self.gate_revision, "gate_revision")
+        _positive_int(self.intent_revision, "intent_revision")
+
+
+@dataclass(frozen=True, slots=True)
+class EvaluationCheckpoint:
+    snapshot: SubscriptionEvaluationSnapshot
+    expected_state_revision: int | None
+    fence: SubscriptionFence | None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.snapshot, SubscriptionEvaluationSnapshot):
+            raise TypeError("checkpoint requires evaluation snapshot")
+        actual = None if self.snapshot.state is None else self.snapshot.state.revision
+        if actual != self.expected_state_revision:
+            raise ValueError("checkpoint state and stored revision differ")
+        if self.expected_state_revision is not None:
+            _positive_int(self.expected_state_revision, "expected_state_revision")
+        if self.fence is not None and type(self.fence) is not SubscriptionFence:
+            raise TypeError("checkpoint fence is invalid")
+
+
+@dataclass(frozen=True, slots=True)
 class ExecutionLease:
     key: CollectionKey
     token: str
@@ -951,6 +1066,7 @@ class ExecutionLease:
     module_epoch: int
     registry_revision: int
     expires_at: datetime
+    subscription_fence: SubscriptionFence | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.key, CollectionKey):
@@ -959,6 +1075,11 @@ class ExecutionLease:
         for name in ("config_revision", "module_epoch", "registry_revision"):
             _positive_int(getattr(self, name), name)
         _require_utc(self.expires_at, "expires_at")
+        if (
+            self.subscription_fence is not None
+            and type(self.subscription_fence) is not SubscriptionFence
+        ):
+            raise TypeError("lease subscription fence is invalid")
 
 
 class SchedulerRepository(Protocol):
@@ -1021,6 +1142,12 @@ class SchedulerRepository(Protocol):
         Return the saved cursor and observation together so callers never infer
         last-observation state from a collection-wide latest row.
         """
+        ...
+
+    async def current_checkpoint(
+        self, subscription_id: str, collection_key: CollectionKey
+    ) -> EvaluationCheckpoint | None:
+        """Read actual CAS revision and persistent stamp separately from module inputs."""
         ...
 
     async def commit_observation(
@@ -1201,6 +1328,12 @@ class DigestWindowRepository(Protocol):
         """
         ...
 
+    async def is_current_for_send(
+        self, claim: DigestEnvelopeClaim, envelope: DigestEnvelope, *, now: datetime
+    ) -> bool:
+        """Read the exact SENDING claim and current qualified digest members."""
+        ...
+
     async def abort_envelope_send(
         self,
         claim: DigestEnvelopeClaim,
@@ -1330,6 +1463,10 @@ class DeliveryRepository(Protocol):
         retry claim clears retry_at. UNKNOWN is never claimable and
         implementations never replace an unresolved SENDING attempt.
         """
+        ...
+
+    async def is_current_for_send(self, event: DeliveryEvent) -> bool:
+        """Read the exact SENDING attempt and its persisted subscription fence."""
         ...
 
     async def mark_sending_unknown(

@@ -12,15 +12,18 @@ import importlib
 import os
 import stat
 import sys
+import warnings
+from collections.abc import Awaitable, Callable
+from contextlib import contextmanager
 from pathlib import Path
 
 # Package execution starts at the install parent's path, not the plugin root.
 # Pin the SDK import to this installed package before importing Core-facing APIs,
 # while keeping this small maintenance CLI independent of AstrBot main.py.
 _PLUGIN_ROOT = Path(__file__).resolve().parents[1]
-_SDK_VERSION = "1.3.0"
-_SDK_CONTRACT_REVISION = "FF14-W1-P1"
-_SDK_COMPATIBLE_CONTRACT_VERSIONS = ("1.0.0", "1.1.0", "1.2.0", "1.3.0")
+_SDK_VERSION = "1.4.0"
+_SDK_CONTRACT_REVISION = "UI-B0-PUBLIC-WEB"
+_SDK_COMPATIBLE_CONTRACT_VERSIONS = ("1.0.0", "1.1.0", "1.2.0", "1.3.0", "1.4.0")
 if str(_PLUGIN_ROOT) not in sys.path:
     sys.path.insert(0, str(_PLUGIN_ROOT))
 try:
@@ -39,6 +42,8 @@ try:
 except Exception:
     raise RuntimeError("the pinned plugin-local SDK is unavailable") from None
 
+from ..extensions.windows_maintenance import WindowsMaintenanceGuard
+from ..infrastructure.sqlite.executor import SQLiteExecutorCloseTimeout
 from ..infrastructure.sqlite.repositories_admin_credentials import (
     AdminCredentialStateError,
     AdminCredentialStatus,
@@ -66,11 +71,7 @@ def _directory_is_restricted(directory: Path, user_id: int) -> bool:
 
 
 def authorize_local_maintenance(database: Path) -> None:
-    """Require an interactive POSIX owner process with private files/parents.
-
-    Windows ACL inspection is not implemented here, so Windows invocations
-    fail closed. A future host-specific ACL verifier can replace this seam.
-    """
+    """Retain the existing POSIX proof; Windows uses the held guard below."""
     if not _POSIX or not hasattr(os, "geteuid"):
         raise LocalMaintenanceAuthorizationError(
             "local maintenance authority cannot be verified on this platform"
@@ -114,6 +115,110 @@ def authorize_local_maintenance(database: Path) -> None:
         )
 
 
+@contextmanager
+def local_maintenance_guard(database: Path, *, plugin_root: Path = _PLUGIN_ROOT):
+    """Authorize actual loaded code; hold OS proof until all resources close."""
+    if Path(plugin_root) != _PLUGIN_ROOT:
+        raise LocalMaintenanceAuthorizationError(
+            "loaded maintenance code cannot be verified"
+        )
+    if os.name == "nt":
+        with WindowsMaintenanceGuard(_PLUGIN_ROOT, Path(database)):
+            yield
+    elif _POSIX:
+        authorize_local_maintenance(database)
+        yield
+    else:
+        raise LocalMaintenanceAuthorizationError(
+            "local maintenance authority cannot be verified"
+        )
+
+
+def _read_hidden(label: str, *, prompt=getpass.getpass) -> str:
+    """A hidden prompt must fail before getpass can fall back to echoed input."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", getpass.GetPassWarning)
+        return prompt(label)
+
+
+async def _finish_cleanup(
+    close: Callable[[], Awaitable[object]],
+    *,
+    confirmed_closed: Callable[[], bool],
+    pending: tuple[type[Exception], ...] = (),
+    after: Callable[[], Awaitable[object]] | None = None,
+) -> None:
+    """Keep OS pins until known pending cleanup drains, even on repeated cancel.
+
+    Each close attempt retains its own timeout. A pending worker cannot safely
+    outlive these pins, so the stopped-host CLI waits with a backoff until it
+    closes; a supervisor may terminate the whole owned process if it stalls.
+    """
+
+    async def drain():
+        failure = None
+        while True:
+            try:
+                await close()
+                break
+            except pending:
+                try:
+                    await asyncio.sleep(0.05)
+                except BaseException as error:
+                    failure = error
+                    break
+            except BaseException as error:
+                failure = error
+                break
+        if after is not None:
+            try:
+                await after()
+            except BaseException as error:
+                if failure is None:
+                    failure = error
+        notified = False
+        while True:
+            try:
+                closed = confirmed_closed()
+                if type(closed) is not bool:
+                    raise RuntimeError("cleanup state is unavailable")
+            except BaseException as error:
+                closed = False
+                if failure is None:
+                    failure = error
+            if closed:
+                break
+            if not notified:
+                notified = True
+                try:
+                    print(
+                        "Local maintenance cleanup is unconfirmed; keeping OS protection "
+                        "until resources close or the owned process is terminated.",
+                        file=sys.stderr,
+                    )
+                except BaseException as error:
+                    if failure is None:
+                        failure = error
+            try:
+                await asyncio.sleep(0.05)
+            except BaseException as error:
+                if failure is None:
+                    failure = error
+        if failure is not None:
+            raise failure
+
+    task = asyncio.create_task(drain())
+    cancelled = False
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            cancelled = True
+    task.result()  # Never swallow an unexpected cleanup failure.
+    if cancelled:
+        raise asyncio.CancelledError()
+
+
 class _Parser(argparse.ArgumentParser):
     def error(self, message: str) -> None:
         del message
@@ -136,43 +241,54 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def _read(label: str) -> str:
-    return getpass.getpass(f"{label} (hidden): ")
+    return _read_hidden(f"{label} (hidden): ")
 
 
 async def _run(database: Path, action: str) -> int:
-    authorize_local_maintenance(database)
-    repository = SQLiteAdminCredentialRepository(database)
-    if action == "bootstrap":
-        first = _read("Enter operator-generated base64url credential")
-        confirmation = _read("Confirm new credential")
-        if first != confirmation:
-            raise ValueError("credential confirmation did not match")
-        state = await repository.bootstrap(_digest(first))
-    elif action == "rotate":
-        current = _read("Current credential")
-        new = _read("New operator-generated base64url credential")
-        confirmation = _read("Confirm new credential")
-        if new != confirmation:
-            raise ValueError("credential confirmation did not match")
-        state = await _rotate_local(repository, current, new)
-    elif action == "revoke":
-        confirmation = _read("Type REVOKE to confirm local revocation")
-        if confirmation != "REVOKE":
-            raise ValueError("revocation confirmation did not match")
-        state = await _revoke_local(repository)
-    else:
-        new = _read("New operator-generated base64url credential")
-        confirmation = _read("Confirm new credential")
-        if new != confirmation:
-            raise ValueError("credential confirmation did not match")
-        current = await repository.current()
-        if current.status is not AdminCredentialStatus.REVOKED:
-            raise AdminCredentialStateError("admin credential lifecycle conflict")
-        state = await repository.recover(current.generation, _digest(new))
-    print(
-        f"Admin credential state: {state.status.value}; generation {state.generation}"
-    )
-    return 0
+    if action not in {"bootstrap", "rotate", "revoke", "recover"}:
+        raise ValueError("unsupported operation")
+    with local_maintenance_guard(database):
+        repository = SQLiteAdminCredentialRepository(database)
+        try:
+            if action == "bootstrap":
+                first = _read("Enter operator-generated base64url credential")
+                confirmation = _read("Confirm new credential")
+                if first != confirmation:
+                    raise ValueError("credential confirmation did not match")
+                state = await repository.bootstrap(_digest(first))
+            elif action == "rotate":
+                current = _read("Current credential")
+                new = _read("New operator-generated base64url credential")
+                confirmation = _read("Confirm new credential")
+                if new != confirmation:
+                    raise ValueError("credential confirmation did not match")
+                state = await _rotate_local(repository, current, new)
+            elif action == "revoke":
+                confirmation = _read("Type REVOKE to confirm local revocation")
+                if confirmation != "REVOKE":
+                    raise ValueError("revocation confirmation did not match")
+                state = await _revoke_local(repository)
+            else:
+                new = _read("New operator-generated base64url credential")
+                confirmation = _read("Confirm new credential")
+                if new != confirmation:
+                    raise ValueError("credential confirmation did not match")
+                current = await repository.current()
+                if current.status is not AdminCredentialStatus.REVOKED:
+                    raise AdminCredentialStateError(
+                        "admin credential lifecycle conflict"
+                    )
+                state = await repository.recover(current.generation, _digest(new))
+            print(
+                f"Admin credential state: {state.status.value}; generation {state.generation}"
+            )
+            return 0
+        finally:
+            await _finish_cleanup(
+                repository.database.executor.close,
+                confirmed_closed=lambda: repository.database.executor.state == "CLOSED",
+                pending=(SQLiteExecutorCloseTimeout,),
+            )
 
 
 async def _rotate_local(repository, current_credential: str, new_credential: str):

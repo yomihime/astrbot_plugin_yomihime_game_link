@@ -188,6 +188,15 @@ class OfflineSampleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(set(self.modules), {"status", "source"})
         status = self.modules["status"]
         source = self.modules["source"]
+        self.assertEqual(self.package.contract_version, "1.1.0")
+        gate = next(
+            field
+            for field in status.config_fields
+            if field.name == "sample_subscriptions_enabled"
+        )
+        self.assertIs(gate.default, True)
+        self.assertFalse(gate.sensitive)
+        self.assertFalse(gate.required)
         capabilities = {item.capability_id: item for item in status.capabilities}
 
         self.assertEqual(

@@ -132,6 +132,7 @@ def is_compatible_contract_version(value: str) -> bool:
 
 class InvocationPolicy(StrEnum):
     COMMAND_ONLY = "command_only"
+    COMMAND_AND_PUBLIC_WEB = "command_and_public_web"
     NATURAL_LANGUAGE_ALLOWED = "natural_language_allowed"
 
 
@@ -290,6 +291,11 @@ class CapabilityDescriptor:
             and self.invocation_policy is not InvocationPolicy.COMMAND_ONLY
         ):
             raise ValueError("private and owner capabilities must be command_only")
+        if self.invocation_policy is InvocationPolicy.COMMAND_AND_PUBLIC_WEB and (
+            self.privacy_floor is not PrivacyFloor.PUBLIC
+            or self.effect is not CapabilityEffect.READ_ONLY
+        ):
+            raise ValueError("public web capabilities must be public and read_only")
         if self.output_version not in COMPATIBLE_CONTRACT_VERSIONS:
             raise ValueError("output_version is not compatible with this runtime")
         input_schema = freeze_input_schema(self.input_schema)
@@ -402,8 +408,13 @@ class ModuleManifest:
                 PrivacyFloor.OWNER,
             ):
                 raise ValueError("tool cannot expose a private or owner capability")
-            if capability.invocation_policy is InvocationPolicy.COMMAND_ONLY:
-                raise ValueError("tool cannot expose a command_only capability")
+            if (
+                capability.invocation_policy
+                is not InvocationPolicy.NATURAL_LANGUAGE_ALLOWED
+            ):
+                raise ValueError(
+                    "tool requires natural_language_allowed; command_only is not allowed"
+                )
             if capability.effect is CapabilityEffect.WRITE:
                 raise ValueError("tool cannot expose a write capability")
             _validate_parameter_mapping(tool.parameter_mapping, capability)

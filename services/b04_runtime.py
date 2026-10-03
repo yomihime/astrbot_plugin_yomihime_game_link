@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import datetime
+from types import MappingProxyType
 
+from ..core.ports import SubscriptionGateBinding
 from ..infrastructure.sqlite.database import (
     SQLiteDatabase,
     SQLiteDatabaseError,
@@ -95,14 +97,24 @@ class B04Repositories:
         database: SQLiteDatabase,
         *,
         utc_clock: Callable[[], datetime] | None = None,
+        subscription_gate_bindings: Mapping[str, SubscriptionGateBinding] | None = None,
     ) -> None:
         self.database = database
+        bindings = MappingProxyType(dict(subscription_gate_bindings or {}))
         self.subscriptions = SQLiteSubscriptionStore(database)
         self.jobs = SQLiteSubscriptionJobRepository(database)
-        self.lifecycle = SQLiteSubscriptionLifecycleRepository(database)
-        self.scheduler = SQLiteSchedulerRepository(database, utc_clock=utc_clock)
-        self.windows = SQLiteDigestWindowRepository(database)
-        self.deliveries = SQLiteDeliveryRepository(database)
+        self.lifecycle = SQLiteSubscriptionLifecycleRepository(
+            database, subscription_gate_bindings=bindings
+        )
+        self.scheduler = SQLiteSchedulerRepository(
+            database, utc_clock=utc_clock, subscription_gate_bindings=bindings
+        )
+        self.windows = SQLiteDigestWindowRepository(
+            database, subscription_gate_bindings=bindings
+        )
+        self.deliveries = SQLiteDeliveryRepository(
+            database, subscription_gate_bindings=bindings
+        )
 
 
 __all__ = [

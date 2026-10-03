@@ -4,6 +4,23 @@
 
 状态：来源字段基于文档、锁定参考实现和一次有限 live probe 核对；这不保证服务持续在线、配额、所有字段稳定或真实宿主端到端可用。源模型只覆盖一期物品查询，不是完整 FF14 数据模型。
 
+2026-10-01 W2：ID `44091` 的 XIVAPI-compatible 和 Garland 公开响应均成功，用户提供的 AstrBot 4.28.2 实例也已通过真实插件命令返回“犎牛牛排”与有限获取途径。日历现有四 variant 的当日资格见下一节；早期网络失败和响应计数保留在本地记录，不能替代最新完整读取证据。系统代理不会自动成为 AstrBot `http_proxy`。详细本地索引：[W2 证据](../../.architecture-refactor/ff14-w2-acceptance.md)。许可边界仍按下文，不随包分发远端数据集或图标。
+
+## 日历来源资格（W2，2026-10-01）
+
+四个固定 URL/国服与国际服映射均与锁定 Tataru `704578d` 的 `CALENDAR_SOURCES` 一致；参考 main.py SHA-256 `6d3719e74e67021eb0c873e4ef15266eeb36cd7f2978a47776ea24fa7af0b049` 已复核。仅沿用公开来源位置，没有复制参考实现或日历数据。
+
+| variant | 本轮网络路径 | HTTP / 完整响应字节 / VEVENT | 查询与严格自动摘要解析 |
+| --- | --- | --- | --- |
+| cn_google | 诊断进程现有代理；直连 20 秒超时 | 200 / 181165 / 318 | 均 COMPLETE，3 条窗口活动 |
+| cn_icloud | 直连 | 200 / 180314 / 318 | 均 COMPLETE，3 条窗口活动 |
+| global_google | 诊断进程现有代理 | 200 / 149216 / 259 | 均 COMPLETE，1 条窗口活动 |
+| global_icloud | 直连 | 200 / 147616 / 259 | 均 COMPLETE，1 条窗口活动 |
+
+均为 text/calendar、identity；有界读取完整响应后使用现有 parser，窗口为 2026-10-01 到 10-08 / Asia/Shanghai，普通解析与 `reject_floating=True` 均无 warning。UID/DTSTART/SUMMARY 齐备。原始 feed 未落盘，不将任一事件的 LAST-MODIFIED 或 DTSTAMP 当作 feed 更新时间。
+
+据此四 variant 获得固定公开来源身份/区域/受支持格式的有限资格，可以按现有主备顺序使用；未知 variant 不自动启用。资格不证明官方背书、活动全集、持续在线或数据最新；每次失败和部分解析仍独立处理。COMPLETE 只描述该 feed 在计算窗口的解析/展开完整性；更新时间未知不自动等于过期，也不禁止合格来源摘要。当前用户实例已通过国服备用源的真实查询，尚不代表实际定时投递通过。
+
 ## 来源职责
 
 | source ID | 声明 host | 用途 | 一期是否阻断能力 |

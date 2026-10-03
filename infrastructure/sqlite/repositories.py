@@ -7,8 +7,11 @@ the B03 service assembly needs.
 
 from __future__ import annotations
 
+from collections.abc import Callable, Mapping
+from datetime import UTC, datetime
 from pathlib import Path
 
+from ...api.services import ConfigTarget
 from ...core.ports import ModuleRegistrationLookup
 from ..files import SafeFileStore
 from ..secret_store import SQLiteSecretStore
@@ -51,6 +54,8 @@ class SQLiteRepositories:
         *,
         file_store: SafeFileStore,
         secret_store: SQLiteSecretStore,
+        subscription_gate_fields: Mapping[ConfigTarget, tuple[str, ...]] | None = None,
+        config_clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         if not callable(getattr(registration_lookup, "require_registered", None)):
             raise TypeError("registration lookup is not usable")
@@ -79,7 +84,11 @@ class SQLiteRepositories:
         if secret_database_path != main_database_path:
             raise ValueError("secret store database does not match repository database")
         self.registration_lookup = registration_lookup
-        self.config = SQLiteConfigRepository(self.database)
+        self.config = SQLiteConfigRepository(
+            self.database,
+            subscription_gate_fields=subscription_gate_fields,
+            clock=config_clock,
+        )
         self.identities = SQLiteIdentityRepository(self.database)
         self.conversations = SQLiteConversationRepository(self.database)
         self.bindings = SQLiteBindingRepository(self.database, registration_lookup)

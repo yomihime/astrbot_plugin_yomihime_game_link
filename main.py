@@ -9,30 +9,30 @@ import sys
 from pathlib import Path
 from types import ModuleType
 
-SDK_VERSION = "1.3.0"
-SDK_CONTRACT_REVISION = "FF14-W1-P1"
-SDK_COMPATIBLE_CONTRACT_VERSIONS = ("1.0.0", "1.1.0", "1.2.0", "1.3.0")
+SDK_VERSION = "1.4.0"
+SDK_CONTRACT_REVISION = "UI-B0-PUBLIC-WEB"
+SDK_COMPATIBLE_CONTRACT_VERSIONS = ("1.0.0", "1.1.0", "1.2.0", "1.3.0", "1.4.0")
 
 SDK_PACKAGE_MANIFEST = {
-    "__init__.py": "427e3a6d04703b37cbde3664eb0e39e3f5b986a57c02fd315424e334d34d57e9",
+    "__init__.py": "66d0a9349614602d7d9bea7ecf09b80d0921206f701256ef2802c898f56e38b3",
     "_examples/empty_module/README.md": "54f44691207b27a1e6ee818cd55e14c30086cd3c685176e470b147ffd5203957",
     "_examples/empty_module/manifest.json": "27ed02b89a99fbea400dd75a1a405db27929f31acb4ceb582b83e8af1e61b1a8",
     "_examples/empty_module/module.py": "231518c6a6db052dcadfd0bd3578ff41f5dcda2d9879808730cbecab74734ce1",
-    "_examples/offline_sample/README.md": "26fac4a0f4a6700c514295cf5bc915a86f34c8409ce01a75e44a9219b5e8f336",
-    "_examples/offline_sample/manifest.json": "2a86197ea2f91ece1099395b3f0e74f4097145a14127842b5f53f652e79f10cb",
+    "_examples/offline_sample/README.md": "4e2a3290cba179a1f7e35c50903b398a02181692687d5ebb97a2ce59323e17db",
+    "_examples/offline_sample/manifest.json": "2849f3fe6ce5ed7809bba396f5dd143700fc880ab3817ac54c2c762eab87f4b9",
     "_examples/offline_sample/module.py": "df6c58755c5af19c5c9035b45fa94ae3edff927a3fd673eca904f8d8057d5ff6",
     "api/__init__.py": "a923e1a55ee842d8244dfbdfe4cd8b3e27eec61c5623abc95845abefda40727a",
     "api/administration.py": "4dddb6cad93c96bac42ec81331fac995424bb44adc42dccdace9d133ffb3e6b5",
-    "api/contexts.py": "b59139523e33a0061388cd22ac5eb036af1f3faff03d28b2e9f07f120fad9e5f",
+    "api/contexts.py": "db3506740aa06f75a8aa42e811056d5c7ccf9dfe039fd94bfca3dd50f675580b",
     "api/display.py": "4fe9438bf3016ca4ac6b97a17c0e20157e77d0b8b66dd4c1ff3054e901d65c03",
-    "api/manifests.py": "5fbf98922ce23d6d15786553492ce42d7a07fba4fd09927ab8d4096ae6ef633f",
+    "api/manifests.py": "99cd23755a228438e0005fef37f7e2a2303f2039f651014dd413b65adc2099e4",
     "api/results.py": "5d6a59587e35e52a2528ec98a461d7c2e45705fd8d60f093f801795e81402135",
     "api/schema.py": "46628cb51be0e4a44df3606af2cbe841120cacf576f193ce57bc1af4b8a3d626",
     "api/services.py": "94b726f13e6e238db01ff37564c5fcddd6ef18b9fae3d6ab17f2e812845517d8",
     "api/storage.py": "ab5fab071b1ddee018053860a46a75019d6d83077d6d7f6c1fa6c1c945ec1db8",
     "api/subscriptions.py": "dddf75abfea96f8a88eecd71d6d6bb7d5f3327a52cb08185035fa2f5e0e6347a",
     "api/validation.py": "b6e0b2e16b8fae127c4cb8bf31efd0fce83c8b5b7ccf58256b01379fbf998e6c",
-    "api/version.py": "e6be0b307d3f75aa324a0b0f5b4d196d408e0d968619a04672fbb4c7c0c6a2a2",
+    "api/version.py": "042c16da11f7ca27d619ec0f588e610dd5d9a1cdb1782032259b1f744441c24a",
     "py.typed": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
 }
 
@@ -211,21 +211,32 @@ class YomihimeGameLink(Star):
         super().__init__(context, config)
         from astrbot.api.star import StarTools
 
+        from .adapters.astrbot.ff14_pages import FF14Pages
         from .adapters.astrbot.runtime import PLUGIN_NAME, AstrBotRuntime
 
         self._runtime = AstrBotRuntime(
             context,
             plugin_root=Path(__file__).resolve().parent,
             data_dir=StarTools.get_data_dir(PLUGIN_NAME),
+            config=config,
         )
+        self._pages = FF14Pages(context, self._runtime)
 
     async def initialize(self) -> None:
         await super().initialize()
-        await self._runtime.initialize()
+        self._pages.register()
+        try:
+            await self._runtime.initialize()
+        except BaseException:
+            self._pages.close()
+            raise
 
     async def terminate(self) -> None:
-        await self._runtime.terminate()
-        await super().terminate()
+        self._pages.close()
+        try:
+            await self._runtime.terminate()
+        finally:
+            await super().terminate()
 
     @filter.command("ygl")
     async def game_link(self, event: AstrMessageEvent):

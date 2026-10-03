@@ -25,8 +25,8 @@ from uuid import uuid4
 # outside the plugin directory. Pin imports to this package's own SDK before
 # importing any host/Core code; never inherit a process-global SDK by accident.
 _PLUGIN_ROOT = Path(__file__).resolve().parents[1]
-_SDK_VERSION = "1.3.0"
-_SDK_CONTRACT_REVISION = "FF14-W1-P1"
+_SDK_VERSION = "1.4.0"
+_SDK_CONTRACT_REVISION = "UI-B0-PUBLIC-WEB"
 if str(_PLUGIN_ROOT) not in sys.path:
     sys.path.insert(0, str(_PLUGIN_ROOT))
 try:
@@ -66,8 +66,8 @@ from ..infrastructure.sqlite.repositories_admin_credentials import (
 )
 from ..presentation.rendering import GenericDisplayRenderer, RenderingBounds
 from ..services.admin_authorization import _matches
-from ..services.core_runtime import CoreRuntime
-from .admin_credentials import authorize_local_maintenance
+from ..services.core_runtime import CoreRuntime, CoreRuntimeCleanupPending
+from .admin_credentials import _finish_cleanup, _read_hidden, local_maintenance_guard
 
 MODULE_ID = "ff14/ff14"
 _REALMS = {
@@ -188,112 +188,141 @@ async def _configure(
 ) -> ConfigSummary:
     if action not in {"set", "clear"} or realm not in _REALMS:
         raise ValueError("unsupported operation")
-    if not data_dir.is_dir():
-        raise ValueError("existing data directory is required")
     database_path = data_dir / "runtime.sqlite3"
-    if not database_path.is_file():
-        raise ValueError("existing Core database is required")
+    with local_maintenance_guard(database_path, plugin_root=plugin_root):
+        if not data_dir.is_dir():
+            raise ValueError("existing data directory is required")
+        if not database_path.is_file():
+            raise ValueError("existing Core database is required")
 
-    installation = install_bundled_ff14(plugin_root, data_dir)
-    if not installation.trusted:
-        raise ValueError("trusted FF14 package is unavailable")
-    credential_alias, realm_label = _REALMS[realm]
-    policies = AstrBotRuntime._bundled_source_credential_policies(
-        installation.extension_root
-    )
-    authority = _SessionAuthority()
-    core, transport = _new_core(
-        data_dir, installation.extension_root, authority, policies
-    )
-    session: _MaintenanceSession | None = None
-    try:
-        await core.database.executor.initialize()
-        state = await core.admin_credential_repository.current()
-        if current_credential is None:
-            current_credential = prompt(
-                "Current independent admin credential (hidden): "
-            )
-        if state.status is not AdminCredentialStatus.ACTIVE or not _matches(
-            current_credential, state
-        ):
-            raise PermissionError("operator authentication failed")
-        session = authority.issue(state.generation)
-
-        if action == "set":
-            if client_id is None:
-                client_id = prompt("FFLogs client ID (hidden): ")
-            if client_secret is None:
-                client_secret = prompt("FFLogs client secret (hidden): ")
-            _validate_client_material(client_id, client_secret)
-            payload = json.dumps(
-                {"schema": 1, "client_id": client_id, "client_secret": client_secret},
-                ensure_ascii=False,
-                separators=(",", ":"),
-            ).encode("utf-8")
-            update = ConfigFieldUpdate(
-                credential_alias,
-                ConfigPatchMode.REPLACE,
-                secret=SecretMaterial(payload),
-            )
-        else:
-            if clear_confirmation is None:
-                clear_confirmation = prompt(
-                    f"Type CLEAR to remove the {realm_label} FFLogs credential: "
-                )
-            if clear_confirmation != "CLEAR":
-                raise ValueError("clear confirmation did not match")
-            update = ConfigFieldUpdate(credential_alias, ConfigPatchMode.CLEAR)
-
-        core.extension_runtime.scan(installation.extension_root)
-        failures = await core.admin_operations.recover_discovered_configuration()
-        if any(failure.module_id == MODULE_ID for failure in failures):
-            raise RuntimeError("module configuration recovery failed")
-        candidate = core.extension_runtime.candidate("ff14")
-        package_manifest = candidate.package.manifest if candidate is not None else None
-        module_manifest = next(
-            (
-                module
-                for module in getattr(package_manifest, "modules", ())
-                if module.module_id == "ff14"
-            ),
-            None,
+        installation = install_bundled_ff14(plugin_root, data_dir)
+        if not installation.trusted:
+            raise ValueError("trusted FF14 package is unavailable")
+        credential_alias, realm_label = _REALMS[realm]
+        policies = AstrBotRuntime._bundled_source_credential_policies(
+            installation.extension_root
         )
-        if module_manifest is None:
-            raise RuntimeError("FF14 manifest was not discovered")
-        snapshot = await core.admin_facade.module_snapshot(
-            None, MODULE_ID, authorization=session
+        authority = _SessionAuthority()
+        core, transport = _new_core(
+            data_dir, installation.extension_root, authority, policies
         )
-        if (
-            snapshot.status.module_id != MODULE_ID
-            or credential_alias not in snapshot.config.sensitive_fields
-        ):
-            raise RuntimeError("FFLogs credential field is not declared sensitive")
-        updated = await core.admin_facade.update_config(
-            None,
-            MODULE_ID,
-            ConfigPatch(
-                snapshot.config.revision,
-                (update,),
-                declared_fields=tuple(module_manifest.config_fields),
-            ),
-            authorization=session,
-        )
-        if credential_alias not in updated.sensitive_fields:
-            raise RuntimeError("FFLogs credential field was not redacted")
-        field_state = updated.fields.get(credential_alias)
-        if action == "set" and field_state != "configured":
-            raise RuntimeError("FFLogs credential was not stored")
-        if action == "clear" and field_state == "configured":
-            raise RuntimeError("FFLogs credential remains configured")
-        return updated
-    finally:
-        authority.revoke()
+        session: _MaintenanceSession | None = None
         try:
-            closed = await core.close()
-            if closed is not True:
-                raise RuntimeError("Core runtime did not close cleanly")
+            await core.database.executor.initialize()
+            state = await core.admin_credential_repository.current()
+            if current_credential is None:
+                current_credential = _read_hidden(
+                    "Current independent admin credential (hidden): ", prompt=prompt
+                )
+            if state.status is not AdminCredentialStatus.ACTIVE or not _matches(
+                current_credential, state
+            ):
+                raise PermissionError("operator authentication failed")
+            session = authority.issue(state.generation)
+
+            if action == "set":
+                EnvironmentKeyProvider("YGL_SECRET_KEY").get_key()
+                if client_id is None:
+                    client_id = _read_hidden(
+                        "FFLogs client ID (hidden): ", prompt=prompt
+                    )
+                if client_secret is None:
+                    client_secret = _read_hidden(
+                        "FFLogs client secret (hidden): ", prompt=prompt
+                    )
+                _validate_client_material(client_id, client_secret)
+                payload = json.dumps(
+                    {
+                        "schema": 1,
+                        "client_id": client_id,
+                        "client_secret": client_secret,
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+                update = ConfigFieldUpdate(
+                    credential_alias,
+                    ConfigPatchMode.REPLACE,
+                    secret=SecretMaterial(payload),
+                )
+            else:
+                if clear_confirmation is None:
+                    clear_confirmation = _read_hidden(
+                        f"Type CLEAR to remove the {realm_label} FFLogs credential: ",
+                        prompt=prompt,
+                    )
+                if clear_confirmation != "CLEAR":
+                    raise ValueError("clear confirmation did not match")
+                update = ConfigFieldUpdate(credential_alias, ConfigPatchMode.CLEAR)
+
+            core.extension_runtime.scan(installation.extension_root)
+            failures = await core.admin_operations.recover_discovered_configuration()
+            if any(failure.module_id == MODULE_ID for failure in failures):
+                raise RuntimeError("module configuration recovery failed")
+            candidate = core.extension_runtime.candidate("ff14")
+            package_manifest = (
+                candidate.package.manifest if candidate is not None else None
+            )
+            module_manifest = next(
+                (
+                    module
+                    for module in getattr(package_manifest, "modules", ())
+                    if module.module_id == "ff14"
+                ),
+                None,
+            )
+            if module_manifest is None:
+                raise RuntimeError("FF14 manifest was not discovered")
+            snapshot = await core.admin_facade.module_snapshot(
+                None, MODULE_ID, authorization=session
+            )
+            if (
+                snapshot.status.module_id != MODULE_ID
+                or credential_alias not in snapshot.config.sensitive_fields
+            ):
+                raise RuntimeError("FFLogs credential field is not declared sensitive")
+            updated = await core.admin_facade.update_config(
+                None,
+                MODULE_ID,
+                ConfigPatch(
+                    snapshot.config.revision,
+                    (update,),
+                    declared_fields=tuple(module_manifest.config_fields),
+                ),
+                authorization=session,
+            )
+            if credential_alias not in updated.sensitive_fields:
+                raise RuntimeError("FFLogs credential field was not redacted")
+            field_state = updated.fields.get(credential_alias)
+            if action == "set" and field_state != "configured":
+                raise RuntimeError("FFLogs credential was not stored")
+            if action == "clear" and field_state == "configured":
+                raise RuntimeError("FFLogs credential remains configured")
+            return updated
         finally:
-            await transport.close()
+            authority.revoke()
+            transport_close_complete = False
+
+            async def close_resources():
+                closed = await core.close()
+                if closed is not True:
+                    raise RuntimeError("Core runtime did not close cleanly")
+
+            async def close_transport():
+                nonlocal transport_close_complete
+                await transport.close()
+                # Transport.closed is set before session.close awaits; only
+                # a successfully completed close also proves that drain.
+                transport_close_complete = True
+
+            await _finish_cleanup(
+                close_resources,
+                confirmed_closed=lambda: (
+                    core.closed and transport.closed and transport_close_complete
+                ),
+                pending=(CoreRuntimeCleanupPending,),
+                after=close_transport,
+            )
 
 
 def _validate_client_material(client_id: str, client_secret: str) -> None:
@@ -340,7 +369,6 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
-        authorize_local_maintenance(args.data_dir / "runtime.sqlite3")
         updated = asyncio.run(_configure(args.data_dir, args.action, args.realm))
     except Exception:
         print("FFLogs 凭据操作失败；配置未确认完成。", file=sys.stderr)

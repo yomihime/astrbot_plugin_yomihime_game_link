@@ -2,8 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import unittest
+from dataclasses import replace
 from datetime import UTC, date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
+
+from ygl_test_subject.presentation.rendering import (
+    GenericDisplayRenderer,
+    RenderingBounds,
+)
 
 from modules.ff14.features.calendar_evaluator import (
     CalendarDailySummaryEvaluator,
@@ -11,7 +17,7 @@ from modules.ff14.features.calendar_evaluator import (
     filter_occurrences,
     load_timezone,
 )
-from yomihime_sdk.api.display import Privacy, TableBlock
+from yomihime_sdk.api.display import DisplayLimits, Privacy, TableBlock
 from yomihime_sdk.api.storage import OwnerScope
 from yomihime_sdk.api.subscriptions import (
     CollectionKey,
@@ -144,6 +150,57 @@ def _state(decision, revision: int = 1) -> EvaluationState:
 
 
 class CalendarEvaluationTests(unittest.TestCase):
+    def test_all_reviewed_variants_and_untrusted_qualified_flag_preserve_state(self):
+        evaluator = CalendarDailySummaryEvaluator()
+        for region in ("cn", "global"):
+            subscription = _subscription(region=region)
+            baseline = evaluator.evaluate(
+                subscription,
+                _observation(datetime(2026, 9, 29, 23, 59, tzinfo=UTC), region=region),
+                None,
+            )
+            previous = _state(baseline)
+            for source_id in (PRIMARY, FALLBACK):
+                observation = _observation(
+                    datetime(2026, 9, 30, tzinfo=UTC),
+                    region=region,
+                    source_id=source_id,
+                )
+                self.assertTrue(
+                    evaluator.evaluate(subscription, observation, previous).triggered
+                )
+                for patch in (
+                    {"source_id": "unknown", "qualified": True},
+                    {"source_variant": "unknown", "qualified": True},
+                    {
+                        "source_url": "https://unreviewed.invalid/private",
+                        "qualified": True,
+                    },
+                ):
+                    with self.subTest(
+                        region=region, source_id=source_id, field=next(iter(patch))
+                    ):
+                        untrusted = replace(
+                            observation, payload={**dict(observation.payload), **patch}
+                        )
+                        decision = evaluator.evaluate(subscription, untrusted, previous)
+                        self.assertFalse(decision.triggered)
+                        self.assertEqual(dict(decision.state), dict(previous.value))
+
+    def test_cross_month_ongoing_event_stays_in_local_window(self):
+        selected = filter_occurrences(
+            (
+                _occurrence(
+                    "Across month", "2026-09-30T23:00:00Z", "2026-10-01T01:00:00Z"
+                ),
+            ),
+            local_date=date(2026, 10, 1),
+            days=7,
+            zone=load_timezone("Asia/Shanghai"),
+            now=datetime(2026, 10, 1, tzinfo=UTC),
+        )
+        self.assertEqual([item.summary for item in selected], ["Across month"])
+
     def test_baseline_before_due_triggers_at_due_and_emits_public_document(
         self,
     ) -> None:
@@ -404,12 +461,21 @@ class CalendarEvaluationTests(unittest.TestCase):
             with self.subTest(completeness=completeness):
                 incomplete = _observation(
                     datetime(2026, 9, 30, 0, 5, tzinfo=UTC),
+                    (
+                        _occurrence(
+                            "Previously known activity",
+                            "2026-09-30T01:00:00Z",
+                            "2026-09-30T02:00:00Z",
+                        ),
+                    ),
                     completeness=completeness,
                     covered_ids=covered,
                 )
                 decision = evaluator.evaluate(subscription, incomplete, previous)
                 self.assertFalse(decision.triggered)
                 self.assertEqual(dict(decision.state), dict(previous.value))
+                self.assertIsNone(decision.display_data)
+                self.assertIsNone(decision.event_key)
 
     def test_utc_minus_12_and_plus_14_local_date_windows_are_covered(self) -> None:
         evaluator = CalendarDailySummaryEvaluator()
@@ -542,6 +608,64 @@ class CalendarEvaluationTests(unittest.TestCase):
             state = _state(delivered)
         self.assertEqual(len(state.value["emitted_local_dates"]), 32)
         self.assertEqual(state.value["emitted_local_dates"][-1], "2026-10-10")
+
+
+class CalendarSummaryRenderingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_old_v1_without_warnings_and_safe_warning_projection_reach_renderer(
+        self,
+    ):
+        evaluator = CalendarDailySummaryEvaluator()
+        subscription = _subscription()
+        baseline = evaluator.evaluate(
+            subscription, _observation(datetime(2026, 9, 29, 23, 59, tzinfo=UTC)), None
+        )
+        observation = _observation(
+            datetime(2026, 9, 30, tzinfo=UTC), source_id=FALLBACK
+        )
+        renderer = GenericDisplayRenderer(
+            RenderingBounds(8000, 100, 10, 20, 32, 128, 8, 64, 32)
+        )
+        for warnings in (
+            None,
+            (
+                "primary_source_failed",
+                "parser:INVALID_EVENT",
+                "parser:synthetic-secret",
+                "synthetic-secret",
+                7,
+            ),
+        ):
+            with self.subTest(old_v1=warnings is None):
+                current = (
+                    observation
+                    if warnings is None
+                    else replace(
+                        observation,
+                        payload={**dict(observation.payload), "warnings": warnings},
+                    )
+                )
+                decision = evaluator.evaluate(subscription, current, _state(baseline))
+                self.assertTrue(decision.triggered)
+                rendered = await renderer.render(
+                    decision.display_data,
+                    limits=DisplayLimits(max_pages=2, max_image_bytes=16),
+                )
+                text = rendered.text
+                self.assertIn("已使用合格备用日历来源", text)
+                self.assertIn("来源更新时间未知", text)
+                self.assertIn("不保证覆盖全部活动", text)
+                self.assertIn("该公开来源在当前窗口未返回活动", text)
+                self.assertNotIn("synthetic-secret", text)
+                self.assertNotIn("primary_source", text)
+                self.assertNotIn("主日历源未能完整解析", text)
+                if warnings is None:
+                    self.assertNotIn("主日历源暂不可用", text)
+                else:
+                    self.assertIn("主日历源暂不可用，已尝试备用源", text)
+                    self.assertIn("日历部分内容不支持自动处理", text)
+                    self.assertLess(
+                        text.index("获取时间"), text.index("主日历源暂不可用")
+                    )
 
 
 if __name__ == "__main__":

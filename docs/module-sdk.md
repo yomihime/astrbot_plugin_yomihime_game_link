@@ -7,9 +7,9 @@ a compatibility forwarding surface whose exported objects retain identity
 with the canonical declarations. The SDK does not import Core runtime
 implementations or AstrBot objects.
 
-The current artifact is `yomihime-module-sdk` version `1.3.0`, carrying contract
-`1.3.0` (`FF14-W1-P1`) and compatible contract versions `1.0.0`, `1.1.0`,
-`1.2.0`, and `1.3.0`.
+The current artifact is `yomihime-module-sdk` version `1.4.0`, carrying contract
+`1.4.0` (`UI-B0-PUBLIC-WEB`) and compatible contract versions `1.0.0`, `1.1.0`,
+`1.2.0`, `1.3.0`, and `1.4.0`.
 Extension declarations use manifest schema v1 and factory ABI v1. The declared
 minimum is Python 3.11 because the public API uses `StrEnum`. A local
 installed-wheel check proves the bundled SDK imports from the installed site
@@ -29,6 +29,16 @@ capabilities must use `InvocationPolicy.COMMAND_ONLY`, and the manifest rejects
 exposing them through a Tool. This restriction is validated when descriptors
 and manifests are constructed; host Core authorization remains responsible for
 proving the current principal before an owner-scoped operation is dispatched.
+
+Contract 1.4.0 adds `InvocationOrigin.WEB_PUBLIC` and the explicit
+`InvocationPolicy.COMMAND_AND_PUBLIC_WEB` policy. This policy requires
+`PrivacyFloor.PUBLIC` and a read-only capability. `COMMAND_ONLY` continues to
+exclude web invocation. Tools still require `NATURAL_LANGUAGE_ALLOWED`; the new
+web policy does not authorize natural-language invocation. Declaring the policy
+alone does not enable an HTTP endpoint: the host and Core must separately verify
+the request, admit the deployed capability, and enforce its lifetime and limits.
+This SDK contract does not grant an administrator, conversation, or subscription
+owner identity to a web request.
 
 ## Offline build and isolated install
 
@@ -62,8 +72,8 @@ New-Item -ItemType Directory -Force (Join-Path $source 'examples') | Out-Null
 Copy-Item -LiteralPath examples/empty_module, examples/offline_sample -Destination (Join-Path $source 'examples') -Recurse
 $env:SOURCE_DATE_EPOCH = '315532800'
 python -m pip wheel --no-index --no-deps --no-build-isolation --wheel-dir $wheelhouse $source
-python -m pip install --no-index --no-deps --target $site (Join-Path $wheelhouse 'yomihime_module_sdk-1.3.0-py3-none-any.whl')
-python -I -c "import sys; sys.path.insert(0, r'$site'); import importlib.metadata, yomihime_sdk; assert importlib.metadata.version('yomihime-module-sdk') == '1.3.0'; assert yomihime_sdk.CONTRACT_VERSION == '1.3.0'; assert yomihime_sdk.CONTRACT_REVISION == 'FF14-W1-P1'; print(yomihime_sdk.__version__)"
+python -m pip install --no-index --no-deps --target $site (Join-Path $wheelhouse 'yomihime_module_sdk-1.4.0-py3-none-any.whl')
+python -I -c "import sys; sys.path.insert(0, r'$site'); import importlib.metadata, yomihime_sdk; assert importlib.metadata.version('yomihime-module-sdk') == '1.4.0'; assert yomihime_sdk.CONTRACT_VERSION == '1.4.0'; assert yomihime_sdk.CONTRACT_REVISION == 'UI-B0-PUBLIC-WEB'; print(yomihime_sdk.__version__)"
 ```
 
 The artifact test performs two builds with the fixed `SOURCE_DATE_EPOCH` and
@@ -89,7 +99,7 @@ git diff --check -- pyproject.toml yomihime_sdk examples/empty_module examples/o
 Both example trees are included in the same wheel under
 `yomihime_sdk/_examples/{empty_module,offline_sample}/`. The empty package has
 no module declarations. The offline sample declares two modules: `status` has
-10 commands, two Tools, two schedules, two subscriptions, and two config
+10 commands, two Tools, two schedules, two subscriptions, and three config
 fields; `source` has one independent public command. The status module
 demonstrates a required capability dependency, configuration-based health,
 command-only account/subscription operations, and public/private collection.
@@ -99,6 +109,15 @@ sample returns deterministic SDK display/fact DTOs and
 does not send host messages, perform network I/O, or start background work.
 Only a later E/CoreRuntime integration can establish host dispatch and
 lifecycle behavior.
+
+The ordinary, non-sensitive `sample_subscriptions_enabled` field defaults to
+the boolean `true`. It is a sample subscription gate, not an authorization
+grant. A deploying host must explicitly bind the gate to the verified
+`offline_sample/status` manifest using the Core's trusted deployment mapping.
+Discovery alone does not establish that trust; without the mapping,
+subscription creation and delivery remain closed. The integration fixture
+uses unmodified installed-wheel resources and normal Core initialization,
+administrator operations, and scheduler fences to exercise this binding.
 
 ## Example resources
 

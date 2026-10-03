@@ -9,6 +9,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from ygl_test_subject.api.display import (
     DisplayDocument,
@@ -45,6 +46,7 @@ from ygl_test_subject.api.subscriptions import (
     DigestEnvelopeState,
     DigestMember,
     DigestMemberAssociation,
+    DigestMemberDisposition,
     DigestScheduleProfile,
     DigestWindow,
     DstFoldPolicy,
@@ -70,7 +72,14 @@ from ygl_test_subject.infrastructure.sqlite.repositories_subscriptions import (
 from ygl_test_subject.services.delivery import DeliveryService
 from ygl_test_subject.services.output import LifecycleApprovedSendScheduler
 
-from tests.fixtures.b04_runtime import _run_async_from_sync
+from tests.fixtures.b04_runtime import (
+    _run_async_from_sync,
+    create_digest_envelope_fixture,
+    create_subscription_event_fixture,
+    initialize_subscription_gate_fixture,
+    replace_subscription_gate_fixture,
+    synthetic_subscription_gate_bindings,
+)
 
 
 async def _resolved(value):
@@ -204,8 +213,13 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.path = Path(self.temp.name) / "delivery.sqlite3"
         self.db = SQLiteDatabase(self.path)
-        self.deliveries = SQLiteDeliveryRepository(self.db)
-        self.windows = SQLiteDigestWindowRepository(self.db)
+        self.bindings = synthetic_subscription_gate_bindings(("sample/game",))
+        self.deliveries = SQLiteDeliveryRepository(
+            self.db, subscription_gate_bindings=self.bindings
+        )
+        self.windows = SQLiteDigestWindowRepository(
+            self.db, subscription_gate_bindings=self.bindings
+        )
         self.subscriptions = SQLiteSubscriptionStore(self.db)
         self.now = datetime(2026, 9, 25, 12, tzinfo=UTC)
         self.registry = Registry()
@@ -349,8 +363,13 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
         await self.lifecycle.stop_candidate("sample/game", operation, 1.0)
 
     async def asyncSetUp(self) -> None:
+        await initialize_subscription_gate_fixture(
+            self.db, self.bindings, self.now - timedelta(days=2)
+        )
         await self.subscriptions.create(self.record)
-        await self.deliveries.create_event(self.event)
+        await create_subscription_event_fixture(
+            self.deliveries, self.bindings, self.event
+        )
 
     async def test_accepted_receipt_is_persisted_for_exact_subscriber(self) -> None:
         result = await self.service.dispatch_event("event-1", 1, "sub-1", 1)
@@ -362,6 +381,552 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(saved.attempt.platform_message_id, "platform-1")
         self.assertEqual(len(self.port.calls), 1)
         self.assertEqual(self.port.calls[0][1].text, "saved-title")
+
+    async def test_scheduled_pause_resume_aborts_before_actual_io(self):
+        scheduled = self.send_scheduler.schedule
+        pauses = []
+
+        async def pause_resume():
+            async with self.lifecycle.admission.mutation("test-pause-resume"):
+                await replace_subscription_gate_fixture(
+                    self.db, self.bindings, "sample/game", False, self.now
+                )
+                await replace_subscription_gate_fixture(
+                    self.db, self.bindings, "sample/game", True, self.now
+                )
+
+        def schedule(permit, work, *, name):
+            pauses.append(asyncio.create_task(pause_resume()))
+            scheduled(permit, work, name=name)
+
+        with patch.object(self.send_scheduler, "schedule", schedule):
+            result = await self.service.dispatch_event("event-1", 1, "sub-1", 1)
+        await asyncio.gather(*pauses)
+        saved = await self.deliveries.current_event(
+            "event-1", 1, subscription_id="sub-1", subscription_revision=1
+        )
+        self.assertEqual(result.state, DeliveryState.CANCELLED)
+        self.assertEqual(saved.attempt.error_code, "cancelled_before_dispatch")
+        self.assertEqual(self.port.calls, [])
+
+    async def test_io_entry_precedes_waiting_mutation_and_receipt_survives_pause(self):
+        proof = asyncio.Event()
+        release_proof = asyncio.Event()
+        entered = asyncio.Event()
+        release_io = asyncio.Event()
+        order = []
+        current = self.deliveries.is_current_for_send
+
+        async def gated_current(event):
+            result = await current(event)
+            proof.set()
+            await release_proof.wait()
+            return result
+
+        class Port(_MessagePort):
+            async def send(port, target, payload):
+                order.append("io")
+                entered.set()
+                await release_io.wait()
+                return await super().send(target, payload)
+
+        async def pause():
+            async with self.lifecycle.admission.mutation("test-pause"):
+                await replace_subscription_gate_fixture(
+                    self.db, self.bindings, "sample/game", False, self.now
+                )
+                order.append("pause")
+
+        port = Port()
+        with patch.object(self.deliveries, "is_current_for_send", gated_current):
+            dispatch = asyncio.create_task(
+                self._service(port=port).dispatch_event("event-1", 1, "sub-1", 1)
+            )
+            waiter = None
+            try:
+                await asyncio.wait_for(proof.wait(), 2)
+                waiter = asyncio.create_task(pause())
+                release_proof.set()
+                await asyncio.wait_for(entered.wait(), 2)
+                await asyncio.wait_for(waiter, 2)
+                self.assertFalse(dispatch.done())
+                self.assertEqual(order, ["io", "pause"])
+                release_io.set()
+                result = await dispatch
+            finally:
+                release_proof.set()
+                release_io.set()
+                await asyncio.gather(
+                    dispatch,
+                    *(() if waiter is None else (waiter,)),
+                    return_exceptions=True,
+                )
+        saved = await self.deliveries.current_event(
+            "event-1", 1, subscription_id="sub-1", subscription_revision=1
+        )
+        self.assertEqual(result.state, DeliveryState.SENT)
+        self.assertEqual(saved.state, DeliveryState.SENT)
+        self.assertEqual(len(port.calls), 1)
+
+    async def test_timeout_before_io_entry_is_known_unsent(self):
+        proof = asyncio.Event()
+        release = asyncio.Event()
+        current = self.deliveries.is_current_for_send
+
+        async def gated_current(event):
+            value = await current(event)
+            proof.set()
+            await release.wait()
+            return value
+
+        service = self._service()
+        service._send_timeout = 0.05
+        with patch.object(self.deliveries, "is_current_for_send", gated_current):
+            dispatch = asyncio.create_task(
+                service.dispatch_event("event-1", 1, "sub-1", 1)
+            )
+            try:
+                await asyncio.wait_for(proof.wait(), 2)
+                await asyncio.sleep(0.1)
+                self.assertFalse(dispatch.done())
+                release.set()
+                result = await dispatch
+            finally:
+                release.set()
+                await asyncio.gather(dispatch, return_exceptions=True)
+        self.assertEqual(result.state, DeliveryState.CANCELLED)
+        self.assertEqual(self.port.calls, [])
+        saved = await self.deliveries.current_event(
+            "event-1", 1, subscription_id="sub-1", subscription_revision=1
+        )
+        self.assertEqual(saved.attempt.error_code, "cancelled_before_dispatch")
+
+    async def test_repeated_caller_cancel_drains_io_before_unknown_archive(self):
+        entered = asyncio.Event()
+        cancelled = asyncio.Event()
+        release = asyncio.Event()
+
+        class Port(_MessagePort):
+            async def send(port, target, payload):
+                port.calls.append((target, payload))
+                entered.set()
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    cancelled.set()
+                    await release.wait()
+                    raise
+
+        port = Port()
+        dispatch = asyncio.create_task(
+            self._service(port=port).dispatch_event("event-1", 1, "sub-1", 1)
+        )
+        try:
+            await asyncio.wait_for(entered.wait(), 2)
+            dispatch.cancel()
+            await asyncio.wait_for(cancelled.wait(), 2)
+            dispatch.cancel()
+            await asyncio.sleep(0)
+            self.assertFalse(dispatch.done())
+            saved = await self.deliveries.current_event(
+                "event-1", 1, subscription_id="sub-1", subscription_revision=1
+            )
+            self.assertEqual(saved.state, DeliveryState.SENDING)
+            async with self.lifecycle.admission.mutation("test-during-drain"):
+                await replace_subscription_gate_fixture(
+                    self.db, self.bindings, "sample/game", False, self.now
+                )
+            release.set()
+            with self.assertRaises(asyncio.CancelledError):
+                await dispatch
+        finally:
+            release.set()
+            await asyncio.gather(dispatch, return_exceptions=True)
+        saved = await self.deliveries.current_event(
+            "event-1", 1, subscription_id="sub-1", subscription_revision=1
+        )
+        self.assertEqual(saved.state, DeliveryState.UNKNOWN)
+        self.assertEqual(len(port.calls), 1)
+
+    async def test_unstarted_owned_sender_or_io_child_is_drained_and_aborted(self):
+        loop = asyncio.get_running_loop()
+        original_factory = loop.get_task_factory()
+        for name in ("runner", "io"):
+            with self.subTest(name=name):
+                key = "unstarted-" + name
+                await create_subscription_event_fixture(
+                    self.deliveries, self.bindings, self._event(key=key)
+                )
+                tasks = []
+
+                def factory(event_loop, work, context=None):
+                    task = asyncio.Task(work, loop=event_loop, context=context)
+                    if work.cr_code.co_name == name:
+                        tasks.append(task)
+                        task.cancel()
+                    return task
+
+                loop.set_task_factory(factory)
+                try:
+                    result = await asyncio.wait_for(
+                        self.service.dispatch_event(key, 1, "sub-1", 1), 2
+                    )
+                finally:
+                    loop.set_task_factory(original_factory)
+                saved = await self.deliveries.current_event(
+                    key, 1, subscription_id="sub-1", subscription_revision=1
+                )
+                self.assertEqual(result.state, DeliveryState.CANCELLED)
+                self.assertEqual(saved.attempt.error_code, "cancelled_before_dispatch")
+                self.assertTrue(tasks and all(task.done() for task in tasks))
+                async with self.lifecycle.admission.mutation("test-after-abort"):
+                    pass
+        self.assertEqual(self.port.calls, [])
+
+    async def _digest_receipt_fixture(self, suffix):
+        event = self._event(key="receipt-" + suffix)
+        member = DigestMember(
+            event.subscription_id,
+            event.subscription_revision,
+            event.event_key,
+            event.event_version,
+        )
+        due = self.now - timedelta(minutes=1)
+        window = DigestWindow(
+            "receipt-window-" + suffix,
+            "UTC",
+            "daily",
+            self.now - timedelta(hours=2),
+            due,
+            due,
+            DstFoldPolicy.FIRST_OCCURRENCE,
+            DstGapPolicy.SKIP,
+            (member,),
+        )
+        await self.windows.create(window)
+        await create_digest_envelope_fixture(
+            self.deliveries,
+            self.bindings,
+            DigestEnvelope(
+                "receipt-envelope-" + suffix,
+                window.window_id,
+                self.recipient,
+                (member,),
+                member_associations=(
+                    DigestMemberAssociation(
+                        window.window_id, self.recipient, member, event
+                    ),
+                ),
+            ),
+        )
+        return window, event
+
+    async def _assert_cancelled_receipt_archived(self, *, digest, scope_cancel, status):
+        entered, cancelled, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        children, send_work = [], []
+        service = None
+
+        class Port(_MessagePort):
+            async def send(port, target, payload):
+                port.calls.append((target, payload))
+                if not scope_cancel:
+                    # The outer wait already captured 30s. Only the IO-owner's
+                    # timeout, installed after this entry handshake, is shortened.
+                    service._send_timeout = 0.03
+                entered.set()
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    cancelled.set()
+                    await release.wait()
+                    return MessageReceipt(status, "receipt-after-cancel")
+
+        loop = asyncio.get_running_loop()
+        previous_factory = loop.get_task_factory()
+
+        def factory(event_loop, work, context=None):
+            task = asyncio.Task(work, loop=event_loop, context=context)
+            if work.cr_code.co_name == "io":
+                children.append(task)
+            elif work.cr_code.co_name == "sender":
+                send_work.append(task)
+            return task
+
+        port = Port()
+        service = self._service(port=port)
+        window, event = (
+            await self._digest_receipt_fixture("cancel")
+            if digest
+            else (None, self.event)
+        )
+        loop.set_task_factory(factory)
+        dispatch = asyncio.create_task(
+            service.dispatch_digest(window.window_id, self.recipient, now=self.now)
+            if digest
+            else service.dispatch_event(event.event_key, 1, event.subscription_id, 1)
+        )
+        scope = self.lifecycle.scope("sample/game")
+        try:
+            await asyncio.wait_for(entered.wait(), 2)
+            if scope_cancel:
+                scope.cancel()
+            await asyncio.wait_for(cancelled.wait(), 2)
+            if scope_cancel:
+                scope.cancel()
+            await asyncio.sleep(0)
+            self.assertFalse(dispatch.done())
+            self.assertTrue(children and not children[0].done())
+            self.assertTrue(send_work and not send_work[0].done())
+            if digest:
+                sending = await self.windows.current_envelope(
+                    window.window_id, self.recipient
+                )
+                self.assertEqual(sending.state, DigestEnvelopeState.SENDING)
+            else:
+                sending = await self.deliveries.current_event(
+                    event.event_key,
+                    1,
+                    subscription_id=event.subscription_id,
+                    subscription_revision=1,
+                )
+                self.assertEqual(sending.state, DeliveryState.SENDING)
+            release.set()
+            result = await asyncio.wait_for(dispatch, 2)
+            await scope.wait(timeout=2)
+        finally:
+            release.set()
+            loop.set_task_factory(previous_factory)
+            await asyncio.gather(
+                dispatch, *children, *send_work, return_exceptions=True
+            )
+        expected = (
+            DeliveryState.SENT
+            if status is MessageStatus.ACCEPTED
+            else DeliveryState.FAILED
+        )
+        self.assertEqual(result.state, expected)
+        self.assertEqual(len(port.calls), 1)
+        self.assertEqual(
+            children[0].result(), MessageReceipt(status, "receipt-after-cancel")
+        )
+        if scope_cancel:
+            self.assertTrue(
+                send_work[0].cancelled(),
+                "original owned cancellation must propagate after archival",
+            )
+        else:
+            self.assertFalse(send_work[0].cancelled())
+        if digest:
+            saved = await self.windows.current_envelope(
+                window.window_id, self.recipient
+            )
+            self.assertEqual(
+                saved.state,
+                DigestEnvelopeState.SENT
+                if expected is DeliveryState.SENT
+                else DigestEnvelopeState.FAILED,
+            )
+            attempt = saved.delivery_attempts[-1]
+            self.assertEqual(
+                attempt.started_at, sending.delivery_attempts[-1].started_at
+            )
+        else:
+            saved = await self.deliveries.current_event(
+                event.event_key,
+                1,
+                subscription_id=event.subscription_id,
+                subscription_revision=1,
+            )
+            self.assertEqual(saved.state, expected)
+            attempt = saved.attempt
+            self.assertEqual(attempt.started_at, sending.attempt.started_at)
+        self.assertEqual(attempt.state, expected)
+        self.assertEqual(attempt.platform_message_id, "receipt-after-cancel")
+        self.assertEqual(attempt.attempt_number, 1)
+        self.assertEqual(
+            attempt.idempotency_key,
+            event.idempotency_key
+            if not digest
+            else sending.delivery_attempts[-1].idempotency_key,
+        )
+
+    async def test_owned_instant_cancel_preserves_accepted_receipt(self):
+        await self._assert_cancelled_receipt_archived(
+            digest=False, scope_cancel=True, status=MessageStatus.ACCEPTED
+        )
+
+    async def test_owned_instant_cancel_preserves_failed_receipt(self):
+        await self._assert_cancelled_receipt_archived(
+            digest=False, scope_cancel=True, status=MessageStatus.FAILED
+        )
+
+    async def test_instant_internal_timeout_preserves_accepted_receipt(self):
+        await self._assert_cancelled_receipt_archived(
+            digest=False, scope_cancel=False, status=MessageStatus.ACCEPTED
+        )
+
+    async def test_instant_internal_timeout_preserves_failed_receipt(self):
+        await self._assert_cancelled_receipt_archived(
+            digest=False, scope_cancel=False, status=MessageStatus.FAILED
+        )
+
+    async def test_owned_digest_cancel_preserves_accepted_receipt(self):
+        await self._assert_cancelled_receipt_archived(
+            digest=True, scope_cancel=True, status=MessageStatus.ACCEPTED
+        )
+
+    async def test_owned_digest_cancel_preserves_failed_receipt(self):
+        await self._assert_cancelled_receipt_archived(
+            digest=True, scope_cancel=True, status=MessageStatus.FAILED
+        )
+
+    async def test_digest_internal_timeout_preserves_accepted_receipt(self):
+        await self._assert_cancelled_receipt_archived(
+            digest=True, scope_cancel=False, status=MessageStatus.ACCEPTED
+        )
+
+    async def test_digest_internal_timeout_preserves_failed_receipt(self):
+        await self._assert_cancelled_receipt_archived(
+            digest=True, scope_cancel=False, status=MessageStatus.FAILED
+        )
+
+    async def test_digest_claim_expiry_while_io_child_queues_is_known_unsent(self):
+        base_now = self.now
+        loop = asyncio.get_running_loop()
+        previous_factory = loop.get_task_factory()
+        current = self.windows.is_current_for_send
+        for offset in (timedelta(0), timedelta(microseconds=1)):
+            with self.subTest(offset=offset):
+                self.now = base_now
+                window, event = await self._digest_receipt_fixture(
+                    "queued-" + str(offset)
+                )
+                expiries, callbacks = [], []
+
+                async def proof(claim, envelope, *, now):
+                    value = await current(claim, envelope, now=now)
+                    self.assertTrue(value)
+                    expiries.append(claim.expires_at)
+                    return value
+
+                def expire():
+                    callbacks.append(True)
+                    self.now = expiries[0] + offset
+
+                def factory(event_loop, work, context=None):
+                    if work.cr_code.co_name == "io":
+                        event_loop.call_soon(expire)
+                    return asyncio.Task(work, loop=event_loop, context=context)
+
+                with patch.object(self.windows, "is_current_for_send", proof):
+                    loop.set_task_factory(factory)
+                    try:
+                        result = await self.service.dispatch_digest(
+                            window.window_id, self.recipient, now=self.now
+                        )
+                    finally:
+                        loop.set_task_factory(previous_factory)
+                self.assertEqual(callbacks, [True])
+                self.assertEqual(
+                    len(expiries), 1, "child must not add another SQL proof"
+                )
+                self.assertEqual(result.state, DeliveryState.CANCELLED)
+                saved = await self.windows.current_envelope(
+                    window.window_id, self.recipient
+                )
+                self.assertEqual(saved.state, DigestEnvelopeState.READY)
+                self.assertEqual(
+                    saved.delivery_attempts[-1].error_code, "cancelled_before_dispatch"
+                )
+        self.assertEqual(self.port.calls, [])
+
+    async def test_private_grant_expiry_while_io_child_queues_is_known_unsent(self):
+        base_now = self.now
+        loop = asyncio.get_running_loop()
+        previous_factory = loop.get_task_factory()
+        for offset in (timedelta(0), timedelta(microseconds=1)):
+            with self.subTest(offset=offset):
+                self.now = base_now
+                suffix = str(offset)
+                grant_ref = GrantReference("queued-grant-" + suffix, 1)
+                record = SubscriptionRecord(
+                    "queued-private-" + suffix,
+                    1,
+                    "sample/game",
+                    replace(self.key, scope=OwnerScope.authorized("u1", grant_ref)),
+                    "u1",
+                    grant_ref,
+                    self.recipient,
+                    "instant",
+                    {},
+                    SubscriptionStatus.ACTIVE,
+                )
+                await self.subscriptions.create(record)
+                key = "queued-private-event-" + suffix
+                event = DeliveryEvent(
+                    key,
+                    1,
+                    record.subscription_id,
+                    1,
+                    "u1",
+                    grant_ref,
+                    self.recipient,
+                    DisplayDocument(
+                        "private",
+                        "subject",
+                        (TextBlock("private body"),),
+                        privacy=Privacy.PRIVATE,
+                    ),
+                    delivery_idempotency_key(
+                        key, 1, record.subscription_id, 1, self.recipient
+                    ),
+                )
+                await create_subscription_event_fixture(
+                    self.deliveries, self.bindings, event
+                )
+                expires = base_now + timedelta(seconds=2)
+                grant = Grant(
+                    grant_ref.grant_id,
+                    1,
+                    "u1",
+                    "sample/game",
+                    "queued-account",
+                    ("read",),
+                    None,
+                    GrantStatus.ACTIVE,
+                    expires,
+                )
+                service = self._service()
+                service._grants = _Grants(grant)
+                callbacks = []
+
+                def expire():
+                    callbacks.append(True)
+                    self.now = expires + offset
+
+                def factory(event_loop, work, context=None):
+                    if work.cr_code.co_name == "io":
+                        event_loop.call_soon(expire)
+                    return asyncio.Task(work, loop=event_loop, context=context)
+
+                loop.set_task_factory(factory)
+                try:
+                    result = await service.dispatch_event(
+                        key, 1, record.subscription_id, 1
+                    )
+                finally:
+                    loop.set_task_factory(previous_factory)
+                self.assertEqual(callbacks, [True])
+                self.assertEqual(result.state, DeliveryState.CANCELLED)
+                saved = await self.deliveries.current_event(
+                    key,
+                    1,
+                    subscription_id=record.subscription_id,
+                    subscription_revision=1,
+                )
+                self.assertEqual(saved.state, DeliveryState.CANCELLED)
+                self.assertEqual(saved.attempt.error_code, "cancelled_before_dispatch")
+        self.assertEqual(self.port.calls, [])
 
     async def test_host_exception_is_unknown_and_not_retried(self) -> None:
         port = _MessagePort(error=OSError("private transport detail"))
@@ -416,7 +981,7 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
                 digest_record.recipient,
             ),
         )
-        await self.deliveries.create_event(event)
+        await create_subscription_event_fixture(self.deliveries, self.bindings, event)
 
         result = await self.service.dispatch_event(
             event.event_key,
@@ -479,14 +1044,24 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
             self.service.dispatch_event("event-1", 1, "sub-1", 1),
             self.service.dispatch_event("event-1", 1, "sub-1", 1),
         )
-        self.assertTrue(all(result.state is DeliveryState.SENT for result in results))
+        self.assertTrue(
+            all(
+                result.state in (DeliveryState.SENT, DeliveryState.SENDING)
+                for result in results
+            )
+        )
+        self.assertIn(DeliveryState.SENT, [result.state for result in results])
         self.assertEqual(len(self.port.calls), 1)
 
     async def test_send_timeout_is_unknown_and_not_retried(self) -> None:
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
         class HangingPort(_MessagePort):
             async def send(self, target, payload):
                 self.calls.append((target, payload))
-                await asyncio.sleep(0.05)
+                entered.set()
+                await release.wait()
 
         port = HangingPort()
         service = DeliveryService(
@@ -502,13 +1077,88 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
             message_port=port,
             limits=DisplayLimits(2, 1024),
             now=lambda: self.now,
-            send_timeout=0.001,
+            send_timeout=0.1,
         )
-        result = await service.dispatch_event("event-1", 1, "sub-1", 1)
+        dispatch = asyncio.create_task(service.dispatch_event("event-1", 1, "sub-1", 1))
+        try:
+            await asyncio.wait_for(entered.wait(), 2)
+            result = await dispatch
+        finally:
+            release.set()
+            await asyncio.gather(dispatch, return_exceptions=True)
         again = await service.dispatch_event("event-1", 1, "sub-1", 1)
         self.assertEqual(result.state, DeliveryState.UNKNOWN)
         self.assertEqual(again.state, DeliveryState.UNKNOWN)
         self.assertEqual(len(port.calls), 1)
+
+    async def test_digest_stamp_change_after_render_removes_member_and_rerenders(self):
+        second = replace(self.record, subscription_id="sub-2")
+        await self.subscriptions.create(second)
+        obsolete = self._event(key="obsolete", title="obsolete-body")
+        survivor = replace(
+            self._event(key="survivor", title="visible-body"),
+            subscription_id=second.subscription_id,
+            idempotency_key=delivery_idempotency_key(
+                "survivor", 1, second.subscription_id, 1, self.recipient
+            ),
+        )
+        members = tuple(
+            DigestMember(event.subscription_id, 1, event.event_key, 1)
+            for event in (obsolete, survivor)
+        )
+        due = self.now - timedelta(minutes=1)
+        window = DigestWindow(
+            "stamp-window",
+            "UTC",
+            "daily",
+            self.now - timedelta(hours=2),
+            due,
+            due,
+            DstFoldPolicy.FIRST_OCCURRENCE,
+            DstGapPolicy.SKIP,
+            members,
+        )
+        await self.windows.create(window)
+        envelope = DigestEnvelope(
+            "stamp-envelope",
+            window.window_id,
+            self.recipient,
+            members,
+            member_associations=tuple(
+                DigestMemberAssociation(window.window_id, self.recipient, member, event)
+                for member, event in zip(members, (obsolete, survivor))
+            ),
+        )
+        await create_digest_envelope_fixture(self.deliveries, self.bindings, envelope)
+
+        class Renderer(_Renderer):
+            async def render_batch(inner, batch, limits):
+                output = await super().render_batch(batch, limits)
+                if len(inner.calls) == 1:
+                    await self.db.executor.run_transaction(
+                        lambda unit: unit.execute(
+                            "UPDATE b04_delivery_events SET gate_revision=NULL,intent_revision=NULL WHERE event_key='obsolete'"
+                        ).rowcount,
+                        begin_mode="IMMEDIATE",
+                    )
+                return output
+
+        renderer = Renderer()
+        result = await self._service(renderer=renderer).dispatch_digest(
+            window.window_id, self.recipient, now=self.now
+        )
+        self.assertEqual(result.state, DeliveryState.SENT)
+        self.assertEqual(len(renderer.calls), 2)
+        self.assertEqual(self.port.calls[0][1].text, "digest:visible-body")
+        saved = await self.windows.current_envelope(window.window_id, self.recipient)
+        self.assertEqual(saved.members, (members[1],))
+        self.assertTrue(
+            any(
+                item.member == members[0]
+                and item.disposition is DigestMemberDisposition.UNAUTHORIZED
+                for item in saved.member_receipts
+            )
+        )
 
     async def test_disabled_module_blocks_before_render_or_send(self) -> None:
         await self._disable()
@@ -584,7 +1234,7 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
                 "event-expiry", 1, record.subscription_id, 1, record.recipient
             ),
         )
-        await self.deliveries.create_event(event)
+        await create_subscription_event_fixture(self.deliveries, self.bindings, event)
         expires_at = self.now + timedelta(seconds=2)
         grant = Grant(
             grant_ref.grant_id,
@@ -682,14 +1332,16 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
         association = DigestMemberAssociation(
             window.window_id, self.recipient, member, event
         )
-        await self.deliveries.create_envelope(
+        await create_digest_envelope_fixture(
+            self.deliveries,
+            self.bindings,
             DigestEnvelope(
                 "envelope-claim-expiry",
                 window.window_id,
                 self.recipient,
                 (member,),
                 member_associations=(association,),
-            )
+            ),
         )
         gated = _GatedDigestWindows(self.windows)
         service = DeliveryService(
@@ -782,8 +1434,12 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
         public_event = self._event(key="event-digest-public", title="public-title")
-        await self.deliveries.create_event(private_event)
-        await self.deliveries.create_event(public_event)
+        await create_subscription_event_fixture(
+            self.deliveries, self.bindings, private_event
+        )
+        await create_subscription_event_fixture(
+            self.deliveries, self.bindings, public_event
+        )
         private_member = DigestMember(
             private_record.subscription_id, 1, private_event.event_key, 1
         )
@@ -800,7 +1456,9 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
             (private_member, public_member),
         )
         await self.windows.create(window)
-        await self.deliveries.create_envelope(
+        await create_digest_envelope_fixture(
+            self.deliveries,
+            self.bindings,
             DigestEnvelope(
                 "envelope-digest-grant-expiry",
                 window.window_id,
@@ -814,7 +1472,7 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
                         window.window_id, self.recipient, public_member, public_event
                     ),
                 ),
-            )
+            ),
         )
 
         expires_at = self.now + timedelta(seconds=2)
@@ -904,8 +1562,12 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
                 "event-pruned-valid", 1, other.subscription_id, 1, self.recipient
             ),
         )
-        await self.deliveries.create_event(removed_event)
-        await self.deliveries.create_event(valid_event)
+        await create_subscription_event_fixture(
+            self.deliveries, self.bindings, removed_event
+        )
+        await create_subscription_event_fixture(
+            self.deliveries, self.bindings, valid_event
+        )
         removed_member = DigestMember("sub-1", 1, removed_event.event_key, 1)
         valid_member = DigestMember(other.subscription_id, 1, valid_event.event_key, 1)
         window = DigestWindow(
@@ -920,7 +1582,9 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
             (removed_member, valid_member),
         )
         await self.windows.create(window)
-        await self.deliveries.create_envelope(
+        await create_digest_envelope_fixture(
+            self.deliveries,
+            self.bindings,
             DigestEnvelope(
                 "envelope-pruned-cancel",
                 window.window_id,
@@ -934,7 +1598,7 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
                         window.window_id, self.recipient, valid_member, valid_event
                     ),
                 ),
-            )
+            ),
         )
 
         class CancellingRoutes(_Routes):
@@ -1029,14 +1693,16 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
         association = DigestMemberAssociation(
             "window-retry", self.recipient, member, event
         )
-        await self.deliveries.create_envelope(
+        await create_digest_envelope_fixture(
+            self.deliveries,
+            self.bindings,
             DigestEnvelope(
                 "envelope-retry",
                 "window-retry",
                 self.recipient,
                 (member,),
                 member_associations=(association,),
-            )
+            ),
         )
         retry_at = self.now + timedelta(minutes=5)
         failed_port = _MessagePort(MessageReceipt(MessageStatus.FAILED))
@@ -1187,7 +1853,7 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
             (member,),
             member_associations=(association,),
         )
-        await self.deliveries.create_envelope(envelope)
+        await create_digest_envelope_fixture(self.deliveries, self.bindings, envelope)
         result = await self.service.dispatch_digest(
             "window-1", self.recipient, now=self.now
         )
@@ -1219,14 +1885,16 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
         association = DigestMemberAssociation(
             window.window_id, self.recipient, member, event
         )
-        await self.deliveries.create_envelope(
+        await create_digest_envelope_fixture(
+            self.deliveries,
+            self.bindings,
             DigestEnvelope(
                 "envelope-digest-unknown",
                 window.window_id,
                 self.recipient,
                 (member,),
                 member_associations=(association,),
-            )
+            ),
         )
         port = _MessagePort(MessageReceipt(MessageStatus.UNKNOWN))
         service = self._service(port=port)
@@ -1284,8 +1952,12 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
             ),
             delivery_idempotency_key("event-two", 1, "sub-2", 1, self.recipient),
         )
-        await self.deliveries.create_event(event_one)
-        await self.deliveries.create_event(event_two)
+        await create_subscription_event_fixture(
+            self.deliveries, self.bindings, event_one
+        )
+        await create_subscription_event_fixture(
+            self.deliveries, self.bindings, event_two
+        )
         member_one = DigestMember("sub-1", 1, "event-one", 1)
         member_two = DigestMember("sub-2", 1, "event-two", 1)
         window = DigestWindow(
@@ -1308,14 +1980,16 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
                 "window-members", self.recipient, member_two, event_two
             ),
         )
-        await self.deliveries.create_envelope(
+        await create_digest_envelope_fixture(
+            self.deliveries,
+            self.bindings,
             DigestEnvelope(
                 "envelope-members",
                 "window-members",
                 self.recipient,
                 (member_one, member_two),
                 member_associations=associations,
-            )
+            ),
         )
 
         class CancellingRenderer(_Renderer):
@@ -1414,8 +2088,12 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
                 "event-final-valid", 1, other.subscription_id, 1, self.recipient
             ),
         )
-        await self.deliveries.create_event(revoked_event)
-        await self.deliveries.create_event(valid_event)
+        await create_subscription_event_fixture(
+            self.deliveries, self.bindings, revoked_event
+        )
+        await create_subscription_event_fixture(
+            self.deliveries, self.bindings, valid_event
+        )
         revoked_member = DigestMember("sub-1", 2, revoked_event.event_key, 1)
         valid_member = DigestMember(other.subscription_id, 1, valid_event.event_key, 1)
         window = DigestWindow(
@@ -1438,14 +2116,16 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
                 window.window_id, self.recipient, valid_member, valid_event
             ),
         )
-        await self.deliveries.create_envelope(
+        await create_digest_envelope_fixture(
+            self.deliveries,
+            self.bindings,
             DigestEnvelope(
                 "envelope-final-route",
                 window.window_id,
                 self.recipient,
                 (revoked_member, valid_member),
                 member_associations=associations,
-            )
+            ),
         )
 
         class CancellingRoutes(_Routes):
@@ -1513,14 +2193,16 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
         association = DigestMemberAssociation(
             window.window_id, self.recipient, member, event
         )
-        await self.deliveries.create_envelope(
+        await create_digest_envelope_fixture(
+            self.deliveries,
+            self.bindings,
             DigestEnvelope(
                 "envelope-all-revoked",
                 window.window_id,
                 self.recipient,
                 (member,),
                 member_associations=(association,),
-            )
+            ),
         )
 
         class CancellingRenderer(_Renderer):

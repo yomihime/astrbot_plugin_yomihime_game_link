@@ -55,7 +55,7 @@ class B05InstalledArtifactDiscoveryTests(unittest.TestCase):
                         "capabilities": 10,
                         "commands": 10,
                         "tools": 2,
-                        "config_fields": 2,
+                        "config_fields": 3,
                         "schedules": 2,
                         "subscriptions": 2,
                     },

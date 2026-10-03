@@ -617,6 +617,11 @@ class SubscriptionOperationsService(SubscriptionOperations):
                 raise PrivateRecipientRequired()
             if owner_floor:
                 await self._owner_proof_current(view)
+            if await self._lifecycle.current_fence(view.module_id) is None:
+                raise SubscriptionOperationError(
+                    "subscription admission is unavailable"
+                )
+            self._check_command_current(view)
             module_snapshot = self._registry.snapshot()
             live_module = module_snapshot.module(view.module_id)
             if not live_module.enabled or live_module.epoch != view.module_epoch:
@@ -955,9 +960,11 @@ class SubscriptionOperationsService(SubscriptionOperations):
             or module.epoch != lease.module_epoch
         ):
             raise SubscriptionOperationError("collection lease is no longer current")
+        await self._require_execution_fence(lease)
         if observation.completeness is ObservationCompleteness.FAILED:
             return ObservationEvaluationCommit(observation, ())
         links = await self._jobs.for_collection(observation.key)
+        await self._require_execution_fence(lease)
         commits: list[SubscriptionEvaluationCommit] = []
         cursor = ObservationCursor(
             observation.observation_id,
@@ -968,11 +975,13 @@ class SubscriptionOperationsService(SubscriptionOperations):
         for link in links:
             if link.collection_key != observation.key:
                 continue
-            snapshot_data = await self._scheduler.current_evaluation(
+            checkpoint = await self._scheduler.current_checkpoint(
                 link.subscription_id, observation.key
             )
-            if snapshot_data is None:
+            await self._require_execution_fence(lease)
+            if checkpoint is None:
                 continue
+            snapshot_data = checkpoint.snapshot
             record = snapshot_data.subscription
             if (
                 record.status is not SubscriptionStatus.ACTIVE
@@ -986,6 +995,7 @@ class SubscriptionOperationsService(SubscriptionOperations):
                     await self._require_record_grant(record)
                 except Exception:
                     continue
+                await self._require_execution_fence(lease)
             descriptor, schedule = self._record_declarations(module, record)
             if descriptor is None or schedule is None:
                 continue
@@ -1002,7 +1012,11 @@ class SubscriptionOperationsService(SubscriptionOperations):
             subscription_view = self._view(record)
             try:
                 decision = evaluator.evaluate(
-                    subscription_view, observation, snapshot_data.state
+                    subscription_view,
+                    observation,
+                    snapshot_data.state
+                    if checkpoint.fence == lease.subscription_fence
+                    else None,
                 )
             except Exception:
                 raise SubscriptionOperationError(
@@ -1023,7 +1037,9 @@ class SubscriptionOperationsService(SubscriptionOperations):
                     "subscription evaluation is invalid"
                 ) from None
             next_state = EvaluationState(
-                1 if snapshot_data.state is None else snapshot_data.state.revision + 1,
+                1
+                if checkpoint.expected_state_revision is None
+                else checkpoint.expected_state_revision + 1,
                 decision.state,
             )
             events: tuple[DeliveryEvent, ...] = ()
@@ -1063,6 +1079,7 @@ class SubscriptionOperationsService(SubscriptionOperations):
                             observation.collected_at.astimezone(UTC),
                         )
                     )
+                    await self._require_execution_fence(lease)
                     if (
                         window is None
                         or window.schedule_profile != record.digest_schedule
@@ -1081,13 +1098,13 @@ class SubscriptionOperationsService(SubscriptionOperations):
                         ),
                     )
                     await self._require_record_grant(record)
+                    await self._require_execution_fence(lease)
+            await self._require_execution_fence(lease)
             commits.append(
                 SubscriptionEvaluationCommit(
                     record.subscription_id,
                     record.revision,
-                    None
-                    if snapshot_data.state is None
-                    else snapshot_data.state.revision,
+                    checkpoint.expected_state_revision,
                     next_state,
                     cursor,
                     events,
@@ -1095,6 +1112,12 @@ class SubscriptionOperationsService(SubscriptionOperations):
                 )
             )
         return ObservationEvaluationCommit(observation, tuple(commits))
+
+    async def _require_execution_fence(self, lease: ExecutionLease) -> None:
+        if lease.subscription_fence is None or not await self._scheduler.is_current(
+            lease, now=self._current_time()
+        ):
+            raise SubscriptionOperationError("collection lease is no longer current")
 
     @staticmethod
     def _record_declarations(module: RegisteredModule, record: SubscriptionRecord):

@@ -1,8 +1,12 @@
 """Real-file SQLite coverage for the B03-S1 repositories."""
 
+import asyncio
+import sqlite3
 import tempfile
 import unittest
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from unittest.mock import patch
 
 from ygl_test_subject.api.administration import (
     AdminAuthorizationDenied,
@@ -49,6 +53,308 @@ from ygl_test_subject.infrastructure.sqlite.repositories_config import (
     SQLiteConfigRepository,
     SQLiteRecordRepository,
 )
+
+
+class SubscriptionGateStorageTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.database = SQLiteDatabase(Path(self.temp.name) / "gates.sqlite3")
+        self.database.initialize()
+        self.target = ConfigTarget("system", "ff14/ff14")
+        self.now = datetime(2026, 10, 2, 12, tzinfo=UTC)
+        self.policy = {self.target: ("subscription_enabled",)}
+        self.repository = self._repository()
+
+    async def asyncTearDown(self) -> None:
+        await self.database.executor.close()
+        self.temp.cleanup()
+
+    def _repository(self, policy=None):
+        return SQLiteConfigRepository(
+            self.database,
+            subscription_gate_fields=self.policy if policy is None else policy,
+            clock=lambda: self.now,
+        )
+
+    def _sql(self, sql, parameters=()):
+        connection = self.database.connect()
+        try:
+            result = connection.execute(sql, parameters).fetchall()
+            connection.commit()
+            return [tuple(row) for row in result]
+        finally:
+            connection.close()
+
+    def _entry(self, field, value_json, revision=7):
+        self._sql("INSERT OR IGNORE INTO config_state VALUES ('system','ff14/ff14',7)")
+        self._sql(
+            "INSERT INTO config_entries(principal_id,module_id,field,value_json,revision) "
+            "VALUES ('system','ff14/ff14',?,?,?)",
+            (field, value_json, revision),
+        )
+
+    def _gate_row(self, field="subscription_enabled"):
+        return self._sql(
+            "SELECT value_json,revision,subscription_transition_at FROM config_entries "
+            "WHERE principal_id='system' AND module_id='ff14/ff14' AND field=?",
+            (field,),
+        )
+
+    def _patch(self, revision, mode, value=None):
+        return PersistedConfigPatch(
+            revision,
+            (ConfigFieldUpdate("subscription_enabled", mode, value=value),),
+            (ConfigField("subscription_enabled"),),
+            "gate-operation",
+            self.target,
+        )
+
+    async def test_whole_map_initializes_once_and_preserves_existing_config(self):
+        self._entry("region", '"cn"')
+        self._entry("logs_alias", '"kept"')
+        self._sql(
+            "INSERT INTO config_entries(principal_id,module_id,field,secret_token,"
+            "secret_principal_id,secret_module_id,secret_field,secret_operation_id,secret_state,revision) "
+            "VALUES ('system','ff14/ff14','logs_secret','secret_existing','system',"
+            "'ff14/ff14','logs_secret','original-operation','active',7)"
+        )
+        secret_metadata = (await self.repository.current(self.target)).secret_metadata
+        second = ConfigTarget("system", "other/module")
+        policy = {
+            self.target: ("subscription_enabled", "another_gate"),
+            second: ("gate",),
+        }
+        repository = self._repository(policy)
+        # The immutable policy is independent of subsequent caller mutations.
+        policy.clear()
+        self.assertTrue(await repository.initialize_subscription_gates())
+        self.assertEqual(self._gate_row(), [("true", 8, self.now.isoformat())])
+        self.assertEqual(
+            self._gate_row("another_gate"), [("true", 8, self.now.isoformat())]
+        )
+        self.assertEqual(self._gate_row("region"), [('"cn"', 7, None)])
+        self.assertEqual(self._gate_row("logs_alias"), [('"kept"', 7, None)])
+        self.assertEqual(
+            (await repository.current(self.target)).secret_metadata, secret_metadata
+        )
+        self.assertEqual(
+            self._sql(
+                "SELECT revision FROM config_state WHERE module_id='other/module'"
+            ),
+            [(1,)],
+        )
+        before = self._sql("SELECT * FROM config_entries ORDER BY module_id,field")
+        self.now += timedelta(days=1)
+        # A completed startup uses read-only SQL even with an unavailable clock.
+        repository._clock = lambda: self.fail("complete startup must not read clock")
+        with patch.object(
+            self.database.executor,
+            "run_transaction",
+            side_effect=AssertionError("completed bootstrap must only read"),
+        ):
+            self.assertTrue(await repository.initialize_subscription_gates())
+        self.assertEqual(
+            before, self._sql("SELECT * FROM config_entries ORDER BY module_id,field")
+        )
+        self.assertEqual(
+            self._sql("SELECT COUNT(*) FROM subscription_gate_initializations"), [(3,)]
+        )
+
+    async def test_existing_false_and_malformed_values_are_never_replaced(self):
+        self._entry("subscription_enabled", "false")
+        self._entry("bad_gate", "not-json")
+        repository = self._repository(
+            {self.target: ("subscription_enabled", "bad_gate")}
+        )
+        before = self._sql("SELECT * FROM config_entries ORDER BY field")
+        self.assertFalse(await repository.initialize_subscription_gates())
+        self.assertEqual(
+            before, self._sql("SELECT * FROM config_entries ORDER BY field")
+        )
+        self.assertEqual(
+            self._sql("SELECT phase FROM subscription_gate_bootstrap"), [("complete",)]
+        )
+        self.assertEqual(self._sql("SELECT revision FROM config_state"), [(7,)])
+
+    async def test_existing_true_only_gets_first_cutoff_metadata(self):
+        self._entry("subscription_enabled", " true ")
+        self.assertTrue(await self.repository.initialize_subscription_gates())
+        self.assertEqual(self._gate_row(), [(" true ", 7, self.now.isoformat())])
+        self.assertEqual(self._sql("SELECT revision FROM config_state"), [(7,)])
+        self.now += timedelta(days=1)
+        self.assertTrue(await self.repository.initialize_subscription_gates())
+        self.assertEqual(
+            self._gate_row(),
+            [(" true ", 7, (self.now - timedelta(days=1)).isoformat())],
+        )
+
+    async def test_invalid_non_null_cutoff_is_not_repaired(self):
+        self._entry("subscription_enabled", "true")
+        self._sql("UPDATE config_entries SET subscription_transition_at='broken'")
+        self.assertFalse(await self.repository.initialize_subscription_gates())
+        self.assertEqual(self._gate_row(), [("true", 7, "broken")])
+
+    async def test_atomic_failure_rolls_back_all_targets_and_markers(self):
+        self._entry("subscription_enabled", "true")
+        original = self._sql("SELECT * FROM config_entries")
+        second = ConfigTarget("system", "other/module")
+        repository = self._repository(
+            {self.target: ("subscription_enabled", "new_gate"), second: ("gate",)}
+        )
+        self._sql(
+            "CREATE TRIGGER reject_second BEFORE INSERT ON subscription_gate_initializations "
+            "WHEN NEW.module_id='other/module' BEGIN SELECT RAISE(ABORT,'fixture'); END"
+        )
+        with self.assertRaises(sqlite3.IntegrityError):
+            await repository.initialize_subscription_gates()
+        self.assertEqual(self._sql("SELECT * FROM config_entries"), original)
+        self.assertEqual(
+            self._sql("SELECT * FROM config_state"), [("system", "ff14/ff14", 7)]
+        )
+        self.assertEqual(
+            self._sql("SELECT * FROM subscription_gate_initializations"), []
+        )
+        self.assertEqual(
+            self._sql("SELECT phase FROM subscription_gate_bootstrap"), [("pending",)]
+        )
+        self._sql("DROP TRIGGER reject_second")
+        self.assertTrue(await repository.initialize_subscription_gates())
+
+    async def test_concurrent_startups_consume_one_pending_batch(self):
+        self._entry("region", '"cn"')
+        outcomes = await asyncio.gather(
+            self.repository.initialize_subscription_gates(),
+            self._repository().initialize_subscription_gates(),
+        )
+        self.assertEqual(outcomes, [True, True])
+        self.assertEqual(self._sql("SELECT revision FROM config_state"), [(8,)])
+        self.assertEqual(
+            self._sql("SELECT COUNT(*) FROM subscription_gate_initializations"), [(1,)]
+        )
+
+    async def test_pending_with_any_marker_does_not_resume(self):
+        self._sql(
+            "INSERT INTO subscription_gate_initializations VALUES ('other','other','gate')"
+        )
+        self.assertFalse(await self.repository.initialize_subscription_gates())
+        self.assertEqual(self._sql("SELECT * FROM config_entries"), [])
+        self.assertEqual(
+            self._sql("SELECT phase FROM subscription_gate_bootstrap"), [("pending",)]
+        )
+
+    async def test_unprepared_policy_does_not_consume_pending(self):
+        for repository in (SQLiteConfigRepository(self.database), self._repository({})):
+            self.assertFalse(await repository.initialize_subscription_gates())
+        self.assertEqual(
+            self._sql("SELECT phase FROM subscription_gate_bootstrap"), [("pending",)]
+        )
+        for fields in ((), ("gate", "gate"), ["gate"]):
+            with self.subTest(fields=fields), self.assertRaises(ValueError):
+                self._repository({self.target: fields})
+
+    async def test_complete_missing_field_marker_or_new_mapping_never_seeds(self):
+        self.assertTrue(await self.repository.initialize_subscription_gates())
+        new_policy = self._repository(
+            {self.target: ("subscription_enabled", "new_gate")}
+        )
+        self.assertFalse(await new_policy.initialize_subscription_gates())
+        self.assertEqual(self._gate_row("new_gate"), [])
+        self.assertEqual(
+            self._sql("SELECT COUNT(*) FROM subscription_gate_initializations"), [(1,)]
+        )
+        self._sql("DELETE FROM config_state")
+        self.assertFalse(await self.repository.initialize_subscription_gates())
+        self.assertEqual(self._sql("SELECT * FROM config_state"), [])
+        self.assertEqual(
+            self._sql("SELECT COUNT(*) FROM subscription_gate_initializations"), [(1,)]
+        )
+        self._entry("subscription_enabled", "true")
+        self._sql("DELETE FROM subscription_gate_initializations")
+        self.assertFalse(await self.repository.initialize_subscription_gates())
+        self.assertEqual(self._gate_row(), [("true", 7, None)])
+        self.assertEqual(
+            self._sql("SELECT * FROM subscription_gate_initializations"), []
+        )
+
+    async def test_missing_or_invalid_bootstrap_is_not_created(self):
+        self._sql("DELETE FROM subscription_gate_bootstrap")
+        self.assertFalse(await self.repository.initialize_subscription_gates())
+        self.assertEqual(self._sql("SELECT * FROM subscription_gate_bootstrap"), [])
+        # Construct an invalid persisted phase on the same fixture connection.
+        connection = self.database.connect()
+        try:
+            connection.execute("PRAGMA ignore_check_constraints=ON")
+            connection.execute(
+                "INSERT INTO subscription_gate_bootstrap VALUES (1,'broken')"
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        self.assertFalse(await self.repository.initialize_subscription_gates())
+        self.assertEqual(
+            self._sql("SELECT phase FROM subscription_gate_bootstrap"), [("broken",)]
+        )
+
+    async def test_same_value_and_keep_preserve_fence_but_cas_advances(self):
+        self.assertTrue(await self.repository.initialize_subscription_gates())
+        original = self._gate_row()
+        self.now += timedelta(hours=1)
+        same = await self.repository.update(
+            self.target, self._patch(1, ConfigPatchMode.REPLACE, True)
+        )
+        self.assertEqual(same.revision, 2)
+        self.assertEqual(self._gate_row(), original)
+        kept = await self.repository.update(
+            self.target, self._patch(2, ConfigPatchMode.KEEP)
+        )
+        self.assertEqual(kept.revision, 3)
+        self.assertEqual(self._gate_row(), original)
+        paused = await self.repository.update(
+            self.target, self._patch(3, ConfigPatchMode.REPLACE, False)
+        )
+        self.assertEqual(paused.revision, 4)
+        self.assertEqual(self._gate_row(), [("false", 4, self.now.isoformat())])
+        self.now += timedelta(hours=1)
+        await self.repository.update(
+            self.target, self._patch(4, ConfigPatchMode.REPLACE, True)
+        )
+        self.assertEqual(self._gate_row(), [("true", 5, self.now.isoformat())])
+        with self.assertRaises(RevisionConflict):
+            await self.repository.update(
+                self.target, self._patch(4, ConfigPatchMode.REPLACE, False)
+            )
+        self.assertEqual(self._gate_row(), [("true", 5, self.now.isoformat())])
+
+    async def test_gate_rejects_clear_and_non_bool_without_advancing_cas(self):
+        self.assertTrue(await self.repository.initialize_subscription_gates())
+        before = self._gate_row()
+        for value in (0, 1, "true", (), {}):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                await self.repository.update(
+                    self.target, self._patch(1, ConfigPatchMode.REPLACE, value)
+                )
+        with self.assertRaises(ValueError):
+            await self.repository.update(
+                self.target, self._patch(1, ConfigPatchMode.CLEAR)
+            )
+        sensitive_keep = PersistedConfigPatch(
+            1,
+            (ConfigFieldUpdate("subscription_enabled", ConfigPatchMode.KEEP),),
+            (ConfigField("subscription_enabled", sensitive=True),),
+            "gate-operation",
+            self.target,
+        )
+        with self.assertRaises(ValueError):
+            await self.repository.update(self.target, sensitive_keep)
+        self.now = datetime(
+            2026, 10, 2
+        )  # A bad transition clock rolls back overall CAS too.
+        with self.assertRaises(ValueError):
+            await self.repository.update(
+                self.target, self._patch(1, ConfigPatchMode.REPLACE, False)
+            )
+        self.assertEqual(self._sql("SELECT revision FROM config_state"), [(1,)])
+        self.assertEqual(self._gate_row(), before)
 
 
 class RegistryBackedLookup:

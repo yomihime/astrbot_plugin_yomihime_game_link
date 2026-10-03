@@ -13,6 +13,21 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class PublicExportTests(unittest.TestCase):
+    def test_public_web_origin_and_policy_round_trip_at_canonical_root(self) -> None:
+        import yomihime_sdk as sdk
+
+        self.assertIs(
+            sdk.InvocationOrigin("web_public"), sdk.InvocationOrigin.WEB_PUBLIC
+        )
+        self.assertIs(
+            sdk.InvocationPolicy("command_and_public_web"),
+            sdk.InvocationPolicy.COMMAND_AND_PUBLIC_WEB,
+        )
+        self.assertIs(
+            sdk.InvocationPolicy("command_only"), sdk.InvocationPolicy.COMMAND_ONLY
+        )
+        self.assertTrue(sdk.is_compatible_contract_version("1.4.0"))
+
     def test_all_api_declarations_are_listed_at_the_sdk_root(self) -> None:
         sdk_tree = ast.parse(
             (ROOT / "yomihime_sdk/__init__.py").read_text(encoding="utf-8")
@@ -56,12 +71,12 @@ class PublicExportTests(unittest.TestCase):
     def test_owner_floor_and_contract_compatibility_are_public(self) -> None:
         import yomihime_sdk as sdk
 
-        self.assertEqual(sdk.__version__, "1.3.0")
-        self.assertEqual(sdk.CONTRACT_VERSION, "1.3.0")
-        self.assertEqual(sdk.CONTRACT_REVISION, "FF14-W1-P1")
+        self.assertEqual(sdk.__version__, "1.4.0")
+        self.assertEqual(sdk.CONTRACT_VERSION, "1.4.0")
+        self.assertEqual(sdk.CONTRACT_REVISION, "UI-B0-PUBLIC-WEB")
         self.assertEqual(
             sdk.COMPATIBLE_CONTRACT_VERSIONS,
-            ("1.0.0", "1.1.0", "1.2.0", "1.3.0"),
+            ("1.0.0", "1.1.0", "1.2.0", "1.3.0", "1.4.0"),
         )
         self.assertIs(sdk.PrivacyFloor.OWNER, sdk.PrivacyFloor("owner"))
         self.assertTrue(

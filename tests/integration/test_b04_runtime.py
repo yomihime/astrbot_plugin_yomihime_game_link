@@ -66,6 +66,9 @@ from tests.fixtures.b04_runtime import (
     OfflineHttpTransport,
     RenderBatchBarrier,
     build_runtime,
+    create_subscription_event_fixture,
+    replace_subscription_gate_fixture,
+    synthetic_subscription_gate_bindings,
 )
 
 
@@ -73,6 +76,7 @@ class B04RuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
+        self.bindings = synthetic_subscription_gate_bindings(("sample/feed",))
         self.clock = DeterministicClock()
         self.runtime = build_runtime(self.root, clock=self.clock)
         self.module_services = self.runtime.module_factory.for_module("sample/feed")
@@ -379,7 +383,9 @@ class B04RuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
         group_recipient = await self.runtime.host_repositories.conversations.current(
             "test-adapter", "group"
         )
-        forged = await self.runtime.repositories.deliveries.create_event(
+        forged = await create_subscription_event_fixture(
+            self.runtime.repositories.deliveries,
+            self.bindings,
             DeliveryEvent(
                 group_event_key,
                 1,
@@ -401,7 +407,7 @@ class B04RuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
                     public_record.revision,
                     group_recipient,
                 ),
-            )
+            ),
         )
         rejected = await self.runtime.delivery.dispatch_event(
             forged.event_key,
@@ -420,7 +426,9 @@ class B04RuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
             alice.subscription_id
         )
         corrupt_key = "invalid-missing-route-kind"
-        valid = await self.runtime.repositories.deliveries.create_event(
+        valid = await create_subscription_event_fixture(
+            self.runtime.repositories.deliveries,
+            self.bindings,
             DeliveryEvent(
                 corrupt_key,
                 1,
@@ -442,7 +450,7 @@ class B04RuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
                     alice_record.revision,
                     alice_record.recipient,
                 ),
-            )
+            ),
         )
         malformed_recipient = object.__new__(ConversationRef)
         object.__setattr__(malformed_recipient, "adapter_id", "test-adapter")
@@ -608,7 +616,9 @@ class B04RuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
             view.subscription_id
         )
         key = "authorized-revoke-before-send"
-        event = await self.runtime.repositories.deliveries.create_event(
+        event = await create_subscription_event_fixture(
+            self.runtime.repositories.deliveries,
+            self.bindings,
             DeliveryEvent(
                 key,
                 1,
@@ -630,7 +640,7 @@ class B04RuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
                     record.revision,
                     record.recipient,
                 ),
-            )
+            ),
         )
         await self.runtime.host_repositories.authorization.revoke_grant(
             grant, expected_revision=grant.revision
@@ -776,7 +786,9 @@ class B04RuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
             "test-adapter", "group"
         )
         group_key = "authorized-forged-group-route"
-        group_event = await self.runtime.repositories.deliveries.create_event(
+        group_event = await create_subscription_event_fixture(
+            self.runtime.repositories.deliveries,
+            self.bindings,
             DeliveryEvent(
                 group_key,
                 1,
@@ -798,7 +810,7 @@ class B04RuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
                     record.revision,
                     record.recipient,
                 ),
-            )
+            ),
         )
         forged_group_read = object.__new__(DeliveryEvent)
         for field in DeliveryEvent.__dataclass_fields__:
@@ -809,7 +821,9 @@ class B04RuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
             )
 
         missing_kind_key = "authorized-missing-route-kind"
-        direct_event = await self.runtime.repositories.deliveries.create_event(
+        direct_event = await create_subscription_event_fixture(
+            self.runtime.repositories.deliveries,
+            self.bindings,
             DeliveryEvent(
                 missing_kind_key,
                 1,
@@ -831,7 +845,7 @@ class B04RuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
                     record.revision,
                     record.recipient,
                 ),
-            )
+            ),
         )
         malformed_recipient = object.__new__(ConversationRef)
         object.__setattr__(malformed_recipient, "adapter_id", "test-adapter")
@@ -889,9 +903,11 @@ class B04RuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
         record = await self.runtime.repositories.subscriptions.current(
             view.subscription_id
         )
-        timeout_runtime = build_runtime(self.root, clock=self.clock, send_timeout=0.01)
+        timeout_runtime = build_runtime(self.root, clock=self.clock, send_timeout=0.1)
         key = "send-timeout-unknown"
-        event = await timeout_runtime.repositories.deliveries.create_event(
+        event = await create_subscription_event_fixture(
+            timeout_runtime.repositories.deliveries,
+            self.bindings,
             DeliveryEvent(
                 key,
                 1,
@@ -908,16 +924,23 @@ class B04RuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
                     record.revision,
                     record.recipient,
                 ),
-            )
+            ),
         )
         timeout_runtime.message_port.block = True
-        result = await timeout_runtime.delivery.dispatch_event(
-            event.event_key,
-            event.event_version,
-            event.subscription_id,
-            event.subscription_revision,
+        dispatch = asyncio.create_task(
+            timeout_runtime.delivery.dispatch_event(
+                event.event_key,
+                event.event_version,
+                event.subscription_id,
+                event.subscription_revision,
+            )
         )
-        timeout_runtime.message_port.release.set()
+        try:
+            await asyncio.wait_for(timeout_runtime.message_port.started.wait(), 2)
+            result = await dispatch
+        finally:
+            timeout_runtime.message_port.release.set()
+            await asyncio.gather(dispatch, return_exceptions=True)
         self.assertEqual(result.state, DeliveryState.UNKNOWN)
         saved = await timeout_runtime.repositories.deliveries.current_event(
             event.event_key,
@@ -971,6 +994,39 @@ class B04RuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
             (failed.state, failed.cursor, failed.observation),
             (prior_state, prior_cursor, prior_observation),
         )
+
+    async def test_pause_resume_during_collector_await_discards_old_work_and_restarts_previous(
+        self,
+    ):
+        await self._create("alice", minimum=0)
+        await self.runtime.scheduler.run_due_page()
+        before = self._count("b04_observations")
+        self.assertEqual(before, 1)
+        self.clock.advance(timedelta(seconds=61))
+        candidate = (
+            await self.runtime.repositories.scheduler.list_due_jobs(
+                now=self.clock(), limit=10
+            )
+        )[0]
+        self.runtime.collector.block = True
+        run = asyncio.create_task(self.runtime.scheduler.run_due_job(candidate))
+        await asyncio.wait_for(self.runtime.collector.started.wait(), timeout=2)
+        self.assertIsNotNone(self.runtime.collector.previous_inputs[-1])
+        bindings = self.runtime.repositories.lifecycle._subscription_gate_bindings
+        await replace_subscription_gate_fixture(
+            self.runtime.database, bindings, "sample/feed", False, self.clock()
+        )
+        await replace_subscription_gate_fixture(
+            self.runtime.database, bindings, "sample/feed", True, self.clock()
+        )
+        self.runtime.collector.release.set()
+        self.assertIsNone(await asyncio.wait_for(run, timeout=2))
+        self.assertEqual(self._count("b04_observations"), before)
+        fresh = await self.runtime.scheduler.run_due_job(candidate)
+        self.assertTrue(fresh.committed)
+        self.assertIsNone(self.runtime.collector.previous_inputs[-1])
+        self.assertEqual(self._count("b04_observations"), before + 1)
+        self.assertEqual(self.runtime.message_port.calls, [])
 
     async def test_i06_disable_cancels_collection_without_commit(self):
         await self._create("alice", minimum=0)
@@ -1224,7 +1280,7 @@ class B04RuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(failing_runtime.message_port.calls, [])
         self.assertEqual(len(self.runtime.message_port.calls), 1)
         reopened = type(self.runtime.database)(self.root / "runtime.sqlite3")
-        self.assertEqual(reopened.schema_version(), 80)
+        self.assertEqual(reopened.schema_version(), 90)
         recovered = build_runtime(self.root, clock=self.clock)
         self.assertTrue(
             await recovered.resource_visibility.contains_non_public_resource_reference(
@@ -1317,7 +1373,9 @@ class B04RuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 ),
             )
             events.append(
-                await self.runtime.repositories.deliveries.create_event(event)
+                await create_subscription_event_fixture(
+                    self.runtime.repositories.deliveries, self.bindings, event
+                )
             )
         self.runtime.message_port.outcomes.extend(
             (
@@ -1359,7 +1417,9 @@ class B04RuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
         events = []
         for key, record in zip(("retry-alice", "retry-bob"), records, strict=True):
             events.append(
-                await self.runtime.repositories.deliveries.create_event(
+                await create_subscription_event_fixture(
+                    self.runtime.repositories.deliveries,
+                    self.bindings,
                     DeliveryEvent(
                         key,
                         1,
@@ -1376,7 +1436,7 @@ class B04RuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
                             record.revision,
                             record.recipient,
                         ),
-                    )
+                    ),
                 )
             )
 
@@ -1448,7 +1508,9 @@ class B04RuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
         )
         failing_runtime = build_runtime(self.root, clock=self.clock, renderer=renderer)
         event_key = "renderer-fallback"
-        event = await failing_runtime.repositories.deliveries.create_event(
+        event = await create_subscription_event_fixture(
+            failing_runtime.repositories.deliveries,
+            self.bindings,
             DeliveryEvent(
                 event_key,
                 1,
@@ -1477,7 +1539,7 @@ class B04RuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
                     owner.revision,
                     owner.recipient,
                 ),
-            )
+            ),
         )
         result = await failing_runtime.delivery.dispatch_event(
             event.event_key,
@@ -1498,7 +1560,9 @@ class B04RuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
             view.subscription_id
         )
         event_key, version = "restart-sending", 1
-        event = await self.runtime.repositories.deliveries.create_event(
+        event = await create_subscription_event_fixture(
+            self.runtime.repositories.deliveries,
+            self.bindings,
             DeliveryEvent(
                 event_key,
                 version,
@@ -1520,7 +1584,7 @@ class B04RuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
                     record.revision,
                     record.recipient,
                 ),
-            )
+            ),
         )
         claimed = await self.runtime.repositories.deliveries.claim_sending(
             event_key,

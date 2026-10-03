@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import MappingProxyType
 
 from ...api.administration import (
     AdminAuthorizationDenied,
@@ -141,8 +143,181 @@ def _secret_metadata(row: sqlite3.Row) -> SecretMetadata:
 class SQLiteConfigRepository:
     """Persist ``ConfigSnapshot`` values and metadata with target-scoped CAS."""
 
-    def __init__(self, database: SQLiteDatabase | str | Path) -> None:
+    def __init__(
+        self,
+        database: SQLiteDatabase | str | Path,
+        *,
+        subscription_gate_fields: Mapping[ConfigTarget, tuple[str, ...]] | None = None,
+        clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+    ) -> None:
         self.database = _database(database)
+        if subscription_gate_fields is not None and not isinstance(
+            subscription_gate_fields, Mapping
+        ):
+            raise ValueError("subscription gate policy must be a mapping")
+        policy: dict[ConfigTarget, tuple[str, ...]] = {}
+        for target, fields in (subscription_gate_fields or {}).items():
+            target = _config_target(target)
+            if (
+                type(fields) is not tuple
+                or not fields
+                or len(set(fields)) != len(fields)
+            ):
+                raise ValueError("subscription gate policy fields are invalid")
+            policy[target] = tuple(_bounded(field, "config field") for field in fields)
+        if not callable(clock):
+            raise ValueError("subscription gate clock must be callable")
+        # Composition must validate the complete trusted map before constructing
+        # this repository. No module-supplied patch can extend this policy.
+        self._subscription_gate_fields = MappingProxyType(policy)
+        self._clock = clock
+
+    def _subscription_timestamp(self) -> str:
+        value = self._clock()
+        if not isinstance(value, datetime) or value.utcoffset() is None:
+            raise ValueError("subscription transition requires an aware datetime")
+        return value.astimezone(UTC).isoformat()
+
+    @staticmethod
+    def _gate_value(row: sqlite3.Row | None) -> bool | None:
+        if row is None or row["value_json"] is None:
+            return None
+        try:
+            value = json.loads(row["value_json"])
+        except (TypeError, ValueError):
+            return None
+        return value if type(value) is bool else None
+
+    @staticmethod
+    def _valid_transition(raw: object) -> bool:
+        if type(raw) is not str:
+            return False
+        try:
+            value = datetime.fromisoformat(raw)
+            return value.utcoffset() == timedelta(0)
+        except (TypeError, ValueError, OverflowError):
+            return False
+
+    @staticmethod
+    def _bootstrap_phase(unit: SQLiteUnitOfWork) -> str | None:
+        row = unit.execute(
+            "SELECT phase FROM subscription_gate_bootstrap WHERE singleton=1"
+        ).fetchone()
+        return None if row is None else row[0]
+
+    def _subscription_gates_valid(self, unit: SQLiteUnitOfWork) -> bool:
+        if self._bootstrap_phase(unit) != "complete":
+            return False
+        for target, fields in self._subscription_gate_fields.items():
+            for field in fields:
+                marker = unit.execute(
+                    "SELECT 1 FROM subscription_gate_initializations "
+                    "WHERE principal_id=? AND module_id=? AND field=?",
+                    (target.principal_id, target.module_id, field),
+                ).fetchone()
+                row = unit.execute(
+                    "SELECT value_json,subscription_transition_at FROM config_entries "
+                    "WHERE principal_id=? AND module_id=? AND field=?",
+                    (target.principal_id, target.module_id, field),
+                ).fetchone()
+                value = self._gate_value(row)
+                if marker is None or value is None:
+                    return False
+                if value and not self._valid_transition(
+                    row["subscription_transition_at"]
+                ):
+                    return False
+        return True
+
+    async def initialize_subscription_gates(self) -> bool:
+        """Consume one migration-owned bootstrap using the full trusted policy.
+
+        After completion this only validates exact markers and gate rows; it
+        never recreates a deleted field, marker, or bootstrap singleton. Invalid
+        existing values remain untouched and produce a closed validation result.
+        """
+        if not self._subscription_gate_fields:
+            return False
+
+        def inspect(unit: SQLiteUnitOfWork) -> tuple[str | None, bool]:
+            phase = self._bootstrap_phase(unit)
+            return phase, self._subscription_gates_valid(unit)
+
+        phase, valid = await self.database.executor.run_read(inspect)
+        if phase != "pending":
+            return valid
+
+        def initialize(unit: SQLiteUnitOfWork) -> bool:
+            phase = self._bootstrap_phase(unit)
+            if phase != "pending":
+                return self._subscription_gates_valid(unit)
+            if (
+                unit.execute(
+                    "SELECT 1 FROM subscription_gate_initializations LIMIT 1"
+                ).fetchone()
+                is not None
+            ):
+                return False
+            transition = self._subscription_timestamp()
+            for target, fields in self._subscription_gate_fields.items():
+                rows = {
+                    field: unit.execute(
+                        "SELECT value_json,subscription_transition_at FROM config_entries "
+                        "WHERE principal_id=? AND module_id=? AND field=?",
+                        (target.principal_id, target.module_id, field),
+                    ).fetchone()
+                    for field in fields
+                }
+                missing = [field for field, row in rows.items() if row is None]
+                if missing:
+                    state = unit.execute(
+                        "SELECT revision FROM config_state "
+                        "WHERE principal_id=? AND module_id=?",
+                        (target.principal_id, target.module_id),
+                    ).fetchone()
+                    revision = 1 if state is None else int(state[0]) + 1
+                    unit.execute(
+                        "INSERT INTO config_state(principal_id,module_id,revision) "
+                        "VALUES (?,?,?) ON CONFLICT(principal_id,module_id) "
+                        "DO UPDATE SET revision=excluded.revision",
+                        (target.principal_id, target.module_id, revision),
+                    )
+                    for field in missing:
+                        unit.execute(
+                            "INSERT INTO config_entries "
+                            "(principal_id,module_id,field,value_json,revision,"
+                            "subscription_transition_at) VALUES (?,?,?,'true',?,?)",
+                            (
+                                target.principal_id,
+                                target.module_id,
+                                field,
+                                revision,
+                                transition,
+                            ),
+                        )
+                for field, row in rows.items():
+                    if (
+                        self._gate_value(row) is True
+                        and row["subscription_transition_at"] is None
+                    ):
+                        unit.execute(
+                            "UPDATE config_entries SET subscription_transition_at=? "
+                            "WHERE principal_id=? AND module_id=? AND field=?",
+                            (transition, target.principal_id, target.module_id, field),
+                        )
+                    unit.execute(
+                        "INSERT INTO subscription_gate_initializations "
+                        "(principal_id,module_id,field) VALUES (?,?,?)",
+                        (target.principal_id, target.module_id, field),
+                    )
+            unit.execute(
+                "UPDATE subscription_gate_bootstrap SET phase='complete' WHERE singleton=1"
+            )
+            return self._subscription_gates_valid(unit)
+
+        return await self.database.executor.run_transaction(
+            initialize, begin_mode="IMMEDIATE"
+        )
 
     async def current(self, target: ConfigTarget) -> ConfigSnapshot:
         target = _config_target(target)
@@ -222,6 +397,24 @@ class SQLiteConfigRepository:
     def _update_in_unit(
         self, unit: SQLiteUnitOfWork, target: ConfigTarget, patch: PersistedConfigPatch
     ) -> ConfigSnapshot:
+        gate_fields = self._subscription_gate_fields.get(target, ())
+        for update in patch.updates:
+            if update.field not in gate_fields:
+                continue
+            declaration = next(
+                field for field in patch.declared_fields if field.name == update.field
+            )
+            if declaration.sensitive or update.mode is ConfigPatchMode.CLEAR:
+                raise ValueError(
+                    "subscription gate requires KEEP or strict bool REPLACE"
+                )
+            if (
+                update.mode is ConfigPatchMode.REPLACE
+                and type(update.value) is not bool
+            ):
+                raise ValueError(
+                    "subscription gate requires KEEP or strict bool REPLACE"
+                )
         self._ensure_state(unit, target)
         row = unit.execute(
             "SELECT revision FROM config_state WHERE principal_id = ? AND module_id = ?",
@@ -241,6 +434,33 @@ class SQLiteConfigRepository:
                 field for field in patch.declared_fields if field.name == update.field
             )
             if update.mode is ConfigPatchMode.KEEP:
+                continue
+            if update.field in gate_fields:
+                existing = unit.execute(
+                    "SELECT value_json FROM config_entries "
+                    "WHERE principal_id=? AND module_id=? AND field=?",
+                    (target.principal_id, target.module_id, update.field),
+                ).fetchone()
+                if self._gate_value(existing) is update.value:
+                    continue
+                unit.execute(
+                    "INSERT INTO config_entries "
+                    "(principal_id,module_id,field,value_json,revision,"
+                    "subscription_transition_at) VALUES (?,?,?,?,?,?) "
+                    "ON CONFLICT(principal_id,module_id,field) DO UPDATE SET "
+                    "value_json=excluded.value_json,secret_token=NULL,"
+                    "secret_principal_id=NULL,secret_module_id=NULL,secret_field=NULL,"
+                    "secret_operation_id=NULL,secret_state=NULL,revision=excluded.revision,"
+                    "subscription_transition_at=excluded.subscription_transition_at",
+                    (
+                        target.principal_id,
+                        target.module_id,
+                        update.field,
+                        _json(update.value),
+                        next_revision,
+                        self._subscription_timestamp(),
+                    ),
+                )
                 continue
             if update.mode is ConfigPatchMode.CLEAR:
                 if declaration.sensitive:

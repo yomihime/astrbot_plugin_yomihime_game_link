@@ -3,6 +3,7 @@
 import math
 import unittest
 from dataclasses import FrozenInstanceError, replace
+from time import monotonic
 from typing import get_type_hints
 
 from ygl_test_subject.api.contexts import (
@@ -12,6 +13,146 @@ from ygl_test_subject.api.contexts import (
     InvocationView,
 )
 from ygl_test_subject.core.context_issuer import ContextIssuer, InvalidInvocation
+from ygl_test_subject.core.ports import PublicWebBinding
+
+
+class _PublicWebProofs:
+    """Synthetic trusted Host composition; no token, Host or network needed."""
+
+    def __init__(self, clock=monotonic):
+        self.clock = clock
+        self.minted = {}
+        self.active = {}
+        self.revoked = []
+
+    def new(
+        self, module_id, capability_id, *, key="bearer-one", deadline=None, generation=1
+    ):
+        proof = object()
+        self.minted[proof] = PublicWebBinding(
+            module_id,
+            capability_id,
+            generation,
+            key,
+            self.clock() + 10 if deadline is None else deadline,
+        )
+        return proof
+
+    def consume(self, proof, *, module_id, capability_id, generation):
+        binding = self.minted.get(proof)
+        if (
+            binding is None
+            or proof in self.active
+            or proof in self.revoked
+            or (binding.module_id, binding.capability_id, binding.generation)
+            != (module_id, capability_id, generation)
+            or binding.deadline_monotonic <= self.clock()
+        ):
+            raise InvalidInvocation("synthetic host proof rejected")
+        self.active[proof] = binding
+        return binding
+
+    def is_current(self, proof, binding):
+        return (
+            self.active.get(proof) is binding
+            and binding.deadline_monotonic > self.clock()
+        )
+
+    def revoke(self, proof):
+        self.active.pop(proof, None)
+        self.revoked.append(proof)
+
+
+class PublicWebIssuerTests(unittest.TestCase):
+    def setUp(self):
+        self.now = 10.0
+        self.proofs = _PublicWebProofs(lambda: self.now)
+        self.issuer = ContextIssuer(
+            clock=lambda: self.now,
+            public_web_validator=self.proofs,
+            public_web_capabilities=frozenset(
+                {("pkg/mod", "read"), ("pkg/child", "read")}
+            ),
+        )
+
+    def _issue(self, proof):
+        return self.issuer.issue_public_web(
+            proof,
+            module_id="pkg/mod",
+            capability_id="read",
+            module_epoch=1,
+            registry_revision=1,
+            generation=1,
+            deadline=30.0,
+        )
+
+    def test_generic_issue_constructed_dto_and_foreign_proof_cannot_authorize(self):
+        with self.assertRaises(InvalidInvocation):
+            self.issuer.issue(
+                origin=InvocationOrigin.WEB_PUBLIC,
+                module_id="pkg/mod",
+                module_epoch=1,
+                registry_revision=1,
+            )
+        for proof in (
+            object(),
+            PublicWebBinding("pkg/mod", "read", 1, "opaque", 20.0),
+            _PublicWebProofs(lambda: self.now).new("pkg/mod", "read"),
+        ):
+            with self.assertRaises(InvalidInvocation):
+                self._issue(proof)
+        proof = self.proofs.new("pkg/mod", "read", deadline=20.0)
+        view = self._issue(proof)
+        with self.assertRaises(InvalidInvocation):
+            self.issuer.require(replace(view))
+        with self.assertRaises(InvalidInvocation):
+            self._issue(proof)
+        for field in (
+            "actor_id",
+            "conversation_id",
+            "adapter_id",
+            "delivery_route",
+            "grant_id",
+            "subscription_id",
+        ):
+            self.assertIsNone(getattr(view, field))
+        self.assertEqual(view.deadline, 20.0)
+        child = self.issuer.derive(
+            view, module_id="pkg/child", module_epoch=1, capability_id="read"
+        )
+        self.assertIs(self.issuer.require(child), child)
+        with self.assertRaises(InvalidInvocation):
+            self.issuer.derive(
+                view, module_id="pkg/other", module_epoch=1, capability_id="read"
+            )
+        self.issuer.release(view)
+        self.assertIn(proof, self.proofs.revoked)
+        with self.assertRaises(InvalidInvocation):
+            self.issuer.require(child)
+
+    def test_no_deployment_expiry_and_validator_revocation_fail_closed(self):
+        proof = self.proofs.new("pkg/mod", "read", deadline=20.0)
+        with self.assertRaises(InvalidInvocation):
+            ContextIssuer(public_web_validator=self.proofs).issue_public_web(
+                proof,
+                module_id="pkg/mod",
+                capability_id="read",
+                module_epoch=1,
+                registry_revision=1,
+                generation=1,
+                deadline=30.0,
+            )
+        view = self._issue(proof)
+        self.now = 20.0
+        with self.assertRaises(InvalidInvocation):
+            self.issuer.require(view)
+        self.issuer.release(view)
+        self.now = 10.0
+        proof = self.proofs.new("pkg/mod", "read")
+        view = self._issue(proof)
+        self.proofs.revoke(proof)
+        with self.assertRaises(InvalidInvocation):
+            self.issuer.require(view)
 
 
 class ContextIssuerTests(unittest.TestCase):

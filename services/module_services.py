@@ -11,6 +11,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from time import monotonic
+from types import MappingProxyType
 from typing import Any
 
 from ..api.contexts import InvocationOrigin, InvocationView
@@ -633,7 +634,16 @@ class _BoundTasks:
                 close()
             raise
 
+        started = False
+
+        def close_unstarted(_task=None) -> None:
+            if not started:
+                close = getattr(work, "close", None)
+                if callable(close):
+                    close()
+
         async def guarded() -> object:
+            nonlocal started
             try:
                 await self.__check()
             except BaseException:
@@ -641,11 +651,18 @@ class _BoundTasks:
                 if callable(close):
                     close()
                 raise
+            started = True
             result = await work
             await self.__check()
             return result
 
-        return self.__scope.create_task(guarded(), name=name)
+        try:
+            task = self.__scope.create_task(guarded(), name=name)
+        except BaseException:
+            close_unstarted()
+            raise
+        task.add_done_callback(close_unstarted)
+        return task
 
     async def await_result(self, work: Awaitable[Any]) -> Any:
         try:
@@ -785,7 +802,11 @@ class InvocationServiceBinder:
             else:
                 if (
                     view.origin
-                    not in (InvocationOrigin.COMMAND, InvocationOrigin.LLM_TOOL)
+                    not in (
+                        InvocationOrigin.COMMAND,
+                        InvocationOrigin.LLM_TOOL,
+                        InvocationOrigin.WEB_PUBLIC,
+                    )
                     or view.capability_id is None
                     or not isinstance(lease, AdmissionLease)
                 ):
@@ -799,6 +820,11 @@ class InvocationServiceBinder:
                     None,
                 )
                 if descriptor is None:
+                    raise ValueError
+                if (
+                    view.origin is InvocationOrigin.WEB_PUBLIC
+                    and not self._issuer.allows_public_web(view.module_id, descriptor)
+                ):
                     raise ValueError
                 if view.origin is InvocationOrigin.LLM_TOOL and not tool_allowed(
                     descriptor
@@ -1040,6 +1066,7 @@ class ModuleServicesFactory:
         "_secret_available",
         "_clock",
         "_utc_clock",
+        "_module_host_config_snapshots",
     )
 
     def __init__(
@@ -1060,6 +1087,7 @@ class ModuleServicesFactory:
         exchange_verifier: Callable[..., object] | None = None,
         clock: Callable[[], float] = monotonic,
         utc_clock: Callable[[], datetime] | None = None,
+        module_host_config_snapshots: Mapping[str, Mapping[str, object]] | None = None,
     ) -> None:
         if not isinstance(registry, Registry) or not isinstance(issuer, ContextIssuer):
             raise TypeError("module services require the host Registry and issuer")
@@ -1146,6 +1174,9 @@ class ModuleServicesFactory:
         self._secret_available = secret_available
         self._clock = clock
         self._utc_clock = utc_clock or (lambda: datetime.now(UTC))
+        self._module_host_config_snapshots = _freeze_host_config_snapshots(
+            module_host_config_snapshots
+        )
 
     def for_module(self, module_id: str) -> ModuleServices:
         try:
@@ -1231,6 +1262,9 @@ class ModuleServicesFactory:
 
     def _build_module(self, module_id: str, manifest: ModuleManifest) -> ModuleServices:
         fields: tuple[ConfigField, ...] = manifest.config_fields
+        host_values = self._module_host_config_snapshots.get(module_id, {})
+        if set(host_values) & {field.name for field in fields}:
+            raise ValueError("host config conflicts with declared Core config fields")
         if fields:
             config = ConfigurationService(
                 ConfigTarget(self._config_principal_id, module_id),
@@ -1242,6 +1276,8 @@ class ModuleServicesFactory:
             config = _EmptyConfigView(
                 ConfigTarget(self._config_principal_id, module_id)
             )
+        if host_values:
+            config = _HostConfigView(config, host_values)
         identities = IdentityResolverService(
             self._repositories.identities,
             self._repositories.conversations,
@@ -1339,6 +1375,44 @@ class ModuleServicesFactory:
             ),
             subscriptions=subscriptions,
             scopes=binder,
+        )
+
+
+def _freeze_host_config_snapshots(
+    snapshots: Mapping[str, Mapping[str, object]] | None,
+) -> Mapping[str, Mapping[str, object]]:
+    """Copy host-owned JSON values without persisting them in Core storage."""
+    if snapshots is None:
+        return MappingProxyType({})
+    if not isinstance(snapshots, Mapping):
+        raise TypeError("module host config snapshots must be a mapping")
+    frozen = {}
+    for module_id, values in snapshots.items():
+        target = ConfigTarget("host-config", module_id)
+        if not isinstance(values, Mapping):
+            raise TypeError("module host config values must be a mapping")
+        frozen[module_id] = ConfigSnapshot(1, values, target=target).values
+    return MappingProxyType(frozen)
+
+
+class _HostConfigView:
+    """Read-only composition; revision and secret metadata remain Core-owned."""
+
+    __slots__ = ("_core", "_host_values")
+
+    def __init__(self, core, host_values: Mapping[str, object]) -> None:
+        self._core = core
+        self._host_values = host_values
+
+    async def current(self) -> ConfigSnapshot:
+        core = await self._core.current()
+        if set(core.values) & set(self._host_values):
+            raise ValueError("host config conflicts with Core config values")
+        return ConfigSnapshot(
+            core.revision,
+            {**core.values, **self._host_values},
+            secret_metadata=core.secret_metadata,
+            target=core.target,
         )
 
 

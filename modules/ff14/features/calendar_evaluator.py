@@ -6,7 +6,9 @@ import hashlib
 import re
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
+from types import MappingProxyType
 from typing import Mapping, Sequence
+from urllib.parse import unquote, urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from dateutil.tz import datetime_exists, resolve_imaginary
@@ -47,25 +49,101 @@ _SOURCE_LABELS = {
     "global_google": "国际服主日历（Google Calendar）",
     "global_icloud": "国际服备用日历（iCloud）",
 }
-_HTTP_SOURCE_IDS = frozenset(("ff14_calendar_primary", "ff14_calendar_fallback"))
-_SOURCE_URLS = {
-    (
-        "cn",
-        "ff14_calendar_primary",
-    ): "https://calendar.google.com/calendar/ical/up88drvlnnh2t77hbpqq8v33i2cngfh7%40import.calendar.google.com/public/basic.ics",
-    (
-        "cn",
-        "ff14_calendar_fallback",
-    ): "https://p66-caldav.icloud.com/published/2/MTAyMTk3MTMxMjExMDIxOXsjasy7WUO0EcKVz7qGEuVjjTlRkgd6WOZM171uxP_u-QM51M24lHzRlAQir-oodDRRTzZeusSLbw0snkZoqI4",
-    (
-        "global",
-        "ff14_calendar_primary",
-    ): "https://calendar.google.com/calendar/ical/1gpnler51bgs1ajti10ao946ou367bf6%40import.calendar.google.com/public/basic.ics",
-    (
-        "global",
-        "ff14_calendar_fallback",
-    ): "https://p66-caldav.icloud.com/published/2/MTAyMTk3MTMxMjExMDIxOXsjasy7WUO0EcKVz7qGEuVzSK8L9ZRQYf1sxUFeH1A1a22GJLf6nfk2-CZNYMv5iOxCNlUR-umbJKFWWAUVRp8",
+_SOURCE_URLS = MappingProxyType(
+    {
+        (
+            "cn",
+            "ff14_calendar_primary",
+        ): "https://calendar.google.com/calendar/ical/up88drvlnnh2t77hbpqq8v33i2cngfh7%40import.calendar.google.com/public/basic.ics",
+        (
+            "cn",
+            "ff14_calendar_fallback",
+        ): "https://p66-caldav.icloud.com/published/2/MTAyMTk3MTMxMjExMDIxOXsjasy7WUO0EcKVz7qGEuVjjTlRkgd6WOZM171uxP_u-QM51M24lHzRlAQir-oodDRRTzZeusSLbw0snkZoqI4",
+        (
+            "global",
+            "ff14_calendar_primary",
+        ): "https://calendar.google.com/calendar/ical/1gpnler51bgs1ajti10ao946ou367bf6%40import.calendar.google.com/public/basic.ics",
+        (
+            "global",
+            "ff14_calendar_fallback",
+        ): "https://p66-caldav.icloud.com/published/2/MTAyMTk3MTMxMjExMDIxOXsjasy7WUO0EcKVz7qGEuVzSK8L9ZRQYf1sxUFeH1A1a22GJLf6nfk2-CZNYMv5iOxCNlUR-umbJKFWWAUVRp8",
+    }
+)
+_SOURCE_VARIANTS = MappingProxyType(
+    {
+        ("cn", "ff14_calendar_primary"): "cn_google",
+        ("cn", "ff14_calendar_fallback"): "cn_icloud",
+        ("global", "ff14_calendar_primary"): "global_google",
+        ("global", "ff14_calendar_fallback"): "global_icloud",
+    }
+)
+_WARNING_TEXT = {
+    "primary_source_failed": "主日历源暂不可用，已尝试备用源。",
+    "fallback_source_failed": "备用日历源暂不可用。",
+    "primary_source_partial": "主日历源未能完整解析，已尝试备用源。",
+    "fallback_source_partial": "备用日历源内容不完整。",
+    "primary_source_unqualified": "主日历源未获资格，未启用。",
+    "fallback_source_unqualified": "备用日历源未获资格，未启用。",
+    "source_rate_limited": "日历源请求频率受限。",
+    "source_timeout": "日历源请求超时。",
+    "source_unavailable": "日历源暂不可用。",
+    "source_partial": "来源未完整解析，自动摘要暂不可用。",
+    "stored_occurrence_limit": "日历内容超过自动摘要存储上限。",
 }
+_PARSER_WARNING_CODES = frozenset(
+    {
+        "INPUT_TOO_LARGE",
+        "INVALID_UTF8",
+        "LINE_LIMIT",
+        "MALFORMED_SOURCE",
+        "EVENT_LIMIT",
+        "PROPERTY_LIMIT",
+        "INVALID_EVENT",
+        "INVALID_TIMEZONE",
+        "FLOATING_TIME_UNSUPPORTED",
+        "UNSUPPORTED_RECURRENCE",
+        "RECURRENCE_BUDGET",
+        "SOURCE_BUDGET",
+        "OUTPUT_LIMIT",
+        "CONFLICTING_REVISION",
+        "ORPHAN_OVERRIDE",
+    }
+)
+
+
+@dataclass(frozen=True, slots=True)
+class CalendarSourceSpec:
+    source_id: str
+    variant: str
+    url: str
+    path: str
+
+
+def calendar_source_spec(region: str, source_id: str) -> CalendarSourceSpec | None:
+    """Reviewed identity/region/format only; not freshness or all-event coverage."""
+    if not isinstance(region, str) or not isinstance(source_id, str):
+        return None
+    key = (region, source_id)
+    variant, url = _SOURCE_VARIANTS.get(key), _SOURCE_URLS.get(key)
+    if variant is None or url is None:
+        return None
+    return CalendarSourceSpec(source_id, variant, url, unquote(urlsplit(url).path))
+
+
+def calendar_warning_messages(codes: object) -> tuple[str, ...]:
+    """Persisted warning values never become raw user-visible text."""
+    if not isinstance(codes, (tuple, list)):
+        return ()
+    messages = []
+    for code in codes[:100]:
+        if not isinstance(code, str):
+            continue
+        message = _WARNING_TEXT.get(code)
+        if code.startswith("parser:") and code[7:] in _PARSER_WARNING_CODES:
+            message = "日历部分内容不支持自动处理。"
+        if message is not None and message not in messages:
+            messages.append(message)
+    return tuple(messages)
 
 
 @dataclass(frozen=True, slots=True)
@@ -155,6 +233,8 @@ def build_calendar_document(
     source_variant: str,
     source_url: str | None = None,
     interpretation_timezone: str | None = None,
+    completeness: ObservationCompleteness = ObservationCompleteness.COMPLETE,
+    warning_codes: object = (),
     privacy: Privacy,
 ) -> DisplayDocument:
     zone = load_timezone(timezone_name)
@@ -165,7 +245,14 @@ def build_calendar_document(
         zone=zone,
         now=now,
     )
-    source_label = _SOURCE_LABELS.get(source_variant, "FF14 日历源")
+    if source_variant not in _SOURCE_LABELS:
+        raise ValueError("calendar source is not qualified")
+    if completeness not in (
+        ObservationCompleteness.COMPLETE,
+        ObservationCompleteness.PARTIAL,
+    ):
+        raise ValueError("calendar document needs a parsed source")
+    source_label = _SOURCE_LABELS[source_variant]
     local_now = now.astimezone(zone)
     blocks: list[TextBlock | TableBlock] = [
         TextBlock(
@@ -173,8 +260,27 @@ def build_calendar_document(
         ),
         TextBlock(f"数据源：{source_label}；获取时间：{local_now:%Y-%m-%d %H:%M %Z}。"),
     ]
+    blocks.append(
+        TextBlock("来源更新时间未知；仅汇总所选公开日历来源，不保证覆盖全部活动。")
+    )
+    if source_variant in {"cn_icloud", "global_icloud"}:
+        blocks.append(TextBlock("已使用合格备用日历来源。"))
+    if completeness is ObservationCompleteness.PARTIAL:
+        blocks.append(TextBlock("来源未完整解析，自动摘要暂不可用。"))
+    blocks.extend(
+        TextBlock(message)
+        for message in calendar_warning_messages(warning_codes)
+        if message != "来源未完整解析，自动摘要暂不可用。"
+        or completeness is not ObservationCompleteness.PARTIAL
+    )
     if not selected:
-        blocks.append(TextBlock(f"未来 {days} 个本地日历日暂无活动。"))
+        blocks.append(
+            TextBlock(
+                "来源未完整解析，无法确认当前窗口是否无活动。"
+                if completeness is ObservationCompleteness.PARTIAL
+                else "该公开来源在当前窗口未返回活动。"
+            )
+        )
     else:
         visible = selected[:MAX_DISPLAY_EVENTS]
         rows = tuple(
@@ -327,6 +433,7 @@ class CalendarDailySummaryEvaluator:
             source_variant=snapshot["source_variant"],
             source_url=snapshot["source_url"],
             privacy=Privacy.PUBLIC,
+            warning_codes=snapshot["warning_codes"],
         )
         state = _evaluation_state(
             subscription.revision,
@@ -371,19 +478,14 @@ def _complete_payload(observation: Observation, region: str) -> Mapping[str, obj
     ):
         raise ValueError("observation payload is not a complete calendar snapshot")
     source_id = payload.get("source_id")
-    if source_id not in _HTTP_SOURCE_IDS:
+    spec = calendar_source_spec(region, source_id)
+    if spec is None:
         raise ValueError("unknown calendar source")
     source_variant = payload.get("source_variant")
-    expected_variant = {
-        ("cn", "ff14_calendar_primary"): "cn_google",
-        ("cn", "ff14_calendar_fallback"): "cn_icloud",
-        ("global", "ff14_calendar_primary"): "global_google",
-        ("global", "ff14_calendar_fallback"): "global_icloud",
-    }.get((region, source_id))
-    if source_variant != expected_variant or source_variant not in _SOURCE_LABELS:
+    if source_variant != spec.variant:
         raise ValueError("calendar source region mismatch")
     source_url = payload.get("source_url")
-    if source_url != _SOURCE_URLS.get((region, source_id)):
+    if source_url != spec.url:
         raise ValueError("invalid calendar source URL")
     source_version = payload.get("source_version")
     if not isinstance(source_version, str) or not re.fullmatch(
@@ -421,6 +523,7 @@ def _complete_payload(observation: Observation, region: str) -> Mapping[str, obj
         "window_start": window_start.astimezone(UTC),
         "window_end": window_end.astimezone(UTC),
         "occurrences": occurrences,
+        "warning_codes": payload.get("warnings", ()),
     }
 
 

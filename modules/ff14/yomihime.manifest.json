@@ -2,7 +2,7 @@
   "schema_version": 1,
   "package_id": "ff14",
   "package_version": "0.3.0",
-  "contract_version": "1.3.0",
+  "contract_version": "1.4.0",
   "author": "yomihime",
   "license": "AGPL-3.0-only",
   "source": "https://github.com/yomihime/astrbot_plugin_yomihime_game_link",
@@ -42,7 +42,7 @@
             ],
             "additionalProperties": false
           },
-          "invocation_policy": "command_only",
+          "invocation_policy": "command_and_public_web",
           "effect": "read_only",
           "privacy_floor": "public",
           "required_sources": [
@@ -109,7 +109,7 @@
             ],
             "additionalProperties": false
           },
-          "invocation_policy": "command_only",
+          "invocation_policy": "command_and_public_web",
           "effect": "read_only",
           "privacy_floor": "public"
         },
@@ -199,7 +199,7 @@
             ],
             "additionalProperties": false
           },
-          "invocation_policy": "command_only",
+          "invocation_policy": "command_and_public_web",
           "effect": "read_only",
           "privacy_floor": "public"
         },
@@ -412,6 +412,13 @@
       ],
       "tools": [],
       "config_fields": [
+        {
+          "name": "ff14_subscriptions_enabled",
+          "sensitive": false,
+          "required": false,
+          "default": true,
+          "description": "FF14 本人订阅推送开关；暂停保留记录，恢复仅处理之后的未来窗口。"
+        },
         {
           "name": "credential_fflogs_cn",
           "sensitive": true,

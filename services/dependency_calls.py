@@ -17,6 +17,7 @@ from ..api.display import Privacy
 from ..api.manifests import (
     CapabilityDescriptor,
     CapabilityReference,
+    InvocationPolicy,
     PrivacyFloor,
 )
 from ..api.results import CapabilityResult, ErrorCode, ErrorDetail, ResultStatus
@@ -24,7 +25,7 @@ from ..api.services import CallerCapability, Grant, GrantStatus, JsonObject
 from ..api.validation import ParameterError, validate_parameters
 from ..core.context_issuer import ContextIssuer, InvalidInvocation
 from ..core.lifecycle import LifecycleController, LifecycleError
-from ..core.policy import tool_allowed
+from ..core.policy import supports_public_read_only, tool_allowed
 from ..core.ports import CallerCapabilityIssuer
 from ..core.registry import RegisteredModule, Registry, RegistryError, RegistrySnapshot
 from ..core.task_scope import (
@@ -171,6 +172,13 @@ class DependencyInvoker:
             if not target.enabled:
                 return _error(ErrorCode.MODULE_UNAVAILABLE)
             self._check_policy(parent, target_descriptor)
+            if parent.origin is InvocationOrigin.WEB_PUBLIC and (
+                not self._issuer.allows_public_web(parent.module_id, descriptor)
+                or not self._issuer.allows_public_web(
+                    target.module_id, target_descriptor
+                )
+            ):
+                raise DependencyCallError("public web dependency is not deployed")
             chain = _ACTIVE_CHAINS.get(
                 parent.invocation_id, ((parent.module_id, caller.capability_id),)
             )
@@ -299,6 +307,21 @@ class DependencyInvoker:
                     or not current_target.enabled
                 ):
                     return _error(ErrorCode.MODULE_UNAVAILABLE)
+                if (
+                    parent.origin is InvocationOrigin.WEB_PUBLIC
+                    and not self._issuer.allows_public_web(
+                        current_target.module_id,
+                        next(
+                            (
+                                item
+                                for item in current_target.manifest.capabilities
+                                if item.capability_id == child.capability_id
+                            ),
+                            None,
+                        ),
+                    )
+                ):
+                    return _error(ErrorCode.MODULE_UNAVAILABLE)
                 self._lifecycle.admission.check(child_lease)
                 parent_lease = self._issuer.lease_for(parent)
                 if parent_lease is None:
@@ -418,6 +441,11 @@ class DependencyInvoker:
 
     @staticmethod
     def _check_policy(parent: InvocationView, target: CapabilityDescriptor) -> None:
+        if parent.origin is InvocationOrigin.WEB_PUBLIC and (
+            not supports_public_read_only(target)
+            or target.invocation_policy is not InvocationPolicy.COMMAND_AND_PUBLIC_WEB
+        ):
+            raise DependencyCallError("target is outside the public web surface")
         if target.privacy_floor is PrivacyFloor.OWNER:
             raise DependencyCallError(
                 "owner capability cannot be invoked as a dependency"

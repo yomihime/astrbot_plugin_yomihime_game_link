@@ -31,7 +31,9 @@ from ygl_test_subject.core.ports import AdminAuthorizationPort
 class B05AdminContractTests(unittest.TestCase):
     def test_admin_revision_is_additive_to_b04_c13(self):
         self.assertEqual(ADMIN_CONTRACT_REVISION, "B05-H-CORE-01")
-        self.assertEqual((CONTRACT_VERSION, CONTRACT_REVISION), ("1.3.0", "FF14-W1-P1"))
+        self.assertEqual(
+            (CONTRACT_VERSION, CONTRACT_REVISION), ("1.4.0", "UI-B0-PUBLIC-WEB")
+        )
         self.assertIn("1.1.0", COMPATIBLE_CONTRACT_VERSIONS)
 
     def test_snapshot_fields_defaults_and_redaction_contract(self):

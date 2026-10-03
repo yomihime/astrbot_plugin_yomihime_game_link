@@ -46,4 +46,21 @@ def tool_allowed(capability: object) -> bool:
     )
 
 
-__all__ = ["origin_allowed", "supports_public_read_only", "tool_allowed"]
+def public_web_allowed(
+    module_id: str, capability: object, deployment: frozenset[tuple[str, str]]
+) -> bool:
+    """Both explicit declaration and immutable deployment opt-in are required."""
+    return (
+        supports_public_read_only(capability)
+        and isinstance(capability, CapabilityDescriptor)
+        and capability.invocation_policy is InvocationPolicy.COMMAND_AND_PUBLIC_WEB
+        and (module_id, capability.capability_id) in deployment
+    )
+
+
+__all__ = [
+    "origin_allowed",
+    "public_web_allowed",
+    "supports_public_read_only",
+    "tool_allowed",
+]

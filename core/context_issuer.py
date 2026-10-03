@@ -16,6 +16,8 @@ from ..api.contexts import (
     InvocationSubscriptionScope,
     InvocationView,
 )
+from .policy import public_web_allowed
+from .ports import PublicWebBinding, PublicWebProofValidator
 
 
 class InvalidInvocation(PermissionError):
@@ -34,8 +36,30 @@ class ContextIssuer:
     the invoked manifest entry, so binders can require capability-scoped views.
     """
 
-    def __init__(self, *, clock: Callable[[], float] = monotonic) -> None:
+    def __init__(
+        self,
+        *,
+        clock: Callable[[], float] = monotonic,
+        public_web_validator: PublicWebProofValidator | None = None,
+        public_web_capabilities: frozenset[tuple[str, str]] = frozenset(),
+    ) -> None:
+        deployment = frozenset(public_web_capabilities)
+        if any(
+            type(item) is not tuple
+            or len(item) != 2
+            or any(type(value) is not str or not value.strip() for value in item)
+            for item in deployment
+        ):
+            raise TypeError("public web deployment must contain exact capability pairs")
+        if public_web_validator is not None and any(
+            not callable(getattr(public_web_validator, name, None))
+            for name in ("consume", "is_current", "revoke")
+        ):
+            raise TypeError("public web proof validator is invalid")
         self._clock = clock
+        self._web_validator = public_web_validator
+        self._web_deployment = deployment
+        self._web_proofs: dict[str, tuple[object, PublicWebBinding]] = {}
         self._issued: dict[str, InvocationView] = {}
         self._children: dict[str, set[str]] = {}
         self._leases: dict[str, object] = {}
@@ -61,6 +85,10 @@ class ContextIssuer:
         subscription_revision: int | None = None,
         capability_id: str | None = None,
     ) -> InvocationView:
+        if origin is InvocationOrigin.WEB_PUBLIC:
+            raise InvalidInvocation(
+                "Public web invocations require an owned host proof"
+            )
         if origin in (InvocationOrigin.COMMAND, InvocationOrigin.LLM_TOOL) and (
             actor_id is None or conversation_id is None
         ):
@@ -142,6 +170,68 @@ class ContextIssuer:
         self._issued[view.invocation_id] = view
         return view
 
+    def issue_public_web(
+        self,
+        proof: object,
+        *,
+        module_id: str,
+        capability_id: str,
+        module_epoch: int,
+        registry_revision: int,
+        generation: int,
+        deadline: float,
+    ) -> InvocationView:
+        """Consume an exact host proof, without fabricating any chat identity."""
+        validator = self._web_validator
+        if validator is None or (module_id, capability_id) not in self._web_deployment:
+            raise InvalidInvocation("Public web capability is not deployed")
+        binding = validator.consume(
+            proof,
+            module_id=module_id,
+            capability_id=capability_id,
+            generation=generation,
+        )
+        try:
+            if (
+                type(binding) is not PublicWebBinding
+                or binding.module_id != module_id
+                or binding.capability_id != capability_id
+                or binding.generation != generation
+                or validator.is_current(proof, binding) is not True
+            ):
+                raise InvalidInvocation("Public web proof was rejected")
+            view = InvocationView(
+                invocation_id=uuid4().hex,
+                origin=InvocationOrigin.WEB_PUBLIC,
+                actor_id=None,
+                conversation_id=None,
+                module_id=module_id,
+                module_epoch=module_epoch,
+                registry_revision=registry_revision,
+                deadline=min(deadline, binding.deadline_monotonic),
+                capability_id=capability_id,
+            )
+            self._check_deadline(view)
+        except BaseException:
+            validator.revoke(proof)
+            raise
+        self._issued[view.invocation_id] = view
+        self._web_proofs[view.invocation_id] = (proof, binding)
+        return view
+
+    def public_web_binding(self, view: InvocationView) -> PublicWebBinding:
+        self.require(view)
+        current = view
+        while current.parent_id is not None:
+            current = self._issued[current.parent_id]
+        pair = self._web_proofs.get(current.invocation_id)
+        if pair is None:
+            raise InvalidInvocation("Public web proof is unavailable")
+        return pair[1]
+
+    def allows_public_web(self, module_id: str, capability: object) -> bool:
+        return public_web_allowed(module_id, capability, self._web_deployment)
+
     def require(self, view: InvocationView) -> InvocationView:
         """Validate identity and the entire still-active parent chain."""
         if not isinstance(view, InvocationView):
@@ -152,6 +242,14 @@ class ContextIssuer:
                 raise InvalidInvocation("Invocation is not active in this runtime")
             self._check_deadline(current)
             if current.parent_id is None:
+                if current.origin is InvocationOrigin.WEB_PUBLIC:
+                    pair = self._web_proofs.get(current.invocation_id)
+                    if (
+                        pair is None
+                        or self._web_validator is None
+                        or self._web_validator.is_current(*pair) is not True
+                    ):
+                        raise InvalidInvocation("Public web proof is no longer current")
                 return view
             parent = self._issued.get(current.parent_id)
             if parent is None:
@@ -192,6 +290,11 @@ class ContextIssuer:
         origin, and subscription provenance are never caller-selectable here.
         """
         self.require(parent)
+        if parent.origin is InvocationOrigin.WEB_PUBLIC and (
+            capability_id is None
+            or (module_id, capability_id) not in self._web_deployment
+        ):
+            raise InvalidInvocation("Public web dependency is not deployed")
         grant_id = parent.grant_id
         grant_revision = parent.grant_revision
         if module_id != parent.module_id and (
@@ -316,6 +419,14 @@ class ContextIssuer:
         for key in removed:
             released = self._issued.pop(key, None)
             self._leases.pop(key, None)
+            proof = self._web_proofs.pop(key, None)
+            if proof is not None and self._web_validator is not None:
+                try:
+                    self._web_validator.revoke(proof[0])
+                except Exception:
+                    # Issuer authority is already invalidated; a faulty Host
+                    # cleanup hook cannot keep the invocation usable.
+                    pass
             if released is None:
                 continue
             for observer in observers:

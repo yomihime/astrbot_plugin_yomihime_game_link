@@ -14,6 +14,7 @@ from yomihime_sdk.api.services import (
 )
 from yomihime_sdk.api.storage import JsonObject
 
+from .config import FF14ConfigSnapshot
 from .features.calendar import CalendarCollector, CalendarQuery
 from .features.calendar_evaluator import CalendarDailySummaryEvaluator
 from .features.calendar_subscriptions import CalendarSubscriptionHandler
@@ -48,13 +49,19 @@ class Factory:
     async def create(self, services: ModuleServices) -> "FF14Module":
         if not isinstance(services, ModuleServices):
             raise TypeError("ModuleServices are required")
-        return FF14Module(services)
+        config = FF14ConfigSnapshot.from_values(
+            (await services.config.current()).values
+        )
+        return FF14Module(services, config=config)
 
 
 class FF14Module:
     """Assemble item, FFLogs, and calendar capabilities."""
 
-    def __init__(self, services: ModuleServices) -> None:
+    def __init__(
+        self, services: ModuleServices, *, config: FF14ConfigSnapshot | None = None
+    ) -> None:
+        config = config or FF14ConfigSnapshot()
         self._started = False
         self._handlers = ModuleHandlers(
             capabilities={
@@ -62,9 +69,9 @@ class FF14Module:
                 CAPABILITY_ITEM_LOOKUP: ItemLookup(services),
                 CAPABILITY_FFLOGS_CHARACTER: FFLogsCharacterLookup(services),
                 CAPABILITY_FFLOGS_OUTPUT: FFLogsOutputPercentiles(services),
-                CAPABILITY_CALENDAR_QUERY: CalendarQuery(services),
+                CAPABILITY_CALENDAR_QUERY: CalendarQuery(services, config=config),
                 CAPABILITY_CALENDAR_SUBSCRIPTION_CREATE: CalendarSubscriptionHandler(
-                    services, "subscribe"
+                    services, "subscribe", config=config
                 ),
                 CAPABILITY_CALENDAR_SUBSCRIPTION_LIST: CalendarSubscriptionHandler(
                     services, "list"
