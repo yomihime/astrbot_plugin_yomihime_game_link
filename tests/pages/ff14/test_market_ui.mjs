@@ -69,7 +69,7 @@ check("configuration stays read-only and public market session never becomes man
   const h = await queryHarness("market"); h.go("settings"); await flush();
   const old = await queryHarness("market"); const settings = structuredClone(old.app.getState().data); old.app.destroy();
   for (const call of h.bridge.calls.filter((c) => c.endpoint === "settings")) call.resolve(settings);
-  await flush(); assert.match(h.root.textContent, /管理入口不可用.*公开查询会话不授予配置管理权/);
+  await flush(); assert.match(h.root.textContent, /公开查询页只读.*不授予配置管理权.*独立授权管理页/);
   assert.equal(h.root.all((n) => n.tagName === "input" || n.getAttribute("type") === "submit").length, 0);
   assert.equal(h.bridge.posts.length, 0); h.app.destroy();
 });

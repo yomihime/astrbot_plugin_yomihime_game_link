@@ -23,6 +23,11 @@
   --error: #fca5a5;
 }
 * { box-sizing: border-box; }
+/* The iframe's document element is the real scrolling root. */
+html { scrollbar-gutter: stable; }
+@supports not (scrollbar-gutter: stable) {
+  html { overflow-y: scroll; }
+}
 body {
   margin: 0;
   background: var(--background);
@@ -134,7 +139,6 @@ footer { margin-top: 32px; }
 .skip-button { position: fixed; z-index: 1; top: 8px; left: 8px; transform: translateY(-180%); }
 .skip-button:focus { transform: none; }
 @media (max-width: 719px) {
- .form-fields { grid-template-columns: minmax(0, 1fr); }
  .result-table-desktop { display: none; }
  .result-table-mobile { display: grid; gap: 12px; }
  .result-table-row, .result-fields { grid-template-columns: minmax(0, 1fr); gap: 4px; }

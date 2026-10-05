@@ -37,6 +37,32 @@ const REASONS = new Set([
 ]);
 const nullableBool = (value) => value === null || typeof value === "boolean";
 const object = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
+// These fields describe presentation in the pinned Host bridge. They are not
+// identity proofs. Any other context change fences reads and query responses;
+// actual authorization remains checked by the Host on every API request.
+const PRESENTATION_CONTEXT = new Set(["isDark", "theme", "locale", "i18n", "displayName", "pageTitle"]);
+function contextBoundary(context) {
+  if (!object(context) || ![Object.prototype, null].includes(Object.getPrototypeOf(context))) throw new Error("invalid_context");
+  // JSON.stringify alone loses undefined, non-finite numbers, sparse slots and
+  // object types. Unknown lifecycle fields must never disappear in comparison.
+  const parents = new Set();
+  const stable = (value) => {
+    if (value === null || ["string", "boolean"].includes(typeof value)) return value;
+    if (typeof value === "number" && Number.isFinite(value) && !Object.is(value, -0)) return value;
+    if ((!object(value) && !Array.isArray(value)) || parents.has(value)) throw new Error("invalid_context");
+    if (!Array.isArray(value) && ![Object.prototype, null].includes(Object.getPrototypeOf(value))) throw new Error("invalid_context");
+    if (Array.isArray(value)) {
+      const keys = Object.keys(value);
+      if (keys.length !== value.length || keys.some((key, index) => key !== String(index))) throw new Error("invalid_context");
+    }
+    parents.add(value);
+    const result = Array.isArray(value) ? Array.from(value, stable)
+      : Object.fromEntries(Object.keys(value).sort().map((key) => [key, stable(value[key])]));
+    parents.delete(value);
+    return result;
+  };
+  return JSON.stringify(stable(Object.fromEntries(Object.entries(context).filter(([key]) => !PRESENTATION_CONTEXT.has(key)))));
+}
 const QUERY_ENDPOINTS = Object.freeze({items: "queries/items", logs: "queries/character", calendar: "queries/calendar", market: "queries/market"});
 const QUERY_MESSAGES = Object.freeze({
   failed: "查询未完成，请检查登录、网页地址和输入后手动重试。可重新登录 Dashboard，检查插件配置齿轮中的网页地址，保存重载后重新打开本页。",
@@ -346,9 +372,10 @@ export function createPageApp({document, window, bridge, timeoutMs = 8000, query
   let selection = selectionFromHash(window.location.hash), moduleId = selection.moduleId, route = selection.route;
   let catalog = null, data = null, disposed = false, started = false;
   let phase = "unchecked", message = MESSAGES.unchecked, stale = false;
-  let bridgeReady = false, hostContext = false, sequence = 0, connection = 0, renderEpoch = 0;
+  let bridgeReady = false, hostContext = false, sequence = 0, connection = 0;
   let requestTimer = null, readyTimer = null, unbindContext = null;
-  let renderedKey = null, content = null, refreshButton = null;
+  let renderedKey = null, content = null, refreshButton = null, statusNotice = null, contentSignature = null, controlsSignature = null;
+  let lastBoundary = null, contextSeen = false;
   let webStatus = null, querySequence = 0, queryTimer = null, queryDom = null;
   let queryView = {phase: "idle", result: null, message: "", errors: {}, submitted: null};
   const drafts = {items: {query: ""}, logs: {region: "", server: "", character: ""}, calendar: {region: "", days: "", timezone: ""},
@@ -383,7 +410,6 @@ export function createPageApp({document, window, bridge, timeoutMs = 8000, query
     textarea.value = text;
     const copy = element("button", "复制命令", {type: "button"});
     const notice = element("p", "", {role: "status", class: "hint"});
-    const epoch = renderEpoch;
     copy.addEventListener("click", async () => {
       copy.disabled = true;
       // Use the Clipboard API when available. A rejected write falls back to
@@ -394,11 +420,11 @@ export function createPageApp({document, window, bridge, timeoutMs = 8000, query
       }};
       const guardedTextarea = {
         value: textarea.value,
-        focus: () => { if (!disposed && epoch === renderEpoch) textarea.focus(); },
-        select: () => { if (!disposed && epoch === renderEpoch) textarea.select(); },
+        focus: () => { if (!disposed && root.contains(textarea)) textarea.focus(); },
+        select: () => { if (!disposed && root.contains(textarea)) textarea.select(); },
       };
       const result = await copyCommand(guardedTextarea, activeClipboard);
-      if (!disposed && epoch === renderEpoch) {
+      if (!disposed && root.contains(textarea)) {
         notice.textContent = result;
         copy.disabled = false;
       }
@@ -464,7 +490,7 @@ export function createPageApp({document, window, bridge, timeoutMs = 8000, query
       children.push(definitions, element("p", "这些值只读，来自本次插件运行快照。显式参数优先；修改默认值不会改写已有订阅。", {class: "hint"}));
       children.push(element("p", "旧版 FF14 默认区域仅作兼容读取；市场默认范围由服务端 Core 配置解析，本页不会用该旧字段补全市场参数。", {class: "hint"}));
     }
-    if (settings) children.push(element("p", "管理入口不可用：公开查询会话不授予配置管理权。独立 Core 管理凭据与 Host 可信会话/代际桥接、真实配置迁移尚未完成；本页不提供写入操作。", {class: "notice warning", role: "status"}));
+    if (settings) children.push(element("p", "本公开查询页只读，不授予配置管理权。普通四字段请在宿主插件的独立授权管理页读取、修改或修复；FFLogs 凭据管理尚未接通，请勿在普通配置中填写密钥。", {class: "notice warning", role: "status"}));
     return card("普通配置", children);
   }
   function navigateTo(id, page = "overview") {
@@ -478,6 +504,9 @@ export function createPageApp({document, window, bridge, timeoutMs = 8000, query
   }
   function syncControls() {
     const available = routesFor();
+    const signature = JSON.stringify([moduleId, route, catalog?.modules?.map((v) => v.module_id), available]);
+    if (signature === controlsSignature) return;
+    controlsSignature = signature;
     for (const select of moduleSelectors) {
       const options = [element("option", "选择模块", {value: ""})];
       for (const module of catalog?.modules || []) options.push(element("option", moduleLabel(module.module_id), {value: module.module_id}));
@@ -505,7 +534,9 @@ export function createPageApp({document, window, bridge, timeoutMs = 8000, query
       row.append(element("strong", field.name), element("span", field.required ? "必填声明" : "选填声明", {class: "hint"}));
       fields.append(row);
     }
-    const fieldCard = card("普通配置声明", [element("p", "这里只展示普通字段名称与必填声明。值读取和修改入口尚未接通。", {class: "hint"}),
+    const fieldCard = card("普通配置声明", [element("p", module.module_id === "ff14/ff14"
+      ? "这里只展示普通字段声明。普通四字段读取、修改与修复使用独立授权管理页；本页不提供写入。"
+      : "这里只展示普通字段名称与必填声明。该模块的值读取和修改入口尚未接通。", {class: "hint"}),
       module.config_fields.length ? fields : element("p", "该模块未声明普通配置字段。")]);
     if (settings) return [fieldCard];
     const capabilities = element("ul", "", {class: "source-list"});
@@ -594,14 +625,16 @@ export function createPageApp({document, window, bridge, timeoutMs = 8000, query
         result.setAttribute("data-query-route", route);
       }
     }
+    updateQueryUi();
+    if (queryDom.nodes) return queryDom.nodes;
     const cli = route === "logs" ? '/ygl ff14 logs cn "潮风亭" "如月怜"'
       : route === "items" ? "/ygl ff14 item 44091" : route === "market" ? '/ygl ff14 market "犎牛牛排"' : "/ygl ff14 calendar cn days=7 timezone=Asia/Shanghai";
-    updateQueryUi();
     const alternative = element("details", "", {class: "card chat-alternative"});
     alternative.append(element("summary", "聊天替代 · 展开查看"), command(cli));
     const result = [queryDom.card, queryDom.result, alternative];
     if (route === "calendar") result.push(card("本人订阅", [element("p", "Dashboard 身份不能证明订阅 owner。本页不显示本人订阅，请在本人私聊中管理。"),
       command("/ygl ff14 calendar subscriptions", "本人私聊命令"), element("p", "创建、修改和取消请先在本人私聊运行 /ygl ff14 help；修改与取消需填写 expected_revision。", {class: "hint"})]));
+    queryDom.nodes = result;
     return result;
   }
   function invalidateQuery() {
@@ -723,6 +756,10 @@ export function createPageApp({document, window, bridge, timeoutMs = 8000, query
     }
     queryDom.entry.textContent = unavailable || "入口已就绪；仅在提交表单时查询公开来源。";
     queryDom.entry.setAttribute("class", `query-entry notice ${unavailable ? "warning" : ""}`);
+    for (const button of queryDom.result.querySelectorAll?.(".market-candidates button") || []) button.disabled = Boolean(unavailable || pending);
+    const rendered = [queryView.phase, queryView.result, queryView.message, queryView.submitted];
+    if (queryDom.rendered?.every((value, index) => value === rendered[index])) return;
+    queryDom.rendered = rendered;
     const nodes = [element("h2", "本次结果")];
     if (pending) {
       const stop = element("button", "停止展示", {type: "button"});
@@ -769,8 +806,6 @@ export function createPageApp({document, window, bridge, timeoutMs = 8000, query
   }
   function render() {
     if (disposed) return;
-    const focus = queryDom && [...Object.values(queryDom.inputs), queryDom.submit].includes(document.activeElement) ? document.activeElement : null;
-    renderEpoch += 1;
     syncControls();
     const key = `${moduleId || "plugin"}/${route || "invalid"}`;
     if (key !== renderedKey) {
@@ -781,15 +816,24 @@ export function createPageApp({document, window, bridge, timeoutMs = 8000, query
       refreshButton = element("button", "刷新状态", {type: "button"});
       refreshButton.addEventListener("click", () => { if (phase !== "loading") bridgeReady ? refresh() : connect(); });
       heading.append(titles, refreshButton);
-      content = element("div", "", {class: "page-sections"}); root.replaceChildren(heading, content); renderedKey = key;
+      statusNotice = element("p", "", {role: "status", class: "notice", hidden: ""});
+      content = element("div", "", {class: "page-sections"}); root.replaceChildren(heading, statusNotice, content); renderedKey = key;
+      contentSignature = null;
     }
     refreshButton.textContent = ["error", "timeout"].includes(phase) ? "重试读取" : "刷新状态";
     refreshButton.setAttribute("aria-disabled", phase === "loading" ? "true" : "false");
+    statusNotice.textContent = phase === "ready" ? "" : `${message}${stale ? ` ${MESSAGES.stale} 已有查询结果未重新查询；依赖入口校验的操作暂不可用。` : ""}`;
+    statusNotice.setAttribute("class", `notice ${["error", "timeout"].includes(phase) ? "error" : ""}`);
+    statusNotice.setAttribute("role", ["error", "timeout"].includes(phase) ? "alert" : "status");
+    if (phase === "ready") statusNotice.setAttribute("hidden", ""); else statusNotice.removeAttribute("hidden");
+    root.setAttribute("aria-busy", phase === "loading" ? "true" : "false");
+    const signature = JSON.stringify([moduleId, route, selection, catalog, data]);
+    if (signature === contentSignature) { updateQueryUi(); return; }
+    contentSignature = signature;
     const children = [];
-    if (phase !== "ready") children.push(element("p", message, {class: `notice ${["error", "timeout"].includes(phase) ? "error" : ""}`, role: ["error", "timeout"].includes(phase) ? "alert" : "status"}));
     const module = selectedModule();
     if (!catalog) {
-      // A failed read clears old success; a timeout is not an empty directory.
+      // No validated snapshot exists yet. Failure is not an empty directory.
     } else if (catalog.modules === null) {
       children.push(element("p", catalog.runtime.state === "invalid_config" ? "普通配置无效，模块目录尚不可读取。请从插件配置齿轮修正并保存重载。" : "运行尚未就绪，模块目录状态未知。请重试读取。", {class: "notice", role: "status"}));
     } else if (selection.invalid || (module && !Object.hasOwn(routesFor(), route))) {
@@ -814,13 +858,16 @@ export function createPageApp({document, window, bridge, timeoutMs = 8000, query
       else if (route === "settings") children.push(ordinaryCard(true), unknownCredentials(), gate(), ...genericDetails(module, true));
       else children.push(...queryPage());
     }
-    content.replaceChildren(...children);
-    if (focus && queryDom && [...Object.values(queryDom.inputs), queryDom.submit].includes(focus)) focus.focus();
-    root.setAttribute("aria-busy", phase === "loading" ? "true" : "false");
+    // Query nodes are reused even when the sanitized status snapshot changes.
+    // Do not detach the same form/results merely to paint a loading notice.
+    if (children.length !== content.children.length || children.some((node, index) => content.children[index] !== node)) content.replaceChildren(...children);
   }
-  function invalidate() {
+  function invalidate(preserveQuery = false) {
     sequence += 1;
-    invalidateQuery(); webStatus = null;
+    if (!preserveQuery) { invalidateQuery(); webStatus = null; }
+    else if (queryView.phase === "loading") {
+      invalidateQuery(); queryView.message = "正在重新校验入口，已停止展示待返回结果。请在校验完成后手动查询。";
+    }
     if (requestTimer !== null) clearTimer(requestTimer);
     requestTimer = null;
   }
@@ -828,9 +875,12 @@ export function createPageApp({document, window, bridge, timeoutMs = 8000, query
     const request = sequence, requestedModule = moduleId, requestedRoute = route;
     requestTimer = setTimer(() => {
       if (disposed || request !== sequence) return;
-      invalidate(); phase = "timeout"; data = null; message = MESSAGES.timeout; render();
+      invalidate(true); phase = "timeout"; message = MESSAGES.timeout; render();
     }, timeoutMs);
-    Promise.resolve().then(() => Array.isArray(endpoint) ? Promise.all(endpoint.map((path) => bridge.apiGet(path, {}))) : bridge.apiGet(endpoint, {})).then((result) => {
+    Promise.resolve().then(() => {
+      if (disposed || request !== sequence || requestedModule !== moduleId || requestedRoute !== route) return null;
+      return Array.isArray(endpoint) ? Promise.all(endpoint.map((path) => bridge.apiGet(path, {}))) : bridge.apiGet(endpoint, {});
+    }).then((result) => {
       if (disposed || request !== sequence || requestedModule !== moduleId || requestedRoute !== route) return;
       const clean = validate(result);
       clearTimer(requestTimer); requestTimer = null;
@@ -838,19 +888,18 @@ export function createPageApp({document, window, bridge, timeoutMs = 8000, query
     }).catch(() => {
       if (disposed || request !== sequence || requestedModule !== moduleId || requestedRoute !== route) return;
       clearTimer(requestTimer); requestTimer = null;
-      if (endpoint === "catalog") catalog = null;
-      data = null; phase = "error"; message = MESSAGES.error; render();
+      phase = "error"; message = MESSAGES.error; render();
     });
   }
   function readSelected() {
-    data = null; webStatus = null;
     if (selectedModule() && RENDERERS[moduleId] && ["overview", "settings"].includes(route)) {
       phase = "loading"; message = MESSAGES.loading; render();
-      read(route, (value) => validateState(value, route), (clean) => { data = clean; phase = "ready"; render(); });
+      read(route, (value) => validateState(value, route), (clean) => { data = clean; phase = "ready"; stale = false; render(); });
     } else if (selectedModule() && moduleId === "ff14/ff14" && Object.hasOwn(QUERY_ENDPOINTS, route)) {
       phase = "loading"; message = MESSAGES.loading; render();
       read(["settings", "web-status"], (values) => ({settings: validateState(values[0], "settings"), web: validateWebStatus(values[1])}), (clean) => {
-        data = clean.settings; webStatus = clean.web; phase = "ready";
+        data = clean.settings; webStatus = clean.web; phase = "ready"; stale = false;
+        if (queryAvailability()) invalidateQuery();
         const values = data.ordinary_config.values;
         if (values) {
           for (const page of ["logs", "calendar"]) if (!editedFields[page].has("region")) drafts[page].region = values.ff14_default_region;
@@ -859,7 +908,7 @@ export function createPageApp({document, window, bridge, timeoutMs = 8000, query
         }
         render();
       });
-    } else { phase = "ready"; render(); }
+    } else { data = null; webStatus = null; invalidateQuery(); phase = "ready"; stale = false; render(); }
   }
   function resolveSelection() {
     if (selection.legacy && catalog?.modules?.some((v) => v.module_id === "ff14/ff14")) moduleId = "ff14/ff14";
@@ -867,7 +916,7 @@ export function createPageApp({document, window, bridge, timeoutMs = 8000, query
   }
   function refresh() {
     if (disposed || !bridgeReady || phase === "loading") return;
-    invalidate(); catalog = null; data = null; stale = false;
+    invalidate(true); stale = catalog !== null;
     phase = "loading"; message = "正在读取模块目录，请稍候。"; render();
     read("catalog", validateCatalog, (clean) => { catalog = clean; resolveSelection(); readSelected(); });
   }
@@ -897,11 +946,27 @@ export function createPageApp({document, window, bridge, timeoutMs = 8000, query
     if (!bridge || typeof bridge.ready !== "function" || typeof bridge.onContext !== "function" || typeof bridge.apiGet !== "function") { fail(); return; }
     const accept = (context, fromEvent = false) => {
       if (disposed || attempt !== connection) return;
+      // ready() can resolve the first context after onContext has already
+      // delivered a newer one. It must not restore a superseded lifecycle.
+      if (!fromEvent && contextSeen) return;
+      let boundary;
+      try { boundary = contextBoundary(context); }
+      catch { boundary = null; }
+      const validPage = boundary !== null && (!Object.hasOwn(context, "pluginName") || context.pluginName === "astrbot_plugin_yomihime_game_link")
+        && (!Object.hasOwn(context, "pageName") || context.pageName === "ff14");
       applyTheme(context);
-      if (bridgeReady) {
-        if (fromEvent) { invalidate(); catalog = null; data = null; phase = "unchecked"; refresh(); }
-        return;
+      if (contextSeen && validPage && boundary === lastBoundary) return;
+      const changed = contextSeen;
+      contextSeen = true; lastBoundary = boundary;
+      if (changed || !validPage) {
+        invalidate(); catalog = null; data = null; stale = false;
+        queryDom = null; renderedKey = null;
+        for (const page of Object.keys(drafts)) {
+          for (const key of Object.keys(drafts[page])) drafts[page][key] = key === "quality" ? "all" : key === "intent" ? "overview" : "";
+          editedFields[page].clear();
+        }
       }
+      if (!validPage) { bridgeReady = false; phase = "error"; message = MESSAGES.unavailable; render(); return; }
       bridgeReady = true; clearTimer(readyTimer); readyTimer = null; phase = "unchecked"; refresh();
     };
     readyTimer = setTimer(fail, timeoutMs);
@@ -918,7 +983,8 @@ export function createPageApp({document, window, bridge, timeoutMs = 8000, query
     phase = "unchecked"; data = null; stale = false; message = MESSAGES.unchecked;
     if (catalog) { resolveSelection(); readSelected(); }
     else { render(); if (bridgeReady) refresh(); }
-    root.focus();
+    root.focus({preventScroll: true});
+    window.scrollTo?.({top: 0, left: 0, behavior: "instant"});
   }
   const selectPage = () => navigateTo(moduleId, selector.value);
   const selectModule = (event) => navigateTo(event.target.value || null);

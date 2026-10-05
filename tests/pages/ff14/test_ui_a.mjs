@@ -36,7 +36,9 @@ class Node extends Target {
     }
     this._text = ""; this.children = []; this.append(...nodes);
   }
-  focus() {
+  contains(node) { return this.all((value) => value === node).length > 0; }
+  focus(options) {
+    this.focusOptions = options;
     if (this.ownerDocument) {
       if (this.ownerDocument.activeElement) this.ownerDocument.activeElement.focused = false;
       this.ownerDocument.activeElement = this;
@@ -308,7 +310,7 @@ check("ready and immediate onContext issue exactly one namespaced read", async (
   const h = harness(); h.app.start(); h.app.start(); await flush();
   assert.equal(h.bridge.calls.length, 1); assert.equal(h.bridge.calls[0].endpoint, "overview"); assert.deepEqual(h.bridge.calls[0].params, {});
   assert.deepEqual(h.bridge.allCalls.map((c) => c.endpoint), ["catalog", "overview"]);
-  h.bridge.emitContext({isDark: true}); await flush(); assert.equal(h.bridge.calls.length, 2);
+  h.bridge.emitContext({isDark: true}); await flush(); assert.equal(h.bridge.calls.length, 1);
   assert.equal(h.document.documentElement.getAttribute("data-theme"), "dark"); h.app.destroy();
 });
 check("pending read ignores duplicate refresh and shows loading", async () => {
@@ -370,10 +372,10 @@ check("timeout fences late response and permits retry", async () => {
   h.app.refresh(); await flush(); assert.equal(h.bridge.calls.length, 2);
   h.bridge.calls[1].resolve(dto()); await flush(); assert.equal(h.app.getState().phase, "ready"); h.app.destroy();
 });
-check("refresh failure clears old success and hides raw message/status", async () => {
+check("refresh failure labels retained snapshot and hides raw message/status", async () => {
   const h = harness(); h.app.start(); await flush(); h.bridge.calls[0].resolve(dto()); await flush(); h.app.refresh(); await flush();
-  assert.equal(h.app.getState().stale, false); assert.equal(h.app.getState().data, null); h.bridge.calls[1].reject(Object.assign(new Error("private payload"), {status: 403})); await flush();
-  assert.equal(h.app.getState().phase, "error"); assert.equal(h.app.getState().data, null); assert.doesNotMatch(h.root.textContent, /已生效/); assert.ok(!h.root.textContent.includes("private payload")); h.app.destroy();
+  assert.equal(h.app.getState().stale, true); assert.ok(h.app.getState().data); h.bridge.calls[1].reject(Object.assign(new Error("private payload"), {status: 403})); await flush();
+  assert.equal(h.app.getState().phase, "error"); assert.ok(h.app.getState().data); assert.match(h.root.textContent, /旧状态.*尚未确认最新状态/); assert.ok(!h.root.textContent.includes("private payload")); h.app.destroy();
 });
 check("invalid settings clears values and both route caches", async () => {
   const h = harness(); h.app.start(); await flush(); h.bridge.calls[0].resolve(dto()); await flush();
@@ -519,7 +521,7 @@ check("gate card renders real Chinese states and fixed error notices on both pag
       if (route === "overview") projections.set(reason, card.textContent);
       else assert.equal(card.textContent, projections.get(reason));
     }
-    if (route === "settings") assert.match(h.root.textContent, /管理入口不可用/);
+    if (route === "settings") assert.match(h.root.textContent, /公开查询页只读.*独立授权管理页/);
     h.app.destroy();
   }
 });
@@ -618,7 +620,7 @@ check("selected module exiting directory and unknown pages have explicit recover
 });
 check("session context change fences old catalog and forces a fresh read", async () => {
   const h = harness("", bridgeFixture({isDark: false}, null)); h.app.start(); await flush();
-  h.bridge.emitContext({isDark: true}); await flush(); assert.equal(h.bridge.calls.length, 2);
+  h.bridge.emitContext({isDark: true, sessionGeneration: 2}); await flush(); assert.equal(h.bridge.calls.length, 2);
   h.bridge.calls[0].resolve(catalogDto(["ff14/ff14"])); await flush(); assert.equal(h.app.getState().catalog, null);
   h.bridge.calls[1].resolve(catalogDto(["new/module"])); await flush();
   assert.equal(h.app.getState().moduleId, "new/module"); assert.equal(h.bridge.calls.length, 2); h.app.destroy();
@@ -751,7 +753,7 @@ check("late query cannot survive input route module metadata close or stop chang
     if (mode === "input") await edit(h, "query", "101");
     else if (mode === "route") h.go("calendar");
     else if (mode === "module") {h.window.location.hash = "#/module/other%2Fmod/overview"; h.app.navigate();}
-    else if (mode === "context") h.bridge.emitContext({isDark: true});
+    else if (mode === "context") h.bridge.emitContext({isDark: true, sessionGeneration: 2});
     else if (mode === "close") h.app.destroy();
     else {const stop = h.root.all((n) => n.textContent === "停止展示")[0]; stop.focus(); await stop.click(); assert.match(h.root.textContent, /本次请求可能仍在后台处理/); assert.equal(h.document.activeElement, submitFor(h));}
     await flush(); call.resolve(ACTUAL_DTO_SAMPLES.items); await flush();
@@ -820,6 +822,110 @@ check("calendar retries use the same submit and reset on pending success input a
   await h.root.all((n) => n.tagName === "button" && n.textContent === "停止展示")[0].click();
   late.resolve(ACTUAL_DTO_SAMPLES.calendar); await flush();
   assert.equal(h.app.getState().query.result, null); assert.equal(submitFor(h).textContent, "查询日历"); h.app.destroy();
+});
+
+check("presentation and duplicate contexts retain input selection focus result and all nodes without requests", async () => {
+  const h = await queryHarness(); await edit(h, "query", "44091"); await submitFor(h).click(); await flush();
+  h.bridge.posts[0].resolve(ACTUAL_DTO_SAMPLES.items); await flush();
+  const input = inputFor(h, "query"), result = h.app.getState().query.result, nodes = [...h.root.children], calls = h.bridge.allCalls.length;
+  input.selectionStart = 1; input.selectionEnd = 4; input.focus();
+  for (const context of [{isDark: false}, {isDark: true}, {isDark: true, locale: "en-US", i18n: {label: "Item"}}, {locale: "zh-CN", isDark: false}]) {
+    h.bridge.emitContext(context); await flush();
+    assert.equal(h.bridge.allCalls.length, calls); assert.equal(h.document.activeElement, input);
+    assert.equal(inputFor(h, "query"), input); assert.equal(input.value, "44091");
+    assert.equal(input.selectionStart, 1); assert.equal(input.selectionEnd, 4);
+    assert.equal(h.app.getState().query.result, result); assert.deepEqual(h.root.children, nodes);
+  }
+  h.app.destroy();
+});
+check("presentation changes during a query retain its pending request and accept its result", async () => {
+  const h = await queryHarness(); await edit(h, "query", "44091"); await submitFor(h).click(); await flush();
+  const calls = h.bridge.allCalls.length; h.bridge.emitContext({isDark: true, locale: "en-US"}); await flush();
+  assert.equal(h.app.getState().query.phase, "loading"); assert.equal(h.bridge.allCalls.length, calls);
+  h.bridge.posts[0].resolve(ACTUAL_DTO_SAMPLES.items); await flush(); assert.ok(h.app.getState().query.result); h.app.destroy();
+});
+check("delayed catalog refresh retains navigation structure and query snapshot while gating submissions", async () => {
+  const h = await queryHarness(); await edit(h, "query", "44091"); await submitFor(h).click(); await flush();
+  h.bridge.posts[0].resolve(ACTUAL_DTO_SAMPLES.items); await flush();
+  const input = inputFor(h, "query"), result = h.app.getState().query.result, form = input.parentNode.parentNode.parentNode;
+  const oldGet = h.bridge.apiGet.bind(h.bridge), delay = deferred(); h.bridge.apiGet = (endpoint, params) => endpoint === "catalog" ? delay.promise : oldGet(endpoint, params);
+  input.focus(); h.app.refresh(); await flush();
+  assert.equal(inputFor(h, "query"), input); assert.equal(input.parentNode.parentNode.parentNode, form);
+  assert.equal(h.document.activeElement, input); assert.ok(h.links.every((v) => v.getAttribute("hidden") === null));
+  assert.match(h.root.textContent, /旧状态.*尚未确认最新状态/); assert.equal(h.app.getState().query.result, result);
+  assert.equal(submitFor(h).disabled, true); await submitFor(h).click(); assert.equal(h.bridge.posts.length, 1);
+  delay.resolve(catalogDto()); await flush();
+  h.bridge.calls.filter(v => v.endpoint === "settings").at(-1).resolve(settingsDto());
+  h.bridge.calls.filter(v => v.endpoint === "web-status").at(-1).resolve(webDto()); await flush();
+  assert.equal(inputFor(h, "query"), input); assert.equal(h.document.activeElement, input); assert.equal(submitFor(h).disabled, false);
+  assert.equal(h.app.getState().query.result, result); assert.equal(h.bridge.posts.length, 1); h.app.destroy();
+});
+check("refresh failure or timeout retains labeled snapshots and never enables unconfirmed querying", async () => {
+  for (const mode of ["failure", "timeout"]) {
+    const h = await queryHarness(); await edit(h, "query", "44091"); await submitFor(h).click(); await flush();
+    h.bridge.posts[0].resolve(ACTUAL_DTO_SAMPLES.items); await flush();
+    const input = inputFor(h, "query"), result = h.app.getState().query.result, delay = deferred();
+    h.bridge.apiGet = () => delay.promise; input.focus(); h.app.refresh(); await flush();
+    if (mode === "failure") delay.reject(new Error("PRIVATE_TRANSPORT_ERROR")); else h.clock.fire();
+    await flush(); assert.equal(inputFor(h, "query"), input); assert.equal(h.document.activeElement, input);
+    assert.equal(h.app.getState().query.result, result); assert.equal(submitFor(h).disabled, true);
+    assert.match(h.root.textContent, /旧状态.*暂不可用/); assert.doesNotMatch(h.root.textContent, /PRIVATE_TRANSPORT_ERROR/);
+    delay.resolve(catalogDto()); await flush(); assert.notEqual(h.app.getState().phase, "ready"); h.app.destroy();
+  }
+});
+check("status revalidation fences a query already in flight without automatically submitting a replacement", async () => {
+  const h = await queryHarness(); await edit(h, "query", "44091"); await submitFor(h).click(); await flush();
+  const post = h.bridge.posts[0]; h.app.refresh(); await flush();
+  post.resolve(ACTUAL_DTO_SAMPLES.items); await flush(); assert.equal(h.app.getState().query.result, null);
+  assert.equal(h.bridge.posts.length, 1); assert.match(h.root.textContent, /已停止展示待返回结果/); h.app.destroy();
+});
+check("same page names do not override a changed identity authorization or instance lifecycle", async () => {
+  for (const change of [{sessionGeneration: 2}, {authorizationGeneration: 2}, {pageInstanceId: "new"}, {lifecycle: "reopened"}]) {
+    const initial = {pluginName: "astrbot_plugin_yomihime_game_link", pageName: "ff14", isDark: false};
+    const h = await queryHarness(); h.bridge.emitContext(initial); await flush();
+    h.bridge.calls.filter(v => v.endpoint === "settings").at(-1).resolve(settingsDto()); h.bridge.calls.filter(v => v.endpoint === "web-status").at(-1).resolve(webDto()); await flush();
+    await edit(h, "query", "44091"); await submitFor(h).click(); await flush(); const post = h.bridge.posts[0];
+    h.bridge.emitContext({...initial, ...change}); await flush(); post.resolve(ACTUAL_DTO_SAMPLES.items); await flush();
+    assert.equal(h.app.getState().query.result, null); assert.equal(inputFor(h, "query").value, ""); assert.equal(h.bridge.posts.length, 1); h.app.destroy();
+  }
+});
+check("unrepresentable unknown lifecycle values reject context instead of being silently erased", async () => {
+  const cyclic = {}; cyclic.self = cyclic;
+  const extended = structuredClone(Object.assign([1], {revoked: true}));
+  const holeWithExtraKey = Object.assign([1, ,], {revoked: true});
+  for (const value of [undefined, NaN, Infinity, -0, 1n, new Date(0), new Map(), cyclic, Array(1), [undefined], extended, holeWithExtraKey, () => true]) {
+    const h = await queryHarness(); await edit(h, "query", "44091"); await submitFor(h).click(); await flush();
+    const old = h.bridge.posts[0], count = h.bridge.allCalls.length;
+    h.bridge.emitContext({isDark: false, authorizationGeneration: value}); await flush();
+    assert.equal(h.app.getState().phase, "error"); assert.equal(h.app.getState().catalog, null);
+    assert.equal(h.app.getState().query.result, null); assert.equal(h.bridge.allCalls.length, count);
+    old.resolve(ACTUAL_DTO_SAMPLES.items); await flush(); assert.equal(h.app.getState().query.result, null);
+    h.app.destroy();
+  }
+});
+check("non-plain root contexts cannot preserve a pending query", async () => {
+  for (const context of [new Date(0), new Map()]) {
+    const h = await queryHarness(); await edit(h, "query", "44091"); await submitFor(h).click(); await flush();
+    h.bridge.emitContext(context); await flush(); assert.equal(h.app.getState().phase, "error");
+    h.bridge.posts[0].resolve(ACTUAL_DTO_SAMPLES.items); await flush(); assert.equal(h.app.getState().query.result, null); h.app.destroy();
+  }
+});
+check("wrong bridge page rejects requests and initial ready cannot resurrect a superseded context", async () => {
+  const h = harness(); h.app.start();
+  h.bridge.emitContext({pluginName: "unrelated", pageName: "ff14"}); await flush();
+  assert.equal(h.app.getState().phase, "error"); assert.equal(h.app.getState().catalog, null);
+  const calls = h.bridge.allCalls.length;
+  h.bridge.emitContext({pluginName: "astrbot_plugin_yomihime_game_link", pageName: "management"}); await flush();
+  assert.equal(h.bridge.allCalls.length, calls); assert.equal(h.app.getState().phase, "error");
+  h.bridge.emitContext({pluginName: "astrbot_plugin_yomihime_game_link", pageName: "ff14"}); await flush();
+  assert.equal(h.app.getState().phase, "loading"); h.app.destroy();
+});
+check("navigation uses explicit scroll to top with preventScroll while skip keeps native focus scroll", async () => {
+  const h = harness(); const scrolls = []; h.window.scrollTo = options => scrolls.push(options);
+  h.app.start(); await flush(); h.go("items"); await flush();
+  assert.deepEqual(h.root.focusOptions, {preventScroll: true}); assert.deepEqual(scrolls, [{top: 0, left: 0, behavior: "instant"}]);
+  h.app.refresh(); await flush(); assert.equal(scrolls.length, 1);
+  await h.skip.click(); assert.equal(h.root.focusOptions, undefined); assert.equal(scrolls.length, 1); h.app.destroy();
 });
 
 export async function runUiATests() {
