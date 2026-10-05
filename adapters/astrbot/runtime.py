@@ -11,16 +11,21 @@ from time import monotonic, time
 from types import MappingProxyType
 from typing import Callable
 
+from ...api.administration import AdminAuthorizationDenied, AdminOperation
 from ...api.contexts import InvocationOrigin
 from ...api.display import DisplayLimits
 from ...api.manifests import ModuleManifest, PrivacyFloor
-from ...api.services import CapabilityHealth, HealthStatus
+from ...api.services import CapabilityHealth, ConfigTarget, HealthStatus
 from ...api.subscriptions import ConversationKind
 from ...extensions.discovery import discover_packages
 from ...extensions.source_snapshot import PackageProvenance
 from ...infrastructure.key_provider import EnvironmentKeyProvider
 from ...infrastructure.secret_codec import AESGCMSecretCodec
+from ...modules.ff14.config import CALENDAR_VALUE_VALIDATORS, FF14ConfigSnapshot
 from ...presentation.rendering import GenericDisplayRenderer, RenderingBounds
+from ...scripts.prepare_ff14_config_migration import INPUT_FILENAME, load_prepared_input
+from ...services.admin_authorization import AdminAuthorizationService
+from ...services.configuration import ConfigurationValueError
 from ...services.core_runtime import (
     CoreRuntime,
     CoreRuntimeCleanupPending,
@@ -30,7 +35,7 @@ from ...services.core_runtime import (
 from ...services.source_credentials import SourceCredentialPolicy
 from .bundled import BundledExtensionError, install_bundled_ff14
 from .command_bridge import AstrBotCommandBridge, CommandInvocation
-from .config_adapter import FF14ConfigError, ff14_config_snapshot
+from .config_adapter import ordinary_migration_fields
 from .message_port import AstrBotMessagePort, MessageChainFactory, PlainFactory
 from .web_public import (
     DEPLOYED_CAPABILITIES,
@@ -45,6 +50,7 @@ from .web_public import (
 PLUGIN_NAME = "astrbot_plugin_yomihime_game_link"
 BUNDLED_SOURCE_HOSTS = {
     "ff14/ff14": {
+        "universalis_market": "universalis.app",
         "xivapi_items": "xivapi-v2.xivcdn.com",
         "garland_items": "garlandtools.cn",
         "fflogs_public_global": "www.fflogs.com",
@@ -106,6 +112,7 @@ class AstrBotRuntime:
         plugin_root: str | Path,
         data_dir: str | Path,
         config: Mapping[str, object] | None = None,
+        raw_legacy_config: Mapping[str, object] | None = None,
         plain_factory: PlainFactory | None = None,
         chain_factory: MessageChainFactory | None = None,
         core_factory: Callable[..., CoreRuntime] = CoreRuntime,
@@ -118,10 +125,11 @@ class AstrBotRuntime:
         self._web_validator: HostPublicWebValidator | None = None
         self._config_snapshot = None
         self._config_error: str | None = None
-        try:
-            self._config_snapshot = ff14_config_snapshot(config)
-        except FF14ConfigError as exc:
-            self._config_error = exc.field
+        # Injected Host config is hydrated and cannot establish raw key presence.
+        # raw_legacy_config is a trusted offline fixture input, never chat input.
+        self._raw_legacy_config = (
+            dict(raw_legacy_config) if raw_legacy_config is not None else None
+        )
         self._plugin_root = Path(plugin_root)
         self._data_dir = Path(data_dir)
         self._plain_factory = plain_factory
@@ -143,6 +151,50 @@ class AstrBotRuntime:
         self._ready = False
         self._generation = 0
         self._closing = False
+        self._admin_source = None
+
+    def management_current(self, core, source):
+        return (
+            core is self._core
+            and source is self._admin_source
+            and not self._closing
+            and getattr(core, "management_available", False) is True
+        )
+
+    def management_entry(self):
+        if (
+            not self.management_current(self._core, self._admin_source)
+            or self._admin_source is None
+        ):
+            raise AdminAuthorizationDenied
+        return self._core, self._admin_source
+
+    async def recover_management(
+        self, core, revisions, *, authorization, complete_from_current
+    ):
+        async with self._lock:
+            current, source = self.management_entry()
+            if current is not core:
+                raise AdminAuthorizationDenied
+            try:
+                result = await core.recover_management(
+                    revisions,
+                    authorization=authorization,
+                    complete_from_current=complete_from_current,
+                )
+            except BaseException:
+                # A preparatory failure retains only a healthy foundation;
+                # failures after business startup require complete cleanup.
+                if not core.configuration_blocked:
+                    source.close()
+                    await self._close_owned_runtime()
+                raise
+            if not self.management_current(core, source):
+                raise AdminAuthorizationDenied
+            self._config_error = None
+            self._bridge = AstrBotCommandBridge(core.registry)
+            self._ready = True
+            return result
 
     @property
     def core_runtime(self) -> CoreRuntime | None:
@@ -233,7 +285,7 @@ class AstrBotRuntime:
         generation, core, was_ready = self._generation, self._core, self._ready
         if self._closing:
             raise RuntimeError("page state generation changed")
-        if core is None:
+        if core is None or self._config_error is not None and not was_ready:
             return {
                 "schema_version": 1,
                 "catalog_revision": None,
@@ -261,6 +313,25 @@ class AstrBotRuntime:
     async def public_ff14_page_state(self, *, include_values: bool = False) -> dict:
         """Project only global metadata; never read credentials or private data."""
         generation, core, was_ready = self._generation, self._core, self._ready
+        config_snapshot, config_error = self._config_snapshot, self._config_error
+        if core is not None and was_ready:
+            try:
+                async with core.lifecycle.admission.mutation(
+                    "host-ordinary-defaults-read"
+                ):
+                    module_config = await core.config_repository.current(
+                        ConfigTarget(PLUGIN_NAME, "ff14/ff14")
+                    )
+                    defaults = await core.core_defaults.current()
+                    config_snapshot = FF14ConfigSnapshot.from_values(
+                        {**module_config.values, "core_defaults": defaults.values}
+                    )
+                config_error = None
+            except ConfigurationValueError as exc:
+                config_snapshot = None
+                config_error = exc.field
+            except Exception:
+                config_snapshot = None
         gate = {
             "supported": False,
             "enabled": None,
@@ -297,7 +368,9 @@ class AstrBotRuntime:
                 "can_run": False,
                 "reason": "runtime_not_ready",
             }
-        invalid = self._config_error is not None
+        # Current-read errors belong to this projection, not the startup latch.
+        self._config_snapshot = config_snapshot
+        invalid = config_error is not None
         ready = self._ready and self._core is not None
         state = "invalid_config" if invalid else "ready" if ready else "not_ready"
         reason = (
@@ -311,7 +384,7 @@ class AstrBotRuntime:
         )
         registered = enabled = None
         declared = None
-        if self._core is not None:
+        if self._core is not None and not self._config_error:
             try:
                 snapshot = self._core.registry.snapshot()
                 module = snapshot.modules.get("ff14/ff14")
@@ -330,19 +403,20 @@ class AstrBotRuntime:
             "state": "invalid"
             if invalid
             else "unknown"
-            if self._config_snapshot is None
+            if config_snapshot is None
             else "applied"
             if ready
             else "valid_not_ready",
-            "invalid_field": self._config_error,
+            "invalid_field": config_error,
         }
         if include_values:
             ordinary["values"] = (
-                dict(self._config_snapshot.as_values())
-                if not invalid and self._config_snapshot is not None
+                dict(config_snapshot.as_values())
+                if not invalid and config_snapshot is not None
                 else None
             )
         sources = (
+            "universalis_market",
             "xivapi_items",
             "garland_items",
             "fflogs_public_cn",
@@ -468,9 +542,18 @@ class AstrBotRuntime:
                     trusted_subscription_gates=subscription_gates,
                     source_health=self._source_health,
                     source_credential_policies=self._source_credential_policies,
-                    module_host_config_snapshots={
-                        "ff14/ff14": self._config_snapshot.as_values()
-                    },
+                    module_config_validators={"ff14/ff14": CALENDAR_VALUE_VALIDATORS},
+                    ordinary_migration_fields=(
+                        ordinary_migration_fields(PLUGIN_NAME)
+                        if self._trusted_bundle
+                        else ()
+                    ),
+                    ordinary_migration_id="ff14-core-defaults-v1",
+                    ordinary_migration_source=lambda: (
+                        self._raw_legacy_config
+                        if self._raw_legacy_config is not None
+                        else load_prepared_input(self._data_dir / INPUT_FILENAME)
+                    ),
                     public_web_validator=validator,
                     public_web_capabilities=DEPLOYED_CAPABILITIES,
                 )
@@ -481,13 +564,40 @@ class AstrBotRuntime:
                     self._cleanup_isolated_extension_dir()
                 raise
             self._core = core
+            if (
+                isinstance(
+                    getattr(core, "admin_authorization", None),
+                    AdminAuthorizationService,
+                )
+                and core.ordinary_config_migration is not None
+            ):
+                self._admin_source = core.admin_authorization.register_source(
+                    "astrbot-dashboard",
+                    resources=core.admin_operations.ordinary_resources(),
+                    operations={
+                        AdminOperation.READ_CONFIG,
+                        AdminOperation.UPDATE_CONFIG,
+                        AdminOperation.ROLLBACK_CONFIG,
+                        AdminOperation.RECOVER_CONFIG,
+                    },
+                )
             validator.attach(core)
             self._web_validator = validator
             try:
                 await core.start()
-            except BaseException:
+            except BaseException as exc:
                 self._ready = False
+                if isinstance(exc, ConfigurationValueError):
+                    self._config_error = exc.field
                 self._bridge = None
+                if (
+                    getattr(core, "configuration_blocked", False) is True
+                    and not self._closing
+                    and generation == self._generation
+                ):
+                    if self._config_error is None:
+                        self._config_error = "ordinary_configuration"
+                    return
                 try:
                     closed = await core.close()
                 except BaseException:
@@ -499,6 +609,8 @@ class AstrBotRuntime:
                     await self._close_http_transport()
                 else:
                     raise CoreRuntimeCleanupPending("core_runtime_close")
+                if isinstance(exc, ConfigurationValueError):
+                    return
                 raise
             if (
                 self._closing
@@ -512,6 +624,8 @@ class AstrBotRuntime:
     async def terminate(self) -> None:
         """Stop ingress and close the owned pump/modules/database once."""
         self._generation += 1
+        if self._admin_source is not None:
+            self._admin_source.close()
         if self._web_validator is not None:
             self._web_validator.close()
         self._closing = True
@@ -522,6 +636,9 @@ class AstrBotRuntime:
             self._closing = False
 
     async def _close_owned_runtime(self) -> None:
+        if self._admin_source is not None:
+            self._admin_source.close()
+            self._admin_source = None
         if self._web_validator is not None:
             self._web_validator.close()
         self._ready = False
@@ -762,8 +879,8 @@ class AstrBotRuntime:
         if self._config_error is not None:
             return (
                 f"FF14 普通配置无效 [{self._config_error}]，插件尚未启动。"
-                "请由管理员打开 AstrBot 插件管理中的原生配置表单，"
-                "按字段说明修正并保存；AstrBot 会重载插件。已有订阅记录保留。"
+                "请通过合法 Core 配置管理权限修复；迁移输入保留原始值，"
+                "不要用 AstrBot 自动补默认的表单覆盖迁移材料。已有订阅记录保留。"
             )
         if not self._trusted_bundle and self._bundle_failure_reason is not None:
             return self._bundle_failure_diagnostic()
@@ -778,8 +895,19 @@ class AstrBotRuntime:
             if tokens is not None and (
                 not tokens or tokens == ["help"] or tokens[0] == "ff14"
             ):
+                try:
+                    region = (await self._core.core_defaults.current()).values[
+                        "default_region"
+                    ]
+                except ConfigurationValueError as exc:
+                    return (
+                        f"FF14 普通配置无效 [{exc.field}]。"
+                        "请通过合法 Core 配置管理权限修复；已有订阅记录保留。"
+                    )
+                except Exception:
+                    return "命令暂时不可用。"
                 return (
-                    action + f"\n默认区域提示：{self._config_snapshot.default_region}；"
+                    action + f"\n默认区域提示：{region}；"
                     "查询命令仍需明确填写区域，显式参数优先。"
                 )
             return action

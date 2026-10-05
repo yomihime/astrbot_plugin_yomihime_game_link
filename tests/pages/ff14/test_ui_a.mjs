@@ -519,7 +519,7 @@ check("gate card renders real Chinese states and fixed error notices on both pag
       if (route === "overview") projections.set(reason, card.textContent);
       else assert.equal(card.textContent, projections.get(reason));
     }
-    if (route === "settings") assert.match(h.root.textContent, /配置齿轮/);
+    if (route === "settings") assert.match(h.root.textContent, /管理入口不可用/);
     h.app.destroy();
   }
 });
@@ -765,10 +765,70 @@ check("35 second query view deadline is separate from status timeout and permits
   await submitFor(h).click(); await flush(); assert.equal(h.bridge.posts.length, 2); h.bridge.posts[1].resolve(ACTUAL_DTO_SAMPLES.items); await flush(); assert.ok(h.app.getState().query.result); h.app.destroy(); assert.equal(h.clock.count, 0);
 });
 
+check("item query polish distinguishes loading complete partial no-match and failure without dropping content", async () => {
+  const h = await queryHarness("items"); await edit(h, "query", "100");
+  assert.equal(h.root.all((n) => n.getAttribute("data-query-route") === "items").length, 2);
+  for (const [status, code, label] of [["success", null, /查询完成/], ["partial_success", null, /部分结果/], ["error", "not_found", /无匹配结果/], ["error", "upstream_error", /查询失败/]]) {
+    await submitFor(h).click(); await flush();
+    assert.match(h.root.textContent, /正在查询/); assert.equal(submitFor(h).disabled, true);
+    const sample = structuredClone(ACTUAL_DTO_SAMPLES.items); sample.status = status;
+    if (code) { sample.document = null; sample.error = {code, message: "PRIVATE"}; }
+    else {
+      sample.document.blocks.push({kind: "text", text: "内容已截断：请查看来源详情。"});
+      sample.warnings.push("另一个缺项警告"); sample.provenance.push("补充来源");
+    }
+    h.bridge.posts.at(-1).resolve(sample); await flush();
+    assert.match(h.root.textContent, label); assert.equal(h.app.getState().query.result.status, status);
+    if (code) assert.equal(h.root.all((n) => n.getAttribute("role") === "alert").length, 1);
+    else {
+      for (const block of sample.document.blocks.filter((b) => b.kind === "text")) assert.ok(h.root.textContent.includes(block.text));
+      for (const text of [...sample.warnings, ...sample.document.sources, ...sample.provenance]) assert.ok(h.root.textContent.includes(text));
+      assert.equal(h.root.all((n) => n.getAttribute("class") === "result-title")[0].textContent, sample.document.title);
+    }
+  }
+  h.app.destroy();
+  const logs = await queryHarness("logs"); assert.equal(logs.root.all((n) => n.getAttribute("data-query-route") !== null).length, 0); logs.app.destroy();
+});
+check("calendar retries use the same submit and reset on pending success input and route changes", async () => {
+  const h = await queryHarness("calendar"), submit = submitFor(h);
+  const fail = async () => {
+    await submitFor(h).click(); await flush();
+    const sample = structuredClone(ACTUAL_DTO_SAMPLES.calendar);
+    sample.status = "error"; sample.document = null; sample.error = {code: "upstream_error", message: "PRIVATE"};
+    h.bridge.posts.at(-1).resolve(sample); await flush();
+    assert.equal(submitFor(h).textContent, "手动重试日历");
+    assert.match(h.root.textContent, /来源暂时不可用/); assert.doesNotMatch(h.root.textContent, /没有活动/);
+    assert.ok(h.root.textContent.includes(`用户输入范围：国服 / ${inputFor(h, "days").value}天 / Asia/Shanghai`));
+  };
+  await fail(); assert.equal(submitFor(h), submit); const count = h.bridge.posts.length;
+  await submit.press("Enter"); await flush(); assert.equal(h.bridge.posts.length, count + 1);
+  assert.equal(submit.textContent, "查询日历"); assert.equal(submit.disabled, true);
+  await submit.click(); await flush(); assert.equal(h.bridge.posts.length, count + 1);
+  h.bridge.posts.at(-1).resolve(ACTUAL_DTO_SAMPLES.calendar); await flush();
+  assert.equal(submit.textContent, "查询日历"); assert.equal(submit.disabled, false);
+  await fail(); await edit(h, "days", "8"); assert.equal(submit.textContent, "查询日历");
+  await fail(); h.go("items"); await flush(); assert.equal(submitFor(h).textContent, "查询物品");
+  h.go("calendar"); await flush(); assert.equal(submitFor(h).textContent, "查询日历");
+  const posts = h.bridge.posts.length;
+  for (const call of h.bridge.calls.filter((v) => v.endpoint === "settings")) call.resolve(settingsDto());
+  for (const call of h.bridge.calls.filter((v) => v.endpoint === "web-status")) call.resolve(webDto());
+  await flush(); assert.equal(h.bridge.posts.length, posts);
+  await submitFor(h).click(); await flush(); h.bridge.posts.at(-1).reject(new Error("PRIVATE")); await flush();
+  assert.equal(submitFor(h).textContent, "手动重试日历");
+  await submitFor(h).click(); await flush(); assert.equal(submitFor(h).textContent, "查询日历");
+  const late = h.bridge.posts.at(-1);
+  await h.root.all((n) => n.tagName === "button" && n.textContent === "停止展示")[0].click();
+  late.resolve(ACTUAL_DTO_SAMPLES.calendar); await flush();
+  assert.equal(h.app.getState().query.result, null); assert.equal(submitFor(h).textContent, "查询日历"); h.app.destroy();
+});
+
 export async function runUiATests() {
   const passed = []; for (const {name, run} of cases) { await run(); passed.push(name); }
   return {kind: "synthetic-state-and-DOM", passed: passed.length, tests: passed};
 }
+
+// Shared only by contract tests consuming freshly projected Python results.
+export {queryHarness, edit, submitFor, flush};
 
 if (typeof process !== "undefined" && process.argv[1] &&
     import.meta.url === pathToFileURL(process.argv[1]).href) {

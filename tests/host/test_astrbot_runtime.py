@@ -23,7 +23,7 @@ from ygl_test_subject.adapters.astrbot.command_bridge import (
 )
 from ygl_test_subject.adapters.astrbot.message_port import AstrBotMessagePort
 from ygl_test_subject.adapters.astrbot.runtime import PLUGIN_NAME, AstrBotRuntime
-from ygl_test_subject.api.administration import AdminAuthorizationGrant, AdminOperation
+from ygl_test_subject.api.administration import AdminOperation
 from ygl_test_subject.api.manifests import (
     CapabilityDescriptor,
     CapabilityEffect,
@@ -259,6 +259,9 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
             chain_factory=lambda components: _MessageChain(list(components)),
             http_transport_factory=http_transport_factory,
             config=config,
+            raw_legacy_config={
+                k: v for k, v in (config or {}).items() if k.startswith("ff14_")
+            },
             core_factory=core_factory,
         )
 
@@ -571,41 +574,30 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 await runtime.terminate()
 
-    async def test_invalid_config_starts_no_install_core_transport_or_background(self):
+    async def test_invalid_raw_migration_stays_incomplete_and_reports_safe_field(self):
         context = _Context()
         for config in (
             {"ff14_calendar_default_days": 31},
             {"ff14_calendar_default_timezone": "private-invalid-zone"},
         ):
-            with self.subTest(config_key=next(iter(config))):
-                with patch(
-                    "ygl_test_subject.adapters.astrbot.runtime.install_bundled_ff14"
-                ) as install:
-                    runtime = self._runtime(
-                        context,
-                        config=config,
-                        http_transport_factory=lambda: self.fail("transport created"),
-                    )
-                    await runtime.initialize()
-                    install.assert_not_called()
-                    self.assertFalse(runtime.ready)
-                    self.assertIsNone(runtime.core_runtime)
-                    for command in (
-                        "/ygl help",
-                        "/ygl ff14 status",
-                        "/ygl ff14 item cn 100",
-                    ):
-                        event = _Event()
-                        event.message = command
-                        text = await runtime.handle_event(event)
-                        self.assertIn("原生配置表单", text)
-                        self.assertIn("尚未启动", text)
-                        self.assertNotIn("private-invalid-zone", text)
-                    await runtime.terminate()
+            runtime = self._runtime(
+                context, config=config, http_transport_factory=_IdleTransport
+            )
+            await runtime.initialize()
+            self.assertFalse(runtime.ready)
+            self.assertTrue(runtime.core_runtime.configuration_blocked)
+            self.assertFalse(runtime.core_runtime.started)
+            self.assertIsNone(runtime.core_runtime._pump_task)
+            event = _Event()
+            event.message = "/ygl help"
+            text = await runtime.handle_event(event)
+            self.assertIn("Core 配置管理", text)
+            self.assertIn("尚未启动", text)
+            self.assertNotIn("private-invalid-zone", text)
+            await runtime.terminate()
         self.assertEqual(context.calls, [])
-        self.assertEqual(list(self.data_dir.iterdir()), [])
 
-    async def test_constructor_snapshot_flows_to_sdk_without_core_double_write(self):
+    async def test_trusted_raw_migrates_to_core_and_ff14_without_host_injection(self):
         config = {
             "ff14_default_region": "global",
             "ff14_calendar_default_days": 3,
@@ -628,10 +620,15 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
             subscribe = module.handlers.capabilities[
                 "ff14.calendar.subscription.create"
             ]
-            self.assertEqual(query._config.calendar_default_days, 3)
-            self.assertEqual(subscribe._config.calendar_default_delivery_time, "13:25")
+            self.assertIsNone(query._config)
+            self.assertIsNone(subscribe._config)
+            self.assertEqual(
+                snapshot.values["core_defaults"]["default_region"], "global"
+            )
             stored = await core.repositories.config.current(snapshot.target)
-            self.assertFalse(set(stored.values) & set(config))
+            self.assertEqual(stored.values["ff14_calendar_default_days"], 3)
+            self.assertNotIn("ff14_default_region", stored.values)
+            self.assertTrue(await core.ordinary_config_migration.complete())
             event = _Event()
             event.message = "/ygl ff14 calendar"
             help_text = await runtime.handle_event(event)
@@ -640,7 +637,236 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await runtime.terminate()
 
-    async def test_reload_rejects_invalid_config_and_preserves_existing_subscription(
+    async def test_manifest_semantic_validators_manage_read_repair_and_marker_restart(
+        self,
+    ):
+        from ygl_test_subject.infrastructure.sqlite.repositories_config_migration import (
+            SQLiteOrdinaryConfigurationMigrationRepository,
+        )
+        from ygl_test_subject.services.configuration import ConfigurationValueError
+        from ygl_test_subject.services.core_configuration import (
+            CORE_CONFIG_FIELDS,
+            CORE_MODULE_ID,
+        )
+
+        class Admin:
+            adapter_id, request_id, session_id = "synthetic", "synthetic", "synthetic"
+
+        admin = Admin()
+
+        def factory(**kwargs):
+            kwargs["admin_context_validator"] = (
+                lambda _op, _inv, context, _gen: context is admin
+            )
+            return CoreRuntime(**kwargs)
+
+        runtime = self._runtime(
+            _Context(),
+            config={"ff14_default_region": "global"},
+            http_transport_factory=_IdleTransport,
+            core_factory=factory,
+        )
+        await runtime.initialize()
+        core = runtime.core_runtime
+        await core.admin_credential_repository.bootstrap(bytes(range(32)))
+        target = ConfigTarget(PLUGIN_NAME, "ff14/ff14")
+        module = core.registry.snapshot().module("ff14/ff14")
+        fields = module.manifest.config_fields
+        self.assertTrue(
+            all(
+                field.group == "calendar"
+                for field in fields
+                if field.name.startswith("ff14_calendar_default_")
+            )
+        )
+        for field, value in (
+            ("ff14_calendar_default_timezone", "private-zone"),
+            ("ff14_calendar_default_delivery_time", "24:00"),
+        ):
+            snapshot = await core.config_repository.current(target)
+            with self.assertRaises(ConfigurationValueError):
+                await core.admin_facade.update_config(
+                    None,
+                    "ff14/ff14",
+                    ConfigPatch(
+                        snapshot.revision,
+                        (
+                            ConfigFieldUpdate(
+                                field, ConfigPatchMode.REPLACE, value=value
+                            ),
+                        ),
+                        fields,
+                    ),
+                    authorization=admin,
+                )
+            self.assertEqual(await core.config_repository.current(target), snapshot)
+        config_repository = SQLiteOrdinaryConfigurationMigrationRepository(
+            core.config_repository
+        )
+        snapshot = await core.config_repository.current(target)
+        await core.database.executor.run_transaction(
+            lambda unit: config_repository._write(
+                unit,
+                target,
+                "ff14_calendar_default_timezone",
+                "private-zone",
+                snapshot.revision,
+            )
+        )
+        with self.assertRaises(ConfigurationValueError):
+            await core.module_services.for_module("ff14/ff14").config.current()
+        await core.admin_facade.update_config(
+            None,
+            "ff14/ff14",
+            ConfigPatch(
+                snapshot.revision,
+                (
+                    ConfigFieldUpdate(
+                        "ff14_calendar_default_timezone",
+                        ConfigPatchMode.REPLACE,
+                        value="UTC",
+                    ),
+                ),
+                fields,
+            ),
+            authorization=admin,
+        )
+        self.assertEqual(
+            (
+                await core.module_services.for_module("ff14/ff14").config.current()
+            ).values["ff14_calendar_default_timezone"],
+            "UTC",
+        )
+        summary = await core.admin_facade.config_snapshot(
+            None, CORE_MODULE_ID, authorization=admin
+        )
+        await core.admin_facade.update_config(
+            None,
+            CORE_MODULE_ID,
+            ConfigPatch(
+                summary.revision,
+                (ConfigFieldUpdate("default_region", ConfigPatchMode.CLEAR),),
+                CORE_CONFIG_FIELDS,
+            ),
+            authorization=admin,
+        )
+        self.assertEqual(
+            (await core.core_defaults.current()).values["default_region"], "cn"
+        )
+        await runtime.terminate()
+        # Completed startup must not parse the absent preparation file again.
+        runtime._raw_legacy_config = None
+        await runtime.initialize()
+        try:
+            self.assertTrue(runtime.ready)
+            self.assertEqual(
+                (await runtime.core_runtime.core_defaults.current()).values[
+                    "default_region"
+                ],
+                "cn",
+            )
+        finally:
+            await runtime.terminate()
+
+    async def _assert_current_config_repair_recovers_commands(self, mode, region):
+        from ygl_test_subject.infrastructure.sqlite.repositories_config_migration import (
+            SQLiteOrdinaryConfigurationMigrationRepository,
+        )
+        from ygl_test_subject.services.core_configuration import (
+            CORE_CONFIG_FIELDS,
+            CORE_MODULE_ID,
+            core_config_target,
+        )
+
+        class Admin:
+            adapter_id, request_id, session_id = "synthetic", "synthetic", "synthetic"
+
+        admin = Admin()
+
+        def factory(**kwargs):
+            kwargs["admin_context_validator"] = (
+                lambda _op, _inv, context, _gen: context is admin
+            )
+            return CoreRuntime(**kwargs)
+
+        context = _Context()
+        runtime = self._runtime(
+            context, http_transport_factory=_IdleTransport, core_factory=factory
+        )
+        await runtime.initialize()
+        try:
+            core = runtime.core_runtime
+            await core.admin_credential_repository.bootstrap(bytes(range(32)))
+            target = core_config_target(PLUGIN_NAME)
+            before = await core.config_repository.current(target)
+            repository = SQLiteOrdinaryConfigurationMigrationRepository(
+                core.config_repository
+            )
+            await core.database.executor.run_transaction(
+                lambda unit: repository._write(
+                    unit, target, "default_region", "synthetic-invalid", before.revision
+                )
+            )
+            state = await runtime.public_ff14_page_state(include_values=True)
+            self.assertEqual(
+                state["ordinary_config"]["invalid_field"], "default_region"
+            )
+            self.assertIsNone(state["ordinary_config"]["values"])
+            self.assertTrue(runtime.ready)
+            event = _Event()
+            event.message = "/ygl ff14 calendar"
+            rejected = await runtime.handle_event(event)
+            self.assertIn("普通配置无效", rejected)
+            self.assertEqual(context.calls, [])
+            summary = await core.admin_facade.config_snapshot(
+                None, CORE_MODULE_ID, authorization=admin
+            )
+            update = (
+                ConfigFieldUpdate("default_region", mode, value=region)
+                if mode is ConfigPatchMode.REPLACE
+                else ConfigFieldUpdate("default_region", mode)
+            )
+            await core.admin_facade.update_config(
+                None,
+                CORE_MODULE_ID,
+                ConfigPatch(summary.revision, (update,), CORE_CONFIG_FIELDS),
+                authorization=admin,
+            )
+            # No page read or restart between authorized repair and the command.
+            help_text = await runtime.handle_event(event)
+            self.assertIn(f"默认区域提示：{region}", help_text)
+            self.assertTrue(runtime.ready)
+            event.message = "/ygl ff14 status"
+            self.assertIsNone(await runtime.handle_event(event))
+            self.assertTrue(context.calls)
+        finally:
+            await runtime.terminate()
+
+    async def test_commands_recover_after_page_invalid_config_replace_without_page_read(
+        self,
+    ):
+        await self._assert_current_config_repair_recovers_commands(
+            ConfigPatchMode.REPLACE, "global"
+        )
+
+    async def test_commands_recover_after_page_invalid_config_clear_without_page_read(
+        self,
+    ):
+        await self._assert_current_config_repair_recovers_commands(
+            ConfigPatchMode.CLEAR, "cn"
+        )
+
+    async def test_real_composition_missing_prepared_raw_input_fails_closed(self):
+        runtime = self._runtime(_Context(), http_transport_factory=_IdleTransport)
+        runtime._raw_legacy_config = None
+        await runtime.initialize()
+        self.assertFalse(runtime.ready)
+        self.assertTrue(runtime.core_runtime.configuration_blocked)
+        self.assertFalse(runtime.core_runtime.started)
+        self.assertIsNone(runtime.core_runtime._pump_task)
+        await runtime.terminate()
+
+    async def test_completed_migration_ignores_invalid_legacy_and_preserves_existing_subscription(
         self,
     ):
         context = _Context()
@@ -660,18 +886,24 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("13:25", context.calls[-1][1].chain[0].text)
         finally:
             await runtime.terminate()
-        database = self.data_dir / "runtime.sqlite3"
-        before = database.read_bytes()
         rejected = self._runtime(
             context,
             config={"ff14_calendar_default_days": 31},
-            http_transport_factory=lambda: self.fail(
-                "invalid reload created transport"
-            ),
+            http_transport_factory=_IdleTransport,
         )
         await rejected.initialize()
-        self.assertFalse(rejected.ready)
-        self.assertEqual(database.read_bytes(), before)
+        self.assertTrue(rejected.ready)
+        self.assertTrue(
+            await rejected.core_runtime.ordinary_config_migration.complete()
+        )
+        self.assertEqual(
+            (
+                await rejected.core_runtime.config_repository.current(
+                    ConfigTarget(PLUGIN_NAME, "ff14/ff14")
+                )
+            ).values["ff14_calendar_default_timezone"],
+            "UTC",
+        )
         await rejected.terminate()
         restored = self._runtime(
             context,
@@ -777,7 +1009,7 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 overview["subscription_gate"],
                 {"supported": True, "enabled": True, "can_run": True, "reason": None},
             )
-            self.assertEqual(len(overview["sources"]), 6)
+            self.assertEqual(len(overview["sources"]), 7)
             self.assertTrue(
                 all(
                     item["declared"] is True
@@ -909,7 +1141,9 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(data["module"], {"registered": None, "enabled": None})
         self.assertTrue(all(item["declared"] is None for item in data["sources"]))
-        self.assertIsNone(runtime.core_runtime)
+        self.assertTrue(runtime.core_runtime.configuration_blocked)
+        self.assertFalse(runtime.core_runtime.started)
+        await runtime.terminate()
 
     async def test_public_projection_registry_failure_is_unknown_not_missing(self):
         from types import SimpleNamespace
@@ -918,7 +1152,7 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
         runtime = self._runtime(_Context())
         self.assertEqual(
             (await runtime.public_ff14_page_state())["ordinary_config"]["state"],
-            "valid_not_ready",
+            "unknown",
         )
         registry = Mock()
         registry.snapshot.side_effect = RuntimeError("private runtime path")
@@ -1011,7 +1245,9 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
         runtime_repository = SQLiteModuleRuntimeRepository(database)
         credentials = SQLiteAdminCredentialRepository(database)
         await credentials.bootstrap(bytes(range(32)))
-        grant = AdminAuthorizationGrant(AdminOperation.SET_ENABLED, 1)
+        from tests.fixtures.admin_authorization import native_grant
+
+        grant = await native_grant(credentials, AdminOperation.SET_ENABLED)
         current = await runtime_repository.current_intent("ff14", "ff14")
         self.assertIsNotNone(current)
         prepared = await runtime_repository.prepare(

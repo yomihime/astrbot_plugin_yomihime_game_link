@@ -50,7 +50,9 @@ class RuntimeRepositoryTests(unittest.IsolatedAsyncioTestCase):
     async def _grant(self) -> AdminAuthorizationGrant:
         await self.database.executor.initialize()
         await self.credentials.bootstrap(bytes(range(32)))
-        return AdminAuthorizationGrant(AdminOperation.SET_ENABLED, 1)
+        from tests.fixtures.admin_authorization import native_grant
+
+        return await native_grant(self.credentials, AdminOperation.SET_ENABLED)
 
     async def test_intent_and_journal_commit_then_reopen(self) -> None:
         self.assertFalse(self.path.exists())
@@ -231,7 +233,9 @@ class RuntimeRepositoryTests(unittest.IsolatedAsyncioTestCase):
             "config-operation",
             target,
         )
-        grant = AdminAuthorizationGrant(AdminOperation.UPDATE_CONFIG, 1)
+        from tests.fixtures.admin_authorization import native_grant
+
+        grant = await native_grant(self.credentials, AdminOperation.UPDATE_CONFIG)
         committed = await config.update_authorized(target, patch, grant)
         self.assertEqual(committed.revision, 2)
 
@@ -270,7 +274,9 @@ class RuntimeRepositoryTests(unittest.IsolatedAsyncioTestCase):
             "config-op",
             target,
         )
-        grant = AdminAuthorizationGrant(AdminOperation.UPDATE_CONFIG, 1)
+        from tests.fixtures.admin_authorization import native_grant
+
+        grant = await native_grant(self.credentials, AdminOperation.UPDATE_CONFIG)
         with self.assertRaises(AdminAuthorizationDenied):
             await config.update_authorized(target, patch, grant)
         current = await config.current(target)

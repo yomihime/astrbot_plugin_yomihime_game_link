@@ -39,6 +39,7 @@ from yomihime_sdk.api.administration import (
 from yomihime_sdk.api.administration import (
     AdminOperations as AdminOperations,
 )
+from yomihime_sdk.api.administration import AdminResourcePolicy as AdminResourcePolicy
 from yomihime_sdk.api.administration import (
     CapabilitySummary as CapabilitySummary,
 )
@@ -54,6 +55,7 @@ from yomihime_sdk.api.administration import (
 from yomihime_sdk.api.administration import (
     ConfigSummaryDTO as ConfigSummaryDTO,
 )
+from yomihime_sdk.api.administration import CoreConfigSummary as CoreConfigSummary
 from yomihime_sdk.api.administration import (
     DataCount as DataCount,
 )
@@ -83,6 +85,12 @@ from yomihime_sdk.api.administration import (
 )
 from yomihime_sdk.api.administration import (
     ModuleStatusDTO as ModuleStatusDTO,
+)
+from yomihime_sdk.api.administration import (
+    OrdinaryConfigProjection as OrdinaryConfigProjection,
+)
+from yomihime_sdk.api.administration import (
+    OrdinaryFieldProjection as OrdinaryFieldProjection,
 )
 from yomihime_sdk.api.administration import (
     Protocol as Protocol,

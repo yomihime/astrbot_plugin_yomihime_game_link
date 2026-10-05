@@ -17,6 +17,7 @@ from ..api.administration import (
     AdminOperations,
     CapabilitySummary,
     ConfigSummary,
+    CoreConfigSummary,
     ModuleAdminSnapshot,
     ModuleHealth,
     ModuleLifecycle,
@@ -36,8 +37,18 @@ from ..infrastructure.secret_store import SQLiteSecretStore
 from ..infrastructure.sqlite.database import SQLiteDatabase
 from ..infrastructure.sqlite.repositories_config import SQLiteConfigRepository
 from ..services.admin_authorization import AdminAuthorizationService
-from ..services.configuration import ConfigurationCoordinator
+from ..services.configuration import (
+    ConfigurationCoordinator,
+    validate_configuration_value,
+)
 from ..services.extension_runtime import ExtensionRuntime
+from .core_configuration import (
+    CORE_CONFIG_FIELDS,
+    CORE_DEFAULTS_FIELD,
+    CORE_MODULE_ID,
+    DEFAULT_REGION,
+    core_config_target,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,6 +104,8 @@ class AdminOperationsService(AdminOperations):
         secret_store: SQLiteSecretStore,
         config_principal_id: str,
         subscription_gate_fields: Mapping[ConfigTarget, tuple[str, ...]] | None = None,
+        module_config_validators: Mapping[str, Mapping[str, object]] | None = None,
+        ordinary_migration=None,
     ) -> None:
         if not isinstance(authorization, AdminAuthorizationService):
             raise TypeError("authorization must be AdminAuthorizationService")
@@ -125,7 +138,113 @@ class AdminOperationsService(AdminOperations):
             dict(subscription_gate_fields or {})
         )
         self._accepting = True
+        self._module_config_validators = MappingProxyType(
+            {
+                module_id: MappingProxyType(dict(checks))
+                for module_id, checks in (module_config_validators or {}).items()
+            }
+        )
         self._inflight: set[asyncio.Task[object]] = set()
+        self._ordinary_migration = ordinary_migration
+
+    def ordinary_resources(self):
+        migration = self._ordinary_migration
+        if migration is None:
+            raise AdminAuthorizationDenied
+        result = {}
+        for field in migration.fields:
+            result.setdefault(field.target, set()).add(field.declaration.name)
+        return result
+
+    @_tracked_admin_request
+    async def ordinary_snapshot(self, *, authorization):
+        resources = self.ordinary_resources()
+        grant = await self.authorization.authorize(
+            AdminOperation.READ_CONFIG,
+            invocation=None,
+            context=authorization,
+            resources=resources,
+        )
+        result = {}
+        async with self.lifecycle.admission.mutation("admin-ordinary-read"):
+            for target in resources:
+                await self.authorization.validate_generation(
+                    grant, operation=AdminOperation.READ_CONFIG
+                )
+                snapshot = await self._config_repository.current(
+                    target, grant=grant, operation=AdminOperation.READ_CONFIG
+                )
+                await self.authorization.validate_generation(
+                    grant, operation=AdminOperation.READ_CONFIG
+                )
+                projection = {}
+                for field in self._ordinary_migration.fields:
+                    if field.target != target:
+                        continue
+                    name = field.declaration.name
+                    present = name in snapshot.values
+                    value = snapshot.values.get(name, field.declaration.default)
+                    try:
+                        if any(m.field == name for m in snapshot.secret_metadata):
+                            raise ValueError("ordinary metadata")
+                        validate_configuration_value(
+                            field.declaration, value, field.validator
+                        )
+                    except (ValueError, TypeError):
+                        state, value = "invalid", None
+                    else:
+                        state = "valid"
+                    projection[name] = {
+                        "value": value,
+                        "state": state,
+                        "present": present,
+                        "source": "sqlite" if present else "default",
+                    }
+                result[target.module_id] = {
+                    "revision": snapshot.revision,
+                    "fields": projection,
+                }
+            self._require_accepting()
+            await self.authorization.validate_generation(
+                grant, operation=AdminOperation.READ_CONFIG
+            )
+        return result
+
+    @_tracked_admin_request
+    async def ordinary_rollback(self, expected_revisions, *, authorization):
+        resources = self.ordinary_resources()
+        grant = await self.authorization.authorize(
+            AdminOperation.ROLLBACK_CONFIG,
+            invocation=None,
+            context=authorization,
+            resources=resources,
+        )
+        async with self.lifecycle.admission.mutation("admin-ordinary-rollback"):
+            await self.authorization.validate_generation(
+                grant, operation=AdminOperation.ROLLBACK_CONFIG
+            )
+            await self._ordinary_migration.rollback(expected_revisions, grant=grant)
+            await self.authorization.validate_generation(
+                grant, operation=AdminOperation.ROLLBACK_CONFIG
+            )
+        return {"rolled_back": True}
+
+    def _core_configuration(self) -> ConfigurationCoordinator:
+        async def validate(grant):
+            self._require_accepting()
+            await self.authorization.validate_generation(
+                grant, operation=AdminOperation.UPDATE_CONFIG
+            )
+
+        return ConfigurationCoordinator(
+            core_config_target(self.config_principal_id),
+            CORE_CONFIG_FIELDS,
+            self._config_repository,
+            self.secret_store,
+            admission=self.lifecycle.admission,
+            validate_admin_grant=validate,
+            publish_config=lambda *_args, **_kwargs: (),
+        )
 
     def stop_accepting(
         self, *, cancel_inflight: bool = False
@@ -213,6 +332,7 @@ class AdminOperationsService(AdminOperations):
             validate_admin_grant=validate,
             publish_config=publish_config,
             subscription_gate_fields=self._subscription_gate_fields.get(target, ()),
+            value_validators=self._module_config_validators.get(target.module_id),
         )
 
     def _selection(
@@ -263,17 +383,26 @@ class AdminOperationsService(AdminOperations):
             raise AdminAuthorizationDenied from None
 
     async def _snapshot(
-        self, selection: _ManifestSelection, registered: RegisteredModule | None
+        self,
+        selection: _ManifestSelection,
+        registered: RegisteredModule | None,
+        *,
+        allowed_fields: frozenset[str] | None = None,
     ) -> ModuleAdminSnapshot:
         module_id = f"{selection.package_id}/{selection.manifest.module_id}"
         target = ConfigTarget(self.config_principal_id, module_id)
         config = await self._config_repository.current(target)
         sensitive = {
-            field.name for field in selection.manifest.config_fields if field.sensitive
+            field.name
+            for field in selection.manifest.config_fields
+            if field.sensitive
+            and (allowed_fields is None or field.name in allowed_fields)
         }
         metadata = {item.field: item for item in config.secret_metadata}
         values: dict[str, str] = {}
         for field in selection.manifest.config_fields:
+            if allowed_fields is not None and field.name not in allowed_fields:
+                continue
             if field.sensitive:
                 receipt = metadata.get(field.name)
                 if receipt is not None and receipt.state is SecretMetadataState.ACTIVE:
@@ -450,6 +579,43 @@ class AdminOperationsService(AdminOperations):
             return snapshots
 
     @_tracked_admin_request
+    async def config_snapshot(
+        self,
+        invocation: InvocationView | None,
+        module_id: str,
+        *,
+        authorization: AdminAuthorizationContext | None = None,
+    ) -> CoreConfigSummary:
+        grant = await self._authorize(
+            AdminOperation.MODULE_SNAPSHOT, invocation, authorization
+        )
+        if module_id != CORE_MODULE_ID:
+            raise ValueError("config_snapshot requires the reserved Core target")
+        async with self.lifecycle.admission.mutation("admin-core-config-snapshot"):
+            self._require_accepting()
+            await self.authorization.validate_generation(
+                grant, operation=AdminOperation.MODULE_SNAPSHOT
+            )
+            snapshot = await self._config_repository.current(
+                core_config_target(self.config_principal_id)
+            )
+            value = snapshot.values.get(DEFAULT_REGION.name, DEFAULT_REGION.default)
+            valid = type(value) is str and value in {"cn", "global"}
+            if snapshot.secret_metadata or set(snapshot.values) - {DEFAULT_REGION.name}:
+                raise ValueError("Core config contains undeclared metadata")
+            result = CoreConfigSummary(
+                snapshot.revision,
+                value if valid else None,
+                DEFAULT_REGION.name in snapshot.values,
+                "valid" if valid else "invalid",
+            )
+            await self.authorization.validate_generation(
+                grant, operation=AdminOperation.MODULE_SNAPSHOT
+            )
+            self._require_accepting()
+            return result
+
+    @_tracked_admin_request
     async def module_snapshot(
         self,
         invocation: InvocationView | None,
@@ -520,10 +686,46 @@ class AdminOperationsService(AdminOperations):
         *,
         authorization: AdminAuthorizationContext | None = None,
     ) -> ConfigSummary:
-        grant = await self._authorize(
-            AdminOperation.UPDATE_CONFIG, invocation, authorization
+        grant = await self.authorization.authorize(
+            AdminOperation.UPDATE_CONFIG,
+            invocation=invocation,
+            context=authorization,
+            resources={
+                ConfigTarget(self.config_principal_id, module_id): {
+                    update.field for update in patch.updates
+                }
+            },
         )
         self._require_accepting()
+        from .admin_authorization import _grant_resource_fields
+
+        allowed_fields = _grant_resource_fields(
+            grant, ConfigTarget(self.config_principal_id, module_id)
+        )
+        if module_id == CORE_MODULE_ID:
+            coordinator = self._core_configuration()
+            updated = await coordinator.update_admin(
+                core_config_target(self.config_principal_id), patch, grant
+            )
+            await self.authorization.validate_generation(
+                grant, operation=AdminOperation.UPDATE_CONFIG
+            )
+            return ConfigSummary(
+                CORE_MODULE_ID,
+                updated.revision,
+                {
+                    field.name: "configured"
+                    if field.name in updated.values
+                    else "unset"
+                    for field in CORE_CONFIG_FIELDS
+                    if allowed_fields is None or field.name in allowed_fields
+                },
+            )
+        if any(
+            update.field in {CORE_DEFAULTS_FIELD, "default_region"}
+            for update in patch.updates
+        ):
+            raise ValueError("module patch contains a reserved Core field")
         registry_snapshot = self.registry.snapshot()
         selection = self._selection(module_id, registry_snapshot)
         coordinator = await self._configuration(selection)
@@ -531,7 +733,9 @@ class AdminOperationsService(AdminOperations):
             ConfigTarget(self.config_principal_id, module_id), patch, grant
         )
         snapshot = await self._snapshot(
-            selection, self.registry.snapshot().modules.get(module_id)
+            selection,
+            self.registry.snapshot().modules.get(module_id),
+            allowed_fields=allowed_fields,
         )
         if updated.revision != snapshot.config.revision:
             raise RevisionConflict("config", updated.revision, snapshot.config.revision)

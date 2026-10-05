@@ -131,6 +131,9 @@ else:
         class Pages:
             def register(self): lifecycle_events.append("register")
             def close(self): lifecycle_events.append("page_close")
+        class AdminPages:
+            def register(self): lifecycle_events.append("admin_register")
+            def close(self): lifecycle_events.append("admin_page_close")
         class LifecycleRuntime:
             def __init__(self, fail_start=False, fail_close=False):
                 self.fail_start, self.fail_close = fail_start, fail_close
@@ -145,18 +148,19 @@ else:
                 lifecycle_events.clear()
                 subject = object.__new__(module.YomihimeGameLink)
                 subject._pages = Pages()
+                subject._admin_pages = AdminPages()
                 subject._runtime = LifecycleRuntime(fail_start, fail_close)
                 try: await subject.initialize()
                 except RuntimeError:
                     assert fail_start
                 if fail_start:
-                    assert lifecycle_events == ["super_initialize", "register", "runtime_initialize", "page_close"]
+                    assert lifecycle_events == ["super_initialize", "register", "admin_register", "runtime_initialize", "page_close", "admin_page_close"]
                     continue
-                assert lifecycle_events == ["super_initialize", "register", "runtime_initialize"]
+                assert lifecycle_events == ["super_initialize", "register", "admin_register", "runtime_initialize"]
                 try: await subject.terminate()
                 except RuntimeError:
                     assert fail_close
-                assert lifecycle_events[-3:] == ["page_close", "runtime_terminate", "super_terminate"]
+                assert lifecycle_events[-4:] == ["page_close", "admin_page_close", "runtime_terminate", "super_terminate"]
         asyncio.run(exercise())
     if mode in {"entry-text", "entry-none"}:
         result = "help text" if mode == "entry-text" else None

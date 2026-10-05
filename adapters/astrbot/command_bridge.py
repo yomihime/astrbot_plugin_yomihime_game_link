@@ -70,6 +70,37 @@ class AstrBotCommandBridge:
     def parse(self, event: MessageTextEvent) -> str | CommandInvocation:
         """Resolve help or produce a command invocation using descriptor schema."""
 
+        # This explicit FF14 command owns its quote-aware grammar. Preserve its
+        # raw tail rather than losing literal boundaries in the generic tokens.
+        try:
+            message = event.get_message_str()
+        except Exception:
+            message = None
+        if isinstance(message, str):
+            market = re.fullmatch(
+                r"/?ygl\s+ff14\s+market\s+(.+)", message.strip(), re.S
+            )
+            if market:
+                snapshot = self._registry.snapshot()
+                try:
+                    module = snapshot.module_for_route("ff14")
+                    command = next(
+                        c
+                        for c in module.manifest.commands
+                        if c.operation_path == "market"
+                    )
+                    capability = next(
+                        c
+                        for c in module.manifest.capabilities
+                        if c.capability_id == command.capability_id
+                    )
+                    if command.capability_id != "ff14.market.query":
+                        raise ValueError
+                    parameters = {"command": market[1]}
+                    validate_parameters(capability, parameters)
+                except (RegistryError, StopIteration, ValueError, TypeError):
+                    return _USAGE
+                return CommandInvocation(module.module_id, "market", parameters)
         tokens = self._tokens(event)
         if tokens is None:
             return _USAGE

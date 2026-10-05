@@ -68,7 +68,8 @@ class ConfigAdapterTests(unittest.TestCase):
         }
         self.assertEqual(defaults, dict(ff14_config_snapshot(None).as_values()))
         self.assertEqual(schema["ff14_default_region"]["options"], ["cn", "global"])
-        self.assertTrue(all("重载" in field["hint"] for field in schema.values()))
+        self.assertTrue(all("迁移完成后本字段不再生效" in field["hint"] for name, field in schema.items() if name != "web_public_origin"))
+        self.assertIn("重载", schema["web_public_origin"]["hint"])
         self.assertFalse(any("secret" in field for field in schema.values()))
         self.assertEqual(
             set(schema),

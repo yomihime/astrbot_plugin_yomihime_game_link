@@ -72,13 +72,14 @@ class ItemLookupTests(unittest.IsolatedAsyncioTestCase):
         second = self.fixture["xivcdn"]["search_second_page"]
         # Include a literal percent sign to assert that the module keeps a raw,
         # structured query value and leaves URI encoding to the Core transport.
-        http = _FakeHttp([first, second])
+        http = _FakeHttp([{"results": []}, first, second])
         result = await self._handler(http).invoke(None, {"query": "Copper 50% Ore"})
 
         self.assertIs(result.status, ResultStatus.NEEDS_SELECTION)
-        self.assertEqual(len(http.requests), 2)
-        first_query = dict(http.requests[0].query)
-        second_query = dict(http.requests[1].query)
+        self.assertEqual(len(http.requests), 3)
+        self.assertEqual(dict(http.requests[0].query)["query"], 'Name="Copper 50% Ore"')
+        first_query = dict(http.requests[1].query)
+        second_query = dict(http.requests[2].query)
         self.assertEqual(first_query["query"], 'Name~"Copper 50% Ore"')
         self.assertNotIn("cursor", first_query)
         self.assertEqual(second_query["cursor"], "synthetic-opaque-cursor-page-2")
@@ -98,14 +99,68 @@ class ItemLookupTests(unittest.IsolatedAsyncioTestCase):
             "results": [{"row_id": 90002, "fields": {"Name": "Synthetic Ore II"}}],
             "next": "opaque-3",
         }
-        http = _FakeHttp([first, second])
+        http = _FakeHttp([{"results": []}, first, second])
         result = await self._handler(http).invoke(None, {"query": "Synthetic Ore"})
         self.assertIs(result.status, ResultStatus.NEEDS_SELECTION)
         self.assertIn(
             "结果未穷尽",
             " ".join(block.text for block in result.document.ordered_blocks),
         )
+        self.assertEqual(len(http.requests), 3)
+
+    async def test_exact_name_wins_without_fuzzy_search(self) -> None:
+        exact = {"results": [{"row_id": 90001, "fields": {"Name": "Sample Ore Alpha"}}]}
+        http = _FakeHttp(
+            [
+                exact,
+                self.fixture["xivcdn"]["item_detail"],
+                self.fixture["garland"]["linked_item_detail"],
+            ]
+        )
+        result = await self._handler(http).invoke(None, {"query": "Sample Ore Alpha"})
+        self.assertIs(result.status, ResultStatus.PARTIAL_SUCCESS)
+        self.assertEqual(
+            dict(http.requests[0].query)["query"], 'Name="Sample Ore Alpha"'
+        )
+        self.assertEqual(len(http.requests), 3)
+        self.assertEqual(http.requests[1].path, "/api/sheet/Item/90001")
+
+    async def test_exact_and_fuzzy_empty_is_not_found(self) -> None:
+        http = _FakeHttp([{"results": []}, {"results": []}])
+        result = await self._handler(http).invoke(None, {"query": "Absent Item"})
+        self.assertIs(result.error.code, ErrorCode.NOT_FOUND)
+        self.assertEqual(
+            [dict(r.query)["query"] for r in http.requests],
+            ['Name="Absent Item"', 'Name~"Absent Item"'],
+        )
+
+    async def test_multiple_exact_names_require_id_and_do_not_fallback(self) -> None:
+        exact = {
+            "results": [
+                {"row_id": item_id, "fields": {"Name": "Same name"}}
+                for item_id in (90001, 90002)
+            ]
+        }
+        http = _FakeHttp([exact])
+        result = await self._handler(http).invoke(None, {"query": "Same name"})
+        self.assertIs(result.status, ResultStatus.NEEDS_SELECTION)
+        self.assertEqual(len(http.requests), 1)
+        self.assertIn("ID 90001", result.document.ordered_blocks[0].text)
+        self.assertIn("ID 90002", result.document.ordered_blocks[1].text)
+
+    async def test_truncated_exact_search_never_chooses_or_runs_fuzzy(self) -> None:
+        exact = {
+            "results": [{"row_id": 90001, "fields": {"Name": "Same name"}}],
+            "next": "opaque-2",
+        }
+        tail = {"results": [], "next": "opaque-3"}
+        http = _FakeHttp([exact, tail])
+        result = await self._handler(http).invoke(None, {"query": "Same name"})
+        self.assertIs(result.status, ResultStatus.NEEDS_SELECTION)
         self.assertEqual(len(http.requests), 2)
+        self.assertIn(
+            "结果未穷尽", " ".join(b.text for b in result.document.ordered_blocks)
+        )
 
     async def test_numeric_id_skips_search_and_returns_partial_when_garland_is_unavailable(
         self,

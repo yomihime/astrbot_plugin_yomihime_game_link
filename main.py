@@ -14,7 +14,7 @@ SDK_CONTRACT_REVISION = "UI-B0-PUBLIC-WEB"
 SDK_COMPATIBLE_CONTRACT_VERSIONS = ("1.0.0", "1.1.0", "1.2.0", "1.3.0", "1.4.0")
 
 SDK_PACKAGE_MANIFEST = {
-    "__init__.py": "66d0a9349614602d7d9bea7ecf09b80d0921206f701256ef2802c898f56e38b3",
+    "__init__.py": "513d1dde7b3eb9bc2b31274128f2f8920db4325246fd284d35d00e46a0b67a03",
     "_examples/empty_module/README.md": "54f44691207b27a1e6ee818cd55e14c30086cd3c685176e470b147ffd5203957",
     "_examples/empty_module/manifest.json": "27ed02b89a99fbea400dd75a1a405db27929f31acb4ceb582b83e8af1e61b1a8",
     "_examples/empty_module/module.py": "231518c6a6db052dcadfd0bd3578ff41f5dcda2d9879808730cbecab74734ce1",
@@ -22,10 +22,10 @@ SDK_PACKAGE_MANIFEST = {
     "_examples/offline_sample/manifest.json": "2849f3fe6ce5ed7809bba396f5dd143700fc880ab3817ac54c2c762eab87f4b9",
     "_examples/offline_sample/module.py": "df6c58755c5af19c5c9035b45fa94ae3edff927a3fd673eca904f8d8057d5ff6",
     "api/__init__.py": "a923e1a55ee842d8244dfbdfe4cd8b3e27eec61c5623abc95845abefda40727a",
-    "api/administration.py": "4dddb6cad93c96bac42ec81331fac995424bb44adc42dccdace9d133ffb3e6b5",
-    "api/contexts.py": "db3506740aa06f75a8aa42e811056d5c7ccf9dfe039fd94bfca3dd50f675580b",
+    "api/administration.py": "ec08286a75fa2189f288e5b9b116ed243d00e9100f2b0e282249faf1206d5214",
+    "api/contexts.py": "a44dfabab4e42d7a30ff7aaa3a1239c5ae4b588abfee4dab9d1fe9e7bcc0dbef",
     "api/display.py": "4fe9438bf3016ca4ac6b97a17c0e20157e77d0b8b66dd4c1ff3054e901d65c03",
-    "api/manifests.py": "99cd23755a228438e0005fef37f7e2a2303f2039f651014dd413b65adc2099e4",
+    "api/manifests.py": "b5603fce1b5f63a639ec2eaeb57a100279013875367fb4bfa5aba5b17a477cfa",
     "api/results.py": "5d6a59587e35e52a2528ec98a461d7c2e45705fd8d60f093f801795e81402135",
     "api/schema.py": "46628cb51be0e4a44df3606af2cbe841120cacf576f193ce57bc1af4b8a3d626",
     "api/services.py": "94b726f13e6e238db01ff37564c5fcddd6ef18b9fae3d6ab17f2e812845517d8",
@@ -211,6 +211,7 @@ class YomihimeGameLink(Star):
         super().__init__(context, config)
         from astrbot.api.star import StarTools
 
+        from .adapters.astrbot.admin_pages import AdminPages
         from .adapters.astrbot.ff14_pages import FF14Pages
         from .adapters.astrbot.runtime import PLUGIN_NAME, AstrBotRuntime
 
@@ -221,18 +222,22 @@ class YomihimeGameLink(Star):
             config=config,
         )
         self._pages = FF14Pages(context, self._runtime)
+        self._admin_pages = AdminPages(context, self._runtime)
 
     async def initialize(self) -> None:
         await super().initialize()
         self._pages.register()
+        self._admin_pages.register()
         try:
             await self._runtime.initialize()
         except BaseException:
             self._pages.close()
+            self._admin_pages.close()
             raise
 
     async def terminate(self) -> None:
         self._pages.close()
+        self._admin_pages.close()
         try:
             await self._runtime.terminate()
         finally:

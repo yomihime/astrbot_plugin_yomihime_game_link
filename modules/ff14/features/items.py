@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import re
-
 from yomihime_sdk.api.contexts import InvocationView
 from yomihime_sdk.api.display import (
     DisplayDocument,
@@ -22,10 +20,12 @@ from yomihime_sdk.api.services import ModuleServices, SourceHttpError
 from yomihime_sdk.api.storage import JsonObject
 
 from ..models import ItemCandidate, ItemRecord
+from .item_resolution import (
+    item_id_from_query,
+    search_item_candidates,
+    validate_item_query,
+)
 from .item_sources import ItemPayloadError, ItemSourceClient
-
-MAX_QUERY_LENGTH = 120
-_ASCII_INTEGER = re.compile(r"[0-9]+\Z", re.ASCII)
 
 
 class ItemLookup:
@@ -37,20 +37,10 @@ class ItemLookup:
     async def invoke(
         self, context: InvocationView, parameters: JsonObject
     ) -> CapabilityResult:
-        query = parameters.get("query")
-        if not isinstance(query, str):
-            return _error(ErrorCode.PARAMETER_ERROR, "请提供物品名称或数字 ID。")
-        query = query.strip()
-        if not query or len(query) > MAX_QUERY_LENGTH or _has_control(query):
-            return _error(
-                ErrorCode.PARAMETER_ERROR,
-                f"查询长度需为 1 到 {MAX_QUERY_LENGTH} 个字符。",
-            )
-        if not _ASCII_INTEGER.fullmatch(query) and ('"' in query or "\\" in query):
-            return _error(
-                ErrorCode.PARAMETER_ERROR,
-                "名称查询暂不支持双引号或反斜线；请改用物品 ID。",
-            )
+        try:
+            query = validate_item_query(parameters.get("query"))
+        except ValueError as exc:
+            return _error(ErrorCode.PARAMETER_ERROR, str(exc))
 
         try:
             scope = await self._services.scopes.bind(context)
@@ -58,14 +48,12 @@ class ItemLookup:
             return _error(ErrorCode.MODULE_UNAVAILABLE, "物品查询服务暂不可用。")
         source = ItemSourceClient(scope.http)
 
-        if _ASCII_INTEGER.fullmatch(query):
-            item_id = int(query)
-            if not 1 <= item_id <= 2_147_483_647:
-                return _error(ErrorCode.PARAMETER_ERROR, "物品 ID 超出允许范围。")
+        item_id = item_id_from_query(query)
+        if item_id is not None:
             return await self._lookup_id(source, item_id)
 
         try:
-            candidates, truncated = await source.search(query)
+            candidates, truncated = await search_item_candidates(source, query)
         except SourceHttpError as exc:
             return _source_error(exc, operation="search")
         except ItemPayloadError:
@@ -110,7 +98,12 @@ def _item_result(record: ItemRecord, *, partial: bool) -> CapabilityResult:
         blocks.append(
             TextBlock("Garland 当前未提供可解析的获取途径；这不代表物品不可获得。")
         )
-    blocks.extend(TextBlock(f"提示：{warning}") for warning in record.warnings)
+    # Source routes are capped at 24. Keep the independently bounded warnings
+    # together so a valid item stays within the public 32-block contract.
+    if record.warnings:
+        blocks.append(
+            TextBlock("\n".join(f"提示：{warning}" for warning in record.warnings))
+        )
     blocks.append(
         LinksBlock(
             (
@@ -183,10 +176,6 @@ def _error(code: ErrorCode, message: str) -> CapabilityResult:
         privacy=Privacy.PUBLIC,
         error=ErrorDetail(code, message),
     )
-
-
-def _has_control(value: str) -> bool:
-    return any(ord(char) < 32 or 0x7F <= ord(char) <= 0x9F for char in value)
 
 
 __all__ = ["ItemLookup"]

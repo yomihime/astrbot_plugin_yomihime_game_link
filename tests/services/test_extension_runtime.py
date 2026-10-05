@@ -3,10 +3,13 @@ from __future__ import annotations
 import asyncio
 import math
 import tempfile
+import time
 import unittest
+from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 from secrets import token_urlsafe
+from unittest.mock import patch
 
 from ygl_test_subject.api.administration import (
     AdminAuthorizationDenied,
@@ -206,6 +209,51 @@ class _FactorySource:
         lease = _BundleLease(self)
         self.leases.append(lease)
         return lease
+
+
+class _CloseBudgetClock:
+    """Control deadline branches without depending on a sub-tick wall budget."""
+
+    def __init__(self) -> None:
+        self.active = False
+        self.guard_expired = False
+
+    def time(self) -> float:
+        elapsed = time.perf_counter() - self.started
+        if self.active and elapsed >= 0.5:
+            # A broken entry barrier must still fail within real bounded time.
+            self.guard_expired = True
+            self.current = max(self.current, self.initial + elapsed)
+        return self.current
+
+    def advance(self, interval: float) -> None:
+        if not self.active or interval <= 0:
+            raise AssertionError("clock advances require an active positive interval")
+        self.current += interval
+
+    @contextmanager
+    def control(self):
+        loop = asyncio.get_running_loop()
+        real_time = loop.time
+        self.initial = self.current = real_time()
+        self.started = time.perf_counter()
+        self.active = True
+        # Frozen/explicit time has no early timer window. Keeping Windows'
+        # 15.625ms resolution would fire the original 10ms timers before entry.
+        with patch.object(loop, "time", self.time), patch.object(
+            loop, "_clock_resolution", 0.0
+        ):
+            try:
+                yield self
+            finally:
+                self.active = False
+                guard = time.perf_counter() + 0.5
+                while real_time() < self.current:
+                    if time.perf_counter() >= guard:
+                        raise AssertionError("real loop clock did not catch up")
+                    time.sleep(0.001)
+        if self.guard_expired:
+            raise AssertionError("stop entry exceeded the real 0.5s guard")
 
 
 class ExtensionRuntimeTests(unittest.IsolatedAsyncioTestCase):
@@ -971,7 +1019,7 @@ class ExtensionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sibling.stopped, 1)
         self.assertEqual(source.leases[0].release_calls, 1)
 
-    async def test_close_deadline_bounds_retained_repair_candidate_and_retry(self):
+    async def _retained_repair_candidate(self):
         factory = _Factory(stop_failures_on_call={3: 1})
         runtime, _candidate, source = await self._runtime(
             factory=factory,
@@ -1004,7 +1052,13 @@ class ExtensionRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 runtime, self.registry.snapshot().revision, "sample/other"
             )
 
-        repair_candidate = factory.instances[2]
+        return runtime, source, sibling, factory.instances[2]
+
+    async def test_close_deadline_bounds_retained_repair_candidate_and_retry(self):
+        runtime, source, sibling, repair_candidate = (
+            await self._retained_repair_candidate()
+        )
+        close_clock = _CloseBudgetClock()
         repair_entered = asyncio.Event()
         repair_cancelled = asyncio.Event()
         release_repair = asyncio.Event()
@@ -1012,6 +1066,9 @@ class ExtensionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         async def slow_repair_stop():
             repair_candidate.stopped += 1
             repair_entered.set()
+            if close_clock.active:
+                self.assertLess(close_clock.time(), close_clock.initial + 0.01)
+                close_clock.advance(0.011)
             try:
                 await release_repair.wait()
             except asyncio.CancelledError:
@@ -1024,8 +1081,9 @@ class ExtensionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(candidate_key, self.lifecycle._candidates)
         self.assertIs(self.lifecycle.instance("sample/mod"), sibling)
 
-        with self.assertRaises(ExtensionCleanupPending):
-            await runtime.close(timeout=0.01)
+        with close_clock.control():
+            with self.assertRaises(ExtensionCleanupPending):
+                await runtime.close(timeout=0.01)
         await asyncio.wait_for(repair_entered.wait(), timeout=0.5)
         await asyncio.wait_for(repair_cancelled.wait(), timeout=0.5)
         self.assertFalse(runtime.closed)
@@ -1033,7 +1091,10 @@ class ExtensionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(candidate_key, self.lifecycle._candidates)
         self.assertIsNotNone(flight.candidate_cleanup_task)
         self.assertFalse(flight.candidate_cleanup_task.done())
-        self.assertFalse(self.lifecycle._candidates[candidate_key][0].stop_task.done())
+        candidate_record = self.lifecycle._candidates[candidate_key][0]
+        self.assertIs(candidate_record.instance, repair_candidate)
+        self.assertFalse(candidate_record.stop_task.done())
+        self.assertTrue(runtime._closing)
         self.assertIs(self.lifecycle.instance("sample/mod"), sibling)
         self.assertEqual(source.leases[0].release_calls, 0)
 
@@ -1043,8 +1104,12 @@ class ExtensionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(runtime._repair_flights)
         self.assertNotIn(candidate_key, self.lifecycle._candidates)
         self.assertEqual(source.leases[0].release_calls, 1)
+        self.assertIsNone(flight.candidate_cleanup_task)
+        self.assertTrue(candidate_record.stop_task.done())
+        self.assertEqual(repair_candidate.stopped, 2)
+        self.assertEqual(sibling.stopped, 1)
 
-    async def test_close_deadline_is_shared_by_unregistered_build_candidates(self):
+    async def _unregistered_build_candidates(self):
         factory = _Factory(
             invalid_handlers_on_call=2,
             stop_failures_on_call={1: 1, 2: 1},
@@ -1060,6 +1125,11 @@ class ExtensionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         flight = runtime._build_flights["sample"]
         self.assertEqual(flight.adopted_module_ids, ["sample/mod", "sample/other"])
         self.assertEqual(len(self.lifecycle._candidates), 2)
+        return runtime, source, factory, flight
+
+    async def test_close_deadline_is_shared_by_unregistered_build_candidates(self):
+        runtime, source, factory, flight = await self._unregistered_build_candidates()
+        close_clock = _CloseBudgetClock()
         entered = {
             module_id: asyncio.Event() for module_id in flight.adopted_module_ids
         }
@@ -1078,6 +1148,9 @@ class ExtensionRuntimeTests(unittest.IsolatedAsyncioTestCase):
             ):
                 instance.stopped += 1
                 entered[module_id].set()
+                if close_clock.active:
+                    self.assertLess(close_clock.time(), close_clock.initial + 0.01)
+                    close_clock.advance(0.011)
                 try:
                     await release[module_id].wait()
                 except asyncio.CancelledError:
@@ -1086,12 +1159,14 @@ class ExtensionRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
             instance.stop = slow_stop
 
-        with self.assertRaises(ExtensionCleanupPending):
-            await runtime.close(timeout=0.01)
+        with close_clock.control():
+            with self.assertRaises(ExtensionCleanupPending):
+                await runtime.close(timeout=0.01)
         await asyncio.wait_for(entered["sample/other"].wait(), timeout=0.5)
         await asyncio.wait_for(cancelled["sample/other"].wait(), timeout=0.5)
         self.assertFalse(entered["sample/mod"].is_set())
         self.assertFalse(runtime.closed)
+        self.assertTrue(runtime._closing)
         self.assertIs(runtime._build_flights["sample"], flight)
         self.assertIsNotNone(flight.candidate_cleanup_task)
         self.assertFalse(flight.candidate_cleanup_task.done())
@@ -1099,6 +1174,11 @@ class ExtensionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         for module_id in flight.adopted_module_ids:
             key = ("sample", module_id, flight.operation_id)
             self.assertIn(key, self.lifecycle._candidates)
+        candidate_record = self.lifecycle._candidates[
+            ("sample", "sample/other", flight.operation_id)
+        ][0]
+        self.assertIs(candidate_record.instance, factory.instances[1])
+        self.assertFalse(candidate_record.stop_task.done())
 
         retry = asyncio.create_task(runtime.close(timeout=0.5))
         release["sample/other"].set()
@@ -1111,6 +1191,112 @@ class ExtensionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(runtime.closed)
         self.assertFalse(runtime._build_flights)
         self.assertFalse(self.lifecycle._candidates)
+        self.assertEqual(source.leases[0].release_calls, 1)
+        self.assertIsNone(flight.candidate_cleanup_task)
+        self.assertTrue(candidate_record.stop_task.done())
+        self.assertEqual([instance.stopped for instance in factory.instances], [2, 2])
+
+    async def test_close_exhausted_budget_retains_repair_candidate_before_stop(self):
+        runtime, source, sibling, repair_candidate = (
+            await self._retained_repair_candidate()
+        )
+        repair_id, flight = next(iter(runtime._repair_flights.items()))
+        key = ("sample", "sample/other", repair_id)
+        record = self.lifecycle._candidates[key][0]
+        self.assertIs(record.instance, repair_candidate)
+        previous_stop = record.stop_task
+        self.assertTrue(previous_stop.done())
+        close_clock = _CloseBudgetClock()
+        discard = runtime._discard_flight_candidates
+
+        async def exhaust_before_cleanup(selected, *, deadline):
+            self.assertIs(selected, flight)
+            self.assertEqual(deadline, close_clock.initial + 0.01)
+            close_clock.advance(0.011)
+            return await discard(selected, deadline=deadline)
+
+        with close_clock.control(), patch.object(
+            runtime, "_discard_flight_candidates", exhaust_before_cleanup
+        ):
+            with self.assertRaises(ExtensionCleanupPending):
+                await runtime.close(timeout=0.01)
+
+        self.assertFalse(runtime.closed)
+        self.assertTrue(runtime._closing)
+        self.assertIs(runtime._repair_flights[repair_id], flight)
+        self.assertTrue(flight.cleanup_pending)
+        self.assertIsNone(flight.candidate_cleanup_task)
+        self.assertIs(self.lifecycle._candidates[key][0], record)
+        self.assertEqual(record.candidate_key, key)
+        self.assertIs(record.stop_task, previous_stop)
+        self.assertEqual(repair_candidate.stopped, 1)
+        self.assertIs(self.lifecycle.instance("sample/mod"), sibling)
+        self.assertEqual(sibling.stopped, 0)
+        self.assertEqual(source.leases[0].release_calls, 0)
+        with self.assertRaises(ExtensionRuntimeError):
+            runtime.scan()
+
+        await runtime.close(timeout=0.5)
+        self.assertTrue(runtime.closed)
+        self.assertFalse(runtime._repair_flights)
+        self.assertFalse(runtime._build_flights)
+        self.assertNotIn(key, self.lifecycle._candidates)
+        self.assertIsNone(flight.candidate_cleanup_task)
+        self.assertTrue(record.stop_task.done())
+        self.assertEqual(repair_candidate.stopped, 2)
+        self.assertIs(self.lifecycle.instance("sample/mod"), sibling)
+        self.assertEqual(sibling.stopped, 1)
+        self.assertEqual(source.leases[0].release_calls, 1)
+
+    async def test_close_exhausted_budget_retains_build_candidates_before_stop(self):
+        runtime, source, factory, flight = await self._unregistered_build_candidates()
+        records = {
+            ("sample", module_id, flight.operation_id): self.lifecycle._candidates[
+                ("sample", module_id, flight.operation_id)
+            ][0]
+            for module_id in flight.adopted_module_ids
+        }
+        previous_stops = {key: record.stop_task for key, record in records.items()}
+        for record in records.values():
+            self.assertTrue(record.stop_task.done())
+        close_clock = _CloseBudgetClock()
+        discard = runtime._discard_flight_candidates
+
+        async def exhaust_before_cleanup(selected, *, deadline):
+            self.assertIs(selected, flight)
+            self.assertEqual(deadline, close_clock.initial + 0.01)
+            close_clock.advance(0.011)
+            return await discard(selected, deadline=deadline)
+
+        with close_clock.control(), patch.object(
+            runtime, "_discard_flight_candidates", exhaust_before_cleanup
+        ):
+            with self.assertRaises(ExtensionCleanupPending):
+                await runtime.close(timeout=0.01)
+
+        self.assertFalse(runtime.closed)
+        self.assertTrue(runtime._closing)
+        self.assertIs(runtime._build_flights["sample"], flight)
+        self.assertTrue(flight.cleanup_pending)
+        self.assertIsNone(flight.candidate_cleanup_task)
+        self.assertEqual(source.leases[0].release_calls, 0)
+        self.assertEqual([instance.stopped for instance in factory.instances], [1, 1])
+        for key, record in records.items():
+            self.assertIs(self.lifecycle._candidates[key][0], record)
+            self.assertEqual(record.candidate_key, key)
+            self.assertIs(record.stop_task, previous_stops[key])
+        with self.assertRaises(ExtensionRuntimeError):
+            runtime.scan()
+
+        await runtime.close(timeout=0.5)
+        self.assertTrue(runtime.closed)
+        self.assertFalse(runtime._build_flights)
+        self.assertFalse(runtime._repair_flights)
+        self.assertFalse(self.lifecycle._candidates)
+        self.assertIsNone(flight.candidate_cleanup_task)
+        for record in records.values():
+            self.assertTrue(record.stop_task.done())
+        self.assertEqual([instance.stopped for instance in factory.instances], [2, 2])
         self.assertEqual(source.leases[0].release_calls, 1)
 
     async def test_runtime_and_close_timeouts_reject_nonfinite_and_bool(self):

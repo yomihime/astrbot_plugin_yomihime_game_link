@@ -30,7 +30,7 @@ from ygl_test_subject.core.ports import AdminAuthorizationPort
 
 class B05AdminContractTests(unittest.TestCase):
     def test_admin_revision_is_additive_to_b04_c13(self):
-        self.assertEqual(ADMIN_CONTRACT_REVISION, "B05-H-CORE-01")
+        self.assertEqual(ADMIN_CONTRACT_REVISION, "H-ADMIN-02")
         self.assertEqual(
             (CONTRACT_VERSION, CONTRACT_REVISION), ("1.4.0", "UI-B0-PUBLIC-WEB")
         )
@@ -130,7 +130,7 @@ class B05AdminContractTests(unittest.TestCase):
         signature = inspect.signature(AdminAuthorizationPort.authorize)
         self.assertEqual(
             tuple(signature.parameters),
-            ("self", "operation", "invocation", "context"),
+            ("self", "operation", "invocation", "context", "resources"),
         )
         self.assertIs(
             signature.parameters["invocation"].default, inspect.Parameter.empty

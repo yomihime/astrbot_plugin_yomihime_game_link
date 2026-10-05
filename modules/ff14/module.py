@@ -20,9 +20,11 @@ from .features.calendar_evaluator import CalendarDailySummaryEvaluator
 from .features.calendar_subscriptions import CalendarSubscriptionHandler
 from .features.fflogs import FFLogsCharacterLookup, FFLogsOutputPercentiles
 from .features.items import ItemLookup
+from .features.market_handler import MarketQueryHandler
 
 CAPABILITY_STATUS = "status"
 CAPABILITY_ITEM_LOOKUP = "item.lookup"
+CAPABILITY_MARKET_QUERY = "ff14.market.query"
 CAPABILITY_FFLOGS_CHARACTER = "ff14.logs.character"
 CAPABILITY_FFLOGS_OUTPUT = "ff14.logs.output_percentile"
 CAPABILITY_CALENDAR_QUERY = "ff14.calendar.query"
@@ -33,6 +35,7 @@ CAPABILITY_CALENDAR_SUBSCRIPTION_CANCEL = "ff14.calendar.subscription.cancel"
 CAPABILITY_IDS = (
     CAPABILITY_STATUS,
     CAPABILITY_ITEM_LOOKUP,
+    CAPABILITY_MARKET_QUERY,
     CAPABILITY_FFLOGS_CHARACTER,
     CAPABILITY_FFLOGS_OUTPUT,
     CAPABILITY_CALENDAR_QUERY,
@@ -49,10 +52,8 @@ class Factory:
     async def create(self, services: ModuleServices) -> "FF14Module":
         if not isinstance(services, ModuleServices):
             raise TypeError("ModuleServices are required")
-        config = FF14ConfigSnapshot.from_values(
-            (await services.config.current()).values
-        )
-        return FF14Module(services, config=config)
+        FF14ConfigSnapshot.from_values((await services.config.current()).values)
+        return FF14Module(services)
 
 
 class FF14Module:
@@ -61,12 +62,13 @@ class FF14Module:
     def __init__(
         self, services: ModuleServices, *, config: FF14ConfigSnapshot | None = None
     ) -> None:
-        config = config or FF14ConfigSnapshot()
         self._started = False
+        self._market = MarketQueryHandler(services)
         self._handlers = ModuleHandlers(
             capabilities={
                 CAPABILITY_STATUS: _StatusHandler(),
                 CAPABILITY_ITEM_LOOKUP: ItemLookup(services),
+                CAPABILITY_MARKET_QUERY: self._market,
                 CAPABILITY_FFLOGS_CHARACTER: FFLogsCharacterLookup(services),
                 CAPABILITY_FFLOGS_OUTPUT: FFLogsOutputPercentiles(services),
                 CAPABILITY_CALENDAR_QUERY: CalendarQuery(services, config=config),
@@ -95,6 +97,7 @@ class FF14Module:
 
     async def stop(self) -> None:
         self._started = False
+        self._market.close()
 
     async def check_health(self) -> HealthReport:
         if not self._started:

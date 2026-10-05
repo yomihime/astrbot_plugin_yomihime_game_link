@@ -150,6 +150,8 @@ class Registry:
         # Build and validate every index entry before touching registry state.
         for module in manifest.modules:
             global_id = manifest.global_module_id(module.module_id)
+            if global_id == "game_link/core":
+                raise RegistryError("module ID is reserved by Core")
             if global_id in candidate_modules:
                 raise RegistryError("module is already registered")
             if module.route in candidate_routes:

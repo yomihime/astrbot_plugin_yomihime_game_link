@@ -7,25 +7,25 @@
       "cn",
       "global"
     ],
-    "hint": "仅用于帮助和缺参提示；命令仍需明确填写区域。保存后 AstrBot 会重载插件；编辑前请刷新表单，避免旧表单覆盖新值。"
+    "hint": "仅保留旧配置兼容与回退材料；迁移完成后本字段不再生效。新默认值由 Core 与 FF14 模块配置管理；迁移前停止实例并使用迁移准备脚本保存原始配置。"
   },
   "ff14_calendar_default_days": {
     "description": "日历默认查询天数",
     "type": "int",
     "default": 7,
-    "hint": "整数 1–30，仅用于省略 days 的新查询。保存后 AstrBot 会重载插件；无效配置会暂停整个插件，请修正后保存重载。"
+    "hint": "仅保留旧配置兼容与回退材料；迁移完成后本字段不再生效。新默认值由 FF14 模块配置管理；迁移前停止实例并保存原始配置。"
   },
   "ff14_calendar_default_timezone": {
     "description": "日历默认时区",
     "type": "string",
     "default": "Asia/Shanghai",
-    "hint": "可解析的 IANA 时区，例如 Asia/Shanghai 或 UTC；用于新查询和新订阅。显式参数优先，已有订阅保持原值。保存后 AstrBot 会重载插件。"
+    "hint": "仅保留旧配置兼容与回退材料；迁移完成后本字段不再生效。新默认值由 FF14 模块配置管理；迁移前停止实例并保存原始配置。"
   },
   "ff14_calendar_default_delivery_time": {
     "description": "新订阅每日摘要时间",
     "type": "string",
     "default": "08:00",
-    "hint": "严格 24 小时制 HH:MM，仅用于本人显式新建订阅时省略 time 的默认值，不自动创建订阅。保存后 AstrBot 会重载插件。"
+    "hint": "仅保留旧配置兼容与回退材料；迁移完成后本字段不再生效。新默认值由 FF14 模块配置管理；迁移前停止实例并保存原始配置。"
   },
   "web_public_origin": {
     "description": "网页访问地址（可选）",

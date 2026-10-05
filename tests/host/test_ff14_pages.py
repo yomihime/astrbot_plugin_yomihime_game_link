@@ -1,15 +1,11 @@
 """Public route scope, failure sanitization and exact handler lifecycle."""
 
-import ast
 import asyncio
-import importlib.util
-import inspect
 import json
 import sys
 import time
 import unittest
 from dataclasses import replace
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -39,136 +35,7 @@ from ygl_test_subject.api.results import (
 )
 from ygl_test_subject.core.ports import PublicWebBinding
 
-HOST_SOURCE = Path(
-    "C:/Users/eveni/.astrbot_launcher/instances/6775391e-2fb9-4f7a-aeb5-401fcc4debc8/core/astrbot"
-)
-
-
-def _host_module(relative):
-    spec = importlib.util.spec_from_file_location(
-        "ygl_host_" + relative.replace("/", "_"), HOST_SOURCE / relative
-    )
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-def _host_contracts():
-    """Use actual public DTO and unchanged Host auth/dispatch AST without startup."""
-    import re
-    from typing import Any, cast
-    from urllib.parse import quote
-
-    import jwt
-    from fastapi import Request
-    from starlette.responses import JSONResponse
-
-    web = _host_module("api/web.py")
-    responses = _host_module("dashboard/responses.py")
-    page_auth = _host_module("dashboard/plugin_page_auth.py")
-    namespace = {
-        "__name__": "host_contract_probe",
-        "jwt": jwt,
-        "Request": Request,
-        "JSONResponse": JSONResponse,
-        "Any": Any,
-        "cast": cast,
-        "re": re,
-        "quote": quote,
-        "ApiError": responses.ApiError,
-        "error": responses.error,
-        "PluginPageAuth": page_auth.PluginPageAuth,
-        "PluginRequest": web.PluginRequest,
-        "bind_request_context": web.bind_request_context,
-        "DASHBOARD_JWT_COOKIE_NAME": "astrbot_dashboard_jwt",
-    }
-    auth = ast.parse(
-        (HOST_SOURCE / "dashboard/api/auth.py").read_text(encoding="utf-8")
-    )
-    names = {
-        "_get_dashboard_state_username",
-        "_extract_dashboard_jwt",
-        "require_dashboard_user",
-    }
-    exec(
-        compile(
-            ast.Module(
-                body=[
-                    node for node in auth.body if getattr(node, "name", None) in names
-                ],
-                type_ignores=[],
-            ),
-            "actual_host_auth",
-            "exec",
-        ),
-        namespace,
-    )
-    server = ast.parse(
-        (HOST_SOURCE / "dashboard/server.py").read_text(encoding="utf-8")
-    )
-    owner = next(
-        node
-        for node in server.body
-        if isinstance(node, ast.ClassDef)
-        and any(
-            getattr(child, "name", None) == "auth_middleware" for child in node.body
-        )
-    )
-    methods = [
-        node
-        for node in owner.body
-        if getattr(node, "name", None)
-        in {"auth_middleware", "_validate_dashboard_token", "_extract_dashboard_jwt"}
-    ]
-    cls = ast.ClassDef(
-        name="HostAuth", bases=[], keywords=[], body=methods, decorator_list=[]
-    )
-    exec(
-        compile(
-            ast.fix_missing_locations(ast.Module(body=[cls], type_ignores=[])),
-            "actual_host_middleware",
-            "exec",
-        ),
-        namespace,
-    )
-
-    async def no_rate_limit(*_):
-        return None
-
-    namespace["HostAuth"]._apply_auth_rate_limit = no_rate_limit
-    plugins = ast.parse(
-        (HOST_SOURCE / "dashboard/api/plugins.py").read_text(encoding="utf-8")
-    )
-    names = {
-        "_normalize_plugin_api_route",
-        "_plugin_api_route_pattern",
-        "_match_registered_web_api",
-        "_plugin_extension_legacy_path",
-        "_call_plugin_extension",
-    }
-
-    async def run_maybe_async(callback):
-        value = callback()
-        return await value if inspect.isawaitable(value) else value
-
-    namespace["run_maybe_async"] = run_maybe_async
-    exec(
-        compile(
-            ast.Module(
-                body=[
-                    node
-                    for node in plugins.body
-                    if getattr(node, "name", None) in names
-                ],
-                type_ignores=[],
-            ),
-            "actual_host_dispatch",
-            "exec",
-        ),
-        namespace,
-    )
-    return web, namespace
+from tests.host.astrbot_contract import host_contracts as _host_contracts
 
 
 def _token(**claims):
@@ -748,12 +615,12 @@ class _PublicRuntime:
 
 
 class FF14PagesTests(unittest.IsolatedAsyncioTestCase):
-    async def test_exact_four_get_and_three_post_handlers_preserve_projections(self):
+    async def test_exact_four_get_and_four_post_handlers_preserve_projections(self):
         context, runtime = _Context(), _PublicRuntime()
         pages = FF14Pages(context, runtime)
         pages.register()
         pages.register()
-        self.assertEqual(len(context.registered_web_apis), 7)
+        self.assertEqual(len(context.registered_web_apis), 8)
         self.assertEqual(
             [(entry[0], entry[2]) for entry in context.registered_web_apis],
             [
@@ -762,7 +629,7 @@ class FF14PagesTests(unittest.IsolatedAsyncioTestCase):
             ]
             + [
                 (f"/{PLUGIN_NAME}/queries/{endpoint}", ["POST"])
-                for endpoint in ("items", "character", "calendar")
+                for endpoint in ("items", "character", "calendar", "market")
             ],
         )
         for endpoint, entry in zip(

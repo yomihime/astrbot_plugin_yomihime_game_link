@@ -55,6 +55,9 @@ from ygl_test_subject.infrastructure.sqlite.repositories import SQLiteRepositori
 from ygl_test_subject.infrastructure.sqlite.repositories_admin_credentials import (
     SQLiteAdminCredentialRepository,
 )
+from ygl_test_subject.infrastructure.sqlite.repositories_subscriptions import (
+    SQLiteSchedulerRepository,
+)
 from ygl_test_subject.services.admin_authorization import (
     AdminAuthorizationService,
     _digest,
@@ -73,6 +76,11 @@ from ygl_test_subject.services.module_services import (
 
 from tests.contracts.test_context_issuer import _PublicWebProofs
 from tests.fixtures.b03_runtime import build_runtime
+from tests.fixtures.b04_runtime import (
+    initialize_subscription_gate_fixture,
+    replace_subscription_gate_fixture,
+    synthetic_subscription_gate_bindings,
+)
 
 
 class B03ServiceAssemblyTests(unittest.IsolatedAsyncioTestCase):
@@ -676,7 +684,17 @@ class B03ServiceAssemblyTests(unittest.IsolatedAsyncioTestCase):
             module.epoch,
             snapshot.revision,
         )
-        execution = await self.runtime.scheduler_repository.claim_due(request, now=now)
+        # This historical B03 assembly has no Host gate composition. Prove the
+        # default rejection, then explicitly compose the test-only persisted gate.
+        self.assertIsNone(
+            await self.runtime.scheduler_repository.claim_due(request, now=now)
+        )
+        bindings = synthetic_subscription_gate_bindings(("sample/alpha",))
+        await initialize_subscription_gate_fixture(self.runtime.database, bindings, now)
+        scheduler = SQLiteSchedulerRepository(
+            self.runtime.database, subscription_gate_bindings=bindings
+        )
+        execution = await scheduler.claim_due(request, now=now)
         self.assertIsNotNone(execution)
         self.runtime.execution_claim_proofs.prove(execution)
         scheduled_lease = self.runtime.lifecycle.admission.admit_schedule(
@@ -704,6 +722,12 @@ class B03ServiceAssemblyTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(stored.value["owner"], "alice")
         finally:
             self.runtime.issuer.release(invocation)
+
+        await replace_subscription_gate_fixture(
+            self.runtime.database, bindings, "sample/alpha", False, now
+        )
+        self.assertFalse(await scheduler.is_current(execution, now=now))
+        self.assertIsNone(await scheduler.claim_due(request, now=now))
 
     async def test_authorized_records_reject_expired_wrong_source_and_release_without_writes(
         self,

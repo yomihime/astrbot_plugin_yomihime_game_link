@@ -73,7 +73,11 @@ def _walk_budget(value: object) -> tuple[int, int]:
                     raise ManifestError("manifest object keys must be strings")
                 if len(key) > EXTENSION_MANIFEST_MAX_STRING_LENGTH:
                     raise ManifestError("manifest string budget exceeded")
-                is_schema = in_schema or key in {"input_schema", "filter_schema"}
+                is_schema = in_schema or key in {
+                    "input_schema",
+                    "filter_schema",
+                    "value_schema",
+                }
                 if is_schema:
                     schemas += 1
                 visit(child, depth + 1, is_schema)
@@ -240,6 +244,8 @@ def _map_module(value: object) -> ModuleManifest:
     config_fields = []
     for raw in _list(obj, "config_fields"):
         item = _keys(raw, "config_field", {"name"})
+        if "value_schema" in item:
+            item["value_schema"] = _schema(item["value_schema"], "value_schema")
         config_fields.append(ConfigField(**item))
     sources = []
     for raw in _list(obj, "sources"):

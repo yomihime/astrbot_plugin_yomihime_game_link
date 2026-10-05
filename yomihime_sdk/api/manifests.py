@@ -107,7 +107,7 @@ EXTENSION_DESCRIPTOR_FIELDS: Mapping[str, frozenset[str]] = MappingProxyType(
             }
         ),
         "config_field": frozenset(
-            {"name", "sensitive", "required", "default", "description"}
+            {"name", "sensitive", "required", "default", "description", "value_schema", "group"}
         ),
         "source": frozenset(
             {
@@ -603,9 +603,13 @@ class ConfigField:
     required: bool = False
     default: JsonValue | None = None
     description: str = ""
+    value_schema: Mapping[str, object] | None = None
+    group: str | None = None
 
     def __post_init__(self) -> None:
         _field_name(self.name, "config field name")
+        if self.group is not None:
+            _identifier(self.group, "config field group")
         if not isinstance(self.sensitive, bool) or not isinstance(self.required, bool):
             raise TypeError("config sensitivity and required markers must be bool")
         if self.sensitive and self.default is not None:
@@ -616,6 +620,21 @@ class ConfigField:
             object.__setattr__(self, "default", freeze_json(self.default))
         if self.description:
             _text(self.description, "config field description")
+        if self.value_schema is not None:
+            if self.sensitive:
+                raise ValueError("sensitive config fields cannot declare value_schema")
+            object.__setattr__(
+                self, "value_schema", freeze_input_schema(self.value_schema)
+            )
+            if self.default is not None:
+                self.validate_value(self.default)
+
+    def validate_value(self, value: object) -> None:
+        """Validate ordinary data using the existing SDK schema vocabulary."""
+        if self.value_schema is not None:
+            from .validation import _validate
+
+            _validate(self.value_schema, value, "config", 0)
 
 
 @dataclass(frozen=True, slots=True)

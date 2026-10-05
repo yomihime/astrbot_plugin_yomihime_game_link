@@ -132,7 +132,12 @@ class SQLiteDatabaseTests(unittest.IsolatedAsyncioTestCase):
             }
         finally:
             connection.close()
-        upgraded = SQLiteDatabase(path)
+        fence_migrations = self.root / "v90-migrations"
+        fence_migrations.mkdir()
+        for migration in discover_migrations(source):
+            if migration.version <= 90:
+                shutil.copyfile(migration.path, fence_migrations / migration.path.name)
+        upgraded = SQLiteDatabase(path, migrations_dir=fence_migrations)
         self.assertEqual(upgraded.initialize(), 90)
         connection = upgraded.connect()
         try:
@@ -160,6 +165,7 @@ class SQLiteDatabaseTests(unittest.IsolatedAsyncioTestCase):
             )
         finally:
             connection.close()
+
         # Reapplying migration does not reset a consumed singleton or add stamps.
         connection = upgraded.connect()
         try:
@@ -186,6 +192,26 @@ class SQLiteDatabaseTests(unittest.IsolatedAsyncioTestCase):
                 ),
                 (None, None),
             )
+        finally:
+            connection.close()
+
+        # The historical fence upgrade remains v90; the current full migration
+        # advances to v100 without resetting the consumed gate or old data.
+        current = SQLiteDatabase(path)
+        self.assertEqual(current.initialize(), 100)
+        self.assertEqual(current.initialize(), 100)
+        connection = current.connect()
+        try:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT phase FROM subscription_gate_bootstrap"
+                ).fetchone()[0],
+                "complete",
+            )
+            for table in tables:
+                row = tuple(connection.execute(f"SELECT * FROM {table}").fetchone())
+                with self.subTest(current_table=table):
+                    self.assertEqual(row[: len(before[table])], before[table])
         finally:
             connection.close()
 

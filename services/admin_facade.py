@@ -11,6 +11,7 @@ from ..api.administration import (
     AdminOperation,
     AdminOperations,
     ConfigSummary,
+    CoreConfigSummary,
     ModuleAdminSnapshot,
     ModuleStatus,
 )
@@ -91,6 +92,14 @@ class AdminFacade:
         return await self._operations.module_snapshot(
             invocation, module_id, authorization=context
         )
+
+    async def config_snapshot(
+        self, invocation: InvocationView | None, module_id: str, *,
+        authorization: AdminAuthorizationContext | None = None,
+    ) -> CoreConfigSummary:
+        context = self._require_context(authorization)
+        await self._authorize(AdminOperation.MODULE_SNAPSHOT, invocation, context)
+        return await self._operations.config_snapshot(invocation, module_id, authorization=context)
 
     async def set_enabled(
         self,

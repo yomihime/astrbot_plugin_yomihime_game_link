@@ -1,0 +1,7 @@
+# Offline Host contract and ASGI test dependencies; not plugin runtime deps.
+# Other dependencies are resolved transitively; this is not a complete lockfile.
+PyJWT==2.10.1
+fastapi==0.135.2
+starlette==0.52.1
+httpx==0.28.1
+Quart==0.20.0

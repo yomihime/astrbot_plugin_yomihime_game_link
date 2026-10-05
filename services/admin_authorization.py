@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import hmac
 import inspect
+import threading
 from collections.abc import Awaitable, Callable
+from contextlib import contextmanager
 from enum import StrEnum
+from pathlib import Path
+from time import time
 
 from ..api.administration import (
     AdminAuthorizationContext,
@@ -16,12 +21,14 @@ from ..api.administration import (
     AdminOperation,
 )
 from ..api.contexts import InvocationView
+from ..api.services import ConfigSnapshot
 from ..core.ports import AdmissionPort
 from ..infrastructure.sqlite.repositories_admin_credentials import (
     AdminCredentialState,
     AdminCredentialStatus,
     SQLiteAdminCredentialRepository,
 )
+from .admin_sources import TrustedAdminSource
 
 
 class AdminCredentialOperation(StrEnum):
@@ -102,6 +109,53 @@ class AdminAuthorizationService:
         self.repository = repository
         self.admission = admission
         self.context_validator = context_validator
+        self._sources = {}
+        self._grants = {}
+        self._lock = threading.RLock()
+        self._closed = False
+
+    def register_source(self, source_id, *, resources, operations):
+        """Explicit deployment assembly; never exposed as a request operation."""
+        with self._lock:
+            if self._closed or source_id in self._sources:
+                raise ValueError("authority unavailable or already registered")
+            source = TrustedAdminSource(source_id, resources, operations)
+            self._sources[source_id] = source
+            return source
+
+    def close(self):
+        with self._lock:
+            self._closed = True
+            self._grants.clear()
+            sources = tuple(self._sources.values())
+        for source in sources:
+            source.close()
+
+    def _owned(self, grant):
+        with self._lock:
+            if self._closed or self._grants.get(id(grant)) is not grant:
+                raise AdminAuthorizationDenied
+        return grant._effect
+
+    def _mint(
+        self, operation, generation, context, invocation, source=None, resources=None
+    ):
+        effect = _GrantEffect(
+            self, operation, generation, context, invocation, source, resources or {}
+        )
+        grant = AdminAuthorizationGrant(operation, generation, effect)
+        effect.grant = grant
+        with self._lock:
+            if self._closed:
+                raise AdminAuthorizationDenied
+            # Grants have a hard request lifetime, including compatibility native grants.
+            self._grants = {
+                key: item
+                for key, item in self._grants.items()
+                if item._effect.expiry > time()
+            }
+            self._grants[id(grant)] = grant
+        return grant
 
     async def authorize(
         self,
@@ -109,11 +163,20 @@ class AdminAuthorizationService:
         *,
         invocation: InvocationView | None,
         context: AdminAuthorizationContext | None,
+        resources=None,
     ) -> AdminAuthorizationGrant:
         if not isinstance(operation, AdminOperation) or not _context_is_structural(
             context
         ):
             raise AdminAuthorizationDenied from None
+        if self._closed:
+            raise AdminAuthorizationDenied
+        source = self._sources.get(context.adapter_id)
+        if source is not None:
+            proof = source.check(context, operation, resources or {})
+            return self._mint(
+                operation, proof.epoch, context, invocation, source, resources
+            )
         validator = self.context_validator
         if validator is None:
             raise AdminAuthorizationDenied from None
@@ -133,7 +196,7 @@ class AdminAuthorizationService:
                 or latest.generation != state.generation
             ):
                 raise AdminAuthorizationDenied
-            return AdminAuthorizationGrant(operation, state.generation)
+            return self._mint(operation, state.generation, context, invocation)
         except AdminAuthorizationDenied:
             raise
         except Exception:
@@ -148,9 +211,15 @@ class AdminAuthorizationService:
         context: AdminAuthorizationContext | None,
     ) -> AdminAuthorizationGrant:
         """Recheck a prior grant immediately before a Core read/write effect."""
-        if grant.operation is not operation:
+        effect = self._owned(grant)
+        if grant.operation is not operation or effect.context is not context:
             raise AdminAuthorizationDenied from None
-        latest = await self.authorize(operation, invocation=invocation, context=context)
+        latest = await self.authorize(
+            operation,
+            invocation=invocation,
+            context=context,
+            resources=effect.resources,
+        )
         if latest.generation != grant.generation:
             raise AdminAuthorizationDenied from None
         return latest
@@ -171,6 +240,11 @@ class AdminAuthorizationService:
             or grant.operation is not operation
         ):
             raise AdminAuthorizationDenied from None
+        effect = self._owned(grant)
+        effect.check_lifetime()
+        if effect.source is not None:
+            effect.source.check(effect.context, operation, effect.resources)
+            return
         try:
             state = await self.repository.current()
         except Exception:
@@ -180,6 +254,16 @@ class AdminAuthorizationService:
             or state.generation != grant.generation
         ):
             raise AdminAuthorizationDenied from None
+        effect.check_lifetime()
+        validator = self.context_validator
+        accepted = validator(
+            operation, effect.invocation, effect.context, grant.generation
+        )
+        if inspect.isawaitable(accepted):
+            accepted = await accepted
+        if accepted is not True:
+            raise AdminAuthorizationDenied
+        effect.check_lifetime()
 
     async def _authorize_lifecycle(
         self,
@@ -226,30 +310,11 @@ class AdminAuthorizationService:
         before reading or mutating protected state. It intentionally accepts
         the existing unit-of-work boundary instead of opening a second one.
         """
-        if grant.operation is not operation:
-            raise AdminAuthorizationDenied from None
-        try:
-            row = unit.execute(  # type: ignore[attr-defined]
-                "SELECT state, generation, verifier_digest FROM admin_credentials "
-                "WHERE singleton=1"
-            ).fetchone()
-            state = AdminCredentialState(
-                AdminCredentialStatus(row["state"]),
-                row["generation"],
-                row["verifier_digest"],
-            )
-            if (
-                state.status is not AdminCredentialStatus.ACTIVE
-                or type(state.generation) is not int
-                or state.generation != grant.generation
-                or type(state.verifier_digest) is not bytes
-                or len(state.verifier_digest) != 32
-            ):
-                raise AdminAuthorizationDenied
-        except AdminAuthorizationDenied:
-            raise
-        except Exception:
-            raise AdminAuthorizationDenied from None
+        from ..infrastructure.sqlite.repositories_admin_credentials import (
+            assert_generation_current,
+        )
+
+        assert_generation_current(unit, grant, operation)
 
     async def rotate(
         self,
@@ -290,6 +355,138 @@ class AdminAuthorizationService:
         )
         async with admission.mutation("admin-credential-revoke"):
             return await self.repository.revoke(state.generation)
+
+
+class _GrantEffect:
+    def __init__(
+        self, service, operation, generation, context, invocation, source, resources
+    ):
+        self.service = service
+        self.operation = operation
+        self.generation = generation
+        self.context = context
+        self.invocation = invocation
+        self.source = source
+        self.resources = {t: frozenset(fields) for t, fields in resources.items()}
+        self.expiry = time() + 60
+        self.task = asyncio.current_task()
+        self.grant = None
+
+    def check_lifetime(self):
+        self.service._owned(self.grant)
+        if (
+            time() >= self.expiry
+            or self.task is None
+            or self.task.done()
+            or self.task.cancelling()
+        ):
+            raise AdminAuthorizationDenied
+
+    def resource_fields(self, target):
+        self.service._owned(self.grant)
+        if self.source is None:
+            return None  # Native authority retains its existing unrestricted resources.
+        if target not in self.resources:
+            raise AdminAuthorizationDenied
+        return self.resources[target]
+
+    def project_snapshot(self, snapshot):
+        fields = self.resource_fields(snapshot.target)
+        return _project_snapshot_fields(snapshot, fields)
+
+    def check_resource(self, target, fields):
+        if self.source is not None and (
+            target not in self.resources or not set(fields) <= self.resources[target]
+        ):
+            raise AdminAuthorizationDenied
+
+    def _check(self, unit):
+        self.check_lifetime()
+        path = unit.execute("PRAGMA database_list").fetchone()[2]
+        if Path(path).resolve() != self.service.repository.database.path.resolve():
+            raise AdminAuthorizationDenied
+        if self.source is not None:
+            self.source.check(self.context, self.operation, self.resources)
+            return
+        row = unit.execute(
+            "SELECT state,generation,verifier_digest FROM admin_credentials WHERE singleton=1"
+        ).fetchone()
+        if (
+            row is None
+            or row["state"] != AdminCredentialStatus.ACTIVE.value
+            or row["generation"] != self.generation
+            or type(row["verifier_digest"]) is not bytes
+            or len(row["verifier_digest"]) != 32
+        ):
+            raise AdminAuthorizationDenied
+        validator = self.service.context_validator
+        # The synchronous SQLite fence must prove the native request is still
+        # live. An async-only validator cannot prove this at commit and is denied.
+        if validator is None:
+            raise AdminAuthorizationDenied
+        if inspect.iscoroutinefunction(validator):
+            raise AdminAuthorizationDenied
+        else:
+            valid = validator(
+                self.operation, self.invocation, self.context, self.generation
+            )
+            if inspect.isawaitable(valid):
+                valid.close()
+                raise AdminAuthorizationDenied
+            if valid is not True:
+                raise AdminAuthorizationDenied
+
+    def check(self, unit, operation):
+        if operation is not self.operation:
+            raise AdminAuthorizationDenied
+        self._check(unit)
+        unit.add_commit_guard(lambda: self.fence(unit))
+
+    @contextmanager
+    def fence(self, unit):
+        if self.source is None:
+            with self.service._lock:
+                self._check(unit)
+                yield
+        else:
+            with self.source.fence(self.context, self.operation, self.resources):
+                self._check(unit)
+                yield
+
+
+def _grant_effect(grant):
+    if (
+        not isinstance(grant, AdminAuthorizationGrant)
+        or type(grant._effect) is not _GrantEffect
+        or grant._effect.grant is not grant
+    ):
+        raise AdminAuthorizationDenied
+    grant._effect.service._owned(grant)
+    return grant._effect
+
+
+def _grant_resource_fields(grant, target):
+    return _grant_effect(grant).resource_fields(target)
+
+
+def _project_snapshot_fields(snapshot, fields):
+    """Pure output projection of a previously owned, immutable result scope.
+
+    This does not authorize an operation or effect. A committed operation can
+    finish its internal cleanup after close without reusing a revoked grant.
+    """
+    if fields is None:
+        return snapshot
+    return ConfigSnapshot(
+        snapshot.revision,
+        {name: value for name, value in snapshot.values.items() if name in fields},
+        tuple(item for item in snapshot.secret_metadata if item.field in fields),
+        snapshot.target,
+    )
+
+
+def _project_grant_snapshot(grant, snapshot):
+    return _grant_effect(grant).project_snapshot(snapshot)
 
 
 __all__ = [

@@ -10,7 +10,6 @@ from unittest.mock import patch
 
 from ygl_test_subject.api.administration import (
     AdminAuthorizationDenied,
-    AdminAuthorizationGrant,
     AdminOperation,
 )
 from ygl_test_subject.api.manifests import (
@@ -483,7 +482,9 @@ class ConfigRecordsRepositoryTests(unittest.IsolatedAsyncioTestCase):
         await self.database.executor.initialize()
         credentials = SQLiteAdminCredentialRepository(self.database)
         await credentials.bootstrap(b"a" * 32)
-        grant = AdminAuthorizationGrant(AdminOperation.UPDATE_CONFIG, 1)
+        from tests.fixtures.admin_authorization import native_grant
+
+        grant = await native_grant(credentials, AdminOperation.UPDATE_CONFIG)
         target = ConfigTarget("user-authorized", "module-a")
         first = await self.config.update_authorized(
             target, self._ordinary_patch(target, 1), grant
@@ -502,6 +503,9 @@ class ConfigRecordsRepositoryTests(unittest.IsolatedAsyncioTestCase):
         credentials = SQLiteAdminCredentialRepository(self.database)
         await credentials.bootstrap(b"c" * 32)
         target = ConfigTarget("user-secret", "module-a")
+        from tests.fixtures.admin_authorization import native_grant
+
+        grant = await native_grant(credentials, AdminOperation.UPDATE_CONFIG)
         receipt = SecretReceipt(
             SecretRef("secret_unclaimed", "user-secret", "module-a", "token", "op"),
             SecretTarget("user-secret", "module-a", "token"),
@@ -520,7 +524,7 @@ class ConfigRecordsRepositoryTests(unittest.IsolatedAsyncioTestCase):
             await self.config.update_authorized(
                 target,
                 patch,
-                AdminAuthorizationGrant(AdminOperation.UPDATE_CONFIG, 1),
+                grant,
             )
         current = await self.config.current(target)
         self.assertEqual(current.revision, 1)

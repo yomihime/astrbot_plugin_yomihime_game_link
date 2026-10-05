@@ -11,6 +11,7 @@ from ygl_test_subject.api.manifests import (
     CapabilityDescriptor,
     CapabilityEffect,
     CommandDescriptor,
+    ConfigField,
     InvocationPolicy,
     ModuleCategory,
     ModuleManifest,
@@ -63,6 +64,31 @@ def _module(**changes: object) -> ModuleManifest:
 
 
 class ManifestContractTests(unittest.TestCase):
+    def test_optional_config_value_schema_is_frozen_and_backward_compatible(self):
+        self.assertIsNone(ConfigField("mode").group)
+        self.assertEqual(ConfigField("days", group="calendar").group, "calendar")
+        for invalid in ("", 1, "bad/group"):
+            with self.assertRaises((ValueError, TypeError)):
+                ConfigField("days", group=invalid)
+        legacy = ConfigField("mode", default="anything")
+        self.assertIsNone(legacy.value_schema)
+        legacy.validate_value(None)
+        schema = {"type": "integer", "minimum": 1, "maximum": 30}
+        field = ConfigField("days", default=7, value_schema=schema)
+        schema["maximum"] = 999
+        self.assertEqual(field.value_schema["maximum"], 30)
+        for invalid in (None, True, 0, 31, "7"):
+            with self.assertRaises(ValueError):
+                field.validate_value(invalid)
+        with self.assertRaises(TypeError):
+            field.value_schema["maximum"] = 999
+        with self.assertRaises(ValueError):
+            ConfigField("days", default=True, value_schema={"type": "integer"})
+        with self.assertRaises(ValueError):
+            ConfigField("token", sensitive=True, value_schema={"type": "string"})
+        with self.assertRaises(ValueError):
+            ConfigField("mode", value_schema={"type": "string", "pattern": ".*"})
+
     def test_public_web_opt_in_is_read_only_public_and_not_a_tool(self) -> None:
         policy = InvocationPolicy.COMMAND_AND_PUBLIC_WEB
         self.assertIs(InvocationPolicy(policy.value), policy)

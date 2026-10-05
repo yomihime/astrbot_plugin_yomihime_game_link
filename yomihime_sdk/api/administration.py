@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from enum import StrEnum
 from types import MappingProxyType
-from typing import Mapping, Protocol
+from typing import Mapping, Protocol, TypedDict
 
 from .contexts import InvocationView
-from .services import ConfigPatch
+from .services import ConfigPatch, ConfigTarget
 from .storage import validate_module_id
 
 _SENSITIVE_TEXT = re.compile(
@@ -78,7 +79,7 @@ ADMIN_REASON_CODES = frozenset(
 
 # Additive B05 admin contract.  The shared B02/B04 contract version stays
 # unchanged; this revision identifies the management-only surface.
-ADMIN_CONTRACT_REVISION = "B05-H-CORE-01"
+ADMIN_CONTRACT_REVISION = "H-ADMIN-02"
 
 
 class AdminOperation(StrEnum):
@@ -86,6 +87,26 @@ class AdminOperation(StrEnum):
     MODULE_SNAPSHOT = "module_snapshot"
     SET_ENABLED = "set_enabled"
     UPDATE_CONFIG = "update_config"
+    READ_CONFIG = "read_config"
+    ROLLBACK_CONFIG = "rollback_config"
+    RECOVER_CONFIG = "recover_config"
+
+
+class OrdinaryFieldProjection(TypedDict):
+    """Validated ordinary value; invalid raw values must be projected as None."""
+
+    value: object | None
+    state: str
+    present: bool
+    source: str
+
+
+class OrdinaryConfigProjection(TypedDict):
+    revision: int
+    fields: Mapping[str, OrdinaryFieldProjection]
+
+
+AdminResourcePolicy = Mapping[ConfigTarget, frozenset[str]]
 
 
 class AdminAuthorizationContext(Protocol):
@@ -93,7 +114,8 @@ class AdminAuthorizationContext(Protocol):
 
     Implementations must only be created by a trusted host adapter. These
     descriptive fields do not prove authorization; Core verifies the current
-    credential, context binding, expiry, and generation on every call.
+    registered source, object ownership, resource policy, expiry and source
+    epoch on every call. Native credentials retain their own durable generation.
     """
 
     @property
@@ -112,6 +134,7 @@ class AdminAuthorizationGrant:
 
     operation: AdminOperation
     generation: int
+    _effect: object | None = dataclass_field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.operation, AdminOperation):
@@ -342,6 +365,34 @@ class ModuleAdminSnapshot:
         object.__setattr__(self, "data_counts", counts)
 
 
+@dataclass(frozen=True, slots=True)
+class CoreConfigSummary:
+    """Reserved Core config projection; this target has no module lifecycle."""
+
+    revision: int
+    default_region: str | None
+    raw_present: bool
+    state: str = "valid"
+    module_id: str = "game_link/core"
+
+    def __post_init__(self):
+        if self.module_id != "game_link/core":
+            raise ValueError("Core config target is reserved")
+        if type(self.revision) is not int or self.revision < 1:
+            raise ValueError("Core config revision must be positive")
+        if self.state not in {"valid", "invalid"} or (
+            self.state == "invalid" and self.default_region is not None
+        ):
+            raise ValueError("invalid Core config state")
+        if self.state == "valid" and (
+            type(self.default_region) is not str
+            or self.default_region not in {"cn", "global"}
+        ):
+            raise ValueError("invalid Core region")
+        if type(self.raw_present) is not bool:
+            raise TypeError("Core config presence must be bool")
+
+
 class AdminOperations(Protocol):
     """Host-independent administrative operations.
 
@@ -350,6 +401,29 @@ class AdminOperations(Protocol):
     or untrusted authorization context is denied. The invocation is descriptive
     and never grants administrative authority by itself.
     """
+
+    async def ordinary_snapshot(
+        self, *, authorization: AdminAuthorizationContext
+    ) -> Mapping[str, OrdinaryConfigProjection]:
+        """Read only deployment-declared ordinary resources with source-owned proof."""
+        ...
+
+    async def ordinary_rollback(
+        self,
+        expected_revisions: Mapping[ConfigTarget, int],
+        *,
+        authorization: AdminAuthorizationContext,
+    ) -> Mapping[str, bool]:
+        """Bounded migration rollback, never an entire database restore."""
+        ...
+
+    async def config_snapshot(
+        self,
+        invocation: InvocationView | None,
+        module_id: str,
+        *,
+        authorization: AdminAuthorizationContext | None = None,
+    ) -> CoreConfigSummary: ...
 
     async def list_modules(
         self,

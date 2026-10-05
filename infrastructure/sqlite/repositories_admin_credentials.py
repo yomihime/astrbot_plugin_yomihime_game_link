@@ -206,23 +206,11 @@ def assert_generation_current(
     if (
         not isinstance(grant, AdminAuthorizationGrant)
         or grant.operation is not operation
+        or grant._effect is None
     ):
         raise AdminAuthorizationDenied from None
-    try:
-        row = unit.execute(
-            "SELECT state, generation, verifier_digest FROM admin_credentials "
-            "WHERE singleton=1"
-        ).fetchone()
-        if (
-            row is None
-            or row["state"] != AdminCredentialStatus.ACTIVE.value
-            or type(row["generation"]) is not int
-            or row["generation"] != grant.generation
-            or type(row["verifier_digest"]) is not bytes
-            or len(row["verifier_digest"]) != 32
-        ):
-            raise AdminAuthorizationDenied
-    except AdminAuthorizationDenied:
-        raise
-    except Exception:
-        raise AdminAuthorizationDenied from None
+    from ...services.admin_authorization import _GrantEffect
+
+    if type(grant._effect) is not _GrantEffect or grant._effect.grant is not grant:
+        raise AdminAuthorizationDenied
+    grant._effect.check(unit, operation)

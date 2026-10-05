@@ -62,6 +62,32 @@ def valid_document() -> dict[str, object]:
 
 
 class DiskManifestTests(unittest.TestCase):
+    def test_optional_config_value_schema_roundtrip_and_invalid_default(self):
+        document = valid_document()
+        module = document["modules"][0]
+        module["config_fields"] = [
+            {
+                "name": "days",
+                "default": 7,
+                "value_schema": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 30,
+                },
+            }
+        ]
+        field = (
+            parse_manifest(json.dumps(document).encode()).modules[0].config_fields[0]
+        )
+        self.assertEqual(field.value_schema["maximum"], 30)
+        module["config_fields"][0]["default"] = True
+        with self.assertRaises(ManifestError):
+            parse_manifest(json.dumps(document).encode())
+        module["config_fields"][0]["default"] = 7
+        module["config_fields"][0]["value_schema"]["pattern"] = ".*"
+        with self.assertRaises(ManifestError):
+            parse_manifest(json.dumps(document).encode())
+
     def test_public_web_disk_opt_in_round_trips_and_rejects_tools_and_private_write(
         self,
     ) -> None:

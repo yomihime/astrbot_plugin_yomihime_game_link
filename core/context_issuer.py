@@ -210,6 +210,7 @@ class ContextIssuer:
                 registry_revision=registry_revision,
                 deadline=min(deadline, binding.deadline_monotonic),
                 capability_id=capability_id,
+                public_session_id=binding.bearer_key,
             )
             self._check_deadline(view)
         except BaseException:

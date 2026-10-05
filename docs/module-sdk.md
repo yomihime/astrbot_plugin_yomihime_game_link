@@ -144,3 +144,11 @@ so pip rejects it before installing the artifact. The SDK performs no install
 or upgrade actions. Manifest incompatibility remains the E parser's stable
 reject path; a missing runtime dependency cannot occur because this wheel has
 no runtime dependencies.
+
+## H-ADMIN-02 host-independent administration revision
+
+The 2026-10-05 product decision replaces the universal independent-credential requirement. Core authorization is host independent: explicitly trusted authorities attest subjects, authentication sources, exact operations/resources, and live request lifetimes. Native Core credentials remain one source with their own durable ACTIVE/generation checks; a trusted Host source uses its own ownership/epoch/expiry and never fabricates a native key.
+
+In AstrBot deployment, the normal formally authenticated management user needs no second Core credential. The Adapter attests a server-owned request; JSON roles, page assets, ordinary API keys and public-query proofs cannot mint administrative grants. Core checks the bounded policy again before effects and inside configuration/rollback transactions. Only the four declared ordinary fields are opened; no lifecycle, secret, subscription or future-module permissions follow automatically.
+
+SDK descriptive IDs and data classes are not authorization evidence. Tests must retain forged, wrong-source/resource, ended/expired/cancelled requests, transaction fencing, revision conflict and recovery rejection cases. Core standalone/test adapters require no AstrBot import or FF14/config-service changes. The exact contract and startup-failure boundaries are frozen in [host-management-authorization-contract.md](host-management-authorization-contract.md). Artifact/source pins must be rebuilt and statically updated for the final implementation; source presence does not claim runtime acceptance.

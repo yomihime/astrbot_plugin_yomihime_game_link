@@ -57,7 +57,13 @@ from ..infrastructure.sqlite.repositories import SQLiteRepositories
 from .authorization import AuthorizationService, SecretAvailability
 from .bindings import AccountOperationsService
 from .cache import CacheAccessService
-from .configuration import ConfigurationService
+from .configuration import ConfigurationCoordinator
+from .core_configuration import (
+    CORE_DEFAULTS_FIELD,
+    CORE_MODULE_ID,
+    CoreDefaultsConfigView,
+    CoreDefaultsView,
+)
 from .dependency_calls import DependencyInvoker
 from .identity import IdentityResolverService, InvocationPrincipalResolver
 from .records import ModuleRecordsService
@@ -1067,6 +1073,8 @@ class ModuleServicesFactory:
         "_clock",
         "_utc_clock",
         "_module_host_config_snapshots",
+        "_core_defaults",
+        "_module_config_validators",
     )
 
     def __init__(
@@ -1088,6 +1096,8 @@ class ModuleServicesFactory:
         clock: Callable[[], float] = monotonic,
         utc_clock: Callable[[], datetime] | None = None,
         module_host_config_snapshots: Mapping[str, Mapping[str, object]] | None = None,
+        core_defaults: CoreDefaultsView | None = None,
+        module_config_validators: Mapping[str, Mapping[str, object]] | None = None,
     ) -> None:
         if not isinstance(registry, Registry) or not isinstance(issuer, ContextIssuer):
             raise TypeError("module services require the host Registry and issuer")
@@ -1177,6 +1187,11 @@ class ModuleServicesFactory:
         self._module_host_config_snapshots = _freeze_host_config_snapshots(
             module_host_config_snapshots
         )
+        self._core_defaults = core_defaults
+        self._module_config_validators = MappingProxyType({
+            module_id: MappingProxyType(dict(checks))
+            for module_id, checks in (module_config_validators or {}).items()
+        })
 
     def for_module(self, module_id: str) -> ModuleServices:
         try:
@@ -1262,22 +1277,33 @@ class ModuleServicesFactory:
 
     def _build_module(self, module_id: str, manifest: ModuleManifest) -> ModuleServices:
         fields: tuple[ConfigField, ...] = manifest.config_fields
+        if module_id == CORE_MODULE_ID or any(
+            field.name in {CORE_DEFAULTS_FIELD, "default_region"} for field in fields
+        ):
+            raise ValueError("module config target or field is reserved by Core")
         host_values = self._module_host_config_snapshots.get(module_id, {})
+        if {CORE_DEFAULTS_FIELD, "default_region"} & set(host_values):
+            raise ValueError("host config contains a reserved Core defaults field")
         if set(host_values) & {field.name for field in fields}:
             raise ValueError("host config conflicts with declared Core config fields")
         if fields:
-            config = ConfigurationService(
+            config = ConfigurationCoordinator(
                 ConfigTarget(self._config_principal_id, module_id),
                 fields,
                 self._repositories.config,
                 self._repositories.secret_store,
-            )
+                value_validators=self._module_config_validators.get(module_id),
+            ).view()
         else:
             config = _EmptyConfigView(
                 ConfigTarget(self._config_principal_id, module_id)
             )
         if host_values:
             config = _HostConfigView(config, host_values)
+        if self._core_defaults is not None:
+            config = CoreDefaultsConfigView(
+                config, self._core_defaults, self._lifecycle.admission
+            )
         identities = IdentityResolverService(
             self._repositories.identities,
             self._repositories.conversations,

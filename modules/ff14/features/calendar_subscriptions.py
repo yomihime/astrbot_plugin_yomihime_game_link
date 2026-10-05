@@ -48,7 +48,7 @@ class CalendarSubscriptionHandler:
         *,
         config: FF14ConfigSnapshot | None = None,
     ) -> None:
-        self._config = config or FF14ConfigSnapshot()
+        self._config = config
         if action not in _ACTIONS:
             raise ValueError("unknown calendar subscription action")
         self._services = services
@@ -78,12 +78,13 @@ class CalendarSubscriptionHandler:
         ):
             return _error(ErrorCode.PARAMETER_ERROR, "请提供日历区域及可选时区、时间。")
         try:
+            config = self._config or FF14ConfigSnapshot.from_values((await self._services.config.current()).values)
             region = normalize_region(parameters["region"])
             timezone_name = _timezone(
-                parameters.get("timezone", self._config.calendar_default_timezone)
+                parameters.get("timezone", config.calendar_default_timezone)
             )
             local_time = _local_time(
-                parameters.get("time", self._config.calendar_default_delivery_time)
+                parameters.get("time", config.calendar_default_delivery_time)
             )
         except ValueError:
             return _error(

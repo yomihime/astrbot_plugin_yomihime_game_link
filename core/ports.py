@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum, StrEnum
 from math import isfinite
-from typing import AsyncContextManager, Awaitable, Callable, Protocol
+from typing import AsyncContextManager, Awaitable, Callable, Mapping, Protocol
 
 from ..api.administration import (
     AdminAuthorizationContext,
@@ -490,11 +490,10 @@ def _require_utc(value: datetime, field: str) -> None:
 class AdminAuthorizationPort(Protocol):
     """Core-owned per-operation authorization boundary for admin calls.
 
-    Implementations reject missing/untrusted/expired contexts and unavailable
-    credential state. Dashboard identity, plugin scope, API keys, and
-    ``InvocationView`` alone never grant access. Reads and mutations are each
-    checked independently; mutations must revalidate within their own write
-    transaction and bind grants to the persisted credential generation.
+    Implementations reject missing/untrusted/expired contexts. Native sources
+    require their own durable ACTIVE generation; registered Host sources require
+    owned request proofs and exact policies. Descriptive identities alone grant
+    nothing. Mutations revalidate proof ownership/lifetime at transaction commit.
     """
 
     async def authorize(
@@ -503,6 +502,7 @@ class AdminAuthorizationPort(Protocol):
         *,
         invocation: InvocationView | None,
         context: AdminAuthorizationContext | None,
+        resources: Mapping[ConfigTarget, frozenset[str]] | None = None,
     ) -> AdminAuthorizationGrant: ...
 
 

@@ -108,12 +108,21 @@ class InvocationView:
     delivery_route: str | None = None
     conversation_kind: InvocationConversationKind | None = None
     subscription_scope: InvocationSubscriptionScope | None = None
+    # Descriptive grouping of a proof-bound WEB_PUBLIC bearer session only.
+    # This is not an actor, permission, grant or independently trusted token.
+    public_session_id: str | None = None
 
     def __post_init__(self) -> None:
         _require_opaque_id(self.invocation_id, "invocation_id")
         if not isinstance(self.origin, InvocationOrigin):
             raise TypeError("origin must be an InvocationOrigin")
         _require_optional_opaque_id(self.actor_id, "actor_id")
+        _require_optional_opaque_id(self.public_session_id, "public_session_id")
+        if (
+            self.public_session_id is not None
+            and self.origin is not InvocationOrigin.WEB_PUBLIC
+        ):
+            raise ValueError("public_session_id requires WEB_PUBLIC origin")
         _require_optional_opaque_id(self.conversation_id, "conversation_id")
         _require_global_module_id(self.module_id)
         _require_optional_opaque_id(self.parent_id, "parent_id")

@@ -1,6 +1,6 @@
 export const ROUTES = Object.freeze({
   overview: "概览", logs: "公开角色 Logs", items: "物品查询",
-  calendar: "活动日历", settings: "设置",
+  calendar: "活动日历", market: "市场查询", settings: "设置",
 });
 export const MESSAGES = Object.freeze({
   unchecked: "尚未读取状态。",
@@ -12,7 +12,7 @@ export const MESSAGES = Object.freeze({
   copyFailed: "复制未完成，命令已选中，请手动复制。",
 });
 const FIELD_LABELS = Object.freeze({
-  ff14_default_region: "默认 FF14 区域",
+  ff14_default_region: "FF14 旧版默认区域（兼容读取）",
   ff14_calendar_default_days: "日历默认查询天数",
   ff14_calendar_default_timezone: "日历默认时区",
   ff14_calendar_default_delivery_time: "新订阅每日摘要时间",
@@ -24,6 +24,7 @@ const SOURCE_LABELS = Object.freeze({
   fflogs_public_global: "国际服公开角色 · FFLogs",
   ff14_calendar_primary: "活动日历主源",
   ff14_calendar_fallback: "活动日历备用源",
+  universalis_market: "市场来源 · Universalis",
 });
 const CONFIG_LABELS = Object.freeze({
   applied: "已生效", valid_not_ready: "配置有效，等待运行",
@@ -36,7 +37,7 @@ const REASONS = new Set([
 ]);
 const nullableBool = (value) => value === null || typeof value === "boolean";
 const object = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
-const QUERY_ENDPOINTS = Object.freeze({items: "queries/items", logs: "queries/character", calendar: "queries/calendar"});
+const QUERY_ENDPOINTS = Object.freeze({items: "queries/items", logs: "queries/character", calendar: "queries/calendar", market: "queries/market"});
 const QUERY_MESSAGES = Object.freeze({
   failed: "查询未完成，请检查登录、网页地址和输入后手动重试。可重新登录 Dashboard，检查插件配置齿轮中的网页地址，保存重载后重新打开本页。",
   stopped: "已停止展示。仅停止展示，本次请求可能仍在后台处理；不会自动重试。",
@@ -73,6 +74,41 @@ function publicLink(link) {
     return {label: link.label, url: url.href};
   } catch { throw new Error("invalid_query_result"); }
 }
+function marketFacts(input) {
+  const fail = () => { throw new Error("invalid_query_result"); };
+  if (!object(input)) return null;
+  const facts = {};
+  if (input.market !== undefined) {
+    const v = input.market, s = v?.scope;
+    const target = (value) => value === null || text(value, 256) || Number.isSafeInteger(value);
+    if (!object(v) || !text(v.query, 120) || !object(s) || !["world", "dc", "region"].includes(s.kind) || !target(s.target)
+        || !Array.isArray(s.regions) || s.regions.length > 8 || !s.regions.every((r) => text(r, 64)) || !["explicit", "default"].includes(s.source)
+        || !["all", "nq", "hq"].includes(v.quality) || !["overview", "min", "listings"].includes(v.intent)
+        || !Number.isSafeInteger(v.module_revision) || !Number.isSafeInteger(v.core_revision)
+        || !Array.isArray(v.coverage) || v.coverage.length > 512 || typeof v.truncated !== "boolean") fail();
+    const coverage = v.coverage.map((c) => {
+      if (!object(c) || !text(c.region, 64) || !target(c.target) || !["available", "empty", "failed"].includes(c.state) || !(c.stage === null || text(c.stage, 64))
+          || !(c.reason === null || text(c.reason, 256)) || !(c.status_code === null || Number.isSafeInteger(c.status_code))
+          || !nullableBool(c.cached) || !(c.fetched_at === null || text(c.fetched_at, 128))) fail();
+      return {region: c.region, target: c.target, state: c.state, stage: c.stage, reason: c.reason,
+        status_code: c.status_code, cached: c.cached, fetched_at: c.fetched_at};
+    });
+    facts.market = {query: v.query, scope: {kind: s.kind, target: s.target, regions: [...s.regions], source: s.source},
+      quality: v.quality, intent: v.intent, module_revision: v.module_revision, core_revision: v.core_revision, coverage, truncated: v.truncated};
+  }
+  if (input.selection !== undefined) {
+    const v = input.selection;
+    if (!object(v) || v.kind !== "item" || !text(v.batch_id, 128) || !v.batch_id || !text(v.generation, 128) || !v.generation
+        || !Array.isArray(v.candidates) || !v.candidates.length || v.candidates.length > 6 || typeof v.truncated !== "boolean") fail();
+    const candidates = v.candidates.map((c) => {
+      if (!object(c) || !Number.isSafeInteger(c.item_id) || c.item_id < 1 || !text(c.name, 4096)) fail();
+      return {item_id: c.item_id, name: c.name};
+    });
+    if (new Set(candidates.map((c) => c.item_id)).size !== candidates.length) fail();
+    facts.selection = {kind: "item", batch_id: v.batch_id, generation: v.generation, candidates, truncated: v.truncated};
+  }
+  return Object.keys(facts).length ? facts : null;
+}
 export function validateQueryResult(input) {
   const fail = () => { throw new Error("invalid_query_result"); };
   if (!object(input) || input.schema_version !== 1 || input.privacy !== "public"
@@ -104,8 +140,9 @@ export function validateQueryResult(input) {
     });
     document = {title: doc.title, subject: doc.subject, blocks, sources: strings(doc.sources), timestamps: times(doc.timestamps)};
   }
-  // model_facts, result IDs, private extras and unknown metadata are not retained.
+  // Only the public market context and bounded candidate contract are retained.
   return {schema_version: 1, status: input.status, privacy: "public", document, error,
+    model_facts: marketFacts(input.model_facts),
     provenance: strings(input.provenance), timestamps: times(input.timestamps), warnings: strings(input.warnings)};
 }
 
@@ -118,6 +155,17 @@ export function queryInput(route, draft) {
   };
   let body;
   if (route === "items") body = {query: bounded("query", "名称或 ID", 120)};
+  else if (route === "market") {
+    body = {query: bounded("query", "物品名称或 ID", 120), quality: String(draft.quality ?? "all"), intent: String(draft.intent ?? "overview")};
+    if (!["all", "nq", "hq"].includes(body.quality)) errors.quality = "请选择全部、NQ 或 HQ。";
+    if (!["overview", "min", "listings"].includes(body.intent)) errors.intent = "请选择概览、最低价或在售列表。";
+    for (const key of ["server", "dc", "region"]) {
+      const value = String(draft[key] ?? "").trim();
+      if (value.length > 100) errors[key] = "范围输入最多100个字符。";
+      if (value) body[key] = value;
+    }
+    if (body.region && !["cn", "global"].includes(body.region)) errors.region = "请选择国服或国际服，或留空使用服务端默认范围。";
+  }
   else {
     const region = String(draft.region ?? "");
     if (!["cn", "global"].includes(region)) errors.region = "请选择国服或国际服。";
@@ -172,7 +220,7 @@ export function validateState(input, route) {
     object(input.credentials[region]) && input.credentials[region].configured === null
       && input.credentials[region].state === "unknown")
     || !Array.isArray(input.sources)
-    || input.sources.length !== Object.keys(SOURCE_LABELS).length) throw new Error("invalid_state");
+      || ![6, 7].includes(input.sources.length)) throw new Error("invalid_state");
   const rawGate = input.subscription_gate;
   let subscriptionGate;
   if (input.schema_version === 1) {
@@ -205,6 +253,7 @@ export function validateState(input, route) {
     return {id: source.id, declared: source.declared, freshness: "unknown", last_success_at: null};
   });
   if (new Set(sources.map((source) => source.id)).size !== sources.length) throw new Error("invalid_state");
+  if (!Object.keys(SOURCE_LABELS).filter((id) => id !== "universalis_market").every((id) => sources.some((s) => s.id === id))) throw new Error("invalid_state");
   return {
     schema_version: input.schema_version, runtime: {state: input.runtime.state, reason: input.runtime.reason},
     module: {registered: input.module.registered, enabled: input.module.enabled},
@@ -302,8 +351,9 @@ export function createPageApp({document, window, bridge, timeoutMs = 8000, query
   let renderedKey = null, content = null, refreshButton = null;
   let webStatus = null, querySequence = 0, queryTimer = null, queryDom = null;
   let queryView = {phase: "idle", result: null, message: "", errors: {}, submitted: null};
-  const drafts = {items: {query: ""}, logs: {region: "", server: "", character: ""}, calendar: {region: "", days: "", timezone: ""}};
-  const editedFields = {items: new Set(), logs: new Set(), calendar: new Set()};
+  const drafts = {items: {query: ""}, logs: {region: "", server: "", character: ""}, calendar: {region: "", days: "", timezone: ""},
+    market: {query: "", server: "", dc: "", region: "", quality: "all", intent: "overview"}};
+  const editedFields = {items: new Set(), logs: new Set(), calendar: new Set(), market: new Set()};
   const selectedModule = () => catalog?.modules?.find((v) => v.module_id === moduleId) || null;
   const routesFor = () => selectedModule() ? RENDERERS[moduleId]?.routes || GENERIC_ROUTES : {};
   const moduleLabel = (id) => RENDERERS[id]?.label || id;
@@ -412,8 +462,9 @@ export function createPageApp({document, window, bridge, timeoutMs = 8000, query
         definitions.append(element("dt", label), element("dd", text));
       }
       children.push(definitions, element("p", "这些值只读，来自本次插件运行快照。显式参数优先；修改默认值不会改写已有订阅。", {class: "hint"}));
+      children.push(element("p", "旧版 FF14 默认区域仅作兼容读取；市场默认范围由服务端 Core 配置解析，本页不会用该旧字段补全市场参数。", {class: "hint"}));
     }
-    if (settings) children.push(nativeSteps());
+    if (settings) children.push(element("p", "管理入口不可用：公开查询会话不授予配置管理权。独立 Core 管理凭据与 Host 可信会话/代际桥接、真实配置迁移尚未完成；本页不提供写入操作。", {class: "notice warning", role: "status"}));
     return card("普通配置", children);
   }
   function navigateTo(id, page = "overview") {
@@ -479,7 +530,7 @@ export function createPageApp({document, window, bridge, timeoutMs = 8000, query
       summary("普通配置", CONFIG_LABELS[data?.ordinary_config.state || "unknown"]),
       summary("订阅推送", gateCard.children[1].textContent, data?.subscription_gate.can_run === true ? "success" : "unknown"));
     const taskGrid = element("div", "", {class: "task-grid"});
-    for (const [page, subtitle] of [["logs", "查看公开角色战斗记录"], ["items", "查找物品与详情"], ["calendar", "查看活动窗口与时区"]]) {
+    for (const [page, subtitle] of [["logs", "查看公开角色战斗记录"], ["items", "查找物品与详情"], ["calendar", "查看活动窗口与时区"], ["market", "按物品名称查询市场与覆盖范围"]]) {
       const task = element("section", "", {class: "card task-card"});
       const action = element("button", "打开查询页面 →", {type: "button", class: "text-action"});
       action.addEventListener("click", () => navigateTo(moduleId, page));
@@ -501,12 +552,19 @@ export function createPageApp({document, window, bridge, timeoutMs = 8000, query
       const form = element("form", "", {class: "query-form", novalidate: ""});
       const fields = element("div", "", {class: "form-fields"}), inputs = {}, errors = {};
       const specs = route === "items" ? [["query", "名称或 ID", "text", "例如 44091", 120]]
+        : route === "market" ? [["query", "物品名称或 ID", "text", "例如 犎牛牛排", 120], ["server", "服务器（可选）", "text", "World ID 或明确服务器名", 100],
+          ["dc", "数据中心（可选）", "text", "规范数据中心名称", 100], ["region", "区域（可选）", "select"], ["quality", "品质", "select"], ["intent", "查询意图", "select"]]
         : route === "logs" ? [["region", "区域", "select"], ["server", "服务器", "text", "请输入服务器", 100], ["character", "角色名", "text", "请输入角色名", 120]]
         : [["region", "区域", "select"], ["days", "天数（1–30）", "number", "请先读取默认配置"], ["timezone", "IANA 时区", "text", "例如 Asia/Shanghai", 128]];
       for (const [key, label, type, placeholder, max] of specs) {
         const id = `${route}-${key}`, field = element("div", "", {class: "field"});
         const input = element(type === "select" ? "select" : "input", "", {id, name: key, "aria-describedby": `${id}-error`});
-        if (type === "select") input.append(element("option", "请选择区域", {value: ""}), element("option", "国服", {value: "cn"}), element("option", "国际服", {value: "global"}));
+        if (type === "select") {
+          const options = key === "quality" ? [["all", "全部品质"], ["nq", "NQ"], ["hq", "HQ"]]
+            : key === "intent" ? [["overview", "概览"], ["min", "最低价"], ["listings", "在售列表"]]
+            : [["", route === "market" ? "服务端默认范围" : "请选择区域"], ["cn", "国服"], ["global", "国际服"]];
+          input.append(...options.map(([value, label]) => element("option", label, {value})));
+        }
         else { input.setAttribute("type", type); input.setAttribute("placeholder", placeholder); if (max) input.setAttribute("maxlength", max); }
         if (type === "number") for (const [key, value] of Object.entries({min: 1, max: 30, step: 1, inputmode: "numeric"})) input.setAttribute(key, value);
         input.value = drafts[route][key];
@@ -522,17 +580,22 @@ export function createPageApp({document, window, bridge, timeoutMs = 8000, query
         inputs[key] = input; errors[key] = error;
         field.append(element("label", label, {for: id}), input, error); fields.append(field);
       }
-      const submit = element("button", route === "items" ? "查询物品" : route === "logs" ? "查询 Logs" : "查询日历", {type: "submit", class: "query-submit"});
+      const submit = element("button", "查询", {type: "submit", class: "query-submit"});
       form.addEventListener("submit", (event) => { event.preventDefault(); if (queryDom?.form === form) submitQuery(); });
       form.append(fields);
       if (route === "logs") form.append(element("p", "指标：rDPS（固定）", {class: "hint"}));
+      if (route === "market") form.append(element("p", "范围可留空，由服务端解析 Core 默认区域的全服范围；名称与范围别名也由服务端判定。范围含糊时请填写明确 World ID 或规范数据中心名。", {class: "hint"}));
       form.append(submit, element("p", "仅手动查询；进入、刷新和恢复连接不会自动查询外网。", {class: "hint"}));
       const entry = element("div", "", {class: "query-entry", role: "status"});
       const result = element("section", "", {class: "card query-result", "aria-label": "本次结果"});
       queryDom = {route, form, entry, result, submit, inputs, errors, card: card(ROUTES[route], [form, entry])};
+      if (["items", "calendar", "market"].includes(route)) {
+        queryDom.card.setAttribute("data-query-route", route);
+        result.setAttribute("data-query-route", route);
+      }
     }
     const cli = route === "logs" ? '/ygl ff14 logs cn "潮风亭" "如月怜"'
-      : route === "items" ? "/ygl ff14 item 44091" : "/ygl ff14 calendar cn days=7 timezone=Asia/Shanghai";
+      : route === "items" ? "/ygl ff14 item 44091" : route === "market" ? '/ygl ff14 market "犎牛牛排"' : "/ygl ff14 calendar cn days=7 timezone=Asia/Shanghai";
     updateQueryUi();
     const alternative = element("details", "", {class: "card chat-alternative"});
     alternative.append(element("summary", "聊天替代 · 展开查看"), command(cli));
@@ -567,7 +630,7 @@ export function createPageApp({document, window, bridge, timeoutMs = 8000, query
     const nodes = [];
     if (!result.document) return nodes;
     const doc = result.document;
-    nodes.push(element("h3", doc.title), element("p", doc.subject, {class: "hint"}));
+    nodes.push(element("h3", doc.title, {class: "result-title"}), element("p", doc.subject, {class: "hint result-subject"}));
     for (const block of doc.blocks) {
       if (block.kind === "text") nodes.push(element("p", block.text, {class: "result-text"}));
       else if (["fields", "metrics"].includes(block.kind)) {
@@ -615,9 +678,41 @@ export function createPageApp({document, window, bridge, timeoutMs = 8000, query
     };
     return messages[code] || "查询未完成，请检查输入与来源状态后手动重试，或使用聊天命令。";
   }
+  function renderMarketContext(result) {
+    const nodes = [], facts = result.model_facts, market = facts?.market;
+    if (market) {
+      const context = element("dl", "", {class: "result-fields market-context"});
+      for (const [label, value] of [["当前解析范围", `${{world: "服务器", dc: "数据中心", region: "区域全服"}[market.scope.kind]} / ${market.scope.target ?? "—"} / ${market.scope.regions.join("、")}（${market.scope.source === "default" ? "服务端默认" : "显式指定"}）`],
+        ["品质", {all: "全部品质", nq: "NQ", hq: "HQ"}[market.quality]], ["意图", {overview: "概览", min: "最低价", listings: "在售列表"}[market.intent]]])
+        context.append(element("dt", label), element("dd", value));
+      nodes.push(context);
+      for (const c of market.coverage) nodes.push(element("p", `来源覆盖：${c.region} / ${c.target ?? "—"} · ${{available: "已取得记录", empty: "来源返回空记录", failed: "获取失败"}[c.state]}；${c.cached === true ? "缓存结果" : c.cached === false ? "本次获取" : "缓存状态未知"}；来源获取时间：${c.fetched_at ?? "未知"}${c.reason ? `；原因：${c.reason}` : ""}。`, {class: "hint market-coverage"}));
+      if (market.truncated) nodes.push(element("p", "结果已截断；只展示本次返回的有限记录，不代表全部市场。", {class: "notice warning", role: "status"}));
+    }
+    if (result.status === "needs_selection" && facts?.selection) {
+      const selection = facts.selection, buttons = element("div", "", {class: "market-candidates", "aria-label": "物品候选"});
+      for (const candidate of selection.candidates) {
+        const button = element("button", `${candidate.name} · ID ${candidate.item_id}`, {type: "button", "data-item-id": candidate.item_id});
+        button.addEventListener("click", () => {
+          if (queryView.result !== result || queryView.phase === "loading" || route !== "market") return;
+          const focused = document.activeElement === button;
+          submitQuery({batch_id: selection.batch_id, generation: selection.generation, item_id: candidate.item_id});
+          if (focused) queryDom.inputs.query.focus();
+        });
+        buttons.append(button);
+      }
+      nodes.push(element("p", "请选择本次返回的物品候选；修改输入或重新提交后旧候选失效。", {class: "hint"}), buttons);
+      if (selection.truncated) nodes.push(element("p", "候选已截断，请进一步明确名称后手动查询。", {class: "notice warning", role: "status"}));
+    }
+    return nodes;
+  }
   function updateQueryUi() {
     if (!queryDom || queryDom.route !== route) return;
     const unavailable = queryAvailability(), pending = queryView.phase === "loading";
+    const polished = ["items", "calendar", "market"].includes(route);
+    const retry = !pending && (queryView.result?.status === "error" || ["error", "timeout"].includes(queryView.phase));
+    queryDom.submit.textContent = route === "items" ? "查询物品" : route === "logs" ? "查询 Logs"
+      : route === "market" ? retry ? "手动重试市场" : "查询市场" : retry ? "手动重试日历" : "查询日历";
     queryDom.submit.disabled = unavailable !== null || pending;
     queryDom.submit.setAttribute("aria-disabled", String(queryDom.submit.disabled));
     queryDom.form.setAttribute("aria-busy", String(pending));
@@ -636,15 +731,16 @@ export function createPageApp({document, window, bridge, timeoutMs = 8000, query
         element("p", "仅停止展示，本次请求可能仍在后台处理。", {class: "hint"}));
     } else if (queryView.result) {
       const result = queryView.result;
-      const label = result.status === "success" ? "查询完成" : result.status === "partial_success" ? "部分结果 · 保留来源说明" : result.status === "needs_selection" ? "需要更精确输入 · 请补充名称或 ID，或使用聊天命令" : queryError(result.error.code);
-      nodes.push(element("p", label, {class: `notice ${result.status === "error" ? "error" : result.status === "success" ? "" : "warning"}`, role: result.status === "error" ? "alert" : "status"}), ...renderBlocks(result));
+      const label = result.status === "success" ? "查询完成" : result.status === "partial_success" ? "部分结果 · 保留来源说明" : result.status === "needs_selection" ? route === "market" && result.model_facts?.selection ? "需要选择物品 · 请确认本次候选" : "需要更精确输入 · 请补充名称或 ID，或使用聊天命令" : `${polished ? result.error.code === "not_found" ? "无匹配结果 · " : result.error.code === "no_records" ? "没有可展示记录 · " : "查询失败 · " : ""}${route === "market" && result.error.code === "parameter_error" ? "请修正输入；范围含糊时使用明确 World ID 或规范数据中心名。" : queryError(result.error.code)}`;
+      nodes.push(element("p", label, {class: `notice ${result.status === "error" ? "error" : result.status === "success" ? polished ? "success" : "" : "warning"}`, role: result.status === "error" ? "alert" : "status"}), ...renderBlocks(result));
+      if (route === "market") nodes.push(...renderMarketContext(result));
       if (route === "calendar" && queryView.submitted) nodes.push(element("p", `用户输入范围：${queryView.submitted.region === "cn" ? "国服" : "国际服"} / ${queryView.submitted.days}天 / ${queryView.submitted.timezone}。这不是来源完整覆盖声明。`, {class: "hint"}));
     } else nodes.push(element("p", queryView.message || "尚未提交查询。", {role: queryView.phase === "error" || queryView.phase === "timeout" ? "alert" : "status", class: queryView.phase === "error" || queryView.phase === "timeout" ? "notice error" : "hint"}));
     queryDom.result.replaceChildren(...nodes);
   }
-  function submitQuery() {
+  function submitQuery(continuation = null) {
     if (queryAvailability() || queryView.phase === "loading" || !Object.hasOwn(QUERY_ENDPOINTS, route)) return;
-    const {body, errors} = queryInput(route, drafts[route]);
+    const {body, errors} = continuation && route === "market" ? {body: {selection: continuation}, errors: {}} : queryInput(route, drafts[route]);
     invalidateQuery();
     if (Object.keys(errors).length) {
       queryView.errors = errors; queryView.message = "请先修正表单中标出的输入。"; updateQueryUi();

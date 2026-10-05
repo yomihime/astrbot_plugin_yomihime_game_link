@@ -14,6 +14,7 @@ from time import monotonic
 from types import MappingProxyType
 from typing import Protocol
 
+from ..api.administration import AdminAuthorizationDenied, AdminOperation
 from ..api.contexts import InvocationOrigin, InvocationView
 from ..api.display import DisplayLimits, DisplayRenderer, Privacy
 from ..api.manifests import (
@@ -50,6 +51,9 @@ from ..infrastructure.sqlite.repositories_admin_credentials import (
     SQLiteAdminCredentialRepository,
 )
 from ..infrastructure.sqlite.repositories_config import SQLiteConfigRepository
+from ..infrastructure.sqlite.repositories_config_migration import (
+    SQLiteOrdinaryConfigurationMigrationRepository,
+)
 from ..infrastructure.sqlite.repositories_output import SQLiteRootOutputRepository
 from ..infrastructure.sqlite.repositories_runtime import SQLiteModuleRuntimeRepository
 from ..services.admin_authorization import AdminAuthorizationService, ContextValidator
@@ -91,6 +95,9 @@ from ..services.scheduler import (
 )
 from ..services.source_credentials import SourceCredentialPolicy
 from ..services.subscriptions import SubscriptionOperationsService
+from .configuration import ConfigurationCoordinator
+from .configuration_migration import OrdinaryConfigurationMigration
+from .core_configuration import CORE_CONFIG_FIELDS, CoreDefaultsView, core_config_target
 
 DEFAULT_CADENCE_CONFIGURATION = CadenceConfiguration((60.0, 300.0, 900.0, 3600.0))
 DEFAULT_CADENCE_REVISION = 1
@@ -292,6 +299,11 @@ class CoreRuntime:
         claim_lease: timedelta = timedelta(minutes=2),
         pump_interval: float = 5.0,
         cleanup_timeout: float = 5.0,
+        legacy_core_defaults: Mapping[str, object] | None = None,
+        module_config_validators: Mapping[str, Mapping[str, object]] | None = None,
+        ordinary_migration_fields: tuple = (),
+        ordinary_migration_source: Callable[[], Mapping[str, object]] | None = None,
+        ordinary_migration_id: str = "ordinary-defaults-v1",
     ) -> None:
         if not isinstance(database, SQLiteDatabase):
             database = SQLiteDatabase(database)
@@ -384,6 +396,16 @@ class CoreRuntime:
             subscription_gate_bindings=execution_gate_bindings,
         )
         self.config_repository: SQLiteConfigRepository = self.repositories.config
+        self.ordinary_config_migration = (
+            OrdinaryConfigurationMigration(
+                SQLiteOrdinaryConfigurationMigrationRepository(self.config_repository),
+                ordinary_migration_fields,
+                migration_id=ordinary_migration_id,
+            )
+            if ordinary_migration_fields
+            else None
+        )
+        self._ordinary_migration_source = ordinary_migration_source
         self.runtime_repository = SQLiteModuleRuntimeRepository(database)
         self.admin_credential_repository = SQLiteAdminCredentialRepository(database)
 
@@ -444,6 +466,21 @@ class CoreRuntime:
             max_subscriptions_per_owner=max_subscriptions_per_owner,
         )
         # Build exactly one ModuleServicesFactory with the shared B04 service.
+        core_configuration = ConfigurationCoordinator(
+            core_config_target(config_principal_id),
+            CORE_CONFIG_FIELDS,
+            self.config_repository,
+            self.secret_store,
+        )
+        self.core_defaults = CoreDefaultsView(
+            core_configuration.view(),
+            legacy_defaults=legacy_core_defaults,
+            migration_complete=(
+                self.ordinary_config_migration.complete
+                if self.ordinary_config_migration is not None
+                else None
+            ),
+        )
         self.module_services = ModuleServicesFactory(
             self.registry,
             self.issuer,
@@ -459,6 +496,8 @@ class CoreRuntime:
             clock=monotonic_clock,
             utc_clock=utc_clock,
             module_host_config_snapshots=host_config_snapshots,
+            core_defaults=self.core_defaults,
+            module_config_validators=module_config_validators,
         )
         self.send_scheduler = LifecycleApprovedSendScheduler(self.lifecycle)
         self.root_output_repository = SQLiteRootOutputRepository(database)
@@ -562,9 +601,11 @@ class CoreRuntime:
             health_resolver=self.health_resolver,
             database=database,
             config_repository=self.config_repository,
+            module_config_validators=module_config_validators,
             secret_store=self.secret_store,
             config_principal_id=config_principal_id,
             subscription_gate_fields=gate_fields,
+            ordinary_migration=self.ordinary_config_migration,
         )
         self.admin_facade = AdminFacade(self.admin_operations, self.admin_authorization)
         self.gateway = Gateway(
@@ -588,6 +629,8 @@ class CoreRuntime:
         self._pump_interval = float(pump_interval)
         self._cleanup_timeout = float(cleanup_timeout)
         self._started = False
+        self._management_ready = False
+        self._configuration_blocked = False
         self._starting = False
         self._accepting = False
         self._closing = False
@@ -604,6 +647,16 @@ class CoreRuntime:
     @property
     def started(self) -> bool:
         return self._started
+
+    @property
+    def management_available(self):
+        return self._management_ready and not (
+            self._closed or self._closing or self._cleanup_pending
+        )
+
+    @property
+    def configuration_blocked(self):
+        return self.management_available and self._configuration_blocked
 
     @property
     def accepting(self) -> bool:
@@ -694,7 +747,61 @@ class CoreRuntime:
         except Exception:
             return SubscriptionGateState(True, None, None, "state_unknown")
 
-    async def start(self) -> CoreStartupReport:
+    async def recover_management(
+        self, expected_revisions, *, authorization, complete_from_current=False
+    ):
+        if not self.configuration_blocked or self._starting:
+            raise AdminAuthorizationDenied
+        resources = self.admin_operations.ordinary_resources()
+        grant = await self.admin_authorization.authorize(
+            AdminOperation.RECOVER_CONFIG,
+            invocation=None,
+            context=authorization,
+            resources=resources,
+        )
+        migration = self.ordinary_config_migration
+        async with self.lifecycle.admission.mutation("admin-ordinary-recovery"):
+
+            def check(unit):
+                self.admin_authorization.assert_generation_current(
+                    unit, grant, AdminOperation.RECOVER_CONFIG
+                )
+                if set(expected_revisions) != set(resources):
+                    raise ValueError("recovery requires both target revisions")
+                for target, revision in expected_revisions.items():
+                    if type(revision) is not int or revision < 1:
+                        raise ValueError("recovery revision is invalid")
+                    migration.repository._revision(unit, target, revision)
+
+            await self.database.executor.run_transaction(check, begin_mode="IMMEDIATE")
+            await self.admin_authorization.validate_generation(
+                grant, operation=AdminOperation.RECOVER_CONFIG
+            )
+            if complete_from_current:
+                await migration.complete_from_current(expected_revisions, grant=grant)
+            elif not await migration.complete():
+                if not callable(self._ordinary_migration_source):
+                    raise ValueError("prepared ordinary migration input is required")
+                await migration.migrate(self._ordinary_migration_source(), grant=grant)
+            await self.admin_authorization.validate_generation(
+                grant, operation=AdminOperation.RECOVER_CONFIG
+            )
+        await self.start(recovery_grant=grant)
+        await self.admin_authorization.validate_generation(
+            grant, operation=AdminOperation.RECOVER_CONFIG
+        )
+        return {"recovered": True}
+
+    def _check_recovery(self, grant):
+        if grant is not None:
+            effect = self.admin_authorization._owned(grant)
+            effect.check_lifetime()
+            if effect.source is not None:
+                effect.source.check(
+                    effect.context, AdminOperation.RECOVER_CONFIG, effect.resources
+                )
+
+    async def start(self, *, recovery_grant=None) -> CoreStartupReport:
         if self._closed or self._closing:
             raise RuntimeError("CoreRuntime is closing or closed")
         if self._started:
@@ -705,53 +812,89 @@ class CoreRuntime:
         self._starting = True
         self._startup_done.clear()
         try:
-            migration_version = await self.database.executor.initialize()
-            if self._closing:
-                raise asyncio.CancelledError
-            await self.database.executor.verify_integrity()
-            if self._closing:
-                raise asyncio.CancelledError
+            self._check_recovery(recovery_grant)
+            try:
+                migration_version = await self.database.executor.initialize()
+                self._check_recovery(recovery_grant)
+                if self._closing:
+                    raise asyncio.CancelledError
+                await self.database.executor.verify_integrity()
+                self._check_recovery(recovery_grant)
+                if self._closing:
+                    raise asyncio.CancelledError
+                candidates = self.extension_runtime.scan(self.extension_root)
+            except BaseException:
+                self._management_ready = False
+                self._configuration_blocked = False
+                raise
+            self._management_ready = True
+            self._configuration_blocked = False
+            if self.ordinary_config_migration is not None:
+                try:
+                    async with self.lifecycle.admission.mutation(
+                        "ordinary-config-startup-migration"
+                    ):
+                        complete = await self.ordinary_config_migration.complete()
+                        self._check_recovery(recovery_grant)
+                        if not complete:
+                            if not callable(self._ordinary_migration_source):
+                                raise ValueError(
+                                    "prepared ordinary migration input is required"
+                                )
+                            await self.ordinary_config_migration.migrate(
+                                self._ordinary_migration_source(), grant=recovery_grant
+                            )
+                            self._check_recovery(recovery_grant)
+                except Exception:
+                    self._configuration_blocked = True
+                    raise
             expired_logins = (
                 await self.repositories.authorization.expire_pending_on_restart()
             )
-            if self._closing:
-                raise asyncio.CancelledError
-            candidates = self.extension_runtime.scan(self.extension_root)
+            self._check_recovery(recovery_grant)
             if self._closing:
                 raise asyncio.CancelledError
             if self._subscription_gate_candidates_match(candidates):
                 await self.config_repository.initialize_subscription_gates()
+            self._check_recovery(recovery_grant)
             if self._closing:
                 raise asyncio.CancelledError
             if self._trusted_bundled_manifests:
                 await self._seed_trusted_bundled_manifests(candidates)
+            self._check_recovery(recovery_grant)
             if self._closing:
                 raise asyncio.CancelledError
             if self._trusted_bundled_defaults:
                 await self._seed_trusted_bundled_defaults(candidates)
+            self._check_recovery(recovery_grant)
             if self._closing:
                 raise asyncio.CancelledError
             config_failures = (
                 await self.admin_operations.recover_discovered_configuration()
             )
+            self._check_recovery(recovery_grant)
             if self._closing:
                 raise asyncio.CancelledError
             file_items = await self.file_store.recover_orphans()
+            self._check_recovery(recovery_grant)
             if self._closing:
                 raise asyncio.CancelledError
             now = _require_utc(self._utc_clock())
             recovered_outputs = await self.root_output_repository.recover_expired(
                 before=now, recovered_at=now
             )
+            self._check_recovery(recovery_grant)
             if self._closing:
                 raise asyncio.CancelledError
             (
                 recovered_events,
                 recovered_envelopes,
             ) = await self.delivery.recover_startup()
+            self._check_recovery(recovery_grant)
             if self._closing:
                 raise asyncio.CancelledError
             module_statuses = await self.extension_runtime.restore_startup()
+            self._check_recovery(recovery_grant)
             report = CoreStartupReport(
                 migration_version,
                 expired_logins,
@@ -903,6 +1046,7 @@ class CoreRuntime:
 
     def stop_accepting_admin_operations(self) -> None:
         self.admin_operations.stop_accepting()
+        self.admin_authorization.close()
 
     async def _host_ingress(
         self, origin: InvocationOrigin, ingress: HostIngress
@@ -1114,6 +1258,7 @@ class CoreRuntime:
         bound = self._cleanup_timeout if timeout is None else timeout
         _positive_finite(bound, "timeout")
         self.gateway.fence_public_web()  # Web-only synchronous fence before first await.
+        self.admin_authorization.close()
         loop = asyncio.get_running_loop()
         deadline = loop.time() + float(bound)
         try:

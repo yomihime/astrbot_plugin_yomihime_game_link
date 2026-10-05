@@ -13,7 +13,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 ARCHIVE = ROOT / "dist" / "astrbot_plugin_yomihime_game_link-local.zip"
 EXPECTED_WHEEL_SHA256 = (
-    "1db47997219e80919020a233a58189e105500705718cd196e854f5183266735d"
+    "28e91da8baec34890c308b2c6e40de383fa80a162ffc5ef4d698e735c678f302"
 )
 EXPECTED_WHEEL_ENTRIES = {
     "yomihime_module_sdk-1.4.0.dist-info/licenses/LICENSE",
@@ -57,6 +57,7 @@ ROOT_FILES = (
     "requirements.txt",
 )
 OPERATOR_SCRIPT_FILES = (
+    "scripts/prepare_ff14_config_migration.py",
     "scripts/__init__.py",
     "scripts/admin_credentials.py",
     "scripts/configure_source_credentials.py",
@@ -66,6 +67,9 @@ PAGE_FILES = (
     "pages/ff14/index.html",
     "pages/ff14/app.js",
     "pages/ff14/styles.css",
+    "pages/management/index.html",
+    "pages/management/app.js",
+    "pages/management/styles.css",
 )
 FF14_BUNDLE_ROOT = Path("modules") / "ff14"
 FF14_BUNDLE_REQUIRED_FILES = {
@@ -73,9 +77,15 @@ FF14_BUNDLE_REQUIRED_FILES = {
     "config.py",
     "module.py",
     "models.py",
+    "query_resolution.py",
     "yomihime.manifest.json",
     "README.md",
     "features/__init__.py",
+    "features/item_resolution.py",
+    "features/market.py",
+    "features/market_handler.py",
+    "features/market_sources.py",
+    "features/market_models.py",
 }
 FF14_BUNDLE_ROOT_FILES = FF14_BUNDLE_REQUIRED_FILES - {"features/__init__.py"}
 FF14_BUNDLE_ALLOWED_DIRS = {Path("features")}

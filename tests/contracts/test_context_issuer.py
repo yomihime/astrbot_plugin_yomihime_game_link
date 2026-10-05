@@ -154,6 +154,27 @@ class PublicWebIssuerTests(unittest.TestCase):
         with self.assertRaises(InvalidInvocation):
             self.issuer.require(view)
 
+    def test_public_session_is_only_descriptive_exact_proof_bound_data(self):
+        proof = self.proofs.new("pkg/mod", "read", key="session-one")
+        view = self._issue(proof)
+        self.assertEqual(view.public_session_id, "session-one")
+        self.assertIsNone(view.actor_id)
+        self.assertIsNone(view.grant_id)
+        with self.assertRaises(InvalidInvocation):
+            self.issuer.require(replace(view, public_session_id="session-two"))
+        self.issuer.release(view)
+        with self.assertRaises(InvalidInvocation):
+            self.issuer.require(view)
+        scheduler = self.issuer.issue(
+            origin=InvocationOrigin.SCHEDULER,
+            module_id="pkg/mod",
+            module_epoch=1,
+            registry_revision=1,
+        )
+        self.assertIsNone(scheduler.public_session_id)
+        with self.assertRaises(ValueError):
+            replace(scheduler, public_session_id="forged")
+
 
 class ContextIssuerTests(unittest.TestCase):
     def setUp(self):
@@ -493,6 +514,7 @@ class ContextIssuerTests(unittest.TestCase):
                 "delivery_route",
                 "conversation_kind",
                 "subscription_scope",
+                "public_session_id",
             },
         )
 

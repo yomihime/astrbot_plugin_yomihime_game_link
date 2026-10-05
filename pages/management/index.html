@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>游戏连结 · 四字段管理</title><link rel="stylesheet" href="./styles.css"></head>
+<body><main class="management">
+  <p class="brand">如月怜的游戏连结</p><h1>四字段配置管理</h1>
+  <p>保存只修改所选配置。启动失败时，修复后需单独点击恢复运行。</p>
+  <p id="status" role="status" aria-live="polite">正在连接宿主管理页面。</p>
+  <button id="refresh" type="button" disabled>刷新配置与版本</button>
+  <section aria-label="普通配置" id="fields"></section>
+  <section class="card"><h2>限定恢复</h2>
+    <p>回退仅处理本次四字段迁移；配置发生后续修改时会拒绝回退。订阅等其它数据继续保留。</p>
+    <button id="rollback" type="button" disabled>回退四字段迁移</button>
+    <p><label><input id="replacement" type="checkbox">以四个已显式保存的有效新值完成恢复（缺少旧准备材料时）</label></p>
+    <button id="recover" type="button" disabled>重新校验并恢复运行</button>
+  </section>
+</main><script src="/api/plugin/page/bridge-sdk.js"></script><script type="module" src="./app.js"></script></body>
+</html>

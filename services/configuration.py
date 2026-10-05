@@ -61,6 +61,28 @@ class ConfigPublisher(Protocol):
 
 
 AdminGrantValidator = Callable[[AdminAuthorizationGrant], Awaitable[None]]
+ConfigValueValidator = Callable[[object], None]
+
+
+class ConfigurationValueError(ValueError):
+    """Stable declaration-owned field identifier, without rejected data."""
+
+    code = "invalid_configuration_value"
+
+    def __init__(self, field: str) -> None:
+        self.field = field
+        super().__init__(f"{self.code}: {field}")
+
+
+def validate_configuration_value(
+    field: ConfigField, value: object, validator: ConfigValueValidator | None = None
+) -> None:
+    try:
+        field.validate_value(value)
+        if validator is not None:
+            validator(value)
+    except (ValueError, TypeError, OSError):
+        raise ConfigurationValueError(field.name) from None
 
 
 class ConfigurationRecoveryRequired(RuntimeError):
@@ -132,6 +154,7 @@ class _ConfigurationCoordinator:
         "__validate_admin_grant",
         "__publish_config",
         "__subscription_gate_fields",
+        "__value_validators",
     )
 
     def __init__(
@@ -146,10 +169,22 @@ class _ConfigurationCoordinator:
         validate_admin_grant: AdminGrantValidator | None = None,
         publish_config: ConfigPublisher | None = None,
         subscription_gate_fields: tuple[str, ...] = (),
+        value_validators: Mapping[str, ConfigValueValidator] | None = None,
     ) -> None:
         target = ConfigTarget.validate(target)
         fields = _fields(fields)
         declarations = {field.name: field for field in fields}
+        validators = dict(value_validators or {})
+        if any(
+            name not in declarations
+            or declarations[name].sensitive
+            or not callable(check)
+            for name, check in validators.items()
+        ):
+            raise ValueError("config validators require declared ordinary fields")
+        object.__setattr__(
+            self, "_ConfigurationCoordinator__value_validators", validators
+        )
         if (
             type(subscription_gate_fields) is not tuple
             or len(set(subscription_gate_fields)) != len(subscription_gate_fields)
@@ -274,7 +309,57 @@ class _ConfigurationCoordinator:
     async def _apply_authorized(
         self, patch: ConfigPatch, grant: AdminAuthorizationGrant
     ) -> ConfigSnapshot:
-        """Single implementation used by the authenticated host operation."""
+        """Project every outward success/recovery result using the owned grant."""
+        from .admin_authorization import (
+            _grant_resource_fields,
+            _project_snapshot_fields,
+        )
+
+        if (
+            not isinstance(grant, AdminAuthorizationGrant)
+            or grant.operation is not AdminOperation.UPDATE_CONFIG
+        ):
+            raise AdminAuthorizationDenied
+        # Capture only immutable output filtering before effects. This conveys
+        # no authority: admission, dynamic validator and SQLite fences remain.
+        fields = _grant_resource_fields(grant, self.__target)
+        if fields is not None and any(
+            update.field not in fields for update in patch.updates
+        ):
+            raise AdminAuthorizationDenied
+        try:
+            snapshot = await self._apply_authorized_internal(
+                patch, grant, result_fields=fields
+            )
+        except ConfigurationRecoveryRequired as error:
+            if error.snapshot is not None:
+                error.snapshot = _project_snapshot_fields(error.snapshot, fields)
+            if fields is not None:
+                error.transitions = tuple(
+                    item
+                    for item in error.transitions
+                    if isinstance(item, SecretTransition)
+                    and all(
+                        ref is None
+                        or (
+                            ref.principal_id == self.__target.principal_id
+                            and ref.module_id == self.__target.module_id
+                            and ref.field in fields
+                        )
+                        for ref in (item.secret_ref, item.old_secret_ref)
+                    )
+                )
+            raise
+        return _project_snapshot_fields(snapshot, fields)
+
+    async def _apply_authorized_internal(
+        self,
+        patch: ConfigPatch,
+        grant: AdminAuthorizationGrant,
+        *,
+        result_fields: frozenset[str] | None,
+    ) -> ConfigSnapshot:
+        """Trusted internal validation/publication retains complete snapshots."""
 
         patch = self._canonical_patch(patch)
         target = self.__target
@@ -425,6 +510,19 @@ class _ConfigurationCoordinator:
                                 for claim in claimed
                             ),
                         ) from exc
+
+                    # Already committed: continue the existing internal drain.
+                    # Captured output scope must not re-authorize this cleanup.
+                    if result_fields is not None:
+                        try:
+                            full = await self.__repository.current(target)
+                        except Exception as exc:
+                            raise ConfigurationRecoveryRequired(
+                                snapshot=committed
+                            ) from exc
+                        if full.revision != committed.revision:
+                            raise ConfigurationRecoveryRequired(snapshot=full)
+                        committed = full
 
                     changed_fields = frozenset(
                         update.field
@@ -632,6 +730,10 @@ class _ConfigurationCoordinator:
                     )
             if not declaration.sensitive and update.secret is not None:
                 raise ValueError("ordinary config field cannot receive a secret")
+            if not declaration.sensitive and update.mode is ConfigPatchMode.REPLACE:
+                validate_configuration_value(
+                    declaration, update.value, self.__value_validators.get(update.field)
+                )
         operation_id = _bounded_operation_id(patch.operation_id)
         return ConfigPatch(
             patch.expected_revision,
@@ -651,7 +753,16 @@ class _ConfigurationCoordinator:
             raise RevisionConflict("config", patch.expected_revision, before.revision)
         if before.target is not None and ConfigTarget.validate(before.target) != target:
             raise ValueError("configuration snapshot target does not match service")
-        self._validate_snapshot_fields(before)
+        declarations = {field.name: field for field in self.__fields}
+        repaired_fields = frozenset(
+            update.field
+            for update in patch.updates
+            if not declarations[update.field].sensitive
+            and update.mode in {ConfigPatchMode.REPLACE, ConfigPatchMode.CLEAR}
+        )
+        # A canonical, authorized patch may repair the ordinary values it
+        # replaces/removes. Everything retained, including KEEP, stays strict.
+        self._validate_snapshot_fields(before, repaired_fields=repaired_fields)
         old = {item.field: item for item in before.secret_metadata}
         result: list[tuple[Any, Any]] = []
         for update in patch.updates:
@@ -703,12 +814,20 @@ class _ConfigurationCoordinator:
                     )
         return tuple(failures)
 
-    def _validate_snapshot_fields(self, snapshot: ConfigSnapshot) -> None:
+    def _validate_snapshot_fields(
+        self, snapshot: ConfigSnapshot, *, repaired_fields: frozenset[str] = frozenset()
+    ) -> None:
         declared = {field.name: field for field in self.__fields}
         if any(field not in declared for field in snapshot.values):
             raise ValueError("configuration snapshot contains an undeclared field")
         if any(declared[field].sensitive for field in snapshot.values):
             raise ValueError("configuration snapshot contains a sensitive value")
+        for name, value in snapshot.values.items():
+            if name in repaired_fields:
+                continue
+            validate_configuration_value(
+                declared[name], value, self.__value_validators.get(name)
+            )
         for metadata in snapshot.secret_metadata:
             declaration = declared.get(metadata.field)
             if declaration is None or not declaration.sensitive:

@@ -37,7 +37,12 @@ from yomihime_sdk.api.contexts import (
 )
 from yomihime_sdk.api.display import DisplayLimits, LinksBlock, Privacy, TableBlock
 from yomihime_sdk.api.results import ErrorCode, ResultStatus
-from yomihime_sdk.api.services import HttpRequest, HttpResponse, SourceHttpError
+from yomihime_sdk.api.services import (
+    ConfigSnapshot,
+    HttpRequest,
+    HttpResponse,
+    SourceHttpError,
+)
 from yomihime_sdk.api.storage import OwnerScope
 from yomihime_sdk.api.subscriptions import (
     CollectionKey,
@@ -47,6 +52,13 @@ from yomihime_sdk.api.subscriptions import (
     SubscriptionRequest,
     SubscriptionView,
 )
+
+
+class _ConfigView:
+    def __init__(self, values=None):
+        self.values = values or {}
+    async def current(self):
+        return ConfigSnapshot(1, self.values)
 
 
 def _ics(*events: str) -> bytes:
@@ -179,6 +191,24 @@ def _invocation(
 
 
 class CalendarCollectorAndQueryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_same_query_handler_reads_each_new_default_and_explicit_values_win(self):
+        raw = _ics(_event("day-two", "SUMMARY:Second day", "DTSTART:20261001T120000Z", "DTEND:20261001T130000Z"))
+        config = _ConfigView({"ff14_calendar_default_days": 1, "ff14_calendar_default_timezone": "UTC"})
+        http = _FakeHttp([raw, raw, raw])
+        services = type("Services", (), {"config": config, "scopes": _Scopes(http)})()
+        handler = CalendarQuery(services, clock=lambda: datetime(2026, 9, 30, 12, tzinfo=UTC))
+        first = await handler.invoke(_invocation(), {"region": "cn"})
+        self.assertNotIn("Second day", repr(first.document.ordered_blocks))
+        config.values = {"ff14_calendar_default_days": 3, "ff14_calendar_default_timezone": "Asia/Tokyo"}
+        second = await handler.invoke(_invocation(), {"region": "cn"})
+        self.assertIn("Second day", repr(second.document.ordered_blocks))
+        self.assertEqual(second.document.timestamps[0].timezone_name, "Asia/Tokyo")
+        explicit = await handler.invoke(_invocation(), {"region": "cn", "days": 1, "timezone": "UTC"})
+        self.assertNotIn("Second day", repr(explicit.document.ordered_blocks))
+        self.assertEqual(explicit.document.timestamps[0].timezone_name, "UTC")
+        missing = await handler.invoke(_invocation(), {})
+        self.assertIs(missing.error.code, ErrorCode.PARAMETER_ERROR)
+
     async def _render(self, document):
         renderer = GenericDisplayRenderer(
             RenderingBounds(8000, 100, 10, 20, 32, 128, 8, 64, 32)
@@ -218,7 +248,7 @@ class CalendarCollectorAndQueryTests(unittest.IsolatedAsyncioTestCase):
                     )
                     self.assertEqual(http.requests[-1].path, spec.path)
         http = _FakeHttp([_ics()])
-        services = type("Services", (), {"scopes": _Scopes(http)})()
+        services = type("Services", (), {"config": _ConfigView(), "scopes": _Scopes(http)})()
         with mock.patch(
             "modules.ff14.features.calendar.calendar_source_spec",
             side_effect=lambda region, source: None
@@ -244,7 +274,7 @@ class CalendarCollectorAndQueryTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
         http = _FakeHttp([partial, _ics()])
-        services = type("Services", (), {"scopes": _Scopes(http)})()
+        services = type("Services", (), {"config": _ConfigView(), "scopes": _Scopes(http)})()
         result = await CalendarQuery(
             services, clock=lambda: datetime(2026, 9, 30, tzinfo=UTC)
         ).invoke(_invocation(), {"region": "cn"})
@@ -272,7 +302,7 @@ class CalendarCollectorAndQueryTests(unittest.IsolatedAsyncioTestCase):
         ):
             with self.subTest(status=status):
                 http = _FakeHttp(responses)
-                services = type("Services", (), {"scopes": _Scopes(http)})()
+                services = type("Services", (), {"config": _ConfigView(), "scopes": _Scopes(http)})()
                 result = await CalendarQuery(
                     services, clock=lambda: datetime(2026, 9, 30, tzinfo=UTC)
                 ).invoke(_invocation(), {"region": "cn"})
@@ -302,7 +332,7 @@ class CalendarCollectorAndQueryTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
         http = _FakeHttp([empty, with_events])
-        services = type("Services", (), {"scopes": _Scopes(http)})()
+        services = type("Services", (), {"config": _ConfigView(), "scopes": _Scopes(http)})()
         result = await CalendarQuery(
             services, clock=lambda: datetime(2026, 9, 30, tzinfo=UTC)
         ).invoke(_invocation(), {"region": "cn"})
@@ -330,7 +360,7 @@ class CalendarCollectorAndQueryTests(unittest.IsolatedAsyncioTestCase):
         ):
             with self.subTest(parameters=parameters):
                 http = _FakeHttp([raw])
-                services = type("Services", (), {"scopes": _Scopes(http)})()
+                services = type("Services", (), {"config": _ConfigView(), "scopes": _Scopes(http)})()
                 result = await CalendarQuery(
                     services,
                     config=config,
@@ -348,7 +378,7 @@ class CalendarCollectorAndQueryTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual("Second day" in repr(tables), visible)
 
     def _collector(self, http: _FakeHttp, now: datetime) -> CalendarCollector:
-        services = type("Services", (), {"scopes": _Scopes(http)})()
+        services = type("Services", (), {"config": _ConfigView(), "scopes": _Scopes(http)})()
         return CalendarCollector(services, clock=lambda: now)
 
     def _collection_view(self, parameters: NormalizedInput) -> CollectionView:
@@ -495,7 +525,7 @@ class CalendarCollectorAndQueryTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         http = _FakeHttp([SourceHttpError("upstream_error", status_code=503), raw])
-        services = type("Services", (), {"scopes": _Scopes(http)})()
+        services = type("Services", (), {"config": _ConfigView(), "scopes": _Scopes(http)})()
         query = CalendarQuery(
             services,
             clock=lambda: datetime(2026, 9, 29, 12, tzinfo=UTC),
@@ -525,7 +555,7 @@ class CalendarCollectorAndQueryTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_query_rejects_invalid_region_without_network(self) -> None:
         http = _FakeHttp([])
-        services = type("Services", (), {"scopes": _Scopes(http)})()
+        services = type("Services", (), {"config": _ConfigView(), "scopes": _Scopes(http)})()
         result = await CalendarQuery(services).invoke(
             _invocation(), {"region": "other"}
         )
@@ -540,6 +570,20 @@ class CalendarCollectorAndQueryTests(unittest.IsolatedAsyncioTestCase):
 
 
 class CalendarSubscriptionHandlerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_same_create_handler_reads_each_default_without_rewriting_existing(self):
+        config = _ConfigView({"ff14_calendar_default_timezone": "UTC", "ff14_calendar_default_delivery_time": "13:25"})
+        operations = _Operations()
+        services = type("Services", (), {"config": config, "subscriptions": operations})()
+        handler = CalendarSubscriptionHandler(services, "subscribe")
+        await handler.invoke(_invocation(), {"region": "cn"})
+        config.values = {"ff14_calendar_default_timezone": "Asia/Tokyo", "ff14_calendar_default_delivery_time": "18:00"}
+        await handler.invoke(_invocation(), {"region": "cn"})
+        await handler.invoke(_invocation(), {"region": "global", "timezone": "UTC", "time": "09:15"})
+        self.assertEqual([(v.filters["timezone"], v.filters["time"]) for v in operations.created],
+                         [("UTC", "13:25"), ("Asia/Tokyo", "18:00"), ("UTC", "09:15")])
+        missing = await handler.invoke(_invocation(), {})
+        self.assertIs(missing.error.code, ErrorCode.PARAMETER_ERROR)
+
     async def test_new_subscriptions_take_host_defaults_and_explicit_values_win(self):
         config = FF14ConfigSnapshot(
             calendar_default_timezone="UTC", calendar_default_delivery_time="13:25"
@@ -553,7 +597,7 @@ class CalendarSubscriptionHandlerTests(unittest.IsolatedAsyncioTestCase):
             ),
         ):
             operations = _Operations()
-            services = type("Services", (), {"subscriptions": operations})()
+            services = type("Services", (), {"config": _ConfigView(), "subscriptions": operations})()
             result = await CalendarSubscriptionHandler(
                 services, "subscribe", config=config
             ).invoke(_invocation(), parameters)
@@ -572,7 +616,7 @@ class CalendarSubscriptionHandlerTests(unittest.IsolatedAsyncioTestCase):
             "time": "09:15",
         }
         operations.views = (_view("existing", 2, filters),)
-        services = type("Services", (), {"subscriptions": operations})()
+        services = type("Services", (), {"config": _ConfigView(), "subscriptions": operations})()
         config = FF14ConfigSnapshot(
             calendar_default_timezone="UTC", calendar_default_delivery_time="13:25"
         )
@@ -594,7 +638,7 @@ class CalendarSubscriptionHandlerTests(unittest.IsolatedAsyncioTestCase):
     def _handler(
         self, operations: _Operations, action: str
     ) -> CalendarSubscriptionHandler:
-        services = type("Services", (), {"subscriptions": operations})()
+        services = type("Services", (), {"config": _ConfigView(), "subscriptions": operations})()
         return CalendarSubscriptionHandler(services, action)
 
     async def test_create_is_explicit_and_public_parameters_exclude_user_data(

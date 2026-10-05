@@ -20,9 +20,26 @@ env:
 jobs:
   verify:
     runs-on: ubuntu-latest
+    env:
+      YGL_TEST_ASTRBOT_SOURCE: ${{ github.workspace }}/.architecture-refactor/host-contract/astrbot
     steps:
       - name: Check out source
         uses: actions/checkout@v6
+
+      - name: Exclude independent Host test source from plugin checkout
+        run: echo '/.architecture-refactor/host-contract/' >> .git/info/exclude
+
+      - name: Check out pinned AstrBot contract source without running Host
+        uses: actions/checkout@v6
+        with:
+          repository: AstrBotDevs/AstrBot
+          ref: 3c7adafa1397e182d60b1016bf88759265113c8a
+          path: .architecture-refactor/host-contract
+          sparse-checkout: |
+            astrbot/api
+            astrbot/dashboard
+            astrbot/core/config
+          persist-credentials: false
 
       - name: Set up Python 3.13.9
         uses: actions/setup-python@v6
@@ -45,6 +62,12 @@ jobs:
 
       - name: Install plugin runtime dependencies
         run: python -m pip install --disable-pip-version-check -r requirements.txt
+
+      - name: Install offline Host contract test dependencies
+        run: python -m pip install --disable-pip-version-check -r requirements-test.txt
+
+      - name: Run FF14 item display contract and DOM tests
+        run: node tests/pages/ff14/test_item_display.mjs
 
       - name: Build Linux SDK wheel for diagnostics
         env:
@@ -74,9 +97,27 @@ jobs:
   build:
     needs: verify
     runs-on: windows-latest
+    env:
+      YGL_TEST_ASTRBOT_SOURCE: ${{ github.workspace }}/.architecture-refactor/host-contract/astrbot
     steps:
       - name: Check out source
         uses: actions/checkout@v6
+
+      - name: Exclude independent Host test source from plugin checkout
+        shell: pwsh
+        run: Add-Content -LiteralPath .git/info/exclude -Value '/.architecture-refactor/host-contract/'
+
+      - name: Check out pinned AstrBot contract source without running Host
+        uses: actions/checkout@v6
+        with:
+          repository: AstrBotDevs/AstrBot
+          ref: 3c7adafa1397e182d60b1016bf88759265113c8a
+          path: .architecture-refactor/host-contract
+          sparse-checkout: |
+            astrbot/api
+            astrbot/dashboard
+            astrbot/core/config
+          persist-credentials: false
 
       - name: Set up Python 3.13.9
         uses: actions/setup-python@v6
@@ -91,10 +132,17 @@ jobs:
       - name: Install plugin runtime dependencies
         run: python -m pip install --disable-pip-version-check -r requirements.txt
 
+      - name: Install offline Host contract test dependencies
+        run: python -m pip install --disable-pip-version-check -r requirements-test.txt
+
       - name: Run Windows host and packaging tests
         run: >-
           python -m unittest -v
           tests.host.test_b05_sdk_bootstrap
+          tests.host.test_astrbot_contract
+          tests.host.test_ff14_pages
+          tests.host.test_astrbot_runtime
+          tests.host.test_item_display_contract
           tests.packaging.test_sdk_artifact_install
           tests.packaging.test_release_build
 

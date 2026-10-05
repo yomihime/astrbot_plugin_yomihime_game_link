@@ -186,6 +186,16 @@ def _subscription(
 
 
 class RegistryTests(unittest.TestCase):
+    def test_core_configuration_target_cannot_register_as_module(self):
+        registry = Registry()
+        before = registry.snapshot()
+        with self.assertRaisesRegex(RegistryError, "reserved"):
+            registry.register_package(
+                _package("game_link", _module("core", "core")),
+                {"core": _handlers("record.query")},
+            )
+        self.assertIs(registry.snapshot(), before)
+
     def test_rg01_empty_and_multiple_packages_have_no_module_limit(self) -> None:
         registry = Registry()
         empty = registry.snapshot()

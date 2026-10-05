@@ -245,24 +245,26 @@ class CoreRuntimeTests(unittest.IsolatedAsyncioTestCase):
             InvocationPolicy.COMMAND_ONLY,
             CapabilityEffect.READ_ONLY,
         )
+
+        def changed_status(**changes):
+            # Preserve descriptor constraints while varying the original status surface.
+            self.assertEqual(
+                sum(cap.capability_id == "status" for cap in expected.capabilities), 1
+            )
+            return tuple(
+                replace(cap, **changes) if cap.capability_id == "status" else cap
+                for cap in expected.capabilities
+            )
+
         cases = (
             replace(expected, capabilities=expected.capabilities + (added_capability,)),
             replace(
                 expected,
-                capabilities=(
-                    replace(expected.capabilities[0], effect=CapabilityEffect.WRITE),
-                    *expected.capabilities[1:],
-                ),
+                capabilities=changed_status(effect=CapabilityEffect.WRITE),
             ),
             replace(
                 expected,
-                capabilities=(
-                    replace(
-                        expected.capabilities[0],
-                        privacy_floor=PrivacyFloor.PRIVATE,
-                    ),
-                    *expected.capabilities[1:],
-                ),
+                capabilities=changed_status(privacy_floor=PrivacyFloor.PRIVATE),
             ),
             replace(
                 expected,

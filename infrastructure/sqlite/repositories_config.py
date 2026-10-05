@@ -319,10 +319,18 @@ class SQLiteConfigRepository:
             initialize, begin_mode="IMMEDIATE"
         )
 
-    async def current(self, target: ConfigTarget) -> ConfigSnapshot:
+    async def current(
+        self, target: ConfigTarget, *, grant=None, operation=None
+    ) -> ConfigSnapshot:
         target = _config_target(target)
 
         def read(unit: SQLiteUnitOfWork) -> ConfigSnapshot:
+            fields = None
+            if grant is not None:
+                if operation is not AdminOperation.READ_CONFIG:
+                    raise AdminAuthorizationDenied
+                assert_generation_current(unit, grant, operation)
+                fields = grant._effect.resource_fields(target)
             self._ensure_state(unit, target)
             rows = unit.execute(
                 "SELECT * FROM config_entries WHERE principal_id = ? AND module_id = ? "
@@ -333,6 +341,8 @@ class SQLiteConfigRepository:
                 "SELECT revision FROM config_state WHERE principal_id = ? AND module_id = ?",
                 (target.principal_id, target.module_id),
             ).fetchone()
+            if fields is not None:
+                rows = [row for row in rows if row["field"] in fields]
             return self._snapshot(target, int(state[0]), rows)
 
         return await self.database.executor.run_transaction(read)
@@ -366,6 +376,9 @@ class SQLiteConfigRepository:
         def apply(unit: SQLiteUnitOfWork) -> ConfigSnapshot:
             if grant is not None:
                 assert_generation_current(unit, grant, AdminOperation.UPDATE_CONFIG)
+                grant._effect.check_resource(
+                    target, (update.field for update in patch.updates)
+                )
                 for update in patch.updates:
                     receipt = update.receipt
                     if receipt is None:
@@ -388,7 +401,10 @@ class SQLiteConfigRepository:
                         or row["state"] != "claimed"
                     ):
                         raise AdminAuthorizationDenied from None
-            return self._update_in_unit(unit, target, patch)
+            snapshot = self._update_in_unit(unit, target, patch)
+            return (
+                snapshot if grant is None else grant._effect.project_snapshot(snapshot)
+            )
 
         return await self.database.executor.run_transaction(
             apply, begin_mode="IMMEDIATE"

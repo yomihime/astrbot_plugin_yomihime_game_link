@@ -268,12 +268,13 @@ class CalendarQuery:
     ) -> None:
         self._services = services
         self._clock = clock or _utc_now
-        self._config = config or FF14ConfigSnapshot()
+        self._config = config
 
     async def invoke(
         self, context: InvocationView, parameters: JsonObject
     ) -> CapabilityResult:
-        normalized = _normalize_query(parameters, self._config)
+        config = self._config or FF14ConfigSnapshot.from_values((await self._services.config.current()).values)
+        normalized = _normalize_query(parameters, config)
         if isinstance(normalized, CapabilityResult):
             return normalized
         region, days, timezone_name = normalized

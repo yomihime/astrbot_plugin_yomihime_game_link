@@ -48,7 +48,9 @@ class ItemSourceClient:
     def __init__(self, http: SourceHttp) -> None:
         self._http = http
 
-    async def search(self, query: str) -> tuple[tuple[ItemCandidate, ...], bool]:
+    async def search(
+        self, query: str, *, exact: bool = False
+    ) -> tuple[tuple[ItemCandidate, ...], bool]:
         cursor: str | None = None
         seen_cursors: set[str] = set()
         found: list[ItemCandidate] = []
@@ -58,7 +60,7 @@ class ItemSourceClient:
             if cursor is None:
                 parameters = (
                     ("sheets", "Item"),
-                    ("query", f'Name~"{query}"'),
+                    ("query", f'Name{"=" if exact else "~"}"{query}"'),
                     ("fields", "Name"),
                     ("language", "chs"),
                     ("limit", str(PAGE_SIZE)),

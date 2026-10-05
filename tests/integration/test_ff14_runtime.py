@@ -9,14 +9,20 @@ from pathlib import Path
 from secrets import token_urlsafe
 from zoneinfo import ZoneInfo
 
+from ygl_test_subject.api.administration import AdminAuthorizationDenied
 from ygl_test_subject.api.display import DisplayLimits
 from ygl_test_subject.api.services import CapabilityHealth, HealthStatus, HttpResponse
 from ygl_test_subject.api.subscriptions import ConversationKind, DeliveryState
 from ygl_test_subject.core.ports import MessageStatus
+from ygl_test_subject.extensions.discovery import discover_packages
 from ygl_test_subject.infrastructure.http import TransportRequest
 from ygl_test_subject.infrastructure.sqlite.database import SQLiteDatabase
 from ygl_test_subject.services.admin_authorization import _digest
-from ygl_test_subject.services.core_runtime import CoreRuntime, HostIngress
+from ygl_test_subject.services.core_runtime import (
+    CoreRuntime,
+    HostIngress,
+    TrustedSubscriptionGate,
+)
 from ygl_test_subject.services.source_credentials import SourceCredentialPolicy
 
 from tests.fixtures.b04_runtime import DeterministicClock, RecordingMessagePort
@@ -87,6 +93,7 @@ class FF14CalendarRuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.event_date = self.clock().astimezone(ZoneInfo("Asia/Shanghai")).date()
         self.transport = _CalendarTransport(self.event_date)
         self._evidence = {actor: object() for actor in ("alice", "bob", "mallory")}
+        self._admin_context = _AdminContext()
         self._runtimes: list[CoreRuntime] = []
         self.runtime = await self._open_runtime()
 
@@ -96,10 +103,21 @@ class FF14CalendarRuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(await runtime.close(timeout=1))
         self._temporary.cleanup()
 
-    async def _open_runtime(self) -> CoreRuntime:
+    async def _open_runtime(self, *, trusted_gate: bool = True) -> CoreRuntime:
         def validate_ingress(_origin, ingress: HostIngress) -> bool:
             return ingress.evidence is self._evidence.get(ingress.actor_id)
 
+        def validate_admin(_operation, _invocation, context, _generation) -> bool:
+            return context is self._admin_context
+
+        packages = discover_packages(self.extension_root)
+        self.assertEqual(len(packages), 1)
+        package = packages[0]
+        self.assertTrue(package.valid)
+        self.assertTrue(package._provenance.trusted)
+        self.assertEqual(package.package_id, "ff14")
+        self.assertEqual(len(package.manifest.modules), 1)
+        manifest = package.manifest.modules[0]
         runtime = CoreRuntime(
             database=SQLiteDatabase(self.root / "core.sqlite3"),
             extension_root=self.extension_root,
@@ -110,10 +128,20 @@ class FF14CalendarRuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
             renderer=_Renderer(),
             display_limits=DisplayLimits(16, 16_384),
             message_port=self.message_port,
-            admin_context_validator=lambda *_args: True,
+            admin_context_validator=validate_admin,
             host_ingress_validator=validate_ingress,
             config_principal_id="ff14-runtime-config",
             identity_namespace="ff14-runtime-identities",
+            trusted_bundled_manifests={GLOBAL_MODULE_ID: manifest},
+            trusted_subscription_gates={
+                GLOBAL_MODULE_ID: TrustedSubscriptionGate(
+                    manifest,
+                    "ff14_subscriptions_enabled",
+                    package._provenance.manifest_sha256,
+                )
+            }
+            if trusted_gate
+            else None,
             source_health=self._source_health,
             source_credential_policies=(
                 SourceCredentialPolicy(
@@ -158,7 +186,7 @@ class FF14CalendarRuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 GLOBAL_MODULE_ID,
                 True,
                 expected_registry_revision=runtime.registry.snapshot().revision,
-                authorization=_AdminContext(),
+                authorization=self._admin_context,
             )
             self.assertEqual(enabled.lifecycle.value, "active")
         # Inject only the deterministic clock seam into the real loaded collector.
@@ -243,6 +271,44 @@ class FF14CalendarRuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(outcome.result.privacy.value, "private")
         return self._subscription_id(outcome)
+
+    async def test_missing_trusted_gate_keeps_subscriptions_unavailable(self) -> None:
+        self.assertTrue(await self.runtime.close(timeout=1))
+        self.runtime = await self._open_runtime(trusted_gate=False)
+        outcome = await self._command("alice", "calendar subscribe", {"region": "cn"})
+        self.assertEqual(outcome.result.status.value, "error")
+        self.assertEqual(outcome.result.error.code.value, "upstream_error")
+        self.assertEqual(
+            await self.runtime.b04_repositories.scheduler.list_due_jobs(
+                now=self.clock(), limit=10
+            ),
+            (),
+        )
+        # The command's private error receipt is delivered normally; no
+        # subscription delivery or collection job may be created.
+        self.assertEqual(len(self.message_port.calls), 1)
+        self.assertEqual(await self.runtime.delivery.dispatch_due_events(), 0)
+        self.assertEqual(len(self.message_port.calls), 1)
+
+    async def test_missing_and_forged_admin_evidence_cannot_disable_module(
+        self,
+    ) -> None:
+        before = self.runtime.registry.snapshot()
+        for context in (None, _AdminContext()):
+            with (
+                self.subTest(context=context),
+                self.assertRaises(AdminAuthorizationDenied),
+            ):
+                await self.runtime.admin_operations.set_enabled(
+                    None,
+                    GLOBAL_MODULE_ID,
+                    False,
+                    expected_registry_revision=before.revision,
+                    authorization=context,
+                )
+        self.assertEqual(self.runtime.registry.snapshot(), before)
+        self.assertEqual(await self.runtime.delivery.dispatch_due_events(), 0)
+        self.assertEqual(len(self.message_port.calls), 0)
 
     async def _run_collection(self, runtime: CoreRuntime | None = None) -> int:
         current = self.runtime if runtime is None else runtime

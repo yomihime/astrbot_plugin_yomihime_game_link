@@ -29,7 +29,11 @@ from ygl_test_subject.extensions.discovery import discover_packages
 from ygl_test_subject.infrastructure.http import TransportRequest
 from ygl_test_subject.infrastructure.sqlite.database import SQLiteDatabase
 from ygl_test_subject.services.admin_authorization import _digest
-from ygl_test_subject.services.core_runtime import CoreRuntime, HostIngress
+from ygl_test_subject.services.core_runtime import (
+    CoreRuntime,
+    HostIngress,
+    TrustedSubscriptionGate,
+)
 from ygl_test_subject.services.source_credentials import SourceCredentialPolicy
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -127,13 +131,14 @@ class FF14InstalledModuleTests(unittest.IsolatedAsyncioTestCase):
             package = discovered[0].manifest
             self.assertIsNotNone(package)
             self.assertEqual(package.package_id, "ff14")
-            self.assertEqual(package.contract_version, "1.3.0")
+            self.assertEqual(package.contract_version, "1.4.0")
             module_manifest = package.modules[0]
             self.assertEqual(module_manifest.module_id, "ff14")
             self.assertEqual(module_manifest.factory_entry, "module:Factory")
             self.assertEqual(
                 tuple(command.operation_path for command in module_manifest.commands),
                 (
+                    "market",
                     "status",
                     "item",
                     "logs",
@@ -154,7 +159,7 @@ class FF14InstalledModuleTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(
                 capabilities["item.lookup"].invocation_policy.value,
-                "command_only",
+                "command_and_public_web",
             )
             self.assertEqual(capabilities["item.lookup"].effect.value, "read_only")
             self.assertEqual(capabilities["item.lookup"].privacy_floor.value, "public")
@@ -176,6 +181,7 @@ class FF14InstalledModuleTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(
                 {source.source_id: source.host for source in module_manifest.sources},
                 {
+                    "universalis_market": "universalis.app",
                     "xivapi_items": "xivapi-v2.xivcdn.com",
                     "garland_items": "garlandtools.cn",
                     "fflogs_public_cn": "cn.fflogs.com",
@@ -201,11 +207,19 @@ class FF14InstalledModuleTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(
                 {field.name for field in module_manifest.config_fields},
-                {"credential_fflogs_cn", "credential_fflogs_global"},
+                {
+                    "credential_fflogs_cn",
+                    "credential_fflogs_global",
+                    "ff14_subscriptions_enabled",
+                    "ff14_calendar_default_days",
+                    "ff14_calendar_default_timezone",
+                    "ff14_calendar_default_delivery_time",
+                },
             )
             self.assertTrue(
                 all(
-                    field.sensitive and not field.required
+                    not field.required
+                    and field.sensitive == field.name.startswith("credential_")
                     for field in module_manifest.config_fields
                 )
             )
@@ -232,6 +246,14 @@ class FF14InstalledModuleTests(unittest.IsolatedAsyncioTestCase):
                 host_ingress_validator=lambda *_args: True,
                 config_principal_id="ff14-test-config",
                 identity_namespace="ff14-test-identities",
+                trusted_bundled_manifests={GLOBAL_MODULE_ID: module_manifest},
+                trusted_subscription_gates={
+                    GLOBAL_MODULE_ID: TrustedSubscriptionGate(
+                        module_manifest,
+                        "ff14_subscriptions_enabled",
+                        discovered[0]._provenance.manifest_sha256,
+                    )
+                },
                 source_health=source_health,
                 source_credential_policies=(
                     SourceCredentialPolicy(

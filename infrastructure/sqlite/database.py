@@ -226,6 +226,13 @@ class SQLiteUnitOfWork:
         self.begin_mode = begin_mode
         self._closed = False
         self._entered = False
+        self._commit_guards = []
+
+    def add_commit_guard(self, guard) -> None:
+        """Register a synchronous authorization lock/check for commit."""
+        self._ensure_open()
+        if guard not in self._commit_guards:
+            self._commit_guards.append(guard)
 
     @property
     def connection(self) -> sqlite3.Connection:
@@ -322,7 +329,14 @@ class SQLiteUnitOfWork:
     def commit_sync(self) -> None:
         self._ensure_open()
         try:
-            self._connection.commit()
+            from contextlib import ExitStack
+
+            # Invalidation takes these same locks. Successful commit is the
+            # linearization point; cancellation after it cannot undo an effect.
+            with ExitStack() as stack:
+                for guard in self._commit_guards:
+                    stack.enter_context(guard())
+                self._connection.commit()
         except sqlite3.Error as exc:
             translated = _translate_sqlite_error(exc)
             if translated is not None:

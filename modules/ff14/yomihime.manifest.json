@@ -15,6 +15,22 @@
       "module_version": "0.3.0",
       "capabilities": [
         {
+          "capability_id": "ff14.market.query",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "input": {"type": "string", "minLength": 2, "maxLength": 4096},
+              "command": {"type": "string", "minLength": 1, "maxLength": 512}
+            },
+            "required": [],
+            "additionalProperties": false
+          },
+          "invocation_policy": "command_and_public_web",
+          "effect": "read_only",
+          "privacy_floor": "public",
+          "required_sources": ["universalis_market"]
+        },
+        {
           "capability_id": "status",
           "input_schema": {
             "type": "object",
@@ -320,6 +336,12 @@
       ],
       "commands": [
         {
+          "operation_path": "market",
+          "capability_id": "ff14.market.query",
+          "parameter_mapping": {"command": "command"},
+          "help_text": "/ygl ff14 market <物品名或ID> [server=World dc=大区 region=cn|global quality=all|nq|hq intent=overview|min|listings]；名称可用引号保护，也支持显式自然查询；choose <批次> <generation> <物品ID> 续接当前候选。"
+        },
+        {
           "operation_path": "status",
           "capability_id": "status",
           "parameter_mapping": {},
@@ -430,9 +452,48 @@
           "sensitive": true,
           "required": false,
           "description": "FFLogs 国际服 OAuth 客户端凭据；加密保存，未配置时仅该区战绩查询不可用。"
+        },
+        {
+          "name": "ff14_calendar_default_days",
+          "sensitive": false,
+          "default": 7,
+          "value_schema": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 30
+          },
+          "group": "calendar"
+        },
+        {
+          "name": "ff14_calendar_default_timezone",
+          "sensitive": false,
+          "default": "Asia/Shanghai",
+          "value_schema": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "group": "calendar"
+        },
+        {
+          "name": "ff14_calendar_default_delivery_time",
+          "sensitive": false,
+          "default": "08:00",
+          "value_schema": {
+            "type": "string",
+            "minLength": 5,
+            "maxLength": 5
+          },
+          "group": "calendar"
         }
       ],
       "sources": [
+        {
+          "source_id": "universalis_market",
+          "host": "universalis.app",
+          "timeout_seconds": 10,
+          "requests_per_minute": 30
+        },
         {
           "source_id": "xivapi_items",
           "host": "xivapi-v2.xivcdn.com",

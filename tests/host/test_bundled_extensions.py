@@ -7,7 +7,7 @@ import shutil
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 from zipfile import ZipFile
 
 from ygl_test_subject.adapters.astrbot.bundled import (
@@ -19,7 +19,12 @@ from ygl_test_subject.extensions.factory_resolver import FilesystemFactorySource
 from ygl_test_subject.extensions.loader import CandidateState, ExtensionCandidate
 
 from scripts.build_release import build_release, build_sdk_wheel
-from yomihime_sdk.api.services import HealthStatus, ModuleFactory, ModuleServices
+from yomihime_sdk.api.services import (
+    ConfigSnapshot,
+    HealthStatus,
+    ModuleFactory,
+    ModuleServices,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 BUNDLE_SOURCE = ROOT / "modules"
@@ -29,6 +34,7 @@ class BundledExtensionTests(unittest.IsolatedAsyncioTestCase):
     EXPECTED_CAPABILITIES = {
         "status",
         "item.lookup",
+        "ff14.market.query",
         "ff14.logs.character",
         "ff14.logs.output_percentile",
         "ff14.calendar.query",
@@ -61,7 +67,12 @@ class BundledExtensionTests(unittest.IsolatedAsyncioTestCase):
         current = json.loads(current_bytes)
         old = json.loads(current_bytes)
         old["contract_version"] = "1.3.0"
-        public_ids = {"item.lookup", "ff14.logs.character", "ff14.calendar.query"}
+        public_ids = {
+            "item.lookup",
+            "ff14.logs.character",
+            "ff14.calendar.query",
+            "ff14.market.query",
+        }
         for capability in old["modules"][0]["capabilities"]:
             if capability["capability_id"] in public_ids:
                 capability["invocation_policy"] = "command_only"
@@ -111,6 +122,45 @@ class BundledExtensionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("HTTP 403", output_health.reason)
         self.assertIn("尚未验证", output_health.reason)
 
+    @staticmethod
+    def _services(values=None):
+        services = object.__new__(ModuleServices)
+        object.__setattr__(
+            services,
+            "config",
+            AsyncMock(
+                current=AsyncMock(
+                    return_value=ConfigSnapshot(
+                        1,
+                        values
+                        if values is not None
+                        else {
+                            "core_defaults": {"default_region": "cn"},
+                            "ff14_calendar_default_days": 7,
+                            "ff14_calendar_default_timezone": "Asia/Shanghai",
+                            "ff14_calendar_default_delivery_time": "08:00",
+                        },
+                    )
+                )
+            ),
+        )
+        return services
+
+    async def test_factory_rejects_missing_and_invalid_config(self) -> None:
+        result = install_bundled_ff14(self.plugin_root, self.data_root)
+        package = discover_packages(result.extension_root)[0]
+        lease = await FilesystemFactorySource().capture(
+            ExtensionCandidate(package, CandidateState.DISABLED, "test")
+        )
+        try:
+            factory = lease.resolve(package.manifest.modules[0].factory_entry)
+            with self.assertRaises(AttributeError):
+                await factory.create(object.__new__(ModuleServices))
+            with self.assertRaisesRegex(ValueError, "ff14_calendar_default_days"):
+                await factory.create(self._services({"ff14_calendar_default_days": 0}))
+        finally:
+            lease.release()
+
     async def test_install_discovers_manifest_and_resolves_factory(self) -> None:
         result = install_bundled_ff14(self.plugin_root, self.data_root)
 
@@ -134,7 +184,7 @@ class BundledExtensionTests(unittest.IsolatedAsyncioTestCase):
         try:
             factory = lease.resolve(package.manifest.modules[0].factory_entry)
             self.assertIsInstance(factory, ModuleFactory)
-            services = object.__new__(ModuleServices)
+            services = self._services()
             instance = await factory.create(services)
             await instance.start()
             health = await instance.check_health()
@@ -174,7 +224,7 @@ class BundledExtensionTests(unittest.IsolatedAsyncioTestCase):
             )
             try:
                 factory = lease.resolve(package.manifest.modules[0].factory_entry)
-                instance = await factory.create(object.__new__(ModuleServices))
+                instance = await factory.create(self._services())
                 await instance.start()
                 health = await instance.check_health()
                 self.assert_ff14_factory_contract(instance, health)
