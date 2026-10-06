@@ -427,6 +427,18 @@ def projected_page_assets(repository_root: Path) -> dict[str, bytes]:
         payload["pages/shell/index.html"] = index.replace(
             marker, '<template id="module-style-assets">' + links + "</template>"
         ).encode("utf-8")
+    # A separate legal page root is the first entry in pinned Host discovery.
+    # Keep the literal loader and module assets local to each root so the Host
+    # can attach that page's asset proof to every import and stylesheet.
+    shell_prefix = "pages/shell/"
+    for name, content in list(payload.items()):
+        if name.startswith(shell_prefix):
+            target = "pages/00-game-link/" + name.removeprefix(shell_prefix)
+            if name == shell_prefix + "index.html":
+                content = content.replace(
+                    b"<html ", b'<html data-page-name="00-game-link" '
+                )
+            payload[target] = content
     return payload
 
 
@@ -463,6 +475,21 @@ def included_files(root: Path = ROOT) -> list[Path]:
         path = repository_root / "pages" / "shell" / name
         if has_pages or path.exists():
             files.append(validate_source_path(path, repository_root, "Shell asset"))
+        default_path = repository_root / "pages" / "00-game-link" / name
+        if has_pages or default_path.exists():
+            files.append(
+                validate_source_path(
+                    default_path, repository_root, "Default page asset"
+                )
+            )
+        if name not in {"index.html", "app.js", "styles.css"}:
+            management_path = repository_root / "pages" / "management" / name
+            if has_pages or management_path.exists():
+                files.append(
+                    validate_source_path(
+                        management_path, repository_root, "Management runtime asset"
+                    )
+                )
     compatibility = repository_root / "pages" / "ff14" / "query-contract.js"
     if compatibility.exists():
         canonical = repository_root / "modules/ff14/pages/src/query-contract.js"

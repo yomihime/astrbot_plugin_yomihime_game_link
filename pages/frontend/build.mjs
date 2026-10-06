@@ -27,8 +27,10 @@ const runtimeAudit = {name: 'runtime-package-notices', generateBundle(_options, 
 await mkdir(shell, {recursive: true});
 await build({...common, plugins:[runtimeAudit], build: {outDir: shell, emptyOutDir: false, lib: {entry: resolve(frontend, 'src/runtime.ts'), formats: ['es'], fileName: () => 'runtime.js'}, minify: true, sourcemap: false}});
 await build({...common, build: {outDir: shell, emptyOutDir: false, lib: {entry: resolve(frontend, 'src/main.ts'), formats: ['es'], fileName: () => 'app.js', cssFileName: 'styles'}, rolldownOptions: {external: ['vue', 'naive-ui', './module-loader.js'], output: {paths: {'vue': './runtime.js', 'naive-ui': './runtime.js'}}}, minify: true}});
+await build({...common, build: {outDir: resolve(root, 'pages/management'), emptyOutDir: false, lib: {entry: resolve(frontend, 'src/management.js'), formats: ['es'], fileName: () => 'app.js'}, rolldownOptions: {external: ['vue', 'naive-ui'], output: {paths: {'vue': './runtime.js', 'naive-ui': './runtime.js'}}}, minify: true}});
 await build({...common, build: {outDir: resolve(ff14, 'dist'), emptyOutDir: true, lib: {entry: resolve(ff14, 'src/entry.ts'), formats: ['es'], fileName: () => 'entry.js', cssFileName: 'styles'}, rolldownOptions: {external: ['vue', 'naive-ui'], output: {paths: {'vue': '../../../../../runtime.js', 'naive-ui': '../../../../../runtime.js'}}}, minify: true}});
 await copyFile(resolve(frontend, 'src/index.html'), resolve(shell, 'index.html'));
+await copyFile(resolve(frontend, 'src/management-index.html'), resolve(root, 'pages/management/index.html'));
 await copyFile(resolve(ff14, 'src/query-contract.js'), resolve(root, 'pages/ff14/query-contract.js'));
 const resources = [];
 for (const file of (await readdir(resolve(ff14, 'dist'))).sort()) {
@@ -53,3 +55,11 @@ await writeFile(resolve(shell,'THIRD_PARTY_NOTICES.txt'),notices.join('\n\n-----
 const auditDir=resolve(root,'.architecture-refactor/modular-r0-r3'); await mkdir(auditDir,{recursive:true});
 await writeFile(resolve(auditDir,'runtime-packages.json'),JSON.stringify({packages:[...runtimePackages].sort(),facades:[{package:'vue',reason:'public runtime export facade; implementation rendered from @vue packages'}],modules:moduleAudit,licenseFiles},null,2)+'\n');
 console.log(JSON.stringify({runtimeBytes: (await readFile(resolve(shell, 'runtime.js'))).length, resources}));
+
+for (const page of ['management','00-game-link']) {
+  const target=resolve(root,'pages',page);await mkdir(resolve(target,'licenses'),{recursive:true});
+  for(const file of ['runtime.js','THIRD_PARTY_NOTICES.txt',...licenseFiles])await copyFile(resolve(shell,file),resolve(target,file));
+}
+const defaultRoot=resolve(root,'pages/00-game-link');
+for(const file of ['index.html','app.js','styles.css'])await copyFile(resolve(shell,file),resolve(defaultRoot,file));
+await writeFile(resolve(defaultRoot,'index.html'),(await readFile(resolve(shell,'index.html'),'utf8')).replace('<html ', '<html data-page-name="00-game-link" '));

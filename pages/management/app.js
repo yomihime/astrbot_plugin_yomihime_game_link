@@ -1,172 +1,448 @@
-const record=v=>v!==null&&typeof v==='object'&&!Array.isArray(v)&&[Object.prototype,null].includes(Object.getPrototypeOf(v));
-const exact=(v,keys)=>record(v)&&Object.keys(v).sort().join('\0')===[...keys].sort().join('\0');
-const identifier=/^[a-z][a-z0-9_]*(?:[.-][a-z0-9_]+)*$/;
-const fail=(code='invalid_config')=>{throw Error(code);};
-const key=f=>JSON.stringify([f.module_id,f.name]);
-const ownedFields=(catalog,target)=>catalog.fields.filter(f=>f.module_id===target);
-const textLength=value=>[...value].length;
-function jsonBudget(value,maxDepth=32,maxNodes=65536){
-  const seen=new Set();let nodes=0;
-  function walk(v,depth){
-    if(++nodes>maxNodes||depth>maxDepth)fail();
-    if(typeof v==='string'){if(textLength(v)>4096)fail();return;}
-    if(v===null||typeof v==='boolean'||typeof v==='number'&&Number.isFinite(v))return;
-    if((!record(v)&&!Array.isArray(v))||seen.has(v))fail();seen.add(v);
-    if(Array.isArray(v)){if(Object.keys(v).length!==v.length)fail();for(const child of v)walk(child,depth+1);}
-    else for(const [name,child] of Object.entries(v)){walk(name,depth+1);walk(child,depth+1);}seen.delete(v);
-  }
-  walk(value,0);if(new TextEncoder().encode(JSON.stringify(value)).length>262144)fail();
+import { createApp as e, defineComponent as t, h as n, nextTick as r, shallowRef as i } from "./runtime.js";
+import { NAlert as a, NCard as o, NConfigProvider as s, darkTheme as c, dateEnUS as l, dateZhCN as u, enUS as d, zhCN as f } from "./runtime.js";
+//#region src/management-view.ts
+function p(r) {
+	let p = i([]), m = i({}), h = () => {}, g = (e, t) => n("button", {
+		id: e,
+		type: "button",
+		disabled: !0
+	}, t), _ = t({ setup() {
+		return () => {
+			let e = m.value.isDark === !0 || m.value.theme === "dark", t = String(m.value.locale || "").startsWith("en");
+			return n(s, {
+				theme: e ? c : null,
+				locale: t ? d : f,
+				dateLocale: t ? l : u,
+				inlineThemeDisabled: !0
+			}, { default: () => n("main", { class: "management" }, [
+				n("p", { class: "brand" }, "如月怜的游戏连结"),
+				n("h1", "配置目录与管理"),
+				n("p", "目录来自可信 Core 与模块声明。当前只开放四字段管理范围；字段注册不授予存量读取或修改权限，写操作仍由后端逐请求鉴权。"),
+				n("p", "保存只修改所选配置。客户端检查用于辅助输入，模块语义校验与配置版本以服务端为准。启动失败时，修复后需单独点击恢复运行。"),
+				n(a, {
+					type: "info",
+					showIcon: !1
+				}, { default: () => n("p", {
+					id: "status",
+					role: "status",
+					"aria-live": "polite"
+				}, "正在连接宿主管理页面。") }),
+				g("refresh", "刷新配置与版本"),
+				n("section", {
+					id: "fields",
+					"aria-label": "普通配置"
+				}, p.value.map((e) => n("section", {
+					class: "card",
+					key: e.target,
+					"data-owner": e.target
+				}, [n(o, { title: e.target }, { default: () => [
+					n("p", e.revision),
+					n("div", e.controls.map((e) => {
+						let t = e.field, r = t.value_schema, i = `config-${encodeURIComponent(t.module_id)}-${encodeURIComponent(t.name)}`, a = r?.enum || (r?.type === "boolean" ? [!1, !0] : null);
+						return n("div", {
+							class: "config-field",
+							key: e.signature,
+							"data-field": t.name,
+							"data-owner": t.module_id
+						}, [
+							n("label", { for: i }, t.description || t.name),
+							n("p", {
+								class: "field-detail",
+								id: i + "-detail"
+							}, e.detail),
+							n("select", {
+								"data-role": "mode",
+								"aria-label": `${t.description || t.name}修改方式`,
+								ref: (t) => {
+									e.mode = t;
+								},
+								onChange: () => {
+									e.draftVersion++, h();
+								}
+							}, [
+								["keep", "保持"],
+								["replace", "替换 / 修复"],
+								["clear", "清除显式值"]
+							].map(([e, t]) => n("option", { value: e }, t))),
+							n(a ? "select" : "input", {
+								id: i,
+								"data-role": "value",
+								"aria-describedby": i + "-detail",
+								onInput: () => {
+									e.draftVersion++;
+								},
+								onChange: () => {
+									e.draftVersion++;
+								},
+								ref: (t) => {
+									e.input = t;
+								},
+								...a ? {} : {
+									type: ["integer", "number"].includes(r?.type || "") ? "number" : "text",
+									min: r?.minimum,
+									max: r?.maximum,
+									step: r?.type === "integer" ? "1" : "any",
+									maxlength: r?.maxLength
+								}
+							}, a ? [n("option", {
+								value: "",
+								disabled: !0
+							}, "请选择有效值"), ...a.map((e, t) => n("option", { value: String(t) }, String(e)))] : void 0)
+						]);
+					})),
+					n("button", {
+						type: "button",
+						"data-action": "save",
+						disabled: !0,
+						ref: (t) => {
+							e.save = t;
+						},
+						onClick: e.onSave
+					}, "保存本组修改")
+				] })]))),
+				n(o, {
+					class: "card",
+					title: "限定恢复"
+				}, { default: () => [
+					n("p", "回退仅处理本次四字段迁移；配置发生后续修改时会拒绝回退。订阅等其它数据继续保留。"),
+					g("rollback", "回退四字段迁移"),
+					n("p", n("label", [n("input", {
+						id: "replacement",
+						type: "checkbox"
+					}), "以四个已显式保存的有效新值完成恢复（缺少旧准备材料时）"])),
+					g("recover", "重新校验并恢复运行")
+				] })
+			]) });
+		};
+	} }), v = e(_);
+	return v.mount(r.getElementById("management-root")), {
+		fields(e, t) {
+			h = t, p.value = e;
+		},
+		context(e) {
+			m.value = e || {};
+		},
+		dispose() {
+			v.unmount();
+		}
+	};
 }
-function valueValid(schema,value){
-  if(schema===null)return true;if(schema.enum&&!schema.enum.includes(value))return false;
-  if(schema.type==='string')return typeof value==='string'&&(schema.minLength===undefined||textLength(value)>=schema.minLength)&&(schema.maxLength===undefined||textLength(value)<=schema.maxLength);
-  if(['integer','number'].includes(schema.type))return (schema.type==='integer'?Number.isSafeInteger(value):typeof value==='number'&&Number.isFinite(value))&&(schema.minimum===undefined||value>=schema.minimum)&&(schema.maximum===undefined||value<=schema.maximum);
-  if(schema.type==='boolean')return typeof value==='boolean';
-  if(schema.type==='array')return Array.isArray(value)&&value.every(v=>valueValid(schema.items,v));
-  if(schema.type==='object')return record(value)&&(schema.required||[]).every(name=>Object.hasOwn(value,name))&&Object.entries(value).every(([name,v])=>Object.hasOwn(schema.properties||{},name)&&valueValid(schema.properties[name],v));
-  return false;
+//#endregion
+//#region src/management.js
+var m = (e) => typeof e == "object" && !!e && !Array.isArray(e) && [Object.prototype, null].includes(Object.getPrototypeOf(e)), h = (e, t) => m(e) && Object.keys(e).sort().join("\0") === [...t].sort().join("\0"), g = /^[a-z][a-z0-9_]*(?:[.-][a-z0-9_]+)*$/, _ = (e = "invalid_config") => {
+	throw Error(e);
+}, v = (e) => JSON.stringify([e.module_id, e.name]), y = (e, t) => e.fields.filter((e) => e.module_id === t), b = (e) => [...e].length;
+function x(e, t = 32, n = 65536) {
+	let r = /* @__PURE__ */ new Set(), i = 0;
+	function a(e, o) {
+		if ((++i > n || o > t) && _(), typeof e == "string") {
+			b(e) > 4096 && _();
+			return;
+		}
+		if (!(e === null || typeof e == "boolean" || typeof e == "number" && Number.isFinite(e))) {
+			if ((!m(e) && !Array.isArray(e) || r.has(e)) && _(), r.add(e), Array.isArray(e)) {
+				Object.keys(e).length !== e.length && _();
+				for (let t of e) a(t, o + 1);
+			} else for (let [t, n] of Object.entries(e)) a(t, o + 1), a(n, o + 1);
+			r.delete(e);
+		}
+	}
+	a(e, 0), new TextEncoder().encode(JSON.stringify(e)).length > 262144 && _();
 }
-function schemaValid(schema,depth=0){
-  if(!record(schema)||depth>16||!['string','integer','number','boolean','object','array'].includes(schema.type))fail();
-  const allowed=['type','description'];if('description'in schema&&(typeof schema.description!=='string'||!schema.description.trim()))fail();
-  if(schema.type==='object'){
-    allowed.push('properties','required','additionalProperties');
-    if('properties'in schema&&!record(schema.properties)||'additionalProperties'in schema&&schema.additionalProperties!==false)fail();
-    const properties=schema.properties||{};for(const [name,child] of Object.entries(properties)){if(!name.trim())fail();schemaValid(child,depth+1);}
-    if('required'in schema&&(!Array.isArray(schema.required)||new Set(schema.required).size!==schema.required.length||!schema.required.every(name=>typeof name==='string'&&Object.hasOwn(properties,name))))fail();
-  }else if(schema.type==='array'){allowed.push('items');schemaValid(schema.items,depth+1);}
-  else{
-    allowed.push('enum');const bounds=schema.type==='string'?['minLength','maxLength']:['integer','number'].includes(schema.type)?['minimum','maximum']:[];allowed.push(...bounds);
-    for(const name of bounds)if(name in schema&&(!Number.isFinite(schema[name])||schema.type!=='number'&&!Number.isSafeInteger(schema[name])||schema.type==='string'&&schema[name]<0))fail();
-    if(bounds.length&&bounds.every(name=>name in schema)&&schema[bounds[0]]>schema[bounds[1]])fail();
-    if('enum'in schema&&(!Array.isArray(schema.enum)||!schema.enum.length||new Set(schema.enum).size!==schema.enum.length||!schema.enum.every(v=>valueValid({...schema,enum:undefined},v))))fail();
-  }
-  if(Object.keys(schema).some(name=>!allowed.includes(name)))fail();
+function S(e, t) {
+	return e === null ? !0 : e.enum && !e.enum.includes(t) ? !1 : e.type === "string" ? typeof t == "string" && (e.minLength === void 0 || b(t) >= e.minLength) && (e.maxLength === void 0 || b(t) <= e.maxLength) : ["integer", "number"].includes(e.type) ? (e.type === "integer" ? Number.isSafeInteger(t) : typeof t == "number" && Number.isFinite(t)) && (e.minimum === void 0 || t >= e.minimum) && (e.maximum === void 0 || t <= e.maximum) : e.type === "boolean" ? typeof t == "boolean" : e.type === "array" ? Array.isArray(t) && t.every((t) => S(e.items, t)) : e.type === "object" && m(t) && (e.required || []).every((e) => Object.hasOwn(t, e)) && Object.entries(t).every(([t, n]) => Object.hasOwn(e.properties || {}, t) && S(e.properties[t], n));
 }
-export function validateCatalog(input){
-  jsonBudget(input);if(!exact(input,['schema_version','fields'])||input.schema_version!==1||!Array.isArray(input.fields)||input.fields.length>128)fail();
-  const keys=['module_id','name','description','group','value_schema','default','required','readable','editable','blocked_reason'],seen=new Set();
-  for(const f of input.fields){
-    if(!exact(f,keys)||typeof f.module_id!=='string'||f.module_id.split('/').length!==2||!f.module_id.split('/').every(p=>identifier.test(p))||typeof f.name!=='string'||!f.name||textLength(f.name)>128||/[\s\x00-\x1f]/u.test(f.name)||typeof f.description!=='string'||!(f.group===null||typeof f.group==='string'&&identifier.test(f.group))||![f.required,f.readable,f.editable].every(v=>typeof v==='boolean'))fail();
-    if(f.blocked_reason===null?!f.readable||!f.editable:f.blocked_reason==='not_granted'?f.readable||f.editable:f.blocked_reason==='semantic_validator_unavailable'?!f.readable||f.editable:true)fail();
-    if(seen.has(key(f)))fail();seen.add(key(f));
-    if(f.value_schema!==null){jsonBudget(f.value_schema,16,2048);schemaValid(f.value_schema);if(f.default!==null&&!valueValid(f.value_schema,f.default))fail();}
-  }
-  const owned=JSON.parse(JSON.stringify(input));const freeze=v=>{if(v&&typeof v==='object'){for(const child of Object.values(v))freeze(child);Object.freeze(v);}return v;};return freeze(owned);
+function C(e, t = 0) {
+	(!m(e) || t > 16 || ![
+		"string",
+		"integer",
+		"number",
+		"boolean",
+		"object",
+		"array"
+	].includes(e.type)) && _();
+	let n = ["type", "description"];
+	if ("description" in e && (typeof e.description != "string" || !e.description.trim()) && _(), e.type === "object") {
+		n.push("properties", "required", "additionalProperties"), ("properties" in e && !m(e.properties) || "additionalProperties" in e && e.additionalProperties !== !1) && _();
+		let r = e.properties || {};
+		for (let [e, n] of Object.entries(r)) e.trim() || _(), C(n, t + 1);
+		"required" in e && (!Array.isArray(e.required) || new Set(e.required).size !== e.required.length || !e.required.every((e) => typeof e == "string" && Object.hasOwn(r, e))) && _();
+	} else if (e.type === "array") n.push("items"), C(e.items, t + 1);
+	else {
+		n.push("enum");
+		let t = e.type === "string" ? ["minLength", "maxLength"] : ["integer", "number"].includes(e.type) ? ["minimum", "maximum"] : [];
+		n.push(...t);
+		for (let n of t) n in e && (!Number.isFinite(e[n]) || e.type !== "number" && !Number.isSafeInteger(e[n]) || e.type === "string" && e[n] < 0) && _();
+		t.length && t.every((t) => t in e) && e[t[0]] > e[t[1]] && _(), "enum" in e && (!Array.isArray(e.enum) || !e.enum.length || new Set(e.enum).size !== e.enum.length || !e.enum.every((t) => S({
+			...e,
+			enum: void 0
+		}, t))) && _();
+	}
+	Object.keys(e).some((e) => !n.includes(e)) && _();
 }
-export function validateSnapshot(data,catalog){
-  if(!catalog)fail();jsonBudget(data);const targets=[...new Set(catalog.fields.filter(f=>f.readable).map(f=>f.module_id))];if(!exact(data,targets))fail();
-  for(const target of targets){const row=data[target],declared=ownedFields(catalog,target).filter(f=>f.readable);
-    if(!exact(row,['revision','fields'])||!Number.isSafeInteger(row.revision)||row.revision<1||!exact(row.fields,declared.map(f=>f.name)))fail();
-    for(const f of declared){const value=row.fields[f.name];if(!exact(value,['value','state','present','source'])||!['valid','invalid'].includes(value.state)||typeof value.present!=='boolean'||!['sqlite','default'].includes(value.source)||(value.state==='invalid'?value.value!==null:!valueValid(f.value_schema,value.value)))fail();}
-  }return data;
+function w(e) {
+	x(e), (!h(e, ["schema_version", "fields"]) || e.schema_version !== 1 || !Array.isArray(e.fields) || e.fields.length > 128) && _();
+	let t = [
+		"module_id",
+		"name",
+		"description",
+		"group",
+		"value_schema",
+		"default",
+		"required",
+		"readable",
+		"editable",
+		"blocked_reason"
+	], n = /* @__PURE__ */ new Set();
+	for (let r of e.fields) (!h(r, t) || typeof r.module_id != "string" || r.module_id.split("/").length !== 2 || !r.module_id.split("/").every((e) => g.test(e)) || typeof r.name != "string" || !r.name || b(r.name) > 128 || /[\s\x00-\x1f]/u.test(r.name) || typeof r.description != "string" || !(r.group === null || typeof r.group == "string" && g.test(r.group)) || ![
+		r.required,
+		r.readable,
+		r.editable
+	].every((e) => typeof e == "boolean")) && _(), (r.blocked_reason === null ? !r.readable || !r.editable : r.blocked_reason === "not_granted" ? r.readable || r.editable : r.blocked_reason !== "semantic_validator_unavailable" || !r.readable || r.editable) && _(), n.has(v(r)) && _(), n.add(v(r)), r.value_schema !== null && (x(r.value_schema, 16, 2048), C(r.value_schema), r.default !== null && !S(r.value_schema, r.default) && _());
+	let r = JSON.parse(JSON.stringify(e)), i = (e) => {
+		if (e && typeof e == "object") {
+			for (let t of Object.values(e)) i(t);
+			Object.freeze(e);
+		}
+		return e;
+	};
+	return i(r);
 }
-const supported=f=>f.value_schema!==null&&['string','integer','number','boolean'].includes(f.value_schema.type);
-function convert(f,raw){
-  const schema=f.value_schema;let value=raw;
-  if(schema.enum||schema.type==='boolean'){const choices=schema.enum||[false,true];if(!/^\d+$/.test(raw)||!Object.hasOwn(choices,Number(raw)))fail();value=choices[Number(raw)];}
-  else if(['integer','number'].includes(schema.type)){if(typeof raw!=='string'||!raw.trim()||! /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i.test(raw.trim()))fail();value=Number(raw);}
-  if(!valueValid(schema,value))fail();return value;
+function T(e, t) {
+	t || _(), x(e);
+	let n = [...new Set(t.fields.filter((e) => e.readable).map((e) => e.module_id))];
+	h(e, n) || _();
+	for (let r of n) {
+		let n = e[r], i = y(t, r).filter((e) => e.readable);
+		(!h(n, ["revision", "fields"]) || !Number.isSafeInteger(n.revision) || n.revision < 1 || !h(n.fields, i.map((e) => e.name))) && _();
+		for (let e of i) {
+			let t = n.fields[e.name];
+			(!h(t, [
+				"value",
+				"state",
+				"present",
+				"source"
+			]) || !["valid", "invalid"].includes(t.state) || typeof t.present != "boolean" || !["sqlite", "default"].includes(t.source) || (t.state === "invalid" ? t.value !== null : !S(e.value_schema, t.value))) && _();
+		}
+	}
+	return e;
 }
-export function updateBody(target,revision,controls,catalog){
-  if(!catalog||!record(controls)||!Number.isSafeInteger(revision)||revision<1)fail();const declared=ownedFields(catalog,target),updates=[];
-  if(!declared.length||Object.keys(controls).some(name=>!declared.some(f=>f.name===name)))fail();
-  for(const [name,control] of Object.entries(controls)){const f=declared.find(item=>item.name===name);if(!record(control)||!['keep','replace','clear'].includes(control.mode))fail();if(control.mode==='keep')continue;
-    if(!f.readable||!f.editable||!supported(f))fail('admin_authorization_denied');updates.push(control.mode==='clear'?{field:name,mode:'clear'}:{field:name,mode:'replace',value:convert(f,control.value)});
-  }if(!updates.length)fail('select_changes');return {module_id:target,expected_revision:revision,updates};
+var E = (e) => e.value_schema !== null && [
+	"string",
+	"integer",
+	"number",
+	"boolean"
+].includes(e.value_schema.type);
+function D(e, t) {
+	let n = e.value_schema, r = t;
+	if (n.enum || n.type === "boolean") {
+		let e = n.enum || [!1, !0];
+		(!/^\d+$/.test(t) || !Object.hasOwn(e, Number(t))) && _(), r = e[Number(t)];
+	} else ["integer", "number"].includes(n.type) && ((typeof t != "string" || !t.trim() || !/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i.test(t.trim())) && _(), r = Number(t));
+	return S(n, r) || _(), r;
 }
-// Matching names bind the bridge surface; the backend owns authorization.
-const presentation=new Set(['theme','isDark','locale','i18n','displayName','pageTitle']);
-function contextBoundary(context){
-  if(!record(context)||!Object.hasOwn(context,'pluginName')||!Object.hasOwn(context,'pageName')||context.pluginName!=='astrbot_plugin_yomihime_game_link'||context.pageName!=='management')fail('invalid_context');
-  const boundary=Object.fromEntries(Object.entries(context).filter(([name])=>!presentation.has(name)));jsonBudget(boundary);
-  const representable=v=>{if(typeof v==='number'&&Object.is(v,-0))fail('invalid_context');if(v&&typeof v==='object')for(const child of Object.values(v))representable(child);};representable(boundary);
-  const stable=v=>Array.isArray(v)?v.map(stable):record(v)?Object.fromEntries(Object.keys(v).sort().map(name=>[name,stable(v[name])])):v;return JSON.stringify(stable(boundary));
+function O(e, t, n, r) {
+	(!r || !m(n) || !Number.isSafeInteger(t) || t < 1) && _();
+	let i = y(r, e), a = [];
+	(!i.length || Object.keys(n).some((e) => !i.some((t) => t.name === e))) && _();
+	for (let [e, t] of Object.entries(n)) {
+		let n = i.find((t) => t.name === e);
+		(!m(t) || ![
+			"keep",
+			"replace",
+			"clear"
+		].includes(t.mode)) && _(), t.mode !== "keep" && ((!n.readable || !n.editable || !E(n)) && _("admin_authorization_denied"), a.push(t.mode === "clear" ? {
+			field: e,
+			mode: "clear"
+		} : {
+			field: e,
+			mode: "replace",
+			value: D(n, t.value)
+		}));
+	}
+	return a.length || _("select_changes"), {
+		module_id: e,
+		expected_revision: t,
+		updates: a
+	};
 }
-export function createManagementPage(document,bridge,window){
-  let catalog=null,snapshot=null,ready=false,closed=false,stale=true,generation=0,boundary=null,contextSeen=false,off=null,active=null;
-  const cards=new Map(),controls=new Map(),status=document.getElementById('status'),fields=document.getElementById('fields');
-  const element=(tag,text)=>{const n=document.createElement(tag);if(text!==undefined)n.textContent=text;return n;};
-  const current=attempt=>!closed&&ready&&generation===attempt,writable=f=>f.readable&&f.editable&&supported(f);
-  const blocked=button=>button.disabled||button.getAttribute('aria-disabled')==='true';
-  function setButton(button,denied){button.setAttribute('aria-disabled',String(denied));button.disabled=denied&&(closed||!ready||document.activeElement!==button);}
-  function buttons(){
-    setButton(document.getElementById('refresh'),closed||!ready||active!==null);
-    const usable=!closed&&ready&&!stale&&snapshot!==null&&Object.keys(snapshot).length>0&&active===null;
-    setButton(document.getElementById('rollback'),!usable);setButton(document.getElementById('recover'),!usable||catalog.fields.some(f=>f.readable&&!f.editable));
-    document.getElementById('replacement').disabled=blocked(document.getElementById('recover'));
-    for(const [target,card]of cards)setButton(card.save,!usable||!catalog||!ownedFields(catalog,target).some(writable));
-    // Preserve focused editable drafts while reading; submit buttons fence writes.
-    for(const control of controls.values()){const allowed=!closed&&ready&&writable(control.field);control.mode.disabled=!allowed;control.input.disabled=!allowed||control.mode.value!=='replace';}
-  }
-  async function post(endpoint,body,attempt){
-    if(!current(attempt))fail('stale_context');const response=await bridge.apiPost(`admin/${endpoint}`,body);if(!current(attempt))fail('stale_context');
-    if(endpoint==='catalog')return validateCatalog(response);if(endpoint==='read')return response;
-    if(endpoint==='update'&&(!exact(response,['module_id','revision'])||response.module_id!==body.module_id||!Number.isSafeInteger(response.revision)||response.revision<=body.expected_revision))fail('operation_unavailable');
-    if(endpoint==='rollback'&&(!exact(response,['rolled_back'])||response.rolled_back!==true))fail('operation_unavailable');
-    if(endpoint==='recover'&&(!exact(response,['recovered'])||response.recovered!==true))fail('operation_unavailable');return response;
-  }
-  function inputValue(f,value){if(value===null)return '';const choices=f.value_schema?.enum||(f.value_schema?.type==='boolean'?[false,true]:null);return choices?String(choices.findIndex(v=>v===value)):String(value);}
-  function makeControl(f){
-    const node=element('div');node.className='config-field';node.dataset.field=f.name;node.dataset.owner=f.module_id;
-    const id=`config-${encodeURIComponent(f.module_id)}-${encodeURIComponent(f.name)}`,label=element('label',f.description||f.name);label.htmlFor=id;
-    const detail=element('p');detail.className='field-detail';detail.id=id+'-detail';
-    const mode=element('select');mode.dataset.role='mode';mode.setAttribute('aria-label',`${f.description||f.name}修改方式`);
-    for(const [value,text]of [['keep','保持'],['replace','替换 / 修复'],['clear','清除显式值']]){const option=element('option',text);option.value=value;mode.append(option);}
-    const schema=f.value_schema,choices=schema?.enum||(schema?.type==='boolean'?[false,true]:null),input=element(choices?'select':'input');input.id=id;input.dataset.role='value';input.setAttribute('aria-describedby',detail.id);
-    if(choices){const option=element('option','请选择有效值');option.value='';option.disabled=true;input.append(option);choices.forEach((value,index)=>{const option=element('option',String(value));option.value=String(index);input.append(option);});}
-    else {input.type=['integer','number'].includes(schema?.type)?'number':'text';if(schema){if(schema.minimum!==undefined)input.min=String(schema.minimum);if(schema.maximum!==undefined)input.max=String(schema.maximum);input.step=schema.type==='integer'?'1':'any';if(schema.maxLength!==undefined)input.maxLength=schema.maxLength;}}
-    mode.addEventListener('change',buttons);node.append(label,detail,mode,input);return {node,detail,mode,input,field:f,signature:JSON.stringify(f)};
-  }
-  function render(){
-    const owners=[...new Set(catalog.fields.map(f=>f.module_id))],wanted=new Set(catalog.fields.map(key));
-    for(const [k,c]of controls)if(!wanted.has(k)){c.node.remove();controls.delete(k);}for(const [target,card]of cards)if(!owners.includes(target)){card.node.remove();cards.delete(target);}
-    for(const target of owners){
-      let card=cards.get(target);if(!card){const node=element('section');node.className='card';node.dataset.owner=target;
-        const revision=element('p'),content=element('div'),save=element('button','保存本组修改');save.type='button';save.dataset.action='save';node.append(element('h2',target),revision,content,save);fields.append(node);card={node,revision,content,save};cards.set(target,card);
-        save.addEventListener('click',()=>!blocked(save)&&run(async attempt=>{
-          const selected=Object.fromEntries(ownedFields(catalog,target).map(f=>{const c=controls.get(key(f));return [f.name,{mode:c.mode.value,value:c.input.value}];}));
-          await post('update',updateBody(target,snapshot[target].revision,selected,catalog),attempt);await refresh(attempt);
-          // A newer draft typed during the pending save survives its response.
-          for(const [name,sent]of Object.entries(selected)){if(sent.mode==='keep')continue;const c=controls.get(JSON.stringify([target,name])),row=snapshot[target]?.fields[name];if(c&&row&&c.mode.value===sent.mode&&c.input.value===sent.value){c.mode.value='keep';c.input.value=inputValue(c.field,row.value);}}
-          status.textContent='配置已保存；需要恢复时请单独执行恢复运行。';
-        }));
-      }
-      card.revision.textContent=snapshot[target]?`配置版本：${snapshot[target].revision}`:'仅声明目录；未读取该模块存量值。';
-      for(const f of ownedFields(catalog,target)){
-        const k=key(f),signature=JSON.stringify(f);let c=controls.get(k);if(!c||c.signature!==signature){const next=makeControl(f);if(c)c.node.replaceWith(next.node);else card.content.append(next.node);controls.set(k,next);c=next;}
-        const row=f.readable?snapshot[target].fields[f.name]:null,detail=[`字段：${f.name}`,f.group?`分组：${f.group}`:'未分组',f.required?'必需配置':'可选配置',`声明默认值：${JSON.stringify(f.default)}`];
-        if(row)detail.push(row.state==='valid'?'有效':'无效存量，原值不显示',row.present?'已有显式值':'未设置',row.source==='sqlite'?'Core 配置':'默认值');else detail.push('无存量读取与修改授权');
-        if(f.blocked_reason==='semantic_validator_unavailable')detail.push('模块语义校验器不可用，禁止修改与清除');if(!supported(f))detail.push('此 schema 暂不支持编辑，仅显示声明与已授权值');c.detail.textContent=detail.join(' · ');
-        if(!supported(f))c.input.value=row?.state==='valid'?JSON.stringify(row.value):'';else if(c.mode.value==='keep')c.input.value=row?inputValue(f,row.value):'';
-      }
-    }buttons();
-  }
-  async function refresh(attempt){stale=true;buttons();const declarations=await post('catalog',{},attempt),values=validateSnapshot(await post('read',{},attempt),declarations);if(!current(attempt))fail('stale_context');catalog=declarations;snapshot=values;stale=false;render();}
-  async function run(action){
-    if(active||closed||!ready)return;const operation={generation};active=operation;buttons();status.textContent='管理操作正在执行。';
-    try{await action(operation.generation);}catch(error){if(!current(operation.generation))return;
-      if(error?.message==='revision_conflict'){stale=true;status.textContent='配置已变化，请刷新并重新核对后修改。';}
-      else if(error?.message==='select_changes')status.textContent='请选择需要修改的字段。';
-      else if(error?.message==='invalid_config')status.textContent='配置或输入未通过校验，请核对字段要求后刷新重试。';
-      else if(error?.message==='admin_authorization_denied'){stale=true;status.textContent='管理授权不可用，请重新打开宿主管理页面后手动刷新。';}
-      else {stale=true;status.textContent='未取得成功确认，请刷新核对配置与版本后重试。';}
-    }finally{if(active===operation){active=null;buttons();}}
-  }
-  const revisions=()=>Object.fromEntries(Object.entries(snapshot).map(([target,row])=>[target,row.revision]));
-  document.getElementById('refresh').addEventListener('click',()=>!blocked(document.getElementById('refresh'))&&run(async attempt=>{await refresh(attempt);status.textContent='已读取配置目录与授权范围内的值；写操作仍逐请求鉴权。';}));
-  document.getElementById('rollback').addEventListener('click',()=>!blocked(document.getElementById('rollback'))&&run(async attempt=>{await post('rollback',{expected_revisions:revisions()},attempt);await refresh(attempt);status.textContent='四字段迁移已限定回退，其他数据保留。';}));
-  document.getElementById('recover').addEventListener('click',()=>!blocked(document.getElementById('recover'))&&run(async attempt=>{await post('recover',{expected_revisions:revisions(),complete_from_current:document.getElementById('replacement').checked},attempt);await refresh(attempt);status.textContent='配置已重新校验，业务运行已恢复。';}));
-  function accept(context){
-    if(closed)return;document.documentElement.dataset.theme=context?.isDark===true||context?.theme==='dark'?'dark':'light';document.documentElement.lang=typeof context?.locale==='string'?context.locale:'zh-CN';let next;
-    try{next=contextBoundary(context);}catch{contextSeen=true;generation++;ready=false;stale=true;active=null;boundary=null;catalog=null;snapshot=null;fields.replaceChildren();cards.clear();controls.clear();buttons();status.textContent='宿主管理上下文无效，请重新打开页面。';return;}
-    contextSeen=true;if(ready&&next===boundary)return;generation++;boundary=next;ready=true;stale=true;active=null;catalog=null;snapshot=null;fields.replaceChildren();cards.clear();controls.clear();buttons();
-    run(async attempt=>{await refresh(attempt);status.textContent='已读取配置目录与授权范围内的值；写操作仍逐请求鉴权。';});
-  }
-  function close(){if(closed)return;closed=true;generation++;ready=false;active=null;catalog=null;snapshot=null;off?.();buttons();}
-  return {start(){
-    if(!bridge||typeof bridge.apiPost!=='function'||typeof bridge.ready!=='function'||typeof bridge.onContext!=='function'){status.textContent='请从宿主插件管理页面打开此页。';return;}
-    off=bridge.onContext(accept);Promise.resolve(bridge.ready()).then(context=>{if(!contextSeen)accept(context);}).catch(()=>{if(!contextSeen&&!closed){ready=false;status.textContent='宿主管理会话不可用。';buttons();}});window?.addEventListener('pagehide',close,{once:true});
-  },close};
+var k = /* @__PURE__ */ new Set([
+	"theme",
+	"isDark",
+	"locale",
+	"i18n",
+	"displayName",
+	"pageTitle"
+]);
+function A(e) {
+	(!m(e) || !Object.hasOwn(e, "pluginName") || !Object.hasOwn(e, "pageName") || e.pluginName !== "astrbot_plugin_yomihime_game_link" || e.pageName !== "management") && _("invalid_context");
+	let t = Object.fromEntries(Object.entries(e).filter(([e]) => !k.has(e)));
+	x(t);
+	let n = (e) => {
+		if (typeof e == "number" && Object.is(e, -0) && _("invalid_context"), e && typeof e == "object") for (let t of Object.values(e)) n(t);
+	};
+	n(t);
+	let r = (e) => Array.isArray(e) ? e.map(r) : m(e) ? Object.fromEntries(Object.keys(e).sort().map((t) => [t, r(e[t])])) : e;
+	return JSON.stringify(r(t));
 }
-if(typeof document!=='undefined')createManagementPage(document,window.AstrBotPluginPage,window).start();
+function j(e, t, n) {
+	let i = null, a = null, o = !1, s = !1, c = !0, l = 0, u = null, d = !1, f = null, m = null, g = p(e), b = /* @__PURE__ */ new Map(), x = /* @__PURE__ */ new Map(), S = e.getElementById("status"), C = (e) => !s && o && l === e, D = (e) => e.readable && e.editable && E(e), k = (e) => e.disabled || e.getAttribute("aria-disabled") === "true";
+	function j(t, n) {
+		t.setAttribute("aria-disabled", String(n)), t.disabled = n && (s || !o || e.activeElement !== t);
+	}
+	function M() {
+		j(e.getElementById("refresh"), s || !o || m !== null);
+		let t = !s && o && !c && a !== null && Object.keys(a).length > 0 && m === null;
+		j(e.getElementById("rollback"), !t), j(e.getElementById("recover"), !t || i.fields.some((e) => e.readable && !e.editable)), e.getElementById("replacement").disabled = k(e.getElementById("recover"));
+		for (let [e, n] of b) j(n.save, !t || !i || !y(i, e).some(D));
+		for (let e of x.values()) {
+			let t = !s && o && D(e.field);
+			e.mode.disabled = !t, e.input.disabled = !t || e.mode.value !== "replace";
+		}
+	}
+	async function N(e, n, r) {
+		C(r) || _("stale_context");
+		let i = await t.apiPost(`admin/${e}`, n);
+		return C(r) || _("stale_context"), e === "catalog" ? w(i) : e === "read" ? i : (e === "update" && (!h(i, ["module_id", "revision"]) || i.module_id !== n.module_id || !Number.isSafeInteger(i.revision) || i.revision <= n.expected_revision) && _("operation_unavailable"), e === "rollback" && (!h(i, ["rolled_back"]) || i.rolled_back !== !0) && _("operation_unavailable"), e === "recover" && (!h(i, ["recovered"]) || i.recovered !== !0) && _("operation_unavailable"), i);
+	}
+	function P(e, t) {
+		if (t === null) return "";
+		let n = e.value_schema?.enum || (e.value_schema?.type === "boolean" ? [!1, !0] : null);
+		return String(n ? n.findIndex((e) => e === t) : t);
+	}
+	function F(e) {
+		return {
+			field: e,
+			signature: JSON.stringify(e),
+			detail: "",
+			draftVersion: 0,
+			mode: null,
+			input: null
+		};
+	}
+	function I(e) {
+		let t = b.get(e).save;
+		k(t) || z(async (t) => {
+			let n = Object.fromEntries(y(i, e).map((e) => {
+				let t = x.get(v(e));
+				return [e.name, {
+					mode: t.mode.value,
+					value: t.input.value,
+					draftVersion: t.draftVersion
+				}];
+			}));
+			await N("update", O(e, a[e].revision, n, i), t), await R(t);
+			for (let [t, r] of Object.entries(n)) {
+				if (r.mode === "keep") continue;
+				let n = x.get(JSON.stringify([e, t])), i = a[e]?.fields[t];
+				n && i && n.draftVersion === r.draftVersion && n.mode.value === r.mode && n.input.value === r.value && (n.mode.value = "keep", n.input.value = P(n.field, i.value));
+			}
+			S.textContent = "配置已保存；需要恢复时请单独执行恢复运行。";
+		});
+	}
+	async function L() {
+		let e = [...new Set(i.fields.map((e) => e.module_id))], t = new Set(i.fields.map(v));
+		for (let e of x.keys()) t.has(e) || x.delete(e);
+		for (let t of b.keys()) e.includes(t) || b.delete(t);
+		let n = [];
+		for (let t of e) {
+			let e = b.get(t);
+			e || (e = {
+				target: t,
+				revision: "",
+				controls: [],
+				save: null,
+				onSave: () => I(t)
+			}, b.set(t, e)), e.revision = a[t] ? `配置版本：${a[t].revision}` : "仅声明目录；未读取该模块存量值。", e.controls = [];
+			for (let r of y(i, t)) {
+				let i = v(r), o = JSON.stringify(r), s = x.get(i);
+				(!s || s.signature !== o) && (s = F(r), x.set(i, s));
+				let c = r.readable ? a[t].fields[r.name] : null, l = [
+					`字段：${r.name}`,
+					r.group ? `分组：${r.group}` : "未分组",
+					r.required ? "必需配置" : "可选配置",
+					`声明默认值：${JSON.stringify(r.default)}`
+				];
+				c ? l.push(c.state === "valid" ? "有效" : "无效存量，原值不显示", c.present ? "已有显式值" : "未设置", c.source === "sqlite" ? "Core 配置" : "默认值") : l.push("无存量读取与修改授权"), r.blocked_reason === "semantic_validator_unavailable" && l.push("模块语义校验器不可用，禁止修改与清除"), E(r) || l.push("此 schema 暂不支持编辑，仅显示声明与已授权值"), s.detail = l.join(" · "), E(r) ? (!s.mode || s.mode.value === "keep") && n.push([
+					s,
+					c ? P(r, c.value) : "",
+					s.mode?.value,
+					s.input?.value,
+					s.draftVersion
+				]) : n.push([
+					s,
+					c?.state === "valid" ? JSON.stringify(c.value) : "",
+					s.mode?.value,
+					s.input?.value,
+					s.draftVersion
+				]), e.controls.push(s);
+			}
+		}
+		g.fields([...b.values()], M), await r();
+		for (let [e, t, r, i, a] of n) e.input && e.draftVersion === a && (r === void 0 || e.mode.value === r && e.input.value === i) && (e.input.value = t);
+		M();
+	}
+	async function R(e) {
+		c = !0, M();
+		let t = await N("catalog", {}, e), n = T(await N("read", {}, e), t);
+		C(e) || _("stale_context"), i = t, a = n, c = !1, await L(), C(e) || _("stale_context");
+	}
+	async function z(e) {
+		if (m || s || !o) return;
+		let t = { generation: l };
+		m = t, M(), S.textContent = "管理操作正在执行。";
+		try {
+			await e(t.generation);
+		} catch (e) {
+			if (!C(t.generation)) return;
+			e?.message === "revision_conflict" ? (c = !0, S.textContent = "配置已变化，请刷新并重新核对后修改。") : e?.message === "select_changes" ? S.textContent = "请选择需要修改的字段。" : e?.message === "invalid_config" ? S.textContent = "配置或输入未通过校验，请核对字段要求后刷新重试。" : e?.message === "admin_authorization_denied" ? (c = !0, S.textContent = "管理授权不可用，请重新打开宿主管理页面后手动刷新。") : (c = !0, S.textContent = "未取得成功确认，请刷新核对配置与版本后重试。");
+		} finally {
+			m === t && (m = null, M());
+		}
+	}
+	let B = () => Object.fromEntries(Object.entries(a).map(([e, t]) => [e, t.revision]));
+	e.getElementById("refresh").addEventListener("click", () => !k(e.getElementById("refresh")) && z(async (e) => {
+		await R(e), S.textContent = "已读取配置目录与授权范围内的值；写操作仍逐请求鉴权。";
+	})), e.getElementById("rollback").addEventListener("click", () => !k(e.getElementById("rollback")) && z(async (e) => {
+		await N("rollback", { expected_revisions: B() }, e), await R(e), S.textContent = "四字段迁移已限定回退，其他数据保留。";
+	})), e.getElementById("recover").addEventListener("click", () => !k(e.getElementById("recover")) && z(async (t) => {
+		await N("recover", {
+			expected_revisions: B(),
+			complete_from_current: e.getElementById("replacement").checked
+		}, t), await R(t), S.textContent = "配置已重新校验，业务运行已恢复。";
+	}));
+	function V(t) {
+		if (s) return;
+		g.context(t), e.documentElement.dataset.theme = t?.isDark === !0 || t?.theme === "dark" ? "dark" : "light", e.documentElement.lang = typeof t?.locale == "string" ? t.locale : "zh-CN";
+		let n;
+		try {
+			n = A(t);
+		} catch {
+			d = !0, l++, o = !1, c = !0, m = null, u = null, i = null, a = null, g.fields([], M), b.clear(), x.clear(), M(), S.textContent = "宿主管理上下文无效，请重新打开页面。";
+			return;
+		}
+		d = !0, !(o && n === u) && (l++, u = n, o = !0, c = !0, m = null, i = null, a = null, g.fields([], M), b.clear(), x.clear(), M(), z(async (e) => {
+			await R(e), S.textContent = "已读取配置目录与授权范围内的值；写操作仍逐请求鉴权。";
+		}));
+	}
+	function H() {
+		s || (s = !0, l++, o = !1, m = null, i = null, a = null, f?.(), M());
+	}
+	return {
+		start() {
+			if (!t || typeof t.apiPost != "function" || typeof t.ready != "function" || typeof t.onContext != "function") {
+				S.textContent = "请从宿主插件管理页面打开此页。";
+				return;
+			}
+			f = t.onContext(V), Promise.resolve(t.ready()).then((e) => {
+				d || V(e);
+			}).catch(() => {
+				!d && !s && (o = !1, S.textContent = "宿主管理会话不可用。", M());
+			}), n?.addEventListener("pagehide", H, { once: !0 });
+		},
+		close: H
+	};
+}
+typeof document < "u" && document.getElementById("management-root") && j(document, window.AstrBotPluginPage, window).start();
+//#endregion
+export { j as createManagementPage, O as updateBody, w as validateCatalog, T as validateSnapshot };

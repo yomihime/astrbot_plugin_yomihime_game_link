@@ -343,6 +343,7 @@ def page_asset_contract():
         "rewrite_plugin_page_css",
         "rewrite_plugin_page_js",
         "apply_theme_to_html",
+        "discover_plugin_pages",
     }
     methods = [node for node in owner.body if getattr(node, "name", None) in names]
     namespace = {
@@ -353,7 +354,20 @@ def page_asset_contract():
         "urlencode": urlencode,
         "urlsplit": urlsplit,
         "urlunsplit": urlunsplit,
+        "StarMetadata": Any,
+        "Path": Path,
     }
+    from types import SimpleNamespace
+
+    async def isfile(path):
+        return Path(path).is_file()
+
+    namespace["aio_ospath"] = SimpleNamespace(isfile=isfile)
+    namespace["PLUGIN_PAGE_ENTRY_FILE_NAME"] = _literal_assignment(
+        sources["astrbot/dashboard/services/plugin_page_service.py"],
+        "PLUGIN_PAGE_ENTRY_FILE_NAME",
+    )
+    namespace["PluginPage"] = lambda **values: SimpleNamespace(**values)
     regexes = [
         node
         for node in tree.body

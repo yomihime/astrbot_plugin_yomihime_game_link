@@ -9,7 +9,7 @@ declare global {interface Window {AstrBotPluginPage: Bridge}}
 const App = defineComponent({setup() {
   const revision = ref(0), root = ref<HTMLElement|null>(null), main = ref<HTMLElement|null>(null);
   let shell: ReturnType<typeof createShell> | null = null;
-  onMounted(() => {shell = createShell({bridge: window.AstrBotPluginPage, container: root.value!, window, loadPage, changed: () => {revision.value++;}}); shell.start();});
+  onMounted(() => {shell = createShell({bridge: window.AstrBotPluginPage, container: root.value!, window, loadPage, expectedPage: document.documentElement.dataset.pageName || 'shell', changed: () => {revision.value++;}}); shell.start();});
   onBeforeUnmount(() => shell?.dispose());
   return () => {
     revision.value;

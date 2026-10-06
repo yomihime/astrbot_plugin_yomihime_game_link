@@ -66,7 +66,7 @@ export function createShell({bridge, container, window, loadPage, changed, timeo
       mounted = instance; identity = target; pendingIdentity = ''; state.mounted = true; changed();
     } catch {if (!closed && !projectionRevoked && !revokedOwners.has(module.module_id)) {
       // A first load failure still belongs to this owner after its view leaves.
-      revokeOwner(module.module_id); if (!state.cleanupPending) state.message = reopenMessage; changed();
+      revokeOwner(module.module_id); if (!state.cleanupPending && state.selected?.owner === module.module_id) state.message = reopenMessage; changed();
     }}
   }
   function pickRoute() {const requested = readRoute(window.location.hash); if (requested) {state.selected = requested; return;} if (window.location.hash && window.location.hash !== '#/' && window.location.hash !== '#') {state.selected = null; return;} const module = state.catalog?.modules?.find(m => m.state === 'loaded' && m.pages.length); state.selected = module ? {owner: module.module_id, route: module.pages[0].route_id} : null;}

@@ -25,7 +25,7 @@ test('explicit skip focuses without implicit scroll then reveals the main start'
  skipToMain(null);assert.equal(calls.length,0);skipToMain(main);
  assert.deepEqual(calls,[['focus',{preventScroll:true}],['scroll',{block:'start',inline:'nearest',behavior:'instant'}]]);dom.window.close();
 });
-function harness({data=catalog(),loader,initialContext,readyTask,assetEvent=()=> 'load'}={}) {
+function harness({data=catalog(),loader,initialContext,readyTask,expectedPage='shell',assetEvent=()=> 'load'}={}) {
   const dom=new JSDOM('<template id="module-style-assets"></template><div id="container"></div>',{url:'http://localhost/#/module/ff14%2Fff14/items'}),window=dom.window,container=window.document.getElementById('container');
   for(const module of data.modules || []) for(const page of module.pages) for(const path of page.styles) {const link=window.document.createElement('link');link.rel='stylesheet';link.dataset.resource=path;link.setAttribute('href','./'+path+'?fixture-authorized');window.document.getElementById('module-style-assets').content.append(link);}
   const styleRequests=[],imports=[],append=window.document.head.append.bind(window.document.head);
@@ -35,7 +35,7 @@ function harness({data=catalog(),loader,initialContext,readyTask,assetEvent=()=>
   const context={pluginName:'astrbot_plugin_yomihime_game_link',pageName:'shell',binding:1,isDark:false,locale:'zh-CN'};
   const bridge={ready:()=>readyTask?.promise || Promise.resolve(initialContext === undefined ? context : initialContext),onContext(fn){callback=fn;return()=>{callback=null;};},apiGet(path){const p=deferred();gets.push({path,...p});return p.promise;},apiPost(path,body){const p=deferred();posts.push({path,body,...p});return p.promise;}};
   const loadPage=loader||(async(entry)=>({mount(view,options){const input=window.document.createElement('input');input.value='draft';view.append(input);const mount={view,input,options,updates:[],disposed:0};mounts.push(mount);return{update(context){mount.updates.push(context);},dispose(){mount.disposed++;view.replaceChildren();}};}}));
-  const shell=createShell({bridge,container,window,loadPage:entry=>{imports.push(entry);return loadPage(entry);},changed(){},timeoutMs:100}); shell.start();
+  const shell=createShell({bridge,container,window,expectedPage,loadPage:entry=>{imports.push(entry);return loadPage(entry);},changed(){},timeoutMs:100}); shell.start();
   return {shell,dom,container,gets,posts,mounts,styleRequests,imports,context,emit:c=>callback?.(c),async start(){await flush();gets[0].resolve(data);await flush();},close(){shell.dispose();dom.window.close();}};
 }
 test('catalog rejects traversal undeclared assets inactive pages and duplicates; second module is data-only',()=>{
@@ -61,6 +61,23 @@ test('generic micro module new page route mounts with no shell module branch; re
   const data=catalog('micro/demo');data.modules[0].pages=[{...data.modules[0].pages[0],route_id:'inspect',title:'Inspect',capability_id:'demo.inspect'}];const h=harness({data});try {h.dom.window.location.hash='#/module/micro%2Fdemo/inspect';await h.start();assert.equal(h.mounts[0].options.routeId,'inspect');await assert.rejects(h.mounts[0].options.services.invoke('item.lookup',{},'queries/items'));await assert.rejects(h.mounts[0].options.services.invoke('demo.inspect',{},'management/config'));assert.equal(h.posts.length,0);}finally{h.close();}
 });
 function queryHarness(route='market',timeoutMs=100) {const requests=[],scope=createScope(()=>true),context={owner:'ff14/ff14',runtimeId:'run',epoch:1,boundary:'b',theme:'light',locale:'zh-CN',available:true};const controller=createQueryController({routeId:route,context,scope,services:{invoke(cap,body,endpoint){const p=deferred();requests.push({cap,body,endpoint,...p});return p.promise;}}},()=>{},timeoutMs);return {controller,requests,scope,context};}
+for(const failure of ['css','js'])test(`late A ${failure} failure revokes A without replacing healthy selected B status or view`,async()=>{
+  const data=catalog();data.modules.push(catalog('micro/demo').modules[0]);
+  const late=deferred(),views=[];
+  const h=harness({data,assetEvent:link=>failure==='css'&&link.dataset.moduleStyle==='ff14/ff14'?null:'load',loader:entry=>{
+    if(entry.includes('ff14/ff14'))return late.promise;
+    return Promise.resolve({mount(view,options){const input=view.ownerDocument.createElement('input');input.value='B draft';view.append(input);const record={view,input,options,updates:[]};views.push(record);return{update(context){record.updates.push(context);},dispose(){view.replaceChildren();}};}});
+  }});
+  try{
+    await h.start();h.shell.select('micro/demo','items');await new Promise(resolve=>setTimeout(resolve,10));await flush();
+    const b=views[0];assert.ok(b);b.input.focus();b.input.setSelectionRange(1,3);const message=h.shell.state.message;
+    if(failure==='css'){late.resolve({mount(){throw Error('A must never mount');}});h.styleRequests.find(link=>link.dataset.moduleStyle==='ff14/ff14').dispatchEvent(new h.dom.window.Event('error'));}
+    else late.reject(Error('expired A JS'));
+    await flush();assert.equal(h.shell.state.message,message);assert.equal(h.shell.state.mounted,true);assert.equal(h.container.firstElementChild,b.view);assert.equal(h.dom.window.document.activeElement,b.input);assert.equal(b.input.selectionStart,1);assert.equal(b.input.value,'B draft');assert.equal(b.updates.at(-1)?.available ?? b.options.context.available,true);
+    assert.equal(h.dom.window.document.head.querySelector('link[data-module-style="ff14/ff14"]'),null);
+    const imports=h.imports.length;h.shell.select('ff14/ff14','items');await flush();assert.match(h.shell.state.message,/重新打开/);assert.equal(h.shell.state.mounted,false);assert.equal(h.imports.length,imports);assert.equal(h.container.children.length,0);
+  }finally{h.close();}
+});
 test('module request and candidate use exact old body contract; edit stops old continuation',async()=>{
   const h=queryHarness();try {h.controller.edit('query','犎牛牛排');h.controller.edit('server','1043');const p=h.controller.submit();assert.deepEqual(h.requests[0].body,{query:'犎牛牛排',quality:'all',intent:'overview',server:'1043'});h.requests[0].resolve(selection);await p;const original=h.controller.state.result;const candidate=h.controller.choose(44091);assert.deepEqual(h.requests[1].body,{selection:{batch_id:'batch-1',generation:'generation-1',item_id:44091}});h.requests[1].resolve(success);await candidate;h.controller.edit('query','new');h.controller.choose(8,original);assert.equal(h.requests.length,2);}finally{h.scope.dispose();}
 });
@@ -73,6 +90,11 @@ test('query deadline permits manual recovery and no automatic post; invalid inpu
 
 test('draft persistence is isolated by true context boundary runtime and epoch',()=>{const h=queryHarness('items');h.controller.edit('query','private previous draft');h.scope.dispose();const scope=createScope(()=>true);const next=createQueryController({routeId:'items',context:{...h.context,boundary:'new',runtimeId:'new-runtime',epoch:2},scope,services:{invoke(){throw Error('unused');}}},()=>{});assert.equal(next.state.draft.query,'');scope.dispose();});
 test('wrong plugin/page contexts fence active view and late ready cannot restore it',async()=>{const h=harness();try {await h.start();h.emit({...h.context,pageName:'management'});await flush();assert.equal(h.shell.state.mounted,false);assert.equal(h.container.children.length,0);assert.equal(h.gets.length,1);}finally{h.close();}});
+test('canonical default binding accepts its own name and rejects shell/default cross-binding',async()=>{
+  const context={pluginName:'astrbot_plugin_yomihime_game_link',pageName:'00-game-link',binding:1};
+  const valid=harness({expectedPage:'00-game-link',initialContext:context});try{await valid.start();assert.equal(valid.shell.state.mounted,true);}finally{valid.close();}
+  for(const [expectedPage,pageName]of [['00-game-link','shell'],['shell','00-game-link']]){const bad=harness({expectedPage,initialContext:{...context,pageName}});try{await flush();assert.equal(bad.gets.length,0);assert.equal(bad.shell.state.mounted,false);assert.equal(bad.imports.length,0);}finally{bad.close();}}
+});
 
 test('HTML-projected authorized style is cloned unchanged and removed by scope',async()=>{const h=harness();try {await h.start();const source=h.dom.window.document.getElementById('module-style-assets').content.querySelector('link'),clone=h.dom.window.document.head.querySelector('link[data-module-style]');assert.notEqual(source,clone);assert.equal(clone.getAttribute('href'),source.getAttribute('href'));h.shell.dispose();assert.equal(h.dom.window.document.head.querySelector('link[data-module-style]'),null);assert.ok(source.parentNode);}finally{h.close();}});
 test('cleanup failure retains owner retry and blocks replacement mounting',async()=>{let fail=true,disposed=0;const h=harness({loader:async()=>({mount(){return{update(){},dispose(){disposed++;if(fail)throw Error('fixture-cleanup');}};}})});try {await h.start();const p=h.shell.refresh();h.gets[1].resolve(catalog('ff14/ff14',2));await p;assert.equal(h.shell.state.cleanupPending,true);assert.equal(h.shell.state.mounted,false);fail=false;h.shell.retryCleanup();await flush();assert.equal(h.shell.state.cleanupPending,false);assert.equal(h.shell.state.mounted,false);assert.match(h.shell.state.message,/\u5bbf\u4e3b\u63d2\u4ef6\u8be6\u60c5\u91cd\u65b0\u6253\u5f00/);assert.equal(disposed,2);}finally{h.close();}});

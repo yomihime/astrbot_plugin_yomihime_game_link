@@ -24,6 +24,12 @@
 }
 * { box-sizing: border-box; }
 html { scrollbar-gutter: stable; }
+html { overflow-y: auto; overflow-anchor: none; }
+.management .n-card, .management .n-card .n-card-header__main, .management .n-card .n-card__content, .management .n-alert { transition: none; }
+.management .n-card .n-card-header__main { color: var(--text); }
+.management .n-alert { background-color: var(--surface); }
+.management .n-alert .n-alert-body { color: var(--text); transition: none; }
+.management .n-alert .n-alert-body .n-alert-body__content, .management #status { color: var(--text); transition: none; }
 body {
   margin: 0;
   background: var(--background);

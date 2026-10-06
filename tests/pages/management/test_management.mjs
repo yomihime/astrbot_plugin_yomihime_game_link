@@ -3,7 +3,9 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import {JSDOM} from '../../../pages/frontend/node_modules/jsdom/lib/api.js';
-import {createManagementPage,validateCatalog,validateSnapshot,updateBody} from '../../../pages/management/app.js';
+const runtimeDOM=new JSDOM('<html><body></body></html>',{pretendToBeVisual:true});
+for(const name of ['window','document','Element','HTMLElement','SVGElement','Node','MutationObserver'])globalThis[name]=runtimeDOM.window[name];
+const {createManagementPage,validateCatalog,validateSnapshot,updateBody}=await import('../../../pages/management/app.js');
 import {catalog,snapshot,context} from './fixtures.mjs';
 const html=await readFile(new URL('../../../pages/management/index.html',import.meta.url),'utf8');
 const flush=async()=>{for(let i=0;i<35;i++)await Promise.resolve();};
@@ -23,6 +25,25 @@ const save=(f,target)=>f.document.querySelector(`section[data-owner="${target}"]
 const status=f=>f.document.getElementById('status').textContent;
 const click=(f,id)=>f.document.getElementById(id).click();
 const region='default_region',zone='ff14_calendar_default_timezone',days='ff14_calendar_default_days';
+
+test('production status and actual Naive content node explicitly override their own color transitions',async()=>{
+  const f=fixture();try{
+    await load(f);const node=f.document.getElementById('status'),content=node.closest('.n-alert-body__content'),alert=node.closest('.n-alert');assert.ok(content);assert.ok(alert);
+    const stylesheet=f.document.createElement('style');stylesheet.textContent=await readFile(new URL('../../../pages/management/styles.css',import.meta.url),'utf8');f.document.head.append(stylesheet);
+    const rules=[...stylesheet.sheet.cssRules],matches=(element,property)=>rules.flatMap(rule=>rule.selectorText?.split(',').filter(selector=>element.matches(selector)).map(selector=>({selector,value:rule.style.getPropertyValue(property)}))||[]).filter(rule=>rule.value);
+    const foreground=matches(content,'color').find(rule=>rule.value==='var(--text)'),transition=matches(content,'transition').find(rule=>rule.value==='none'),background=matches(alert,'background-color').find(rule=>rule.value==='var(--surface)');assert.ok(foreground);assert.ok(transition);assert.ok(background);
+    // The paragraph must have an explicit declaration; parent inheritance alone
+    // does not override Naive's content-level color and 0.3s transition.
+    assert.ok(matches(node,'color').some(rule=>rule.selector.includes('#status')&&rule.value==='var(--text)'));assert.ok(matches(node,'transition').some(rule=>rule.selector.includes('#status')&&rule.value==='none'));
+    const classes=selector=>(selector.match(/\.[\w-]+/g)||[]).length;
+    const native=runtimeDOM.window.document.querySelector('style[cssr-id="n-alert"]');assert.ok(native);let nativeContentTransitions=0,nativeContentColors=0;
+    for(const rule of native.sheet.cssRules)for(const selector of rule.selectorText?.split(',')||[])if(content.matches(selector)){
+      if(rule.style.getPropertyValue('color')){nativeContentColors++;assert.ok(classes(foreground.selector)>classes(selector));}
+      if(rule.style.getPropertyValue('transition').includes('color')){nativeContentTransitions++;assert.ok(classes(transition.selector)>classes(selector));}
+    }assert.ok(nativeContentTransitions>0);assert.ok(nativeContentColors>0);
+    for(const isDark of [true,false]){f.context({...context,isDark});await flush();assert.equal(f.document.getElementById('status'),node);assert.equal(node.closest('.n-alert-body__content'),content);assert.equal(f.document.documentElement.dataset.theme,isDark?'dark':'light');assert.equal(node.getAttribute('aria-live'),'polite');assert.equal(node.getAttribute('role'),'status');}
+  }finally{f.close();}
+});
 
 test('synchronous onContext/ready issue one catalog, then one read; tiny metadata needs no root branch',async()=>{
   const f=fixture();try{await flush();assert.equal(f.calls.length,1);assert.equal(f.calls[0].endpoint,'admin/catalog');await load(f);
@@ -105,6 +126,9 @@ test('a newer draft during save survives response and refresh',async()=>{
 });
 test('closing fences pending responses and removes the context listener',async()=>{
   const f=fixture();try{const old=pending(f,'catalog');f.app.close();old.resolve(catalog());f.context(context);await flush();assert.equal(f.calls.length,1);assert.equal(f.document.getElementById('refresh').disabled,true);}finally{f.close();}
+});
+test('newer input event returning to the sent value remains a draft after old save confirmation',async()=>{
+  const f=fixture();try{await load(f);mode(f,zone,'replace');const node=input(f,zone);node.value='UTC';save(f,'ff14/ff14').click();node.value='Europe/London';node.dispatchEvent(new f.dom.window.Event('input'));node.value='UTC';node.dispatchEvent(new f.dom.window.Event('input'));pending(f,'update').resolve({module_id:'ff14/ff14',revision:2});await flush();await load(f,catalog(),snapshot(2));assert.equal(node.value,'UTC');assert.equal(field(f,zone).querySelector('[data-role=mode]').value,'replace');}finally{f.close();}
 });
 test('focused refresh retains its node and focus while aria-disabled prevents duplicate activation',async()=>{
   const f=fixture();try{await load(f);const button=f.document.getElementById('refresh');button.focus();button.click();await flush();assert.equal(f.document.activeElement,button);assert.equal(button.getAttribute('aria-disabled'),'true');assert.equal(button.disabled,false);button.click();await flush();assert.equal(f.calls.length,3);await load(f,catalog(),snapshot(2));assert.equal(f.document.activeElement,button);assert.equal(button.getAttribute('aria-disabled'),'false');assert.equal(f.document.getElementById('refresh'),button);}finally{f.close();}

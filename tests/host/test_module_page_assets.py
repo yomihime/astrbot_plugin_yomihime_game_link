@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import re
 import tempfile
@@ -19,6 +20,117 @@ from tests.host.astrbot_contract import page_asset_contract
 
 
 class ModulePageAssetTests(unittest.TestCase):
+    def test_pinned_discovery_default_and_independent_legal_roots(self):
+        service, namespace = page_asset_contract()
+
+        async def pages_root(_plugin):
+            return ROOT / "pages"
+
+        service.resolve_plugin_pages_root = pages_root
+        pages = asyncio.run(service.discover_plugin_pages(None))
+        self.assertEqual(
+            [page.name for page in pages],
+            ["00-game-link", "ff14", "management", "shell"],
+        )
+        assets = projected_page_assets(ROOT)
+        for page in ("00-game-link", "shell", "management"):
+            root = ROOT / "pages" / page
+            html = assets.get(
+                f"pages/{page}/index.html", (root / "index.html").read_bytes()
+            ).decode()
+            rewritten_html = service.rewrite_plugin_page_html(
+                html,
+                "fixture-plugin",
+                page,
+                "index.html",
+                theme=None,
+                extra_query_params={"asset_token": "offline-proof"},
+            )
+            self.assertIn(
+                f'href="/api/plugin/page/content/fixture-plugin/{page}/styles.css?asset_token=offline-proof"',
+                rewritten_html,
+            )
+            self.assertIn(
+                f'src="/api/plugin/page/content/fixture-plugin/{page}/app.js?asset_token=offline-proof"',
+                rewritten_html,
+            )
+            css = (root / "styles.css").read_text(encoding="utf-8")
+            rewritten_css = service.rewrite_plugin_page_css(
+                css,
+                "fixture-plugin",
+                page,
+                "styles.css",
+                {"asset_token": "offline-proof"},
+            )
+            for match in namespace["_CSS_URL_RE"].finditer(rewritten_css):
+                if service.is_rewritable_asset_url(match["url"]):
+                    self.assertTrue(
+                        match["url"].startswith(
+                            f"/api/plugin/page/content/fixture-plugin/{page}/"
+                        )
+                    )
+                    self.assertEqual(
+                        parse_qs(urlsplit(match["url"]).query),
+                        {"asset_token": ["offline-proof"]},
+                    )
+            self.assertEqual(
+                (root / "runtime.js").read_bytes(),
+                (ROOT / "pages/shell/runtime.js").read_bytes(),
+            )
+            self.assertEqual(
+                (root / "THIRD_PARTY_NOTICES.txt").read_bytes(),
+                (ROOT / "pages/shell/THIRD_PARTY_NOTICES.txt").read_bytes(),
+            )
+            for license in (ROOT / "pages/shell/licenses").iterdir():
+                self.assertEqual(
+                    (root / "licenses" / license.name).read_bytes(),
+                    license.read_bytes(),
+                )
+            paths = (
+                ["app.js"]
+                if page == "management"
+                else [
+                    "app.js",
+                    "module-loader.js",
+                    "module-assets/ff14/ff14/pages/dist/entry.js",
+                ]
+            )
+            observed = set()
+            for path in paths:
+                source = assets.get(f"pages/{page}/{path}", None)
+                if source is None:
+                    source = (root / path).read_bytes()
+                rewritten = service.rewrite_plugin_page_js(
+                    source.decode(),
+                    "fixture-plugin",
+                    page,
+                    path,
+                    {"asset_token": "offline-proof"},
+                )
+                for pattern in (
+                    "_JS_DYNAMIC_IMPORT_RE",
+                    "_JS_MODULE_FROM_RE",
+                    "_JS_SIDE_EFFECT_IMPORT_RE",
+                ):
+                    for match in namespace[pattern].finditer(rewritten):
+                        url = urlsplit(match["url"])
+                        self.assertTrue(
+                            url.path.startswith(
+                                f"/api/plugin/page/content/fixture-plugin/{page}/"
+                            ),
+                            match["url"],
+                        )
+                        self.assertEqual(
+                            parse_qs(url.query), {"asset_token": ["offline-proof"]}
+                        )
+                        observed.add(url.path.rsplit("/", 1)[-1])
+            self.assertIn("runtime.js", observed)
+        default_index = assets["pages/00-game-link/index.html"].decode()
+        self.assertIn('data-page-name="00-game-link"', default_index)
+        self.assertNotIn(
+            'data-page-name="00-game-link"', assets["pages/shell/index.html"].decode()
+        )
+
     def test_inert_styles_and_literal_js_follow_host_asset_proof_chain(self):
         service, namespace = page_asset_contract()
         assets = projected_page_assets(ROOT)
