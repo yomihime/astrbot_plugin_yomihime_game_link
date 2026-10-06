@@ -7,7 +7,7 @@ from collections.abc import Callable
 from ..api.display import CommandsBlock, DisplayDocument, TextBlock
 from ..api.manifests import InvocationPolicy, PrivacyFloor
 from ..api.services import CapabilityHealth, HealthStatus
-from .registry import RegistryError, RegistrySnapshot
+from .registry import RegisteredModule, RegistryError, RegistrySnapshot
 
 
 class HelpCatalog:
@@ -21,16 +21,30 @@ class HelpCatalog:
     def __init__(
         self,
         health_query: Callable[[str, str], tuple[CapabilityHealth, int]] | None = None,
+        active_query: Callable[[RegisteredModule], bool] | None = None,
     ) -> None:
         if health_query is not None and not callable(health_query):
             raise TypeError("health_query must be callable")
         self._health_query = health_query
+        self._active_query = active_query
+
+    def _visible(self, module) -> bool:
+        if not module.enabled:
+            return False
+        if self._active_query is None:
+            return False
+        try:
+            return self._active_query(module) is True
+        except Exception:
+            return False
 
     def total(self, snapshot: RegistrySnapshot) -> DisplayDocument:
         """Return root help for command-only operations and module routes."""
 
         self._require_snapshot(snapshot)
-        modules = self._sorted_modules(snapshot)
+        modules = tuple(
+            module for module in self._sorted_modules(snapshot) if self._visible(module)
+        )
         commands: list[str] = []
         for module in modules:
             route = module.manifest.route
@@ -63,6 +77,8 @@ class HelpCatalog:
         try:
             module = snapshot.module_for_route(route)
         except RegistryError:
+            return self._unknown_route_document(route)
+        if not self._visible(module):
             return self._unknown_route_document(route)
 
         status = "已启用" if module.enabled else "未启用"

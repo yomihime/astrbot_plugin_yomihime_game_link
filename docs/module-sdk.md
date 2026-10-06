@@ -7,9 +7,9 @@ a compatibility forwarding surface whose exported objects retain identity
 with the canonical declarations. The SDK does not import Core runtime
 implementations or AstrBot objects.
 
-The current artifact is `yomihime-module-sdk` version `1.4.0`, carrying contract
-`1.4.0` (`UI-B0-PUBLIC-WEB`) and compatible contract versions `1.0.0`, `1.1.0`,
-`1.2.0`, `1.3.0`, and `1.4.0`.
+The current artifact is `yomihime-module-sdk` version `1.5.0`, carrying contract
+`1.5.0` (`R1-MODULE-PAGES`) and compatible contract versions `1.0.0`, `1.1.0`,
+`1.2.0`, `1.3.0`, `1.4.0`, and `1.5.0`.
 Extension declarations use manifest schema v1 and factory ABI v1. The declared
 minimum is Python 3.11 because the public API uses `StrEnum`. A local
 installed-wheel check proves the bundled SDK imports from the installed site
@@ -72,8 +72,8 @@ New-Item -ItemType Directory -Force (Join-Path $source 'examples') | Out-Null
 Copy-Item -LiteralPath examples/empty_module, examples/offline_sample -Destination (Join-Path $source 'examples') -Recurse
 $env:SOURCE_DATE_EPOCH = '315532800'
 python -m pip wheel --no-index --no-deps --no-build-isolation --wheel-dir $wheelhouse $source
-python -m pip install --no-index --no-deps --target $site (Join-Path $wheelhouse 'yomihime_module_sdk-1.4.0-py3-none-any.whl')
-python -I -c "import sys; sys.path.insert(0, r'$site'); import importlib.metadata, yomihime_sdk; assert importlib.metadata.version('yomihime-module-sdk') == '1.4.0'; assert yomihime_sdk.CONTRACT_VERSION == '1.4.0'; assert yomihime_sdk.CONTRACT_REVISION == 'UI-B0-PUBLIC-WEB'; print(yomihime_sdk.__version__)"
+python -m pip install --no-index --no-deps --target $site (Join-Path $wheelhouse 'yomihime_module_sdk-1.5.0-py3-none-any.whl')
+python -I -c "import sys; sys.path.insert(0, r'$site'); import importlib.metadata, yomihime_sdk; assert importlib.metadata.version('yomihime-module-sdk') == '1.5.0'; assert yomihime_sdk.CONTRACT_VERSION == '1.5.0'; assert yomihime_sdk.CONTRACT_REVISION == 'R1-MODULE-PAGES'; print(yomihime_sdk.__version__)"
 ```
 
 The artifact test performs two builds with the fixed `SOURCE_DATE_EPOCH` and
@@ -152,3 +152,11 @@ The 2026-10-05 product decision replaces the universal independent-credential re
 In AstrBot deployment, the normal formally authenticated management user needs no second Core credential. The Adapter attests a server-owned request; JSON roles, page assets, ordinary API keys and public-query proofs cannot mint administrative grants. Core checks the bounded policy again before effects and inside configuration/rollback transactions. Only the four declared ordinary fields are opened; no lifecycle, secret, subscription or future-module permissions follow automatically.
 
 SDK descriptive IDs and data classes are not authorization evidence. Tests must retain forged, wrong-source/resource, ended/expired/cancelled requests, transaction fencing, revision conflict and recovery rejection cases. Core standalone/test adapters require no AstrBot import or FF14/config-service changes. The exact contract and startup-failure boundaries are frozen in [host-management-authorization-contract.md](host-management-authorization-contract.md). Artifact/source pins must be rebuilt and statically updated for the final implementation; source presence does not claim runtime acceptance.
+
+## Contract 1.5.0
+
+`CommandDescriptor.parameter_mode` defaults to `structured`; `raw_tail` declares a single `raw_tail_parameter` referencing a closed capability string property and requires an empty mapping. The generic Host preserves the original tail and Core validates it.
+
+`ModuleManifest.pages` and `resources` default to empty tuples. `PageDescriptor(route_id, title, entry, order=0, access="public_web", capability_id=None, styles=())` references `PageResource(path, sha256)` declarations. These are trusted local relative assets with bounded reads and SHA-256 verification; public declarations grant no user authority. Lifecycle ACTIVE and the existing run identity fence callable page catalog entries. SDK 1.4.0 and older examples remain supported.
+
+Optional `ModuleServices.storage` contains read-only `ModuleStoragePaths` describing stable module ownership directories. Existing SQLite config, cache, secrets and records retain their shared transactions. Stop/uninstall never deletes these paths or records.

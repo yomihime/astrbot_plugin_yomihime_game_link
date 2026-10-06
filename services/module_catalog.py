@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Mapping
 
@@ -89,6 +90,44 @@ def project_module_catalog(
                 "lifecycle": state.lifecycle.value,
                 "state": availability,
                 "reason": reason,
+                "module_epoch": state.epoch,
+                "runtime_id": identity.runtime_id if availability == "loaded" else None,
+                "asset_version": hashlib.sha256(
+                    json.dumps(
+                        [
+                            (item.path, item.sha256)
+                            for item in sorted(
+                                manifest.resources, key=lambda item: item.path
+                            )
+                        ],
+                        separators=(",", ":"),
+                    ).encode()
+                ).hexdigest(),
+                "pages": [
+                    {
+                        "route_id": page.route_id,
+                        "title": page.title,
+                        "order": page.order,
+                        "access": page.access,
+                        "capability_id": page.capability_id,
+                        "entry": f"module-assets/{module_id}/{page.entry}",
+                        "styles": [
+                            f"module-assets/{module_id}/{path}" for path in page.styles
+                        ],
+                    }
+                    for page in sorted(
+                        manifest.pages, key=lambda item: (item.order, item.route_id)
+                    )
+                    if availability == "loaded"
+                ],
+                "resources": [
+                    {
+                        "path": f"module-assets/{module_id}/{item.path}",
+                        "sha256": item.sha256,
+                    }
+                    for item in manifest.resources
+                    if availability == "loaded"
+                ],
                 "capabilities": [
                     {
                         "capability_id": capability.capability_id,

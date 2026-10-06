@@ -6,6 +6,7 @@ import unittest
 
 from ygl_test_subject.adapters.astrbot.command_bridge import (
     AstrBotCommandBridge,
+    CommandHelp,
     CommandInvocation,
 )
 from ygl_test_subject.api.manifests import (
@@ -14,8 +15,23 @@ from ygl_test_subject.api.manifests import (
     CommandDescriptor,
     InvocationPolicy,
 )
-from ygl_test_subject.core.registry import Registry
+from ygl_test_subject.core.registry import Registry as CoreRegistry
 from ygl_test_subject.tests.fixtures.minimal_module import build_package
+
+
+class Registry(CoreRegistry):
+    def register_package(self, manifest, handlers_by_module):
+        super().register_package(manifest, handlers_by_module)
+        for module in manifest.modules:
+            self.set_enabled(manifest.global_module_id(module.module_id), True)
+        return self.snapshot()
+
+    def is_active(self, module_id):
+        if not isinstance(module_id, str):
+            if module_id is not self.snapshot().module(module_id.module_id):
+                return False
+            module_id = module_id.module_id
+        return self.snapshot().module(module_id).enabled
 
 
 class _FakeEvent:
@@ -53,6 +69,30 @@ class AstrBotCommandBridgeTests(unittest.TestCase):
         self.assertIn("demo 模块帮助", known)
         self.assertIn("/ygl demo 查询", known)
         self.assertIn("/ygl demo", unknown)
+
+    def test_catalog_help_is_classified_for_implicit_and_invalid_arguments(self):
+        package, handlers = build_package()
+        self.registry.register_package(package, {"demo": handlers})
+        for text in (
+            "/ygl",
+            "/ygl help",
+            "/ygl demo",
+            "/ygl demo help",
+            "/ygl missing",
+            "/ygl demo absent",
+            "/ygl demo 查询",
+        ):
+            with self.subTest(text=text):
+                action = self.bridge.parse(_FakeEvent(text))
+                self.assertIsInstance(action, CommandHelp)
+                self.assertIsInstance(action, str)
+                self.assertEqual(self.bridge.handle(_FakeEvent(text)), action)
+        # Lexical errors are usage, not catalog help or a dispatch.
+        for text in ('/ygl demo 查询 "unclosed', '/ygl "invalid route" help', "hello"):
+            with self.subTest(text=text):
+                action = self.bridge.parse(_FakeEvent(text))
+                self.assertIsInstance(action, str)
+                self.assertNotIsInstance(action, CommandHelp)
 
     def test_generic_command_parameters_follow_descriptor_schema(self) -> None:
         package, handlers = build_package()

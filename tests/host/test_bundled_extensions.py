@@ -67,6 +67,7 @@ class BundledExtensionTests(unittest.IsolatedAsyncioTestCase):
         current = json.loads(current_bytes)
         old = json.loads(current_bytes)
         old["contract_version"] = "1.3.0"
+        old["modules"][0]["pages"] = []
         public_ids = {
             "item.lookup",
             "ff14.logs.character",
@@ -96,7 +97,7 @@ class BundledExtensionTests(unittest.IsolatedAsyncioTestCase):
                 if path.is_file()
             },
         )
-        self.assertEqual(current["contract_version"], "1.4.0")
+        self.assertEqual(current["contract_version"], "1.5.0")
         self.assertEqual(
             {
                 capability["capability_id"]
@@ -108,7 +109,8 @@ class BundledExtensionTests(unittest.IsolatedAsyncioTestCase):
         for capability in old["modules"][0]["capabilities"]:
             if capability["capability_id"] in public_ids:
                 capability["invocation_policy"] = "command_and_public_web"
-        old["contract_version"] = "1.4.0"
+        old["contract_version"] = "1.5.0"
+        old["modules"][0]["pages"] = current["modules"][0]["pages"]
         self.assertEqual(old, current)
 
     def assert_ff14_factory_contract(self, instance, health) -> None:

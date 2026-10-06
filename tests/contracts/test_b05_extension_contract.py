@@ -134,8 +134,43 @@ class B05ExtensionContractTests(unittest.TestCase):
         )
         self.assertEqual(
             tuple(ModuleServices.__dataclass_fields__),
-            ("config", "identities", "accounts", "subscriptions", "scopes"),
+            ("config", "identities", "accounts", "subscriptions", "scopes", "storage"),
         )
+        signature = inspect.signature(ModuleServices)
+        self.assertEqual(
+            tuple(signature.parameters),
+            ("config", "identities", "accounts", "subscriptions", "scopes", "storage"),
+        )
+        self.assertIsNone(signature.parameters["storage"].default)
+        self.assertEqual(CONTRACT_VERSION, "1.5.0")
+        self.assertIn("1.4.0", COMPATIBLE_CONTRACT_VERSIONS)
+        # The five positional handles used by old factories remain valid.
+        handles = tuple(object() for _ in range(5))
+        legacy_services = ModuleServices(*handles)
+        self.assertIsNone(legacy_services.storage)
+        self.assertEqual(
+            tuple(
+                getattr(legacy_services, name)
+                for name in tuple(signature.parameters)[:5]
+            ),
+            handles,
+        )
+        with self.assertRaises(TypeError):
+            ModuleServices(*handles, host=object())
+        from ygl_test_subject.examples.empty_module.module import (
+            Factory as EmptyFactory,
+        )
+        from ygl_test_subject.examples.offline_sample.module import (
+            Factory as SampleFactory,
+        )
+
+        for factory in (EmptyFactory, SampleFactory):
+            self.assertEqual(
+                tuple(inspect.signature(factory.create).parameters),
+                ("self", "services"),
+            )
+            self.assertTrue(inspect.iscoroutinefunction(factory.create))
+            self.assertIs(get_type_hints(factory.create)["services"], ModuleServices)
         self.assertEqual(
             tuple(ModuleHandlers.__dataclass_fields__),
             ("capabilities", "collectors", "evaluators"),

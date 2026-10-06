@@ -19,7 +19,17 @@ from ygl_test_subject.api.manifests import (
 from ygl_test_subject.api.services import ModuleHandlers
 from ygl_test_subject.api.version import CONTRACT_VERSION
 from ygl_test_subject.core.help_catalog import HelpCatalog
-from ygl_test_subject.core.registry import Registry
+from ygl_test_subject.core.registry import Registry as CoreRegistry
+
+
+class Registry(CoreRegistry):
+    """Active declaration fixture; lifecycle behavior is tested separately."""
+
+    def register_package(self, manifest, handlers_by_module):
+        super().register_package(manifest, handlers_by_module)
+        for module in manifest.modules:
+            self.set_enabled(manifest.global_module_id(module.module_id), True)
+        return self.snapshot()
 
 
 class _Handler:
@@ -116,7 +126,7 @@ class HelpCatalogTests(unittest.TestCase):
                 )
             },
         )
-        catalog = HelpCatalog()
+        catalog = HelpCatalog(active_query=lambda module_id: True)
         total = catalog.total(registry.snapshot()).ordered_blocks[1].commands
         self.assertIn("/ygl catalog web", total)
         self.assertIn("/ygl catalog 绑定", total)
@@ -138,7 +148,9 @@ class HelpCatalogTests(unittest.TestCase):
         self.assertEqual(handler.calls, 0)
 
     def test_hp01_zero_modules_has_explicit_empty_state_and_help_prompt(self) -> None:
-        document = HelpCatalog().total(Registry().snapshot())
+        document = HelpCatalog(active_query=lambda module_id: True).total(
+            Registry().snapshot()
+        )
 
         self.assertIsInstance(document.ordered_blocks[0], TextBlock)
         text = document.ordered_blocks[0].text
@@ -151,22 +163,26 @@ class HelpCatalogTests(unittest.TestCase):
         registry = Registry()
         registry.register_package(_package("pkg", module), {"first": handlers})
 
-        document = HelpCatalog().total(registry.snapshot())
+        document = HelpCatalog(active_query=lambda module_id: True).total(
+            registry.snapshot()
+        )
         commands = document.ordered_blocks[1].commands
         self.assertIn("/ygl zeta help", commands)
         self.assertIn("/ygl zeta 绑定", commands)
         self.assertNotIn("/ygl zeta 查询", commands)
 
-    def test_hp03_module_help_lists_all_commands_and_disabled_state(self) -> None:
+    def test_hp03_module_help_lists_all_commands_for_active_state(self) -> None:
         module, handlers, _ = _module("first", "zeta")
         registry = Registry()
         registry.register_package(_package("pkg", module), {"first": handlers})
 
-        document = HelpCatalog().module(registry.snapshot(), "zeta")
+        document = HelpCatalog(active_query=lambda module_id: True).module(
+            registry.snapshot(), "zeta"
+        )
         intro = document.ordered_blocks[0]
         commands = document.ordered_blocks[1]
         self.assertIsInstance(intro, TextBlock)
-        self.assertIn("未启用", intro.text)
+        self.assertIn("已启用", intro.text)
         self.assertIsInstance(commands, CommandsBlock)
         self.assertIn("/ygl zeta 查询", commands.commands[0])
         self.assertIn("/ygl zeta 绑定", commands.commands[1])
@@ -183,7 +199,7 @@ class HelpCatalogTests(unittest.TestCase):
             _package("pkg", first, second),
             {"first": first_handlers, "second": second_handlers},
         )
-        catalog = HelpCatalog()
+        catalog = HelpCatalog(active_query=lambda module_id: True)
 
         unknown = catalog.module(registry.snapshot(), "missing")
         self.assertIn("未找到模块路由", unknown.ordered_blocks[0].text)
@@ -209,20 +225,18 @@ class HelpCatalogTests(unittest.TestCase):
         module, handlers, _ = _module("first", "alpha", handler=handler)
         registry = Registry()
         registry.register_package(_package("pkg", module), {"first": handlers})
+        registry.set_enabled("pkg/first", False)
         disabled = registry.snapshot()
-        catalog = HelpCatalog()
+        catalog = HelpCatalog(active_query=lambda module_id: True)
 
         document = catalog.module(disabled, "alpha")
         registry.set_enabled("pkg/first", True)
         old_document = catalog.module(disabled, "alpha")
         new_document = catalog.module(registry.snapshot(), "alpha")
 
-        self.assertEqual(
-            "未启用",
-            old_document.ordered_blocks[0].text.split("状态：")[1].split("\n")[0],
-        )
+        self.assertIn("未找到模块路由", old_document.ordered_blocks[0].text)
         self.assertIn("已启用", new_document.ordered_blocks[0].text)
-        self.assertIn("未启用", document.ordered_blocks[0].text)
+        self.assertIn("未找到模块路由", document.ordered_blocks[0].text)
         self.assertEqual(handler.calls, 0)
 
     def test_hp06_owner_floor_is_described_as_private_direct_use(self) -> None:
@@ -249,7 +263,9 @@ class HelpCatalogTests(unittest.TestCase):
             {"owner": ModuleHandlers({"owner_read": handler}, {}, {})},
         )
 
-        document = HelpCatalog().module(registry.snapshot(), "owner")
+        document = HelpCatalog(active_query=lambda module_id: True).module(
+            registry.snapshot(), "owner"
+        )
 
         self.assertIn("仅本人私聊可用", document.ordered_blocks[1].commands[0])
         self.assertEqual(handler.calls, 0)

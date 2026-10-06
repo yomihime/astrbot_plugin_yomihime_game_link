@@ -1,0 +1,10 @@
+[
+  {
+    "path": "pages/dist/entry.js",
+    "sha256": "7481c63dc1f9f22879666179de552a2ee176ae61504971b7576d565ff8cb18f9"
+  },
+  {
+    "path": "pages/dist/styles.css",
+    "sha256": "7277ccfc270360e4df8a889815b20beac99840f9911369dd8ff090cc84cc7557"
+  }
+]

@@ -16,6 +16,25 @@ from types import MappingProxyType
 from typing import Mapping, Protocol, TypeAlias
 
 JsonScalar: TypeAlias = str | int | float | bool | None
+
+
+@dataclass(frozen=True, slots=True)
+class ModuleStoragePaths:
+    """Core-issued descriptive ownership routes, never filesystem authority.
+
+    Existing configuration/cache/secret records retain their shared SQLite
+    transactions. Paths identify retained module directories for future data;
+    this object supplies no arbitrary file access or deletion operation.
+    """
+
+    module_id: str
+    root: str
+    config: str
+    cache: str
+    data: str
+    secrets: str
+
+
 JsonValue: TypeAlias = JsonScalar | tuple["JsonValue", ...] | Mapping[str, "JsonValue"]
 JsonObject: TypeAlias = Mapping[str, JsonValue]
 

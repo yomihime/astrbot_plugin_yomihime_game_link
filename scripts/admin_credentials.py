@@ -21,9 +21,16 @@ from pathlib import Path
 # Pin the SDK import to this installed package before importing Core-facing APIs,
 # while keeping this small maintenance CLI independent of AstrBot main.py.
 _PLUGIN_ROOT = Path(__file__).resolve().parents[1]
-_SDK_VERSION = "1.4.0"
-_SDK_CONTRACT_REVISION = "UI-B0-PUBLIC-WEB"
-_SDK_COMPATIBLE_CONTRACT_VERSIONS = ("1.0.0", "1.1.0", "1.2.0", "1.3.0", "1.4.0")
+_SDK_VERSION = "1.5.0"
+_SDK_CONTRACT_REVISION = "R1-MODULE-PAGES"
+_SDK_COMPATIBLE_CONTRACT_VERSIONS = (
+    "1.0.0",
+    "1.1.0",
+    "1.2.0",
+    "1.3.0",
+    "1.4.0",
+    "1.5.0",
+)
 if str(_PLUGIN_ROOT) not in sys.path:
     sys.path.insert(0, str(_PLUGIN_ROOT))
 try:

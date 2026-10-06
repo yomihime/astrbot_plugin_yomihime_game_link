@@ -420,38 +420,46 @@ class PublicWebGatewayTests(IsolatedAsyncioTestCase):
 
     async def test_deadline_and_synchronous_fence_revoke_before_drain(self):
         entered, release = asyncio.Event(), asyncio.Event()
-        await self._ready_web(_Handler(started=entered, release=release))
+        handler = await self._ready_web(_Handler(started=entered, release=release))
         proof = self.proofs.new(
             "testpkg/records",
             "record.query",
             deadline=asyncio.get_running_loop().time() + 0.02,
         )
         self.assertEqual(
-            (await self._invoke(proof=proof)).error.code, ErrorCode.MODULE_UNAVAILABLE
+            (await asyncio.wait_for(self._invoke(proof=proof), 1)).error.code,
+            ErrorCode.MODULE_UNAVAILABLE,
         )
         self.assertIn(proof, self.proofs.revoked)
         self.assertTrue(await self.gateway.drain_public_web(0.5))
+        # The first 20 ms budget may expire before handler entry. After its flight
+        # has drained, wait for this request's own entry rather than a fixed total.
+        calls_before = len(handler.calls)
+        entered.clear()
         request = asyncio.create_task(self._invoke())
-        while (
-            len(
-                self.fixture.registry.snapshot()
-                .module("testpkg/records")
-                .handlers.capabilities["record.query"]
-                .calls
+        try:
+            await asyncio.wait_for(entered.wait(), 1)
+            self.assertEqual(len(handler.calls), calls_before + 1)
+            self.gateway.fence_public_web()
+            self.assertFalse(self.proofs.active)
+            self.assertTrue(
+                all(flight.sealed for flight in self.gateway._web_flights.values())
             )
-            < 2
-        ):
-            await asyncio.sleep(0)
-        self.gateway.fence_public_web()
-        self.assertFalse(self.proofs.active)
-        self.assertTrue(
-            all(flight.sealed for flight in self.gateway._web_flights.values())
-        )
-        self.assertEqual(
-            (await self._invoke()).error.code, ErrorCode.MODULE_UNAVAILABLE
-        )
-        await request
-        self.assertTrue(await self.gateway.drain_public_web(0.5))
+            self.assertEqual(
+                (await asyncio.wait_for(self._invoke(), 1)).error.code,
+                ErrorCode.MODULE_UNAVAILABLE,
+            )
+            self.assertEqual(
+                (await asyncio.wait_for(request, 1)).error.code,
+                ErrorCode.MODULE_UNAVAILABLE,
+            )
+            self.assertTrue(await self.gateway.drain_public_web(0.5))
+        finally:
+            release.set()
+            self.gateway.fence_public_web()
+            request.cancel()
+            await asyncio.wait_for(asyncio.gather(request, return_exceptions=True), 1)
+            self.assertTrue(await self.gateway.drain_public_web(0.5))
 
 
 def _result(*, privacy: Privacy = Privacy.PUBLIC) -> CapabilityResult:

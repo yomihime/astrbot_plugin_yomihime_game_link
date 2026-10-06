@@ -9,12 +9,19 @@ import sys
 from pathlib import Path
 from types import ModuleType
 
-SDK_VERSION = "1.4.0"
-SDK_CONTRACT_REVISION = "UI-B0-PUBLIC-WEB"
-SDK_COMPATIBLE_CONTRACT_VERSIONS = ("1.0.0", "1.1.0", "1.2.0", "1.3.0", "1.4.0")
+SDK_VERSION = "1.5.0"
+SDK_CONTRACT_REVISION = "R1-MODULE-PAGES"
+SDK_COMPATIBLE_CONTRACT_VERSIONS = (
+    "1.0.0",
+    "1.1.0",
+    "1.2.0",
+    "1.3.0",
+    "1.4.0",
+    "1.5.0",
+)
 
 SDK_PACKAGE_MANIFEST = {
-    "__init__.py": "513d1dde7b3eb9bc2b31274128f2f8920db4325246fd284d35d00e46a0b67a03",
+    "__init__.py": "51d543bb5e022d8d0d9b365726daa1948bca74934e5a22c55acc9e5c22929410",
     "_examples/empty_module/README.md": "54f44691207b27a1e6ee818cd55e14c30086cd3c685176e470b147ffd5203957",
     "_examples/empty_module/manifest.json": "27ed02b89a99fbea400dd75a1a405db27929f31acb4ceb582b83e8af1e61b1a8",
     "_examples/empty_module/module.py": "231518c6a6db052dcadfd0bd3578ff41f5dcda2d9879808730cbecab74734ce1",
@@ -25,14 +32,14 @@ SDK_PACKAGE_MANIFEST = {
     "api/administration.py": "ec08286a75fa2189f288e5b9b116ed243d00e9100f2b0e282249faf1206d5214",
     "api/contexts.py": "a44dfabab4e42d7a30ff7aaa3a1239c5ae4b588abfee4dab9d1fe9e7bcc0dbef",
     "api/display.py": "4fe9438bf3016ca4ac6b97a17c0e20157e77d0b8b66dd4c1ff3054e901d65c03",
-    "api/manifests.py": "b5603fce1b5f63a639ec2eaeb57a100279013875367fb4bfa5aba5b17a477cfa",
+    "api/manifests.py": "e76bd545541ff47efdad5dbc47662e3ae9fc179e6196c990c2a2d7e17091a230",
     "api/results.py": "5d6a59587e35e52a2528ec98a461d7c2e45705fd8d60f093f801795e81402135",
     "api/schema.py": "46628cb51be0e4a44df3606af2cbe841120cacf576f193ce57bc1af4b8a3d626",
-    "api/services.py": "94b726f13e6e238db01ff37564c5fcddd6ef18b9fae3d6ab17f2e812845517d8",
-    "api/storage.py": "ab5fab071b1ddee018053860a46a75019d6d83077d6d7f6c1fa6c1c945ec1db8",
+    "api/services.py": "bebd90c9fe24581af816a4bb7e75367cea403f4eb615065bf5dbb79c684e9348",
+    "api/storage.py": "bbe6e241a26727d56c1609bb8d6fa15173b04befa67f8305a2c39e3fc9491962",
     "api/subscriptions.py": "dddf75abfea96f8a88eecd71d6d6bb7d5f3327a52cb08185035fa2f5e0e6347a",
     "api/validation.py": "b6e0b2e16b8fae127c4cb8bf31efd0fce83c8b5b7ccf58256b01379fbf998e6c",
-    "api/version.py": "042c16da11f7ca27d619ec0f588e610dd5d9a1cdb1782032259b1f744441c24a",
+    "api/version.py": "6555a82ddbfe1ccce43ab2943a0fafc6b8de59336a403f49c6d76c990d979fa9",
     "py.typed": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
 }
 

@@ -22,6 +22,7 @@ from .storage import (
     CacheVisibility,
     GrantReference,
     JsonObject,
+    ModuleStoragePaths,
     OwnerScope,
     RecordCollection,
     SecretMetadata,
@@ -645,6 +646,7 @@ class ModuleServices:
     accounts: AccountOperations
     subscriptions: SubscriptionOperations
     scopes: "InvocationServiceBinder"
+    storage: ModuleStoragePaths | None = None
 
 
 class InvocationServices(Protocol):

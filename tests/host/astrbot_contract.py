@@ -24,6 +24,7 @@ HOST_COMMIT = "3c7adafa1397e182d60b1016bf88759265113c8a"
 HOST_REPOSITORY = "https://github.com/AstrBotDevs/AstrBot"
 # SHA256 of UTF-8 source with universal newlines (LF), identical on Windows/Linux.
 SOURCE_SHA256 = {
+    "astrbot/dashboard/services/plugin_page_service.py": "18e41ee0bb5d25e5ced473224cd4a89686d794dae0c2a74a053f8b8d154cef33",
     "astrbot/core/config/astrbot_config.py": "1907838acd129201e92c96dd8b4a704183fa72150226ccaf1f4e82f9426ba014",
     "pyproject.toml": "9834b677dae6bacfc2f1e75ed6da1e8e99c7f011bf31deeb278903ff8786689c",
     "astrbot/__init__.py": "a199525f1f93fcc5799bcbf847381094de975e1a78ec161e0579decac715373c",
@@ -314,3 +315,73 @@ def host_contracts():
         namespace,
     )
     return web, namespace
+
+
+def page_asset_contract():
+    """Unchanged fixed Host HTML/CSS/JS rewrite methods, without Host startup."""
+    import posixpath
+    from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+
+    _, sources = validate_host_source()
+    tree = ast.parse(sources["astrbot/dashboard/services/plugin_page_service.py"])
+    owner = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "PluginPageService"
+    )
+    names = {
+        "normalize_plugin_page_name",
+        "normalize_plugin_page_path",
+        "is_rewritable_asset_url",
+        "resolve_referenced_asset_path",
+        "build_plugin_page_asset_url",
+        "build_plugin_page_content_path",
+        "get_plugin_page_bridge_sdk_url",
+        "is_js_relative_module_specifier",
+        "rewrite_relative_asset_url",
+        "rewrite_plugin_page_html",
+        "rewrite_plugin_page_css",
+        "rewrite_plugin_page_js",
+        "apply_theme_to_html",
+    }
+    methods = [node for node in owner.body if getattr(node, "name", None) in names]
+    namespace = {
+        "re": re,
+        "posixpath": posixpath,
+        "parse_qsl": parse_qsl,
+        "quote": quote,
+        "urlencode": urlencode,
+        "urlsplit": urlsplit,
+        "urlunsplit": urlunsplit,
+    }
+    regexes = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name)
+            and target.id
+            in {
+                "_HTML_ASSET_ATTR_RE",
+                "_CSS_URL_RE",
+                "_JS_DYNAMIC_IMPORT_RE",
+                "_JS_MODULE_FROM_RE",
+                "_JS_SIDE_EFFECT_IMPORT_RE",
+            }
+            for target in node.targets
+        )
+    ]
+    cls = ast.ClassDef(
+        name="PluginPageService", bases=[], keywords=[], body=methods, decorator_list=[]
+    )
+    exec(
+        compile(
+            ast.fix_missing_locations(
+                ast.Module(body=[*regexes, cls], type_ignores=[])
+            ),
+            "actual_host_page_asset_rewrite",
+            "exec",
+        ),
+        namespace,
+    )
+    return namespace["PluginPageService"](), namespace

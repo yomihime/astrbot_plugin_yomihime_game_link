@@ -1,8 +1,8 @@
 """Version of the locally importable public contract surface."""
 
 # UI-B0 adds an explicit opt-in for public, read-only web invocations.
-CONTRACT_VERSION = "1.4.0"
-CONTRACT_REVISION = "UI-B0-PUBLIC-WEB"
+CONTRACT_VERSION = "1.5.0"
+CONTRACT_REVISION = "R1-MODULE-PAGES"
 B02_CONTRACT_VERSION = "1.0.0"
 _B04_CONTRACT_VERSION = "1.1.0"
 _FF14_W1_N1_CONTRACT_VERSION = "1.2.0"
@@ -12,5 +12,6 @@ COMPATIBLE_CONTRACT_VERSIONS = (
     _B04_CONTRACT_VERSION,
     _FF14_W1_N1_CONTRACT_VERSION,
     _FF14_W1_P1_CONTRACT_VERSION,
+    "1.4.0",
     CONTRACT_VERSION,
 )

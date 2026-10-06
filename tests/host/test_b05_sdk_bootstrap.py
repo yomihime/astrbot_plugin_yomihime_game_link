@@ -380,6 +380,10 @@ class SDKBootstrapTests(unittest.TestCase):
             repository / "modules" / "ff14",
             ignore=shutil.ignore_patterns("__pycache__"),
         )
+        for relative in zip_builder.SHELL_FILES:
+            target = repository / "pages/shell" / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(ROOT / "pages/shell" / relative, target)
         runtime_file = repository / "core" / "snapshot.py"
         original = b"trusted snapshot bytes\n"
         runtime_file.write_bytes(original)

@@ -23,6 +23,8 @@ from yomihime_sdk.api.manifests import (
     ModuleCategory,
     ModuleManifest,
     PackageManifest,
+    PageDescriptor,
+    PageResource,
     PrivacyFloor,
     SourceDeclaration,
     ToolDescriptor,
@@ -280,6 +282,8 @@ def _map_module(value: object) -> ModuleManifest:
             "config_fields",
             "sources",
             "collections",
+            "pages",
+            "resources",
         )
     )
     if counts > EXTENSION_MANIFEST_ABI.max_declarations_per_module:
@@ -300,6 +304,19 @@ def _map_module(value: object) -> ModuleManifest:
         config_fields=tuple(config_fields),
         sources=tuple(sources),
         collections=tuple(collections),
+        pages=tuple(
+            PageDescriptor(
+                **{
+                    **_keys(item, "page", {"route_id", "title", "entry"}),
+                    "styles": tuple(_list(item, "styles")),
+                }
+            )
+            for item in _list(obj, "pages")
+        ),
+        resources=tuple(
+            PageResource(**_keys(item, "page_resource", {"path", "sha256"}))
+            for item in _list(obj, "resources")
+        ),
     )
 
 

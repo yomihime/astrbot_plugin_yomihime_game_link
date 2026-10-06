@@ -19,6 +19,7 @@ from .web_admin import bounded_body, verified_dashboard_request
 
 _OPERATIONS = {
     "read": AdminOperation.READ_CONFIG,
+    "catalog": AdminOperation.READ_CONFIG,
     "update": AdminOperation.UPDATE_CONFIG,
     "rollback": AdminOperation.ROLLBACK_CONFIG,
     "recover": AdminOperation.RECOVER_CONFIG,
@@ -168,6 +169,10 @@ class AdminPages:
 
     async def _invoke(self, endpoint, core, data, context):
         ops = core.admin_operations
+        if endpoint == "catalog":
+            if data:
+                raise ValueError("catalog parameters are not accepted")
+            return await ops.ordinary_catalog(authorization=context)
         if endpoint == "read":
             if data:
                 raise ValueError("read parameters are not accepted")

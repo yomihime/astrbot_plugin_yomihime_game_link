@@ -92,12 +92,15 @@ from .api.manifests import (
     ModuleCategory,
     ModuleManifest,
     PackageManifest,
+    PageDescriptor,
+    PageResource,
     PrivacyFloor,
     SourceDeclaration,
     SourceDescriptor,
     SourceSpec,
     ToolDescriptor,
     is_compatible_contract_version,
+    validate_page_resource_path,
 )
 from .api.results import (
     CapabilityResult,
@@ -186,6 +189,7 @@ from .api.storage import (
     JsonObject,
     JsonScalar,
     JsonValue,
+    ModuleStoragePaths,
     OwnerScope,
     OwnershipKind,
     QueryOperator,
@@ -264,7 +268,7 @@ from .api.version import (
     CONTRACT_VERSION,
 )
 
-__version__ = "1.4.0"
+__version__ = "1.5.0"
 
 __all__ = [
     "__version__",
@@ -432,6 +436,7 @@ __all__ = [
     "ModuleManifest",
     "ModuleRecords",
     "ModuleServices",
+    "ModuleStoragePaths",
     "ModuleStatus",
     "ModuleStatusDTO",
     "MoneyValue",
@@ -444,6 +449,9 @@ __all__ = [
     "OwnerScope",
     "OwnershipKind",
     "PackageManifest",
+    "PageDescriptor",
+    "PageResource",
+    "validate_page_resource_path",
     "ParameterError",
     "PersistedConfigPatch",
     "Privacy",

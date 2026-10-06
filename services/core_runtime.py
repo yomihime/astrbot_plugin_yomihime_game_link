@@ -80,6 +80,7 @@ from ..services.module_services import (
     RegistryRegistrationLookup,
     _freeze_host_config_snapshots,
 )
+from ..services.module_storage import ModuleStorageRouter
 from ..services.output import (
     LifecycleApprovedSendScheduler,
     OutputResult,
@@ -362,6 +363,7 @@ class CoreRuntime:
         self._trusted_bundled_defaults = bundled_defaults
         self._trusted_bundled_manifests = bundled_manifests
         self._trusted_subscription_gates = subscription_gates
+        self.module_storage = ModuleStorageRouter(Path(file_root).parent / "modules")
         self.file_store = LocalSafeFileStore(file_root)
         self.secret_store = SQLiteSecretStore(database, secret_root, codec=secret_codec)
         self.registry = Registry()
@@ -401,6 +403,7 @@ class CoreRuntime:
                 SQLiteOrdinaryConfigurationMigrationRepository(self.config_repository),
                 ordinary_migration_fields,
                 migration_id=ordinary_migration_id,
+                value_validators=module_config_validators or {},
             )
             if ordinary_migration_fields
             else None
@@ -498,6 +501,7 @@ class CoreRuntime:
             module_host_config_snapshots=host_config_snapshots,
             core_defaults=self.core_defaults,
             module_config_validators=module_config_validators,
+            storage_router=self.module_storage,
         )
         self.send_scheduler = LifecycleApprovedSendScheduler(self.lifecycle)
         self.root_output_repository = SQLiteRootOutputRepository(database)
@@ -760,6 +764,7 @@ class CoreRuntime:
             resources=resources,
         )
         migration = self.ordinary_config_migration
+        self.admin_operations.require_ordinary_validators()
         async with self.lifecycle.admission.mutation("admin-ordinary-recovery"):
 
             def check(unit):
@@ -834,6 +839,7 @@ class CoreRuntime:
                     async with self.lifecycle.admission.mutation(
                         "ordinary-config-startup-migration"
                     ):
+                        self.admin_operations.require_ordinary_validators()
                         complete = await self.ordinary_config_migration.complete()
                         self._check_recovery(recovery_grant)
                         if not complete:

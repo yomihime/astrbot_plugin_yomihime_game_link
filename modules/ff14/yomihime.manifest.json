@@ -2,7 +2,7 @@
   "schema_version": 1,
   "package_id": "ff14",
   "package_version": "0.3.0",
-  "contract_version": "1.4.0",
+  "contract_version": "1.5.0",
   "author": "yomihime",
   "license": "AGPL-3.0-only",
   "source": "https://github.com/yomihime/astrbot_plugin_yomihime_game_link",
@@ -19,8 +19,16 @@
           "input_schema": {
             "type": "object",
             "properties": {
-              "input": {"type": "string", "minLength": 2, "maxLength": 4096},
-              "command": {"type": "string", "minLength": 1, "maxLength": 512}
+              "input": {
+                "type": "string",
+                "minLength": 2,
+                "maxLength": 4096
+              },
+              "command": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              }
             },
             "required": [],
             "additionalProperties": false
@@ -28,7 +36,9 @@
           "invocation_policy": "command_and_public_web",
           "effect": "read_only",
           "privacy_floor": "public",
-          "required_sources": ["universalis_market"]
+          "required_sources": [
+            "universalis_market"
+          ]
         },
         {
           "capability_id": "status",
@@ -338,7 +348,9 @@
         {
           "operation_path": "market",
           "capability_id": "ff14.market.query",
-          "parameter_mapping": {"command": "command"},
+          "parameter_mapping": {},
+          "parameter_mode": "raw_tail",
+          "raw_tail_parameter": "command",
           "help_text": "/ygl ff14 market <物品名或ID> [server=World dc=大区 region=cn|global quality=all|nq|hq intent=overview|min|listings]；名称可用引号保护，也支持显式自然查询；choose <批次> <generation> <物品ID> 续接当前候选。"
         },
         {
@@ -462,7 +474,8 @@
             "minimum": 1,
             "maximum": 30
           },
-          "group": "calendar"
+          "group": "calendar",
+          "description": "日历默认天数"
         },
         {
           "name": "ff14_calendar_default_timezone",
@@ -473,7 +486,8 @@
             "minLength": 1,
             "maxLength": 128
           },
-          "group": "calendar"
+          "group": "calendar",
+          "description": "日历默认时区"
         },
         {
           "name": "ff14_calendar_default_delivery_time",
@@ -484,7 +498,8 @@
             "minLength": 5,
             "maxLength": 5
           },
-          "group": "calendar"
+          "group": "calendar",
+          "description": "日历默认投递时间"
         }
       ],
       "sources": [
@@ -619,7 +634,41 @@
           ]
         }
       ],
-      "collections": []
+      "collections": [],
+      "pages": [
+        {
+          "route_id": "items",
+          "title": "物品",
+          "entry": "pages/dist/entry.js",
+          "order": 10,
+          "access": "public_web",
+          "capability_id": "item.lookup",
+          "styles": [
+            "pages/dist/styles.css"
+          ]
+        },
+        {
+          "route_id": "market",
+          "title": "市场",
+          "entry": "pages/dist/entry.js",
+          "order": 20,
+          "access": "public_web",
+          "capability_id": "ff14.market.query",
+          "styles": [
+            "pages/dist/styles.css"
+          ]
+        }
+      ],
+      "resources": [
+        {
+          "path": "pages/dist/entry.js",
+          "sha256": "7481c63dc1f9f22879666179de552a2ee176ae61504971b7576d565ff8cb18f9"
+        },
+        {
+          "path": "pages/dist/styles.css",
+          "sha256": "7277ccfc270360e4df8a889815b20beac99840f9911369dd8ff090cc84cc7557"
+        }
+      ]
     }
   ]
 }

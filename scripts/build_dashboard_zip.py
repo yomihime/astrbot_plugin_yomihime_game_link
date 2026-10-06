@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import html
+import json
 import os
 import stat
 import zipfile
@@ -13,14 +15,14 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 ARCHIVE = ROOT / "dist" / "astrbot_plugin_yomihime_game_link-local.zip"
 EXPECTED_WHEEL_SHA256 = (
-    "28e91da8baec34890c308b2c6e40de383fa80a162ffc5ef4d698e735c678f302"
+    "bf5dae1f8d95ad2330f26e8dc3874217c503ad86775fc896a12009ae1b465878"
 )
 EXPECTED_WHEEL_ENTRIES = {
-    "yomihime_module_sdk-1.4.0.dist-info/licenses/LICENSE",
-    "yomihime_module_sdk-1.4.0.dist-info/METADATA",
-    "yomihime_module_sdk-1.4.0.dist-info/WHEEL",
-    "yomihime_module_sdk-1.4.0.dist-info/top_level.txt",
-    "yomihime_module_sdk-1.4.0.dist-info/RECORD",
+    "yomihime_module_sdk-1.5.0.dist-info/licenses/LICENSE",
+    "yomihime_module_sdk-1.5.0.dist-info/METADATA",
+    "yomihime_module_sdk-1.5.0.dist-info/WHEEL",
+    "yomihime_module_sdk-1.5.0.dist-info/top_level.txt",
+    "yomihime_module_sdk-1.5.0.dist-info/RECORD",
     "yomihime_sdk/__init__.py",
     "yomihime_sdk/py.typed",
     "yomihime_sdk/_examples/empty_module/README.md",
@@ -70,6 +72,32 @@ PAGE_FILES = (
     "pages/management/index.html",
     "pages/management/app.js",
     "pages/management/styles.css",
+)
+SHELL_FILES = (
+    "index.html",
+    "app.js",
+    "runtime.js",
+    "styles.css",
+    "THIRD_PARTY_NOTICES.txt",
+    "licenses/@css-render_plugin-bem.txt",
+    "licenses/@css-render_vue3-ssr.txt",
+    "licenses/@emotion_hash.txt",
+    "licenses/@juggle_resize-observer.txt",
+    "licenses/@vue_reactivity.txt",
+    "licenses/@vue_runtime-core.txt",
+    "licenses/@vue_runtime-dom.txt",
+    "licenses/@vue_shared.txt",
+    "licenses/css-render.txt",
+    "licenses/date-fns.txt",
+    "licenses/evtd.txt",
+    "licenses/lodash-es.txt",
+    "licenses/naive-ui.txt",
+    "licenses/seemly.txt",
+    "licenses/treemate.txt",
+    "licenses/vdirs.txt",
+    "licenses/vooks.txt",
+    "licenses/vue.txt",
+    "licenses/vueuc.txt",
 )
 FF14_BUNDLE_ROOT = Path("modules") / "ff14"
 FF14_BUNDLE_REQUIRED_FILES = {
@@ -256,11 +284,11 @@ def validate_wheel(path: Path) -> dict[str, bytes]:
                 "SDK wheel entry manifest differs from the reviewed artifact"
             )
         metadata_lines = set(
-            wheel.read("yomihime_module_sdk-1.4.0.dist-info/METADATA")
+            wheel.read("yomihime_module_sdk-1.5.0.dist-info/METADATA")
             .decode("utf-8")
             .splitlines()
         )
-        if not {"Name: yomihime-module-sdk", "Version: 1.4.0"} <= metadata_lines:
+        if not {"Name: yomihime-module-sdk", "Version: 1.5.0"} <= metadata_lines:
             raise ValueError("SDK wheel distribution metadata is unsupported")
         package = {name: wheel.read(name) for name in sorted(PACKAGE_ENTRY_NAMES)}
     return package
@@ -304,6 +332,8 @@ def _ff14_bundle_files(repository_root: Path) -> list[Path]:
             metadata = resolved.stat()
             if stat.S_ISDIR(metadata.st_mode):
                 relative_directory = resolved.relative_to(package_root)
+                if relative_directory == Path("pages"):
+                    continue
                 if entry.name in FF14_BUNDLE_CACHE_DIRS:
                     continue
                 if relative_directory not in FF14_BUNDLE_ALLOWED_DIRS:
@@ -333,7 +363,71 @@ def _ff14_bundle_files(repository_root: Path) -> list[Path]:
     missing = FF14_BUNDLE_REQUIRED_FILES - found_names
     if missing:
         raise ValueError(f"FF14 bundle is missing required files: {sorted(missing)}")
+    from extensions.disk_manifest import parse_manifest
+    from extensions.page_resources import read_page_resources
+
+    manifest = parse_manifest(
+        _read_snapshot(
+            package_root / "yomihime.manifest.json", repository_root, "FF14 manifest"
+        )
+    )
+    resources = read_page_resources(package_root, manifest)
+    found.extend(
+        validate_source_path(
+            package_root / path, repository_root, "Module page resource"
+        )
+        for path in resources
+    )
     return found
+
+
+def projected_page_assets(repository_root: Path) -> dict[str, bytes]:
+    """Publish trusted, hash-verified bundle assets below the Host's page root."""
+    from extensions.disk_manifest import parse_manifest
+    from extensions.page_resources import read_page_resources
+
+    package_root = repository_root / FF14_BUNDLE_ROOT
+    manifest = parse_manifest(
+        _read_snapshot(
+            package_root / "yomihime.manifest.json", repository_root, "FF14 manifest"
+        )
+    )
+    resources = read_page_resources(package_root, manifest)
+    payload = {}
+    branches = []
+    styles = set()
+    for module in manifest.modules:
+        owner = manifest.global_module_id(module.module_id)
+        for resource in module.resources:
+            name = f"pages/shell/module-assets/{owner}/{resource.path}"
+            payload[name] = resources[resource.path]
+            payload[f"modules/ff14/{resource.path}"] = resources[resource.path]
+        for page in module.pages:
+            entry = f"module-assets/{owner}/{page.entry}"
+            branches.append(
+                f"case {json.dumps(entry)}: return import({json.dumps('./' + entry)});"
+            )
+            styles.update(f"module-assets/{owner}/{style}" for style in page.styles)
+    if branches:
+        payload["pages/shell/module-loader.js"] = (
+            "export async function loadPage(entry) {\nswitch (entry) {\n"
+            + "\n".join(sorted(set(branches)))
+            + "\ndefault: throw new Error('Unknown module page');\n}\n}\n"
+        ).encode()
+        index = _read_snapshot(
+            repository_root / "pages/shell/index.html", repository_root, "Shell index"
+        ).decode("utf-8")
+        marker = '<template id="module-style-assets"></template>'
+        if index.count(marker) != 1:
+            raise ValueError("Shell index must declare one inert module style template")
+        links = "".join(
+            f'<link rel="stylesheet" data-resource="{html.escape(path, quote=True)}" href="./{html.escape(path, quote=True)}">'
+            for path in sorted(styles)
+        )
+        payload["pages/shell/index.html"] = index.replace(
+            marker, '<template id="module-style-assets">' + links + "</template>"
+        ).encode("utf-8")
+    return payload
 
 
 def included_files(root: Path = ROOT) -> list[Path]:
@@ -364,6 +458,27 @@ def included_files(root: Path = ROOT) -> list[Path]:
         )
         files.extend(_runtime_files(runtime_root, repository_root))
     files.extend(_ff14_bundle_files(repository_root))
+    has_pages = "pages/shell/module-loader.js" in projected_page_assets(repository_root)
+    for name in SHELL_FILES:
+        path = repository_root / "pages" / "shell" / name
+        if has_pages or path.exists():
+            files.append(validate_source_path(path, repository_root, "Shell asset"))
+    compatibility = repository_root / "pages" / "ff14" / "query-contract.js"
+    if compatibility.exists():
+        canonical = repository_root / "modules/ff14/pages/src/query-contract.js"
+        if _read_snapshot(
+            canonical, repository_root, "Canonical legacy query contract"
+        ) != _read_snapshot(
+            compatibility, repository_root, "Legacy compatibility asset"
+        ):
+            raise ValueError(
+                "Legacy query contract differs from module authority; rebuild frontend"
+            )
+        files.append(
+            validate_source_path(
+                compatibility, repository_root, "Legacy compatibility asset"
+            )
+        )
     return sorted(
         set(files), key=lambda path: path.relative_to(repository_root).as_posix()
     )
@@ -377,6 +492,7 @@ def build(
     package = validate_wheel(sdk_wheel)
     repository_root = Path(repository_root).resolve(strict=True)
     files = included_files(repository_root)
+    page_assets = projected_page_assets(repository_root)
     archive_path.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(
         archive_path, "w", compression=zipfile.ZIP_DEFLATED
@@ -384,20 +500,32 @@ def build(
         for path in files:
             name = path.relative_to(repository_root).as_posix()
             content = _read_snapshot(path, repository_root, "Runtime source")
+            if name in page_assets:
+                content = page_assets[name]
             _write_entry(archive, name, content)
         for name, data in package.items():
             _write_entry(archive, name, data)
+        for name, data in page_assets.items():
+            if name not in {
+                path.relative_to(repository_root).as_posix() for path in files
+            }:
+                _write_entry(archive, name, data)
 
     with zipfile.ZipFile(archive_path) as result:
         names = result.namelist()
-        expected_names = {
-            path.relative_to(repository_root).as_posix() for path in files
-        } | set(package)
+        expected_names = (
+            {path.relative_to(repository_root).as_posix() for path in files}
+            | set(package)
+            | set(page_assets)
+        )
         if len(names) != len(set(names)) or set(names) != expected_names:
             raise RuntimeError("Generated ZIP entry manifest is not exact")
         for name, data in package.items():
             if result.read(name) != data:
                 raise RuntimeError(f"SDK bytes differ from the pinned wheel: {name}")
+        for name, data in page_assets.items():
+            if result.read(name) != data:
+                raise RuntimeError(f"Module asset differs from verified bundle: {name}")
         if result.testzip() is not None:
             raise RuntimeError("The generated ZIP failed its integrity check")
     return archive_path

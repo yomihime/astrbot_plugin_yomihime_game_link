@@ -1,9 +1,10 @@
 <!doctype html>
 <html lang="zh-CN">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>游戏连结 · 四字段管理</title><link rel="stylesheet" href="./styles.css"></head>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>游戏连结 · 配置管理</title><link rel="stylesheet" href="./styles.css"></head>
 <body><main class="management">
-  <p class="brand">如月怜的游戏连结</p><h1>四字段配置管理</h1>
-  <p>保存只修改所选配置。启动失败时，修复后需单独点击恢复运行。</p>
+  <p class="brand">如月怜的游戏连结</p><h1>配置目录与管理</h1>
+  <p>目录来自可信 Core 与模块声明。当前只开放四字段管理范围；字段注册不授予存量读取或修改权限，写操作仍由后端逐请求鉴权。</p>
+  <p>保存只修改所选配置。客户端检查用于辅助输入，模块语义校验与配置版本以服务端为准。启动失败时，修复后需单独点击恢复运行。</p>
   <p id="status" role="status" aria-live="polite">正在连接宿主管理页面。</p>
   <button id="refresh" type="button" disabled>刷新配置与版本</button>
   <section aria-label="普通配置" id="fields"></section>

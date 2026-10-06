@@ -61,6 +61,8 @@ EXTENSION_DESCRIPTOR_FIELDS: Mapping[str, frozenset[str]] = MappingProxyType(
                 "config_fields",
                 "sources",
                 "collections",
+                "pages",
+                "resources",
             }
         ),
         "capability": frozenset(
@@ -78,8 +80,19 @@ EXTENSION_DESCRIPTOR_FIELDS: Mapping[str, frozenset[str]] = MappingProxyType(
         ),
         "capability_reference": frozenset({"module_id", "capability_id"}),
         "command": frozenset(
-            {"operation_path", "capability_id", "parameter_mapping", "help_text"}
+            {
+                "operation_path",
+                "capability_id",
+                "parameter_mapping",
+                "help_text",
+                "parameter_mode",
+                "raw_tail_parameter",
+            }
         ),
+        "page": frozenset(
+            {"route_id", "title", "entry", "order", "access", "capability_id", "styles"}
+        ),
+        "page_resource": frozenset({"path", "sha256"}),
         "tool": frozenset(
             {"name", "capability_id", "parameter_mapping", "description"}
         ),
@@ -107,7 +120,15 @@ EXTENSION_DESCRIPTOR_FIELDS: Mapping[str, frozenset[str]] = MappingProxyType(
             }
         ),
         "config_field": frozenset(
-            {"name", "sensitive", "required", "default", "description", "value_schema", "group"}
+            {
+                "name",
+                "sensitive",
+                "required",
+                "default",
+                "description",
+                "value_schema",
+                "group",
+            }
         ),
         "source": frozenset(
             {
@@ -319,6 +340,8 @@ class CommandDescriptor:
     capability_id: str
     parameter_mapping: Mapping[str, str]
     help_text: str
+    parameter_mode: str = "structured"
+    raw_tail_parameter: str | None = None
 
     def __post_init__(self) -> None:
         _operation_path(self.operation_path)
@@ -328,6 +351,103 @@ class CommandDescriptor:
         if not all(isinstance(value, str) and value for value in mapping.values()):
             raise ValueError("parameter_mapping values must be non-empty strings")
         object.__setattr__(self, "parameter_mapping", mapping)
+        if self.parameter_mode not in {"structured", "raw_tail"}:
+            raise ValueError("invalid command parameter_mode")
+        if self.parameter_mode == "structured":
+            if self.raw_tail_parameter is not None:
+                raise ValueError("structured command cannot declare raw_tail_parameter")
+        else:
+            _identifier(self.raw_tail_parameter, "raw_tail_parameter")
+            if mapping:
+                raise ValueError(
+                    "raw_tail command cannot also declare parameter_mapping"
+                )
+
+
+def validate_page_resource_path(value: str) -> str:
+    """Validate a portable, non-executable filesystem declaration (not a URL)."""
+    if type(value) is not str or len(value) > 240:
+        raise ValueError("invalid page resource path")
+    parts = value.split("/")
+    if any(
+        not part
+        or part.endswith(".")
+        or part in {".", ".."}
+        or re.fullmatch(r"[A-Za-z0-9_-][A-Za-z0-9_.-]*", part) is None
+        for part in parts
+    ):
+        raise ValueError("page resource path must be a normalized relative path")
+    if value.rsplit(".", 1)[-1] not in {
+        "js",
+        "css",
+        "svg",
+        "png",
+        "jpg",
+        "jpeg",
+        "webp",
+        "woff",
+        "woff2",
+    }:
+        raise ValueError("unsupported page resource extension")
+    if any(
+        part.split(".", 1)[0].upper()
+        in {
+            "CON",
+            "PRN",
+            "AUX",
+            "NUL",
+            *(f"COM{i}" for i in range(1, 10)),
+            *(f"LPT{i}" for i in range(1, 10)),
+        }
+        for part in parts
+    ):
+        raise ValueError("reserved page resource path")
+    return value
+
+
+@dataclass(frozen=True, slots=True)
+class PageResource:
+    path: str
+    sha256: str
+
+    def __post_init__(self) -> None:
+        validate_page_resource_path(self.path)
+        if (
+            type(self.sha256) is not str
+            or re.fullmatch(r"[0-9a-f]{64}", self.sha256) is None
+        ):
+            raise ValueError("page resource sha256 must be a lowercase SHA-256")
+
+
+@dataclass(frozen=True, slots=True)
+class PageDescriptor:
+    route_id: str
+    title: str
+    entry: str
+    order: int = 0
+    access: str = "public_web"
+    capability_id: str | None = None
+    styles: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        _identifier(self.route_id, "page route_id")
+        _text(self.title, "page title")
+        validate_page_resource_path(self.entry)
+        if not self.entry.endswith(".js"):
+            raise ValueError("page entry must be JavaScript")
+        if type(self.order) is not int or not -10000 <= self.order <= 10000:
+            raise ValueError("page order is outside its budget")
+        if self.access != "public_web":
+            raise ValueError("unsupported page access")
+        if self.capability_id is not None:
+            _identifier(self.capability_id, "page capability_id")
+        if type(self.styles) is not tuple:
+            raise TypeError("page styles must be a tuple")
+        for style in self.styles:
+            validate_page_resource_path(style)
+            if not style.endswith(".css"):
+                raise ValueError("page style must be CSS")
+        _unique(self.styles, "page styles")
 
 
 @dataclass(frozen=True, slots=True)
@@ -362,6 +482,8 @@ class ModuleManifest:
     config_fields: tuple["ConfigField", ...] = ()
     sources: tuple["SourceDeclaration", ...] = ()
     collections: tuple[CollectionDescriptor, ...] = ()
+    pages: tuple[PageDescriptor, ...] = ()
+    resources: tuple[PageResource, ...] = ()
 
     def __post_init__(self) -> None:
         _identifier(self.module_id, "module_id")
@@ -378,6 +500,18 @@ class ModuleManifest:
         _descriptor_tuple(self.config_fields, ConfigField, "config_fields")
         _descriptor_tuple(self.sources, SourceDeclaration, "sources")
         _descriptor_tuple(self.collections, CollectionDescriptor, "collections")
+        _descriptor_tuple(self.pages, PageDescriptor, "pages")
+        _descriptor_tuple(self.resources, PageResource, "resources")
+        if len(self.pages) > 128 or len(self.resources) > 128:
+            raise ValueError("page declaration budget exceeded")
+        _unique(tuple(item.route_id for item in self.pages), "page routes")
+        _unique(
+            tuple(item.path.casefold() for item in self.resources), "page resources"
+        )
+        resources = {item.path for item in self.resources}
+        for page in self.pages:
+            if not {page.entry, *page.styles} <= resources:
+                raise ValueError("page references an undeclared resource")
         capabilities = {item.capability_id: item for item in self.capabilities}
         _unique(tuple(item.capability_id for item in self.capabilities), "capabilities")
         _unique(tuple(item.operation_path for item in self.commands), "commands")
@@ -398,7 +532,31 @@ class ModuleManifest:
             capability = capabilities.get(command.capability_id)
             if capability is None:
                 raise ValueError("command references an undeclared capability")
-            _validate_parameter_mapping(command.parameter_mapping, capability)
+            if command.parameter_mode == "raw_tail":
+                field = capability.input_schema["properties"].get(
+                    command.raw_tail_parameter
+                )
+                if not isinstance(field, Mapping) or field.get("type") != "string":
+                    raise ValueError(
+                        "raw_tail_parameter must reference a declared string"
+                    )
+                if set(capability.input_schema["required"]) - {
+                    command.raw_tail_parameter
+                }:
+                    raise ValueError(
+                        "raw_tail cannot satisfy other required parameters"
+                    )
+            else:
+                _validate_parameter_mapping(command.parameter_mapping, capability)
+        for page in self.pages:
+            if page.capability_id is not None:
+                capability = capabilities.get(page.capability_id)
+                if (
+                    capability is None
+                    or capability.invocation_policy
+                    is not InvocationPolicy.COMMAND_AND_PUBLIC_WEB
+                ):
+                    raise ValueError("page capability must be declared public web")
         for tool in self.tools:
             capability = capabilities.get(tool.capability_id)
             if capability is None:
@@ -491,6 +649,14 @@ class PackageManifest:
         _text(self.source, "source")
         _unique(tuple(item.module_id for item in self.modules), "modules")
         _unique(tuple(item.route for item in self.modules), "module routes")
+        _unique(
+            tuple(
+                resource.path.casefold()
+                for module in self.modules
+                for resource in module.resources
+            ),
+            "package page resources",
+        )
         _unique(
             tuple(
                 f"{item.route}\x00{command.operation_path}"

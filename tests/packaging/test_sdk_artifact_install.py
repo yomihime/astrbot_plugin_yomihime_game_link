@@ -18,7 +18,7 @@ from scripts.build_release import build_release
 
 ROOT = Path(__file__).resolve().parents[2]
 EXPECTED_WHEEL_SHA256 = (
-    "28e91da8baec34890c308b2c6e40de383fa80a162ffc5ef4d698e735c678f302"
+    "bf5dae1f8d95ad2330f26e8dc3874217c503ad86775fc896a12009ae1b465878"
 )
 EXPECTED_RESOURCES = {
     f"yomihime_sdk/_examples/{example}/{filename}"
@@ -117,11 +117,11 @@ assert sdk.SourceHttpError is CanonicalSourceHttpError
 assert GatewayResultType is sdk.CapabilityResult
 assert OutputResultType is sdk.CapabilityResult
 
-assert sdk.__version__ == "1.4.0"
-assert sdk.CONTRACT_VERSION == "1.4.0"
-assert sdk.CONTRACT_REVISION == "UI-B0-PUBLIC-WEB"
+assert sdk.__version__ == "1.5.0"
+assert sdk.CONTRACT_VERSION == "1.5.0"
+assert sdk.CONTRACT_REVISION == "R1-MODULE-PAGES"
 assert sdk.COMPATIBLE_CONTRACT_VERSIONS == (
-    "1.0.0", "1.1.0", "1.2.0", "1.3.0", "1.4.0"
+    "1.0.0", "1.1.0", "1.2.0", "1.3.0", "1.4.0", "1.5.0"
 )
 assert all(
     sdk.is_compatible_contract_version(version)
@@ -175,7 +175,7 @@ assert len(sdk.__all__) == len(set(sdk.__all__))
 assert all(hasattr(sdk, name) for name in sdk.__all__)
 assert inspect.iscoroutinefunction(sdk.ModuleFactory.create)
 assert tuple(sdk.ModuleServices.__annotations__) == (
-    "config", "identities", "accounts", "subscriptions", "scopes"
+    "config", "identities", "accounts", "subscriptions", "scopes", "storage"
 )
 before_threads = {thread.ident for thread in threading.enumerate()}
 
@@ -347,7 +347,7 @@ class InstalledArtifactTests(unittest.TestCase):
             wheel = build_wheel(wheelhouse)
             wheel_digest = hashlib.sha256(wheel.read_bytes()).hexdigest()
             self.assertEqual(wheel_digest, EXPECTED_WHEEL_SHA256)
-            self.assertEqual(wheel.name, "yomihime_module_sdk-1.4.0-py3-none-any.whl")
+            self.assertEqual(wheel.name, "yomihime_module_sdk-1.5.0-py3-none-any.whl")
             with zipfile.ZipFile(wheel) as archive:
                 entries = set(archive.namelist())
                 self.assertFalse(

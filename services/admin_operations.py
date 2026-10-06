@@ -156,6 +156,57 @@ class AdminOperationsService(AdminOperations):
             result.setdefault(field.target, set()).add(field.declaration.name)
         return result
 
+    def require_ordinary_validators(self, resources=None):
+        if self._ordinary_migration is not None:
+            self._ordinary_migration.require_semantic_validators(
+                resources, value_validators=self._module_config_validators
+            )
+
+    @_tracked_admin_request
+    async def ordinary_catalog(self, *, authorization):
+        from .configuration_catalog import project_configuration_catalog
+
+        resources = self.ordinary_resources()
+        grant = await self.authorization.authorize(
+            AdminOperation.READ_CONFIG,
+            invocation=None,
+            context=authorization,
+            resources=resources,
+        )
+        async with self.lifecycle.admission.mutation("admin-ordinary-catalog"):
+            snapshot = self.registry.snapshot()
+            selections = {}
+            for module_id in snapshot.modules:
+                selections[module_id] = self._selection(module_id, snapshot)
+            for candidate in self.extension_runtime.candidates():
+                package = candidate.package
+                if not isinstance(package, DiscoveredPackage) or not package.valid:
+                    continue
+                for manifest in package.manifest.modules:
+                    module_id = f"{package.package_id}/{manifest.module_id}"
+                    if module_id not in selections:
+                        selections[module_id] = self._selection(module_id, snapshot)
+            declarations = {CORE_MODULE_ID: CORE_CONFIG_FIELDS}
+            for module_id, selected in selections.items():
+                if module_id == CORE_MODULE_ID:
+                    raise ValueError("reserved Core configuration owner")
+                declarations[module_id] = selected.manifest.config_fields
+            result = project_configuration_catalog(
+                declarations,
+                resources,
+                principal_id=self.config_principal_id,
+                validator_check=self.require_ordinary_validators,
+            )
+            await self.authorization.validate_generation(
+                grant, operation=AdminOperation.READ_CONFIG
+            )
+            self._require_accepting()
+            for selected in selections.values():
+                self._require_same_selection(selected)
+            if self.registry.snapshot() is not snapshot:
+                raise AdminAuthorizationDenied
+        return result
+
     @_tracked_admin_request
     async def ordinary_snapshot(self, *, authorization):
         resources = self.ordinary_resources()
@@ -701,6 +752,15 @@ class AdminOperationsService(AdminOperations):
 
         allowed_fields = _grant_resource_fields(
             grant, ConfigTarget(self.config_principal_id, module_id)
+        )
+        self.require_ordinary_validators(
+            {
+                ConfigTarget(self.config_principal_id, module_id): {
+                    update.field
+                    for update in patch.updates
+                    if update.mode.value != "keep"
+                }
+            }
         )
         if module_id == CORE_MODULE_ID:
             coordinator = self._core_configuration()

@@ -10,7 +10,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
 
+from yomihime_sdk.api.manifests import validate_page_resource_path
+
 from ...extensions.discovery import DiscoveredPackage, discover_packages
+from ...extensions.page_resources import capture_page_resources
 from ...extensions.source_snapshot import (
     MAX_PACKAGE_SOURCE_BYTES,
     SourceSnapshotError,
@@ -264,6 +267,7 @@ def _read_bundled_package(source_root: Path) -> dict[str, object]:
     except (SourceSnapshotError, OSError, ValueError):
         raise BundledExtensionError("bundled_source_invalid") from None
 
+    resources = dict(capture_page_resources(provenance, package.manifest))
     source_paths = set(snapshot.files)
     if "module.py" not in source_paths or "__init__.py" not in source_paths:
         raise BundledExtensionError("bundled_factory_missing")
@@ -274,7 +278,7 @@ def _read_bundled_package(source_root: Path) -> dict[str, object]:
     required_files = {MANIFEST_FILENAME, README_FILENAME}
     if not required_files <= inventory:
         raise BundledExtensionError("bundled_documentation_missing")
-    if inventory != source_paths | required_files:
+    if inventory != source_paths | set(resources) | required_files:
         raise BundledExtensionError("bundled_package_has_unreviewed_files")
 
     manifest = _read_stable_file(
@@ -290,7 +294,7 @@ def _read_bundled_package(source_root: Path) -> dict[str, object]:
         max_bytes=MAX_README_BYTES,
     )
     return {
-        "sources": dict(snapshot.files),
+        "sources": {**dict(snapshot.files), **resources},
         "manifest": manifest,
         "readme": readme,
     }
@@ -322,8 +326,15 @@ def _matches_current_bundle(
             provenance,
             SourceSnapshotLimits(max_runtime_bytes=MAX_PACKAGE_SOURCE_BYTES),
         )
-        if dict(snapshot.files) != dict(sources):
+        if dict(snapshot.files) != {
+            key: value for key, value in sources.items() if key.endswith(".py")
+        }:
             return False, "existing_source_mismatch"
+        resources = capture_page_resources(provenance, package.manifest)
+        if dict(resources) != {
+            key: value for key, value in sources.items() if not key.endswith(".py")
+        }:
+            return False, "existing_resource_mismatch"
         actual_manifest = _read_stable_file(
             target / MANIFEST_FILENAME, extension_root, max_bytes=262_144
         )
@@ -349,7 +360,9 @@ def _matches_current_bundle(
             checked_provenance,
             SourceSnapshotLimits(max_runtime_bytes=MAX_PACKAGE_SOURCE_BYTES),
         )
-        if dict(checked_snapshot.files) != dict(sources):
+        if dict(checked_snapshot.files) != {
+            key: value for key, value in sources.items() if key.endswith(".py")
+        }:
             return False, "existing_package_changed"
         if checked_provenance.manifest_sha256 != hashlib.sha256(manifest).digest():
             return False, "existing_package_changed"
@@ -405,19 +418,24 @@ def _inventory_package(package_root: Path) -> set[str]:
             resolved = _validate_path(entry, package_root)
             metadata = resolved.stat()
             if stat.S_ISDIR(metadata.st_mode):
+                if resolved.relative_to(package_root).as_posix() == "pages/src":
+                    continue
                 if entry.name not in IGNORED_DIRECTORIES:
                     pending.append(resolved)
                 continue
             if not stat.S_ISREG(metadata.st_mode):
                 raise BundledExtensionError("package_entry_invalid")
             relative = resolved.relative_to(package_root).as_posix()
+            if relative == "pages/resources.json":
+                continue
             if relative.endswith(".py") or relative in {
                 MANIFEST_FILENAME,
                 README_FILENAME,
             }:
                 found.add(relative)
             else:
-                raise BundledExtensionError("package_entry_unreviewed")
+                validate_page_resource_path(relative)
+                found.add(relative)
     return found
 
 

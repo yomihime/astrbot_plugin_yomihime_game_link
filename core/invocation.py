@@ -496,7 +496,15 @@ class Gateway:
             return _error(code, privacy=Privacy.PRIVATE if owner else Privacy.PUBLIC)
 
         try:
-            mapped = self._map_parameters(descriptor.parameter_mapping, parameters)
+            if (
+                isinstance(descriptor, CommandDescriptor)
+                and descriptor.parameter_mode == "raw_tail"
+            ):
+                if set(parameters) != {descriptor.raw_tail_parameter}:
+                    raise ValueError("raw_tail parameters do not match the declaration")
+                mapped = dict(parameters)
+            else:
+                mapped = self._map_parameters(descriptor.parameter_mapping, parameters)
             validated = validate_parameters(capability, mapped)
         except Exception:
             return denied(ErrorCode.PARAMETER_ERROR)

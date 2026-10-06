@@ -131,7 +131,7 @@ class FF14InstalledModuleTests(unittest.IsolatedAsyncioTestCase):
             package = discovered[0].manifest
             self.assertIsNotNone(package)
             self.assertEqual(package.package_id, "ff14")
-            self.assertEqual(package.contract_version, "1.4.0")
+            self.assertEqual(package.contract_version, "1.5.0")
             module_manifest = package.modules[0]
             self.assertEqual(module_manifest.module_id, "ff14")
             self.assertEqual(module_manifest.factory_entry, "module:Factory")

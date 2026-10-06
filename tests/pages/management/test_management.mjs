@@ -1,57 +1,123 @@
-// Official bridge payload/context contract, synthetic DOM; no browser acceptance.
-import assert from "node:assert/strict";
-import {createManagementPage, validateSnapshot, updateBody} from "../../../pages/management/app.js";
-const flush = async () => { for (let i=0;i<25;i++) await Promise.resolve(); };
-const deferred = () => { let resolve; const promise = new Promise(r => resolve=r); return {promise,resolve}; };
-class Node {
-  children=[]; listeners=new Map(); disabled=false; value=""; checked=false; textContent="";
-  constructor(tag) {this.tagName=tag;}
-  append(...nodes) {this.children.push(...nodes);}
-  replaceChildren(...nodes) {this.children=nodes;}
-  setAttribute() {}
-  addEventListener(name,callback) {this.listeners.set(name,callback);}
-  all() {return [this,...this.children.flatMap(n=>n.all())];}
-  click() {if (!this.disabled) this.listeners.get("click")?.();}
+// Offline JSDOM/bridge contracts. Not Host/browser acceptance.
+import {test} from 'node:test';
+import assert from 'node:assert/strict';
+import {readFile} from 'node:fs/promises';
+import {JSDOM} from '../../../pages/frontend/node_modules/jsdom/lib/api.js';
+import {createManagementPage,validateCatalog,validateSnapshot,updateBody} from '../../../pages/management/app.js';
+import {catalog,snapshot,context} from './fixtures.mjs';
+const html=await readFile(new URL('../../../pages/management/index.html',import.meta.url),'utf8');
+const flush=async()=>{for(let i=0;i<35;i++)await Promise.resolve();};
+const deferred=()=>{let resolve,reject;const promise=new Promise((a,b)=>{resolve=a;reject=b;});return {promise,resolve,reject};};
+function fixture(initial=context,resolveReady=true){
+  const dom=new JSDOM(html,{pretendToBeVisual:true,url:'http://localhost/management/'}),calls=[],ready=deferred();let callback=null;
+  const bridge={onContext(fn){callback=fn;if(initial)fn(initial);return()=>{callback=null;};},ready:()=>ready.promise,apiPost(endpoint,body){const d=deferred(),call={endpoint,body,settled:false,promise:d.promise,resolve(value){this.settled=true;d.resolve(value);},reject(value){this.settled=true;d.reject(value);}};calls.push(call);return d.promise;}};
+  const app=createManagementPage(dom.window.document,bridge,dom.window);app.start();if(resolveReady)ready.resolve(initial||context);
+  return {dom,app,calls,ready,context(value){callback?.(value);},get document(){return dom.window.document;},close(){app.close();dom.window.close();}};
 }
-function doc() {
-  const nodes=Object.fromEntries(["status","fields","refresh","rollback","recover","replacement"].map(id=>{const n=new Node(["refresh","rollback","recover"].includes(id)?"button":"div");n.id=id;return [id,n];}));
-  return {nodes,getElementById:id=>nodes[id],createElement:tag=>new Node(tag),querySelectorAll:()=>Object.values(nodes).flatMap(n=>n.all()).filter(n=>n.tagName==="button")};
-}
-function snapshot(revision=1) {
-  const field=value=>({value,state:"valid",present:false,source:"default"});
-  return {"game_link/core":{revision,fields:{default_region:field("cn")}},"ff14/ff14":{revision,fields:{ff14_calendar_default_days:field(3),ff14_calendar_default_timezone:field("Asia/Shanghai"),ff14_calendar_default_delivery_time:field("09:00")}}};
-}
-function fixture(existing) {
-  const calls=[], ready=deferred();let callback;
-  const bridge={onContext(fn){callback=fn;if(existing)fn(existing);return()=>callback=null;},ready:()=>ready.promise,
-    apiPost(endpoint,body){const call={endpoint,body,...deferred()};calls.push(call);return call.promise;}};
-  return {calls,bridge,ready,context(value){callback?.(value);}};
-}
-const context={pluginName:"astrbot_plugin_yomihime_game_link",pageName:"management"};
-// Context is already present: synchronous onContext and ready resolve the same
-// object. There must be one read, and that read must be allowed to render.
-{
-  const f=fixture(context),d=doc(),app=createManagementPage(d,f.bridge,{addEventListener(){}});
-  app.start();f.ready.resolve(context);await flush();assert.equal(f.calls.length,1);
-  f.calls[0].resolve(snapshot());await flush();assert.equal(d.nodes.fields.children.length,2);assert.equal(d.nodes.refresh.disabled,false);
-  const save=d.nodes.fields.children[0].children.find(n=>n.tagName==="button");
-  const select=d.nodes.fields.children[0].children.find(n=>n.tagName==="select");select.value="clear";
-  save.click();await flush();assert.deepEqual(f.calls[1].body,{module_id:"game_link/core",expected_revision:1,updates:[{field:"default_region",mode:"clear"}]});
-  f.calls[1].resolve({module_id:"game_link/core",revision:2});await flush();assert.equal(f.calls[2].endpoint,"admin/read");
-  f.calls[2].resolve(snapshot(2));await flush();assert.equal(f.calls.filter(c=>c.endpoint==="admin/recover").length,0);
-  d.nodes.rollback.click();await flush();f.calls[3].resolve({rolled_back:true});await flush();f.calls[4].resolve(snapshot(3));await flush();
-  app.close();d.nodes.refresh.click();await flush();assert.equal(f.calls.length,5);
-}
-// Context arrives later and twice. A real context replacement invalidates the
-// pending read and queues a new read; the late old snapshot is never shown.
-{
-  const f=fixture(null),d=doc(),app=createManagementPage(d,f.bridge,{addEventListener(){}});app.start();
-  f.context(context);f.ready.resolve(context);await flush();assert.equal(f.calls.length,1);
-  f.context({...context,locale:"en-US"});f.calls[0].resolve(snapshot(9));await flush();assert.equal(f.calls.length,2);assert.equal(d.nodes.fields.children.length,0);
-  f.calls[1].resolve(snapshot(2));await flush();assert.equal(d.nodes.fields.children.length,2);
-  d.nodes.refresh.click();await flush();f.calls[2].resolve({status:"ok",data:snapshot()});await flush();assert.match(d.nodes.status.textContent,/\u672a\u53d6\u5f97\u6210\u529f\u786e\u8ba4/);
-  app.close();
-}
-assert.throws(()=>validateSnapshot({...snapshot(),"x/y":{}}));
-assert.throws(()=>updateBody("x/y",1,{}));
-console.log("management bridge/DOM contracts: 3 groups passed");
+const pending=(f,endpoint)=>{const call=f.calls.find(c=>c.endpoint===`admin/${endpoint}`&&!c.settled);assert.ok(call,'pending '+endpoint);return call;};
+async function load(f,declarations=catalog(),values=snapshot()){pending(f,'catalog').resolve(declarations);await flush();pending(f,'read').resolve(values);await flush();}
+const field=(f,name)=>f.document.querySelector(`[data-field="${name}"]`);
+const mode=(f,name,value)=>{const node=field(f,name).querySelector('[data-role=mode]');node.value=value;node.dispatchEvent(new f.dom.window.Event('change'));};
+const input=(f,name)=>field(f,name).querySelector('[data-role=value]');
+const save=(f,target)=>f.document.querySelector(`section[data-owner="${target}"] [data-action=save]`);
+const status=f=>f.document.getElementById('status').textContent;
+const click=(f,id)=>f.document.getElementById(id).click();
+const region='default_region',zone='ff14_calendar_default_timezone',days='ff14_calendar_default_days';
+
+test('synchronous onContext/ready issue one catalog, then one read; tiny metadata needs no root branch',async()=>{
+  const f=fixture();try{await flush();assert.equal(f.calls.length,1);assert.equal(f.calls[0].endpoint,'admin/catalog');await load(f);
+    assert.equal(f.document.querySelectorAll('#fields > section').length,3);assert.match(field(f,'sample').textContent,/无存量读取与修改授权/);assert.equal(input(f,'sample').value,'');assert.equal(input(f,'sample').disabled,true);assert.equal(save(f,'example/demo').disabled,true);
+    assert.equal(input(f,region).tagName,'SELECT');assert.equal(input(f,days).type,'number');assert.equal(input(f,zone).type,'text');
+    f.context({...context});f.context({...context,theme:'dark',locale:'en-US'});await flush();assert.equal(f.calls.length,2);assert.equal(f.document.documentElement.dataset.theme,'dark');
+  }finally{f.close();}
+});
+test('same/presentation context preserves dirty input, focus, selection and pending read without extra requests',async()=>{
+  const f=fixture();try{await load(f);mode(f,zone,'replace');const node=input(f,zone);node.value='Europe/London';node.focus();node.setSelectionRange(2,8);f.document.documentElement.scrollTop=91;
+    f.context({...context,isDark:true,locale:'en-US',i18n:{label:'x'}});await flush();assert.equal(input(f,zone),node);assert.equal(node.value,'Europe/London');assert.equal(f.document.activeElement,node);assert.equal(node.selectionStart,2);assert.equal(f.calls.length,2);
+    click(f,'refresh');await flush();assert.equal(input(f,zone),node);assert.equal(f.document.activeElement,node);assert.equal(save(f,'ff14/ff14').disabled,true);
+    pending(f,'catalog').resolve(catalog());await flush();f.context({...context,isDark:false});assert.equal(f.calls.length,4);pending(f,'read').resolve(snapshot(2));await flush();
+    assert.equal(input(f,zone),node);assert.equal(node.value,'Europe/London');assert.equal(node.selectionEnd,8);assert.equal(f.document.documentElement.scrollTop,91);assert.equal(save(f,'ff14/ff14').disabled,false);
+  }finally{f.close();}
+});
+test('presentation during initial catalog/read retains the in-flight request',async()=>{
+  const f=fixture();try{f.context({...context,locale:'en-US'});await flush();assert.equal(f.calls.length,1);pending(f,'catalog').resolve(catalog());await flush();f.context({...context,theme:'dark'});pending(f,'read').resolve(snapshot());await flush();assert.equal(f.calls.length,2);assert.ok(input(f,region));}finally{f.close();}
+});
+test('refresh failure retains drafts and nodes, gates writes until explicit recovery',async()=>{
+  const f=fixture();try{await load(f);mode(f,zone,'replace');const node=input(f,zone);node.value='UTC';node.focus();click(f,'refresh');pending(f,'catalog').reject(Error('PRIVATE backend error'));await flush();
+    assert.equal(input(f,zone),node);assert.equal(node.value,'UTC');assert.equal(f.document.activeElement,node);assert.equal(save(f,'ff14/ff14').disabled,true);assert.match(status(f),/未取得成功确认/);assert.ok(!status(f).includes('PRIVATE'));
+    click(f,'refresh');await load(f,catalog(),snapshot(2));assert.equal(node.value,'UTC');assert.equal(save(f,'ff14/ff14').disabled,false);
+  }finally{f.close();}
+});
+test('real unknown boundary change fences late read and clears drafts across identities',async()=>{
+  const f=fixture();try{pending(f,'catalog').resolve(catalog());await flush();const old=pending(f,'read');f.context({...context,session:'mock-two',instance:{revision:2}});await flush();assert.equal(f.calls.length,3);old.resolve(snapshot(99));await flush();assert.equal(f.document.querySelectorAll('.config-field').length,0);
+    await load(f,catalog(),snapshot(2));assert.match(f.document.querySelector('section[data-owner="game_link/core"]').textContent,/配置版本：2/);assert.ok(!f.document.querySelector('#fields').textContent.includes('99'));
+    mode(f,zone,'replace');input(f,zone).value='DIRTY-OLD';f.context({...context,session:'mock-three'});await load(f,catalog(),snapshot(3));assert.equal(input(f,zone).value,'Asia/Shanghai');
+  }finally{f.close();}
+});
+test('late update after boundary change cannot refresh or claim success in the new context',async()=>{
+  const f=fixture();try{await load(f);mode(f,region,'clear');save(f,'game_link/core').click();const old=pending(f,'update');f.context({...context,session:'next'});old.resolve({module_id:'game_link/core',revision:9});await flush();assert.equal(f.calls.length,4);await load(f,catalog(),snapshot(2));assert.ok(!status(f).includes('已保存'));assert.equal(f.calls.filter(c=>c.endpoint==='admin/read').length,2);}finally{f.close();}
+});
+for(const entry of ['ready','onContext'])test(`${entry} missing/wrong plugin/page binding fails closed`,async()=>{
+  for(const bad of [null,{}, {pluginName:context.pluginName},{pageName:'management'},{...context,pageName:'shell'},{...context,pluginName:'other'}]){
+    const f=fixture(null,false);try{if(entry==='ready')f.ready.resolve(bad);else f.context(bad);await flush();assert.equal(f.calls.length,0);assert.equal(f.document.getElementById('refresh').disabled,true);}finally{f.close();}
+  }
+});
+test('invalid binding event prevents late ready from resurrecting a management session',async()=>{
+  const f=fixture(null);try{f.context({pluginName:context.pluginName});f.ready.resolve(context);await flush();assert.equal(f.calls.length,0);}finally{f.close();}
+});
+test('unrepresentable unknown lifecycle fields reject instead of collapsing the boundary',async()=>{
+  for(const value of [undefined,()=>{},NaN,-0,new Date(),[,1]]){const f=fixture();try{f.context({...context,lifecycle:value});await flush();assert.equal(f.document.getElementById('refresh').disabled,true);assert.equal(f.calls.length,1);pending(f,'catalog').resolve(catalog());await flush();assert.equal(f.calls.length,1);}finally{f.close();}}
+});
+test('exact update/CAS body and explicit clear, then catalog/read refresh; no implicit recover',async()=>{
+  const f=fixture();try{await load(f);mode(f,region,'clear');save(f,'game_link/core').click();assert.deepEqual(pending(f,'update').body,{module_id:'game_link/core',expected_revision:1,updates:[{field:region,mode:'clear'}]});
+    pending(f,'update').resolve({module_id:'game_link/core',revision:2});await flush();await load(f,catalog(),snapshot(2));assert.match(status(f),/配置已保存/);assert.equal(f.calls.filter(c=>c.endpoint==='admin/recover').length,0);assert.equal(field(f,region).querySelector('[data-role=mode]').value,'keep');
+  }finally{f.close();}
+});
+test('invalid stored values are hidden and repair uses schema conversion with no fabricated value',async()=>{
+  const f=fixture(),values=snapshot();values['ff14/ff14'].fields[days]={value:null,state:'invalid',present:true,source:'sqlite'};
+  try{await load(f,catalog(),values);assert.equal(input(f,days).value,'');assert.match(field(f,days).textContent,/无效存量/);mode(f,days,'replace');input(f,days).value='12';save(f,'ff14/ff14').click();assert.deepEqual(pending(f,'update').body.updates,[{field:days,mode:'replace',value:12}]);pending(f,'update').reject(Error('revision_conflict'));await flush();assert.match(status(f),/配置已变化/);assert.equal(input(f,days).value,'12');assert.equal(save(f,'ff14/ff14').disabled,true);}finally{f.close();}
+});
+test('client input failure posts nothing; server authorization/validation failures never show success',async()=>{
+  const f=fixture();try{await load(f);mode(f,days,'replace');input(f,days).value='31';save(f,'ff14/ff14').click();await flush();assert.equal(f.calls.length,2);assert.match(status(f),/未通过校验/);
+    input(f,days).value='10';save(f,'ff14/ff14').click();pending(f,'update').reject(Error('admin_authorization_denied'));await flush();assert.match(status(f),/管理授权不可用/);assert.equal(save(f,'ff14/ff14').disabled,true);
+  }finally{f.close();}
+});
+test('missing semantic validator blocks replace/clear/recovery and preserves readable values',async()=>{
+  const f=fixture(),declarations=catalog();Object.assign(declarations.fields.find(f=>f.name===zone),{editable:false,blocked_reason:'semantic_validator_unavailable'});
+  try{await load(f,declarations);assert.equal(input(f,zone).value,'Asia/Shanghai');assert.equal(field(f,zone).querySelector('[data-role=mode]').disabled,true);assert.equal(f.document.getElementById('recover').disabled,true);assert.match(field(f,zone).textContent,/语义校验器不可用/);assert.throws(()=>updateBody('ff14/ff14',1,{[zone]:{mode:'clear'}},validateCatalog(declarations)));assert.equal(f.calls.length,2);}finally{f.close();}
+});
+test('unsupported object schema is explicitly readonly and an added declaration needs no app edit',async()=>{
+  const f=fixture(),declarations=catalog();declarations.fields.push({...declarations.fields[0],name:'new_number',description:'新增数字',value_schema:{type:'integer',minimum:0},default:2});
+  declarations.fields[0].value_schema={type:'object',properties:{label:{type:'string'}},required:['label'],additionalProperties:false};declarations.fields[0].default={label:'example'};
+  try{await load(f,declarations);assert.match(field(f,'sample').textContent,/schema 暂不支持编辑/);assert.equal(input(f,'sample').disabled,true);assert.equal(input(f,'new_number').type,'number');assert.equal(input(f,'new_number').value,'');assert.equal(save(f,'example/demo').disabled,true);}finally{f.close();}
+});
+test('recover/rollback retain old exact bodies and only exact successful confirmations claim success',async()=>{
+  const f=fixture();try{await load(f);f.document.getElementById('replacement').checked=true;click(f,'recover');assert.deepEqual(pending(f,'recover').body,{expected_revisions:{'game_link/core':1,'ff14/ff14':1},complete_from_current:true});pending(f,'recover').resolve({recovered:true});await flush();await load(f,catalog(),snapshot(2));assert.match(status(f),/业务运行已恢复/);
+    click(f,'rollback');assert.deepEqual(pending(f,'rollback').body,{expected_revisions:{'game_link/core':2,'ff14/ff14':2}});pending(f,'rollback').resolve({rolled_back:true});await flush();await load(f,catalog(),snapshot(3));assert.match(status(f),/限定回退/);
+  }finally{f.close();}
+});
+test('malformed update/recover/rollback and read envelopes never become successful',async()=>{
+  for(const endpoint of ['update','recover','rollback']){const f=fixture();try{await load(f);if(endpoint==='update'){mode(f,region,'clear');save(f,'game_link/core').click();}else click(f,endpoint);pending(f,endpoint).resolve(endpoint==='update'?{module_id:'other/module',revision:2}:endpoint==='recover'?{recovered:false}:{rolled_back:true,extra:'PRIVATE'});await flush();assert.match(status(f),/未取得成功确认/);assert.equal(f.calls.length,3);}finally{f.close();}}
+  const f=fixture();try{pending(f,'catalog').resolve(catalog());await flush();pending(f,'read').resolve({status:'ok',data:snapshot()});await flush();assert.match(status(f),/未通过校验/);assert.equal(f.document.querySelectorAll('.config-field').length,0);}finally{f.close();}
+});
+test('a newer draft during save survives response and refresh',async()=>{
+  const f=fixture();try{await load(f);mode(f,zone,'replace');input(f,zone).value='UTC';save(f,'ff14/ff14').click();input(f,zone).value='Europe/London';pending(f,'update').resolve({module_id:'ff14/ff14',revision:2});await flush();await load(f,catalog(),snapshot(2));assert.equal(input(f,zone).value,'Europe/London');assert.equal(field(f,zone).querySelector('[data-role=mode]').value,'replace');}finally{f.close();}
+});
+test('closing fences pending responses and removes the context listener',async()=>{
+  const f=fixture();try{const old=pending(f,'catalog');f.app.close();old.resolve(catalog());f.context(context);await flush();assert.equal(f.calls.length,1);assert.equal(f.document.getElementById('refresh').disabled,true);}finally{f.close();}
+});
+test('focused refresh retains its node and focus while aria-disabled prevents duplicate activation',async()=>{
+  const f=fixture();try{await load(f);const button=f.document.getElementById('refresh');button.focus();button.click();await flush();assert.equal(f.document.activeElement,button);assert.equal(button.getAttribute('aria-disabled'),'true');assert.equal(button.disabled,false);button.click();await flush();assert.equal(f.calls.length,3);await load(f,catalog(),snapshot(2));assert.equal(f.document.activeElement,button);assert.equal(button.getAttribute('aria-disabled'),'false');assert.equal(f.document.getElementById('refresh'),button);}finally{f.close();}
+});
+test('blocked writes and recover cannot be posted by forced events after refresh failure or validator loss',async()=>{
+  const f=fixture();try{await load(f);mode(f,region,'clear');const button=save(f,'game_link/core');button.focus();click(f,'refresh');pending(f,'catalog').reject(Error('operation_unavailable'));await flush();assert.equal(button.getAttribute('aria-disabled'),'true');button.dispatchEvent(new f.dom.window.Event('click'));f.document.getElementById('recover').dispatchEvent(new f.dom.window.Event('click'));await flush();assert.equal(f.calls.length,3);
+    click(f,'refresh');const declarations=catalog();Object.assign(declarations.fields.find(f=>f.name===zone),{editable:false,blocked_reason:'semantic_validator_unavailable'});await load(f,declarations);f.document.getElementById('recover').dispatchEvent(new f.dom.window.Event('click'));await flush();assert.equal(f.calls.length,5);
+  }finally{f.close();}
+});
+test('invalid catalog fails before any value read and missing schema stays visibly readonly',async()=>{
+  const f=fixture();try{pending(f,'catalog').resolve({schema_version:1,fields:[],extra:true});await flush();assert.equal(f.calls.length,1);assert.equal(f.document.querySelectorAll('.config-field').length,0);click(f,'refresh');const declarations=catalog();declarations.fields[0].value_schema=null;await load(f,declarations);assert.equal(input(f,'sample').disabled,true);assert.match(field(f,'sample').textContent,/schema 暂不支持编辑/);}finally{f.close();}
+});
+test('ungranted metadata beside an authorized field is never read or submitted and does not break save confirmation',async()=>{
+  const f=fixture(),declarations=catalog();declarations.fields.push({...declarations.fields[0],module_id:'game_link/core',name:'extra_declared'});
+  try{await load(f,declarations);assert.equal(input(f,'extra_declared').value,'');assert.equal(input(f,'extra_declared').disabled,true);mode(f,region,'clear');save(f,'game_link/core').click();assert.deepEqual(pending(f,'update').body.updates,[{field:region,mode:'clear'}]);pending(f,'update').resolve({module_id:'game_link/core',revision:2});await flush();await load(f,declarations,snapshot(2));assert.match(status(f),/配置已保存/);assert.equal(input(f,'extra_declared').value,'');}finally{f.close();}
+});

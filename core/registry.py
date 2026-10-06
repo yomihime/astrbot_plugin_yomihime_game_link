@@ -123,6 +123,26 @@ class Registry:
 
         return self._snapshot
 
+    def is_active(self, module_id: str | RegisteredModule) -> bool:
+        """Consult the Lifecycle owner; intent alone never proves availability."""
+        if self._is_lifecycle_active is None:
+            return False
+        try:
+            if isinstance(module_id, RegisteredModule):
+                registered = module_id
+                module_id = registered.module_id
+                # Registry keeps the same owned module object across unrelated
+                # publications, but replaces it for every lifecycle projection.
+                if registered is not self._snapshot.module(module_id):
+                    return False
+            state = self._lifecycle_owner.guard(module_id)
+            return (
+                state.cleanup_pending is False
+                and state.identity is self._lifecycle_owner.current_identity(module_id)
+            )
+        except Exception:
+            return False
+
     def register_package(
         self,
         manifest: PackageManifest,

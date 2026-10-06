@@ -66,6 +66,7 @@ from .core_configuration import (
 )
 from .dependency_calls import DependencyInvoker
 from .identity import IdentityResolverService, InvocationPrincipalResolver
+from .module_storage import ModuleStorageRouter
 from .records import ModuleRecordsService
 from .resources import ResourceAccessService
 from .source_credentials import (
@@ -1075,6 +1076,7 @@ class ModuleServicesFactory:
         "_module_host_config_snapshots",
         "_core_defaults",
         "_module_config_validators",
+        "_storage_router",
     )
 
     def __init__(
@@ -1098,6 +1100,7 @@ class ModuleServicesFactory:
         module_host_config_snapshots: Mapping[str, Mapping[str, object]] | None = None,
         core_defaults: CoreDefaultsView | None = None,
         module_config_validators: Mapping[str, Mapping[str, object]] | None = None,
+        storage_router: ModuleStorageRouter | None = None,
     ) -> None:
         if not isinstance(registry, Registry) or not isinstance(issuer, ContextIssuer):
             raise TypeError("module services require the host Registry and issuer")
@@ -1166,6 +1169,7 @@ class ModuleServicesFactory:
         self._registry = registry
         self._issuer = issuer
         self._lifecycle = lifecycle
+        self._storage_router = storage_router
         self._repositories = repositories
         self._lookup = repositories.registration_lookup
         self._principal_resolver = principal_resolver
@@ -1188,10 +1192,12 @@ class ModuleServicesFactory:
             module_host_config_snapshots
         )
         self._core_defaults = core_defaults
-        self._module_config_validators = MappingProxyType({
-            module_id: MappingProxyType(dict(checks))
-            for module_id, checks in (module_config_validators or {}).items()
-        })
+        self._module_config_validators = MappingProxyType(
+            {
+                module_id: MappingProxyType(dict(checks))
+                for module_id, checks in (module_config_validators or {}).items()
+            }
+        )
 
     def for_module(self, module_id: str) -> ModuleServices:
         try:
@@ -1401,6 +1407,9 @@ class ModuleServicesFactory:
             ),
             subscriptions=subscriptions,
             scopes=binder,
+            storage=self._storage_router.paths(module_id)
+            if self._storage_router is not None
+            else None,
         )
 
 

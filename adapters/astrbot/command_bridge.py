@@ -39,6 +39,10 @@ class CommandInvocation:
     parameters: Mapping[str, object]
 
 
+class CommandHelp(str):
+    """Catalog-rendered help, retaining the bridge's text-only contract."""
+
+
 class AstrBotCommandBridge:
     """Render help or parse a generic module command from a Core snapshot."""
 
@@ -55,7 +59,7 @@ class AstrBotCommandBridge:
         if type(max_chars) is not int or max_chars < 1:
             raise ValueError("max_chars must be a positive integer")
         self._registry = registry
-        self._catalog = catalog or HelpCatalog()
+        self._catalog = catalog or HelpCatalog(active_query=registry.is_active)
         self._presenter = presenter or TextPresenter()
         self._max_chars = max_chars
 
@@ -70,37 +74,49 @@ class AstrBotCommandBridge:
     def parse(self, event: MessageTextEvent) -> str | CommandInvocation:
         """Resolve help or produce a command invocation using descriptor schema."""
 
-        # This explicit FF14 command owns its quote-aware grammar. Preserve its
-        # raw tail rather than losing literal boundaries in the generic tokens.
+        # Resolve only the declaration prefix before parsing any arguments.
+        # Raw-tail modules own their argument grammar; slicing the original
+        # message preserves quote boundaries and whitespace within that tail.
         try:
             message = event.get_message_str()
         except Exception:
             message = None
         if isinstance(message, str):
-            market = re.fullmatch(
-                r"/?ygl\s+ff14\s+market\s+(.+)", message.strip(), re.S
-            )
-            if market:
+            prefix = re.match(r"\s*/?ygl\s+([^\s]+)(?:\s+|$)", message)
+            if prefix:
                 snapshot = self._registry.snapshot()
                 try:
-                    module = snapshot.module_for_route("ff14")
-                    command = next(
-                        c
-                        for c in module.manifest.commands
-                        if c.operation_path == "market"
+                    module = snapshot.module_for_route(prefix[1])
+                except RegistryError:
+                    module = None
+                matches = []
+                if module is not None:
+                    for command in module.manifest.commands:
+                        pattern = r"\s+".join(
+                            re.escape(part) for part in command.operation_path.split()
+                        )
+                        match = re.match(pattern + r"(?=\s|$)", message[prefix.end() :])
+                        if match:
+                            matches.append((command, prefix.end() + match.end()))
+                if matches:
+                    command, end = max(
+                        matches, key=lambda item: len(item[0].operation_path.split())
                     )
-                    capability = next(
-                        c
-                        for c in module.manifest.capabilities
-                        if c.capability_id == command.capability_id
-                    )
-                    if command.capability_id != "ff14.market.query":
-                        raise ValueError
-                    parameters = {"command": market[1]}
-                    validate_parameters(capability, parameters)
-                except (RegistryError, StopIteration, ValueError, TypeError):
-                    return _USAGE
-                return CommandInvocation(module.module_id, "market", parameters)
+                    if command.parameter_mode == "raw_tail":
+                        raw = message[end:].lstrip()
+                        capability = next(
+                            item
+                            for item in module.manifest.capabilities
+                            if item.capability_id == command.capability_id
+                        )
+                        parameters = {command.raw_tail_parameter: raw}
+                        try:
+                            validate_parameters(capability, parameters)
+                        except (ValueError, TypeError):
+                            return _USAGE
+                        return CommandInvocation(
+                            module.module_id, command.operation_path, parameters
+                        )
         tokens = self._tokens(event)
         if tokens is None:
             return _USAGE
@@ -121,8 +137,8 @@ class AstrBotCommandBridge:
             return self._render(self._catalog.module(snapshot, module.manifest.route))
         return invocation
 
-    def _render(self, document) -> str:
-        return self._presenter.render(document, max_chars=self._max_chars)
+    def _render(self, document) -> CommandHelp:
+        return CommandHelp(self._presenter.render(document, max_chars=self._max_chars))
 
     @staticmethod
     def _tokens(event: MessageTextEvent) -> list[str] | None:

@@ -34,7 +34,7 @@ from ...services.core_runtime import (
 )
 from ...services.source_credentials import SourceCredentialPolicy
 from .bundled import BundledExtensionError, install_bundled_ff14
-from .command_bridge import AstrBotCommandBridge, CommandInvocation
+from .command_bridge import AstrBotCommandBridge, CommandHelp, CommandInvocation
 from .config_adapter import ordinary_migration_fields
 from .message_port import AstrBotMessagePort, MessageChainFactory, PlainFactory
 from .web_public import (
@@ -891,24 +891,21 @@ class AstrBotRuntime:
         except Exception:
             return "命令暂时不可用。"
         if isinstance(action, str):
-            tokens = AstrBotCommandBridge._tokens(event)
-            if tokens is not None and (
-                not tokens or tokens == ["help"] or tokens[0] == "ff14"
-            ):
+            if isinstance(action, CommandHelp):
                 try:
                     region = (await self._core.core_defaults.current()).values[
                         "default_region"
                     ]
                 except ConfigurationValueError as exc:
                     return (
-                        f"FF14 普通配置无效 [{exc.field}]。"
+                        f"Core 普通配置无效 [{exc.field}]。"
                         "请通过合法 Core 配置管理权限修复；已有订阅记录保留。"
                     )
                 except Exception:
                     return "命令暂时不可用。"
                 return (
                     action + f"\n默认区域提示：{region}；"
-                    "查询命令仍需明确填写区域，显式参数优先。"
+                    "缺省区域与显式参数的具体规则见模块帮助。"
                 )
             return action
         if not isinstance(action, CommandInvocation):

@@ -105,6 +105,8 @@ from yomihime_sdk.api.manifests import (
 from yomihime_sdk.api.manifests import (
     PackageManifest as PackageManifest,
 )
+from yomihime_sdk.api.manifests import PageDescriptor as PageDescriptor
+from yomihime_sdk.api.manifests import PageResource as PageResource
 from yomihime_sdk.api.manifests import (
     PrivacyFloor as PrivacyFloor,
 )

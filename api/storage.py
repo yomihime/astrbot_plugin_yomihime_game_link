@@ -54,6 +54,7 @@ from yomihime_sdk.api.storage import (
 from yomihime_sdk.api.storage import (
     MappingProxyType as MappingProxyType,
 )
+from yomihime_sdk.api.storage import ModuleStoragePaths as ModuleStoragePaths
 from yomihime_sdk.api.storage import (
     OwnerScope as OwnerScope,
 )

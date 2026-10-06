@@ -19,16 +19,22 @@ ORDINARY_FIELDS = frozenset((REGION, DAYS, TIMEZONE, DELIVERY_TIME))
 # The manifest owns these defaults; Host legacy JSON is migration input only.
 CALENDAR_CONFIG_FIELDS = (
     ConfigField(
-        DAYS, default=7, value_schema={"type": "integer", "minimum": 1, "maximum": 30}, group="calendar"
+        DAYS,
+        description="日历默认天数",
+        default=7,
+        value_schema={"type": "integer", "minimum": 1, "maximum": 30},
+        group="calendar",
     ),
     ConfigField(
         TIMEZONE,
+        description="日历默认时区",
         default="Asia/Shanghai",
         group="calendar",
         value_schema={"type": "string", "minLength": 1, "maxLength": 128},
     ),
     ConfigField(
         DELIVERY_TIME,
+        description="日历默认投递时间",
         default="08:00",
         group="calendar",
         value_schema={"type": "string", "minLength": 5, "maxLength": 5},
@@ -102,7 +108,9 @@ class FF14ConfigSnapshot:
         if not isinstance(values, Mapping):
             raise FF14ConfigError("ordinary_config")
         return cls(
-            values["core_defaults"]["default_region"] if "core_defaults" in values else values.get(REGION, "cn"),
+            values["core_defaults"]["default_region"]
+            if "core_defaults" in values
+            else values.get(REGION, "cn"),
             values.get(DAYS, 7),
             values.get(TIMEZONE, "Asia/Shanghai"),
             values.get(DELIVERY_TIME, "08:00"),

@@ -26,7 +26,7 @@ class PublicExportTests(unittest.TestCase):
         self.assertIs(
             sdk.InvocationPolicy("command_only"), sdk.InvocationPolicy.COMMAND_ONLY
         )
-        self.assertTrue(sdk.is_compatible_contract_version("1.4.0"))
+        self.assertTrue(sdk.is_compatible_contract_version("1.5.0"))
 
     def test_all_api_declarations_are_listed_at_the_sdk_root(self) -> None:
         sdk_tree = ast.parse(
@@ -71,12 +71,12 @@ class PublicExportTests(unittest.TestCase):
     def test_owner_floor_and_contract_compatibility_are_public(self) -> None:
         import yomihime_sdk as sdk
 
-        self.assertEqual(sdk.__version__, "1.4.0")
-        self.assertEqual(sdk.CONTRACT_VERSION, "1.4.0")
-        self.assertEqual(sdk.CONTRACT_REVISION, "UI-B0-PUBLIC-WEB")
+        self.assertEqual(sdk.__version__, "1.5.0")
+        self.assertEqual(sdk.CONTRACT_VERSION, "1.5.0")
+        self.assertEqual(sdk.CONTRACT_REVISION, "R1-MODULE-PAGES")
         self.assertEqual(
             sdk.COMPATIBLE_CONTRACT_VERSIONS,
-            ("1.0.0", "1.1.0", "1.2.0", "1.3.0", "1.4.0"),
+            ("1.0.0", "1.1.0", "1.2.0", "1.3.0", "1.4.0", "1.5.0"),
         )
         self.assertIs(sdk.PrivacyFloor.OWNER, sdk.PrivacyFloor("owner"))
         self.assertTrue(

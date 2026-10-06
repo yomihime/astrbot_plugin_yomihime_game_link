@@ -25,8 +25,8 @@ from uuid import uuid4
 # outside the plugin directory. Pin imports to this package's own SDK before
 # importing any host/Core code; never inherit a process-global SDK by accident.
 _PLUGIN_ROOT = Path(__file__).resolve().parents[1]
-_SDK_VERSION = "1.4.0"
-_SDK_CONTRACT_REVISION = "UI-B0-PUBLIC-WEB"
+_SDK_VERSION = "1.5.0"
+_SDK_CONTRACT_REVISION = "R1-MODULE-PAGES"
 if str(_PLUGIN_ROOT) not in sys.path:
     sys.path.insert(0, str(_PLUGIN_ROOT))
 try:

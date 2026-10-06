@@ -633,7 +633,48 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
             event.message = "/ygl ff14 calendar"
             help_text = await runtime.handle_event(event)
             self.assertIn("默认区域提示：global", help_text)
-            self.assertIn("明确填写区域", help_text)
+            self.assertIn("具体规则见模块帮助", help_text)
+        finally:
+            await runtime.terminate()
+
+    async def test_all_catalog_help_projections_read_core_defaults_without_dispatch(
+        self,
+    ):
+        context = _Context()
+        runtime = self._runtime(
+            context,
+            config={"ff14_default_region": "global"},
+            http_transport_factory=_IdleTransport,
+        )
+        await runtime.initialize()
+        try:
+            event = _Event()
+            for text in (
+                "/ygl",
+                "/ygl help",
+                "/ygl ff14",
+                "/ygl ff14 help",
+                "/ygl missing",
+                "/ygl ff14 absent",
+                "/ygl ff14 calendar",
+                "/ygl ff14 calendar cn days=bad",
+            ):
+                with self.subTest(text=text):
+                    event.message = text
+                    response = await runtime.handle_event(event)
+                    self.assertIn("默认区域提示：global", response)
+                    self.assertIn("帮助", response)
+            for text in ('/ygl ff14 calendar "unclosed', '/ygl "invalid route" help'):
+                with self.subTest(text=text):
+                    event.message = text
+                    response = await runtime.handle_event(event)
+                    self.assertIn("用法", response)
+                    self.assertNotIn("默认区域提示", response)
+            self.assertEqual(context.calls, [])
+            event.message = "/ygl ff14 market help"
+            self.assertIsNone(await runtime.handle_event(event))
+            self.assertEqual(len(context.calls), 1)
+            self.assertNotIn("默认区域提示", context.calls[-1][1].chain[0].text)
         finally:
             await runtime.terminate()
 
@@ -778,6 +819,8 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
             core_config_target,
         )
 
+        from tests.host.test_market_integration import FixtureTransport
+
         class Admin:
             adapter_id, request_id, session_id = "synthetic", "synthetic", "synthetic"
 
@@ -790,8 +833,9 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
             return CoreRuntime(**kwargs)
 
         context = _Context()
+        transport = FixtureTransport()
         runtime = self._runtime(
-            context, http_transport_factory=_IdleTransport, core_factory=factory
+            context, http_transport_factory=lambda: transport, core_factory=factory
         )
         await runtime.initialize()
         try:
@@ -818,6 +862,15 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
             rejected = await runtime.handle_event(event)
             self.assertIn("普通配置无效", rejected)
             self.assertEqual(context.calls, [])
+            # Invalid defaults refuse a price query; public catalog IO precedes config.
+            event.message = "/ygl ff14 market 44091"
+            self.assertIsNone(await runtime.handle_event(event))
+            self.assertEqual(
+                [request.path for request in transport.requests],
+                ["/api/v2/worlds", "/api/v2/data-centers"],
+            )
+            self.assertIn("request failed", context.calls[-1][1].chain[0].text)
+            self.assertNotIn("synthetic-invalid", context.calls[-1][1].chain[0].text)
             summary = await core.admin_facade.config_snapshot(
                 None, CORE_MODULE_ID, authorization=admin
             )
@@ -833,12 +886,34 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 authorization=admin,
             )
             # No page read or restart between authorized repair and the command.
+            event.message = "/ygl ff14 calendar"
             help_text = await runtime.handle_event(event)
             self.assertIn(f"默认区域提示：{region}", help_text)
             self.assertTrue(runtime.ready)
             event.message = "/ygl ff14 status"
             self.assertIsNone(await runtime.handle_event(event))
             self.assertTrue(context.calls)
+            # Read the repaired Core default in the registered market handler.
+            event.message = "/ygl ff14 market 44091"
+            self.assertIsNone(await runtime.handle_event(event))
+            queried_regions = {
+                request.path.split("/")[-2]
+                for request in transport.requests
+                if "/aggregated/" in request.path
+            }
+            self.assertEqual(
+                queried_regions,
+                {"China"}
+                if region == "cn"
+                else {"North-America", "Europe", "Japan", "Oceania"},
+            )
+            # Help/repair grants no new admission: a forged Host event does no IO.
+            calls, requests = len(context.calls), len(transport.requests)
+            event.sender = ""
+            self.assertIn("来源", await runtime.handle_event(event))
+            self.assertEqual(
+                (len(context.calls), len(transport.requests)), (calls, requests)
+            )
         finally:
             await runtime.terminate()
 
@@ -1063,6 +1138,11 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(catalog["runtime"], {"state": "ready"})
             self.assertEqual(len(catalog["modules"]), 1)
             module = catalog["modules"][0]
+            self.assertEqual(catalog["schema_version"], 1)
+            self.assertEqual(
+                set(catalog),
+                {"schema_version", "catalog_revision", "runtime", "modules"},
+            )
             self.assertEqual(module["module_id"], "ff14/ff14")
             self.assertEqual(module["state"], "loaded")
             self.assertEqual(
@@ -1078,6 +1158,11 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
                     "reason",
                     "capabilities",
                     "config_fields",
+                    "pages",
+                    "resources",
+                    "module_epoch",
+                    "runtime_id",
+                    "asset_version",
                 },
             )
             self.assertTrue(
@@ -1086,6 +1171,23 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
                     for item in module["config_fields"]
                 )
             )
+            self.assertTrue(module["pages"])
+            self.assertTrue(module["resources"])
+            for page in module["pages"]:
+                self.assertEqual(
+                    set(page),
+                    {
+                        "route_id",
+                        "title",
+                        "order",
+                        "access",
+                        "capability_id",
+                        "entry",
+                        "styles",
+                    },
+                )
+            for resource in module["resources"]:
+                self.assertEqual(set(resource), {"path", "sha256"})
             self.assertNotIn("can_invoke", json.dumps(catalog))
             catalog["modules"].clear()
             self.assertEqual(len(runtime.public_module_catalog()["modules"]), 1)

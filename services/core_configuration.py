@@ -20,6 +20,7 @@ CORE_DEFAULTS_FIELD = "core_defaults"
 DEFAULT_REGION = ConfigField(
     "default_region",
     default="cn",
+    description="默认查询区域",
     value_schema={"type": "string", "enum": ["cn", "global"]},
 )
 CORE_CONFIG_FIELDS = (DEFAULT_REGION,)
@@ -140,7 +141,10 @@ class CoreDefaultsView:
     __slots__ = ("__current",)
 
     def __init__(
-        self, configuration, *, legacy_defaults: Mapping[str, object] | None = None,
+        self,
+        configuration,
+        *,
+        legacy_defaults: Mapping[str, object] | None = None,
         migration_complete=None,
     ):
         if legacy_defaults is None:
@@ -153,7 +157,11 @@ class CoreDefaultsView:
 
         async def current():
             raw = await configuration.current()
-            old = {} if migration_complete is not None and await migration_complete() else legacy
+            old = (
+                {}
+                if migration_complete is not None and await migration_complete()
+                else legacy
+            )
             selected = select_configuration_value(DEFAULT_REGION, raw.values, old)
             return ConfigSnapshot(
                 raw.revision,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from types import MappingProxyType
 
 from ..api.manifests import ConfigField
 from ..api.services import ConfigTarget
@@ -31,7 +32,15 @@ class OrdinaryMigrationField:
 class OrdinaryConfigurationMigration:
     """No implicit raw source, no default injection, no secret/subscription writes."""
 
-    def __init__(self, repository, fields, *, migration_id: str, version: int = 1):
+    def __init__(
+        self,
+        repository,
+        fields,
+        *,
+        migration_id: str,
+        version: int = 1,
+        value_validators: Mapping[str, Mapping[str, object]] | None = None,
+    ):
         self.repository = repository
         self.fields = tuple(fields)
         if (
@@ -50,11 +59,44 @@ class OrdinaryConfigurationMigration:
             raise ValueError("invalid ordinary migration definition")
         self.migration_id = migration_id
         self.version = version
+        # The trusted migration binding freezes required semantics, independently
+        # of the declaration catalog. Missing live bindings never downgrade them.
+        self._required_validators = MappingProxyType(
+            {
+                (field.target, field.declaration.name): field.validator
+                for field in self.fields
+                if field.validator is not None
+            }
+        )
+        if value_validators is None:
+            checks = {}
+            for (target, name), validator in self._required_validators.items():
+                checks.setdefault(target.module_id, {})[name] = validator
+        else:
+            checks = value_validators
+        self._value_validators = MappingProxyType(
+            {
+                module_id: MappingProxyType(dict(values))
+                for module_id, values in checks.items()
+            }
+        )
+
+    def require_semantic_validators(self, resources=None, *, value_validators=None):
+        checks = (
+            self._value_validators if value_validators is None else value_validators
+        )
+        for (target, name), expected in self._required_validators.items():
+            if resources is not None and name not in resources.get(target, ()):
+                continue
+            actual = checks.get(target.module_id, {}).get(name)
+            if not callable(actual) or actual is not expected:
+                raise ValueError("semantic validator unavailable")
 
     async def complete(self) -> bool:
         return await self.repository.complete(self)
 
     async def migrate(self, raw_legacy: Mapping[str, object] | None, *, grant=None):
+        self.require_semantic_validators()
         if await self.complete():
             return ()
         if not isinstance(raw_legacy, Mapping):
@@ -88,6 +130,7 @@ class OrdinaryConfigurationMigration:
 
     async def complete_from_current(self, expected_revisions, *, grant):
         """Explicit replacement recovery, without manufacturing legacy inputs."""
+        self.require_semantic_validators()
         return await self.repository.complete_from_current(
             self, expected_revisions, grant
         )

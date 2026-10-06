@@ -104,6 +104,36 @@ class AdminPagesTests(unittest.IsolatedAsyncioTestCase):
             follow_redirects=True,
         )
 
+    async def test_catalog_uses_existing_host_proof_redirect_and_empty_body(self):
+        response = await self.call("catalog", {})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.history[0].status_code, 307)
+        self.assertEqual(response.headers["cache-control"], "no-store")
+        data = response.json()["data"]
+        self.assertEqual(set(data), {"schema_version", "fields"})
+        self.assertEqual(
+            len([field for field in data["fields"] if field["readable"]]), 4
+        )
+        self.assertNotIn("PRIVATE-INVALID-LEGACY", response.text)
+        self.assertEqual(
+            (await self.call("catalog", {"module_id": "ff14/ff14"})).status_code, 400
+        )
+        self.assertEqual((await self.call("catalog", {}, headers={})).status_code, 401)
+        asset = {
+            **self.headers,
+            "Authorization": "Bearer "
+            + _token(
+                token_type="plugin_page_asset",
+                plugin_name=PLUGIN_NAME,
+                page_name="management",
+            ),
+        }
+        self.assertEqual(
+            (await self.call("catalog", {}, headers=asset)).status_code, 401
+        )
+        self.assertEqual(self.pages.requests, {})
+        self.assertEqual(self.runtime._admin_source._proofs, {})
+
     async def test_actual_host_read_update_conflict_recover_and_limited_rollback(self):
         self.assertFalse(self.runtime.ready)
         self.assertTrue(self.runtime.core_runtime.configuration_blocked)

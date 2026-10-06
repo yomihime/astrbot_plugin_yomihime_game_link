@@ -23,6 +23,7 @@
   --error: #fca5a5;
 }
 * { box-sizing: border-box; }
+html { scrollbar-gutter: stable; }
 body {
   margin: 0;
   background: var(--background);
@@ -49,3 +50,6 @@ p { margin: 0 0 12px; }
 .brand { font-weight: 650; overflow-wrap: anywhere; }
 .card { background: var(--surface); min-width: 0; overflow-wrap: anywhere; }
 .management{max-width:900px;margin:2rem auto;padding:1.5rem}.management .card{margin-top:1.5rem;padding:1.5rem;border:1px solid var(--border);border-radius:12px}.management input:not([type=checkbox]),.management select{display:block;width:100%;margin:.5rem 0 1rem}.management button{margin:.5rem 1rem .5rem 0}
+.config-field { padding: 1rem 0; border-top: 1px solid var(--border); }
+.config-field label { font-weight: 650; }
+.field-detail { margin-top: .5rem; color: var(--muted); overflow-wrap: anywhere; }
