@@ -19,7 +19,7 @@ from setuptools import build_meta
 from scripts.build_dashboard_zip import (
     FF14_BUNDLE_REQUIRED_FILES,
     FF14_BUNDLE_ROOT,
-    FF14_LEGACY_FILES,
+    FF14_COMPAT_FILES,
     MAINTENANCE_HELPER_FILES,
     OPERATOR_SCRIPT_FILES,
     PAGE_FILES,
@@ -43,7 +43,7 @@ def _write_operator_script_fixtures(root: Path) -> None:
         path = root / filename
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(b"operator script fixture")
-    for relative in FF14_LEGACY_FILES:
+    for relative in FF14_COMPAT_FILES:
         canonical = root / FF14_BUNDLE_ROOT / relative
         canonical.parent.mkdir(parents=True, exist_ok=True)
         canonical.write_bytes((root / "pages/ff14" / Path(relative).name).read_bytes())
@@ -234,9 +234,9 @@ class ReleaseBuildTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "projection differs"):
                 included_files(root)
             projected.write_bytes(original_page)
-            extra = ff14_root / "pages/legacy/unreviewed.js"
+            extra = ff14_root / "pages/compat/unreviewed.js"
             extra.write_bytes(b"unexpected canonical source")
-            with self.assertRaisesRegex(ValueError, "Unreviewed canonical"):
+            with self.assertRaisesRegex(ValueError, "Unreviewed compatibility locator"):
                 included_files(root)
             extra.unlink()
             sentinel = root / "private-sentinel"
@@ -369,7 +369,7 @@ class ReleaseBuildTests(unittest.TestCase):
     def test_reused_sdk_wheel_still_requires_the_independent_pin(self) -> None:
         with tempfile.TemporaryDirectory(prefix="yomihime-release-wheel-") as work:
             root = Path(work)
-            wheel = root / "yomihime_module_sdk-1.6.0-py3-none-any.whl"
+            wheel = root / "yomihime_module_sdk-1.7.0-py3-none-any.whl"
             wheel.write_bytes(b"not the reviewed wheel")
             output = root / "artifacts"
 

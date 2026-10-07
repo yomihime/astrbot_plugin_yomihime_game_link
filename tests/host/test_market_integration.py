@@ -131,6 +131,26 @@ class MarketHostIntegrationTests(unittest.IsolatedAsyncioTestCase):
         finally:
             self.runtime.finish_public_web(state)
 
+    async def test_module_public_market_validator_is_active_and_malformed_facts_fail_closed(self):
+        await self.start()
+        handler=self.runtime.core_runtime.registry.snapshot().module("ff14/ff14").handlers.capabilities["ff14.market.query"]
+        globals_=handler.invoke.__func__.__globals__
+        validator=globals_["validate_public_market_facts"]
+        calls=[]
+        def checked(facts):
+            calls.append(facts)
+            return validator(facts)
+        with patch.dict(globals_, {"validate_public_market_facts":checked}):
+            result=await self.public(dict(query="44091",server="90001",quality="hq",intent="min"))
+            self.assertEqual(result["status"],"success")
+            self.assertTrue(calls)
+            calls.clear()
+            with patch.dict(globals_, {"_query_facts":lambda _: {"private":"fixture"}}):
+                result=await self.public(dict(query="44091",server="90001",quality="hq",intent="min"))
+                self.assertEqual(result["status"],"error")
+                self.assertTrue(calls)
+                self.assertNotIn("private",json.dumps(result))
+
     async def test_registered_handler_real_http_cache_sdk_and_public_projection(self):
         await self.start()
         parameters = dict(
@@ -539,10 +559,10 @@ class MarketHostIntegrationTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_public_market_and_candidate_projection_is_closed_and_typed(self):
-        from ygl_test_subject.adapters.astrbot.web_public import (
-            WebPublicRejected,
-            _market_facts,
+        from ygl_test_subject.modules.ff14.features.public_projection import (
+            validate_public_market_facts as _market_facts,
         )
+        WebPublicRejected = ValueError
 
         await self.start()
         result = await self.public({"query": "44091", "server": "90001"})

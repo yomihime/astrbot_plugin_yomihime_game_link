@@ -236,6 +236,53 @@ var w = {
 		placeholder: "例如 犎牛牛排，或 44091",
 		limit: 120
 	}],
+	logs: [
+		{
+			name: "region",
+			label: "区域",
+			options: [{
+				label: "国服",
+				value: "cn"
+			}, {
+				label: "国际服",
+				value: "global"
+			}]
+		},
+		{
+			name: "server",
+			label: "服务器",
+			limit: 100
+		},
+		{
+			name: "character",
+			label: "角色名",
+			limit: 120
+		}
+	],
+	calendar: [
+		{
+			name: "region",
+			label: "区域",
+			options: [{
+				label: "国服",
+				value: "cn"
+			}, {
+				label: "国际服",
+				value: "global"
+			}]
+		},
+		{
+			name: "days",
+			label: "查询天数（1–30）",
+			limit: 2
+		},
+		{
+			name: "timezone",
+			label: "IANA 时区",
+			placeholder: "例如 Asia/Shanghai",
+			limit: 128
+		}
+	],
 	market: [
 		{
 			name: "query",
@@ -312,11 +359,19 @@ var w = {
 	]
 }, T = {
 	items: "item.lookup",
-	market: "ff14.market.query"
-}, E = {
-	items: "queries/items",
-	market: "queries/market"
-}, D = "已停止展示。仅停止展示，本次请求可能仍在后台处理；不会自动重试。", O = /* @__PURE__ */ new Map();
+	market: "ff14.market.query",
+	logs: "ff14.logs.character",
+	calendar: "ff14.calendar.query"
+};
+function E(e, t) {
+	return e === "market" ? { input: JSON.stringify(t) } : e === "logs" ? {
+		realm: t.region,
+		server: t.server,
+		character: t.character,
+		metric: "rdps"
+	} : t;
+}
+var D = "已停止展示。仅停止展示，本次请求可能仍在后台处理；不会自动重试。", O = /* @__PURE__ */ new Map();
 function k(e, t, n = 35e3) {
 	let r = e.routeId;
 	if (!w[r]) throw Error("invalid_query_route");
@@ -327,7 +382,7 @@ function k(e, t, n = 35e3) {
 		e.context.runtimeId,
 		e.context.epoch
 	]), a = {
-		draft: { ...O.get(i) || Object.fromEntries(w[r].map((e) => [e.name, e.name === "quality" ? "all" : e.name === "intent" ? "overview" : ""])) },
+		draft: { ...O.get(i) || Object.fromEntries(w[r].map((e) => [e.name, e.name === "quality" ? "all" : e.name === "intent" ? "overview" : e.name === "region" && r !== "market" ? "cn" : e.name === "days" ? "7" : e.name === "timezone" ? "Asia/Shanghai" : ""])) },
 		errors: {},
 		result: null,
 		phase: "idle",
@@ -359,7 +414,7 @@ function k(e, t, n = 35e3) {
 			u(m) && (s++, c = null, a.phase = "timeout", a.message = "等待查询超过35秒，已停止展示。后台请求可能仍在处理，请检查会话与来源后手动重试。", t());
 		}, n);
 		try {
-			let n = await e.services.invoke(T[r], f.body, E[r]);
+			let n = await e.services.invoke(T[r], E(r, f.body));
 			if (!u(m)) return;
 			let i = S(n);
 			l(), a.result = i, a.phase = "result", a.message = "", t();
@@ -434,6 +489,16 @@ function j(e) {
 	return e === null ? "—" : e && typeof e == "object" && !Array.isArray(e) && Object.hasOwn(e, "value") ? [String(e.value), e.currency || e.unit || e.timezone].filter(Boolean).join(" ") : e && typeof e == "object" ? JSON.stringify(e) : String(e);
 }
 var M = {
+	items: "查找物品与公开详情",
+	market: "按物品查询市场",
+	logs: "查询角色 Logs",
+	calendar: "查询活动日历"
+}, N = {
+	items: "名称或 ID 查询；缺项与来源说明保留在结果中。",
+	market: "范围可留空，由服务端解析默认区域的全服范围；名称与范围别名也由服务端判定。",
+	logs: "选择对应区域和服务器，输入角色名；来源凭据由管理员维护，不在公开页面填写。",
+	calendar: "仅手动查询选定窗口；来源失败和覆盖限制以本次结果为准。"
+}, P = {
 	parameter_error: "参数未被来源接受；范围含糊时使用明确 World ID 或规范数据中心名。",
 	auth_required: "来源凭据不可用，请联系管理员配置相应区域的来源凭据。",
 	auth_expired: "授权已过期，请重新登录 Dashboard。",
@@ -444,7 +509,7 @@ var M = {
 	no_records: "来源未返回记录；这不表示查询窗口已被完整覆盖。",
 	not_public: "来源内容未公开。"
 };
-function N(e) {
+function F(e) {
 	let t = e.document, r = t ? [n("h3", t.title), n("p", { class: "ff14-hint" }, t.subject)] : [];
 	for (let e of t?.blocks || []) e.kind === "text" ? r.push(n("p", { class: "ff14-result-text" }, e.text)) : ["fields", "metrics"].includes(e.kind) ? r.push(n("dl", { class: "ff14-fields" }, Object.entries(e[e.kind]).flatMap(([e, t]) => [n("dt", e), n("dd", j(t))]))) : e.kind === "table" ? (r.push(n("div", {
 		class: "ff14-table-desktop",
@@ -462,7 +527,7 @@ function N(e) {
 	let a = [...t?.timestamps || [], ...e.timestamps];
 	return a.length && r.push(n("p", { class: "ff14-hint" }, `返回时间：${a.map(j).join("；")}`)), r;
 }
-function P(h, g) {
+function I(h, g) {
 	let _ = new Set(Array.from(h.ownerDocument.head.querySelectorAll("style"))), v = A(h), y = r({}), b = r(0), x = k(g, () => {
 		b.value++;
 	}), S = e(t({ setup() {
@@ -484,10 +549,10 @@ function P(h, g) {
 				class: "ff14-page",
 				"data-theme": _.theme
 			}, [n(o, {
-				title: g.routeId === "market" ? "按物品查询市场" : "查找物品与公开详情",
+				title: M[g.routeId],
 				bordered: !1
 			}, { default: () => [
-				n("p", { class: "ff14-hint" }, g.routeId === "market" ? "范围可留空，由服务端解析默认区域的全服范围；名称与范围别名也由服务端判定。" : "名称或 ID 查询；缺项与来源说明保留在结果中。"),
+				n("p", { class: "ff14-hint" }, N[g.routeId]),
 				n("form", {
 					class: "ff14-form",
 					"aria-busy": t,
@@ -546,7 +611,12 @@ function P(h, g) {
 					type: "primary",
 					attrType: "submit",
 					disabled: t || !_.available
-				}, () => g.routeId === "market" ? "查询市场" : "查询物品"), t ? n(a, { onClick: () => {
+				}, () => ({
+					market: "查询市场",
+					items: "查询物品",
+					logs: "查询 Logs",
+					calendar: "查询日历"
+				})[g.routeId]), t ? n(a, { onClick: () => {
 					x.stop(), h.querySelector("input")?.focus();
 				} }, () => "停止展示") : null])]),
 				n("p", {
@@ -557,14 +627,15 @@ function P(h, g) {
 				title: "本次结果",
 				bordered: !1,
 				class: "ff14-result",
-				"aria-live": "polite"
+				"aria-live": "polite",
+				"data-result-status": r?.status || e.phase
 			}, { default: () => [
 				r ? n("p", {
 					class: r.status === "error" ? "ff14-error" : r.status === "success" ? "ff14-success" : "ff14-warning",
 					role: r.status === "error" ? "alert" : "status"
-				}, r.status === "success" ? "查询完成" : r.status === "partial_success" ? "部分结果 · 保留来源说明" : r.status === "needs_selection" ? "需要选择物品 · 请确认本次候选" : `${r.error?.code === "not_found" ? "无匹配结果" : r.error?.code === "no_records" ? "没有可展示记录" : "查询失败"} · ${M[r.error?.code || ""] || "查询未完成，请检查输入与来源后手动重试。"}`) : n("p", { role: ["error", "timeout"].includes(e.phase) ? "alert" : "status" }, e.message),
+				}, r.status === "success" ? "查询完成" : r.status === "partial_success" ? "部分结果 · 保留来源说明" : r.status === "needs_selection" ? "需要选择物品 · 请确认本次候选" : `${r.error?.code === "not_found" ? "无匹配结果" : r.error?.code === "no_records" ? "没有可展示记录" : "查询失败"} · ${P[r.error?.code || ""] || "查询未完成，请检查输入与来源后手动重试。"}`) : n("p", { role: ["error", "timeout"].includes(e.phase) ? "alert" : "status" }, e.message),
 				t ? n("p", { class: "ff14-hint" }, "仅停止展示，本次请求可能仍在后台处理。") : null,
-				...r ? N(r) : [],
+				...r ? F(r) : [],
 				T ? n("div", { class: "ff14-market-context" }, [
 					n("dl", { class: "ff14-fields" }, [
 						n("dt", "当前解析范围"),
@@ -635,4 +706,4 @@ function P(h, g) {
 	};
 }
 //#endregion
-export { P as mount };
+export { I as mount };

@@ -3,7 +3,7 @@ import {createScope, contextBoundary, mountIdentity} from './lifecycle';
 import {createModuleAssets, assetIdentity} from './module-assets';
 import type {Bridge, Catalog, ModuleDescriptor, PageDescriptor, PageContext, PageModule, MountedPage} from './contracts';
 export function createShell({bridge, container, window, loadPage, changed, timeoutMs = 8000, expectedPlugin = 'astrbot_plugin_yomihime_game_link', expectedPage = 'shell'}: {bridge: Bridge; container: HTMLElement; window: Window; loadPage(entry: string): Promise<PageModule>; changed(): void; timeoutMs?: number; expectedPlugin?: string; expectedPage?: string}) {
-  const state = {catalog: null as Catalog | null, busy: false, stale: false, message: '正在连接宿主。', theme: 'light' as 'light'|'dark', locale: 'zh-CN', selected: null as {owner: string; route: string}|null, mounted: false, cleanupPending: false};
+  const state = {catalog: null as Catalog | null, busy: false, stale: false, message: '正在连接宿主。', theme: 'light' as 'light'|'dark', locale: 'zh-CN', selected: null as {owner: string; route: string}|null, mounted: false, cleanupPending: false, settings: false, settingsOwner: null as string|null};
   let closed = false, ready = false, sequence = 0, generation = 0, boundary = '', contextSeen = false;
   let off: (() => void) | undefined, mounted: MountedPage | null = null, identity = '', pendingIdentity = '';
   let scope: ReturnType<typeof createScope> | null = null;
@@ -13,7 +13,7 @@ export function createShell({bridge, container, window, loadPage, changed, timeo
   let retiring: {scope: ReturnType<typeof createScope> | null; page: MountedPage | null; scopeDone: boolean; pageDone: boolean; domDone: boolean} | null = null;
   const timers = new Set<ReturnType<typeof setTimeout>>();
   const deadline = <T>(promise: Promise<T>): Promise<T> => new Promise((resolve,reject) => {const timer = setTimeout(() => {timers.delete(timer); reject(Error('timeout'));}, timeoutMs); timers.add(timer); promise.then(resolve,reject).finally(() => {clearTimeout(timer); timers.delete(timer);});});
-  function selected(): {module: ModuleDescriptor; page: PageDescriptor}|null {const module = state.catalog?.modules?.find(m => m.module_id === state.selected?.owner); const page = module?.pages.find(p => p.route_id === state.selected?.route); return module?.state === 'loaded' && page ? {module,page} : null;}
+  function selected(): {module: ModuleDescriptor; page: PageDescriptor}|null {if (state.settings) return null; const module = state.catalog?.modules?.find(m => m.module_id === state.selected?.owner); const page = module?.pages.find(p => p.route_id === state.selected?.route); return module?.state === 'loaded' && page ? {module,page} : null;}
   function pageContext(module: ModuleDescriptor): Readonly<PageContext> {return Object.freeze({theme: state.theme, locale: state.locale, available: ready && !state.busy && !state.stale && !retiring && !projectionRevoked && !revokedOwners.has(module.module_id), owner: module.module_id, runtimeId: module.runtime_id!, epoch: module.module_epoch, boundary});}
   function cleanupState() {state.cleanupPending = retiring !== null || assets.cleanupPending; if (state.cleanupPending) state.message='页面清理未完成，请重试页面清理。';}
   function revokeOwner(owner: string) {revokedOwners.add(owner); if (activeOwner === owner) disposePage(); assets.invalidate(owner); cleanupState();}
@@ -55,9 +55,9 @@ export function createShell({bridge, container, window, loadPage, changed, timeo
       if (!ownScope.isCurrent() || pendingIdentity !== target) return;
       if (!code || typeof code.mount !== 'function') throw Error('invalid_page_entry');
       const view = container.ownerDocument.createElement('div'); view.className = 'module-view'; view.dataset.owner = module.module_id; container.append(view);
-      const services = Object.freeze({async invoke(capabilityId: string, body: unknown, endpoint: string) {
-        if (!ownScope.isCurrent() || state.stale || state.busy || !ready || capabilityId !== page.capability_id || endpoint !== `queries/${page.route_id}`) throw Error('page_unavailable');
-        const result = await bridge.apiPost(endpoint, body);
+      const services = Object.freeze({async invoke(capabilityId: string, parameters: unknown) {
+        if (!ownScope.isCurrent() || state.stale || state.busy || !ready || capabilityId !== page.capability_id) throw Error('page_unavailable');
+        const result = await bridge.apiPost('invoke', {owner: module.module_id, page: page.route_id, capability_id: capabilityId, parameters});
         if (!ownScope.isCurrent() || state.stale || state.busy || !ready) throw Error('page_revoked');
         return result;
       }});
@@ -69,7 +69,7 @@ export function createShell({bridge, container, window, loadPage, changed, timeo
       revokeOwner(module.module_id); if (!state.cleanupPending && state.selected?.owner === module.module_id) state.message = reopenMessage; changed();
     }}
   }
-  function pickRoute() {const requested = readRoute(window.location.hash); if (requested) {state.selected = requested; return;} if (window.location.hash && window.location.hash !== '#/' && window.location.hash !== '#') {state.selected = null; return;} const module = state.catalog?.modules?.find(m => m.state === 'loaded' && m.pages.length); state.selected = module ? {owner: module.module_id, route: module.pages[0].route_id} : null;}
+  function pickRoute() {state.settings = window.location.hash === '#/settings'||window.location.hash.startsWith('#/settings/module/'); state.settingsOwner=null; if (state.settings) {if(window.location.hash.startsWith('#/settings/module/'))try{state.settingsOwner=decodeURIComponent(window.location.hash.slice('#/settings/module/'.length));}catch{}state.selected=null; return;} const requested = readRoute(window.location.hash); if (requested) {state.selected = requested; return;} if (window.location.hash && window.location.hash !== '#/' && window.location.hash !== '#') {state.selected = null; return;} const module = state.catalog?.modules?.find(m => m.state === 'loaded' && m.pages.length); state.selected = module ? {owner: module.module_id, route: module.pages[0].route_id} : null;}
   async function refresh() {
     if (closed || !ready || state.busy) return;
     const version = ++sequence; state.busy = true; state.stale = state.catalog !== null; state.message = state.stale ? '正在刷新；当前为上次目录，暂不可提交查询。' : '正在读取模块目录。';
@@ -87,7 +87,7 @@ export function createShell({bridge, container, window, loadPage, changed, timeo
     contextSeen = true; boundary = next; ready = true; void refresh();
   }
   const hashChanged = () => {pickRoute(); void syncPage(); const main = container.ownerDocument.getElementById('page-root'); main?.focus({preventScroll:true}); window.scrollTo({top:0,left:0,behavior:'instant'});};
-  return {state, selected, refresh, select(owner: string, route: string) {window.location.hash = routeHash(owner,route); state.selected = {owner,route}; void syncPage();},
+  return {state, selected, refresh, selectSettings(owner?:string) {window.location.hash=owner?'#/settings/module/'+encodeURIComponent(owner):'#/settings'; pickRoute(); void syncPage();}, select(owner: string, route: string) {window.location.hash = routeHash(owner,route); state.settings=false; state.selected = {owner,route}; void syncPage();},
     retryCleanup() {if (!state.cleanupPending) return; if (retiring) disposePage(); assets.retryCleanup(); cleanupState(); if (!state.cleanupPending) {state.message=projectionRevoked || revokedOwners.has(state.selected?.owner || '') ? reopenMessage : '页面清理完成，请手动刷新状态。'; if (!closed) void syncPage();} changed();},
     start() {if (closed) return; window.addEventListener('hashchange',hashChanged); if (!bridge?.ready || !bridge?.onContext || !bridge?.apiGet || !bridge?.apiPost) {state.message = '宿主连接尚未就绪，请重新打开页面。'; changed(); return;} off = bridge.onContext(context => accept(context,true)); deadline(Promise.resolve(bridge.ready())).then(context => accept(context)).catch(() => {if (!ready && !closed) {state.message = '连接宿主失败，请重新打开页面。'; changed();}});},
     dispose() {if (closed) return; closed = true; sequence++; ready = false; off?.(); window.removeEventListener('hashchange',hashChanged); for (const timer of timers) clearTimeout(timer); timers.clear(); disposePage(); assets.invalidateAll(); cleanupState();},

@@ -9,8 +9,8 @@ import sys
 from pathlib import Path
 from types import ModuleType
 
-SDK_VERSION = "1.6.0"
-SDK_CONTRACT_REVISION = "R5-LLM-TOOLS"
+SDK_VERSION = "1.7.0"
+SDK_CONTRACT_REVISION = "MODULE-LIFECYCLE-01"
 SDK_COMPATIBLE_CONTRACT_VERSIONS = (
     "1.0.0",
     "1.1.0",
@@ -19,10 +19,12 @@ SDK_COMPATIBLE_CONTRACT_VERSIONS = (
     "1.4.0",
     "1.5.0",
     "1.6.0",
+    "1.7.0",
 )
 
 SDK_PACKAGE_MANIFEST = {
-    "__init__.py": "68116dc98ab85d9999660d6a55d107b5b8f240fb66f6759cdc21277f8c700d39",
+    "__init__.py": "50a16eba8e5f8e3223f5f1b265fac6094ea09c70f21b9ef7c1309e62be3a7024",
+    "py.typed": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
     "_examples/empty_module/README.md": "54f44691207b27a1e6ee818cd55e14c30086cd3c685176e470b147ffd5203957",
     "_examples/empty_module/manifest.json": "27ed02b89a99fbea400dd75a1a405db27929f31acb4ceb582b83e8af1e61b1a8",
     "_examples/empty_module/module.py": "231518c6a6db052dcadfd0bd3578ff41f5dcda2d9879808730cbecab74734ce1",
@@ -30,18 +32,17 @@ SDK_PACKAGE_MANIFEST = {
     "_examples/offline_sample/manifest.json": "2849f3fe6ce5ed7809bba396f5dd143700fc880ab3817ac54c2c762eab87f4b9",
     "_examples/offline_sample/module.py": "df6c58755c5af19c5c9035b45fa94ae3edff927a3fd673eca904f8d8057d5ff6",
     "api/__init__.py": "a923e1a55ee842d8244dfbdfe4cd8b3e27eec61c5623abc95845abefda40727a",
-    "api/administration.py": "ec08286a75fa2189f288e5b9b116ed243d00e9100f2b0e282249faf1206d5214",
+    "api/administration.py": "33eb1c275f6c673feff6c034255465cfa1f6a269d7ae627c6fa4115ceb49159e",
     "api/contexts.py": "a44dfabab4e42d7a30ff7aaa3a1239c5ae4b588abfee4dab9d1fe9e7bcc0dbef",
     "api/display.py": "4fe9438bf3016ca4ac6b97a17c0e20157e77d0b8b66dd4c1ff3054e901d65c03",
-    "api/manifests.py": "a3f1616777ac490361b9a2c4a437add67d1d86064a7fe585890a408ba241b17e",
-    "api/results.py": "cd38421d7c4b7636f79dce7e90f4f52635c5efaf47fef13bb5c8b5ae2dba3bea",
+    "api/manifests.py": "2fa294412f8ebb057226b654b2bb5f22ae9f2a188550dec11662652b8447d93b",
+    "api/results.py": "1fe77827fa4446d94023c400acc78a4ef90988d4a437172f7ffeedb2a2aa558f",
     "api/schema.py": "46628cb51be0e4a44df3606af2cbe841120cacf576f193ce57bc1af4b8a3d626",
     "api/services.py": "bebd90c9fe24581af816a4bb7e75367cea403f4eb615065bf5dbb79c684e9348",
     "api/storage.py": "bbe6e241a26727d56c1609bb8d6fa15173b04befa67f8305a2c39e3fc9491962",
     "api/subscriptions.py": "dddf75abfea96f8a88eecd71d6d6bb7d5f3327a52cb08185035fa2f5e0e6347a",
     "api/validation.py": "b6e0b2e16b8fae127c4cb8bf31efd0fce83c8b5b7ccf58256b01379fbf998e6c",
-    "api/version.py": "ab2730fa666a8c78fbc5de2d784da081efc0ccb938e5b8f5388a2f48d6c3e19c",
-    "py.typed": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+    "api/version.py": "2612079478bd6888df99c4afae76eb6c95a21a388896228f643158b225593089",
 }
 
 SDK_API_MODULES = {
@@ -220,7 +221,7 @@ class YomihimeGameLink(Star):
         from astrbot.api.star import StarTools
 
         from .adapters.astrbot.admin_pages import AdminPages
-        from .adapters.astrbot.ff14_pages import FF14Pages
+        from .adapters.astrbot.public_pages import PublicPages
         from .adapters.astrbot.runtime import PLUGIN_NAME, AstrBotRuntime
 
         self._runtime = AstrBotRuntime(
@@ -229,7 +230,7 @@ class YomihimeGameLink(Star):
             data_dir=StarTools.get_data_dir(PLUGIN_NAME),
             config=config,
         )
-        self._pages = FF14Pages(context, self._runtime)
+        self._pages = PublicPages(context, self._runtime)
         self._admin_pages = AdminPages(context, self._runtime)
 
     async def initialize(self) -> None:

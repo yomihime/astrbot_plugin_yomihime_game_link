@@ -25,9 +25,9 @@ def selected_assembly(plugin_root=ROOT, principal_id="host"):
             "assembly.json",
             "pages/dist/entry.js",
             "pages/dist/styles.css",
-            "pages/legacy/app.js",
-            "pages/legacy/index.html",
-            "pages/legacy/styles.css",
+            "pages/compat/app.js",
+            "pages/compat/index.html",
+            "pages/compat/styles.css",
         ):
             files[name] = (source / name).read_bytes()
         payload = {

@@ -13,7 +13,7 @@ from pathlib import Path
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 EXPECTED_WHEEL_SHA256 = (
-    "134a07ef54ed008adf7e8ab352dc0757a1c8a780383b61996c95eab357b398e0"
+    "3c1a911d510507a4b4ddebfd254872a5f276d48c159e015f9a1277f20f0736d3"
 )
 
 
@@ -86,7 +86,7 @@ def build_and_install_pinned_sdk(work_root: Path) -> InstalledSdk:
         raise RuntimeError("SDK build did not produce exactly one wheel")
     wheel = wheels[0]
     digest = hashlib.sha256(wheel.read_bytes()).hexdigest()
-    if wheel.name != "yomihime_module_sdk-1.6.0-py3-none-any.whl":
+    if wheel.name != "yomihime_module_sdk-1.7.0-py3-none-any.whl":
         raise RuntimeError(
             "SDK wheel name or version does not match the reviewed artifact"
         )
@@ -145,7 +145,7 @@ from ygl_r_preflight_subject.services.b05_runtime import (
 )
 
 assert Path(yomihime_sdk.__file__).resolve().is_relative_to(site_root.resolve())
-assert importlib.metadata.version("yomihime-module-sdk") == "1.6.0"
+assert importlib.metadata.version("yomihime-module-sdk") == "1.7.0"
 before_threads = {thread.ident for thread in threading.enumerate()}
 registry = Registry()
 before_snapshot = registry.snapshot()

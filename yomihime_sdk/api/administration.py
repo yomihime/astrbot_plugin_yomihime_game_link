@@ -86,6 +86,7 @@ class AdminOperation(StrEnum):
     LIST_MODULES = "list_modules"
     MODULE_SNAPSHOT = "module_snapshot"
     SET_ENABLED = "set_enabled"
+    UNLOAD_MODULE = "unload_module"
     UPDATE_CONFIG = "update_config"
     READ_CONFIG = "read_config"
     ROLLBACK_CONFIG = "rollback_config"
@@ -458,6 +459,23 @@ class AdminOperations(Protocol):
         *,
         authorization: AdminAuthorizationContext | None = None,
     ) -> ConfigSummary: ...
+
+    async def unload_module(
+        self,
+        invocation: InvocationView | None,
+        module_id: str,
+        *,
+        expected_registry_revision: int,
+        authorization: AdminAuthorizationContext | None = None,
+    ) -> Mapping[str, object]:
+        """Disable, drain and detach one owner, preserving all persistent data.
+
+        Trusted contexts explicitly grant UNLOAD_MODULE and SET_ENABLED for the
+        exact ConfigTarget with __module_lifecycle__. This marker is never a
+        configuration field or permission to read/write fields. Restore uses
+        SET_ENABLED on the retained trusted candidate with a fresh run epoch.
+        """
+        ...
 
 
 # Names used by the design document remain available as explicit aliases.

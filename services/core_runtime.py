@@ -85,6 +85,7 @@ from ..services.output import (
     OutputResult,
     OutputService,
     OutputStatus,
+    _require_public_fact_resources,
 )
 from ..services.owner_authority import OwnerRouteProofAuthority
 from ..services.scheduler import (
@@ -305,6 +306,9 @@ class CoreRuntime:
         ordinary_migration_fields: tuple = (),
         ordinary_migration_source: Callable[[], Mapping[str, object]] | None = None,
         ordinary_migration_id: str = "ordinary-defaults-v1",
+        ordinary_config_resources=None,
+        managed_module_owners=(),
+        owner_cleanup=None,
     ) -> None:
         if not isinstance(database, SQLiteDatabase):
             database = SQLiteDatabase(database)
@@ -611,6 +615,9 @@ class CoreRuntime:
             subscription_gate_fields=gate_fields,
             ordinary_migration=self.ordinary_config_migration,
             managed_source_credentials=managed_source_credentials,
+            ordinary_config_resources=ordinary_config_resources,
+            managed_module_owners=managed_module_owners,
+            owner_cleanup=owner_cleanup,
         )
         self.admin_facade = AdminFacade(self.admin_operations, self.admin_authorization)
         self.gateway = Gateway(
@@ -622,6 +629,9 @@ class CoreRuntime:
             owner_authority=self.owner_authority,
             handler_timeout=handler_timeout,
             clock=monotonic_clock,
+            public_fact_guard=lambda facts: _require_public_fact_resources(
+                facts, self.resource_visibility
+            ),
         )
         self.trusted_route_publisher = TrustedRoutePublisher(
             self.repositories.conversations, self.lifecycle.admission

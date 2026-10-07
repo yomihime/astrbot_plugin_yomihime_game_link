@@ -38,6 +38,7 @@ from .market import MarketClient, _diagnostic
 from .market import _world_name as _catalog_world_name
 from .market_models import MarketExecution
 from .market_sources import MarketDeadlineError, MarketPayloadError, MarketSourceClient
+from .public_projection import validate_public_market_facts
 
 
 def _stamp(stamp, observed):
@@ -519,7 +520,11 @@ class MarketQueryHandler:
                         }
                         for row in facts["coverage"]
                     ]
-                    return replace(result, model_facts=FactDocument({"market": public}))
+                    return replace(
+                        result, model_facts=FactDocument(
+                            validate_public_market_facts({"market": public})
+                        )
+                    )
                 return replace(
                     result, model_facts=_tool_facts(result, {"market": facts})
                 )
@@ -589,7 +594,7 @@ class MarketQueryHandler:
                     name_confirmation="回复唯一完整名称或“完整名称那个”；暂不支持序号",
                 )
                 if context.origin is InvocationOrigin.LLM_TOOL
-                else {"market": facts, "selection": selection}
+                else validate_public_market_facts({"market": facts, "selection": selection})
             ),
         )
 

@@ -67,6 +67,24 @@ class SQLiteSecretStore:
             raise SecretStoreUnavailable()
         return codec
 
+    def encryption_readiness(self) -> dict[str, str | bool]:
+        """Probe only the current injected codec in memory, never stored secrets."""
+        try:
+            codec = self._require_codec()
+            probe = b"yomihime:encryption-readiness:v1"
+            encrypted = codec.encrypt(probe)
+            if type(encrypted) is not bytes or encrypted == probe:
+                raise ValueError
+            if codec.decrypt(encrypted) != probe:
+                raise ValueError
+        except Exception:
+            return {
+                "ready": False,
+                "state": "unavailable",
+                "reason_code": "secret_encryption_unavailable",
+            }
+        return {"ready": True, "state": "ready", "reason_code": "ready"}
+
     @staticmethod
     def _target(target: SecretTarget) -> SecretTarget:
         if not isinstance(target, SecretTarget):

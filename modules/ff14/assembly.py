@@ -7,6 +7,7 @@ from dataclasses import dataclass, replace
 from zoneinfo import ZoneInfo
 
 from .config import (
+    CALENDAR_CONFIG_FIELDS,
     CALENDAR_VALUE_VALIDATORS,
     ORDINARY_FIELDS,
     REGION,
@@ -92,6 +93,7 @@ class ReviewedSupport:
     module_id: str = "ff14/ff14"
     validators: object = None
     metadata: object = None
+    ordinary_config_fields = tuple(field.name for field in CALENDAR_CONFIG_FIELDS)
 
     def with_metadata(self, metadata):
         return replace(self, metadata=metadata)
@@ -99,28 +101,6 @@ class ReviewedSupport:
     ordinary_snapshot = staticmethod(ordinary_snapshot)
     query_parameters = staticmethod(query_parameters)
 
-    def page_state(self, *, runtime, registered, enabled, ordinary, gate, declared):
-        metadata = self.metadata or {"page_sources": (), "credential_regions": ()}
-        return {
-            "schema_version": 2,
-            "runtime": runtime,
-            "module": {"registered": registered, "enabled": enabled},
-            "ordinary_config": ordinary,
-            "credentials": {
-                region: {"configured": None, "state": "unknown"}
-                for region in metadata["credential_regions"]
-            },
-            "subscription_gate": gate,
-            "sources": [
-                {
-                    "id": name,
-                    "declared": name in declared if declared is not None else None,
-                    "freshness": "unknown",
-                    "last_success_at": None,
-                }
-                for name in metadata["page_sources"]
-            ],
-        }
 
 
 SUPPORT = ReviewedSupport(validators=CALENDAR_VALUE_VALIDATORS)

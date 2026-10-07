@@ -15,14 +15,14 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 ARCHIVE = ROOT / "dist" / "astrbot_plugin_yomihime_game_link-local.zip"
 EXPECTED_WHEEL_SHA256 = (
-    "134a07ef54ed008adf7e8ab352dc0757a1c8a780383b61996c95eab357b398e0"
+    "3c1a911d510507a4b4ddebfd254872a5f276d48c159e015f9a1277f20f0736d3"
 )
 EXPECTED_WHEEL_ENTRIES = {
-    "yomihime_module_sdk-1.6.0.dist-info/licenses/LICENSE",
-    "yomihime_module_sdk-1.6.0.dist-info/METADATA",
-    "yomihime_module_sdk-1.6.0.dist-info/WHEEL",
-    "yomihime_module_sdk-1.6.0.dist-info/top_level.txt",
-    "yomihime_module_sdk-1.6.0.dist-info/RECORD",
+    "yomihime_module_sdk-1.7.0.dist-info/licenses/LICENSE",
+    "yomihime_module_sdk-1.7.0.dist-info/METADATA",
+    "yomihime_module_sdk-1.7.0.dist-info/WHEEL",
+    "yomihime_module_sdk-1.7.0.dist-info/top_level.txt",
+    "yomihime_module_sdk-1.7.0.dist-info/RECORD",
     "yomihime_sdk/__init__.py",
     "yomihime_sdk/py.typed",
     "yomihime_sdk/_examples/empty_module/README.md",
@@ -114,11 +114,12 @@ FF14_BUNDLE_REQUIRED_FILES = {
     "features/item_resolution.py",
     "features/market.py",
     "features/market_handler.py",
+    "features/public_projection.py",
     "features/market_sources.py",
     "features/market_models.py",
 }
-FF14_LEGACY_FILES = {
-    f"pages/legacy/{name}" for name in ("app.js", "index.html", "styles.css")
+FF14_COMPAT_FILES = {
+    f"pages/compat/{name}" for name in ("app.js", "index.html", "styles.css")
 }
 FF14_BUNDLE_ROOT_FILES = FF14_BUNDLE_REQUIRED_FILES - {"features/__init__.py"}
 FF14_BUNDLE_ALLOWED_DIRS = {Path("features")}
@@ -289,11 +290,11 @@ def validate_wheel(path: Path) -> dict[str, bytes]:
                 "SDK wheel entry manifest differs from the reviewed artifact"
             )
         metadata_lines = set(
-            wheel.read("yomihime_module_sdk-1.6.0.dist-info/METADATA")
+            wheel.read("yomihime_module_sdk-1.7.0.dist-info/METADATA")
             .decode("utf-8")
             .splitlines()
         )
-        if not {"Name: yomihime-module-sdk", "Version: 1.6.0"} <= metadata_lines:
+        if not {"Name: yomihime-module-sdk", "Version: 1.7.0"} <= metadata_lines:
             raise ValueError("SDK wheel distribution metadata is unsupported")
         package = {name: wheel.read(name) for name in sorted(PACKAGE_ENTRY_NAMES)}
     return package
@@ -377,21 +378,21 @@ def _ff14_bundle_files(repository_root: Path) -> list[Path]:
         )
     )
     resources = read_page_resources(package_root, manifest)
-    for relative in sorted(FF14_LEGACY_FILES):
+    for relative in sorted(FF14_COMPAT_FILES):
         canonical = validate_source_path(
-            package_root / relative, repository_root, "FF14 canonical legacy"
+            package_root / relative, repository_root, "FF14 compatibility locator"
         )
         projected = repository_root / "pages/ff14" / Path(relative).name
         if _read_snapshot(
-            canonical, repository_root, "Canonical legacy page"
-        ) != _read_snapshot(projected, repository_root, "Projected legacy page"):
-            raise ValueError("Legacy page projection differs from canonical source")
+            canonical, repository_root, "Canonical compatibility locator"
+        ) != _read_snapshot(projected, repository_root, "Projected compatibility locator"):
+            raise ValueError("Compatibility locator projection differs from canonical source")
         found.append(canonical)
-    legacy_root = package_root / "pages/legacy"
+    legacy_root = package_root / "pages/compat"
     if {path.name for path in legacy_root.iterdir()} != {
-        Path(name).name for name in FF14_LEGACY_FILES
+        Path(name).name for name in FF14_COMPAT_FILES
     }:
-        raise ValueError("Unreviewed canonical legacy page input")
+        raise ValueError("Unreviewed compatibility locator page input")
     found.extend(
         validate_source_path(
             package_root / path, repository_root, "Module page resource"
@@ -510,22 +511,7 @@ def included_files(root: Path = ROOT) -> list[Path]:
                         management_path, repository_root, "Management runtime asset"
                     )
                 )
-    compatibility = repository_root / "pages" / "ff14" / "query-contract.js"
-    if compatibility.exists():
-        canonical = repository_root / "modules/ff14/pages/src/query-contract.js"
-        if _read_snapshot(
-            canonical, repository_root, "Canonical legacy query contract"
-        ) != _read_snapshot(
-            compatibility, repository_root, "Legacy compatibility asset"
-        ):
-            raise ValueError(
-                "Legacy query contract differs from module authority; rebuild frontend"
-            )
-        files.append(
-            validate_source_path(
-                compatibility, repository_root, "Legacy compatibility asset"
-            )
-        )
+
     return sorted(
         set(files), key=lambda path: path.relative_to(repository_root).as_posix()
     )

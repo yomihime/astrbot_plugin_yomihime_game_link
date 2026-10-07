@@ -132,8 +132,8 @@ def sample_invocation(
 
 class B04ContractTests(unittest.TestCase):
     def test_c01_revision_imports_and_b03_operation_signatures_remain_compatible(self):
-        self.assertEqual(CONTRACT_VERSION, "1.6.0")
-        self.assertEqual(CONTRACT_REVISION, "R5-LLM-TOOLS")
+        self.assertEqual(CONTRACT_VERSION, "1.7.0")
+        self.assertEqual(CONTRACT_REVISION, "MODULE-LIFECYCLE-01")
         self.assertEqual(
             COMPATIBLE_CONTRACT_VERSIONS,
             (
@@ -144,6 +144,7 @@ class B04ContractTests(unittest.TestCase):
                 "1.4.0",
                 "1.5.0",
                 "1.6.0",
+                "1.7.0",
             ),
         )
         self.assertIn("1.1.0", COMPATIBLE_CONTRACT_VERSIONS)

@@ -15,7 +15,7 @@ from ...api.administration import AdminAuthorizationDenied, AdminOperation
 from ...api.contexts import InvocationOrigin
 from ...api.display import DisplayLimits
 from ...api.manifests import PrivacyFloor
-from ...api.services import CapabilityHealth, ConfigTarget, HealthStatus
+from ...api.services import CapabilityHealth, HealthStatus
 from ...api.subscriptions import ConversationKind
 from ...core.help_catalog import HelpCatalog
 from ...extensions.factory_resolver import (
@@ -28,6 +28,7 @@ from ...presentation.rendering import GenericDisplayRenderer, RenderingBounds
 from ...scripts.prepare_ff14_config_migration import INPUT_FILENAME, load_prepared_input
 from ...services.admin_authorization import AdminAuthorizationService
 from ...services.configuration import ConfigurationValueError
+from ...services.core_configuration import CORE_CONFIG_FIELDS, core_config_target
 from ...services.core_runtime import (
     CoreRuntime,
     CoreRuntimeCleanupPending,
@@ -139,20 +140,29 @@ class AstrBotRuntime:
         self._closing = False
         self._admin_source = None
         self._credential_admin_source = None
+        self._module_admin_source = None
 
     def management_current(self, core, source):
         return (
             core is self._core
             and source is not None
             and (
-                source is self._admin_source or source is self._credential_admin_source
+                source is self._admin_source
+                or source is self._credential_admin_source
+                or source is self._module_admin_source
             )
             and not self._closing
             and getattr(core, "management_available", False) is True
         )
 
-    def management_entry(self, *, credentials=False):
-        source = self._credential_admin_source if credentials else self._admin_source
+    def management_entry(self, *, credentials=False, modules=False):
+        source = (
+            self._module_admin_source
+            if modules
+            else self._credential_admin_source
+            if credentials
+            else self._admin_source
+        )
         if not self.management_current(self._core, source) or source is None:
             raise AdminAuthorizationDenied
         return self._core, source
@@ -218,8 +228,10 @@ class AstrBotRuntime:
             and not self._closing
         )
 
-    def begin_public_web(self, request: object, endpoint: str, legacy_path: str):
-        started_at = monotonic()
+    def begin_public_web(
+        self, request: object, endpoint, legacy_path: str, *, started_at=None
+    ):
+        started_at = monotonic() if started_at is None else started_at
         validator = self._web_validator
         if validator is None or not self.public_web_status()["entry_ready"]:
             raise WebPublicRejected("entry_unavailable")
@@ -248,7 +260,7 @@ class AstrBotRuntime:
         self.public_web_remaining(request_state)
         proof = validator.mint(ticket)
         result = await core.invoke_public_web(
-            *self._assembly.public_bindings[endpoint], parameters, proof=proof
+            *validator._bindings[endpoint], parameters, proof=proof
         )
         # Core deliberately revokes proof after result publication. Keep the
         # independent Host request deadline/generation facts for this final hop.
@@ -306,134 +318,29 @@ class AstrBotRuntime:
         return data
 
     async def public_ff14_page_state(self, *, include_values: bool = False) -> dict:
-        """Project only global metadata; never read credentials or private data."""
-        generation, core, was_ready = self._generation, self._core, self._ready
-        config_snapshot, config_error = self._config_snapshot, self._config_error
-        if core is not None and was_ready:
-            try:
-                async with core.lifecycle.admission.mutation(
-                    "host-ordinary-defaults-read"
-                ):
-                    module_config = await core.config_repository.current(
-                        ConfigTarget(PLUGIN_NAME, self._assembly.module_id)
-                    )
-                    defaults = await core.core_defaults.current()
-                    config_snapshot = self._assembly.support.ordinary_snapshot(
-                        {
-                            f.declaration.name: module_config.values[f.declaration.name]
-                            for f in self._assembly.migration_fields
-                            if f.target.module_id == self._assembly.module_id
-                            and f.declaration.name in module_config.values
-                        },
-                        defaults.values,
-                    )
-                config_error = None
-            except ConfigurationValueError as exc:
-                config_snapshot = None
-                config_error = exc.field
-            except Exception:
-                config_snapshot = None
-        gate = {
-            "supported": False,
-            "enabled": None,
-            "can_run": None,
-            "reason": "unsupported",
-        }
-        if core is not None:
-            try:
-                state = await core.subscription_gate_state(self._assembly.module_id)
-                gate = {
-                    "supported": state.supported,
-                    "enabled": state.enabled,
-                    "can_run": state.can_run,
-                    "reason": state.reason,
-                }
-            except Exception:
-                gate = {
-                    "supported": True,
-                    "enabled": None,
-                    "can_run": None,
-                    "reason": "state_unknown",
-                }
-        if (
-            self._closing
-            or generation != self._generation
-            or core is not self._core
-            or was_ready != self._ready
-        ):
-            raise RuntimeError("page state generation changed")
-        if not was_ready and gate["can_run"] is True:
-            gate = {
-                "supported": True,
-                "enabled": True,
-                "can_run": False,
-                "reason": "runtime_not_ready",
-            }
-        # Current-read errors belong to this projection, not the startup latch.
-        self._config_snapshot = config_snapshot
-        invalid = config_error is not None
-        ready = self._ready and self._core is not None
-        state = "invalid_config" if invalid else "ready" if ready else "not_ready"
-        reason = (
-            "ordinary_config_invalid"
-            if invalid
-            else self._safe_bundle_reason(self._bundle_failure_reason)
-            if self._bundle_failure_reason is not None
-            else None
-            if ready
-            else "runtime_not_ready"
-        )
-        registered = enabled = None
-        declared = None
-        if self._core is not None and not self._config_error:
-            try:
-                snapshot = self._core.registry.snapshot()
-                module = snapshot.modules.get(self._assembly.module_id)
-                registered = module is not None
-                enabled = module.enabled if module is not None else False
-                declared = (
-                    {source.source_id for source in module.manifest.sources}
-                    if module is not None
-                    else set()
-                )
-            except Exception:
-                # Failure to read a Registry is not proof of non-registration.
-                registered = enabled = None
-                declared = None
-        ordinary = {
-            "state": "invalid"
-            if invalid
-            else "unknown"
-            if config_snapshot is None
-            else "applied"
-            if ready
-            else "valid_not_ready",
-            "invalid_field": config_error,
-        }
-        if include_values:
-            ordinary["values"] = (
-                dict(config_snapshot.as_values())
-                if not invalid and config_snapshot is not None
-                else None
-            )
+        """Deprecated locator only; no module defaults, gates or credential state."""
+        return {"schema_version": 1, "state": "retired",
+                "reopen_required": True, "host_path": "/#/extension/plugins"}
+
+    def public_page_bindings(self):
         if self._assembly is None:
-            return {
-                "schema_version": 2,
-                "runtime": {"state": state, "reason": reason},
-                "module": {"registered": registered, "enabled": enabled},
-                "ordinary_config": ordinary,
-                "credentials": {},
-                "subscription_gate": gate,
-                "sources": [],
-            }
-        return self._assembly.support.page_state(
-            runtime={"state": state, "reason": reason},
-            registered=registered,
-            enabled=enabled,
-            ordinary=ordinary,
-            gate=gate,
-            declared=declared,
-        )
+            return {}
+        bindings = dict(self._assembly.public_bindings)
+        for owner, manifest in self._assembly.manifests.items():
+            for page in manifest.pages:
+                target = (owner, page.capability_id)
+                if target in self._assembly.public_capabilities:
+                    bindings[(owner, page.route_id, page.capability_id)] = target
+        return bindings
+
+    def compatibility_query_routes(self):
+        return tuple(self._assembly.public_bindings) if self._assembly else ()
+
+    def _cleanup_module_owner(self, owner):
+        if self._web_validator is not None:
+            self._web_validator.revoke_owner(owner)
+        if self._tool_publisher is not None:
+            self._tool_publisher.retire_owner(owner)
 
     def public_query_parameters(self, endpoint, body):
         if self._assembly is None or endpoint not in self._assembly.public_bindings:
@@ -526,7 +433,7 @@ class AstrBotRuntime:
                 validator = HostPublicWebValidator(
                     self._generation,
                     self._web_current,
-                    bindings=self._assembly.public_bindings if self._assembly else {},
+                    bindings=self.public_page_bindings(),
                 )
                 self._http_transport = self._new_http_transport()
                 self._transport_closed = False
@@ -577,6 +484,20 @@ class AstrBotRuntime:
                     module_config_validators=self._assembly.validators
                     if self._assembly
                     else {},
+                    ordinary_config_resources={
+                        core_config_target(PLUGIN_NAME): frozenset(
+                            field.name for field in CORE_CONFIG_FIELDS
+                        ),
+                        **(
+                            self._assembly.ordinary_resources(PLUGIN_NAME)
+                            if self._assembly
+                            else {}
+                        ),
+                    },
+                    managed_module_owners=tuple(self._assembly.manifests)
+                    if self._assembly
+                    else (),
+                    owner_cleanup=self._cleanup_module_owner,
                     ordinary_migration_fields=self._assembly.migration_fields
                     if self._assembly
                     else (),
@@ -608,12 +529,9 @@ class AstrBotRuntime:
                         self._assembly_lease = None
                 raise
             self._core = core
-            if (
-                isinstance(
-                    getattr(core, "admin_authorization", None),
-                    AdminAuthorizationService,
-                )
-                and core.ordinary_config_migration is not None
+            if isinstance(
+                getattr(core, "admin_authorization", None),
+                AdminAuthorizationService,
             ):
                 self._admin_source = core.admin_authorization.register_source(
                     "astrbot-dashboard",
@@ -623,6 +541,22 @@ class AstrBotRuntime:
                         AdminOperation.UPDATE_CONFIG,
                         AdminOperation.ROLLBACK_CONFIG,
                         AdminOperation.RECOVER_CONFIG,
+                    },
+                )
+            if (
+                isinstance(
+                    getattr(core, "admin_authorization", None),
+                    AdminAuthorizationService,
+                )
+                and self._assembly
+            ):
+                self._module_admin_source = core.admin_authorization.register_source(
+                    "astrbot-dashboard-modules",
+                    resources=core.admin_operations.module_resources(),
+                    operations={
+                        AdminOperation.LIST_MODULES,
+                        AdminOperation.SET_ENABLED,
+                        AdminOperation.UNLOAD_MODULE,
                     },
                 )
             validator.attach(core)
@@ -721,6 +655,10 @@ class AstrBotRuntime:
             self._core.stop_accepting_host_ingress()
         if self._admin_source is not None:
             self._admin_source.close()
+        if self._module_admin_source is not None:
+            self._module_admin_source.close()
+        if self._credential_admin_source is not None:
+            self._credential_admin_source.close()
         if self._web_validator is not None:
             self._web_validator.close()
         self._closing = True
@@ -749,6 +687,13 @@ class AstrBotRuntime:
                 pending.append(("admin_source", exc))
             else:
                 self._admin_source = None
+        if self._module_admin_source is not None:
+            try:
+                self._module_admin_source.close()
+            except BaseException as exc:
+                pending.append(("module_admin_source", exc))
+            else:
+                self._module_admin_source = None
         if self._credential_admin_source is not None:
             try:
                 self._credential_admin_source.close()

@@ -31,14 +31,17 @@ await build({...common, build: {outDir: resolve(root, 'pages/management'), empty
 await build({...common, build: {outDir: resolve(ff14, 'dist'), emptyOutDir: true, lib: {entry: resolve(ff14, 'src/entry.ts'), formats: ['es'], fileName: () => 'entry.js', cssFileName: 'styles'}, rolldownOptions: {external: ['vue', 'naive-ui'], output: {paths: {'vue': '../../../../../runtime.js', 'naive-ui': '../../../../../runtime.js'}}}, minify: true}});
 await copyFile(resolve(frontend, 'src/index.html'), resolve(shell, 'index.html'));
 await copyFile(resolve(frontend, 'src/management-index.html'), resolve(root, 'pages/management/index.html'));
-for (const name of ['app.js','index.html','styles.css']) await copyFile(resolve(ff14, 'legacy', name), resolve(root, 'pages/ff14', name));
-await copyFile(resolve(ff14, 'src/query-contract.js'), resolve(root, 'pages/ff14/query-contract.js'));
+for (const name of ['app.js','index.html','styles.css']) await copyFile(resolve(ff14, 'compat', name), resolve(root, 'pages/ff14', name));
 const resources = [];
 for (const file of (await readdir(resolve(ff14, 'dist'))).sort()) {
   const bytes = await readFile(resolve(ff14, 'dist', file));
   resources.push({path: `pages/dist/${file}`, sha256: createHash('sha256').update(bytes).digest('hex')});
 }
 await writeFile(resolve(ff14, 'resources.json'), JSON.stringify(resources, null, 2) + '\n');
+const manifestPath=resolve(root,'modules/ff14/yomihime.manifest.json');
+const manifestSource=await readFile(manifestPath,'utf8');
+const manifest=JSON.parse(manifestSource);for(const module of manifest.modules)module.resources=resources;
+await writeFile(manifestPath,(JSON.stringify(manifest,null,2)+'\n').replaceAll('\n',manifestSource.includes('\r\n')?'\r\n':'\n'));
 await mkdir(resolve(shell, 'licenses'), {recursive: true});
 const notices = ['Third-party notices for the production shared Vue / Naive UI runtime.\nSources are locked in pages/frontend/package-lock.json.\n'];
 const licenseFiles=[];

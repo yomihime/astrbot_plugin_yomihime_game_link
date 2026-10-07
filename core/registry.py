@@ -332,6 +332,54 @@ class Registry:
         self._notify()
         return updated
 
+    def _detach_lifecycle_module(self, owner, module_id):
+        if owner is not self._lifecycle_owner or self.is_active(module_id):
+            raise RegistryError("only quiescent Lifecycle owner may detach a module")
+        old = self._snapshot
+        old.module(module_id)
+        self._snapshot = RegistrySnapshot(
+            old.revision + 1,
+            {key: value for key, value in old.modules.items() if key != module_id},
+            {key: value for key, value in old.routes.items() if value != module_id},
+            {key: value for key, value in old.tools.items() if value[0] != module_id},
+        )
+        package_id = module_id.split("/", 1)[0]
+        if not any(key.startswith(package_id + "/") for key in self._snapshot.modules):
+            self._packages.discard(package_id)
+        self._notify()
+        return self._snapshot
+
+    def _restore_lifecycle_module(self, owner, package_id, manifest, handlers):
+        if owner is not self._lifecycle_owner:
+            raise RegistryError("only Lifecycle may restore a module")
+        module_id = f"{package_id}/{manifest.module_id}"
+        old = self._snapshot
+        if (
+            module_id in old.modules
+            or manifest.route in old.routes
+            or any(tool.name in old.tools for tool in manifest.tools)
+        ):
+            raise RegistryError("restored module indexes conflict")
+        self._validate_handlers(manifest, handlers)
+        self._snapshot = RegistrySnapshot(
+            old.revision + 1,
+            {
+                **old.modules,
+                module_id: RegisteredModule(module_id, manifest, handlers, False, 0),
+            },
+            {**old.routes, manifest.route: module_id},
+            {
+                **old.tools,
+                **{
+                    tool.name: (module_id, tool.capability_id)
+                    for tool in manifest.tools
+                },
+            },
+        )
+        self._packages.add(package_id)
+        self._notify()
+        return self._snapshot
+
     @staticmethod
     def _validate_handlers(module: ModuleManifest, handlers: ModuleHandlers) -> None:
         if not isinstance(handlers, ModuleHandlers):

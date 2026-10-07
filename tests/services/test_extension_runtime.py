@@ -240,8 +240,9 @@ class _CloseBudgetClock:
         self.active = True
         # Frozen/explicit time has no early timer window. Keeping Windows'
         # 15.625ms resolution would fire the original 10ms timers before entry.
-        with patch.object(loop, "time", self.time), patch.object(
-            loop, "_clock_resolution", 0.0
+        with (
+            patch.object(loop, "time", self.time),
+            patch.object(loop, "_clock_resolution", 0.0),
         ):
             try:
                 yield self
@@ -828,10 +829,12 @@ class ExtensionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         second_authorizations = 0
         second_authorized = asyncio.Event()
 
-        async def observe_second_authorization(operation, *, invocation, context):
+        async def observe_second_authorization(
+            operation, *, invocation, context, resources=None
+        ):
             nonlocal second_authorizations
             grant = await original_authorize(
-                operation, invocation=invocation, context=context
+                operation, invocation=invocation, context=context, resources=resources
             )
             if context is second_context:
                 second_authorizations += 1
@@ -1055,9 +1058,12 @@ class ExtensionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         return runtime, source, sibling, factory.instances[2]
 
     async def test_close_deadline_bounds_retained_repair_candidate_and_retry(self):
-        runtime, source, sibling, repair_candidate = (
-            await self._retained_repair_candidate()
-        )
+        (
+            runtime,
+            source,
+            sibling,
+            repair_candidate,
+        ) = await self._retained_repair_candidate()
         close_clock = _CloseBudgetClock()
         repair_entered = asyncio.Event()
         repair_cancelled = asyncio.Event()
@@ -1197,9 +1203,12 @@ class ExtensionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([instance.stopped for instance in factory.instances], [2, 2])
 
     async def test_close_exhausted_budget_retains_repair_candidate_before_stop(self):
-        runtime, source, sibling, repair_candidate = (
-            await self._retained_repair_candidate()
-        )
+        (
+            runtime,
+            source,
+            sibling,
+            repair_candidate,
+        ) = await self._retained_repair_candidate()
         repair_id, flight = next(iter(runtime._repair_flights.items()))
         key = ("sample", "sample/other", repair_id)
         record = self.lifecycle._candidates[key][0]
@@ -1215,8 +1224,9 @@ class ExtensionRuntimeTests(unittest.IsolatedAsyncioTestCase):
             close_clock.advance(0.011)
             return await discard(selected, deadline=deadline)
 
-        with close_clock.control(), patch.object(
-            runtime, "_discard_flight_candidates", exhaust_before_cleanup
+        with (
+            close_clock.control(),
+            patch.object(runtime, "_discard_flight_candidates", exhaust_before_cleanup),
         ):
             with self.assertRaises(ExtensionCleanupPending):
                 await runtime.close(timeout=0.01)
@@ -1268,8 +1278,9 @@ class ExtensionRuntimeTests(unittest.IsolatedAsyncioTestCase):
             close_clock.advance(0.011)
             return await discard(selected, deadline=deadline)
 
-        with close_clock.control(), patch.object(
-            runtime, "_discard_flight_candidates", exhaust_before_cleanup
+        with (
+            close_clock.control(),
+            patch.object(runtime, "_discard_flight_candidates", exhaust_before_cleanup),
         ):
             with self.assertRaises(ExtensionCleanupPending):
                 await runtime.close(timeout=0.01)

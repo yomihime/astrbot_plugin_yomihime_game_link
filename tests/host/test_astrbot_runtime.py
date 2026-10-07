@@ -539,9 +539,7 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 connection.close()
             self.assertTrue(
-                (await runtime.public_ff14_page_state())["subscription_gate"][
-                    "supported"
-                ]
+                (await runtime.core_runtime.subscription_gate_state("ff14/ff14")).supported
             )
         finally:
             await runtime.terminate()
@@ -878,11 +876,9 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
                     unit, target, "default_region", "synthetic-invalid", before.revision
                 )
             )
-            state = await runtime.public_ff14_page_state(include_values=True)
-            self.assertEqual(
-                state["ordinary_config"]["invalid_field"], "default_region"
-            )
-            self.assertIsNone(state["ordinary_config"]["values"])
+            from ygl_test_subject.services.configuration import ConfigurationValueError
+            with self.assertRaises(ConfigurationValueError):
+                await core.core_defaults.current()
             self.assertTrue(runtime.ready)
             event = _Event()
             event.message = "/ygl ff14 calendar help"
@@ -1116,92 +1112,53 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
         await close
         self.assertIsNone(runtime.core_runtime)
 
-    async def test_public_projection_fences_core_replacement_readiness_and_close(self):
-        from types import SimpleNamespace
+    async def test_retired_locator_is_static_and_cannot_read_replaced_core(self):
+        from unittest.mock import Mock
 
-        from ygl_test_subject.core.ports import SubscriptionGateState
+        runtime = self._runtime(_Context())
+        core = Mock()
+        runtime._core = core
+        runtime._ready = True
+        first = await runtime.public_ff14_page_state()
+        runtime._core = None
+        runtime._generation += 1
+        runtime._closing = True
+        self.assertEqual(await runtime.public_ff14_page_state(include_values=True), first)
+        self.assertEqual(
+            first,
+            {
+                "schema_version": 1,
+                "state": "retired",
+                "reopen_required": True,
+                "host_path": "/#/extension/plugins",
+            },
+        )
+        self.assertEqual(core.mock_calls, [])
 
-        for change in ("replace", "ready", "close"):
-            with self.subTest(change=change):
-                entered, release = asyncio.Event(), asyncio.Event()
-
-                async def blocked(_):
-                    entered.set()
-                    await release.wait()
-                    return SubscriptionGateState(True, True, True, None)
-
-                runtime = self._runtime(_Context())
-                from tests.host.assembly_contract import selected_assembly
-
-                runtime._assembly = selected_assembly(self.plugin_root, PLUGIN_NAME)
-                runtime._core = SimpleNamespace(subscription_gate_state=blocked)
-                runtime._ready = True
-                task = asyncio.create_task(runtime.public_ff14_page_state())
-                await entered.wait()
-                if change == "replace":
-                    runtime._core = None
-                elif change == "ready":
-                    runtime._ready = False
-                else:
-                    runtime._generation += 1
-                    runtime._closing = True
-                release.set()
-                with self.assertRaisesRegex(RuntimeError, "generation changed"):
-                    await task
-
-    async def test_public_page_projection_ready_uses_registry_but_never_secrets(self):
+    async def test_retired_locator_never_reads_values_secrets_or_module_handlers(self):
         runtime = self._runtime(_Context(), http_transport_factory=_IdleTransport)
         await runtime.initialize()
         try:
             core = runtime.core_runtime
-            with patch.object(
-                type(core.module_services),
-                "for_module",
-                side_effect=AssertionError("page read module services"),
+            with (
+                patch.object(
+                    type(core.module_services),
+                    "for_module",
+                    side_effect=AssertionError("locator invoked module"),
+                ),
+                patch.object(
+                    type(core.config_repository),
+                    "current",
+                    side_effect=AssertionError("locator read config"),
+                ),
             ):
                 overview = await runtime.public_ff14_page_state()
                 settings = await runtime.public_ff14_page_state(include_values=True)
-            self.assertEqual(overview["runtime"], {"state": "ready", "reason": None})
-            self.assertEqual(overview["module"], {"registered": True, "enabled": True})
-            self.assertNotIn("values", overview["ordinary_config"])
+            self.assertEqual(overview, settings)
             self.assertEqual(
-                settings["ordinary_config"]["values"],
-                dict(runtime._config_snapshot.as_values()),
+                set(settings), {"schema_version", "state", "reopen_required", "host_path"}
             )
-            for item in overview["credentials"].values():
-                self.assertEqual(item, {"configured": None, "state": "unknown"})
-            self.assertEqual(
-                overview["subscription_gate"],
-                {"supported": True, "enabled": True, "can_run": True, "reason": None},
-            )
-            self.assertEqual(len(overview["sources"]), 7)
-            self.assertTrue(
-                all(
-                    item["declared"] is True
-                    and item["freshness"] == "unknown"
-                    and item["last_success_at"] is None
-                    for item in overview["sources"]
-                )
-            )
-            self.assertEqual(
-                set(overview),
-                {
-                    "schema_version",
-                    "runtime",
-                    "module",
-                    "ordinary_config",
-                    "credentials",
-                    "subscription_gate",
-                    "sources",
-                },
-            )
-            settings["ordinary_config"]["values"]["ff14_calendar_default_days"] = 20
-            self.assertEqual(
-                (await runtime.public_ff14_page_state(include_values=True))[
-                    "ordinary_config"
-                ]["values"]["ff14_calendar_default_days"],
-                7,
-            )
+            self.assertEqual(settings["state"], "retired")
         finally:
             await runtime.terminate()
 
@@ -1313,53 +1270,30 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
         )
         await runtime.terminate()
 
-    async def test_public_page_projection_invalid_config_is_recoverable_without_core(
-        self,
-    ):
+    async def test_invalid_config_retired_locator_keeps_formal_management_recovery(self):
         runtime = self._runtime(_Context(), config={"ff14_calendar_default_days": 0})
         await runtime.initialize()
-        data = await runtime.public_ff14_page_state(include_values=True)
-        self.assertEqual(
-            data["runtime"],
-            {"state": "invalid_config", "reason": "ordinary_config_invalid"},
-        )
-        self.assertEqual(
-            data["ordinary_config"],
-            {
-                "state": "invalid",
-                "invalid_field": "ff14_calendar_default_days",
-                "values": None,
-            },
-        )
-        self.assertEqual(data["module"], {"registered": None, "enabled": None})
-        self.assertTrue(all(item["declared"] is None for item in data["sources"]))
-        self.assertTrue(runtime.core_runtime.configuration_blocked)
-        self.assertFalse(runtime.core_runtime.started)
-        await runtime.terminate()
+        try:
+            data = await runtime.public_ff14_page_state(include_values=True)
+            self.assertEqual(data["state"], "retired")
+            self.assertNotIn("values", data)
+            self.assertTrue(runtime.core_runtime.configuration_blocked)
+            self.assertFalse(runtime.core_runtime.started)
+        finally:
+            await runtime.terminate()
 
-    async def test_public_projection_registry_failure_is_unknown_not_missing(self):
+    async def test_retired_locator_does_not_borrow_registry_or_declaration_authority(self):
         from types import SimpleNamespace
         from unittest.mock import Mock
 
-        runtime = self._runtime(_Context())
-        self.assertEqual(
-            (await runtime.public_ff14_page_state())["ordinary_config"]["state"],
-            "unknown",
-        )
         registry = Mock()
-        registry.snapshot.side_effect = RuntimeError("private runtime path")
-        from tests.host.assembly_contract import selected_assembly
-
-        runtime._assembly = selected_assembly(self.plugin_root, PLUGIN_NAME)
+        registry.snapshot.side_effect = AssertionError("locator read Registry")
+        runtime = self._runtime(_Context())
         runtime._core = SimpleNamespace(registry=registry)
         data = await runtime.public_ff14_page_state()
-        self.assertEqual(data["module"], {"registered": None, "enabled": None})
-        self.assertTrue(all(item["declared"] is None for item in data["sources"]))
-        registry.snapshot.side_effect = None
-        registry.snapshot.return_value = SimpleNamespace(modules={})
-        data = await runtime.public_ff14_page_state()
-        self.assertEqual(data["module"], {"registered": False, "enabled": False})
-        self.assertTrue(all(item["declared"] is False for item in data["sources"]))
+        self.assertEqual(data["state"], "retired")
+        self.assertNotIn("module", data)
+        self.assertEqual(registry.mock_calls, [])
 
     async def test_initialize_is_single_and_real_core_command_reaches_message_chain(
         self,

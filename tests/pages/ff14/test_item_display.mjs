@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import {execFileSync} from "node:child_process";
 import {fileURLToPath} from "node:url";
-import {validateQueryResult} from "../../../pages/ff14/app.js";
+import {validateQueryResult} from "../../../modules/ff14/pages/src/query-contract.js";
 import {queryHarness, edit, submitFor, flush} from "./test_ui_a.mjs";
 
 const root = fileURLToPath(new URL("../../../", import.meta.url));
@@ -24,7 +24,7 @@ for (const [name, sample] of Object.entries(samples)) {
   try {
     await edit(h, "query", "90001"); await submitFor(h).click(); await flush();
     h.bridge.posts[0].resolve(sample); await flush();
-    assert.equal(h.app.getState().query.result.status, "partial_success", name);
+    assert.match(h.root.textContent,/部分结果/,name);
     assert.ok(h.root.textContent.includes(sample.document.title), name);
     for (const warning of sample.warnings) assert.ok(h.root.textContent.includes(warning), name);
     assert.ok(h.root.textContent.includes("来源详情未关联"), name);

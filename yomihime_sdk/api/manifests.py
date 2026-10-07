@@ -700,7 +700,7 @@ class PackageManifest:
         if self.contract_version not in COMPATIBLE_CONTRACT_VERSIONS:
             raise ValueError("contract_version is not compatible with this runtime")
         _descriptor_tuple(self.modules, ModuleManifest, "modules")
-        if self.contract_version != "1.6.0" and any(
+        if self.contract_version not in ("1.6.0", "1.7.0") and any(
             capability.invocation_origins is not None
             for module in self.modules
             for capability in module.capabilities

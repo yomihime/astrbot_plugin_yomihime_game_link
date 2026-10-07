@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from math import isfinite
 from pathlib import Path
@@ -27,7 +27,7 @@ from ..api.administration import (
 )
 from ..api.contexts import InvocationView
 from ..api.manifests import ModuleManifest, PackageManifest
-from ..api.services import ModuleFactory, ModuleHandlers, ModuleInstance
+from ..api.services import ConfigTarget, ModuleFactory, ModuleHandlers, ModuleInstance
 from ..core.health import HealthResolver
 from ..core.lifecycle import LifecycleController, LifecycleError
 from ..core.ports import AdminAuthorizationPort, RevisionConflict, RunIdentity
@@ -139,6 +139,7 @@ class _BuildFlight:
     owner_invocation: InvocationView | None = None
     owner_authorization: AdminAuthorizationContext | None = None
     restore: bool = False
+    requested_module_id: str | None = None
     lease: FactoryBundleLease | None = None
     adopted_module_ids: list[str] = field(default_factory=list)
     installed_instance_ids: dict[str, str] = field(default_factory=dict)
@@ -327,6 +328,10 @@ class ExtensionRuntime:
         """Return the current exact catalog objects without triggering a scan."""
         return tuple(self._catalog.values())
 
+    @property
+    def unloaded_owners(self):
+        return frozenset(getattr(self, "_unloaded_owners", ()))
+
     async def set_enabled(
         self,
         invocation: InvocationView | None,
@@ -345,14 +350,23 @@ class ExtensionRuntime:
         ):
             raise ValueError("expected_registry_revision must be non-negative")
         package_id, local_id = self._split_module_id(module_id)
-        initial = await self._authorize(invocation, authorization)
+        if enabled and module_id in getattr(self, "_unload_pending", set()):
+            raise ExtensionCleanupPending("module unload cleanup is pending")
+        original = getattr(self, "_detached_candidates", {}).get(module_id)
+        if (
+            enabled
+            and original is not None
+            and self._catalog.get(package_id) is not original
+        ):
+            raise ExtensionCandidateStale("unloaded module trusted candidate changed")
+        initial = await self._authorize(invocation, authorization, module_id)
         expected_revision = expected_registry_revision
 
         while True:
             wait_for: ModuleOperation | None = None
             selected: ModuleOperation | None = None
             grant = await self._reauthorize(
-                invocation, authorization, initial.generation
+                invocation, authorization, initial.generation, module_id
             )
             async with self.admission.mutation(f"extension-request:{module_id}"):
                 self._require_open()
@@ -704,6 +718,7 @@ class ExtensionRuntime:
             operation._invocation,
             operation._authorization,
             grant.generation,
+            operation.module_id,
         )
 
         async with self.admission.mutation(
@@ -748,6 +763,7 @@ class ExtensionRuntime:
                 operation._invocation,
                 operation._authorization,
                 grant.generation,
+                operation.module_id,
             )
 
             publication_error: BaseException | None = None
@@ -789,6 +805,9 @@ class ExtensionRuntime:
                         True,
                         operation.expected_registry_revision,
                     )
+                    getattr(self, "_unloaded_owners", set()).discard(
+                        operation.module_id
+                    )
                 except BaseException as exc:
                     self._repair_closed_projection(operation, identity)
                     publication_error = exc
@@ -829,6 +848,7 @@ class ExtensionRuntime:
             operation._invocation,
             operation._authorization,
             grant.generation,
+            operation.module_id,
         )
         try:
             async with self.admission.mutation(
@@ -1035,6 +1055,7 @@ class ExtensionRuntime:
                     owner_invocation=operation._invocation,
                     owner_authorization=operation._authorization,
                     restore=operation._restore,
+                    requested_module_id=operation.module_id,
                 )
                 flight.task = asyncio.create_task(
                     self._build_package(flight),
@@ -1087,7 +1108,12 @@ class ExtensionRuntime:
                 raise ExtensionCandidateUnavailable("candidate manifest is invalid")
             instances: dict[str, ModuleInstance] = {}
             handlers: dict[str, ModuleHandlers] = {}
-            for module in manifest.modules:
+            modules = tuple(
+                module for module in manifest.modules
+                if f"{manifest.package_id}/{module.module_id}" not in self.unloaded_owners
+                or f"{manifest.package_id}/{module.module_id}" == flight.requested_module_id
+            )
+            for module in modules:
                 self._check_build_live(flight)
                 await self._reauthorize_build(flight)
                 async with self.admission.mutation(
@@ -1129,7 +1155,9 @@ class ExtensionRuntime:
                 self._check_build_current(flight)
                 self._require_exact_catalog_candidate(flight.candidate)
                 self._check_registry_value(flight.base_registry_revision)
-                registered = self.registry.register_package(manifest, handlers)
+                registered = self.registry.register_package(
+                    replace(manifest, modules=modules), handlers
+                )
                 package_registered = True
                 flight.registered = True
                 package = _CandidatePackage(
@@ -1143,7 +1171,7 @@ class ExtensionRuntime:
                 )
                 self._built[flight.package_id] = package
                 expected_revision = registered.revision
-                for module in manifest.modules:
+                for module in modules:
                     module_id = f"{manifest.package_id}/{module.module_id}"
                     if self.registry.snapshot().revision != expected_revision:
                         raise RevisionConflict(
@@ -1272,6 +1300,10 @@ class ExtensionRuntime:
                 await self._validate_build_grant(flight)
                 self._check_registry_revision(operation)
                 self._require_exact_built_package(built)
+                if not self._is_registered(operation.module_id):
+                    self.lifecycle.restore_registration(
+                        operation.package_id, module, handlers
+                    )
                 self.lifecycle.install_dormant(
                     operation.package_id,
                     operation.module_id,
@@ -1636,8 +1668,11 @@ class ExtensionRuntime:
             return
         if grant is None:
             raise AdminAuthorizationDenied
-        current = await self._authorize(
-            flight.owner_invocation, flight.owner_authorization
+        current = await self.authorization.revalidate(
+            grant,
+            operation=AdminOperation.SET_ENABLED,
+            invocation=flight.owner_invocation,
+            context=flight.owner_authorization,
         )
         if current.generation != grant.generation:
             raise AdminAuthorizationDenied
@@ -1669,11 +1704,17 @@ class ExtensionRuntime:
         self,
         invocation: InvocationView | None,
         context: AdminAuthorizationContext | None,
+        module_id: str,
     ) -> AdminAuthorizationGrant:
         grant = await self.authorization.authorize(
             AdminOperation.SET_ENABLED,
             invocation=invocation,
             context=context,
+            resources={
+                ConfigTarget(self.module_services._config_principal_id, module_id): {
+                    "__module_lifecycle__"
+                }
+            },
         )
         if (
             not isinstance(grant, AdminAuthorizationGrant)
@@ -1687,8 +1728,9 @@ class ExtensionRuntime:
         invocation: InvocationView | None,
         context: AdminAuthorizationContext | None,
         generation: int,
+        module_id: str,
     ) -> AdminAuthorizationGrant:
-        grant = await self._authorize(invocation, context)
+        grant = await self._authorize(invocation, context, module_id)
         if grant.generation != generation:
             raise AdminAuthorizationDenied
         return grant
@@ -1903,6 +1945,44 @@ class ExtensionRuntime:
         operation.installation_operation_id = built.installation_operation_ids.get(
             operation.module_id
         )
+
+    def detached(self, module_id):
+        """Release installed-instance bookkeeping; retain the trusted source lease."""
+        package_id, _ = self._split_module_id(module_id)
+        built = self._built.get(package_id)
+        if built is not None:
+            built.installation_operation_ids.pop(module_id, None)
+        getattr(self, "_unload_pending", set()).discard(module_id)
+        if not hasattr(self, "_unloaded_owners"):
+            self._unloaded_owners = set()
+        self._unloaded_owners.add(module_id)
+
+    async def prepare_detach(self, module_id):
+        """Retire owner-scoped caches and the final package source lease before detach."""
+        if not hasattr(self, "_unload_pending"):
+            self._unload_pending = set()
+            self._detached_candidates = {}
+        self._unload_pending.add(module_id)
+        package_id, _ = self._split_module_id(module_id)
+        registered = self.registry.snapshot().module(module_id)
+        await self.module_services.retire_module_credentials(
+            module_id, manifest=registered.manifest
+        )
+        self.health_resolver._runs.pop(module_id, None)
+        self.health_resolver._configs.pop(module_id, None)
+        built = self._built.get(package_id)
+        if built is not None:
+            if self._catalog.get(package_id) is not built.candidate:
+                raise ExtensionCandidateStale(
+                    "unloaded module trusted candidate changed"
+                )
+            self._detached_candidates[module_id] = built.candidate
+            if not any(
+                owner != module_id and owner.startswith(package_id + "/")
+                for owner in self.registry.snapshot().modules
+            ):
+                built.lease.release()
+                self._built.pop(package_id, None)
 
     def _is_noop(
         self,

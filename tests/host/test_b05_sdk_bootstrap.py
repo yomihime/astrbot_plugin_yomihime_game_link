@@ -393,7 +393,7 @@ class SDKBootstrapTests(unittest.TestCase):
                 shutil.copyfile(ROOT / "pages" / page / relative, target)
         for name in ("app.js", "index.html", "styles.css"):
             shutil.copyfile(
-                repository / "modules/ff14/pages/legacy" / name,
+                repository / "modules/ff14/pages/compat" / name,
                 repository / "pages/ff14" / name,
             )
         runtime_file = repository / "core" / "snapshot.py"
@@ -470,13 +470,17 @@ class SDKBootstrapTests(unittest.TestCase):
             )
         self.assertFalse(incomplete_archive.exists())
 
-    def test_legacy_html_projects_current_independent_management_hint(self) -> None:
-        canonical = (ROOT / "modules/ff14/pages/legacy/index.html").read_bytes()
+    def test_legacy_html_projects_manual_host_reopening_locator(self) -> None:
+        canonical = (ROOT / "modules/ff14/pages/compat/index.html").read_bytes()
         self.assertEqual((ROOT / "pages/ff14/index.html").read_bytes(), canonical)
         text = canonical.decode("utf-8")
-        self.assertIn("普通四字段和 FFLogs 来源凭据", text)
-        self.assertIn("插件管理中的独立授权配置页", text)
-        self.assertNotIn("FFLogs 凭据管理尚未接通", text)
+        self.assertIn('href="/#/extension/plugins" target="_top"', text)
+        self.assertIn("旧 FF14 页面已退役", text)
+        self.assertIn("请从宿主插件详情重新打开页面", text)
+        script = (ROOT / "modules/ff14/pages/compat/app.js").read_text(encoding="utf-8")
+        self.assertEqual((ROOT / "pages/ff14/app.js").read_text(encoding="utf-8"), script)
+        for forbidden in ("queries/", "apiGet", "apiPost", "URLSearchParams", "location.search", "../00-game-link", "?token=", "?authorization="):
+            self.assertNotIn(forbidden, text + script)
 
     def test_builder_rejects_modified_wheel_even_with_a_self_reported_digest(
         self,

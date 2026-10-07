@@ -827,7 +827,7 @@ class MarketExecutionTests(unittest.IsolatedAsyncioTestCase):
     async def test_manifest_source_policy_and_registered_read_only_market(self):
         root = Path(__file__).resolve().parents[3]
         manifest = json.loads(
-            (root / "modules/ff14/yomihime.manifest.json").read_text()
+            (root / "modules/ff14/yomihime.manifest.json").read_text(encoding="utf-8")
         )
         source = next(
             row

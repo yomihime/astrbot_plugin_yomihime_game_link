@@ -23,7 +23,7 @@
 | FF14 凭据表单与消费 | [模块装配中的表单声明](../modules/ff14/assembly.json)、[受限管理政策](../services/managed_source_credentials.py)、[来源消费](../services/source_credentials.py) |
 | 公共壳与管理视图 | [前端构建](../pages/frontend/build.mjs)；管理页测试需单独运行，`npm test` 当前只含 shell 测试 |
 | 模块业务页面与资源 | [模块页面源码](../modules/ff14/pages/src)、[资源摘要](../modules/ff14/pages/resources.json)；构建后校验 manifest 和发布投影 |
-| 旧 FF14 显式页面 | [模块内唯一源码](../modules/ff14/pages/legacy) 构建投影到 `pages/ff14`；保留已发布入口，不把 standalone CSS 加入动态壳 |
+| 旧 FF14 定位入口 | [静态兼容页](../modules/ff14/pages/compat) 构建投影到 `pages/ff14`；仅引导从宿主插件列表正式重开，不执行业务或转发授权 URL |
 | 稳定持久目录 | [存储路由](../services/module_storage.py)；Core 选择 module_id，用户输入不能选择路径 |
 | 正式包与 SDK | [发布构建](../scripts/build_release.py)、[插件包清单](../scripts/build_dashboard_zip.py)；核对实际 wheel、pin、资源和许可证，不只测试源码副本 |
 
@@ -39,9 +39,27 @@
 
 第二模块的现有证据是隔离 fixture：通用导航、页面挂载/失效、配置声明拒绝未授权读写，以及非 FF14 工具的正式 Core/Host 调用。它不证明第二个生产包、任意来源或新管理权限已验收。模块声明、受信装配与实际部署能力应分别检查。
 
-当前 Host 仍明确选择内置 FF14 发布包，并保留原有固定公开物理路由。装配描述及源码 fingerprint 证明选定输入的一致性，不是独立发布签名，也不让扫描到的模块自动获得来源、网页或管理权限。旧 `ff14` 页面退役前须补齐新壳的 Logs/日历等价入口、发布链接迁移和实际宿主兼容验收；共享存储与旧安装槽的清理由独立迁移/恢复方案处理。
+当前 Host 仍明确选择内置 FF14 发布包。装配描述及源码 fingerprint 证明选定输入的一致性，不是独立发布签名，也不让扫描到的模块自动获得来源、网页或管理权限。旧业务 renderer 和专属业务状态装配已退出；保留的旧物理路径只返回静态定位说明。物品、市场、Logs 和日历由正式 Vue 模块页执行。共享存储与旧安装槽的清理由独立迁移/恢复方案处理。
 
-旧 Host `config_adapter.py` 仅保留弃用标记，不再提供普通配置兼容函数；实际调用已迁至 FF14 的配置支持。旧公开页的源码只在模块维护，根 `pages/ff14` 由构建生成并核对字节，不能作为另一套手改实现。
+旧 Host `config_adapter.py` 仅保留弃用标记，不再提供普通配置兼容函数；实际调用已迁至 FF14 的配置支持。根 `pages/ff14` 由静态兼容页构建生成并核对字节，不能作为另一套手改业务实现。
+
+## 统一设置与生命周期能力矩阵
+
+| 需求 | 当前正式能力 | 验收边界 |
+| --- | --- | --- |
+| REQ01 | 壳底部固定全局设置，空目录或 FF14 未加载仍可进入 Core 设置 | 最终 ZIP 的固定 Host 重写与窄屏可见交互另行验收 |
+| REQ02 | 公共表单按 owner/group 显示；全局只选 Core，各模块导航有自己的设置入口；普通值与凭据接口分离，保存采用 revision CAS | schema/catalog 只描述 UI；资源权来自显式部署政策和逐请求鉴权，不能从声明自动获得 |
+| REQ03 | 当前注入 KeyProvider/codec 提供无秘密 readiness；未就绪或未知时禁止填写/替换；已受权 clear 仍须确认并通过最新 catalog/CAS，keep 零写；FFLogs cn/global 独立操作 | 仅接入现有 external/env 密钥提供者（默认 `YGL_SECRET_KEY`）；没有持久主钥生成或自动轮换实现，预检不读取旧 secret |
+| REQ04 | 公共调用使用闭合 owner/page/capability_id/parameters 信封；Host 不分派行情业务，FF14 解释输入并验证行情事实 | 保留受信 allowlist、epoch、准入、只读/隐私检查与 32 blocks/512 nodes 总预算 |
+| REQ05 | Logs/日历使用模块 Vue 页及现有客户端、错误和恢复语义；旧业务 renderer 已移除 | 旧兼容入口仅定位到宿主插件列表；真实查询与最终宿主浏览器尚须独立验收 |
+| REQ06 | exact owner disable/unload/restore；停用保留设置；卸载先 fence、排空与 cleanup，再撤销工具对象、许可、来源及 Registry 注册 | pending 保留可重试所有权；配置、秘密、缓存和 data 均保留。恢复只使用受信原候选；旧壳不自动续资产证明，应从宿主正式重开 |
+| REQ07 | 隔离中性模块有普通配置、公共只读能力和页面；正式 Host→Core 链验证同名页面隔离、声明不授信与持久数据恢复 | fixture 不入发布包；不等于任意第三方生产包安装验收 |
+
+Core 与模块的命名空间配置是当前读写权威；Core 目录不依赖 FF14 的 lifecycle 或 migration。原 native 四字段只保留受审的一次性导入机制，不再作为运行时配置权威或普通目录资源政策。非法初始配置仍可通过受权管理入口修复；本批没有自动执行任何真实配置或共享 SQLite 迁移。
+
+`disable` 关闭业务准入，继续允许模块设置与启用管理。显式 `unload` 退出 active 普通/凭据目录、页面、来源、工具和 owner 注册，但模块管理仍显示可信恢复候选；保留最大部署政策不允许旧请求在卸载后提交。SDK 1.7 的生命周期 marker 仅用于精确 owner 管理操作，不能据此读写任何配置字段。
+
+当前发布使用 `yomihime_module_sdk-1.7.0-py3-none-any.whl`，实际摘要与 pin 由正式发布构建核对；1.0–1.6 的兼容闭合集合保留，已发布 1.6 字节不改。升级固定 SDK 需要保留数据的宿主卸载与冷加载，以退出旧进程中已导入的 SDK；不能以同壳恢复模拟该步骤。本批尚未执行真实安装、凭据查询、SDK 冷加载或 IM 投递验收。
 
 对应检查入口：声明与工厂见 [磁盘解析测试](../tests/extensions/test_disk_manifest.py)、[工厂解析测试](../tests/extensions/test_factory_resolver.py) 和 [扩展生命周期测试](../tests/services/test_extension_runtime.py)；第二模块 fixture 见 [壳生命周期测试](../tests/pages/shell/lifecycle.test.mjs)、[配置目录测试](../tests/services/test_configuration_catalog.py) 和 [宿主工具测试](../tests/host/test_llm_tools.py)。凭据正反例见 [受管凭据测试](../tests/host/test_managed_credentials.py) 与 [来源凭据测试](../tests/services/test_source_credentials.py)。这些是定位与运行入口，实际通过范围仍以对应冻结版本的报告为准。
 

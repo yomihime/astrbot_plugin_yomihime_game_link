@@ -162,6 +162,15 @@ class AstrBotToolPublisher:
             raise
         self.failure = None
 
+    def retire_owner(self, module_id):
+        """Revoke and remove only exact tools belonging to this owner."""
+        for handle in self.handles:
+            if handle.module_id == module_id:
+                handle.revoked = True
+        self.cleanup()
+        if any(handle.module_id == module_id for handle in self.handles):
+            raise ToolPublicationError("owner tool cleanup remains pending")
+
     def _tool(self, handle, capability):
         from astrbot.core.agent.tool import FunctionTool
 

@@ -161,6 +161,7 @@ class Gateway:
         lifecycle: LifecycleController | None = None,
         private_authorizer: Callable[[InvocationView], Awaitable[object]] | None = None,
         owner_authority: object | None = None,
+        public_fact_guard: Callable[[FactDocument], Awaitable[None]] | None = None,
         handler_timeout: float = 30.0,
         clock: Callable[[], float] = monotonic,
     ) -> None:
@@ -183,6 +184,7 @@ class Gateway:
             raise TypeError("Gateway must use the shared CoreRuntime authorities")
         if private_authorizer is not None and not callable(private_authorizer):
             raise TypeError("private_authorizer must be callable")
+        self._public_fact_guard = public_fact_guard
         if owner_authority is not None and any(
             not callable(getattr(owner_authority, name, None))
             for name in ("capture", "require_current")
@@ -392,7 +394,11 @@ class Gateway:
             )
             if not self._issuer.allows_public_web(view.module_id, descriptor):
                 return _error(ErrorCode.UNSUPPORTED)
-            return self._valid_public_result(result)
+            checked = self._valid_public_result(result)
+            if checked.model_facts is not None and self._public_fact_guard is not None:
+                await self._public_fact_guard(checked.model_facts)
+                self._require_current(view, lease)
+            return checked
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -649,7 +655,14 @@ class Gateway:
 
     @staticmethod
     def _valid_public_result(result: object) -> CapabilityResult:
-        return Gateway._valid_result(result, expected_privacy=Privacy.PUBLIC)
+        from .public_result import public_fact_strings
+
+        checked = Gateway._valid_result(result, expected_privacy=Privacy.PUBLIC)
+        if checked.document is not None and len(checked.document.ordered_blocks) > 32:
+            raise ValueError("public_document_exceed_limits")
+        if checked.model_facts is not None:
+            tuple(public_fact_strings(checked.model_facts))
+        return checked
 
     @staticmethod
     def _valid_result(result: object, *, expected_privacy: Privacy) -> CapabilityResult:
