@@ -85,6 +85,8 @@ POSIX 入口沿用交互终端和文件所有者检查。当前 Windows 开发�
 
 开发环境、构建命令和验证范围见[贡献指南](https://github.com/yomihime/astrbot_plugin_yomihime_game_link/blob/master/CONTRIBUTING.md)。项目更新记录见[CHANGELOG](https://github.com/yomihime/astrbot_plugin_yomihime_game_link/blob/master/CHANGELOG.md)。本地构建会生成插件 ZIP、独立 SDK wheel 和 SHA-256 校验文件。发布插件到 AstrBot 市场时，请以[AstrBot 插件发布说明](https://docs.astrbot.app/dev/star/plugin-publish.html)为准。
 
+Core、Host、SDK、FF14 的职责与模块入口见[模块维护速查](https://github.com/yomihime/astrbot_plugin_yomihime_game_link/blob/master/docs/module-maintainer-guide.md)；首版能力、离线检查和待真实验收范围见[FF14 首版能力表](https://github.com/yomihime/astrbot_plugin_yomihime_game_link/blob/master/docs/ff14-first-release.md)。当前文档及构建完成不代表新版本已经部署、真实 FFLogs 或全部平台验收通过。
+
 ## 来源与许可
 
 插件骨架由 AstrBot 的[helloworld 插件模板](https://github.com/Soulter/helloworld)初始化。仓库许可证见[LICENSE](https://github.com/yomihime/astrbot_plugin_yomihime_game_link/blob/master/LICENSE)；随包 SDK 的许可声明以独立 SDK 工件为准，两者的许可对应关系仍待核对。
