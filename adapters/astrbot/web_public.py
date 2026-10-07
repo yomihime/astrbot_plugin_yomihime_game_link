@@ -15,7 +15,6 @@ from decimal import Decimal
 from math import isfinite
 from time import monotonic, time
 from urllib.parse import urlsplit
-from zoneinfo import ZoneInfo
 
 from ...api.display import (
     DisplayDocument,
@@ -33,15 +32,7 @@ from ...api.display import (
 from ...api.results import CapabilityResult, ErrorCode, ResultStatus
 from ...core.ports import PublicWebBinding
 
-QUERY_CAPABILITIES = {
-    "items": "item.lookup",
-    "character": "ff14.logs.character",
-    "calendar": "ff14.calendar.query",
-    "market": "ff14.market.query",
-}
-DEPLOYED_CAPABILITIES = frozenset(
-    ("ff14/ff14", value) for value in QUERY_CAPABILITIES.values()
-)
+QUERY_ENDPOINTS = ("items", "character", "calendar", "market")
 REQUEST_LIMIT = 4096  # Processing limit, not a bound on Host's underlying allocation.
 RESPONSE_LIMIT = 256 * 1024
 PROOF_TTL = 30.0
@@ -159,54 +150,6 @@ def validated_bearer(
     return token, expiry
 
 
-def query_parameters(endpoint: str, body: bytes) -> dict:
-    if type(body) is not bytes or len(body) > REQUEST_LIMIT:
-        raise WebPublicRejected("request_rejected")
-    try:
-        values = json.loads(
-            body.decode("utf-8"),
-            object_pairs_hook=_unique_object,
-            parse_constant=lambda _: (_ for _ in ()).throw(ValueError()),
-        )
-        if endpoint == "market":
-            # Only the authenticated business handler validates semantics so
-            # rejected object queries also invalidate old candidate generations.
-            if type(values) is not dict:
-                raise ValueError
-            return {"input": body.decode("utf-8")}
-        expected = {
-            "items": {"query"},
-            "character": {"region", "server", "character"},
-            "calendar": {"region", "days", "timezone"},
-        }[endpoint]
-        if type(values) is not dict or set(values) != expected:
-            raise ValueError
-        limits = {"query": 120, "server": 100, "character": 120, "timezone": 128}
-        for key, maximum in limits.items():
-            if key in values and (
-                type(values[key]) is not str
-                or not values[key].strip()
-                or len(values[key]) > maximum
-            ):
-                raise ValueError
-        if endpoint != "items" and values["region"] not in ("cn", "global"):
-            raise ValueError
-        if endpoint == "character":
-            return {
-                "realm": values["region"],
-                "server": values["server"],
-                "character": values["character"],
-                "metric": "rdps",
-            }
-        if endpoint == "calendar":
-            if type(values["days"]) is not int or not 1 <= values["days"] <= 30:
-                raise ValueError
-            ZoneInfo(values["timezone"])
-        return values
-    except (ValueError, TypeError, KeyError, UnicodeError):
-        raise WebPublicRejected("request_rejected") from None
-
-
 @dataclass(slots=True)
 class _RequestFacts:
     endpoint: str
@@ -221,8 +164,19 @@ class _RequestFacts:
 class HostPublicWebValidator:
     """One Core's exact proof table. No raw Bearer bytes are retained."""
 
-    def __init__(self, generation: int, current, *, clock=monotonic, wall_clock=time):
+    def __init__(
+        self,
+        generation: int,
+        current,
+        *,
+        bindings=None,
+        clock=monotonic,
+        wall_clock=time,
+    ):
         self._generation = generation
+        self._bindings = dict(bindings or {})
+        if any(endpoint not in QUERY_ENDPOINTS for endpoint in self._bindings):
+            raise ValueError("undeployed public endpoint")
         self._current = current
         self._clock, self._wall_clock = clock, wall_clock
         self._salt = secrets.token_bytes(32)
@@ -254,7 +208,7 @@ class HostPublicWebValidator:
     def begin(
         self, endpoint: str, token: str, expiry: int, *, started_at: float | None = None
     ) -> object:
-        if endpoint not in QUERY_CAPABILITIES or type(expiry) is not int:
+        if endpoint not in self._bindings or type(expiry) is not int:
             raise WebPublicRejected("request_rejected")
         now = self._clock()
         deadline = min(
@@ -298,8 +252,7 @@ class HostPublicWebValidator:
         if (
             not facts.minted
             or facts.binding is not None
-            or module_id != "ff14/ff14"
-            or capability_id != QUERY_CAPABILITIES[facts.endpoint]
+            or (module_id, capability_id) != self._bindings[facts.endpoint]
         ):
             raise WebPublicRejected("request_rejected")
         # The Core-supplied generation is distinct from the Host generation.

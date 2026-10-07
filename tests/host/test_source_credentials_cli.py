@@ -23,7 +23,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from ygl_test_subject.adapters.astrbot.bundled import install_bundled_ff14
-from ygl_test_subject.adapters.astrbot.runtime import PLUGIN_NAME, AstrBotRuntime
+from ygl_test_subject.adapters.astrbot.runtime import PLUGIN_NAME
 from ygl_test_subject.api.administration import AdminOperation
 from ygl_test_subject.api.services import (
     ConfigFieldUpdate,
@@ -39,6 +39,8 @@ from ygl_test_subject.infrastructure.sqlite.repositories_admin_credentials impor
 from ygl_test_subject.scripts import admin_credentials
 from ygl_test_subject.scripts import configure_source_credentials as cli
 from ygl_test_subject.services.admin_authorization import _digest
+
+from tests.host.assembly_contract import selected_assembly
 
 ROOT = Path(__file__).resolve().parents[2]
 _ADMIN = token_urlsafe(32)
@@ -76,12 +78,14 @@ class SourceCredentialCliTests(unittest.IsolatedAsyncioTestCase):
     async def _seed_database(self) -> None:
         installation = install_bundled_ff14(self.plugin_root, self.data_dir)
         self.assertTrue(installation.trusted)
-        policies = AstrBotRuntime._bundled_source_credential_policies(
-            installation.extension_root
-        )
+        assembly = selected_assembly(self.plugin_root, PLUGIN_NAME)
         authority = cli._SessionAuthority()
         core, transport = cli._new_core(
-            self.data_dir, installation.extension_root, authority, policies
+            self.data_dir,
+            installation.extension_root,
+            authority,
+            assembly,
+            installation.inventory,
         )
         try:
             await core.database.executor.initialize()
@@ -98,12 +102,14 @@ class SourceCredentialCliTests(unittest.IsolatedAsyncioTestCase):
 
     async def _read_config_state(self, alias: str) -> tuple[str, int]:
         installation = install_bundled_ff14(self.plugin_root, self.data_dir)
-        policies = AstrBotRuntime._bundled_source_credential_policies(
-            installation.extension_root
-        )
+        assembly = selected_assembly(self.plugin_root, PLUGIN_NAME)
         authority = cli._SessionAuthority()
         core, transport = cli._new_core(
-            self.data_dir, installation.extension_root, authority, policies
+            self.data_dir,
+            installation.extension_root,
+            authority,
+            assembly,
+            installation.inventory,
         )
         try:
             await core.database.executor.initialize()
@@ -130,12 +136,14 @@ class SourceCredentialCliTests(unittest.IsolatedAsyncioTestCase):
 
     async def _read_secret_payload(self, alias: str) -> bytes:
         installation = install_bundled_ff14(self.plugin_root, self.data_dir)
-        policies = AstrBotRuntime._bundled_source_credential_policies(
-            installation.extension_root
-        )
+        assembly = selected_assembly(self.plugin_root, PLUGIN_NAME)
         authority = cli._SessionAuthority()
         core, transport = cli._new_core(
-            self.data_dir, installation.extension_root, authority, policies
+            self.data_dir,
+            installation.extension_root,
+            authority,
+            assembly,
+            installation.inventory,
         )
         try:
             await core.database.executor.initialize()
@@ -812,12 +820,14 @@ class SourceCredentialCliTests(unittest.IsolatedAsyncioTestCase):
                 plugin_root=self.plugin_root,
             )
             installation = install_bundled_ff14(self.plugin_root, self.data_dir)
-            policies = AstrBotRuntime._bundled_source_credential_policies(
-                installation.extension_root
-            )
+            assembly = selected_assembly(self.plugin_root, PLUGIN_NAME)
             authority = cli._SessionAuthority()
             core, transport = cli._new_core(
-                self.data_dir, installation.extension_root, authority, policies
+                self.data_dir,
+                installation.extension_root,
+                authority,
+                assembly,
+                installation.inventory,
             )
             try:
                 await core.database.executor.initialize()
@@ -877,11 +887,16 @@ class SourceCredentialCliTests(unittest.IsolatedAsyncioTestCase):
 
     def test_main_only_reports_safe_result(self) -> None:
         stdout = io.StringIO()
+
+        async def configured(*_args, label_sink=None):
+            label_sink("国际服")
+            return SimpleNamespace(revision=4)
+
         with (
             patch.object(
                 cli,
                 "_configure",
-                new=AsyncMock(return_value=SimpleNamespace(revision=4)),
+                new=AsyncMock(side_effect=configured),
             ),
             contextlib.redirect_stdout(stdout),
         ):

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import importlib.abc
 import importlib.machinery
 import importlib.util
@@ -130,6 +131,37 @@ class FilesystemFactorySource:
                     self._reserved_bytes = 0
 
 
+class ReviewedInventoryFactorySource(FilesystemFactorySource):
+    """Consistency fence for the explicit Host-selected immutable inventory."""
+
+    def __init__(self, inventory, *, selected=False):
+        if selected is not True:
+            raise FactoryResolutionError("reviewed inventory was not selected")
+        super().__init__()
+        self._expected_package = inventory.package_id
+        self._expected_manifest = hashlib.sha256(inventory.manifest).digest()
+        self._expected_sources = {
+            name: content
+            for name, content in inventory.files.items()
+            if name.endswith(".py")
+        }
+
+    async def capture(self, candidate):
+        package = candidate.package
+        provenance = package._provenance
+        if (
+            package.package_id != self._expected_package
+            or provenance is None
+            or provenance.manifest_sha256 != self._expected_manifest
+        ):
+            raise SourceSnapshotError("candidate_stale")
+        lease = await super().capture(candidate)
+        if dict(lease._bundle.files) != self._expected_sources:
+            lease.release()
+            raise SourceSnapshotError("candidate_stale")
+        return lease
+
+
 class _SnapshotFinder(importlib.abc.MetaPathFinder, importlib.abc.Loader):
     """Imports one private namespace exclusively from immutable source bytes."""
 
@@ -198,6 +230,55 @@ class _SnapshotFinder(importlib.abc.MetaPathFinder, importlib.abc.Loader):
             dont_inherit=True,
         )
         exec(code, module.__dict__)
+
+
+class ReviewedSupportLease:
+    """Explicit reviewed assembly code from already captured immutable bytes.
+
+    This is internal Host wiring, never a manifest entry or factory authority.
+    Namespace disposal removes future imports; it does not kill existing code.
+    """
+
+    def __init__(self, files: Mapping[str, bytes], *, selected: bool = False):
+        if selected is not True:
+            raise FactoryResolutionError("reviewed support was not selected")
+        sources = {
+            name: content for name, content in files.items() if name.endswith(".py")
+        }
+        if (
+            "assembly.py" not in sources
+            or len(sources) > SourceSnapshotLimits().max_files
+            or sum(map(len, sources.values())) > MAX_PACKAGE_SOURCE_BYTES
+        ):
+            raise FactoryResolutionError("reviewed support inventory is invalid")
+        self._namespace = f"_yomihime_reviewed_{uuid4().hex}"
+        self._finder = _SnapshotFinder(self._namespace, sources, uuid4().hex)
+        self._released = False
+        self.support = None
+        with _IMPORT_LOCK:
+            sys.meta_path.insert(0, self._finder)
+            try:
+                # Fixed Host-selected pure support entry. JSON cannot redirect it.
+                module = importlib.import_module(f"{self._namespace}.assembly")
+                self.support = module.SUPPORT
+            except BaseException:
+                self.release()
+                raise
+
+    def release(self) -> None:
+        if self._released:
+            return
+        with _IMPORT_LOCK:
+            self._released = True
+            if self._finder in sys.meta_path:
+                sys.meta_path.remove(self._finder)
+            self._finder._released = True
+            self._finder._files.clear()
+            self._finder._module_paths.clear()
+            for name in tuple(sys.modules):
+                if name == self._namespace or name.startswith(self._namespace + "."):
+                    sys.modules.pop(name, None)
+            self.support = None
 
 
 class _FactoryBundleLease:

@@ -4,7 +4,6 @@ import json
 import unittest
 from dataclasses import replace
 
-from ygl_test_subject.adapters.astrbot.config_adapter import legacy_core_defaults
 from ygl_test_subject.api.administration import AdminAuthorizationDenied, AdminOperation
 from ygl_test_subject.api.manifests import ConfigField
 from ygl_test_subject.api.services import (
@@ -21,6 +20,7 @@ from ygl_test_subject.modules.ff14.config import (
     DELIVERY_TIME,
     TIMEZONE,
     FF14ConfigSnapshot,
+    legacy_core_defaults,
 )
 from ygl_test_subject.services.configuration import (
     ConfigurationCoordinator,
@@ -243,14 +243,15 @@ class CoreDefaultsRuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_actual_admin_write_conflicts_with_migration_without_partial_completion(self):
         from unittest.mock import patch
 
-        from ygl_test_subject.adapters.astrbot.config_adapter import (
-            ordinary_migration_fields,
-        )
         from ygl_test_subject.infrastructure.sqlite.repositories_config_migration import (
             SQLiteOrdinaryConfigurationMigrationRepository,
         )
         from ygl_test_subject.services.configuration_migration import (
             OrdinaryConfigurationMigration,
+        )
+
+        from tests.host.assembly_contract import (
+            ordinary_migration_fields,
         )
         runtime = self._runtime()
         await self._start_with_candidate(runtime)

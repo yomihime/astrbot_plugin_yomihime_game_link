@@ -8,6 +8,7 @@ import secrets
 import stat
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 from typing import Mapping
 
 from yomihime_sdk.api.manifests import validate_page_resource_path
@@ -20,6 +21,7 @@ from ...extensions.source_snapshot import (
     SourceSnapshotLimits,
     capture_source_bundle,
 )
+from ...services.trusted_assembly import CapturedAssemblyInventory
 
 PACKAGE_ID = "ff14"
 PACKAGE_DIRECTORY = "ff14"
@@ -46,6 +48,7 @@ class BundledExtensionInstallation:
     installed: bool
     trusted: bool
     reason: str | None = None
+    inventory: CapturedAssemblyInventory | None = None
 
 
 class BundledExtensionError(ValueError):
@@ -80,6 +83,9 @@ def install_bundled_ff14(
     data_root = _require_directory(Path(data_dir), "data_root")
 
     payload = _read_bundled_package(source_root)
+    inventory = CapturedAssemblyInventory(
+        PACKAGE_ID, payload["manifest"], payload["sources"]
+    )
     fingerprint = _bundle_fingerprint(
         payload["sources"], payload["manifest"], payload["readme"]
     )
@@ -95,6 +101,7 @@ def install_bundled_ff14(
             package_dir=package_dir,
             installed=False,
             trusted=matches,
+            inventory=inventory if matches else None,
             reason=None if matches else reason,
         )
 
@@ -167,6 +174,7 @@ def install_bundled_ff14(
                 package_dir=package_dir,
                 installed=False,
                 trusted=matches,
+                inventory=inventory if matches else None,
                 reason=None if matches else reason,
             )
     except PermissionError:
@@ -192,6 +200,7 @@ def install_bundled_ff14(
         package_dir=package_dir,
         installed=True,
         trusted=matches,
+        inventory=inventory if matches else None,
         reason=None if matches else reason,
     )
 
@@ -275,10 +284,21 @@ def _read_bundled_package(source_root: Path) -> dict[str, object]:
     python_paths = {relative for relative in inventory if relative.endswith(".py")}
     if python_paths != source_paths:
         raise BundledExtensionError("bundled_source_mismatch")
+    auxiliary = {}
+    auxiliary_paths = {
+        "assembly.json",
+        "pages/legacy/app.js",
+        "pages/legacy/index.html",
+        "pages/legacy/styles.css",
+    }
+    for relative in auxiliary_paths & inventory:
+        auxiliary[relative] = _read_stable_file(
+            package.package_dir / relative, source_root, max_bytes=262_144
+        )
     required_files = {MANIFEST_FILENAME, README_FILENAME}
     if not required_files <= inventory:
         raise BundledExtensionError("bundled_documentation_missing")
-    if inventory != source_paths | set(resources) | required_files:
+    if inventory != source_paths | set(resources) | set(auxiliary) | required_files:
         raise BundledExtensionError("bundled_package_has_unreviewed_files")
 
     manifest = _read_stable_file(
@@ -293,8 +313,24 @@ def _read_bundled_package(source_root: Path) -> dict[str, object]:
         source_root,
         max_bytes=MAX_README_BYTES,
     )
+    # Recheck every captured component and inventory. The selected release
+    # identity is Host trust; this comparison establishes byte consistency.
+    if _inventory_package(package.package_dir) != inventory:
+        raise BundledExtensionError("bundled_package_changed")
+    if dict(capture_source_bundle(provenance, limits).files) != dict(snapshot.files):
+        raise BundledExtensionError("bundled_source_changed")
+    if dict(capture_page_resources(provenance, package.manifest)) != resources:
+        raise BundledExtensionError("bundled_resource_changed")
+    for relative, content in auxiliary.items():
+        if (
+            _read_stable_file(
+                package.package_dir / relative, source_root, max_bytes=262_144
+            )
+            != content
+        ):
+            raise BundledExtensionError("bundled_assembly_changed")
     return {
-        "sources": {**dict(snapshot.files), **resources},
+        "sources": MappingProxyType({**dict(snapshot.files), **resources, **auxiliary}),
         "manifest": manifest,
         "readme": readme,
     }
@@ -332,9 +368,20 @@ def _matches_current_bundle(
             return False, "existing_source_mismatch"
         resources = capture_page_resources(provenance, package.manifest)
         if dict(resources) != {
-            key: value for key, value in sources.items() if not key.endswith(".py")
+            key: value
+            for key, value in sources.items()
+            if key in {r.path for m in package.manifest.modules for r in m.resources}
         }:
             return False, "existing_resource_mismatch"
+        for relative, content in sources.items():
+            if not relative.endswith(".py") and relative not in resources:
+                if (
+                    _read_stable_file(
+                        target / relative, extension_root, max_bytes=262_144
+                    )
+                    != content
+                ):
+                    return False, "existing_assembly_mismatch"
         actual_manifest = _read_stable_file(
             target / MANIFEST_FILENAME, extension_root, max_bytes=262_144
         )
@@ -431,6 +478,10 @@ def _inventory_package(package_root: Path) -> set[str]:
             if relative.endswith(".py") or relative in {
                 MANIFEST_FILENAME,
                 README_FILENAME,
+                "assembly.json",
+                "pages/legacy/app.js",
+                "pages/legacy/index.html",
+                "pages/legacy/styles.css",
             }:
                 found.add(relative)
             else:

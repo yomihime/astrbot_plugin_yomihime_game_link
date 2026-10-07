@@ -127,4 +127,28 @@ class FF14ConfigSnapshot:
         )
 
 
+def legacy_core_defaults(config: Mapping[str, object] | None):
+    """Presence-preserving legacy region projection, with no migration writes."""
+    if config is None:
+        return MappingProxyType({})
+    if not isinstance(config, Mapping):
+        raise FF14ConfigError("ordinary_config")
+    return MappingProxyType(
+        {"default_region": config[REGION]} if REGION in config else {}
+    )
+
+
+def ff14_config_snapshot(config: Mapping[str, object] | None) -> FF14ConfigSnapshot:
+    """Accept missing legacy fields; reject invalid or undeclared host inputs."""
+    if config is None:
+        config = {}
+    if isinstance(config, Mapping):
+        config = {
+            key: value for key, value in config.items() if key != "web_public_origin"
+        }
+    if not isinstance(config, Mapping) or set(config) - ORDINARY_FIELDS:
+        raise FF14ConfigError("ordinary_config")
+    return FF14ConfigSnapshot.from_values(config)
+
+
 __all__ = ["FF14ConfigError", "FF14ConfigSnapshot", "ORDINARY_FIELDS"]

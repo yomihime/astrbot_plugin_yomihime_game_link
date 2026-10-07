@@ -384,7 +384,7 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
                             request, endpoint, request.path
                         )
                         try:
-                            from ygl_test_subject.adapters.astrbot.web_public import (
+                            from ygl_test_subject.modules.ff14.assembly import (
                                 query_parameters,
                             )
 
@@ -498,12 +498,13 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self,
     ):
         with patch(
-            "ygl_test_subject.adapters.astrbot.runtime.discover_packages",
+            "ygl_test_subject.adapters.astrbot.bundled.discover_packages",
             wraps=discover_packages,
         ) as scan:
-            expected, gates = AstrBotRuntime._bundled_manifest_expectations(
-                self.plugin_root
-            )
+            from tests.host.assembly_contract import selected_assembly
+
+            assembly = selected_assembly(self.plugin_root, PLUGIN_NAME)
+            expected, gates = assembly.manifests, assembly.gates
             scan.assert_called_once()
         gate = gates["ff14/ff14"]
         self.assertIsInstance(gate, TrustedSubscriptionGate)
@@ -957,6 +958,66 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
             ConfigPatchMode.CLEAR, "cn"
         )
 
+    async def test_prepared_migration_caller_uses_selected_inventory_without_live_catalog(
+        self,
+    ):
+        from ygl_test_subject.scripts import (
+            prepare_ff14_config_migration as preparation,
+        )
+
+        from tests.host.assembly_contract import selected_assembly
+
+        legacy = self.root / "legacy.json"
+        legacy.write_text(
+            json.dumps(
+                {
+                    "ff14_default_region": "global",
+                    "ff14_calendar_default_days": 3,
+                    "secret": "synthetic-private",
+                }
+            ),
+            encoding="utf8",
+        )
+        prepared = self.data_dir / preparation.INPUT_FILENAME
+        preparation.prepare(legacy, prepared)
+        expected = selected_assembly(self.plugin_root, PLUGIN_NAME)
+        self.assertEqual(
+            preparation.reviewed_legacy_fields(),
+            frozenset(f.legacy_field for f in expected.migration_fields),
+        )
+        runtime = self._runtime(_Context(), http_transport_factory=_IdleTransport)
+        runtime._raw_legacy_config = None
+        try:
+            with (
+                patch.object(
+                    preparation,
+                    "reviewed_legacy_fields",
+                    side_effect=AssertionError("Runtime must use captured fields"),
+                ),
+                patch(
+                    "ygl_test_subject.adapters.astrbot.runtime.load_prepared_input",
+                    wraps=preparation.load_prepared_input,
+                ) as load,
+            ):
+                await runtime.initialize()
+                self.assertTrue(runtime.ready)
+                self.assertEqual(
+                    set(load.call_args.kwargs["legacy_fields"]),
+                    preparation_fields := {
+                        f.legacy_field for f in runtime._assembly.migration_fields
+                    },
+                )
+                (self.plugin_root / "modules/ff14/assembly.json").write_bytes(b"{}")
+                self.assertEqual(
+                    runtime.core_runtime._ordinary_migration_source(),
+                    {"ff14_default_region": "global", "ff14_calendar_default_days": 3},
+                )
+                self.assertEqual(
+                    set(load.call_args.kwargs["legacy_fields"]), preparation_fields
+                )
+        finally:
+            await runtime.terminate()
+
     async def test_real_composition_missing_prepared_raw_input_fails_closed(self):
         runtime = self._runtime(_Context(), http_transport_factory=_IdleTransport)
         runtime._raw_legacy_config = None
@@ -1070,6 +1131,9 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
                     return SubscriptionGateState(True, True, True, None)
 
                 runtime = self._runtime(_Context())
+                from tests.host.assembly_contract import selected_assembly
+
+                runtime._assembly = selected_assembly(self.plugin_root, PLUGIN_NAME)
                 runtime._core = SimpleNamespace(subscription_gate_state=blocked)
                 runtime._ready = True
                 task = asyncio.create_task(runtime.public_ff14_page_state())
@@ -1284,6 +1348,9 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
         )
         registry = Mock()
         registry.snapshot.side_effect = RuntimeError("private runtime path")
+        from tests.host.assembly_contract import selected_assembly
+
+        runtime._assembly = selected_assembly(self.plugin_root, PLUGIN_NAME)
         runtime._core = SimpleNamespace(registry=registry)
         data = await runtime.public_ff14_page_state()
         self.assertEqual(data["module"], {"registered": None, "enabled": None})

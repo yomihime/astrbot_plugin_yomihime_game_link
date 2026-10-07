@@ -265,9 +265,7 @@ class ManagedCredentialPagesTests(unittest.IsolatedAsyncioTestCase):
                 .modules.get("ff14/ff14")
                 .manifest
                 if self.runtime.ready
-                else self.runtime._bundled_manifest_expectations(
-                    self.runtime._plugin_root
-                )[0]["ff14/ff14"]
+                else self.runtime._assembly.manifests["ff14/ff14"]
             )
         response = await self.call(
             "credential-update",

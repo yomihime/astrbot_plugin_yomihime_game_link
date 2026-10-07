@@ -391,6 +391,11 @@ class SDKBootstrapTests(unittest.TestCase):
                 target = repository / "pages" / page / relative
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(ROOT / "pages" / page / relative, target)
+        for name in ("app.js", "index.html", "styles.css"):
+            shutil.copyfile(
+                repository / "modules/ff14/pages/legacy" / name,
+                repository / "pages/ff14" / name,
+            )
         runtime_file = repository / "core" / "snapshot.py"
         original = b"trusted snapshot bytes\n"
         runtime_file.write_bytes(original)
@@ -464,6 +469,14 @@ class SDKBootstrapTests(unittest.TestCase):
                 repository_root=incomplete_repository,
             )
         self.assertFalse(incomplete_archive.exists())
+
+    def test_legacy_html_projects_current_independent_management_hint(self) -> None:
+        canonical = (ROOT / "modules/ff14/pages/legacy/index.html").read_bytes()
+        self.assertEqual((ROOT / "pages/ff14/index.html").read_bytes(), canonical)
+        text = canonical.decode("utf-8")
+        self.assertIn("普通四字段和 FFLogs 来源凭据", text)
+        self.assertIn("插件管理中的独立授权配置页", text)
+        self.assertNotIn("FFLogs 凭据管理尚未接通", text)
 
     def test_builder_rejects_modified_wheel_even_with_a_self_reported_digest(
         self,

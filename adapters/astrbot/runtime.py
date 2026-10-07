@@ -14,16 +14,16 @@ from typing import Callable
 from ...api.administration import AdminAuthorizationDenied, AdminOperation
 from ...api.contexts import InvocationOrigin
 from ...api.display import DisplayLimits
-from ...api.manifests import ModuleManifest, PrivacyFloor
+from ...api.manifests import PrivacyFloor
 from ...api.services import CapabilityHealth, ConfigTarget, HealthStatus
 from ...api.subscriptions import ConversationKind
 from ...core.help_catalog import HelpCatalog
-from ...extensions.discovery import discover_packages
-from ...extensions.source_snapshot import PackageProvenance
+from ...extensions.factory_resolver import (
+    ReviewedInventoryFactorySource,
+    ReviewedSupportLease,
+)
 from ...infrastructure.key_provider import EnvironmentKeyProvider
 from ...infrastructure.secret_codec import AESGCMSecretCodec
-from ...modules.ff14.config import CALENDAR_VALUE_VALIDATORS, FF14ConfigSnapshot
-from ...modules.ff14.credential_forms import FFLOGS_CREDENTIAL_FORMS
 from ...presentation.rendering import GenericDisplayRenderer, RenderingBounds
 from ...scripts.prepare_ff14_config_migration import INPUT_FILENAME, load_prepared_input
 from ...services.admin_authorization import AdminAuthorizationService
@@ -32,17 +32,13 @@ from ...services.core_runtime import (
     CoreRuntime,
     CoreRuntimeCleanupPending,
     HostIngress,
-    TrustedSubscriptionGate,
 )
-from ...services.managed_source_credentials import ManagedSourceCredentialPolicy
 from ...services.source_credentials import SourceCredentialPolicy
 from .bundled import BundledExtensionError, install_bundled_ff14
 from .command_bridge import AstrBotCommandBridge, CommandHelp, CommandInvocation
-from .config_adapter import ordinary_migration_fields
 from .message_port import AstrBotMessagePort, MessageChainFactory, PlainFactory
+from .trusted_assembly import LegacyAssemblySupport, assemble_reviewed
 from .web_public import (
-    DEPLOYED_CAPABILITIES,
-    QUERY_CAPABILITIES,
     HostPublicWebValidator,
     WebPublicRejected,
     origin_configuration,
@@ -51,23 +47,6 @@ from .web_public import (
 )
 
 PLUGIN_NAME = "astrbot_plugin_yomihime_game_link"
-BUNDLED_SOURCE_HOSTS = {
-    "ff14/ff14": {
-        "universalis_market": "universalis.app",
-        "xivapi_items": "xivapi-v2.xivcdn.com",
-        "garland_items": "garlandtools.cn",
-        "fflogs_public_global": "www.fflogs.com",
-        "fflogs_public_cn": "cn.fflogs.com",
-        "fflogs_stats_global": "www.fflogs.com",
-        "fflogs_stats_cn": "cn.fflogs.com",
-        "ff14_calendar_primary": "calendar.google.com",
-        "ff14_calendar_fallback": "p66-caldav.icloud.com",
-    }
-}
-_BUNDLED_FFLOGS_CREDENTIAL_SOURCES = (
-    ("fflogs_public_global", "credential_fflogs_global", "www.fflogs.com"),
-    ("fflogs_public_cn", "credential_fflogs_cn", "cn.fflogs.com"),
-)
 _INITIALIZING = "服务正在初始化，请稍后重试。"
 _UNTRUSTED_EVENT = "无法确认消息来源，命令未执行。"
 _OWNER_DIRECT_HINT = "该本人管理命令仅支持私聊，请前往私聊继续。"
@@ -150,6 +129,8 @@ class AstrBotRuntime:
         self._http_transport: object | None = None
         self._transport_closed = False
         self._trusted_bundle = False
+        self._assembly = None
+        self._assembly_lease = None
         self._bundle_failure_reason: str | None = None
         self._source_credential_policies: tuple[SourceCredentialPolicy, ...] = ()
         self._isolated_extension_dir: tempfile.TemporaryDirectory[str] | None = None
@@ -267,7 +248,7 @@ class AstrBotRuntime:
         self.public_web_remaining(request_state)
         proof = validator.mint(ticket)
         result = await core.invoke_public_web(
-            "ff14/ff14", QUERY_CAPABILITIES[endpoint], parameters, proof=proof
+            *self._assembly.public_bindings[endpoint], parameters, proof=proof
         )
         # Core deliberately revokes proof after result publication. Keep the
         # independent Host request deadline/generation facts for this final hop.
@@ -334,11 +315,17 @@ class AstrBotRuntime:
                     "host-ordinary-defaults-read"
                 ):
                     module_config = await core.config_repository.current(
-                        ConfigTarget(PLUGIN_NAME, "ff14/ff14")
+                        ConfigTarget(PLUGIN_NAME, self._assembly.module_id)
                     )
                     defaults = await core.core_defaults.current()
-                    config_snapshot = FF14ConfigSnapshot.from_values(
-                        {**module_config.values, "core_defaults": defaults.values}
+                    config_snapshot = self._assembly.support.ordinary_snapshot(
+                        {
+                            f.declaration.name: module_config.values[f.declaration.name]
+                            for f in self._assembly.migration_fields
+                            if f.target.module_id == self._assembly.module_id
+                            and f.declaration.name in module_config.values
+                        },
+                        defaults.values,
                     )
                 config_error = None
             except ConfigurationValueError as exc:
@@ -354,7 +341,7 @@ class AstrBotRuntime:
         }
         if core is not None:
             try:
-                state = await core.subscription_gate_state("ff14/ff14")
+                state = await core.subscription_gate_state(self._assembly.module_id)
                 gate = {
                     "supported": state.supported,
                     "enabled": state.enabled,
@@ -401,7 +388,7 @@ class AstrBotRuntime:
         if self._core is not None and not self._config_error:
             try:
                 snapshot = self._core.registry.snapshot()
-                module = snapshot.modules.get("ff14/ff14")
+                module = snapshot.modules.get(self._assembly.module_id)
                 registered = module is not None
                 enabled = module.enabled if module is not None else False
                 declared = (
@@ -429,35 +416,32 @@ class AstrBotRuntime:
                 if not invalid and config_snapshot is not None
                 else None
             )
-        sources = (
-            "universalis_market",
-            "xivapi_items",
-            "garland_items",
-            "fflogs_public_cn",
-            "fflogs_public_global",
-            "ff14_calendar_primary",
-            "ff14_calendar_fallback",
+        if self._assembly is None:
+            return {
+                "schema_version": 2,
+                "runtime": {"state": state, "reason": reason},
+                "module": {"registered": registered, "enabled": enabled},
+                "ordinary_config": ordinary,
+                "credentials": {},
+                "subscription_gate": gate,
+                "sources": [],
+            }
+        return self._assembly.support.page_state(
+            runtime={"state": state, "reason": reason},
+            registered=registered,
+            enabled=enabled,
+            ordinary=ordinary,
+            gate=gate,
+            declared=declared,
         )
-        return {
-            "schema_version": 2,
-            "runtime": {"state": state, "reason": reason},
-            "module": {"registered": registered, "enabled": enabled},
-            "ordinary_config": ordinary,
-            "credentials": {
-                region: {"configured": None, "state": "unknown"}
-                for region in ("cn", "global")
-            },
-            "subscription_gate": gate,
-            "sources": [
-                {
-                    "id": source_id,
-                    "declared": source_id in declared if declared is not None else None,
-                    "freshness": "unknown",
-                    "last_success_at": None,
-                }
-                for source_id in sources
-            ],
-        }
+
+    def public_query_parameters(self, endpoint, body):
+        if self._assembly is None or endpoint not in self._assembly.public_bindings:
+            raise WebPublicRejected("entry_unavailable")
+        try:
+            return self._assembly.support.query_parameters(endpoint, body)
+        except (ValueError, TypeError, KeyError):
+            raise WebPublicRejected("request_rejected") from None
 
     async def initialize(self) -> None:
         """Install the exact bundled module, then start the one CoreRuntime."""
@@ -497,12 +481,33 @@ class AstrBotRuntime:
             )
             if installation.trusted:
                 extension_root = installation.extension_root
-                defaults, subscription_gates = self._bundled_manifest_expectations(
-                    self._plugin_root
+                support = LegacyAssemblySupport("ff14/ff14")
+                if "assembly.json" in installation.inventory.files:
+                    self._assembly_lease = ReviewedSupportLease(
+                        installation.inventory.files, selected=True
+                    )
+                    support = self._assembly_lease.support
+                try:
+                    self._assembly = assemble_reviewed(
+                        installation.inventory,
+                        principal_id=PLUGIN_NAME,
+                        support=support,
+                        selected=True,
+                    )
+                except BaseException as exc:
+                    if self._assembly_lease is not None:
+                        self._assembly_lease.release()
+                        self._assembly_lease = None
+                    if isinstance(exc, ValueError):
+                        raise RuntimeError(
+                            "trusted assembly credential declaration or reference is invalid"
+                        ) from None
+                    raise
+                defaults, subscription_gates = (
+                    self._assembly.manifests,
+                    self._assembly.gates,
                 )
-                self._source_credential_policies = (
-                    self._bundled_source_credential_policies(extension_root)
-                )
+                self._source_credential_policies = self._assembly.credential_policies
             else:
                 self._isolated_extension_dir = tempfile.TemporaryDirectory(
                     prefix="ygl-disabled-extensions-", dir=self._data_dir
@@ -511,13 +516,18 @@ class AstrBotRuntime:
                 defaults = {}
                 subscription_gates = MappingProxyType({})
                 self._source_credential_policies = ()
+                self._assembly = None
             message_port = AstrBotMessagePort(
                 self._context,
                 plain_factory=self._plain_factory,
                 chain_factory=self._chain_factory,
             )
             try:
-                validator = HostPublicWebValidator(self._generation, self._web_current)
+                validator = HostPublicWebValidator(
+                    self._generation,
+                    self._web_current,
+                    bindings=self._assembly.public_bindings if self._assembly else {},
+                )
                 self._http_transport = self._new_http_transport()
                 self._transport_closed = False
                 if not callable(getattr(self._http_transport, "request", None)):
@@ -552,31 +562,50 @@ class AstrBotRuntime:
                     host_ingress_validator=self._validate_ingress,
                     config_principal_id=PLUGIN_NAME,
                     identity_namespace=PLUGIN_NAME,
+                    factory_source=ReviewedInventoryFactorySource(
+                        installation.inventory, selected=True
+                    )
+                    if installation.trusted
+                    else None,
                     trusted_bundled_manifests=defaults,
                     trusted_subscription_gates=subscription_gates,
                     source_health=self._source_health,
                     source_credential_policies=self._source_credential_policies,
-                    managed_source_credentials=self._bundled_managed_credentials(),
-                    module_config_validators={"ff14/ff14": CALENDAR_VALUE_VALIDATORS},
-                    ordinary_migration_fields=(
-                        ordinary_migration_fields(PLUGIN_NAME)
-                        if self._trusted_bundle
-                        else ()
-                    ),
-                    ordinary_migration_id="ff14-core-defaults-v1",
+                    managed_source_credentials=self._assembly.managed_credentials
+                    if self._assembly
+                    else (),
+                    module_config_validators=self._assembly.validators
+                    if self._assembly
+                    else {},
+                    ordinary_migration_fields=self._assembly.migration_fields
+                    if self._assembly
+                    else (),
+                    ordinary_migration_id=self._assembly.migration_id
+                    if self._assembly
+                    else "unavailable-assembly",
                     ordinary_migration_source=lambda: (
                         self._raw_legacy_config
                         if self._raw_legacy_config is not None
-                        else load_prepared_input(self._data_dir / INPUT_FILENAME)
+                        else load_prepared_input(
+                            self._data_dir / INPUT_FILENAME,
+                            legacy_fields=tuple(
+                                f.legacy_field for f in self._assembly.migration_fields
+                            ),
+                        )
                     ),
                     public_web_validator=validator,
-                    public_web_capabilities=DEPLOYED_CAPABILITIES,
+                    public_web_capabilities=self._assembly.public_capabilities
+                    if self._assembly
+                    else (),
                 )
             except BaseException:
                 try:
                     await self._close_http_transport()
                 finally:
                     self._cleanup_isolated_extension_dir()
+                    if self._assembly_lease is not None:
+                        self._assembly_lease.release()
+                        self._assembly_lease = None
                 raise
             self._core = core
             if (
@@ -634,6 +663,9 @@ class AstrBotRuntime:
                     raise
                 if closed:
                     self._core = None
+                    if self._assembly_lease is not None:
+                        self._assembly_lease.release()
+                        self._assembly_lease = None
                     self._cleanup_isolated_extension_dir()
                     await self._close_http_transport()
                 else:
@@ -742,6 +774,9 @@ class AstrBotRuntime:
         # its existing retry contract; failed tool removal alone does not block
         # transport/directory closure once Core is quiet.
         if self._core is None:
+            if self._assembly_lease is not None:
+                self._assembly_lease.release()
+                self._assembly_lease = None
             try:
                 await self._close_http_transport()
             except BaseException as exc:
@@ -787,124 +822,6 @@ class AstrBotRuntime:
             raise TypeError("AstrBot http_proxy must be a string")
         return value
 
-    @staticmethod
-    def _bundled_manifest_expectations(
-        plugin_root: Path,
-    ) -> tuple[Mapping[str, ModuleManifest], Mapping[str, TrustedSubscriptionGate]]:
-        """Return exact declarations from the reviewed packaged FF14 source."""
-        packages = discover_packages(plugin_root / "modules")
-        matching = tuple(
-            item
-            for item in packages
-            if item.package_id == "ff14" and item.valid and item.manifest is not None
-        )
-        if len(packages) != 1 or len(matching) != 1:
-            raise RuntimeError("trusted bundled manifest source is unavailable")
-        package = matching[0]
-        modules = tuple(
-            item for item in package.manifest.modules if item.module_id == "ff14"
-        )
-        if len(modules) != 1:
-            raise RuntimeError("trusted bundled FF14 module is unavailable")
-        module = modules[0]
-        expectations = MappingProxyType({"ff14/ff14": module})
-        fields = tuple(
-            field
-            for field in module.config_fields
-            if field.name == "ff14_subscriptions_enabled"
-        )
-        if not fields:
-            return expectations, MappingProxyType({})
-        provenance = package._provenance
-        if (
-            len(fields) != 1
-            or fields[0].sensitive
-            or fields[0].default is not True
-            or type(provenance) is not PackageProvenance
-            or not provenance.trusted
-            or provenance.package_id != package.package_id
-            or type(provenance.manifest_sha256) is not bytes
-            or len(provenance.manifest_sha256) != 32
-        ):
-            raise RuntimeError("trusted bundled subscription declaration is invalid")
-        return expectations, MappingProxyType(
-            {
-                "ff14/ff14": TrustedSubscriptionGate(
-                    module, fields[0].name, provenance.manifest_sha256
-                )
-            }
-        )
-
-    @staticmethod
-    def _bundled_source_credential_policies(
-        extension_root: Path,
-    ) -> tuple[SourceCredentialPolicy, ...]:
-        """Bind only exact FFLogs source and sensitive-field declarations.
-
-        Legacy M0/M1 manifests without FFLogs credential declarations receive
-        no policies. Once a credentialed source or sensitive alias is present,
-        its counterpart and fixed host/field contract must also match; a
-        partial declaration fails closed instead of exposing an anonymous
-        FFLogs source.
-        """
-
-        packages = discover_packages(extension_root)
-        matching = tuple(
-            item
-            for item in packages
-            if item.package_id == "ff14" and item.valid and item.manifest is not None
-        )
-        if len(matching) != 1:
-            raise RuntimeError("trusted bundled FF14 manifest is unavailable")
-        module = next(
-            (item for item in matching[0].manifest.modules if item.module_id == "ff14"),
-            None,
-        )
-        if module is None:
-            raise RuntimeError("trusted bundled FF14 module is unavailable")
-        sources = {item.source_id: item for item in module.sources}
-        fields = {item.name: item for item in module.config_fields}
-        policies: list[SourceCredentialPolicy] = []
-        for source_id, alias, host in _BUNDLED_FFLOGS_CREDENTIAL_SOURCES:
-            declaration = sources.get(source_id)
-            field = fields.get(alias)
-            if declaration is None and field is None:
-                continue
-            if (
-                declaration is None
-                or field is None
-                or declaration.host != host
-                or declaration.credential_ref is not None
-                or field.sensitive is not True
-                or field.required is not False
-                or field.default is not None
-            ):
-                raise RuntimeError(
-                    "trusted bundled FFLogs credential declaration is incomplete"
-                )
-            policies.append(
-                SourceCredentialPolicy(
-                    "ff14/ff14",
-                    source_id,
-                    alias,
-                    host,
-                    ("/api/v2/client",),
-                    host,
-                    "/oauth/token",
-                )
-            )
-        return tuple(policies)
-
-    def _bundled_managed_credentials(self):
-        if not self._trusted_bundle:
-            return ()
-        reviewed = {p.credential_ref for p in self._source_credential_policies}
-        return tuple(
-            ManagedSourceCredentialPolicy("ff14/ff14", alias, group, description)
-            for alias, group, description in FFLOGS_CREDENTIAL_FORMS
-            if alias in reviewed
-        )
-
     async def _close_http_transport(self) -> None:
         transport = self._http_transport
         if transport is None:
@@ -922,7 +839,11 @@ class AstrBotRuntime:
     async def _source_health(self, module_id: str, source_id: str) -> CapabilityHealth:
         """Report local wiring readiness only; never probe remote endpoints."""
         unavailable = CapabilityHealth(HealthStatus.UNAVAILABLE, "source_unavailable")
-        if not self._trusted_bundle or module_id not in BUNDLED_SOURCE_HOSTS:
+        if (
+            not self._trusted_bundle
+            or self._assembly is None
+            or module_id != self._assembly.module_id
+        ):
             return unavailable
         transport = self._http_transport
         if transport is None or self._transport_closed:
@@ -937,12 +858,12 @@ class AstrBotRuntime:
             (item for item in module.manifest.sources if item.source_id == source_id),
             None,
         )
-        allowed_host = BUNDLED_SOURCE_HOSTS[module_id].get(source_id)
+        allowed_host = self._assembly.source_hosts.get(source_id)
         credential_alias = next(
             (
-                alias
-                for expected_source, alias, _host in _BUNDLED_FFLOGS_CREDENTIAL_SOURCES
-                if expected_source == source_id
+                p.credential_ref
+                for p in self._assembly.credential_policies
+                if p.source_id == source_id
             ),
             None,
         )

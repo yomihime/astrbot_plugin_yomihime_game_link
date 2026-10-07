@@ -103,7 +103,8 @@ FF14_BUNDLE_ROOT = Path("modules") / "ff14"
 FF14_BUNDLE_REQUIRED_FILES = {
     "__init__.py",
     "config.py",
-    "credential_forms.py",
+    "assembly.py",
+    "assembly.json",
     "module.py",
     "models.py",
     "query_resolution.py",
@@ -115,6 +116,9 @@ FF14_BUNDLE_REQUIRED_FILES = {
     "features/market_handler.py",
     "features/market_sources.py",
     "features/market_models.py",
+}
+FF14_LEGACY_FILES = {
+    f"pages/legacy/{name}" for name in ("app.js", "index.html", "styles.css")
 }
 FF14_BUNDLE_ROOT_FILES = FF14_BUNDLE_REQUIRED_FILES - {"features/__init__.py"}
 FF14_BUNDLE_ALLOWED_DIRS = {Path("features")}
@@ -373,6 +377,21 @@ def _ff14_bundle_files(repository_root: Path) -> list[Path]:
         )
     )
     resources = read_page_resources(package_root, manifest)
+    for relative in sorted(FF14_LEGACY_FILES):
+        canonical = validate_source_path(
+            package_root / relative, repository_root, "FF14 canonical legacy"
+        )
+        projected = repository_root / "pages/ff14" / Path(relative).name
+        if _read_snapshot(
+            canonical, repository_root, "Canonical legacy page"
+        ) != _read_snapshot(projected, repository_root, "Projected legacy page"):
+            raise ValueError("Legacy page projection differs from canonical source")
+        found.append(canonical)
+    legacy_root = package_root / "pages/legacy"
+    if {path.name for path in legacy_root.iterdir()} != {
+        Path(name).name for name in FF14_LEGACY_FILES
+    }:
+        raise ValueError("Unreviewed canonical legacy page input")
     found.extend(
         validate_source_path(
             package_root / path, repository_root, "Module page resource"

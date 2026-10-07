@@ -8,7 +8,6 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from ygl_test_subject.adapters.astrbot.config_adapter import ordinary_migration_fields
 from ygl_test_subject.api.services import ConfigTarget
 from ygl_test_subject.core.ports import RevisionConflict
 from ygl_test_subject.infrastructure.sqlite.database import (
@@ -30,6 +29,8 @@ from ygl_test_subject.services.core_configuration import (
     CoreDefaultsView,
     core_config_target,
 )
+
+from tests.host.assembly_contract import ordinary_migration_fields
 
 
 class MigrationTests(unittest.IsolatedAsyncioTestCase):

@@ -1,0 +1,90 @@
+{
+  "version": 1,
+  "module_id": "ff14/ff14",
+  "sources": {
+    "universalis_market": "universalis.app",
+    "xivapi_items": "xivapi-v2.xivcdn.com",
+    "garland_items": "garlandtools.cn",
+    "fflogs_public_global": "www.fflogs.com",
+    "fflogs_public_cn": "cn.fflogs.com",
+    "fflogs_stats_global": "www.fflogs.com",
+    "fflogs_stats_cn": "cn.fflogs.com",
+    "ff14_calendar_primary": "calendar.google.com",
+    "ff14_calendar_fallback": "p66-caldav.icloud.com"
+  },
+  "credentials": [
+    {
+      "source": "fflogs_public_global",
+      "alias": "credential_fflogs_global",
+      "resource_paths": [
+        "/api/v2/client"
+      ],
+      "token_host": "www.fflogs.com",
+      "token_path": "/oauth/token",
+      "scope": null,
+      "group": "fflogs",
+      "description": "FFLogs 国际服来源凭据",
+      "region": "global",
+      "label": "国际服"
+    },
+    {
+      "source": "fflogs_public_cn",
+      "alias": "credential_fflogs_cn",
+      "resource_paths": [
+        "/api/v2/client"
+      ],
+      "token_host": "cn.fflogs.com",
+      "token_path": "/oauth/token",
+      "scope": null,
+      "group": "fflogs",
+      "description": "FFLogs 国服来源凭据",
+      "region": "cn",
+      "label": "国服"
+    }
+  ],
+  "gate": "ff14_subscriptions_enabled",
+  "migration": {
+    "id": "ff14-core-defaults-v1",
+    "fields": [
+      {
+        "target": "$core",
+        "field": "default_region",
+        "legacy": "ff14_default_region"
+      },
+      {
+        "target": "ff14/ff14",
+        "field": "ff14_calendar_default_days",
+        "legacy": "ff14_calendar_default_days"
+      },
+      {
+        "target": "ff14/ff14",
+        "field": "ff14_calendar_default_timezone",
+        "legacy": "ff14_calendar_default_timezone"
+      },
+      {
+        "target": "ff14/ff14",
+        "field": "ff14_calendar_default_delivery_time",
+        "legacy": "ff14_calendar_default_delivery_time"
+      }
+    ]
+  },
+  "public": {
+    "items": "item.lookup",
+    "character": "ff14.logs.character",
+    "calendar": "ff14.calendar.query",
+    "market": "ff14.market.query"
+  },
+  "page_sources": [
+    "universalis_market",
+    "xivapi_items",
+    "garland_items",
+    "fflogs_public_cn",
+    "fflogs_public_global",
+    "ff14_calendar_primary",
+    "ff14_calendar_fallback"
+  ],
+  "credential_regions": [
+    "cn",
+    "global"
+  ]
+}

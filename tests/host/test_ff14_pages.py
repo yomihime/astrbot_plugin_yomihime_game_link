@@ -15,7 +15,6 @@ from ygl_test_subject.adapters.astrbot.web_public import (
     HostPublicWebValidator,
     WebPublicRejected,
     project_result,
-    query_parameters,
 )
 from ygl_test_subject.api.display import (
     DisplayDocument,
@@ -34,7 +33,9 @@ from ygl_test_subject.api.results import (
     ResultStatus,
 )
 from ygl_test_subject.core.ports import PublicWebBinding
+from ygl_test_subject.modules.ff14.assembly import query_parameters
 
+from tests.host.assembly_contract import selected_assembly
 from tests.host.astrbot_contract import host_contracts as _host_contracts
 
 
@@ -126,7 +127,10 @@ class PublicWebPagesTests(unittest.IsolatedAsyncioTestCase):
         )
         runtime._generation = 13
         runtime._ready = True
-        validator = HostPublicWebValidator(13, runtime._web_current)
+        runtime._assembly = selected_assembly()
+        validator = HostPublicWebValidator(
+            13, runtime._web_current, bindings=runtime._assembly.public_bindings
+        )
         core = _QueryCore(validator, status)
         runtime._core = core
         validator.attach(core)
@@ -539,7 +543,9 @@ class PublicWebPagesTests(unittest.IsolatedAsyncioTestCase):
                 )
         self.assertEqual(bindings[0].bearer_key, bindings[1].bearer_key)
         self.assertNotIn(token, repr(runtime._web_validator._requests))
-        other = HostPublicWebValidator(13, lambda *_: True)
+        other = HostPublicWebValidator(
+            13, lambda *_: True, bindings=runtime._assembly.public_bindings
+        )
         other.attach(object())
         proof = other.begin("items", token, int(time.time()) + 60)
         other.mint(proof)
@@ -557,17 +563,17 @@ class PublicWebPagesTests(unittest.IsolatedAsyncioTestCase):
             b"\xff",
             b'{"query":"' + b"x" * 4096 + b'"}',
         ):
-            with self.assertRaises(WebPublicRejected):
+            with self.assertRaises(ValueError):
                 query_parameters("items", body)
         for days in (0, 31, True):
-            with self.assertRaises(WebPublicRejected):
+            with self.assertRaises(ValueError):
                 query_parameters(
                     "calendar",
                     json.dumps(
                         {"region": "cn", "days": days, "timezone": "UTC"}
                     ).encode(),
                 )
-        with self.assertRaises(WebPublicRejected):
+        with self.assertRaises(ValueError):
             query_parameters(
                 "calendar", b'{"region":"cn","days":7,"timezone":"not/a/zone"}'
             )

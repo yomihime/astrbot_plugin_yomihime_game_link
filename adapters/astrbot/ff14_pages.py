@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 
 from .runtime import PLUGIN_NAME
-from .web_public import QUERY_CAPABILITIES, WebPublicRejected, query_parameters
+from .web_public import QUERY_ENDPOINTS, WebPublicRejected
 
 _READ_FAILED = "状态暂时无法读取，请稍后重试。"
 _CLOSED = "页面状态读取已停止，请重新打开插件页面。"
@@ -46,7 +46,7 @@ class FF14Pages:
             handler = self._web_status_handler()
             self._registrations.append((route, handler))
             self._context.register_web_api(route, handler, ["GET"], "网页公开查询状态")
-            for endpoint in QUERY_CAPABILITIES:
+            for endpoint in QUERY_ENDPOINTS:
                 route = f"/{PLUGIN_NAME}/queries/{endpoint}"
                 handler = self._query_handler(endpoint)
                 self._registrations.append((route, handler))
@@ -146,7 +146,7 @@ class FF14Pages:
                     raise WebPublicRejected("entry_unavailable")
                 body = body_task.result()
                 self._runtime.public_web_remaining(state)
-                parameters = query_parameters(endpoint, body)
+                parameters = self._runtime.public_query_parameters(endpoint, body)
                 data = await self._runtime.invoke_public_web(
                     state, endpoint, parameters
                 )

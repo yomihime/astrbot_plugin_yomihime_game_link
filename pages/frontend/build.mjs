@@ -31,6 +31,7 @@ await build({...common, build: {outDir: resolve(root, 'pages/management'), empty
 await build({...common, build: {outDir: resolve(ff14, 'dist'), emptyOutDir: true, lib: {entry: resolve(ff14, 'src/entry.ts'), formats: ['es'], fileName: () => 'entry.js', cssFileName: 'styles'}, rolldownOptions: {external: ['vue', 'naive-ui'], output: {paths: {'vue': '../../../../../runtime.js', 'naive-ui': '../../../../../runtime.js'}}}, minify: true}});
 await copyFile(resolve(frontend, 'src/index.html'), resolve(shell, 'index.html'));
 await copyFile(resolve(frontend, 'src/management-index.html'), resolve(root, 'pages/management/index.html'));
+for (const name of ['app.js','index.html','styles.css']) await copyFile(resolve(ff14, 'legacy', name), resolve(root, 'pages/ff14', name));
 await copyFile(resolve(ff14, 'src/query-contract.js'), resolve(root, 'pages/ff14/query-contract.js'));
 const resources = [];
 for (const file of (await readdir(resolve(ff14, 'dist'))).sort()) {

@@ -19,6 +19,7 @@ from setuptools import build_meta
 from scripts.build_dashboard_zip import (
     FF14_BUNDLE_REQUIRED_FILES,
     FF14_BUNDLE_ROOT,
+    FF14_LEGACY_FILES,
     MAINTENANCE_HELPER_FILES,
     OPERATOR_SCRIPT_FILES,
     PAGE_FILES,
@@ -42,6 +43,10 @@ def _write_operator_script_fixtures(root: Path) -> None:
         path = root / filename
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(b"operator script fixture")
+    for relative in FF14_LEGACY_FILES:
+        canonical = root / FF14_BUNDLE_ROOT / relative
+        canonical.parent.mkdir(parents=True, exist_ok=True)
+        canonical.write_bytes((root / "pages/ff14" / Path(relative).name).read_bytes())
 
 
 def _render_record(payloads: dict[str, bytes], record_name: str) -> bytes:
@@ -179,7 +184,7 @@ class ReleaseBuildTests(unittest.TestCase):
                 (root / directory).mkdir()
             _write_operator_script_fixtures(root)
             ff14_root = root / FF14_BUNDLE_ROOT
-            ff14_root.mkdir(parents=True)
+            ff14_root.mkdir(parents=True, exist_ok=True)
             for filename in FF14_BUNDLE_REQUIRED_FILES:
                 package_file = ff14_root / filename
                 package_file.parent.mkdir(parents=True, exist_ok=True)
@@ -223,6 +228,17 @@ class ReleaseBuildTests(unittest.TestCase):
             self.assertEqual(
                 {name for name in names if name.startswith("pages/")}, set(PAGE_FILES)
             )
+            projected = root / "pages/ff14/app.js"
+            original_page = projected.read_bytes()
+            projected.write_bytes(b"changed generated page")
+            with self.assertRaisesRegex(ValueError, "projection differs"):
+                included_files(root)
+            projected.write_bytes(original_page)
+            extra = ff14_root / "pages/legacy/unreviewed.js"
+            extra.write_bytes(b"unexpected canonical source")
+            with self.assertRaisesRegex(ValueError, "Unreviewed canonical"):
+                included_files(root)
+            extra.unlink()
             sentinel = root / "private-sentinel"
             sentinel.write_bytes(b"private")
             for filename, label in (
@@ -252,7 +268,7 @@ class ReleaseBuildTests(unittest.TestCase):
                 (root / directory).mkdir()
             _write_operator_script_fixtures(root)
             ff14_root = root / FF14_BUNDLE_ROOT
-            ff14_root.mkdir(parents=True)
+            ff14_root.mkdir(parents=True, exist_ok=True)
             for filename in FF14_BUNDLE_REQUIRED_FILES:
                 package_file = ff14_root / filename
                 package_file.parent.mkdir(parents=True, exist_ok=True)
@@ -285,7 +301,7 @@ class ReleaseBuildTests(unittest.TestCase):
                     (root / directory).mkdir()
                 _write_operator_script_fixtures(root)
                 ff14_root = root / FF14_BUNDLE_ROOT
-                ff14_root.mkdir(parents=True)
+                ff14_root.mkdir(parents=True, exist_ok=True)
                 for filename in FF14_BUNDLE_REQUIRED_FILES:
                     package_file = ff14_root / filename
                     package_file.parent.mkdir(parents=True, exist_ok=True)
@@ -312,7 +328,7 @@ class ReleaseBuildTests(unittest.TestCase):
                 (root / directory).mkdir()
             _write_operator_script_fixtures(root)
             ff14_root = root / FF14_BUNDLE_ROOT
-            ff14_root.mkdir(parents=True)
+            ff14_root.mkdir(parents=True, exist_ok=True)
             for filename in FF14_BUNDLE_REQUIRED_FILES:
                 package_file = ff14_root / filename
                 package_file.parent.mkdir(parents=True, exist_ok=True)

@@ -4,14 +4,14 @@ import json
 import unittest
 from pathlib import Path
 
-from ygl_test_subject.adapters.astrbot.config_adapter import (
-    FF14ConfigError,
-    ff14_config_snapshot,
-)
 from ygl_test_subject.adapters.astrbot.web_public import (
     WebPublicRejected,
     normalize_origin,
     origin_configuration,
+)
+from ygl_test_subject.modules.ff14.config import (
+    FF14ConfigError,
+    ff14_config_snapshot,
 )
 
 

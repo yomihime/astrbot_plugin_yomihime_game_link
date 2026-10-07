@@ -44,7 +44,8 @@ except Exception:
     raise RuntimeError("the pinned plugin-local SDK is unavailable") from None
 
 from ..adapters.astrbot.bundled import install_bundled_ff14
-from ..adapters.astrbot.runtime import PLUGIN_NAME, AstrBotRuntime
+from ..adapters.astrbot.runtime import PLUGIN_NAME
+from ..adapters.astrbot.trusted_assembly import assemble_reviewed
 from ..api.administration import (
     AdminAuthorizationContext,
     AdminOperation,
@@ -56,6 +57,10 @@ from ..api.services import (
     ConfigPatch,
     ConfigPatchMode,
     SecretMaterial,
+)
+from ..extensions.factory_resolver import (
+    ReviewedInventoryFactorySource,
+    ReviewedSupportLease,
 )
 from ..infrastructure.http_transport import AioHttpTransport
 from ..infrastructure.key_provider import EnvironmentKeyProvider
@@ -70,10 +75,7 @@ from ..services.core_runtime import CoreRuntime, CoreRuntimeCleanupPending
 from .admin_credentials import _finish_cleanup, _read_hidden, local_maintenance_guard
 
 MODULE_ID = "ff14/ff14"
-_REALMS = {
-    "cn": ("credential_fflogs_cn", "国服"),
-    "global": ("credential_fflogs_global", "国际服"),
-}
+_REALMS = ("cn", "global")
 _SESSION_TTL_SECONDS = 5 * 60
 
 
@@ -140,7 +142,8 @@ def _new_core(
     data_dir: Path,
     extension_root: Path,
     authority: _SessionAuthority,
-    policies,
+    assembly,
+    inventory,
 ):
     transport = AioHttpTransport()
     core = CoreRuntime(
@@ -169,7 +172,12 @@ def _new_core(
         host_ingress_validator=lambda *_args: False,
         config_principal_id=PLUGIN_NAME,
         identity_namespace=PLUGIN_NAME,
-        source_credential_policies=policies,
+        factory_source=ReviewedInventoryFactorySource(inventory, selected=True),
+        source_credential_policies=assembly.credential_policies,
+        trusted_bundled_manifests=assembly.manifests,
+        trusted_subscription_gates=assembly.gates,
+        module_config_validators=assembly.validators,
+        managed_source_credentials=assembly.managed_credentials,
     )
     return core, transport
 
@@ -185,6 +193,7 @@ async def _configure(
     clear_confirmation: str | None = None,
     plugin_root: Path = _PLUGIN_ROOT,
     prompt=getpass.getpass,
+    label_sink=None,
 ) -> ConfigSummary:
     if action not in {"set", "clear"} or realm not in _REALMS:
         raise ValueError("unsupported operation")
@@ -198,14 +207,32 @@ async def _configure(
         installation = install_bundled_ff14(plugin_root, data_dir)
         if not installation.trusted:
             raise ValueError("trusted FF14 package is unavailable")
-        credential_alias, realm_label = _REALMS[realm]
-        policies = AstrBotRuntime._bundled_source_credential_policies(
-            installation.extension_root
+        support_lease = ReviewedSupportLease(
+            installation.inventory.files, selected=True
         )
+        try:
+            assembly = assemble_reviewed(
+                installation.inventory,
+                principal_id=PLUGIN_NAME,
+                support=support_lease.support,
+                selected=True,
+            )
+            credential_alias, realm_label = assembly.credential_realms[realm]
+        except BaseException:
+            support_lease.release()
+            raise
         authority = _SessionAuthority()
-        core, transport = _new_core(
-            data_dir, installation.extension_root, authority, policies
-        )
+        try:
+            core, transport = _new_core(
+                data_dir,
+                installation.extension_root,
+                authority,
+                assembly,
+                installation.inventory,
+            )
+        except BaseException:
+            support_lease.release()
+            raise
         session: _MaintenanceSession | None = None
         try:
             await core.database.executor.initialize()
@@ -298,6 +325,8 @@ async def _configure(
                 raise RuntimeError("FFLogs credential was not stored")
             if action == "clear" and field_state == "configured":
                 raise RuntimeError("FFLogs credential remains configured")
+            if label_sink is not None:
+                label_sink(realm_label)
             return updated
         finally:
             authority.revoke()
@@ -314,6 +343,7 @@ async def _configure(
                 # Transport.closed is set before session.close awaits; only
                 # a successfully completed close also proves that drain.
                 transport_close_complete = True
+                support_lease.release()
 
             await _finish_cleanup(
                 close_resources,
@@ -369,11 +399,14 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
-        updated = asyncio.run(_configure(args.data_dir, args.action, args.realm))
+        labels = []
+        updated = asyncio.run(
+            _configure(args.data_dir, args.action, args.realm, label_sink=labels.append)
+        )
     except Exception:
         print("FFLogs 凭据操作失败；配置未确认完成。", file=sys.stderr)
         return 1
-    label = _REALMS[args.realm][1]
+    label = labels[0] if labels else args.realm
     verb = "已更新" if args.action == "set" else "已清除"
     print(f"FFLogs {label}凭据{verb}，配置版本 {updated.revision}。")
     return 0

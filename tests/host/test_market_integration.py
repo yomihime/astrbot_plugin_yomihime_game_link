@@ -16,9 +16,9 @@ import httpx
 from fastapi import FastAPI, Request
 from ygl_test_subject.adapters.astrbot.ff14_pages import FF14Pages
 from ygl_test_subject.adapters.astrbot.runtime import PLUGIN_NAME
-from ygl_test_subject.adapters.astrbot.web_public import query_parameters
 from ygl_test_subject.api.administration import AdminAuthorizationDenied
 from ygl_test_subject.api.services import HttpResponse
+from ygl_test_subject.modules.ff14.assembly import query_parameters
 
 from tests.host import test_astrbot_runtime as runtime_fixture
 from tests.host import test_ff14_pages as page_fixture

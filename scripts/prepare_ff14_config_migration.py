@@ -14,14 +14,6 @@ from pathlib import Path
 
 PLUGIN_ID = "astrbot_plugin_yomihime_game_link"
 INPUT_FILENAME = "ff14-config-migration-v1.json"
-FIELDS = frozenset(
-    (
-        "ff14_default_region",
-        "ff14_calendar_default_days",
-        "ff14_calendar_default_timezone",
-        "ff14_calendar_default_delivery_time",
-    )
-)
 
 
 def _object(pairs):
@@ -56,6 +48,72 @@ def _canonical(fields):
     ).encode("utf-8")
 
 
+def reviewed_legacy_fields():
+    """Ordinary catalog from the fixed reviewed release; no executable imports.
+
+    This offline selection exports presence only and grants no Core authority.
+    Runtime supplies its already selected immutable fields instead of using it.
+    """
+    root = Path(__file__).resolve().parents[1] / "modules/ff14"
+    raw = (root / "assembly.json").read_bytes()
+    manifest_raw = (root / "yomihime.manifest.json").read_bytes()
+    if len(raw) > 32768 or len(manifest_raw) > 262144:
+        raise ValueError("reviewed preparation catalog exceeds limit")
+    descriptor, manifest = _parse(raw), _parse(manifest_raw)
+    if (
+        type(descriptor) is not dict
+        or type(descriptor.get("version")) is not int
+        or descriptor["version"] != 1
+        or descriptor.get("module_id") != "ff14/ff14"
+        or type(manifest) is not dict
+        or manifest.get("package_id") != "ff14"
+    ):
+        raise ValueError("reviewed preparation catalog is invalid")
+    modules = manifest.get("modules")
+    if type(modules) is not list:
+        raise ValueError("reviewed preparation manifest is invalid")
+    selected = [
+        item
+        for item in modules
+        if type(item) is dict and item.get("module_id") == "ff14"
+    ]
+    if len(selected) != 1:
+        raise ValueError("reviewed preparation module is unavailable")
+    declarations = {item["name"]: item for item in selected[0].get("config_fields", ())}
+    migration = descriptor.get("migration")
+    if type(migration) is not dict or set(migration) != {"id", "fields"}:
+        raise ValueError("reviewed preparation migration is invalid")
+    fields = migration["fields"]
+    if type(fields) is not list or not 1 <= len(fields) <= 32:
+        raise ValueError("reviewed preparation field limit is invalid")
+    legacy = set()
+    for item in fields:
+        if type(item) is not dict or set(item) != {"target", "field", "legacy"}:
+            raise ValueError("reviewed preparation field is invalid")
+        name = item["legacy"]
+        if (
+            type(name) is not str
+            or re.fullmatch(r"[a-z][a-z0-9_.]{0,127}", name) is None
+            or name in legacy
+        ):
+            raise ValueError("reviewed preparation legacy key is invalid")
+        if item["target"] == "$core":
+            if item["field"] != "default_region":
+                raise ValueError("reviewed preparation Core reference is invalid")
+        elif item["target"] == "ff14/ff14":
+            field = declarations.get(item["field"])
+            if (
+                field is None
+                or field.get("sensitive", False) is not False
+                or item["field"] == descriptor.get("gate")
+            ):
+                raise ValueError("reviewed preparation requires ordinary fields")
+        else:
+            raise ValueError("reviewed preparation target is invalid")
+        legacy.add(name)
+    return frozenset(legacy)
+
+
 def prepare(source: Path, output: Path):
     source, output = Path(source).resolve(), Path(output).resolve()
     if source == output or output.exists():
@@ -66,7 +124,8 @@ def prepare(source: Path, output: Path):
     original = _parse(raw)
     if not isinstance(original, dict):
         raise ValueError("legacy plugin JSON must be an object")
-    fields = {key: value for key, value in original.items() if key in FIELDS}
+    allowed = reviewed_legacy_fields()
+    fields = {key: value for key, value in original.items() if key in allowed}
     payload = {
         "schema_version": 1,
         "plugin_id": PLUGIN_ID,
@@ -82,7 +141,10 @@ def prepare(source: Path, output: Path):
     return payload
 
 
-def load_prepared_input(path: Path):
+def load_prepared_input(path: Path, *, legacy_fields=None):
+    allowed = (
+        reviewed_legacy_fields() if legacy_fields is None else frozenset(legacy_fields)
+    )
     try:
         raw = Path(path).read_bytes()
     except FileNotFoundError:
@@ -105,7 +167,7 @@ def load_prepared_input(path: Path):
         or payload["schema_version"] != 1
         or payload["plugin_id"] != PLUGIN_ID
         or not isinstance(payload["fields"], dict)
-        or set(payload["fields"]) - FIELDS
+        or set(payload["fields"]) - allowed
         or any(
             type(payload[key]) is not str
             or re.fullmatch(r"[0-9a-f]{64}", payload[key]) is None

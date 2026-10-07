@@ -77,18 +77,22 @@ def package():
     ), content
 
 
-class ContractTests(unittest.TestCase):
-    def test_raw_tail_preserves_text_and_longest_structured_path_wins(self):
+class ContractTests(unittest.IsolatedAsyncioTestCase):
+    async def test_raw_tail_preserves_text_and_longest_structured_path_wins(self):
         manifest, _ = package()
         registry = Registry()
 
         class Handler:
-            async def invoke(self, *args):
-                return None
+            calls = 0
 
-        registry.register_package(
-            manifest, {"demo": ModuleHandlers({"query": Handler()}, {}, {})}
-        )
+            async def invoke(self, *args):
+                self.calls += 1
+                raise AssertionError("help invoked a business handler")
+
+        handler = Handler()
+        handlers = ModuleHandlers({"query": handler}, {}, {})
+        registry.register_package(manifest, {"demo": handlers})
+        lifecycle = LifecycleController(registry, runtime_id="raw-tail-contract")
         bridge = AstrBotCommandBridge(registry)
 
         class Event:
@@ -98,18 +102,50 @@ class ContractTests(unittest.TestCase):
             def get_message_str(self):
                 return self.text
 
-        action = bridge.parse(Event('/ygl demo search "A  B"  name="C D"  '))
-        self.assertIsInstance(action, CommandInvocation)
-        self.assertEqual(action.parameters, {"text": '"A  B"  name="C D"  '})
-        action = bridge.parse(Event("/ygl demo search help"))
-        self.assertIsInstance(action, CommandInvocation)
-        self.assertNotIsInstance(action, CommandHelp)
-        self.assertEqual(action.parameters, {"text": "help"})
-        action = bridge.parse(Event('/ygl demo search exact "A B"'))
-        self.assertEqual(
-            (action.operation_path, dict(action.parameters)),
-            ("search exact", {"query": "A B"}),
+        def assert_unavailable():
+            for text in ("/ygl demo search help", "/ygl demo search value"):
+                action = bridge.parse(Event(text))
+                self.assertIsInstance(action, str)
+                self.assertNotIsInstance(action, CommandInvocation)
+                self.assertNotIsInstance(action, CommandHelp)
+
+        assert_unavailable()
+
+        class Instance(_Instance):
+            async def check_health(self):
+                return HealthReport({"query": CapabilityHealth(HealthStatus.AVAILABLE)})
+
+        instance = Instance(handlers)
+        lifecycle.adopt_candidate("sample", manifest.modules[0], "install", instance)
+        lifecycle.install_dormant(
+            "sample", "sample/demo", "install", instance, handlers
         )
+        identity, _ = await lifecycle.start_candidate("sample/demo", "start")
+        lifecycle.publish_committed_intent(
+            "sample/demo", "start", identity, True, registry.snapshot().revision
+        )
+        try:
+            action = bridge.parse(Event('/ygl demo search "A  B"  name="C D"  '))
+            self.assertIsInstance(action, CommandInvocation)
+            self.assertEqual(action.parameters, {"text": '"A  B"  name="C D"  '})
+            action = bridge.parse(Event("/ygl demo search help"))
+            self.assertIsInstance(action, CommandHelp)
+            self.assertNotIsInstance(action, CommandInvocation)
+            self.assertEqual(handler.calls, 0)
+            for tail in ('"help"', "help more"):
+                action = bridge.parse(Event("/ygl demo search " + tail))
+                self.assertIsInstance(action, CommandInvocation)
+                self.assertEqual(action.parameters, {"text": tail})
+            action = bridge.parse(Event('/ygl demo search exact "A B"'))
+            self.assertIsInstance(action, CommandInvocation)
+            self.assertEqual(
+                (action.operation_path, dict(action.parameters)),
+                ("search exact", {"query": "A B"}),
+            )
+        finally:
+            await lifecycle.stop("sample/demo")
+        assert_unavailable()
+        self.assertEqual(handler.calls, 0)
 
     def test_raw_tail_cannot_bypass_schema_or_mapping(self):
         manifest, _ = package()
