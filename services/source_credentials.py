@@ -518,16 +518,16 @@ class SourceCredentialService:
         except asyncio.TimeoutError:
             raise SourceHttpError("timeout") from None
         except SourceHttpError as exc:
-            if exc.code == "timeout":
-                raise
-            raise SourceHttpError("credentials_unavailable") from None
+            raise SourceHttpError(exc.code, status_code=exc.status_code) from None
         except Exception:
-            raise SourceHttpError("credentials_unavailable") from None
-        if (
-            not isinstance(response, HttpResponse)
-            or not 200 <= response.status_code < 300
-        ):
-            raise SourceHttpError("credentials_unavailable") from None
+            raise SourceHttpError("transport_failed") from None
+        if not isinstance(response, HttpResponse):
+            raise SourceHttpError("invalid_response") from None
+        if not 200 <= response.status_code < 300:
+            raise SourceHttpError(
+                "rate_limited" if response.status_code == 429 else "upstream_error",
+                status_code=response.status_code,
+            ) from None
         if len(response.body) > _TOKEN_RESPONSE_BYTES:
             raise SourceHttpError("response_too_large") from None
         try:
@@ -555,7 +555,7 @@ class SourceCredentialService:
             lifetime = float(min(expires_in, 86400))
             return token, lifetime
         except Exception:
-            raise SourceHttpError("credentials_unavailable") from None
+            raise SourceHttpError("invalid_response") from None
 
     @staticmethod
     def _lease(state: _TokenState) -> CredentialLease:

@@ -23,6 +23,7 @@ from ...extensions.source_snapshot import PackageProvenance
 from ...infrastructure.key_provider import EnvironmentKeyProvider
 from ...infrastructure.secret_codec import AESGCMSecretCodec
 from ...modules.ff14.config import CALENDAR_VALUE_VALIDATORS, FF14ConfigSnapshot
+from ...modules.ff14.credential_forms import FFLOGS_CREDENTIAL_FORMS
 from ...presentation.rendering import GenericDisplayRenderer, RenderingBounds
 from ...scripts.prepare_ff14_config_migration import INPUT_FILENAME, load_prepared_input
 from ...services.admin_authorization import AdminAuthorizationService
@@ -33,6 +34,7 @@ from ...services.core_runtime import (
     HostIngress,
     TrustedSubscriptionGate,
 )
+from ...services.managed_source_credentials import ManagedSourceCredentialPolicy
 from ...services.source_credentials import SourceCredentialPolicy
 from .bundled import BundledExtensionError, install_bundled_ff14
 from .command_bridge import AstrBotCommandBridge, CommandHelp, CommandInvocation
@@ -155,22 +157,24 @@ class AstrBotRuntime:
         self._generation = 0
         self._closing = False
         self._admin_source = None
+        self._credential_admin_source = None
 
     def management_current(self, core, source):
         return (
             core is self._core
-            and source is self._admin_source
+            and source is not None
+            and (
+                source is self._admin_source or source is self._credential_admin_source
+            )
             and not self._closing
             and getattr(core, "management_available", False) is True
         )
 
-    def management_entry(self):
-        if (
-            not self.management_current(self._core, self._admin_source)
-            or self._admin_source is None
-        ):
+    def management_entry(self, *, credentials=False):
+        source = self._credential_admin_source if credentials else self._admin_source
+        if not self.management_current(self._core, source) or source is None:
             raise AdminAuthorizationDenied
-        return self._core, self._admin_source
+        return self._core, source
 
     async def recover_management(
         self, core, revisions, *, authorization, complete_from_current
@@ -552,6 +556,7 @@ class AstrBotRuntime:
                     trusted_subscription_gates=subscription_gates,
                     source_health=self._source_health,
                     source_credential_policies=self._source_credential_policies,
+                    managed_source_credentials=self._bundled_managed_credentials(),
                     module_config_validators={"ff14/ff14": CALENDAR_VALUE_VALIDATORS},
                     ordinary_migration_fields=(
                         ordinary_migration_fields(PLUGIN_NAME)
@@ -592,6 +597,20 @@ class AstrBotRuntime:
                     },
                 )
             validator.attach(core)
+            if (
+                self._admin_source is not None
+                and core.admin_operations.credential_resources()
+            ):
+                self._credential_admin_source = (
+                    core.admin_authorization.register_source(
+                        "astrbot-dashboard-source-credentials",
+                        resources=core.admin_operations.credential_resources(),
+                        operations={
+                            AdminOperation.READ_CONFIG,
+                            AdminOperation.UPDATE_CONFIG,
+                        },
+                    )
+                )
             self._web_validator = validator
             try:
                 await core.start()
@@ -698,6 +717,13 @@ class AstrBotRuntime:
                 pending.append(("admin_source", exc))
             else:
                 self._admin_source = None
+        if self._credential_admin_source is not None:
+            try:
+                self._credential_admin_source.close()
+            except BaseException as exc:
+                pending.append(("credential_admin_source", exc))
+            else:
+                self._credential_admin_source = None
         if self._web_validator is not None:
             try:
                 self._web_validator.close()
@@ -868,6 +894,16 @@ class AstrBotRuntime:
                 )
             )
         return tuple(policies)
+
+    def _bundled_managed_credentials(self):
+        if not self._trusted_bundle:
+            return ()
+        reviewed = {p.credential_ref for p in self._source_credential_policies}
+        return tuple(
+            ManagedSourceCredentialPolicy("ff14/ff14", alias, group, description)
+            for alias, group, description in FFLOGS_CREDENTIAL_FORMS
+            if alias in reviewed
+        )
 
     async def _close_http_transport(self) -> None:
         transport = self._http_transport

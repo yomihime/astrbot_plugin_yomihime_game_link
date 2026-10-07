@@ -103,6 +103,7 @@ FF14_BUNDLE_ROOT = Path("modules") / "ff14"
 FF14_BUNDLE_REQUIRED_FILES = {
     "__init__.py",
     "config.py",
+    "credential_forms.py",
     "module.py",
     "models.py",
     "query_resolution.py",

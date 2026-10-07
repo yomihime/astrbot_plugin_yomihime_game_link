@@ -29,7 +29,13 @@ from modules.ff14.features.fflogs_catalog import (
 from modules.ff14.features.fflogs_models import FFLogsPayloadError, RegionRecord
 from yomihime_sdk.api.display import TextBlock
 from yomihime_sdk.api.results import ErrorCode, ResultStatus
-from yomihime_sdk.api.services import HttpRequest, HttpResponse, SourceHttpError
+from yomihime_sdk.api.services import (
+    ConfigSnapshot,
+    HttpRequest,
+    HttpResponse,
+    SourceHttpError,
+)
+from yomihime_sdk.api.storage import SecretMetadata, SecretMetadataState, SecretRef
 
 
 class _Scope:
@@ -64,8 +70,29 @@ class _FakeHttp:
         return HttpResponse(200, {"Content-Type": "application/json"}, body)
 
 
-def _services(http: _FakeHttp):
-    return type("Services", (), {"scopes": _Scopes(http)})()
+def _services(http: _FakeHttp, *, configured=True):
+    class Config:
+        async def current(self):
+            aliases = ("credential_fflogs_cn", "credential_fflogs_global")
+            return ConfigSnapshot(
+                1,
+                {},
+                tuple(
+                    SecretMetadata(
+                        alias,
+                        SecretRef(
+                            "secret_synthetic", "test", "ff14/ff14", alias, "synthetic"
+                        ),
+                        1,
+                        SecretMetadataState.ACTIVE,
+                    )
+                    for alias in aliases
+                )
+                if configured
+                else (),
+            )
+
+    return type("Services", (), {"scopes": _Scopes(http), "config": Config()})()
 
 
 def _type(kind: str, name: str | None = None, of_type: dict | None = None) -> dict:
@@ -515,6 +542,46 @@ class FFLogsContractTests(unittest.TestCase):
 
 
 class FFLogsHandlerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_unknown_credential_metadata_is_neutral_and_never_does_http(self):
+        for invalid in (False, True):
+            for handler, parameters in (
+                (
+                    FFLogsCharacterLookup,
+                    {
+                        "realm": "global",
+                        "server": "Cerberus",
+                        "character": "Synthetic Hero",
+                    },
+                ),
+                (
+                    FFLogsOutputPercentiles,
+                    {
+                        "realm": "global",
+                        "encounter": "合成首领",
+                        "difficulty": "合成零式",
+                        "job": "合成职业",
+                    },
+                ),
+            ):
+                with self.subTest(handler=handler.__name__, invalid_snapshot=invalid):
+
+                    class Config:
+                        async def current(self):
+                            if invalid:
+                                return {"synthetic-private-value": "not-a-snapshot"}
+                            raise RuntimeError("synthetic-private-metadata-error")
+
+                    http = _FakeHttp([])
+                    services = _services(http)
+                    services.config = Config()
+                    result = await handler(services).invoke(None, parameters)
+                    self.assertIs(result.error.code, ErrorCode.AUTH_REQUIRED)
+                    self.assertIn("无法确认", result.error.message)
+                    self.assertNotIn("已配置", result.error.message)
+                    self.assertNotIn("尚未配置", result.error.message)
+                    self.assertNotIn("synthetic-private", result.error.message)
+                    self.assertEqual(http.requests, [])
+
     async def test_public_character_accepts_chinese_realm_and_directory_resolves_names(
         self,
     ) -> None:
@@ -853,6 +920,23 @@ class FFLogsHandlerTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIs(auth_result.error.code, ErrorCode.AUTH_REQUIRED)
         self.assertNotIn("Authorization", auth.requests[0].headers)
+
+        missing = _FakeHttp([])
+        absent = await FFLogsOutputPercentiles(
+            _services(missing, configured=False)
+        ).invoke(
+            None,
+            {
+                "realm": "global",
+                "encounter": "合成首领",
+                "difficulty": "合成零式",
+                "job": "合成职业",
+            },
+        )
+        self.assertIs(absent.error.code, ErrorCode.AUTH_REQUIRED)
+        self.assertIn("尚未配置", absent.error.message)
+        self.assertEqual(missing.requests, [])
+        self.assertIn("已配置但", auth_result.error.message)
 
         challenge = _FakeHttp(_output_responses(b"<title>Human Verification</title>"))
         challenge_result = await FFLogsOutputPercentiles(_services(challenge)).invoke(

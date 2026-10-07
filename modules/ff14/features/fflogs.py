@@ -22,8 +22,13 @@ from yomihime_sdk.api.results import (
     ErrorDetail,
     ResultStatus,
 )
-from yomihime_sdk.api.services import HttpRequest, ModuleServices, SourceHttpError
-from yomihime_sdk.api.storage import JsonObject
+from yomihime_sdk.api.services import (
+    ConfigSnapshot,
+    HttpRequest,
+    ModuleServices,
+    SourceHttpError,
+)
+from yomihime_sdk.api.storage import JsonObject, SecretMetadataState
 
 from .fflogs_catalog import (
     FFLOGS_CN_SOURCE,
@@ -101,12 +106,18 @@ class FFLogsCharacterLookup:
             return inputs
         realm, server_label, name, server_hint, metric, zone_tuple = inputs
         source_id, host = _realm_source(realm)
+        credential_state = await _credential_state(self._services, realm)
+        if credential_state != "configured":
+            return _http_error(
+                SourceHttpError("credentials_unavailable"),
+                credential_state=credential_state,
+            )
         try:
             scope = await self._services.scopes.bind(context)
             catalog = FFLogsCatalog(scope.http, source_id)
             resolution = await catalog.resolve_server(realm, server_label)
         except SourceHttpError as exc:
-            return _http_error(exc)
+            return _http_error(exc, credential_state=credential_state)
         except (FFLogsPayloadError, FFLogsGraphQLError):
             return _error(
                 ErrorCode.UNPARSED, "FFLogs 服务器目录格式暂不可用，未尝试自动猜测。"
@@ -200,7 +211,7 @@ class FFLogsCharacterLookup:
                     "FFLogs返回的副本、难度或分区与请求不一致。未展示战绩。",
                 )
         except SourceHttpError as exc:
-            return _http_error(exc)
+            return _http_error(exc, credential_state=credential_state)
         except FFLogsGraphQLError:
             return _error(ErrorCode.UPSTREAM_ERROR, "FFLogs 未接受公开角色查询。")
         except FFLogsPayloadError:
@@ -230,6 +241,12 @@ class FFLogsOutputPercentiles:
         realm, encounter_label, difficulty_label, job_label, metric, period = inputs
         source_id, _ = _realm_source(realm)
         stats_source_id, stats_host = _realm_source(realm, statistics=True)
+        credential_state = await _credential_state(self._services, realm)
+        if credential_state != "configured":
+            return _http_error(
+                SourceHttpError("credentials_unavailable"),
+                credential_state=credential_state,
+            )
         try:
             scope = await self._services.scopes.bind(context)
             catalog = FFLogsCatalog(scope.http, source_id)
@@ -238,7 +255,7 @@ class FFLogsOutputPercentiles:
                 metadata, encounter_label, difficulty_label, job_label
             )
         except SourceHttpError as exc:
-            return _http_error(exc)
+            return _http_error(exc, credential_state=credential_state)
         except FFLogsGraphQLError:
             return _error(ErrorCode.UPSTREAM_ERROR, "FFLogs 未接受副本与职业目录查询。")
         except FFLogsPayloadError:
@@ -624,15 +641,40 @@ def _realm_source(realm: str, *, statistics: bool = False) -> tuple[str, str]:
     )
 
 
-def _http_error(error: SourceHttpError, *, page: bool = False) -> CapabilityResult:
+async def _credential_state(services, realm):
+    """Inspect this module's redacted metadata; never decrypt credentials."""
+    try:
+        snapshot = await services.config.current()
+        if not isinstance(snapshot, ConfigSnapshot):
+            return "unknown"
+        alias = "credential_fflogs_cn" if realm == "cn" else "credential_fflogs_global"
+        metadata = next(
+            (item for item in snapshot.secret_metadata if item.field == alias), None
+        )
+        if metadata is None or metadata.state is SecretMetadataState.TOMBSTONED:
+            return "unset"
+        return (
+            "configured" if metadata.state is SecretMetadataState.ACTIVE else "unusable"
+        )
+    except Exception:
+        return "unknown"
+
+
+def _http_error(
+    error: SourceHttpError, *, page: bool = False, credential_state="configured"
+) -> CapabilityResult:
     if error.code == "credentials_unavailable":
         return _error(
             ErrorCode.AUTH_REQUIRED,
-            "该 FFLogs 区域尚未配置访问凭据。",
+            "该 FFLogs 区域尚未配置访问凭据；请从 AstrBot 插件管理页打开配置管理。"
+            if credential_state == "unset"
+            else "无法确认该 FFLogs 区域的凭据配置状态；请管理员从 AstrBot 插件管理页核对来源凭据。"
+            if credential_state == "unknown"
+            else "该 FFLogs 区域已配置但凭据暂不可用；请管理员核对加密密钥与来源凭据。",
         )
     if error.code == "rate_limited" or error.status_code == 429:
         return _error(ErrorCode.RATE_LIMITED, "FFLogs 请求过于频繁，请稍后再试。")
-    if error.status_code == 401:
+    if error.status_code == 401 or (error.status_code == 403 and not page):
         return _error(
             ErrorCode.AUTH_EXPIRED, "FFLogs 拒绝了当前访问凭据，请检查凭据配置。"
         )

@@ -77,6 +77,23 @@ export function updateBody(target,revision,controls,catalog){
     if(!f.readable||!f.editable||!supported(f))fail('admin_authorization_denied');updates.push(control.mode==='clear'?{field:name,mode:'clear'}:{field:name,mode:'replace',value:convert(f,control.value)});
   }if(!updates.length)fail('select_changes');return {module_id:target,expected_revision:revision,updates};
 }
+export function validateCredentialCatalog(input){
+  jsonBudget(input);if(!exact(input,['schema_version','fields'])||input.schema_version!==1||!Array.isArray(input.fields)||input.fields.length>32)fail();
+  const seen=new Set(),schema={type:'object',properties:{client_id:{type:'string',minLength:1,maxLength:512},client_secret:{type:'string',minLength:1,maxLength:512}},required:['client_id','client_secret'],additionalProperties:false};
+  for(const f of input.fields){if(!exact(f,['module_id','name','group','description','value_schema'])||typeof f.module_id!=='string'||f.module_id.split('/').length!==2||!f.module_id.split('/').every(p=>identifier.test(p))||typeof f.name!=='string'||!identifier.test(f.name)||typeof f.group!=='string'||!identifier.test(f.group)||typeof f.description!=='string'||!f.description||seen.has(key(f)))fail();seen.add(key(f));
+    if(!exact(f.value_schema,['type','properties','required','additionalProperties'])||f.value_schema.type!=='object'||f.value_schema.additionalProperties!==false||!exact(f.value_schema.properties,['client_id','client_secret'])||JSON.stringify(f.value_schema.required)!==JSON.stringify(schema.required))fail();
+    for(const name of schema.required){const s=f.value_schema.properties[name];if(!exact(s,['type','minLength','maxLength'])||s.type!=='string'||s.minLength!==1||s.maxLength!==512)fail();}}
+  return JSON.parse(JSON.stringify(input));
+}
+export function validateCredentialStatus(data,catalog){
+  jsonBudget(data);const targets=[...new Set(catalog.fields.map(f=>f.module_id))];if(!exact(data,targets))fail();
+  for(const target of targets){const row=data[target];if(!exact(row,['revision','fields'])||!Number.isSafeInteger(row.revision)||row.revision<1||!exact(row.fields,ownedFields(catalog,target).map(f=>f.name))||Object.values(row.fields).some(value=>!['unset','configured','unusable'].includes(value)))fail();}return data;
+}
+export function credentialUpdateBody(target,revision,name,mode,value,catalog){
+  if(!Number.isSafeInteger(revision)||revision<1||!catalog.fields.some(f=>f.module_id===target&&f.name===name)||!['replace','clear'].includes(mode))fail();
+  if(mode==='replace'&&(!exact(value,['client_id','client_secret'])||Object.values(value).some(v=>typeof v!=='string'||textLength(v)<1||textLength(v)>512||/[\x00-\x1f\x7f-\x9f]/u.test(v))))fail();
+  return {module_id:target,expected_revision:revision,updates:[mode==='replace'?{field:name,mode,value}:{field:name,mode}]};
+}
 // Matching names bind the bridge surface; the backend owns authorization.
 const presentation=new Set(['theme','isDark','locale','i18n','displayName','pageTitle']);
 function contextBoundary(context){
@@ -86,8 +103,9 @@ function contextBoundary(context){
   const stable=v=>Array.isArray(v)?v.map(stable):record(v)?Object.fromEntries(Object.keys(v).sort().map(name=>[name,stable(v[name])])):v;return JSON.stringify(stable(boundary));
 }
 export function createManagementPage(document,bridge,window){
-  let catalog=null,snapshot=null,ready=false,closed=false,stale=true,generation=0,boundary=null,contextSeen=false,off=null,active=null;
+  let catalog=null,snapshot=null,credentialCatalog=null,credentialSnapshot=null,ready=false,closed=false,stale=true,generation=0,boundary=null,contextSeen=false,off=null,active=null;
   const view=createManagementView(document),cards=new Map(),controls=new Map(),status=document.getElementById('status');
+  const credentialControls=new Map();
   const current=attempt=>!closed&&ready&&generation===attempt,writable=f=>f.readable&&f.editable&&supported(f);
   const blocked=button=>button.disabled||button.getAttribute('aria-disabled')==='true';
   function setButton(button,denied){button.setAttribute('aria-disabled',String(denied));button.disabled=denied&&(closed||!ready||document.activeElement!==button);}
@@ -99,11 +117,21 @@ export function createManagementPage(document,bridge,window){
     for(const [target,card]of cards)setButton(card.save,!usable||!catalog||!ownedFields(catalog,target).some(writable));
     // Preserve focused editable drafts while reading; submit buttons fence writes.
     for(const control of controls.values()){const allowed=!closed&&ready&&writable(control.field);control.mode.disabled=!allowed;control.input.disabled=!allowed||control.mode.value!=='replace';}
+    for(const c of credentialControls.values()){
+      // A validated form keeps local drafts editable while refreshing;
+      // writes still require a fresh revision and no active operation.
+      const allowed=!closed&&ready&&credentialSnapshot!==null&&credentialCatalog!==null&&credentialCatalog.fields.some(f=>key(f)===key(c.field)&&JSON.stringify(f)===c.signature);
+      if(c.save)setButton(c.save,!allowed||stale||active!==null);
+      if(c.mode)c.mode.disabled=!allowed;
+      for(const input of [c.clientId,c.clientSecret])if(input)input.disabled=!allowed||c.mode?.value!=='replace';
+      if(c.confirm)c.confirm.disabled=!allowed||c.mode?.value!=='clear';
+    }
   }
   async function post(endpoint,body,attempt){
     if(!current(attempt))fail('stale_context');const response=await bridge.apiPost(`admin/${endpoint}`,body);if(!current(attempt))fail('stale_context');
     if(endpoint==='catalog')return validateCatalog(response);if(endpoint==='read')return response;
-    if(endpoint==='update'&&(!exact(response,['module_id','revision'])||response.module_id!==body.module_id||!Number.isSafeInteger(response.revision)||response.revision<=body.expected_revision))fail('operation_unavailable');
+    if(endpoint==='credential-catalog')return validateCredentialCatalog(response);
+    if((endpoint==='update'||endpoint==='credential-update')&&(!exact(response,['module_id','revision'])||response.module_id!==body.module_id||!Number.isSafeInteger(response.revision)||response.revision<=body.expected_revision))fail('operation_unavailable');
     if(endpoint==='rollback'&&(!exact(response,['rolled_back'])||response.rolled_back!==true))fail('operation_unavailable');
     if(endpoint==='recover'&&(!exact(response,['recovered'])||response.recovered!==true))fail('operation_unavailable');return response;
   }
@@ -119,6 +147,25 @@ export function createManagementPage(document,bridge,window){
       for(const [name,sent]of Object.entries(selected)){if(sent.mode==='keep')continue;const c=controls.get(JSON.stringify([target,name])),row=snapshot[target]?.fields[name];if(c&&row&&c.draftVersion===sent.draftVersion&&c.mode.value===sent.mode&&c.input.value===sent.value){c.mode.value='keep';c.input.value=inputValue(c.field,row.value);}}
       status.textContent='配置已保存；需要恢复时请单独执行恢复运行。';
     });
+  }
+  function clearSecrets(){for(const c of credentialControls.values()){for(const node of [c.clientId,c.clientSecret])if(node)node.value='';if(c.confirm)c.confirm.checked=false;if(c.mode)c.mode.value='keep';c.draftVersion++;}}
+  function saveCredential(c){
+    if(blocked(c.save))return;
+    run(async attempt=>{
+      const mode=c.mode.value;if(mode==='keep')fail('select_changes');if(mode==='clear'&&!c.confirm.checked)fail('confirm_clear');
+      const version=c.draftVersion,value={client_id:c.clientId.value,client_secret:c.clientSecret.value};
+      const body=credentialUpdateBody(c.field.module_id,credentialSnapshot[c.field.module_id].revision,c.field.name,mode,value,credentialCatalog);
+      await post('credential-update',body,attempt);await refresh(attempt);
+      if(c.draftVersion===version&&c.mode.value===mode&&c.clientId.value===value.client_id&&c.clientSecret.value===value.client_secret){c.clientId.value='';c.clientSecret.value='';c.mode.value='keep';c.confirm.checked=false;}
+      buttons();status.textContent=mode==='clear'?'已清除所选来源凭据；公开查询需要重新配置该组凭据。':'来源凭据已加密保存；尚未验证 FFLogs 上游。';
+    });
+  }
+  async function renderCredentials(){
+    const wanted=new Set(credentialCatalog.fields.map(key));for(const [k,c]of credentialControls)if(!wanted.has(k)){for(const node of [c.clientId,c.clientSecret])if(node)node.value='';credentialControls.delete(k);}
+    for(const f of credentialCatalog.fields){const k=key(f),signature=JSON.stringify(f);let c=credentialControls.get(k);
+      if(!c||c.signature!==signature){if(c)for(const node of [c.clientId,c.clientSecret])if(node)node.value='';c={field:f,signature,draftVersion:0,mode:null,clientId:null,clientSecret:null,confirm:null,save:null,detail:'',onSave:null};c.onSave=()=>saveCredential(c);credentialControls.set(k,c);}
+      const state=credentialSnapshot[f.module_id].fields[f.name];c.detail=(state==='unset'?'未配置':state==='configured'?'已保存 · 尚未验证上游':'已配置但暂不可用')+` · 配置版本：${credentialSnapshot[f.module_id].revision}`;
+    }view.credentials([...credentialControls.values()],buttons);await nextTick();buttons();
   }
   async function render(){
     const owners=[...new Set(catalog.fields.map(f=>f.module_id))],wanted=new Set(catalog.fields.map(key));
@@ -141,14 +188,19 @@ export function createManagementPage(document,bridge,window){
     for(const [c,value,mode,input,draftVersion]of reset)if(c.input&&c.draftVersion===draftVersion&&(mode===undefined||c.mode.value===mode&&c.input.value===input))c.input.value=value;
     buttons();
   }
-  async function refresh(attempt){stale=true;buttons();const declarations=await post('catalog',{},attempt),values=validateSnapshot(await post('read',{},attempt),declarations);if(!current(attempt))fail('stale_context');catalog=declarations;snapshot=values;stale=false;await render();if(!current(attempt))fail('stale_context');}
+  async function refresh(attempt){stale=true;buttons();const declarations=await post('catalog',{},attempt),values=validateSnapshot(await post('read',{},attempt),declarations);if(!current(attempt))fail('stale_context');catalog=declarations;snapshot=values;
+    let credentialNotice='';try{const forms=await post('credential-catalog',{},attempt),states=validateCredentialStatus(await post('credential-status',{},attempt),forms);if(!current(attempt))fail('stale_context');credentialCatalog=forms;credentialSnapshot=states;}
+    catch(error){if(!current(attempt))throw error;if(error?.message==='admin_authorization_denied')clearSecrets();credentialCatalog=null;credentialSnapshot=null;credentialNotice=error?.message==='admin_authorization_denied'?'来源凭据管理授权不可用；请重新打开宿主管理页面后刷新。':'来源凭据状态暂不可用；未读取旧值，请刷新核对后再提交。';}
+    stale=false;await render();if(credentialCatalog)await renderCredentials();else view.credentials([...credentialControls.values()],buttons,credentialNotice);if(!current(attempt))fail('stale_context');}
   async function run(action){
     if(active||closed||!ready)return;const operation={generation};active=operation;buttons();status.textContent='管理操作正在执行。';
     try{await action(operation.generation);}catch(error){if(!current(operation.generation))return;
       if(error?.message==='revision_conflict'){stale=true;status.textContent='配置已变化，请刷新并重新核对后修改。';}
       else if(error?.message==='select_changes')status.textContent='请选择需要修改的字段。';
+      else if(error?.message==='confirm_clear')status.textContent='请勾选清除确认后再提交；保持选项不会写入。';
+      else if(error?.message==='secret_encryption_unavailable')status.textContent='未保存：宿主缺少或未正确配置加密密钥 YGL_SECRET_KEY；请管理员配置后重试。';
       else if(error?.message==='invalid_config')status.textContent='配置或输入未通过校验，请核对字段要求后刷新重试。';
-      else if(error?.message==='admin_authorization_denied'){stale=true;status.textContent='管理授权不可用，请重新打开宿主管理页面后手动刷新。';}
+      else if(error?.message==='admin_authorization_denied'){clearSecrets();credentialCatalog=null;credentialSnapshot=null;stale=true;status.textContent='管理授权不可用，请重新打开宿主管理页面后手动刷新。';}
       else {stale=true;status.textContent='未取得成功确认，请刷新核对配置与版本后重试。';}
     }finally{if(active===operation){active=null;buttons();}}
   }
@@ -158,11 +210,11 @@ export function createManagementPage(document,bridge,window){
   document.getElementById('recover').addEventListener('click',()=>!blocked(document.getElementById('recover'))&&run(async attempt=>{await post('recover',{expected_revisions:revisions(),complete_from_current:document.getElementById('replacement').checked},attempt);await refresh(attempt);status.textContent='配置已重新校验，业务运行已恢复。';}));
   function accept(context){
     if(closed)return;view.context(context);document.documentElement.dataset.theme=context?.isDark===true||context?.theme==='dark'?'dark':'light';document.documentElement.lang=typeof context?.locale==='string'?context.locale:'zh-CN';let next;
-    try{next=contextBoundary(context);}catch{contextSeen=true;generation++;ready=false;stale=true;active=null;boundary=null;catalog=null;snapshot=null;view.fields([],buttons);cards.clear();controls.clear();buttons();status.textContent='宿主管理上下文无效，请重新打开页面。';return;}
-    contextSeen=true;if(ready&&next===boundary)return;generation++;boundary=next;ready=true;stale=true;active=null;catalog=null;snapshot=null;view.fields([],buttons);cards.clear();controls.clear();buttons();
+    try{next=contextBoundary(context);}catch{clearSecrets();contextSeen=true;generation++;ready=false;stale=true;active=null;boundary=null;catalog=null;snapshot=null;credentialCatalog=null;credentialSnapshot=null;view.fields([],buttons);view.credentials([],buttons);cards.clear();controls.clear();credentialControls.clear();buttons();status.textContent='宿主管理上下文无效，请重新打开页面。';return;}
+    contextSeen=true;if(ready&&next===boundary)return;clearSecrets();generation++;boundary=next;ready=true;stale=true;active=null;catalog=null;snapshot=null;credentialCatalog=null;credentialSnapshot=null;view.fields([],buttons);view.credentials([],buttons);cards.clear();controls.clear();credentialControls.clear();buttons();
     run(async attempt=>{await refresh(attempt);status.textContent='已读取配置目录与授权范围内的值；写操作仍逐请求鉴权。';});
   }
-  function close(){if(closed)return;closed=true;generation++;ready=false;active=null;catalog=null;snapshot=null;off?.();buttons();}
+  function close(){if(closed)return;clearSecrets();closed=true;generation++;ready=false;active=null;catalog=null;snapshot=null;credentialCatalog=null;credentialSnapshot=null;off?.();buttons();}
   return {start(){
     if(!bridge||typeof bridge.apiPost!=='function'||typeof bridge.ready!=='function'||typeof bridge.onContext!=='function'){status.textContent='请从宿主插件管理页面打开此页。';return;}
     off=bridge.onContext(accept);Promise.resolve(bridge.ready()).then(context=>{if(!contextSeen)accept(context);}).catch(()=>{if(!contextSeen&&!closed){ready=false;status.textContent='宿主管理会话不可用。';buttons();}});window?.addEventListener('pagehide',close,{once:true});

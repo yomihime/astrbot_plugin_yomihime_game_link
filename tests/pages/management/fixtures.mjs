@@ -14,3 +14,5 @@ export function snapshot(revision=1){
   const field=value=>({value,state:'valid',present:false,source:'default'});
   return {'game_link/core':{revision,fields:{default_region:field('cn')}},'ff14/ff14':{revision,fields:{ff14_calendar_default_days:field(7),ff14_calendar_default_timezone:field('Asia/Shanghai'),ff14_calendar_default_delivery_time:field('08:00')}}};
 }
+export function credentialCatalog(){return {schema_version:1,fields:['cn','global'].map(realm=>({module_id:'ff14/ff14',name:'credential_fflogs_'+realm,group:'fflogs',description:realm==='cn'?'FFLogs 国服来源凭据':'FFLogs 国际服来源凭据',value_schema:{type:'object',properties:{client_id:{type:'string',minLength:1,maxLength:512},client_secret:{type:'string',minLength:1,maxLength:512}},required:['client_id','client_secret'],additionalProperties:false}}))};}
+export function credentialStatus(revision=1){return {'ff14/ff14':{revision,fields:{credential_fflogs_cn:'unset',credential_fflogs_global:'configured'}}};}

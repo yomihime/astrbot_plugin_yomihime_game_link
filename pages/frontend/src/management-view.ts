@@ -3,14 +3,17 @@ import {NConfigProvider, NCard, NAlert, darkTheme, zhCN, enUS, dateZhCN, dateEnU
 type Field = {module_id:string; name:string; description:string; value_schema: null | {type:string; enum?: unknown[]; minimum?:number; maximum?:number; maxLength?:number}};
 type Control = {field:Field; signature:string; detail:string; draftVersion:number; mode:HTMLSelectElement|null; input:HTMLInputElement|HTMLSelectElement|null};
 type Card = {target:string; revision:string; controls:Control[]; save:HTMLButtonElement|null; onSave():void};
+type Credential = {field:{module_id:string;name:string;description:string};signature:string;detail:string;draftVersion:number;mode:HTMLSelectElement|null;clientId:HTMLInputElement|null;clientSecret:HTMLInputElement|null;confirm:HTMLInputElement|null;save:HTMLButtonElement|null;onSave():void};
 export function createManagementView(document:Document) {
   const cards=shallowRef<Card[]>([]),context=shallowRef<Record<string,unknown>>({});let changed=()=>{};
+  const credentials=shallowRef<Credential[]>([]);
+  const credentialNotice=shallowRef('');
   const button=(id:string,text:string)=>h('button',{id,type:'button',disabled:true},text);
   const App=defineComponent({setup(){return()=>{
     const dark=context.value.isDark===true||context.value.theme==='dark',english=String(context.value.locale||'').startsWith('en');
     return h(NConfigProvider,{theme:dark?darkTheme:null,locale:english?enUS:zhCN,dateLocale:english?dateEnUS:dateZhCN,inlineThemeDisabled:true},{default:()=>h('main',{class:'management'},[
       h('p',{class:'brand'},'如月怜的游戏连结'),h('h1','配置目录与管理'),
-      h('p','目录来自可信 Core 与模块声明。当前只开放四字段管理范围；字段注册不授予存量读取或修改权限，写操作仍由后端逐请求鉴权。'),
+      h('p','目录来自可信 Core 与模块声明。普通四字段与来源凭据分别限定授权；字段注册不授予存量读取或修改权限，写操作仍由后端逐请求鉴权。'),
       h('p','保存只修改所选配置。客户端检查用于辅助输入，模块语义校验与配置版本以服务端为准。启动失败时，修复后需单独点击恢复运行。'),
       h(NAlert,{type:'info',showIcon:false},{default:()=>h('p',{id:'status',role:'status','aria-live':'polite'},'正在连接宿主管理页面。')}),button('refresh','刷新配置与版本'),
       h('section',{id:'fields','aria-label':'普通配置'},cards.value.map(card=>h('section',{class:'card',key:card.target,'data-owner':card.target},[
@@ -25,6 +28,19 @@ export function createManagementView(document:Document) {
           })),h('button',{type:'button','data-action':'save',disabled:true,ref:(node:unknown)=>{card.save=node as HTMLButtonElement;},onClick:card.onSave},'保存本组修改'),
         ]}),
       ]))),
+      h('p',{id:'credential-status',role:'status','aria-live':'polite'},credentialNotice.value),
+      h('section',{id:'credentials','aria-label':'来源凭据'},credentials.value.map(c=>{
+        const id=`credential-${encodeURIComponent(c.field.module_id)}-${encodeURIComponent(c.field.name)}`;
+        const edit=()=>{c.draftVersion++;};
+        return h(NCard,{class:'card',key:c.signature,title:c.field.description,'data-credential':c.field.name,'data-owner':c.field.module_id},{default:()=>[
+          h('p',`${c.field.module_id} · ${c.detail}`),h('p','只显示保存状态，不回读 Client ID / Client Secret。保存不代表 FFLogs 可连通；公开查询请从 FF14 查询页手动发起。'),
+          h('label',{for:id+'-mode'},'本次操作'),h('select',{id:id+'-mode','data-role':'credential-mode',ref:(node:unknown)=>{c.mode=node as HTMLSelectElement;},onChange:()=>{edit();if(c.mode?.value!=='replace'){if(c.clientId)c.clientId.value='';if(c.clientSecret)c.clientSecret.value='';}if(c.confirm)c.confirm.checked=false;changed();}},[['keep','保持（不写入）'],['replace','替换完整凭据对'],['clear','清除已保存凭据']].map(([value,text])=>h('option',{value},text))),
+          ...(['client_id','client_secret'] as const).map(name=>h('div',{key:name},[
+            h('label',{for:id+'-'+name},name==='client_id'?'Client ID':'Client Secret'),h('input',{id:id+'-'+name,type:'password',autocomplete:'off',maxlength:512,'data-role':name,ref:(node:unknown)=>{if(name==='client_id')c.clientId=node as HTMLInputElement;else c.clientSecret=node as HTMLInputElement;},onInput:edit,onChange:edit}),
+          ])),h('label',[h('input',{type:'checkbox','data-role':'credential-clear-confirm',ref:(node:unknown)=>{c.confirm=node as HTMLInputElement;},onChange:edit}),'确认清除本组已保存凭据']),
+          h('button',{type:'button','data-action':'credential-save',disabled:true,ref:(node:unknown)=>{c.save=node as HTMLButtonElement;},onClick:c.onSave},'提交本组操作'),
+        ]});
+      })),
       h(NCard,{class:'card',title:'限定恢复'},{default:()=>[
         h('p','回退仅处理本次四字段迁移；配置发生后续修改时会拒绝回退。订阅等其它数据继续保留。'),button('rollback','回退四字段迁移'),
         h('p',h('label',[h('input',{id:'replacement',type:'checkbox'}),'以四个已显式保存的有效新值完成恢复（缺少旧准备材料时）'])),button('recover','重新校验并恢复运行'),
@@ -32,5 +48,5 @@ export function createManagementView(document:Document) {
     ])});
   };}});
   const app=createApp(App);app.mount(document.getElementById('management-root')!);
-  return {fields(value:Card[],onChange:()=>void){changed=onChange;cards.value=value;},context(value:Record<string,unknown>){context.value=value||{};},dispose(){app.unmount();}};
+  return {fields(value:Card[],onChange:()=>void){changed=onChange;cards.value=value;},credentials(value:Credential[],onChange:()=>void,notice=''){changed=onChange;credentials.value=value;credentialNotice.value=notice;},context(value:Record<string,unknown>){context.value=value||{};},dispose(){app.unmount();}};
 }

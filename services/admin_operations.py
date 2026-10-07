@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from functools import wraps
@@ -25,7 +26,13 @@ from ..api.administration import (
 )
 from ..api.contexts import InvocationView
 from ..api.manifests import ModuleManifest, PackageManifest
-from ..api.services import ConfigPatch, ConfigSnapshot, ConfigTarget
+from ..api.services import (
+    ConfigFieldUpdate,
+    ConfigPatch,
+    ConfigPatchMode,
+    ConfigSnapshot,
+    ConfigTarget,
+)
 from ..api.storage import SecretMetadataState
 from ..core.health import HealthResolver
 from ..core.lifecycle import LifecycleController
@@ -49,6 +56,7 @@ from .core_configuration import (
     DEFAULT_REGION,
     core_config_target,
 )
+from .managed_source_credentials import ManagedSourceCredentialPolicy
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,6 +114,7 @@ class AdminOperationsService(AdminOperations):
         subscription_gate_fields: Mapping[ConfigTarget, tuple[str, ...]] | None = None,
         module_config_validators: Mapping[str, Mapping[str, object]] | None = None,
         ordinary_migration=None,
+        managed_source_credentials=(),
     ) -> None:
         if not isinstance(authorization, AdminAuthorizationService):
             raise TypeError("authorization must be AdminAuthorizationService")
@@ -146,6 +155,182 @@ class AdminOperationsService(AdminOperations):
         )
         self._inflight: set[asyncio.Task[object]] = set()
         self._ordinary_migration = ordinary_migration
+        policies = tuple(managed_source_credentials)
+        if len(policies) > 32 or any(
+            not isinstance(p, ManagedSourceCredentialPolicy) for p in policies
+        ):
+            raise ValueError("invalid managed credential policies")
+        if len({(p.module_id, p.name) for p in policies}) != len(policies):
+            raise ValueError("duplicate managed credential policy")
+        self._managed_source_credentials = policies
+
+    def credential_resources(self):
+        resources = {}
+        for policy in self._managed_source_credentials:
+            resources.setdefault(
+                ConfigTarget(self.config_principal_id, policy.module_id), set()
+            ).add(policy.name)
+        return resources
+
+    def _credential_selections(self):
+        snapshot = self.registry.snapshot()
+        selections = {
+            p.module_id: self._selection(p.module_id, snapshot)
+            for p in self._managed_source_credentials
+        }
+        for policy in self._managed_source_credentials:
+            policy.validate_declaration(selections[policy.module_id].manifest)
+        return snapshot, selections
+
+    @_tracked_admin_request
+    async def credential_catalog(self, *, authorization):
+        grant = await self.authorization.authorize(
+            AdminOperation.READ_CONFIG,
+            invocation=None,
+            context=authorization,
+            resources=self.credential_resources(),
+        )
+        async with self.lifecycle.admission.mutation("admin-credential-catalog"):
+            await self.authorization.validate_generation(
+                grant, operation=AdminOperation.READ_CONFIG
+            )
+            self._require_accepting()
+            registry, selections = self._credential_selections()
+            result = {
+                "schema_version": 1,
+                "fields": [p.project() for p in self._managed_source_credentials],
+            }
+            if len(json.dumps(result, ensure_ascii=False).encode("utf-8")) > 262144:
+                raise ValueError("managed credential catalog exceeds budget")
+            await self.authorization.validate_generation(
+                grant, operation=AdminOperation.READ_CONFIG
+            )
+            self._require_accepting()
+            for selection in selections.values():
+                self._require_same_selection(selection)
+            if self.registry.snapshot() is not registry:
+                raise AdminAuthorizationDenied
+        return result
+
+    @_tracked_admin_request
+    async def credential_status(self, *, authorization):
+        resources = self.credential_resources()
+        grant = await self.authorization.authorize(
+            AdminOperation.READ_CONFIG,
+            invocation=None,
+            context=authorization,
+            resources=resources,
+        )
+        result = {}
+        async with self.lifecycle.admission.mutation("admin-credential-status"):
+            await self.authorization.validate_generation(
+                grant, operation=AdminOperation.READ_CONFIG
+            )
+            self._require_accepting()
+            registry, selections = self._credential_selections()
+            for target, fields in resources.items():
+                await self.authorization.validate_generation(
+                    grant, operation=AdminOperation.READ_CONFIG
+                )
+                self._require_accepting()
+                config = await self._config_repository.current(
+                    target, grant=grant, operation=AdminOperation.READ_CONFIG
+                )
+                await self.authorization.validate_generation(
+                    grant, operation=AdminOperation.READ_CONFIG
+                )
+                self._require_accepting()
+                if not isinstance(config, ConfigSnapshot) or config.target != target:
+                    raise AdminAuthorizationDenied
+                metadata = {item.field: item for item in config.secret_metadata}
+                result[target.module_id] = {
+                    "revision": config.revision,
+                    "fields": {
+                        name: "unset"
+                        if name not in metadata
+                        or metadata[name].state is SecretMetadataState.TOMBSTONED
+                        else "configured"
+                        if metadata[name].state is SecretMetadataState.ACTIVE
+                        and metadata[name].secret_ref is not None
+                        and metadata[name].secret_ref.principal_id
+                        == target.principal_id
+                        and metadata[name].secret_ref.module_id == target.module_id
+                        else "unusable"
+                        for name in sorted(fields)
+                    },
+                }
+            await self.authorization.validate_generation(
+                grant, operation=AdminOperation.READ_CONFIG
+            )
+            self._require_accepting()
+            for selection in selections.values():
+                self._require_same_selection(selection)
+            if self.registry.snapshot() is not registry:
+                raise AdminAuthorizationDenied
+        return result
+
+    @_tracked_admin_request
+    async def credential_update(self, data, *, authorization):
+        # Closed request validation chooses exact resources, never grants them.
+        if type(data) is not dict or set(data) != {
+            "module_id",
+            "expected_revision",
+            "updates",
+        }:
+            raise ValueError("invalid credential update")
+        target = ConfigTarget(self.config_principal_id, data["module_id"])
+        raw = data["updates"]
+        if type(raw) is not list or not 1 <= len(raw) <= 2:
+            raise ValueError("invalid credential updates")
+        names = set()
+        for item in raw:
+            if (
+                type(item) is not dict
+                or set(item) not in ({"field", "mode"}, {"field", "mode", "value"})
+                or type(item["field"]) is not str
+                or item["field"] in names
+                or item["mode"] not in ("replace", "clear")
+                or (item["mode"] == "replace") != ("value" in item)
+            ):
+                raise ValueError("invalid credential field update")
+            names.add(item["field"])
+        policies = {
+            p.name: p
+            for p in self._managed_source_credentials
+            if p.module_id == target.module_id
+        }
+        if not names <= policies.keys():
+            raise AdminAuthorizationDenied
+        grant = await self.authorization.authorize(
+            AdminOperation.UPDATE_CONFIG,
+            invocation=None,
+            context=authorization,
+            resources={target: names},
+        )
+        self._require_accepting()
+        selection = self._selection(target.module_id, self.registry.snapshot())
+        for name in names:
+            policies[name].validate_declaration(selection.manifest)
+        updates = tuple(
+            ConfigFieldUpdate(
+                item["field"],
+                ConfigPatchMode(item["mode"]),
+                secret=policies[item["field"]].material(item["value"])
+                if item["mode"] == "replace"
+                else None,
+            )
+            for item in raw
+        )
+        patch = ConfigPatch(
+            data["expected_revision"], updates, selection.manifest.config_fields
+        )
+        coordinator = await self._configuration(selection)
+        config = await coordinator.update_admin(target, patch, grant)
+        self._require_same_selection(selection)
+        await self.authorization.validate_generation(
+            grant, operation=AdminOperation.UPDATE_CONFIG
+        )
+        return {"module_id": target.module_id, "revision": config.revision}
 
     def ordinary_resources(self):
         migration = self._ordinary_migration

@@ -14,6 +14,8 @@ from ...api.services import (
     ConfigTarget,
 )
 from ...core.ports import RevisionConflict
+from ...infrastructure.key_provider import EnvironmentKeyProvider, SecretKeyUnavailable
+from ...infrastructure.secret_store import SecretStoreUnavailable
 from .runtime import PLUGIN_NAME
 from .web_admin import bounded_body, verified_dashboard_request
 
@@ -23,6 +25,9 @@ _OPERATIONS = {
     "update": AdminOperation.UPDATE_CONFIG,
     "rollback": AdminOperation.ROLLBACK_CONFIG,
     "recover": AdminOperation.RECOVER_CONFIG,
+    "credential-catalog": AdminOperation.READ_CONFIG,
+    "credential-status": AdminOperation.READ_CONFIG,
+    "credential-update": AdminOperation.UPDATE_CONFIG,
 }
 
 
@@ -88,14 +93,20 @@ class AdminPages:
                     )
                 concrete = request._get_current()
                 raw, subject, expiry = verified_dashboard_request(concrete, legacy)
-                core, source = self.runtime.management_entry()
+                credentials = endpoint.startswith("credential-")
+                core, source = self.runtime.management_entry(credentials=credentials)
+                resources = (
+                    core.admin_operations.credential_resources()
+                    if credentials
+                    else core.admin_operations.ordinary_resources()
+                )
                 alive = {"value": True}
                 context = source.issue(
                     subject=subject,
                     request=raw,
                     expiry=expiry,
                     operations={_OPERATIONS[endpoint]},
-                    resources=core.admin_operations.ordinary_resources(),
+                    resources=resources,
                     live=lambda actual: alive["value"]
                     and actual is raw
                     and not self.closed
@@ -109,7 +120,7 @@ class AdminPages:
                 source.check(
                     context,
                     _OPERATIONS[endpoint],
-                    core.admin_operations.ordinary_resources(),
+                    resources,
                 )
 
                 async def disconnect():
@@ -129,7 +140,7 @@ class AdminPages:
                 source.check(
                     context,
                     _OPERATIONS[endpoint],
-                    core.admin_operations.ordinary_resources(),
+                    resources,
                 )
                 return json_response(
                     {"status": "ok", "data": result, "message": ""},
@@ -139,6 +150,12 @@ class AdminPages:
                 code, status = "revision_conflict", 409
             except AdminAuthorizationDenied:
                 code, status = "admin_authorization_denied", 403
+            except SecretStoreUnavailable:
+                code, status = "operation_unavailable", 503
+                try:
+                    EnvironmentKeyProvider("YGL_SECRET_KEY").get_key()
+                except SecretKeyUnavailable:
+                    code = "secret_encryption_unavailable"
             except (ValueError, TypeError):
                 code, status = "invalid_config", 400
             except Exception:
@@ -169,6 +186,16 @@ class AdminPages:
 
     async def _invoke(self, endpoint, core, data, context):
         ops = core.admin_operations
+        if endpoint in ("credential-catalog", "credential-status"):
+            if data:
+                raise ValueError("credential read parameters must be empty")
+            return await (
+                ops.credential_catalog(authorization=context)
+                if endpoint == "credential-catalog"
+                else ops.credential_status(authorization=context)
+            )
+        if endpoint == "credential-update":
+            return await ops.credential_update(data, authorization=context)
         if endpoint == "catalog":
             if data:
                 raise ValueError("catalog parameters are not accepted")

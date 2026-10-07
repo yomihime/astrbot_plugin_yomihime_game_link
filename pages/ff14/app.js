@@ -298,7 +298,7 @@ export function createPageApp({document, window, bridge, timeoutMs = 8000, query
   function unknownCredentials() {
     return card("FFLogs 凭据", [status("国服：状态未知 · 国际服：状态未知"),
       element("p", "当前页面无法读取凭据配置状态。"),
-      element("p", "凭据管理入口尚未接通；请勿在普通配置表单中填写 Client ID 或 Client Secret。", {class: "hint"})]);
+      element("p", "请从 AstrBot 插件管理页打开配置管理，在 FFLogs 来源凭据组加密保存 Client ID / Client Secret；聊天和普通配置不接收密钥。", {class: "hint"})]);
   }
   function gate() {
     const gateState = data?.subscription_gate;
@@ -353,7 +353,7 @@ export function createPageApp({document, window, bridge, timeoutMs = 8000, query
       children.push(definitions, element("p", "这些值只读，来自本次插件运行快照。显式参数优先；修改默认值不会改写已有订阅。", {class: "hint"}));
       children.push(element("p", "旧版 FF14 默认区域仅作兼容读取；市场默认范围由服务端 Core 配置解析，本页不会用该旧字段补全市场参数。", {class: "hint"}));
     }
-    if (settings) children.push(element("p", "本公开查询页只读，不授予配置管理权。普通四字段请在宿主插件的独立授权管理页读取、修改或修复；FFLogs 凭据管理尚未接通，请勿在普通配置中填写密钥。", {class: "notice warning", role: "status"}));
+    if (settings) children.push(element("p", "本公开查询页只读，不授予配置管理权。普通四字段请在宿主插件的独立授权管理页读取、修改或修复；FFLogs 来源凭据请在该管理页独立凭据组加密保存，聊天和普通配置不接收密钥。", {class: "notice warning", role: "status"}));
     return card("普通配置", children);
   }
   function navigateTo(id, page = "overview") {
@@ -433,7 +433,7 @@ export function createPageApp({document, window, bridge, timeoutMs = 8000, query
       taskGrid.append(task);
     }
     const credentials = element("section", "", {class: "card credential-strip"});
-    credentials.append(element("strong", "FFLogs 凭据"), element("span", "国服 / 国际服：状态未知 · 管理入口尚未接通", {class: "hint"}),
+    credentials.append(element("strong", "FFLogs 凭据"), element("span", "国服 / 国际服：状态未知 · 请从 AstrBot 插件管理页打开配置管理", {class: "hint"}),
       element("p", "当前页面无法读取凭据配置状态。请勿在普通配置表单中填写 Client ID 或 Client Secret。", {class: "hint"}));
     const config = element("button", "普通配置 · 查看只读配置与修改说明 →", {type: "button", class: "card config-entry"});
     config.addEventListener("click", () => navigateTo(moduleId, "settings"));

@@ -431,7 +431,7 @@ class SourceCredentialTests(unittest.IsolatedAsyncioTestCase):
                     await self._source_http(service).fetch(
                         HttpRequest(SOURCE_ID, RESOURCE_PATH)
                     )
-                self.assertEqual(caught.exception.code, "credentials_unavailable")
+                self.assertEqual(caught.exception.code, "invalid_response")
                 self.assertEqual(len(self.transport.resources), 0)
 
     async def test_cancelled_oauth_exchange_propagates_without_fallback(self):
@@ -475,6 +475,59 @@ class SourceCredentialTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(caught.exception.code, "timeout")
         self.assertNotIn("private", str(caught.exception))
+        self.assertEqual(self.transport.resources, [])
+
+    async def test_oauth_preserves_closed_codes_and_actual_status_without_body(self):
+        for status, code in (
+            (401, "upstream_error"),
+            (403, "upstream_error"),
+            (429, "rate_limited"),
+            (503, "upstream_error"),
+            (200, "invalid_response"),
+        ):
+            with self.subTest(status=status):
+
+                async def exchange(_request):
+                    return HttpResponse(status, {}, b"private-upstream-body")
+
+                self.transport.request_credential_exchange = exchange
+                with self.assertRaises(SourceHttpError) as caught:
+                    await self._source_http().fetch(
+                        HttpRequest(SOURCE_ID, RESOURCE_PATH)
+                    )
+                self.assertEqual(caught.exception.code, code)
+                self.assertEqual(
+                    caught.exception.status_code, status if status != 200 else None
+                )
+                self.assertNotIn("private", str(caught.exception))
+        self.assertEqual(self.transport.resources, [])
+
+    async def test_oauth_transport_and_oversize_keep_closed_errors(self):
+        for failure, code in (
+            (RuntimeError("synthetic-private-transport"), "transport_failed"),
+            (SourceHttpError("response_too_large"), "response_too_large"),
+            (SourceHttpError("invalid_response"), "invalid_response"),
+        ):
+            with self.subTest(code=code):
+
+                async def exchange(_request):
+                    raise failure
+
+                self.transport.request_credential_exchange = exchange
+                with self.assertRaises(SourceHttpError) as caught:
+                    await self._source_http().fetch(
+                        HttpRequest(SOURCE_ID, RESOURCE_PATH)
+                    )
+                self.assertEqual(caught.exception.code, code)
+                self.assertNotIn("private", str(caught.exception))
+
+        async def oversized(_request):
+            return HttpResponse(200, {}, b"x" * (64 * 1024 + 1))
+
+        self.transport.request_credential_exchange = oversized
+        with self.assertRaises(SourceHttpError) as caught:
+            await self._source_http().fetch(HttpRequest(SOURCE_ID, RESOURCE_PATH))
+        self.assertEqual(caught.exception.code, "response_too_large")
         self.assertEqual(self.transport.resources, [])
 
     async def test_policy_requires_unique_sensitive_alias_and_exact_resource_path(self):

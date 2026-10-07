@@ -285,6 +285,7 @@ class CoreRuntime:
         public_web_validator: PublicWebProofValidator | None = None,
         public_web_capabilities: frozenset[tuple[str, str]] = frozenset(),
         source_credential_policies: Sequence[SourceCredentialPolicy] = (),
+        managed_source_credentials=(),
         factory_source: FactorySourcePort | None = None,
         source_health: Callable[[str, str], Awaitable[CapabilityHealth]] | None = None,
         utc_clock: Callable[[], datetime] = lambda: datetime.now(UTC),
@@ -609,6 +610,7 @@ class CoreRuntime:
             config_principal_id=config_principal_id,
             subscription_gate_fields=gate_fields,
             ordinary_migration=self.ordinary_config_migration,
+            managed_source_credentials=managed_source_credentials,
         )
         self.admin_facade = AdminFacade(self.admin_operations, self.admin_authorization)
         self.gateway = Gateway(

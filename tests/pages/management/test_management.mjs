@@ -6,13 +6,15 @@ import {JSDOM} from '../../../pages/frontend/node_modules/jsdom/lib/api.js';
 const runtimeDOM=new JSDOM('<html><body></body></html>',{pretendToBeVisual:true});
 for(const name of ['window','document','Element','HTMLElement','SVGElement','Node','MutationObserver'])globalThis[name]=runtimeDOM.window[name];
 const {createManagementPage,validateCatalog,validateSnapshot,updateBody}=await import('../../../pages/management/app.js');
-import {catalog,snapshot,context} from './fixtures.mjs';
+import {catalog,snapshot,context,credentialCatalog,credentialStatus} from './fixtures.mjs';
 const html=await readFile(new URL('../../../pages/management/index.html',import.meta.url),'utf8');
 const flush=async()=>{for(let i=0;i<35;i++)await Promise.resolve();};
 const deferred=()=>{let resolve,reject;const promise=new Promise((a,b)=>{resolve=a;reject=b;});return {promise,resolve,reject};};
 function fixture(initial=context,resolveReady=true){
   const dom=new JSDOM(html,{pretendToBeVisual:true,url:'http://localhost/management/'}),calls=[],ready=deferred();let callback=null;
-  const bridge={onContext(fn){callback=fn;if(initial)fn(initial);return()=>{callback=null;};},ready:()=>ready.promise,apiPost(endpoint,body){const d=deferred(),call={endpoint,body,settled:false,promise:d.promise,resolve(value){this.settled=true;d.resolve(value);},reject(value){this.settled=true;d.reject(value);}};calls.push(call);return d.promise;}};
+  // Ordinary request counts remain scoped to ordinary endpoints;
+  // independent credential tests capture their own requests and assertions.
+  const bridge={onContext(fn){callback=fn;if(initial)fn(initial);return()=>{callback=null;};},ready:()=>ready.promise,apiPost(endpoint,body){if(endpoint==='admin/credential-catalog')return Promise.resolve(credentialCatalog());if(endpoint==='admin/credential-status')return Promise.resolve(credentialStatus());const d=deferred(),call={endpoint,body,settled:false,promise:d.promise,resolve(value){this.settled=true;d.resolve(value);},reject(value){this.settled=true;d.reject(value);}};calls.push(call);return d.promise;}};
   const app=createManagementPage(dom.window.document,bridge,dom.window);app.start();if(resolveReady)ready.resolve(initial||context);
   return {dom,app,calls,ready,context(value){callback?.(value);},get document(){return dom.window.document;},close(){app.close();dom.window.close();}};
 }

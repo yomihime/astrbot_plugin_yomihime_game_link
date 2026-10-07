@@ -567,12 +567,14 @@
         {
           "name": "credential_fflogs_cn",
           "sensitive": true,
+          "group": "fflogs",
           "required": false,
           "description": "FFLogs \u56fd\u670d OAuth \u5ba2\u6237\u7aef\u51ed\u636e\uff1b\u52a0\u5bc6\u4fdd\u5b58\uff0c\u672a\u914d\u7f6e\u65f6\u4ec5\u8be5\u533a\u6218\u7ee9\u67e5\u8be2\u4e0d\u53ef\u7528\u3002"
         },
         {
           "name": "credential_fflogs_global",
           "sensitive": true,
+          "group": "fflogs",
           "required": false,
           "description": "FFLogs \u56fd\u9645\u670d OAuth \u5ba2\u6237\u7aef\u51ed\u636e\uff1b\u52a0\u5bc6\u4fdd\u5b58\uff0c\u672a\u914d\u7f6e\u65f6\u4ec5\u8be5\u533a\u6218\u7ee9\u67e5\u8be2\u4e0d\u53ef\u7528\u3002"
         },
