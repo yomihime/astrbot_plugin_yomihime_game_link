@@ -17,6 +17,7 @@ from ...api.display import DisplayLimits
 from ...api.manifests import ModuleManifest, PrivacyFloor
 from ...api.services import CapabilityHealth, ConfigTarget, HealthStatus
 from ...api.subscriptions import ConversationKind
+from ...core.help_catalog import HelpCatalog
 from ...extensions.discovery import discover_packages
 from ...extensions.source_snapshot import PackageProvenance
 from ...infrastructure.key_provider import EnvironmentKeyProvider
@@ -194,7 +195,13 @@ class AstrBotRuntime:
             if not self.management_current(core, source):
                 raise AdminAuthorizationDenied
             self._config_error = None
-            self._bridge = AstrBotCommandBridge(core.registry)
+            self._bridge = AstrBotCommandBridge(
+                core.registry,
+                catalog=HelpCatalog(
+                    health_query=core.health_resolver.current,
+                    active_query=core.registry.is_active,
+                ),
+            )
             self._ready = True
             await self._publish_tools_or_close(core)
             return result
@@ -621,7 +628,13 @@ class AstrBotRuntime:
                 or core is not self._core
             ):
                 return
-            self._bridge = AstrBotCommandBridge(core.registry)
+            self._bridge = AstrBotCommandBridge(
+                core.registry,
+                catalog=HelpCatalog(
+                    health_query=core.health_resolver.current,
+                    active_query=core.registry.is_active,
+                ),
+            )
             self._ready = True
             await self._publish_tools_or_close(core)
 

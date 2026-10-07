@@ -1,4 +1,4 @@
-"""Generate the two levels of help from an immutable registry snapshot."""
+"""Generate layered help from an immutable registry snapshot."""
 
 from __future__ import annotations
 
@@ -40,7 +40,7 @@ class HelpCatalog:
             return False
 
     def total(self, snapshot: RegistrySnapshot) -> DisplayDocument:
-        """Return root help for command-only operations and module routes."""
+        """Return only the active module directory and its help routes."""
 
         self._require_snapshot(snapshot)
         modules = tuple(
@@ -50,14 +50,15 @@ class HelpCatalog:
         for module in modules:
             route = module.manifest.route
             commands.append(f"/ygl {route} help")
-            commands.extend(
-                self._command_line(
-                    module, command_only=True, health_query=self._health_query
-                )
-            )
 
         if modules:
-            intro = TextBlock("总帮助：列出必须使用命令的操作，以及各模块的帮助入口。")
+            summaries = "\n".join(
+                f"{module.manifest.route}：" + self._module_summary(module)
+                for module in modules
+            )
+            intro = TextBlock(
+                "总帮助：当前活跃模块；使用模块帮助查看能力。\n" + summaries
+            )
             blocks = (intro, CommandsBlock(tuple(commands)))
         else:
             blocks = (
@@ -68,6 +69,16 @@ class HelpCatalog:
                 CommandsBlock((), fallback_text="暂无可用模块命令。"),
             )
         return DisplayDocument("Yomihime Game Link 帮助", "ygl", blocks)
+
+    @staticmethod
+    def _module_summary(module: RegisteredModule) -> str:
+        summaries = tuple(
+            command.help_text.splitlines()[0][:24]
+            for command in module.manifest.commands[:3]
+        )
+        if summaries:
+            return "；".join(summaries)
+        return f"{module.manifest.category.value} 模块，暂无已声明命令。"
 
     def module(self, snapshot: RegistrySnapshot, route: str) -> DisplayDocument:
         """Return all declared commands for ``route`` and its status."""
@@ -86,7 +97,7 @@ class HelpCatalog:
         manifest = module.manifest
         intro = TextBlock(
             f"模块：{manifest.route}\n状态：{status}\n"
-            "帮助展示不代表当前允许调用；执行时仍会校验模块状态和调用来源。"
+            "在命令路径后加 help 查看参数与例子；执行时仍校验状态和调用来源。"
         )
         commands = tuple(
             self._command_line(
@@ -97,8 +108,53 @@ class HelpCatalog:
             command_block = CommandsBlock((), fallback_text="该模块没有声明命令。")
         else:
             command_block = CommandsBlock(commands)
+        examples = tuple(
+            line
+            for command in manifest.commands
+            for line in command.help_text.splitlines()[1:]
+            if line.startswith("示例：")
+        )[:2]
+        blocks = (intro, command_block)
+        if examples:
+            blocks += (TextBlock("\n".join(examples)),)
+        return DisplayDocument(f"{manifest.route} 模块帮助", manifest.route, blocks)
+
+    def command(
+        self, snapshot: RegistrySnapshot, route: str, operation_path: str
+    ) -> DisplayDocument:
+        """Render details only for an active module's exact declared path."""
+        self._require_snapshot(snapshot)
+        try:
+            module = snapshot.module_for_route(route)
+        except RegistryError:
+            return self._unknown_route_document(route)
+        if not self._visible(module):
+            return self._unknown_route_document(route)
+        command = next(
+            (
+                item
+                for item in module.manifest.commands
+                if item.operation_path == operation_path
+            ),
+            None,
+        )
+        if command is None:
+            return DisplayDocument(
+                "命令帮助",
+                route,
+                (TextBlock(f"未找到命令。请使用 /ygl {route} help 查看能力。"),),
+            )
+        line = next(
+            line
+            for line in self._command_line(
+                module, command_only=False, health_query=self._health_query
+            )
+            if line.startswith(f"/ygl {route} {operation_path} help —")
+        )
         return DisplayDocument(
-            f"{manifest.route} 模块帮助", manifest.route, (intro, command_block)
+            f"{route} {operation_path} 帮助",
+            route,
+            (TextBlock(line), TextBlock(command.help_text)),
         )
 
     @staticmethod
@@ -135,7 +191,7 @@ class HelpCatalog:
                 )
             ):
                 continue
-            command_text = f"/ygl {manifest.route} {command.operation_path}"
+            command_text = f"/ygl {manifest.route} {command.operation_path} help"
             if command_only:
                 lines.append(command_text)
                 continue
@@ -164,7 +220,7 @@ class HelpCatalog:
                     health_query, module.module_id, capability.capability_id
                 )
             lines.append(
-                f"{command_text} — {command.help_text}（{policy}；{privacy}；{status}）"
+                f"{command_text} — {command.help_text.splitlines()[0]}（{policy}；{privacy}；{status}）"
             )
         return lines
 

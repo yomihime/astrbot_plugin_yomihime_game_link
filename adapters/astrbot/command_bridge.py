@@ -21,7 +21,7 @@ from ...core.registry import (
 from ...presentation.text import TextPresenter
 
 _ROUTE = re.compile(r"[a-z][a-z0-9_]*(?:[.-][a-z0-9_]+)*\Z")
-_USAGE = "用法：/ygl [help | <模块路由> help | <模块路由> <命令及参数>]。参数以空格分隔；双引号用于包含空格；不支持转义或 shell 语法。"
+_USAGE = "用法：/ygl help 查看模块；/ygl <模块路由> help 查看能力；/ygl <模块路由> <命令路径> help 查看参数。参数以空格分隔；双引号用于包含空格；不支持转义或 shell 语法。"
 
 
 class MessageTextEvent(Protocol):
@@ -89,6 +89,8 @@ class AstrBotCommandBridge:
                     module = snapshot.module_for_route(prefix[1])
                 except RegistryError:
                     module = None
+                if module is not None and not self._registry.is_active(module):
+                    return "模块当前不可用。请使用 /ygl help 查看活跃模块。"
                 matches = []
                 if module is not None:
                     for command in module.manifest.commands:
@@ -102,6 +104,13 @@ class AstrBotCommandBridge:
                     command, end = max(
                         matches, key=lambda item: len(item[0].operation_path.split())
                     )
+                    raw = message[end:].strip()
+                    if raw == "help":
+                        return self._render(
+                            self._catalog.command(
+                                snapshot, module.manifest.route, command.operation_path
+                            )
+                        )
                     if command.parameter_mode == "raw_tail":
                         raw = message[end:].lstrip()
                         capability = next(
@@ -113,7 +122,7 @@ class AstrBotCommandBridge:
                         try:
                             validate_parameters(capability, parameters)
                         except (ValueError, TypeError):
-                            return _USAGE
+                            return self._parameter_hint(module, command)
                         return CommandInvocation(
                             module.module_id, command.operation_path, parameters
                         )
@@ -128,14 +137,33 @@ class AstrBotCommandBridge:
         try:
             module = snapshot.module_for_route(tokens[0])
         except RegistryError:
-            return self._render(self._catalog.total(snapshot))
+            return "未找到模块路由。请使用 /ygl help 查看活跃模块。"
+        if not self._registry.is_active(module):
+            return "模块当前不可用。请使用 /ygl help 查看活跃模块。"
         tail = tokens[1:]
-        if tail == ["help"]:
+        if not tail or tail == ["help"]:
             return self._render(self._catalog.module(snapshot, module.manifest.route))
         invocation = self._parse_module_command(module, tail)
         if invocation is None:
-            return self._render(self._catalog.module(snapshot, module.manifest.route))
+            matches = [
+                command
+                for command in module.manifest.commands
+                if tuple(tail[: len(command.operation_path.split())])
+                == self._path_tokens(command.operation_path)
+            ]
+            if matches:
+                return self._parameter_hint(
+                    module,
+                    max(
+                        matches, key=lambda command: len(command.operation_path.split())
+                    ),
+                )
+            return f"未找到命令。请使用 /ygl {module.manifest.route} help 查看能力。"
         return invocation
+
+    @staticmethod
+    def _parameter_hint(module: RegisteredModule, command: CommandDescriptor) -> str:
+        return f"参数无效。请使用 /ygl {module.manifest.route} {command.operation_path} help 查看参数帮助。"
 
     def _render(self, document) -> CommandHelp:
         return CommandHelp(self._presenter.render(document, max_chars=self._max_chars))

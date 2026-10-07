@@ -100,6 +100,25 @@ def _package(package_id: str, *modules: ModuleManifest) -> PackageManifest:
 
 
 class HelpCatalogTests(unittest.TestCase):
+    def test_root_is_module_directory_and_details_are_opt_in(self):
+        module, handlers, handler = _module("first", "demo")
+        command = replace(
+            module.commands[0],
+            help_text="简短简介\n详细参数：query 必填\n示例：/ygl demo 查询 铜矿",
+        )
+        module = replace(module, commands=(command, module.commands[1]))
+        registry = Registry()
+        registry.register_package(_package("pkg", module), {"first": handlers})
+        catalog = HelpCatalog(active_query=lambda module: True)
+        total = catalog.total(registry.snapshot())
+        self.assertEqual(total.ordered_blocks[1].commands, ("/ygl demo help",))
+        overview = catalog.module(registry.snapshot(), "demo")
+        self.assertNotIn("详细参数", str(overview))
+        self.assertIn("简短简介", str(overview))
+        details = catalog.command(registry.snapshot(), "demo", "查询")
+        self.assertIn("详细参数", str(details))
+        self.assertEqual(handler.calls, 0)
+
     def test_explicit_three_origins_keep_command_visible_with_full_entry_labels(self):
         for policy in (
             InvocationPolicy.NATURAL_LANGUAGE_ALLOWED,
@@ -129,7 +148,7 @@ class HelpCatalogTests(unittest.TestCase):
                 )
                 catalog = HelpCatalog(active_query=lambda module: True)
                 total = catalog.total(registry.snapshot()).ordered_blocks[1].commands
-                self.assertIn("/ygl catalog 查询", total)
+                self.assertEqual(("/ygl catalog help",), total)
                 line = next(
                     line
                     for line in catalog.module(registry.snapshot(), "catalog")
@@ -170,8 +189,7 @@ class HelpCatalogTests(unittest.TestCase):
         )
         catalog = HelpCatalog(active_query=lambda module_id: True)
         total = catalog.total(registry.snapshot()).ordered_blocks[1].commands
-        self.assertIn("/ygl catalog web", total)
-        self.assertIn("/ygl catalog 绑定", total)
+        self.assertEqual(("/ygl catalog help",), total)
         self.assertNotIn("/ygl catalog 查询", total)
         lines = (
             catalog.module(registry.snapshot(), "catalog").ordered_blocks[1].commands
@@ -210,7 +228,7 @@ class HelpCatalogTests(unittest.TestCase):
         )
         commands = document.ordered_blocks[1].commands
         self.assertIn("/ygl zeta help", commands)
-        self.assertIn("/ygl zeta 绑定", commands)
+        self.assertEqual(("/ygl zeta help",), commands)
         self.assertNotIn("/ygl zeta 查询", commands)
 
     def test_hp03_module_help_lists_all_commands_for_active_state(self) -> None:

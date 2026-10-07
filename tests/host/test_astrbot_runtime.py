@@ -35,6 +35,7 @@ from ygl_test_subject.api.manifests import (
     PrivacyFloor,
 )
 from ygl_test_subject.api.services import (
+    CapabilityHealth,
     ConfigFieldUpdate,
     ConfigPatch,
     ConfigPatchMode,
@@ -102,7 +103,11 @@ class _ProxyContext(_Context):
 class _ClosePendingCore:
     def __init__(self) -> None:
         self.registry = Registry()
+        self.health_resolver = self
         self.close_calls = 0
+
+    def current(self, _module_id, _capability_id):
+        return CapabilityHealth(HealthStatus.UNKNOWN), 0
 
     async def start(self) -> None:
         return None
@@ -630,7 +635,7 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("ff14_default_region", stored.values)
             self.assertTrue(await core.ordinary_config_migration.complete())
             event = _Event()
-            event.message = "/ygl ff14 calendar"
+            event.message = "/ygl ff14 calendar help"
             help_text = await runtime.handle_event(event)
             self.assertIn("默认区域提示：global", help_text)
             self.assertIn("具体规则见模块帮助", help_text)
@@ -654,10 +659,9 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 "/ygl help",
                 "/ygl ff14",
                 "/ygl ff14 help",
-                "/ygl missing",
-                "/ygl ff14 absent",
-                "/ygl ff14 calendar",
-                "/ygl ff14 calendar cn days=bad",
+                "/ygl ff14 market help",
+                "/ygl ff14 calendar help",
+                "/ygl ff14 calendar subscribe help",
             ):
                 with self.subTest(text=text):
                     event.message = text
@@ -670,11 +674,33 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
                     response = await runtime.handle_event(event)
                     self.assertIn("用法", response)
                     self.assertNotIn("默认区域提示", response)
+            for text in (
+                "/ygl missing",
+                "/ygl ff14 absent",
+                "/ygl ff14 calendar",
+                "/ygl ff14 calendar cn days=bad",
+            ):
+                event.message = text
+                response = await runtime.handle_event(event)
+                self.assertIn("help", response)
+                self.assertNotIn("默认区域提示", response)
+                self.assertNotIn("/ygl ff14 market", response)
+            event.message = "/ygl help"
+            root_help = await runtime.handle_event(event)
+            self.assertIn("/ygl ff14 help", root_help)
+            self.assertNotIn("/ygl ff14 market", root_help)
+            self.assertNotIn("ygo", root_help)
+            event.message = "/ygl ff14 help"
+            module_help = await runtime.handle_event(event)
+            self.assertIn("market help", module_help)
+            self.assertIn("logs help", module_help)
+            self.assertIn("需对应区域凭据", module_help)
+            self.assertIn("当前不可用", module_help)
+            self.assertNotIn("server_hint=", module_help)
+            event.message = "/ygl ff14 logs help"
+            details = await runtime.handle_event(event)
+            self.assertIn("server_hint=", details)
             self.assertEqual(context.calls, [])
-            event.message = "/ygl ff14 market help"
-            self.assertIsNone(await runtime.handle_event(event))
-            self.assertEqual(len(context.calls), 1)
-            self.assertNotIn("默认区域提示", context.calls[-1][1].chain[0].text)
         finally:
             await runtime.terminate()
 
@@ -858,7 +884,7 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(state["ordinary_config"]["values"])
             self.assertTrue(runtime.ready)
             event = _Event()
-            event.message = "/ygl ff14 calendar"
+            event.message = "/ygl ff14 calendar help"
             rejected = await runtime.handle_event(event)
             self.assertIn("普通配置无效", rejected)
             self.assertEqual(context.calls, [])
@@ -886,7 +912,7 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 authorization=admin,
             )
             # No page read or restart between authorized repair and the command.
-            event.message = "/ygl ff14 calendar"
+            event.message = "/ygl ff14 calendar help"
             help_text = await runtime.handle_event(event)
             self.assertIn(f"默认区域提示：{region}", help_text)
             self.assertTrue(runtime.ready)
@@ -1598,7 +1624,13 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
         )
         event = _Event()
         event.message = "/ygl owner manage"
+        response = await runtime.handle_event(event)
+        self.assertIn("模块当前不可用", response)
+        self.assertEqual(handler.calls, 0)
+        self.assertEqual(context.calls, [])
 
+        # The bundled module is active and has a genuine OWNER declaration.
+        event.message = "/ygl ff14 calendar subscriptions"
         response = await runtime.handle_event(event)
 
         self.assertEqual(response, "该本人管理命令仅支持私聊，请前往私聊继续。")

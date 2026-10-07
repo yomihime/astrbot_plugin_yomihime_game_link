@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import unittest
+from dataclasses import replace
 
 from ygl_test_subject.adapters.astrbot.command_bridge import (
     AstrBotCommandBridge,
@@ -47,6 +48,49 @@ class _FakeEvent:
 
 
 class AstrBotCommandBridgeTests(unittest.TestCase):
+    def test_raw_tail_and_multiword_help_never_dispatch(self):
+        package, handlers = build_package()
+        module = package.modules[0]
+        command = replace(
+            module.commands[0],
+            operation_path="query raw",
+            parameter_mapping={},
+            parameter_mode="raw_tail",
+            raw_tail_parameter="item",
+        )
+        module = replace(module, commands=(command, *module.commands[1:]))
+        package = replace(package, modules=(module,))
+        self.registry.register_package(package, {"demo": handlers})
+        action = self.bridge.parse(_FakeEvent("/ygl demo query raw help"))
+        self.assertIsInstance(action, CommandHelp)
+        self.assertNotIsInstance(action, CommandInvocation)
+        raw = self.bridge.parse(
+            _FakeEvent('/ygl demo query raw "Copper Ore"  intent=min')
+        )
+        self.assertIsInstance(raw, CommandInvocation)
+        self.assertEqual(raw.parameters["item"], '"Copper Ore"  intent=min')
+        self.registry.set_enabled("sample/demo", False)
+        self.assertNotIsInstance(
+            self.bridge.parse(_FakeEvent("/ygl demo query raw alpha")),
+            CommandInvocation,
+        )
+
+    def test_declared_command_help_is_intercepted_and_errors_stay_short(self):
+        package, handlers = build_package()
+        self.registry.register_package(package, {"demo": handlers})
+        action = self.bridge.parse(_FakeEvent("/ygl demo 查询 help"))
+        self.assertIsInstance(action, CommandHelp)
+        self.assertIn("查询", action)
+        for text in ("/ygl missing", "/ygl demo absent", "/ygl demo 查询"):
+            error = self.bridge.parse(_FakeEvent(text))
+            self.assertIsInstance(error, str)
+            self.assertNotIsInstance(error, CommandHelp)
+            self.assertNotIn("必须通过命令", error)
+        self.registry.set_enabled("sample/demo", False)
+        self.assertNotIsInstance(
+            self.bridge.parse(_FakeEvent("/ygl demo 查询 alpha")), CommandInvocation
+        )
+
     def setUp(self) -> None:
         self.registry = Registry()
         self.bridge = AstrBotCommandBridge(self.registry)
@@ -68,7 +112,7 @@ class AstrBotCommandBridgeTests(unittest.TestCase):
 
         self.assertIn("demo 模块帮助", known)
         self.assertIn("/ygl demo 查询", known)
-        self.assertIn("/ygl demo", unknown)
+        self.assertIn("/ygl help", unknown)
 
     def test_catalog_help_is_classified_for_implicit_and_invalid_arguments(self):
         package, handlers = build_package()
@@ -78,9 +122,6 @@ class AstrBotCommandBridgeTests(unittest.TestCase):
             "/ygl help",
             "/ygl demo",
             "/ygl demo help",
-            "/ygl missing",
-            "/ygl demo absent",
-            "/ygl demo 查询",
         ):
             with self.subTest(text=text):
                 action = self.bridge.parse(_FakeEvent(text))
@@ -133,7 +174,7 @@ class AstrBotCommandBridgeTests(unittest.TestCase):
         )
         self.assertIn("/ygl", self.bridge.handle(_FakeEvent('/ygl "demo route" help')))
         self.assertIn("/ygl", self.bridge.handle(_FakeEvent("/ygl demo 查询 player")))
-        self.assertIn("/ygl demo", self.bridge.handle(_FakeEvent("/ygl missing")))
+        self.assertIn("/ygl help", self.bridge.handle(_FakeEvent("/ygl missing")))
 
     def test_untrusted_event_fields_are_ignored_and_bad_text_fails_closed(self) -> None:
         response = self.bridge.handle(_FakeEvent("/ygl help"))
