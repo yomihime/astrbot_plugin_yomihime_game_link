@@ -178,6 +178,405 @@ class LLMToolTests(unittest.IsolatedAsyncioTestCase):
                 lambda unit: unit.execute("SELECT 1").fetchone()[0]
             )
 
+    async def test_global_all_intents_cross_real_core_fact_gate(self):
+        from collections.abc import Mapping
+
+        def nodes(value):
+            if isinstance(value, Mapping):
+                return 1 + sum(nodes(k) + nodes(v) for k, v in value.items())
+            if isinstance(value, (tuple, list)):
+                return 1 + sum(nodes(v) for v in value)
+            return 1
+
+        await self.start()
+        handler = (
+            self.runtime.core_runtime.registry.snapshot()
+            .module("ff14/ff14")
+            .handlers.capabilities["ff14.market.query"]
+        )
+        original = handler.invoke
+        counts = []
+
+        async def measured(*args):
+            result = await original(*args)
+            counts.append(
+                nodes(result.model_facts.facts) + len(result.model_facts.sources)
+            )
+            print(
+                "FF14 public fact nodes:", args[1].get("intent"), counts[-1], flush=True
+            )
+            return result
+
+        handler.invoke = measured
+        for intent in ("min", "overview"):
+            with self.subTest(intent=intent):
+                before = len(
+                    [r for r in self.transport.requests if "/aggregated/" in r.path]
+                )
+                facts = await self.call(
+                    parameters={
+                        "query": "44091",
+                        "region": "global",
+                        "quality": "all",
+                        "intent": intent,
+                    }
+                )
+                self.assertEqual(facts["status"], "success")
+                self.assertLessEqual(counts[-1], 512)
+                market = facts["market"]
+                self.assertEqual(len(market["coverage"]), 4)
+                self.assertTrue(
+                    all(row["state"] == "available" for row in market["coverage"])
+                )
+                self.assertEqual(
+                    {row["quality"] for row in market["minimums"]}, {"nq", "hq"}
+                )
+                self.assertTrue(
+                    all(
+                        row["world_name_state"] == "verified"
+                        for row in market["minimums"]
+                    )
+                )
+                self.assertFalse(market["limitations"]["realtime_availability"])
+                self.assertEqual(
+                    len(
+                        [r for r in self.transport.requests if "/aggregated/" in r.path]
+                    )
+                    - before,
+                    4,
+                )
+                before = len(self.transport.requests)
+                cached = await self.call(
+                    parameters={
+                        "query": "44091",
+                        "region": "global",
+                        "quality": "all",
+                        "intent": intent,
+                    }
+                )
+                self.assertEqual(cached["status"], "success")
+                self.assertTrue(
+                    all(row["cached"] for row in cached["market"]["coverage"])
+                )
+                self.assertEqual(len(self.transport.requests), before)
+        self.assertEqual(
+            len([r for r in self.transport.requests if "/aggregated/" in r.path]), 8
+        )
+
+    async def test_same_query_new_event_reparses_but_same_event_keeps_batch(self):
+        await self.start()
+        parameters = {
+            "query": "Synthetic",
+            "region": "cn",
+            "quality": "all",
+            "intent": "overview",
+        }
+        user = self.wrapper("Synthetic国服行情")
+        pending = await self.call(parameters=parameters, wrapper=user)
+        retry = await self.call(
+            parameters={
+                **parameters,
+                "region": "global",
+                "quality": "hq",
+                "intent": "min",
+            },
+            wrapper=user,
+        )
+        self.assertEqual(retry["selection"], pending["selection"])
+        self.assertEqual(retry["market"], pending["market"])
+        for field, value, text in (
+            ("region", "global", "Synthetic国际服行情？"),
+            ("quality", "hq", "Synthetic国服HQ行情？"),
+            ("intent", "min", "Synthetic国服最低价？"),
+            ("intent", "overview", "Synthetic什么价？"),
+        ):
+            with self.subTest(field=field):
+                fresh = await self.call(
+                    parameters={**parameters, field: value}, wrapper=self.wrapper(text)
+                )
+                self.assertNotEqual(
+                    fresh["selection"]["generation"], pending["selection"]["generation"]
+                )
+                self.assertEqual(
+                    fresh["market"][field]
+                    if field != "region"
+                    else fresh["market"]["scope"]["regions"],
+                    value
+                    if field != "region"
+                    else ["North-America", "Europe", "Japan", "Oceania"],
+                )
+                stale = {
+                    key: pending["selection"][key] for key in ("batch_id", "generation")
+                }
+                stale["item_id"] = 44091
+                self.assertEqual(
+                    (
+                        await self.call(
+                            "ff14_market_select", stale, self.wrapper("选择物品 44091")
+                        )
+                    )["status"],
+                    "error",
+                )
+                pending = fresh
+
+    async def test_global_missing_metrics_and_warning_bound_cross_core_gate(self):
+        from collections.abc import Mapping
+        from dataclasses import replace
+        from unittest.mock import patch
+
+        from .test_market_integration import aggregated
+
+        def nodes(value):
+            if isinstance(value, Mapping):
+                return 1 + sum(nodes(k) + nodes(v) for k, v in value.items())
+            if isinstance(value, (tuple, list)):
+                return 1 + sum(nodes(v) for v in value)
+            return 1
+
+        await self.start()
+
+        async def missing(request):
+            if "/aggregated/" in request.path:
+                payload = aggregated(request.path.split("/")[-2])
+                for quality in ("nq", "hq"):
+                    for metric in (
+                        "recentPurchase",
+                        "averageSalePrice",
+                        "dailySaleVelocity",
+                    ):
+                        payload["results"][0][quality].pop(metric)
+                return payload
+            return None
+
+        self.transport.callback = missing
+        handler = (
+            self.runtime.core_runtime.registry.snapshot()
+            .module("ff14/ff14")
+            .handlers.capabilities["ff14.market.query"]
+        )
+        client_type = type(handler).invoke.__globals__["MarketClient"]
+        original = client_type.execute
+
+        async def warnings(client, query):
+            execution = await original(client, query)
+            return replace(
+                execution,
+                result=replace(
+                    execution.result,
+                    warnings=tuple("Synthetic warning " + str(i) for i in range(8)),
+                ),
+            )
+
+        with patch.object(client_type, "execute", warnings):
+            for intent in ("min", "overview"):
+                with self.subTest(intent=intent):
+                    facts = await self.call(
+                        parameters={
+                            "query": "44091",
+                            "region": "global",
+                            "quality": "all",
+                            "intent": intent,
+                        }
+                    )
+                    self.assertEqual(facts["status"], "partial_success")
+                    print(
+                        "FF14 missing metric public fact nodes:",
+                        intent,
+                        nodes(facts),
+                        flush=True,
+                    )
+                    self.assertLessEqual(nodes(facts), 512)
+                    market = facts["market"]
+                    self.assertEqual(len(market["warnings"]), 8)
+                    self.assertFalse(market["coverage_complete"])
+                    self.assertEqual(len(market["coverage"]), 4)
+                    self.assertTrue(
+                        all(row["state"] == "available" for row in market["coverage"])
+                    )
+                    for row in market["minimums"]:
+                        self.assertEqual(row["price_per_unit"], 100)
+                        self.assertEqual(row["world_name_state"], "verified")
+                        self.assertIsNotNone(row["time"]["source_time"])
+                        self.assertIsNotNone(row["source"]["fetched_age_seconds"])
+                    for scope in market["coverage"]:
+                        for quote in scope["quotes"]:
+                            if intent == "overview":
+                                self.assertIsNone(quote["recent_purchase"])
+                                self.assertIsNone(quote["average_sale_price"])
+                                self.assertIsNone(quote["daily_sale_velocity"])
+                                self.assertEqual(
+                                    quote["missing"],
+                                    [
+                                        "recent_purchase",
+                                        "average_sale_price",
+                                        "daily_sale_velocity",
+                                    ],
+                                )
+                            else:
+                                self.assertEqual(quote["missing"], [])
+                                self.assertNotIn("recent_purchase", quote)
+
+    async def test_missing_query_rejected_in_module_without_losing_candidate(self):
+        await self.start()
+        pending = await self.call(
+            parameters={"query": "Synthetic"}, wrapper=self.wrapper("Synthetic什么价")
+        )
+        query_tool = self.manager.get_full_tool_set().get_tool("ff14_market_query")
+        self.assertEqual(query_tool.parameters["required"], [])
+        before = len(self.transport.requests)
+        missing = json.loads(
+            await query_tool.call(self.wrapper("Synthetic什么价"), region="global")
+        )
+        self.assertEqual(missing["status"], "error")
+        self.assertEqual(missing["error"]["code"], "parameter_error")
+        self.assertEqual(len(self.transport.requests), before)
+        selected = await self.call(
+            "ff14_market_select",
+            {
+                **{
+                    key: pending["selection"][key] for key in ("batch_id", "generation")
+                },
+                "item_id": 44091,
+            },
+            self.wrapper("选择物品 44091"),
+        )
+        self.assertEqual(selected["status"], "success")
+
+    async def test_generic_publisher_query_is_not_an_item_contract(self):
+        from uuid import uuid4
+
+        from yomihime_sdk.api.display import DisplayDocument, TextBlock
+        from yomihime_sdk.api.manifests import (
+            CapabilityDescriptor,
+            CapabilityEffect,
+            InvocationPolicy,
+            ModuleCategory,
+            ModuleManifest,
+            PackageManifest,
+            ToolDescriptor,
+        )
+        from yomihime_sdk.api.results import FactDocument
+        from yomihime_sdk.api.services import (
+            CapabilityHealth,
+            HealthReport,
+            HealthStatus,
+            ModuleHandlers,
+        )
+        from yomihime_sdk.api.version import CONTRACT_VERSION
+
+        await self.start()
+        descriptor = ToolDescriptor(
+            name="generic_query",
+            description="generic",
+            capability_id="read",
+            parameter_mapping={"query": "text"},
+        )
+        capability = CapabilityDescriptor(
+            capability_id="read",
+            invocation_policy=InvocationPolicy.NATURAL_LANGUAGE_ALLOWED,
+            effect=CapabilityEffect.READ_ONLY,
+            input_schema={
+                "type": "object",
+                "properties": {"text": {"type": "string"}},
+                "required": ["text"],
+                "additionalProperties": False,
+            },
+        )
+        manifest = ModuleManifest(
+            module_id="module",
+            route="generic",
+            category=ModuleCategory.GAME,
+            factory_entry="synthetic:Factory",
+            module_version="1.0.0",
+            capabilities=(capability,),
+            tools=(descriptor,),
+            commands=(),
+        )
+        seen = []
+
+        class Handler:
+            async def invoke(self, context, parameters):
+                seen.append(dict(parameters))
+                return CapabilityResult(
+                    "generic",
+                    ResultStatus.SUCCESS,
+                    DisplayDocument("Generic", "generic", (TextBlock("ok"),)),
+                    model_facts=FactDocument({"answer": parameters["text"]}),
+                )
+
+        handlers = ModuleHandlers({"read": Handler()}, {}, {})
+
+        class Instance:
+            def handlers(self):
+                return handlers
+
+            async def start(self):
+                pass
+
+            async def stop(self):
+                pass
+
+            async def check_health(self):
+                return HealthReport({"read": CapabilityHealth(HealthStatus.AVAILABLE)})
+
+        core = self.runtime.core_runtime
+        core.registry.register_package(
+            PackageManifest(
+                package_id="generic",
+                package_version="1.0.0",
+                contract_version=CONTRACT_VERSION,
+                modules=(manifest,),
+                author="Tests",
+                license="AGPL-3.0",
+                source="synthetic fixture",
+            ),
+            {"module": handlers},
+        )
+        instance, install_id, run_id = Instance(), uuid4().hex, uuid4().hex
+        adopted = core.lifecycle.adopt_candidate(
+            "generic", manifest, install_id, instance
+        )
+        core.lifecycle.install_dormant(
+            "generic", "generic/module", install_id, instance, adopted
+        )
+        identity, _ = await core.lifecycle.start_candidate("generic/module", run_id)
+        core.lifecycle.publish_committed_intent(
+            "generic/module", run_id, identity, True, core.registry.snapshot().revision
+        )
+        self.addAsyncCleanup(core.lifecycle.stop, "generic/module")
+        toolset = self.manager.get_full_tool_set()
+        tool = toolset.get_tool("generic_query")
+        self.assertEqual(tool.parameters["required"], ["query"])
+        for query in ("44091", "no item evidence"):
+            self.assertEqual(
+                await self.call(
+                    "generic_query", {"query": query}, self.wrapper("hello")
+                ),
+                {"answer": query},
+            )
+        self.assertEqual(len(seen), 2)
+        self.assertEqual(self.transport.requests, [])
+        self.host.preferences.permissions = {"_default": {"generic_query": "admin"}}
+        self.assertIn(
+            "Permission denied",
+            await self.call("generic_query", {"query": "other"}, self.wrapper("hello")),
+        )
+        self.assertEqual(len(seen), 2)
+        self.assertEqual(
+            await self.call(
+                "generic_query", {"query": "other"}, self.wrapper("hello", role="admin")
+            ),
+            {"answer": "other"},
+        )
+        await core.lifecycle.stop("generic/module")
+        with self.assertRaises(PermissionError):
+            await self.call(
+                "generic_query",
+                {"query": "other"},
+                self.wrapper("hello", role="admin"),
+                toolset=toolset,
+            )
+
     async def test_fixed_host_query_prices_cache_and_explicit_command_provider_zero(
         self,
     ):
@@ -319,10 +718,12 @@ class LLMToolTests(unittest.IsolatedAsyncioTestCase):
             "服务器44092的Synthetic价格",
             "物品ID 440920",
         ):
-            with self.subTest(text=text), self.assertRaises(PermissionError):
-                await self.call(
+            with self.subTest(text=text):
+                denied = await self.call(
                     parameters={"query": "44092"}, wrapper=self.wrapper(text)
                 )
+                self.assertEqual(denied["status"], "error")
+                self.assertEqual(denied["error"]["code"], "unsupported")
         continued, reply = await self.provider.chat(
             self.wrapper("选择物品 44092"), self.manager.get_full_tool_set()
         )
@@ -373,7 +774,7 @@ class LLMToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(market["quality"], "all")
         for key in ("scope", "module_revision", "core_revision"):
             self.assertEqual(market[key], pending["market"][key])
-        self.assertEqual(market["fact_projection_version"], 2)
+        self.assertEqual(market["fact_projection_version"], 3)
         self.assertEqual(market["minimums"][0]["world_name"], "SyntheticChina")
         self.assertEqual(
             market["coverage"][0]["quotes"][0]["minimum_ref"], "market.minimums[0]"
@@ -423,8 +824,10 @@ class LLMToolTests(unittest.IsolatedAsyncioTestCase):
             "someitem ID 44091 price",
         ):
             before = len(self.transport.requests)
-            with self.subTest(text=text), self.assertRaises(PermissionError):
-                await self.call(wrapper=self.wrapper(text))
+            with self.subTest(text=text):
+                denied = await self.call(wrapper=self.wrapper(text))
+                self.assertEqual(denied["status"], "error")
+                self.assertEqual(denied["error"]["code"], "unsupported")
             self.assertEqual(len(self.transport.requests), before)
         for text in (
             "物品ID 44091多少钱",
@@ -457,11 +860,12 @@ class LLMToolTests(unittest.IsolatedAsyncioTestCase):
         args["item_id"] = 44092
         for wrapper in (user, self.wrapper("刚才那个"), self.wrapper("随便选一个")):
             before = len(self.transport.requests)
-            with self.assertRaises(PermissionError):
-                await self.call(
-                    parameters={**parameters, "query": "Synthetic Item 44092"},
-                    wrapper=wrapper,
-                )
+            denied = await self.call(
+                parameters={**parameters, "query": "Synthetic Item 44092"},
+                wrapper=wrapper,
+            )
+            self.assertEqual(denied["status"], "error")
+            self.assertEqual(denied["error"]["code"], "unsupported")
             self.assertEqual(len(self.transport.requests), before)
 
         from .test_market_integration import aggregated
@@ -1426,6 +1830,12 @@ class LLMToolTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(len(result["market"]["coverage"]), 4)
         self.assertEqual(result["market"]["coverage"][1]["fetched_at"], None)
+        minimum = await self.call(
+            parameters={"query": "44091", "region": "global", "intent": "min"}
+        )
+        self.assertEqual(minimum["status"], "partial_success")
+        self.assertEqual(minimum["market"]["limitations"]["failed_regions"], ["Europe"])
+        self.assertEqual(len(minimum["market"]["coverage"]), 4)
 
         async def missing_future(request):
             if "/aggregated/" in request.path:

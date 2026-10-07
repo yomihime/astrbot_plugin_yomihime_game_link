@@ -224,6 +224,37 @@ def _region(value: object) -> tuple[str, ...]:
     raise QueryResolutionError("区域不受支持；请使用 cn/global 或标准区域。")
 
 
+def validate_tool_query(query: object, message: str) -> str:
+    """FF14 item evidence from the privately bound real user message only."""
+    try:
+        query = validate_item_query(query)
+    except ValueError as exc:
+        raise QueryResolutionError(str(exc)) from exc
+    if query.isascii() and query.isdigit():
+        item_id = re.escape(str(int(query)))
+        if not (
+            re.search(
+                r"(?:物品\s*ID|(?<![a-z0-9_])item\s+ID)\s*[:：#]?\s*"
+                + item_id
+                + r"(?![0-9])",
+                message,
+                re.I,
+            )
+            or re.fullmatch(
+                r"\s*(?:查价|查一下|查询)?\s*" + item_id + r"\s*(?:多少钱|什么价)?\s*",
+                message,
+            )
+        ):
+            raise QueryResolutionError(
+                "物品 ID 需要本条真实用户消息明确提供。", ErrorCode.UNSUPPORTED
+            )
+    elif " ".join(query.casefold().split()) not in " ".join(message.casefold().split()):
+        raise QueryResolutionError(
+            "物品名称需要本条真实用户消息明确提供。", ErrorCode.UNSUPPORTED
+        )
+    return query
+
+
 class MarketQueryResolver:
     def __init__(self, catalog: ScopeCatalog) -> None:
         self.catalog = catalog
@@ -605,7 +636,13 @@ class CandidateRegistry:
             )
             or (
                 original in message
-                and re.search(r"那个|这个|不要|不是|不选|选择|就选|[？?]", message)
+                and (
+                    re.search(r"那个|这个|不要|不是|不选|选择|就选", message)
+                    or (
+                        re.search(r"[？?]", message)
+                        and (name != original or message.rstrip("？?") == original)
+                    )
+                )
             )
         ):
             raise QueryResolutionError(
@@ -616,7 +653,7 @@ class CandidateRegistry:
                 raise QueryResolutionError(
                     "本次选择正在查询，请等待结果或明确提出无关的新物品查询。"
                 )
-            return batch
+            return None  # A different real event starts a fresh query/context.
         return None
 
     def choose_confirmed(

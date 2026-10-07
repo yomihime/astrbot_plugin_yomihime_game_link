@@ -31,6 +31,7 @@ from ..query_resolution import (
     QueryResolutionError,
     QueryTicket,
     TrustedOwner,
+    validate_tool_query,
 )
 from .item_sources import ItemPayloadError, ItemSourceClient
 from .market import MarketClient, _diagnostic
@@ -96,7 +97,7 @@ def _execution_facts(execution: MarketExecution) -> dict:
     query, observed = execution.query, execution.observed_at
     facts = _query_facts(query)
     facts.update(
-        fact_projection_version=2,
+        fact_projection_version=3,
         answer_guidance="成功或可用 partial 足够时直接回答；来源与范围/非实时限定紧邻价格，缺值写未知。无新用户范围不补查服务器；不推断 HQ 用途、补货或购买建议。",
         item_id=query.item_id,
         item_name=query.item_name,
@@ -156,6 +157,17 @@ def _execution_facts(execution: MarketExecution) -> dict:
                     if getattr(quote, name) is None
                 ],
             )
+            if query.intent == "min":
+                projected = {
+                    key: projected[key]
+                    for key in (
+                        "quality",
+                        "minimum",
+                        "minimum_world_id",
+                        "minimum_time",
+                    )
+                }
+                projected["missing"] = ["minimum"] if quote.minimum is None else []
             for index, (quality, region, minimum) in enumerate(execution.minimums[:2]):
                 if (
                     quality == quote.quality
@@ -194,6 +206,13 @@ def _execution_facts(execution: MarketExecution) -> dict:
                 quotes=quotes,
             )
         )
+        # v3: successful scopes have no failure diagnostic. Aggregated quotes
+        # carry their own World upload time, so an absent scope upload is redundant.
+        if not outcome.failed:
+            for key in ("stage", "reason", "status_code"):
+                coverage[-1].pop(key)
+        if not data or data.uploaded_at is None:
+            coverage[-1].pop("uploaded")
     facts["coverage"] = coverage
     facts["minimums"] = [
         dict(
@@ -385,6 +404,8 @@ class MarketQueryHandler:
             }
             if not selecting:
                 if context.origin is InvocationOrigin.LLM_TOOL:
+                    # Validate before any registry mutation, including retries.
+                    validate_tool_query(parameters.get("query"), evidence[2])
                     retry = self.registry.tool_query(
                         owner, evidence[1], evidence[2], parameters.get("query", "")
                     )
@@ -495,7 +516,7 @@ class MarketQueryHandler:
                     public["truncated"] = execution.truncated
                     public["coverage"] = [
                         {
-                            key: row[key]
+                            key: row.get(key)
                             for key in (
                                 "region",
                                 "target",

@@ -262,6 +262,23 @@ class NaturalConfirmationTests(unittest.TestCase):
                 self.registry.tool_query(self.owner, object(), text, query)
         self.assertEqual(self.choose("犎牛牛排那个。").scope, self.query.scope)
 
+    def test_original_word_only_same_event_is_retry_new_questions_are_fresh(self):
+        self.assertIs(
+            self.registry.tool_query(self.owner, self.event, "牛排什么价？", "牛排"),
+            self.batch,
+        )
+        self.assertIsNone(
+            self.registry.tool_query(self.owner, object(), "牛排国际服什么价？", "牛排")
+        )
+        self.assertIsNone(
+            self.registry.tool_query(
+                self.owner, object(), "牛排国服哪里最便宜？", "牛排"
+            )
+        )
+        with self.assertRaises(QueryResolutionError):
+            self.registry.tool_query(self.owner, object(), "牛排？", "牛排")
+        self.assertEqual(self.choose("犎牛牛排那个。").scope, self.query.scope)
+
     def test_all_positional_denial_messages_refuse_before_begin_in_every_state(self):
         # Candidate capacity is not a boundary on rejected ordinal syntax.
         for state in ("active", "absent", "expired", "consumed"):

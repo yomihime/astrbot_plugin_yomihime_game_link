@@ -14,7 +14,9 @@
 
 `ff14_market_query` 只接受 Q1 的 `query`、`server`/`dc`/`region`、`quality`（all/nq/hq）、`intent`（overview/min/listings）。它直接进入现有 MarketQueryHandler、Q1、S1；不向模型暴露 JSON/命令 wrapper。用户直接以 ID 查询时应明确说“物品ID 44091”或“item ID 44091”，或使用整条数字查价句（纯 ID、ID 后接“多少钱”/“什么价”，可前接“查价”/“查一下”/“查询”）；范围、数量及没有 ID 标签的“物品44091个”不是物品 ID 依据。
 
-名称 query 必须在本条真实用户消息中有明确名称依据，只规范大小写和连续空白。当前候选的名称、ID，以及包含候选的确认、疑问、否定或多名回复不能改走 query 重算范围，较短名称子串也不能绕过；原 query 重试保留原批次和上下文，真正无关的新物品查询仍使旧批次失效。没有有效候选时，明确确认模板拒绝续接；裸完整名称与独立新查询无法可靠区分，此时只作为有本条名称依据的新查询，不恢复已失效上下文。
+名称 query 必须在本条真实用户消息中有明确名称依据，只规范大小写和连续空白。名称与 ID 原文规则由 FF14 模块使用 Runtime 已验证的私有任务局部 event/text/owner 绑定执行，Host publisher 不解释任何物品 query。publisher 的 required 仅映射能力 schema 的 required；市场能力为兼容 command/input/selection 保持 required=[]，FF14 工具模块在重试判断和候选 begin 前拒绝缺 query，保留已有候选。
+
+当前候选的名称、ID，以及包含候选的确认、疑问、否定或多名回复不能改走 query 重算范围，较短名称子串也不能绕过；只有同一真实事件的原 query 重试保留原批次和上下文。新的真实用户消息以原词发起普通查询，重新解析范围、品质、意图与配置并使旧批次失效；名称确认仍必须走 select 并保存原上下文。真正无关的新物品查询也使旧批次失效。没有有效候选时，明确确认模板拒绝续接；裸完整名称与独立新查询无法可靠区分，此时只作为有本条名称依据的新查询，不恢复已失效上下文。
 
 歧义返回至多六个候选，模型展示名称并追问唯一完整名称。支持“犎牛牛排”“犎牛牛排那个。”及闭合肯定模板“选/选择/就/就选 + 完整名称”，允许末尾句号或感叹号，大小写和连续空白规范化；旧“选择物品 <ID>”兼容。`ff14_market_select` 仍只接收 batch_id/generation/item_id。Runtime 在已验证 ingress 后把真实 event/text/owner 任务局部绑定到 exact 当前 handler，模块先独立确定唯一 ID 再核对模型参数，finally 清除绑定；原始歧义事件不能自动选择。疑问、否定、多名、同名、简称、数量及无有效批次均拒绝且不消费。序号没有可信展示顺序绑定，首版不支持“第一/第二个”，应追问完整名称；“刚才那个”、翻译名和模型自声明确认也不支持。原范围、品质、意图、配置 revision 和候选名称由模块保存；TTL、单次消费、新查询失效及迟到围栏仍生效。COMMAND、WEB_PUBLIC、LLM_TOOL 的候选命名空间隔离。
 
@@ -52,6 +54,14 @@ LLM_TOOL 只使用 PUBLIC cache，USER/AUTHORIZED cache 拒绝；不为模型或
 SDK 1.6 错误事实仍保持精确 `{status, error: {code, message}}`（市场执行错误可保留 market），恢复指引附正式 `ErrorDetail.message`，不增加 error 子字段或修改 SDK/Core。
 
 真实证据的原 query 显式 `cn/all/overview`；其名称 select 续接已通过。随后两个服务器 query 来自同一模型批次，不归因为收到错误后的自动重试。最终坏措辞结论来自真实验收报告。历史数值仅用于离线回放；受控模型 stub 和离线测试不能证明模型遵循描述或真实聊天验收通过。
+
+## R5 A/B/C 市场回答事实投影 v3（离线实现）
+
+`market.fact_projection_version=3` 沿用 v2 的 minimums/listings 报价行和精确 minimum_ref。`min` 只投影最低挂牌相关的 quality、minimum/World/time 或 minimum_ref、minimum 缺项；最近成交、均价和成交量省略，不应把省略解读为零或来源缺值。`overview` 保留这些指标及原 null/缺项语义。两种意图仍保留每个区域的最低挂牌、来源/获取年龄/缓存、失败和空区域、范围与非实时/有限样本限定，canonical 报价仍有可信 World 名称与上传年龄。
+
+成功或空 scope 的 stage/reason/status_code 不再重复 null；失败 scope 仍保留诊断字段。没有 scope 上传时间时省略 coverage[].uploaded，省略表示 scope 上传未知，区域各报价的 minimum_time 或 canonical time 仍独立保留。消费者须按 v3 读取可选字段，不假定 v2 的每个 coverage key 必有；COMMAND/WEB_PUBLIC 的原八字段覆盖白名单保持原字段与 null 语义。SDK、Core 512 节点门槛及公共资源校验均未更改。
+
+四国际区 quality=all 的固定 Host 隔离工具链已分别执行冷/缓存 min 和 overview；这是合成来源的正式 Core 输出验证，不等于当前真实行情或真实模型验收。历史 v2 和既有真实两轮记录仍保留，不归为 v3 实例验收。
 
 ## 2026-10-07 阶段验收与剩余待办
 

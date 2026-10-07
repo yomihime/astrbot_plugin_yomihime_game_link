@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import Decimal
@@ -174,8 +173,6 @@ class AstrBotToolPublisher:
         required = [
             name for name, field in mapping.items() if field in schema["required"]
         ]
-        if handle.descriptor.name == "ff14_market_query":
-            required = ["query"]
         parameters = dict(
             type="object",
             properties=properties,
@@ -204,47 +201,6 @@ class AstrBotToolPublisher:
                     raise PermissionError("official Host event required")
                 _validate(parameters, kwargs, "parameters", 0)
                 event = context.context.event
-                message = event.get_message_str()
-                query = kwargs.get("query")
-                if (
-                    isinstance(query, str)
-                    and query.strip().isascii()
-                    and query.strip().isdigit()
-                    and (
-                        type(message) is not str
-                        or not (
-                            re.search(
-                                r"(?:物品\s*ID|(?<![a-z0-9_])item\s+ID)\s*[:：#]?\s*"
-                                + re.escape(str(int(query)))
-                                + r"(?![0-9])",
-                                message,
-                                re.I,
-                            )
-                            or re.fullmatch(
-                                r"\s*(?:查价|查一下|查询)?\s*"
-                                + re.escape(str(int(query)))
-                                + r"\s*(?:多少钱|什么价)?\s*",
-                                message,
-                            )
-                        )
-                    )
-                ):
-                    raise PermissionError("item ID requires explicit user evidence")
-                if isinstance(query, str) and not (
-                    query.strip().isascii() and query.strip().isdigit()
-                ):
-                    name = " ".join(query.casefold().split())
-                    user_text = (
-                        " ".join(message.casefold().split())
-                        if type(message) is str
-                        else ""
-                    )
-                    if not name or name not in user_text:
-                        # Reject before entering Core: an unsupported refinement
-                        # must not invalidate the user's existing candidate batch.
-                        raise PermissionError(
-                            "item name requires explicit user evidence"
-                        )
                 outcome = await publisher.invoke(
                     handle.module_id, handle.descriptor.name, kwargs, event
                 )

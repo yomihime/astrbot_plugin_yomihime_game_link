@@ -21,7 +21,7 @@ from .test_market import NOW, REGION_IDS, catalog, query
 
 
 class MarketFactsTests(unittest.TestCase):
-    def execution(self, *, intent="min", snapshot=True, partial=False):
+    def execution(self, *, intent="overview", snapshot=True, partial=False):
         q = query(region="cn", intent=intent)
         quotes = tuple(
             Quote(
@@ -62,7 +62,7 @@ class MarketFactsTests(unittest.TestCase):
 
     def test_canonical_rows_names_quality_source_and_separate_ages(self):
         facts = _execution_facts(self.execution())
-        self.assertEqual(facts["fact_projection_version"], 2)
+        self.assertEqual(facts["fact_projection_version"], 3)
         self.assertEqual([r["price_per_unit"] for r in facts["minimums"]], [100, 500])
         for i, row in enumerate(facts["minimums"]):
             self.assertEqual(row["world_name"], "SyntheticChina")
@@ -189,6 +189,20 @@ class MarketFactsTests(unittest.TestCase):
             self.assertEqual(
                 _execution_facts(replace(ex, query=q))["scope"]["source"], "default"
             )
+
+    def test_min_projects_only_price_metrics_and_preserves_null_minimum(self):
+        original = self.execution(intent="min")
+        facts = _execution_facts(original)
+        for row in facts["coverage"][0]["quotes"]:
+            self.assertEqual(set(row), {"quality", "minimum_ref", "missing"})
+            self.assertEqual(row["missing"], [])
+        missing = replace(original.outcomes[0], data=ScopeData(quotes=(Quote("nq"),)))
+        row = _execution_facts(replace(original, outcomes=(missing,), minimums=()))[
+            "coverage"
+        ][0]["quotes"][0]
+        self.assertIsNone(row["minimum"])
+        self.assertIsNone(row["minimum_time"]["source_time"])
+        self.assertEqual(row["missing"], ["minimum"])
 
 
 if __name__ == "__main__":
