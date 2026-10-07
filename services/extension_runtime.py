@@ -32,7 +32,11 @@ from ..core.health import HealthResolver
 from ..core.lifecycle import LifecycleController, LifecycleError
 from ..core.ports import AdminAuthorizationPort, RevisionConflict, RunIdentity
 from ..core.registry import Registry
-from ..extensions.discovery import DiscoveryRootError, discover_packages
+from ..extensions.discovery import (
+    DiscoveredPackage,
+    DiscoveryRootError,
+    discover_packages,
+)
 from ..extensions.loader import CandidateState, ExtensionCandidate
 from ..infrastructure.sqlite.repositories_runtime import (
     ModuleRuntimeIntent,
@@ -331,6 +335,10 @@ class ExtensionRuntime:
     @property
     def unloaded_owners(self):
         return frozenset(getattr(self, "_unloaded_owners", ()))
+
+    def owner_generation(self, module_id: str) -> int:
+        """Fence old management selections across this owner's detach/restore."""
+        return getattr(self, "_owner_generations", {}).get(module_id, 0)
 
     async def set_enabled(
         self,
@@ -1109,9 +1117,12 @@ class ExtensionRuntime:
             instances: dict[str, ModuleInstance] = {}
             handlers: dict[str, ModuleHandlers] = {}
             modules = tuple(
-                module for module in manifest.modules
-                if f"{manifest.package_id}/{module.module_id}" not in self.unloaded_owners
-                or f"{manifest.package_id}/{module.module_id}" == flight.requested_module_id
+                module
+                for module in manifest.modules
+                if f"{manifest.package_id}/{module.module_id}"
+                not in self.unloaded_owners
+                or f"{manifest.package_id}/{module.module_id}"
+                == flight.requested_module_id
             )
             for module in modules:
                 self._check_build_live(flight)
@@ -1955,6 +1966,10 @@ class ExtensionRuntime:
         getattr(self, "_unload_pending", set()).discard(module_id)
         if not hasattr(self, "_unloaded_owners"):
             self._unloaded_owners = set()
+        if module_id not in self._unloaded_owners:
+            if not hasattr(self, "_owner_generations"):
+                self._owner_generations = {}
+            self._owner_generations[module_id] = self.owner_generation(module_id) + 1
         self._unloaded_owners.add(module_id)
 
     async def prepare_detach(self, module_id):
@@ -1964,19 +1979,36 @@ class ExtensionRuntime:
             self._detached_candidates = {}
         self._unload_pending.add(module_id)
         package_id, _ = self._split_module_id(module_id)
-        registered = self.registry.snapshot().module(module_id)
+        registered = self.registry.snapshot().modules.get(module_id)
+        candidate = self.candidate(package_id)
+        if (
+            candidate is None
+            or not isinstance(candidate.package, DiscoveredPackage)
+            or not candidate.package.valid
+            or not isinstance(candidate.package.manifest, PackageManifest)
+        ):
+            raise ExtensionCandidateUnavailable(
+                "unloaded module candidate is unavailable"
+            )
+        manifest = (
+            registered.manifest
+            if registered is not None
+            else self._manifest_module(candidate.package.manifest, module_id)
+        )
         await self.module_services.retire_module_credentials(
-            module_id, manifest=registered.manifest
+            module_id, manifest=manifest
         )
         self.health_resolver._runs.pop(module_id, None)
         self.health_resolver._configs.pop(module_id, None)
+        if self._catalog.get(package_id) is not candidate:
+            raise ExtensionCandidateStale("unloaded module trusted candidate changed")
+        self._detached_candidates[module_id] = candidate
         built = self._built.get(package_id)
         if built is not None:
             if self._catalog.get(package_id) is not built.candidate:
                 raise ExtensionCandidateStale(
                     "unloaded module trusted candidate changed"
                 )
-            self._detached_candidates[module_id] = built.candidate
             if not any(
                 owner != module_id and owner.startswith(package_id + "/")
                 for owner in self.registry.snapshot().modules

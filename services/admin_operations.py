@@ -65,6 +65,7 @@ class _ManifestSelection:
     package_id: str
     candidate: ExtensionCandidate | None
     registered: RegisteredModule | None
+    owner_generation: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -232,12 +233,19 @@ class AdminOperationsService(AdminOperations):
             return result
 
     def _active_credential_policies(self):
-        return tuple(policy for policy in self._managed_source_credentials
-                     if policy.module_id not in self.extension_runtime.unloaded_owners)
+        return tuple(
+            policy
+            for policy in self._managed_source_credentials
+            if policy.module_id not in self.extension_runtime.unloaded_owners
+        )
 
     def credential_resources(self, *, active=False):
         resources = {}
-        policies = self._active_credential_policies() if active else self._managed_source_credentials
+        policies = (
+            self._active_credential_policies()
+            if active
+            else self._managed_source_credentials
+        )
         for policy in policies:
             resources.setdefault(
                 ConfigTarget(self.config_principal_id, policy.module_id), set()
@@ -286,7 +294,6 @@ class AdminOperationsService(AdminOperations):
 
     @_tracked_admin_request
     async def credential_status(self, *, authorization):
-        resources = self.credential_resources(active=True)
         grant = await self.authorization.authorize(
             AdminOperation.READ_CONFIG,
             invocation=None,
@@ -299,6 +306,7 @@ class AdminOperationsService(AdminOperations):
                 grant, operation=AdminOperation.READ_CONFIG
             )
             self._require_accepting()
+            resources = self.credential_resources(active=True)
             registry, selections = self._credential_selections()
             for target, fields in resources.items():
                 await self.authorization.validate_generation(
@@ -337,7 +345,10 @@ class AdminOperationsService(AdminOperations):
             self._require_accepting()
             for selection in selections.values():
                 self._require_same_selection(selection)
-            if self.registry.snapshot() is not registry:
+            if (
+                self.registry.snapshot() is not registry
+                or self.credential_resources(active=True) != resources
+            ):
                 raise AdminAuthorizationDenied
         return result
 
@@ -666,7 +677,13 @@ class AdminOperationsService(AdminOperations):
             package_id, local_id = module_id.split("/", 1)
             if registered.manifest.module_id != local_id:
                 raise AdminAuthorizationDenied from None
-            return _ManifestSelection(registered.manifest, package_id, None, registered)
+            return _ManifestSelection(
+                registered.manifest,
+                package_id,
+                None,
+                registered,
+                self.extension_runtime.owner_generation(module_id),
+            )
         package_id, separator, local_id = module_id.partition("/")
         if not separator or not local_id:
             raise AdminAuthorizationDenied from None
@@ -686,10 +703,21 @@ class AdminOperationsService(AdminOperations):
         )
         if selected is None:
             raise AdminAuthorizationDenied from None
-        return _ManifestSelection(selected, package_id, candidate, None)
+        return _ManifestSelection(
+            selected,
+            package_id,
+            candidate,
+            None,
+            self.extension_runtime.owner_generation(module_id),
+        )
 
     def _require_same_selection(self, selection: _ManifestSelection) -> None:
         module_id = f"{selection.package_id}/{selection.manifest.module_id}"
+        if (
+            self.extension_runtime.owner_generation(module_id)
+            != selection.owner_generation
+        ):
+            raise AdminAuthorizationDenied from None
         registered = self.registry.snapshot().modules.get(module_id)
         if selection.registered is not None:
             if registered is not selection.registered:
@@ -833,7 +861,11 @@ class AdminOperationsService(AdminOperations):
             for module in manifest.modules:
                 module_id = f"{package.package_id}/{module.module_id}"
                 selection = _ManifestSelection(
-                    module, package.package_id, candidate, None
+                    module,
+                    package.package_id,
+                    candidate,
+                    None,
+                    self.extension_runtime.owner_generation(module_id),
                 )
                 try:
                     coordinator = await self._configuration(selection)
@@ -868,7 +900,11 @@ class AdminOperationsService(AdminOperations):
             registry_snapshot = self.registry.snapshot()
             selections: dict[str, _ManifestSelection] = {
                 module_id: _ManifestSelection(
-                    registered.manifest, module_id.split("/", 1)[0], None, registered
+                    registered.manifest,
+                    module_id.split("/", 1)[0],
+                    None,
+                    registered,
+                    self.extension_runtime.owner_generation(module_id),
                 )
                 for module_id, registered in registry_snapshot.modules.items()
             }
@@ -881,7 +917,13 @@ class AdminOperationsService(AdminOperations):
                     module_id = f"{package.package_id}/{module.module_id}"
                     selections.setdefault(
                         module_id,
-                        _ManifestSelection(module, package.package_id, candidate, None),
+                        _ManifestSelection(
+                            module,
+                            package.package_id,
+                            candidate,
+                            None,
+                            self.extension_runtime.owner_generation(module_id),
+                        ),
                     )
             snapshots = tuple(
                 [
@@ -1046,7 +1088,8 @@ class AdminOperationsService(AdminOperations):
                 raise RevisionConflict(
                     "registry", status.registry_revision, snapshot.revision
                 )
-            if module_id in snapshot.modules:
+            if module_id not in self.extension_runtime.unloaded_owners:
+                selection = self._selection(module_id, snapshot)
                 await self.extension_runtime.prepare_detach(module_id)
                 if self._owner_cleanup is not None:
                     self._owner_cleanup(module_id)
@@ -1057,6 +1100,7 @@ class AdminOperationsService(AdminOperations):
                     raise RevisionConflict(
                         "registry", snapshot.revision, self.registry.snapshot().revision
                     )
+                self._require_same_selection(selection)
                 from contextlib import nullcontext
 
                 from .admin_authorization import _grant_effect
@@ -1071,7 +1115,8 @@ class AdminOperationsService(AdminOperations):
                     else nullcontext()
                 )
                 with fence:
-                    self.lifecycle.detach_stopped(module_id)
+                    if module_id in snapshot.modules:
+                        self.lifecycle.detach_stopped(module_id)
                     self.extension_runtime.detached(module_id)
             return {
                 "module_id": module_id,

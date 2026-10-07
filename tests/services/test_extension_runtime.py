@@ -61,6 +61,7 @@ from ygl_test_subject.services.admin_authorization import (
     _digest,
 )
 from ygl_test_subject.services.extension_runtime import (
+    ExtensionCandidateStale,
     ExtensionCleanupPending,
     ExtensionRuntime,
     ExtensionRuntimeError,
@@ -411,6 +412,54 @@ class ExtensionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(runtime.closed)
         self.assertEqual(instance.stopped, 2)
         self.assertEqual(source.leases[0].release_calls, 1)
+
+    async def test_candidate_detach_does_not_build_and_restore_requires_exact_source(
+        self,
+    ):
+        runtime, candidate, source = await self._runtime()
+        runtime.scan()
+        async with self.lifecycle.admission.mutation("test-candidate-detach"):
+            await runtime.prepare_detach("sample/mod")
+            runtime.detached("sample/mod")
+        self.assertEqual((source.capture_calls, source.factory.create_calls), (0, 0))
+        self.assertEqual(dict(self.registry.snapshot().modules), {})
+        self.assertIs(runtime._detached_candidates["sample/mod"], candidate)
+        self.assertEqual(runtime.owner_generation("sample/mod"), 1)
+        runtime.detached("sample/mod")
+        self.assertEqual(runtime.owner_generation("sample/mod"), 1)
+        runtime._catalog["sample"] = replace(candidate)
+        with self.assertRaises(ExtensionCandidateStale):
+            await self._enable(runtime, 0)
+        self.assertEqual(source.capture_calls, 0)
+        runtime._catalog["sample"] = candidate
+        await self._enable(runtime, 0)
+        self.assertTrue(self.registry.is_active("sample/mod"))
+        self.assertEqual(runtime.owner_generation("sample/mod"), 1)
+        self.assertIs(source.candidates[0], candidate)
+
+    async def test_candidate_cleanup_pending_blocks_restore_until_retry(self):
+        runtime, _candidate, source = await self._runtime()
+        runtime.scan()
+        services = runtime.module_services
+        retire = type(services).retire_module_credentials
+
+        async def fail_cleanup(_services, *_args, **_kwargs):
+            raise RuntimeError("injected cleanup failure")
+
+        with patch.object(type(services), "retire_module_credentials", fail_cleanup):
+            async with self.lifecycle.admission.mutation("test-candidate-detach"):
+                with self.assertRaises(RuntimeError):
+                    await runtime.prepare_detach("sample/mod")
+        with self.assertRaises(ExtensionCleanupPending):
+            await self._enable(runtime, 0)
+        self.assertEqual((source.capture_calls, source.factory.create_calls), (0, 0))
+        self.assertNotIn("sample/mod", runtime.unloaded_owners)
+        self.assertIs(type(services).retire_module_credentials, retire)
+        async with self.lifecycle.admission.mutation("test-candidate-detach-retry"):
+            await runtime.prepare_detach("sample/mod")
+            runtime.detached("sample/mod")
+        await self._enable(runtime, 0)
+        self.assertTrue(self.registry.is_active("sample/mod"))
 
     async def test_concurrent_same_direction_requests_join_one_build_and_start(self):
         factory = _Factory(block_create=True)
