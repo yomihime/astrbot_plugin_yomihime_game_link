@@ -92,7 +92,7 @@ def _isolated_probe_main() -> None:
     sdk = importlib.import_module("yomihime_sdk")
     if not Path(sdk.__file__).resolve().is_relative_to(site_root.resolve()):
         raise AssertionError("canonical SDK did not load from the installed site")
-    if importlib.metadata.version("yomihime-module-sdk") != "1.5.0":
+    if importlib.metadata.version("yomihime-module-sdk") != "1.6.0":
         raise AssertionError("installed SDK version changed")
 
     sys.path.insert(1, str(repository_root))

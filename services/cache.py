@@ -17,7 +17,7 @@ from datetime import UTC, datetime, timedelta
 from time import monotonic
 from typing import Callable, TypeVar
 
-from ..api.contexts import InvocationView
+from ..api.contexts import InvocationOrigin, InvocationView
 from ..api.services import CacheAccess, CacheAccessRequest, JsonObject
 from ..api.storage import (
     CacheEntry,
@@ -264,6 +264,8 @@ class _CacheAccessCoordinator:
             raise TypeError("cache visibility is invalid")
         if visibility is CacheVisibility.PUBLIC:
             return OwnerScope.public()
+        if invocation.origin is InvocationOrigin.LLM_TOOL:
+            raise CacheAccessError("Tool cache must remain public", code="scope_denied")
         if invocation.actor_id is None:
             raise CacheAccessError("user scope requires an actor", code="scope_denied")
         principal_id = await self._principal_id()
@@ -387,6 +389,8 @@ class _CacheAccessCoordinator:
             )
 
     def _default_visibility(self) -> CacheVisibility:
+        if self.__invocation.origin is InvocationOrigin.LLM_TOOL:
+            return CacheVisibility.PUBLIC
         if self.__invocation.grant_id is not None:
             return CacheVisibility.AUTHORIZED
         if self.__invocation.actor_id is not None:

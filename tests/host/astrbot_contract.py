@@ -24,6 +24,16 @@ HOST_COMMIT = "3c7adafa1397e182d60b1016bf88759265113c8a"
 HOST_REPOSITORY = "https://github.com/AstrBotDevs/AstrBot"
 # SHA256 of UTF-8 source with universal newlines (LF), identical on Windows/Linux.
 SOURCE_SHA256 = {
+    "astrbot/core/pipeline/process_stage/stage.py": "b4e83a1d81955351a863ddb56016153b531333b6b9e4cd0df2e07db4ea13a268",
+    "astrbot/core/star/context.py": "a9a2772080b463583af2c3082b4c13e3612ebd9fda0d234147be462394a1ba2e",
+    "astrbot/core/star/register/star_handler.py": "8eeeb59901d9944f10e326bfa10f76eee0629c3f380ed1fb7c5c47b3e50dc266",
+    "astrbot/core/agent/tool.py": "e761f599d3d6a8ab3c4afb47be6bb093fdad3ac5ffa9bd2d71cf58ee02c32935",
+    "astrbot/core/provider/func_tool_manager.py": "bef0154d4bd50b924cd9e1be82426d67bfc1f410c2f725d5812d9d936316eab4",
+    "astrbot/core/astr_agent_context.py": "6c99c09bf086ce484c9c2f7d180fe3d17c268be398a013e68066a7b92dfa0c5e",
+    "astrbot/core/platform/astr_message_event.py": "1c51db0b7e78e8cf6c8aa0f64c621d87e2af72a21fee0ff1524b68e6b5850954",
+    "astrbot/core/star/star_manager.py": "9f6d2f51f8ef006a7026e7aec0b232b06f4743734c4afdca494a0e6cb539c3ce",
+    "astrbot/core/agent/tool_executor.py": "f061a0541fc968a1952d0506d5ea5e2fe96f28caa07d0ee625a38f9d5cad9d7a",
+    "astrbot/core/agent/run_context.py": "1dc78f2312877a1fee7ec53ed62fd95329c00c8172f765ea6814f0126c562c58",
     "astrbot/dashboard/services/plugin_page_service.py": "18e41ee0bb5d25e5ced473224cd4a89686d794dae0c2a74a053f8b8d154cef33",
     "astrbot/core/config/astrbot_config.py": "1907838acd129201e92c96dd8b4a704183fa72150226ccaf1f4e82f9426ba014",
     "pyproject.toml": "9834b677dae6bacfc2f1e75ed6da1e8e99c7f011bf31deeb278903ff8786689c",
@@ -43,6 +53,7 @@ TEST_DEPENDENCIES = {
     "starlette": "0.52.1",
     "httpx": "0.28.1",
     "Quart": "0.20.0",
+    "jsonschema": "4.23.0",
 }
 
 

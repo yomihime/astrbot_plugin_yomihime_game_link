@@ -744,6 +744,7 @@ class LifecycleController:
                 ),
                 registry_revision=snapshot.revision,
             )
+        self.registry._notify()
         return self.status(module_id)
 
     async def stop(

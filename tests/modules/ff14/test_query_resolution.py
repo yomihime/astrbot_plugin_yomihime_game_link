@@ -18,6 +18,7 @@ from ygl_test_subject.modules.ff14.query_resolution import (
     QueryCoordinator,
     QueryDefaults,
     QueryResolutionError,
+    QueryTicket,
     ScopeCatalog,
     TrustedOwner,
     command_parameters,
@@ -81,6 +82,251 @@ class _Search:
     async def search(self, query, *, exact=False):
         self.calls.append((query, exact))
         return self.values
+
+
+class NaturalConfirmationTests(unittest.TestCase):
+    continuations = (
+        "第7个",
+        "第七个",
+        "第十个",
+        "最后一个",
+        "不是",
+        "不要",
+        "不选",
+        "后者",
+        "第0个",
+        "第10个",
+        "第十一",
+        "第十一個",
+        "第十一项",
+        "第两百个",
+        "第-1个",
+        "第1.5个",
+        "第９９９个",
+        "前者",
+        "前一个",
+        "下一个",
+        "那个？",
+    )
+
+    def setUp(self):
+        self.now = 0
+        self.registry = CandidateRegistry(clock=lambda: self.now)
+        self.owner = TrustedOwner("user", "session", "llm_tool:adapter")
+        self.event = object()
+        self.query = MarketQueryResolver(catalog()).parse(
+            {"query": "牛排", "server": "71001", "quality": "hq", "intent": "min"},
+            QueryDefaults("cn", 2, 3),
+        )
+        self.publish()
+
+    def publish(self, names=("犎牛牛排", "另一种牛排")):
+        ticket = self.registry.begin(self.owner, source_event=self.event)
+        self.batch = self.registry.publish(
+            ticket,
+            self.query,
+            tuple(ItemCandidate(90001 + i, name) for i, name in enumerate(names)),
+            False,
+        )
+
+    def choose(self, text, *, event=None, owner=None, item_id=90001):
+        return self.registry.choose_confirmed(
+            owner or self.owner,
+            self.batch.batch_id,
+            self.batch.generation,
+            item_id,
+            event=event or object(),
+            text=text,
+        )
+
+    def test_closed_positive_templates_restore_frozen_context_and_consume(self):
+        for text in (
+            "犎牛牛排",
+            "犎牛牛排那个。",
+            "选犎牛牛排",
+            "选择犎牛牛排",
+            "就犎牛牛排",
+            "就选犎牛牛排",
+            "选犎牛牛排",
+            "就犎牛牛排！",
+            "就选犎牛牛排",
+            "选择物品 90001",
+        ):
+            with self.subTest(text=text):
+                self.publish()
+                selected = self.choose(text)
+                self.assertEqual(selected.item_id, 90001)
+                self.assertEqual(selected.item_name, "犎牛牛排")
+                self.assertEqual(selected.original_query, "牛排")
+                for field in (
+                    "scope",
+                    "quality",
+                    "intent",
+                    "core_revision",
+                    "module_revision",
+                ):
+                    self.assertEqual(
+                        getattr(selected, field), getattr(self.query, field)
+                    )
+                with self.assertRaises(QueryResolutionError):
+                    self.choose(text)
+
+    def test_rejections_preserve_ticket_and_do_not_let_model_choose(self):
+        for text in (
+            "犎牛牛排？",
+            "不是犎牛牛排",
+            "不要犎牛牛排",
+            "犎牛牛排或另一种牛排",
+            "牛排那个",
+            "第一/第二个",
+            "第二个",
+            "犎牛牛排2个",
+            "刚才那个",
+        ):
+            with self.subTest(text=text), self.assertRaises(QueryResolutionError):
+                self.choose(text)
+        with self.assertRaises(QueryResolutionError):
+            self.choose("犎牛牛排", event=self.event)
+        with self.assertRaises(QueryResolutionError):
+            self.choose("犎牛牛排", item_id=90002)
+        self.assertEqual(self.choose("犎牛牛排那个。").item_id, 90001)
+        self.publish(("同名牛排", "同名牛排"))
+        with self.assertRaises(QueryResolutionError):
+            self.choose("同名牛排")
+        self.assertEqual(self.choose("选择物品 90001").item_id, 90001)
+
+    def test_owner_ttl_absence_and_new_query_invalidation(self):
+        for owner in (
+            TrustedOwner("other", "session", "llm_tool:adapter"),
+            TrustedOwner("user", "other", "llm_tool:adapter"),
+            TrustedOwner("user", "session", "adapter"),
+        ):
+            with self.assertRaises(QueryResolutionError):
+                self.choose("犎牛牛排", owner=owner)
+        self.now = 301
+        with self.assertRaises(QueryResolutionError):
+            self.choose("犎牛牛排")
+
+        for text in (
+            "犎牛牛排那个。",
+            "选择犎牛牛排",
+            "选择物品 90001",
+            "第二个",
+            "刚才那个",
+        ):
+            with self.subTest(text=text), self.assertRaises(QueryResolutionError):
+                self.registry.tool_query(self.owner, object(), text, "犎牛牛排")
+        self.publish()
+        self.assertIsNone(
+            self.registry.tool_query(self.owner, object(), "新矿石多少钱", "新矿石")
+        )
+        self.registry.begin(self.owner, source_event=object())
+        with self.assertRaises(QueryResolutionError):
+            self.choose("犎牛牛排")
+
+    def test_names_with_spaces_normalize_and_duplicate_names_remain_ambiguous(self):
+        self.publish(("Synthetic Steak", "Other Steak"))
+        self.assertEqual(self.choose("就选 SYNTHETIC   STEAK。").item_id, 90001)
+        self.publish(("Synthetic Steak", "synthetic   steak"))
+        with self.assertRaises(QueryResolutionError):
+            self.choose("Synthetic Steak那个")
+        with self.assertRaises(QueryResolutionError):
+            self.choose("不是 Synthetic Steak")
+        self.assertEqual(self.choose("选择物品 90001").item_id, 90001)
+
+    def test_pending_query_cannot_recalculate_context_from_confirmation(self):
+        self.assertIs(
+            self.registry.tool_query(
+                self.owner, self.event, "牛排国服哪里最便宜？", "牛排"
+            ),
+            self.batch,
+        )
+        for text, query in (
+            ("犎牛牛排那个。", "犎牛牛排"),
+            ("犎牛牛排那个。", "牛排"),
+            ("犎牛牛排那个。", "犎"),
+            ("犎牛牛排？", "犎牛牛排"),
+            ("不是犎牛牛排", "犎牛牛排"),
+            ("不是犎牛", "犎牛"),
+            ("就犎牛", "犎牛"),
+            ("犎牛？", "犎牛"),
+            ("犎牛牛排或另一种牛排", "另一种牛排"),
+            ("物品ID 90001", "90001"),
+            ("第二个", "第二个"),
+            ("牛排国服哪里最便宜？", "犎牛牛排"),
+        ):
+            with (
+                self.subTest(text=text, query=query),
+                self.assertRaises(QueryResolutionError),
+            ):
+                self.registry.tool_query(self.owner, object(), text, query)
+        self.assertEqual(self.choose("犎牛牛排那个。").scope, self.query.scope)
+
+    def test_all_positional_denial_messages_refuse_before_begin_in_every_state(self):
+        # Candidate capacity is not a boundary on rejected ordinal syntax.
+        for state in ("active", "absent", "expired", "consumed"):
+            for text in self.continuations:
+                with self.subTest(state=state, text=text):
+                    self.publish()
+                    ticket = QueryTicket(self.owner, self.batch.generation)
+                    if state == "absent":
+                        self.registry.finish(ticket, self.query)
+                    elif state == "expired":
+                        self.now += 301
+                    elif state == "consumed":
+                        self.registry.choose_confirmed(
+                            self.owner,
+                            self.batch.batch_id,
+                            self.batch.generation,
+                            90001,
+                            event=object(),
+                            text="犎牛牛排",
+                            retain=True,
+                        )
+                    with self.assertRaises(QueryResolutionError):
+                        self.registry.tool_query(self.owner, object(), text, text)
+                    if state == "active":
+                        self.assertIs(self.registry._current(ticket).batch, self.batch)
+                        self.assertEqual(
+                            self.choose("犎牛牛排").scope, self.query.scope
+                        )
+                    elif state == "consumed":
+                        pending = self.registry._current(ticket)
+                        self.assertIsNone(pending.batch)
+                        self.assertIs(pending.consumed_batch, self.batch)
+                        self.registry._release_confirmed(ticket)
+                        self.assertEqual(self.registry.size, 0)
+                    else:
+                        self.assertEqual(self.registry.size, 0)
+
+    def test_positional_query_token_refuses_but_unrelated_full_names_remain_queries(
+        self,
+    ):
+        for text, query in (
+            ("第七个多少钱", "第七个"),
+            ("看看最后一个价格", "最后一个"),
+            ("第7个吗？", "第7个"),
+            ("帮我看后者", "后者"),
+            ("不是吧", "不是"),
+            ("我说不要", "不要"),
+            ("我说不选", "不选"),
+            ("我说不要犎牛", "不要犎牛"),
+        ):
+            with self.subTest(text=text), self.assertRaises(QueryResolutionError):
+                self.registry.tool_query(self.owner, object(), text, query)
+        for name in (
+            "第七天堂牛排",
+            "第七个勇士徽章",
+            "最后一个传说牛排",
+            "前者的矿石",
+        ):
+            self.assertIsNone(
+                self.registry.tool_query(self.owner, object(), f"查询{name}价格", name)
+            )
+        self.publish(("第7个", "另一种牛排"))
+        with self.assertRaises(QueryResolutionError):
+            self.choose("选第7个")
+        self.assertEqual(self.choose("选择物品 90001").item_id, 90001)
 
 
 class ParsingTests(unittest.TestCase):

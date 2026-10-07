@@ -7,13 +7,13 @@ import json
 from collections.abc import Mapping
 
 from ..api.administration import ModuleLifecycle
+from ..api.contexts import InvocationOrigin
 from ..api.manifests import (
     EXTENSION_MANIFEST_MAX_BYTES,
     EXTENSION_MANIFEST_MAX_STRING_LENGTH,
     EXTENSION_MODULE_MAX_DECLARATIONS,
     EXTENSION_PACKAGE_MAX_MODULES,
     CapabilityEffect,
-    InvocationPolicy,
     PrivacyFloor,
 )
 from ..core.lifecycle import LifecycleState
@@ -132,8 +132,11 @@ def project_module_catalog(
                     {
                         "capability_id": capability.capability_id,
                         "invocation_policy": capability.invocation_policy.value,
-                        "web_declared": capability.invocation_policy
-                        is InvocationPolicy.COMMAND_AND_PUBLIC_WEB,
+                        "web_declared": InvocationOrigin.WEB_PUBLIC
+                        in capability.effective_origins,
+                        "invocation_origins": [
+                            origin.value for origin in capability.effective_origins
+                        ],
                     }
                     for capability in sorted(
                         manifest.capabilities, key=lambda item: item.capability_id

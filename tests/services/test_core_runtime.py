@@ -1234,11 +1234,13 @@ class CoreRuntimeTests(unittest.IsolatedAsyncioTestCase):
                             "capability_id": "public_read",
                             "invocation_policy": "command_only",
                             "web_declared": False,
+                            "invocation_origins": ["command"],
                         },
                         {
                             "capability_id": "public_web",
                             "invocation_policy": "command_and_public_web",
                             "web_declared": True,
+                            "invocation_origins": ["command", "web_public"],
                         },
                     ],
                 )

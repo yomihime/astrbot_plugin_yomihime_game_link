@@ -25,6 +25,7 @@ from .features.market_handler import MarketQueryHandler
 CAPABILITY_STATUS = "status"
 CAPABILITY_ITEM_LOOKUP = "item.lookup"
 CAPABILITY_MARKET_QUERY = "ff14.market.query"
+CAPABILITY_MARKET_SELECT = "ff14.market.select"
 CAPABILITY_FFLOGS_CHARACTER = "ff14.logs.character"
 CAPABILITY_FFLOGS_OUTPUT = "ff14.logs.output_percentile"
 CAPABILITY_CALENDAR_QUERY = "ff14.calendar.query"
@@ -36,6 +37,7 @@ CAPABILITY_IDS = (
     CAPABILITY_STATUS,
     CAPABILITY_ITEM_LOOKUP,
     CAPABILITY_MARKET_QUERY,
+    CAPABILITY_MARKET_SELECT,
     CAPABILITY_FFLOGS_CHARACTER,
     CAPABILITY_FFLOGS_OUTPUT,
     CAPABILITY_CALENDAR_QUERY,
@@ -69,6 +71,7 @@ class FF14Module:
                 CAPABILITY_STATUS: _StatusHandler(),
                 CAPABILITY_ITEM_LOOKUP: ItemLookup(services),
                 CAPABILITY_MARKET_QUERY: self._market,
+                CAPABILITY_MARKET_SELECT: self._market,
                 CAPABILITY_FFLOGS_CHARACTER: FFLogsCharacterLookup(services),
                 CAPABILITY_FFLOGS_OUTPUT: FFLogsOutputPercentiles(services),
                 CAPABILITY_CALENDAR_QUERY: CalendarQuery(services, config=config),

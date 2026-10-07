@@ -36,7 +36,7 @@ Host 页面和 runtime 测试从独立的 [AstrBot 上游源码](https://github.
 Add-Content -LiteralPath .git/info/exclude -Value '/.architecture-refactor/host-contract/'
 git clone --filter=blob:none --no-checkout https://github.com/AstrBotDevs/AstrBot.git .architecture-refactor/host-contract
 git -C .architecture-refactor/host-contract sparse-checkout init --cone
-git -C .architecture-refactor/host-contract sparse-checkout set astrbot/api astrbot/dashboard astrbot/core/config
+git -C .architecture-refactor/host-contract sparse-checkout set astrbot/api astrbot/dashboard astrbot/core
 git -C .architecture-refactor/host-contract checkout --detach 3c7adafa1397e182d60b1016bf88759265113c8a
 $env:YGL_TEST_ASTRBOT_SOURCE = (Resolve-Path .architecture-refactor/host-contract/astrbot).Path
 ```
@@ -92,3 +92,5 @@ Ubuntu job 保留全量 unittest，不过滤已知历史失败；回归记录必
 ## 文档与许可
 
 README、CHANGELOG 和本文件用于公开项目说明；仓库中的设计、路线图和协作材料可能面向开发过程，不应作为插件已经提供的用户功能说明。提交插件代码或资源时，请保留其各自适用的版权与许可声明；本指南不重新定义或合并不同工件的许可。
+
+R5 isolated tool tests require the pinned Host core/agent, core/provider, core/star, core/platform, core/pipeline/process_stage and astr_agent_context.py sources. Prepare astrbot/core through sparse-checkout before running the tests; tests validate every required source hash and never fetch missing files automatically.

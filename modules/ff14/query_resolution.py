@@ -167,6 +167,8 @@ class MarketQuery:
     core_revision: int
     module_revision: int
     parser_version: str = PARSER_VERSION
+    original_query: str | None = None
+    item_name: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -446,6 +448,62 @@ class _Pending:
     generation: str
     expires: float
     batch: CandidateBatch | None = None
+    source_event: object | None = None
+    consumed_batch: CandidateBatch | None = None
+    confirmation_event: object | None = None
+
+
+def _confirmation_text(value: str) -> str:
+    return " ".join(value.casefold().split()).rstrip("。.!！")
+
+
+def _closed_reference(text: str) -> bool:
+    """Whole-message position/denial syntax, independent of capacity."""
+    return bool(
+        re.fullmatch(
+            r"第\s*[+-]?(?:[0-9０-９]+(?:[.．][0-9０-９]+)?|[零〇一二三四五六七八九十百千万亿两]+)\s*[个個项項条條]?[？?]?",
+            text,
+        )
+        or text.rstrip("？?")
+        in {
+            "最后一个",
+            "最后那个",
+            "前一个",
+            "后一个",
+            "前者",
+            "后者",
+            "前面那个",
+            "后面那个",
+            "上一个",
+            "下一个",
+            "第几个",
+            "刚才那个",
+            "就那个",
+            "那个",
+            "这个",
+            "这一个",
+            "那一个",
+            "不是",
+            "不要",
+            "不选",
+        }
+    )
+
+
+def _continuation_message(value: str, query: str) -> bool:
+    text = _confirmation_text(value)
+    query_text = _confirmation_text(query)
+    return (
+        _closed_reference(text)
+        or _closed_reference(query_text)
+        or bool(re.fullmatch(r"(?:不要|不是|不选).*", query_text))
+        or bool(
+            re.fullmatch(
+                r"选择物品\s+[0-9]+|就选.+|就.+|选择.+|选.+|(?:不要|不是|不选).*|.+那个[？?]?",
+                text,
+            )
+        )
+    )
 
 
 class CandidateRegistry:
@@ -485,7 +543,9 @@ class CandidateRegistry:
         self._prune()
         return len(self._pending)
 
-    def begin(self, owner: TrustedOwner | None) -> QueryTicket:
+    def begin(
+        self, owner: TrustedOwner | None, *, source_event: object | None = None
+    ) -> QueryTicket:
         if not isinstance(owner, TrustedOwner):
             raise QueryResolutionError(
                 "缺少可信用户/会话绑定，无法续接候选。", ErrorCode.UNSUPPORTED
@@ -495,8 +555,135 @@ class CandidateRegistry:
         while len(self._pending) >= self._capacity:
             self._pending.popitem(last=False)
         ticket = QueryTicket(owner, secrets.token_urlsafe(18))
-        self._pending[owner] = _Pending(ticket.generation, self._clock() + self._ttl)
+        self._pending[owner] = _Pending(
+            ticket.generation, self._clock() + self._ttl, source_event=source_event
+        )
         return ticket
+
+    def tool_query(
+        self, owner: TrustedOwner, event: object, text: str, query: str
+    ) -> CandidateBatch | None:
+        """Keep candidate continuations out of the new-query invalidation path."""
+        self._prune()
+        pending = self._pending.get(owner)
+        if pending is None or (
+            pending.batch is None and pending.consumed_batch is None
+        ):
+            if _continuation_message(text, query):
+                raise QueryResolutionError(
+                    "没有有效候选可供确认，请先明确提出新的物品查询。"
+                )
+            return None
+        batch = pending.batch or pending.consumed_batch
+        name, message = _confirmation_text(query), _confirmation_text(text)
+        original = _confirmation_text(batch.query.query)
+        if (
+            pending.batch is not None
+            and event is pending.source_event
+            and name == original
+        ):
+            return batch  # Retry keeps the complete frozen context and ticket.
+        candidate_names = tuple(
+            _confirmation_text(item.name) for item in batch.candidates
+        )
+        candidate_ids = tuple(str(item.item_id) for item in batch.candidates)
+        if (
+            event is pending.source_event
+            or event is pending.confirmation_event
+            or _continuation_message(text, query)
+            or name in candidate_names
+            or name in candidate_ids
+            or (
+                name != original
+                and bool(name)
+                and any(name in candidate for candidate in candidate_names)
+            )
+            or any(candidate and candidate in message for candidate in candidate_names)
+            or any(
+                re.search(r"(?<![0-9])" + candidate + r"(?![0-9])", message)
+                for candidate in candidate_ids
+            )
+            or (
+                original in message
+                and re.search(r"那个|这个|不要|不是|不选|选择|就选|[？?]", message)
+            )
+        ):
+            raise QueryResolutionError(
+                "当前候选请通过选择工具确认唯一完整名称或物品 ID，原查询上下文保持不变。"
+            )
+        if name == original:
+            if pending.batch is None:
+                raise QueryResolutionError(
+                    "本次选择正在查询，请等待结果或明确提出无关的新物品查询。"
+                )
+            return batch
+        return None
+
+    def choose_confirmed(
+        self,
+        owner: TrustedOwner,
+        batch_id: str,
+        generation: str,
+        item_id: int,
+        *,
+        event: object,
+        text: str,
+        retain: bool = False,
+    ) -> MarketQuery:
+        """Derive the choice from a new trusted event before checking model ID."""
+        if (
+            not isinstance(owner, TrustedOwner)
+            or event is None
+            or type(text) is not str
+        ):
+            raise QueryResolutionError("缺少可信用户消息绑定。", ErrorCode.UNSUPPORTED)
+        self._prune()
+        pending = self._pending.get(owner)
+        if (
+            pending is None
+            or pending.batch is None
+            or pending.generation != generation
+            or pending.batch.batch_id != batch_id
+            or event is pending.source_event
+        ):
+            raise QueryResolutionError(
+                "候选确认无效或已过期，请重新查询或回复当前候选的完整名称。"
+            )
+        message = _confirmation_text(text)
+        explicit = re.fullmatch(r"选择物品\s+([0-9]+)", message)
+        if explicit:
+            confirmed = int(explicit[1])
+        else:
+            matches = [
+                candidate.item_id
+                for candidate in pending.batch.candidates
+                for name in (_confirmation_text(candidate.name),)
+                if not _closed_reference(name)
+                and message
+                in {
+                    name,
+                    name + "那个",
+                    name + " 那个",
+                    *(
+                        prefix + separator + name
+                        for prefix in ("选", "选择", "就", "就选")
+                        for separator in ("", " ")
+                    ),
+                }
+            ]
+            if len(matches) != 1:
+                raise QueryResolutionError(
+                    "请回复当前候选的唯一完整名称；疑问、否定、多项及序号不能确认选择。"
+                )
+            confirmed = matches[0]
+        if type(item_id) is not int or item_id != confirmed:
+            raise QueryResolutionError("模型提交的物品 ID 与真实用户确认不一致。")
+        batch = pending.batch
+        selected = self.choose(owner, batch_id, generation, confirmed, retain=retain)
+        if retain:
+            pending.consumed_batch = batch
+            pending.confirmation_event = event
+        return selected
 
     def _current(self, ticket: QueryTicket) -> _Pending:
         self._prune()
@@ -504,6 +691,16 @@ class CandidateRegistry:
         if pending is None or pending.generation != ticket.generation:
             raise QueryResolutionError("候选已失效，请重新查询。")
         return pending
+
+    def _release_confirmed(self, ticket: QueryTicket) -> None:
+        """Drop only this consumed flight's proof, including exceptional exits."""
+        pending = self._pending.get(ticket.owner)
+        if (
+            pending is not None
+            and pending.generation == ticket.generation
+            and pending.consumed_batch is not None
+        ):
+            del self._pending[ticket.owner]
 
     def finish(
         self, ticket: QueryTicket, query: MarketQuery, *, retain: bool = False
@@ -566,11 +763,21 @@ class CandidateRegistry:
             c.item_id for c in pending.batch.candidates
         ):
             raise QueryResolutionError("请选择当前列表中的物品 ID。")
-        query = replace(pending.batch.query, query=str(item_id), item_id=item_id)
+        selected = next(
+            item for item in pending.batch.candidates if item.item_id == item_id
+        )
+        query = replace(
+            pending.batch.query,
+            query=str(item_id),
+            item_id=item_id,
+            original_query=pending.batch.query.query,
+            item_name=selected.name,
+        )
         if retain:
             pending.batch = (
                 None  # Consume selection immediately, retain late-result fence.
             )
+            pending.source_event = None
         else:
             del self._pending[owner]
         return query
@@ -632,7 +839,7 @@ class QueryCoordinator:
                 raise QueryResolutionError("物品 ID 无效。", ErrorCode.UNPARSED)
             return self.registry.finish(
                 ticket,
-                replace(query, item_id=candidate.item_id),
+                replace(query, item_id=candidate.item_id, item_name=candidate.name),
                 retain=retain_until_result,
             )
         return self.registry.publish(ticket, query, candidates, truncated)

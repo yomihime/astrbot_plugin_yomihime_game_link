@@ -125,7 +125,15 @@ class CapabilityResult:
             raise ValueError("successful results require a document")
         if self.status is ResultStatus.ERROR and self.document is not None:
             raise ValueError("error results cannot contain a document")
-        if self.status is ResultStatus.ERROR and self.model_facts is not None:
+        if (
+            self.status is ResultStatus.ERROR
+            and self.model_facts is not None
+            and (
+                self.schema_version != "1.6.0"
+                or self.model_facts.schema_version != "1.6.0"
+                or self.privacy is not Privacy.PUBLIC
+            )
+        ):
             raise ValueError("error results cannot contain model facts")
         if self.status is ResultStatus.NEEDS_SELECTION and self.document is None:
             raise ValueError("selection results require a candidate document")
@@ -133,6 +141,17 @@ class CapabilityResult:
             raise ValueError("error results require stable error detail")
         if self.status is not ResultStatus.ERROR and self.error is not None:
             raise ValueError("only error results may contain error detail")
+        if self.status is ResultStatus.ERROR and self.model_facts is not None:
+            facts = self.model_facts.facts
+            if (
+                set(facts) not in ({"status", "error"}, {"status", "error", "market"})
+                or facts.get("status") != "error"
+                or facts.get("error")
+                != {"code": self.error.code.value, "message": self.error.message}
+            ):
+                raise ValueError(
+                    "error model facts require the public status/error envelope"
+                )
 
 
 __all__ = [

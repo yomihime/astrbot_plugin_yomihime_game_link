@@ -18,7 +18,7 @@ from scripts.build_release import build_release
 
 ROOT = Path(__file__).resolve().parents[2]
 EXPECTED_WHEEL_SHA256 = (
-    "bf5dae1f8d95ad2330f26e8dc3874217c503ad86775fc896a12009ae1b465878"
+    "134a07ef54ed008adf7e8ab352dc0757a1c8a780383b61996c95eab357b398e0"
 )
 EXPECTED_RESOURCES = {
     f"yomihime_sdk/_examples/{example}/{filename}"
@@ -117,11 +117,11 @@ assert sdk.SourceHttpError is CanonicalSourceHttpError
 assert GatewayResultType is sdk.CapabilityResult
 assert OutputResultType is sdk.CapabilityResult
 
-assert sdk.__version__ == "1.5.0"
-assert sdk.CONTRACT_VERSION == "1.5.0"
-assert sdk.CONTRACT_REVISION == "R1-MODULE-PAGES"
+assert sdk.__version__ == "1.6.0"
+assert sdk.CONTRACT_VERSION == "1.6.0"
+assert sdk.CONTRACT_REVISION == "R5-LLM-TOOLS"
 assert sdk.COMPATIBLE_CONTRACT_VERSIONS == (
-    "1.0.0", "1.1.0", "1.2.0", "1.3.0", "1.4.0", "1.5.0"
+    "1.0.0", "1.1.0", "1.2.0", "1.3.0", "1.4.0", "1.5.0", "1.6.0"
 )
 assert all(
     sdk.is_compatible_contract_version(version)
@@ -347,7 +347,7 @@ class InstalledArtifactTests(unittest.TestCase):
             wheel = build_wheel(wheelhouse)
             wheel_digest = hashlib.sha256(wheel.read_bytes()).hexdigest()
             self.assertEqual(wheel_digest, EXPECTED_WHEEL_SHA256)
-            self.assertEqual(wheel.name, "yomihime_module_sdk-1.5.0-py3-none-any.whl")
+            self.assertEqual(wheel.name, "yomihime_module_sdk-1.6.0-py3-none-any.whl")
             with zipfile.ZipFile(wheel) as archive:
                 entries = set(archive.namelist())
                 self.assertFalse(

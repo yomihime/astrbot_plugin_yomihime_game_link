@@ -11,7 +11,6 @@ from ..api.contexts import InvocationOrigin
 from ..api.manifests import (
     CapabilityDescriptor,
     CapabilityEffect,
-    InvocationPolicy,
     PrivacyFloor,
 )
 
@@ -42,7 +41,7 @@ def tool_allowed(capability: object) -> bool:
     return (
         supports_public_read_only(capability)
         and isinstance(capability, CapabilityDescriptor)
-        and capability.invocation_policy is InvocationPolicy.NATURAL_LANGUAGE_ALLOWED
+        and InvocationOrigin.LLM_TOOL in capability.effective_origins
     )
 
 
@@ -53,7 +52,7 @@ def public_web_allowed(
     return (
         supports_public_read_only(capability)
         and isinstance(capability, CapabilityDescriptor)
-        and capability.invocation_policy is InvocationPolicy.COMMAND_AND_PUBLIC_WEB
+        and InvocationOrigin.WEB_PUBLIC in capability.effective_origins
         and (module_id, capability.capability_id) in deployment
     )
 

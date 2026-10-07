@@ -35,6 +35,7 @@ class BundledExtensionTests(unittest.IsolatedAsyncioTestCase):
         "status",
         "item.lookup",
         "ff14.market.query",
+        "ff14.market.select",
         "ff14.logs.character",
         "ff14.logs.output_percentile",
         "ff14.calendar.query",
@@ -66,6 +67,20 @@ class BundledExtensionTests(unittest.IsolatedAsyncioTestCase):
         current_bytes = manifest_path.read_bytes()
         current = json.loads(current_bytes)
         old = json.loads(current_bytes)
+        # A real legacy declaration: R5 native fields/selection/tools/origins
+        # did not exist in the historical package being upgraded.
+        old_module = old["modules"][0]
+        old_module["tools"] = []
+        old_module["capabilities"] = [
+            capability
+            for capability in old_module["capabilities"]
+            if capability["capability_id"] != "ff14.market.select"
+        ]
+        for capability in old_module["capabilities"]:
+            capability.pop("invocation_origins", None)
+            if capability["capability_id"] == "ff14.market.query":
+                for field in ("query", "server", "dc", "region", "quality", "intent"):
+                    capability["input_schema"]["properties"].pop(field)
         old["contract_version"] = "1.3.0"
         old["modules"][0]["pages"] = []
         public_ids = {
@@ -97,7 +112,18 @@ class BundledExtensionTests(unittest.IsolatedAsyncioTestCase):
                 if path.is_file()
             },
         )
-        self.assertEqual(current["contract_version"], "1.5.0")
+        self.assertEqual(current["contract_version"], "1.6.0")
+        self.assertEqual(
+            (replacement.package_dir / "yomihime.manifest.json").read_bytes(),
+            current_bytes,
+        )
+        legacy = discover_packages(previous.extension_root)[0].manifest
+        self.assertEqual(legacy.contract_version, "1.3.0")
+        self.assertEqual(legacy.modules[0].tools, ())
+        self.assertEqual(
+            {capability.capability_id for capability in legacy.modules[0].capabilities},
+            self.EXPECTED_CAPABILITIES - {"ff14.market.select"},
+        )
         self.assertEqual(
             {
                 capability["capability_id"]
@@ -111,7 +137,44 @@ class BundledExtensionTests(unittest.IsolatedAsyncioTestCase):
                 capability["invocation_policy"] = "command_and_public_web"
         old["contract_version"] = "1.5.0"
         old["modules"][0]["pages"] = current["modules"][0]["pages"]
-        self.assertEqual(old, current)
+        # Retain the 1.5 compatibility fixture as well: it remains a different
+        # immutable slot with no R5 field or tool declaration.
+        manifest_path.write_text(
+            json.dumps(old, ensure_ascii=False, indent=2), encoding="utf8"
+        )
+        legacy15 = install_bundled_ff14(self.plugin_root, self.data_root)
+        self.assertNotIn(
+            legacy15.extension_root,
+            (previous.extension_root, replacement.extension_root),
+        )
+        package15 = discover_packages(legacy15.extension_root)[0].manifest
+        self.assertEqual(package15.contract_version, "1.5.0")
+        self.assertEqual(package15.modules[0].tools, ())
+        market15 = next(
+            capability
+            for capability in package15.modules[0].capabilities
+            if capability.capability_id == "ff14.market.query"
+        )
+        self.assertEqual(set(market15.input_schema["properties"]), {"input", "command"})
+        self.assertEqual(market15.invocation_policy.value, "command_and_public_web")
+        self.assertTrue(
+            all(
+                capability.invocation_origins is None
+                for capability in package15.modules[0].capabilities
+            )
+        )
+        self.assertEqual(
+            before,
+            {
+                str(path.relative_to(previous.extension_root)): path.read_bytes()
+                for path in previous.extension_root.rglob("*")
+                if path.is_file()
+            },
+        )
+        self.assertEqual(
+            (replacement.package_dir / "yomihime.manifest.json").read_bytes(),
+            current_bytes,
+        )
 
     def assert_ff14_factory_contract(self, instance, health) -> None:
         handlers = instance.handlers()

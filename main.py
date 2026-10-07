@@ -9,8 +9,8 @@ import sys
 from pathlib import Path
 from types import ModuleType
 
-SDK_VERSION = "1.5.0"
-SDK_CONTRACT_REVISION = "R1-MODULE-PAGES"
+SDK_VERSION = "1.6.0"
+SDK_CONTRACT_REVISION = "R5-LLM-TOOLS"
 SDK_COMPATIBLE_CONTRACT_VERSIONS = (
     "1.0.0",
     "1.1.0",
@@ -18,10 +18,11 @@ SDK_COMPATIBLE_CONTRACT_VERSIONS = (
     "1.3.0",
     "1.4.0",
     "1.5.0",
+    "1.6.0",
 )
 
 SDK_PACKAGE_MANIFEST = {
-    "__init__.py": "51d543bb5e022d8d0d9b365726daa1948bca74934e5a22c55acc9e5c22929410",
+    "__init__.py": "68116dc98ab85d9999660d6a55d107b5b8f240fb66f6759cdc21277f8c700d39",
     "_examples/empty_module/README.md": "54f44691207b27a1e6ee818cd55e14c30086cd3c685176e470b147ffd5203957",
     "_examples/empty_module/manifest.json": "27ed02b89a99fbea400dd75a1a405db27929f31acb4ceb582b83e8af1e61b1a8",
     "_examples/empty_module/module.py": "231518c6a6db052dcadfd0bd3578ff41f5dcda2d9879808730cbecab74734ce1",
@@ -32,14 +33,14 @@ SDK_PACKAGE_MANIFEST = {
     "api/administration.py": "ec08286a75fa2189f288e5b9b116ed243d00e9100f2b0e282249faf1206d5214",
     "api/contexts.py": "a44dfabab4e42d7a30ff7aaa3a1239c5ae4b588abfee4dab9d1fe9e7bcc0dbef",
     "api/display.py": "4fe9438bf3016ca4ac6b97a17c0e20157e77d0b8b66dd4c1ff3054e901d65c03",
-    "api/manifests.py": "e76bd545541ff47efdad5dbc47662e3ae9fc179e6196c990c2a2d7e17091a230",
-    "api/results.py": "5d6a59587e35e52a2528ec98a461d7c2e45705fd8d60f093f801795e81402135",
+    "api/manifests.py": "a3f1616777ac490361b9a2c4a437add67d1d86064a7fe585890a408ba241b17e",
+    "api/results.py": "cd38421d7c4b7636f79dce7e90f4f52635c5efaf47fef13bb5c8b5ae2dba3bea",
     "api/schema.py": "46628cb51be0e4a44df3606af2cbe841120cacf576f193ce57bc1af4b8a3d626",
     "api/services.py": "bebd90c9fe24581af816a4bb7e75367cea403f4eb615065bf5dbb79c684e9348",
     "api/storage.py": "bbe6e241a26727d56c1609bb8d6fa15173b04befa67f8305a2c39e3fc9491962",
     "api/subscriptions.py": "dddf75abfea96f8a88eecd71d6d6bb7d5f3327a52cb08185035fa2f5e0e6347a",
     "api/validation.py": "b6e0b2e16b8fae127c4cb8bf31efd0fce83c8b5b7ccf58256b01379fbf998e6c",
-    "api/version.py": "6555a82ddbfe1ccce43ab2943a0fafc6b8de59336a403f49c6d76c990d979fa9",
+    "api/version.py": "ab2730fa666a8c78fbc5de2d784da081efc0ccb938e5b8f5388a2f48d6c3e19c",
     "py.typed": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
 }
 

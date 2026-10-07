@@ -381,9 +381,16 @@ class SDKBootstrapTests(unittest.TestCase):
             ignore=shutil.ignore_patterns("__pycache__"),
         )
         for relative in zip_builder.SHELL_FILES:
-            target = repository / "pages/shell" / relative
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(ROOT / "pages/shell" / relative, target)
+            for page in ("shell", "00-game-link", "management"):
+                if page == "management" and relative in {
+                    "index.html",
+                    "app.js",
+                    "styles.css",
+                }:
+                    continue
+                target = repository / "pages" / page / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(ROOT / "pages" / page / relative, target)
         runtime_file = repository / "core" / "snapshot.py"
         original = b"trusted snapshot bytes\n"
         runtime_file.write_bytes(original)

@@ -10,6 +10,7 @@ from enum import StrEnum
 from types import MappingProxyType
 from typing import Mapping
 
+from .contexts import InvocationOrigin
 from .schema import freeze_input_schema
 from .storage import CollectionDescriptor, JsonValue
 from .subscriptions import ScheduleDescriptor, SubscriptionDescriptor
@@ -70,6 +71,7 @@ EXTENSION_DESCRIPTOR_FIELDS: Mapping[str, frozenset[str]] = MappingProxyType(
                 "capability_id",
                 "input_schema",
                 "invocation_policy",
+                "invocation_origins",
                 "effect",
                 "output_version",
                 "privacy_floor",
@@ -298,6 +300,23 @@ class CapabilityDescriptor:
     required_config: tuple[str, ...] = ()
     required_sources: tuple[str, ...] = ()
     required_capabilities: tuple[str | CapabilityReference, ...] = ()
+    invocation_origins: tuple[InvocationOrigin, ...] | None = None
+
+    @property
+    def effective_origins(self) -> tuple[InvocationOrigin, ...]:
+        if self.invocation_origins is not None:
+            return self.invocation_origins
+        return {
+            InvocationPolicy.COMMAND_ONLY: (InvocationOrigin.COMMAND,),
+            InvocationPolicy.COMMAND_AND_PUBLIC_WEB: (
+                InvocationOrigin.COMMAND,
+                InvocationOrigin.WEB_PUBLIC,
+            ),
+            InvocationPolicy.NATURAL_LANGUAGE_ALLOWED: (
+                InvocationOrigin.COMMAND,
+                InvocationOrigin.LLM_TOOL,
+            ),
+        }[self.invocation_policy]
 
     def __post_init__(self) -> None:
         _identifier(self.capability_id, "capability_id")
@@ -307,6 +326,47 @@ class CapabilityDescriptor:
             raise TypeError("effect must be a CapabilityEffect")
         if not isinstance(self.privacy_floor, PrivacyFloor):
             raise TypeError("privacy_floor must be a PrivacyFloor")
+        if self.invocation_origins is not None:
+            origins = self.invocation_origins
+            if (
+                type(origins) is not tuple
+                or not origins
+                or any(
+                    type(origin) is not InvocationOrigin
+                    or origin
+                    not in (
+                        InvocationOrigin.COMMAND,
+                        InvocationOrigin.WEB_PUBLIC,
+                        InvocationOrigin.LLM_TOOL,
+                    )
+                    for origin in origins
+                )
+                or len(set(origins)) != len(origins)
+                or InvocationOrigin.COMMAND not in origins
+            ):
+                raise ValueError(
+                    "invocation_origins must be a closed, unique command entry set"
+                )
+            if len(origins) > 1 and (
+                self.privacy_floor is not PrivacyFloor.PUBLIC
+                or self.effect is not CapabilityEffect.READ_ONLY
+            ):
+                raise ValueError("non-command entries must be public and read_only")
+            legacy = {
+                InvocationPolicy.COMMAND_ONLY: (InvocationOrigin.COMMAND,),
+                InvocationPolicy.COMMAND_AND_PUBLIC_WEB: (
+                    InvocationOrigin.COMMAND,
+                    InvocationOrigin.WEB_PUBLIC,
+                ),
+                InvocationPolicy.NATURAL_LANGUAGE_ALLOWED: (
+                    InvocationOrigin.COMMAND,
+                    InvocationOrigin.LLM_TOOL,
+                ),
+            }[self.invocation_policy]
+            if not set(legacy).issubset(origins):
+                raise ValueError(
+                    "invocation_origins cannot remove a legacy policy entry"
+                )
         if (
             self.privacy_floor in (PrivacyFloor.PRIVATE, PrivacyFloor.OWNER)
             and self.invocation_policy is not InvocationPolicy.COMMAND_ONLY
@@ -553,8 +613,7 @@ class ModuleManifest:
                 capability = capabilities.get(page.capability_id)
                 if (
                     capability is None
-                    or capability.invocation_policy
-                    is not InvocationPolicy.COMMAND_AND_PUBLIC_WEB
+                    or InvocationOrigin.WEB_PUBLIC not in capability.effective_origins
                 ):
                     raise ValueError("page capability must be declared public web")
         for tool in self.tools:
@@ -566,10 +625,7 @@ class ModuleManifest:
                 PrivacyFloor.OWNER,
             ):
                 raise ValueError("tool cannot expose a private or owner capability")
-            if (
-                capability.invocation_policy
-                is not InvocationPolicy.NATURAL_LANGUAGE_ALLOWED
-            ):
+            if InvocationOrigin.LLM_TOOL not in capability.effective_origins:
                 raise ValueError(
                     "tool requires natural_language_allowed; command_only is not allowed"
                 )
@@ -644,6 +700,12 @@ class PackageManifest:
         if self.contract_version not in COMPATIBLE_CONTRACT_VERSIONS:
             raise ValueError("contract_version is not compatible with this runtime")
         _descriptor_tuple(self.modules, ModuleManifest, "modules")
+        if self.contract_version != "1.6.0" and any(
+            capability.invocation_origins is not None
+            for module in self.modules
+            for capability in module.capabilities
+        ):
+            raise ValueError("invocation_origins requires contract 1.6.0")
         _text(self.author, "author")
         _text(self.license, "license")
         _text(self.source, "source")

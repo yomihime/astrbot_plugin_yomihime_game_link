@@ -100,6 +100,7 @@ class _IngressEvidence:
     sender_id: str
     conversation_id: str
     conversation_kind: ConversationKind
+    origin: InvocationOrigin = InvocationOrigin.COMMAND
 
 
 class AstrBotRuntime:
@@ -142,6 +143,7 @@ class AstrBotRuntime:
         self._evidence_seal = object()
         self._core: CoreRuntime | None = None
         self._bridge: AstrBotCommandBridge | None = None
+        self._tool_publisher = None
         self._http_transport: object | None = None
         self._transport_closed = False
         self._trusted_bundle = False
@@ -194,6 +196,7 @@ class AstrBotRuntime:
             self._config_error = None
             self._bridge = AstrBotCommandBridge(core.registry)
             self._ready = True
+            await self._publish_tools_or_close(core)
             return result
 
     @property
@@ -620,10 +623,38 @@ class AstrBotRuntime:
                 return
             self._bridge = AstrBotCommandBridge(core.registry)
             self._ready = True
+            await self._publish_tools_or_close(core)
+
+    async def _publish_tools_or_close(self, core) -> None:
+        if not callable(getattr(self._context, "add_llm_tools", None)):
+            return
+        from .tool_publisher import AstrBotToolPublisher
+
+        try:
+            if self._tool_publisher is None:
+                self._tool_publisher = AstrBotToolPublisher(
+                    self._context, core, self.invoke_tool
+                )
+            self._tool_publisher.publish()
+        except BaseException:
+            self._ready = False
+            self._closing = True
+            core.stop_accepting_host_ingress()
+            if self._tool_publisher is not None:
+                self._tool_publisher.revoke()
+            await self._close_owned_runtime()
+            self._closing = False
+            raise
 
     async def terminate(self) -> None:
         """Stop ingress and close the owned pump/modules/database once."""
         self._generation += 1
+        if self._tool_publisher is not None:
+            self._tool_publisher.revoke()
+        if self._core is not None and callable(
+            getattr(self._core, "stop_accepting_host_ingress", None)
+        ):
+            self._core.stop_accepting_host_ingress()
         if self._admin_source is not None:
             self._admin_source.close()
         if self._web_validator is not None:
@@ -636,20 +667,58 @@ class AstrBotRuntime:
             self._closing = False
 
     async def _close_owned_runtime(self) -> None:
-        if self._admin_source is not None:
-            self._admin_source.close()
-            self._admin_source = None
-        if self._web_validator is not None:
-            self._web_validator.close()
+        pending = []
         self._ready = False
         self._bridge = None
+        if self._tool_publisher is not None:
+            self._tool_publisher.revoke()
+            try:
+                self._tool_publisher.cleanup()
+            except BaseException as exc:
+                pending.append(("tool_publication", exc))
+            else:
+                self._tool_publisher = None
+        if self._admin_source is not None:
+            try:
+                self._admin_source.close()
+            except BaseException as exc:
+                pending.append(("admin_source", exc))
+            else:
+                self._admin_source = None
+        if self._web_validator is not None:
+            try:
+                self._web_validator.close()
+            except BaseException as exc:
+                pending.append(("web_validator", exc))
         core = self._core
         if core is not None:
-            if not await core.close():
-                raise CoreRuntimeCleanupPending("core_runtime_close")
-            self._core = None
-        await self._close_http_transport()
-        self._cleanup_isolated_extension_dir()
+            try:
+                if not await core.close():
+                    raise CoreRuntimeCleanupPending("core_runtime_close")
+            except BaseException as exc:
+                pending.append(("core_runtime_close", exc))
+            else:
+                self._core = None
+        # A pending Core may still own workers using these resources. Preserve
+        # its existing retry contract; failed tool removal alone does not block
+        # transport/directory closure once Core is quiet.
+        if self._core is None:
+            try:
+                await self._close_http_transport()
+            except BaseException as exc:
+                pending.append(("http_transport_close", exc))
+            try:
+                self._cleanup_isolated_extension_dir()
+            except BaseException as exc:
+                pending.append(("isolated_extension_dir", exc))
+        if pending:
+            if len(pending) == 1 and isinstance(
+                pending[0][1], CoreRuntimeCleanupPending
+            ):
+                raise pending[0][1]
+            raise CoreRuntimeCleanupPending(
+                ",".join(component for component, _ in pending)
+            ) from pending[0][1]
 
     def _new_http_transport(self) -> object:
         factory = self._http_transport_factory
@@ -963,10 +1032,47 @@ class AstrBotRuntime:
         )
         return capability is not None and capability.privacy_floor is PrivacyFloor.OWNER
 
-    def _make_ingress(self, event: object) -> HostIngress:
+    async def invoke_tool(self, module_id, tool_name, parameters, event):
+        if not self._ready or self._closing or self._core is None:
+            raise PermissionError("Host tool ingress unavailable")
+        from astrbot.core.platform.astr_message_event import AstrMessageEvent
+
+        if not isinstance(event, AstrMessageEvent):
+            raise PermissionError("official Host event required")
+        core = self._core
+        ingress = self._make_ingress(event, origin=InvocationOrigin.LLM_TOOL)
+        if not self._validate_ingress(InvocationOrigin.LLM_TOOL, ingress):
+            raise PermissionError("validated Host event required")
+        module, capability = core._active_module(
+            module_id, origin=InvocationOrigin.LLM_TOOL, target=tool_name
+        )
+        handler = module.handlers.capabilities[capability]
+        # This private, task-local proof belongs to the exact installed handler.
+        # It adds no model parameters and grants no alternative Core entry point.
+        binder = getattr(handler, "_bind_tool_event", None)
+        if binder is None:
+            return await core.invoke_tool(
+                module_id, tool_name, parameters, ingress=ingress
+            )
+        if core.registry.snapshot().module(module_id) is not module:
+            raise PermissionError("module changed before Host event binding")
+        with binder(
+            event,
+            event.get_message_str(),
+            ingress.actor_id,
+            ingress.conversation_id,
+            ingress.adapter_id,
+        ):
+            return await core.invoke_tool(
+                module_id, tool_name, parameters, ingress=ingress
+            )
+
+    def _make_ingress(
+        self, event: object, *, origin=InvocationOrigin.COMMAND
+    ) -> HostIngress:
         adapter, sender, conversation, kind = self._read_event_facts(event)
         evidence = _IngressEvidence(
-            self._evidence_seal, event, adapter, sender, conversation, kind
+            self._evidence_seal, event, adapter, sender, conversation, kind, origin
         )
         return HostIngress(
             adapter_id=adapter,
@@ -979,15 +1085,20 @@ class AstrBotRuntime:
 
     def _validate_ingress(self, origin: InvocationOrigin, ingress: HostIngress) -> bool:
         if (
-            origin is not InvocationOrigin.COMMAND
+            origin not in (InvocationOrigin.COMMAND, InvocationOrigin.LLM_TOOL)
             or not isinstance(ingress, HostIngress)
             or ingress.grant_reference is not None
             or not isinstance(ingress.evidence, _IngressEvidence)
         ):
             return False
         evidence = ingress.evidence
-        if evidence.seal is not self._evidence_seal:
+        if evidence.seal is not self._evidence_seal or evidence.origin is not origin:
             return False
+        if origin is InvocationOrigin.LLM_TOOL:
+            from astrbot.core.platform.astr_message_event import AstrMessageEvent
+
+            if not isinstance(evidence.event, AstrMessageEvent):
+                return False
         try:
             facts = self._read_event_facts(evidence.event)
         except Exception:

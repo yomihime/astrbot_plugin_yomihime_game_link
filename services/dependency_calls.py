@@ -17,7 +17,6 @@ from ..api.display import Privacy
 from ..api.manifests import (
     CapabilityDescriptor,
     CapabilityReference,
-    InvocationPolicy,
     PrivacyFloor,
 )
 from ..api.results import CapabilityResult, ErrorCode, ErrorDetail, ResultStatus
@@ -443,7 +442,7 @@ class DependencyInvoker:
     def _check_policy(parent: InvocationView, target: CapabilityDescriptor) -> None:
         if parent.origin is InvocationOrigin.WEB_PUBLIC and (
             not supports_public_read_only(target)
-            or target.invocation_policy is not InvocationPolicy.COMMAND_AND_PUBLIC_WEB
+            or InvocationOrigin.WEB_PUBLIC not in target.effective_origins
         ):
             raise DependencyCallError("target is outside the public web surface")
         if target.privacy_floor is PrivacyFloor.OWNER:

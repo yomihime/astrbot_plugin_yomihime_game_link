@@ -624,5 +624,12 @@ class MarketClient:
         observed_at = self.session.wall_clock()
         result = _result(query, outcomes, listings, minimums, truncated, observed_at)
         return MarketExecution(
-            query, outcomes, listings, minimums, truncated, result, observed_at
+            query,
+            outcomes,
+            listings,
+            minimums,
+            truncated,
+            result,
+            observed_at,
+            self.catalog,
         )

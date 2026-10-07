@@ -131,7 +131,7 @@ class FF14InstalledModuleTests(unittest.IsolatedAsyncioTestCase):
             package = discovered[0].manifest
             self.assertIsNotNone(package)
             self.assertEqual(package.package_id, "ff14")
-            self.assertEqual(package.contract_version, "1.5.0")
+            self.assertEqual(package.contract_version, "1.6.0")
             module_manifest = package.modules[0]
             self.assertEqual(module_manifest.module_id, "ff14")
             self.assertEqual(module_manifest.factory_entry, "module:Factory")
@@ -192,7 +192,49 @@ class FF14InstalledModuleTests(unittest.IsolatedAsyncioTestCase):
                     "ff14_calendar_fallback": "p66-caldav.icloud.com",
                 },
             )
-            self.assertEqual(module_manifest.tools, ())
+            self.assertEqual(
+                tuple(
+                    (tool.name, tool.capability_id, dict(tool.parameter_mapping))
+                    for tool in module_manifest.tools
+                ),
+                (
+                    (
+                        "ff14_market_query",
+                        "ff14.market.query",
+                        {
+                            "query": "query",
+                            "server": "server",
+                            "dc": "dc",
+                            "region": "region",
+                            "quality": "quality",
+                            "intent": "intent",
+                        },
+                    ),
+                    (
+                        "ff14_market_select",
+                        "ff14.market.select",
+                        {
+                            "batch_id": "batch_id",
+                            "generation": "generation",
+                            "item_id": "item_id",
+                        },
+                    ),
+                ),
+            )
+            self.assertEqual(
+                tuple(
+                    origin.value
+                    for origin in capabilities["ff14.market.query"].invocation_origins
+                ),
+                ("command", "web_public", "llm_tool"),
+            )
+            self.assertEqual(
+                tuple(
+                    origin.value
+                    for origin in capabilities["ff14.market.select"].invocation_origins
+                ),
+                ("command", "llm_tool"),
+            )
             self.assertEqual(len(module_manifest.schedules), 1)
             self.assertEqual(
                 module_manifest.schedules[0].collector_id, "ff14.calendar.collect"

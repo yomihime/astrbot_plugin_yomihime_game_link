@@ -15,14 +15,14 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 ARCHIVE = ROOT / "dist" / "astrbot_plugin_yomihime_game_link-local.zip"
 EXPECTED_WHEEL_SHA256 = (
-    "bf5dae1f8d95ad2330f26e8dc3874217c503ad86775fc896a12009ae1b465878"
+    "134a07ef54ed008adf7e8ab352dc0757a1c8a780383b61996c95eab357b398e0"
 )
 EXPECTED_WHEEL_ENTRIES = {
-    "yomihime_module_sdk-1.5.0.dist-info/licenses/LICENSE",
-    "yomihime_module_sdk-1.5.0.dist-info/METADATA",
-    "yomihime_module_sdk-1.5.0.dist-info/WHEEL",
-    "yomihime_module_sdk-1.5.0.dist-info/top_level.txt",
-    "yomihime_module_sdk-1.5.0.dist-info/RECORD",
+    "yomihime_module_sdk-1.6.0.dist-info/licenses/LICENSE",
+    "yomihime_module_sdk-1.6.0.dist-info/METADATA",
+    "yomihime_module_sdk-1.6.0.dist-info/WHEEL",
+    "yomihime_module_sdk-1.6.0.dist-info/top_level.txt",
+    "yomihime_module_sdk-1.6.0.dist-info/RECORD",
     "yomihime_sdk/__init__.py",
     "yomihime_sdk/py.typed",
     "yomihime_sdk/_examples/empty_module/README.md",
@@ -284,11 +284,11 @@ def validate_wheel(path: Path) -> dict[str, bytes]:
                 "SDK wheel entry manifest differs from the reviewed artifact"
             )
         metadata_lines = set(
-            wheel.read("yomihime_module_sdk-1.5.0.dist-info/METADATA")
+            wheel.read("yomihime_module_sdk-1.6.0.dist-info/METADATA")
             .decode("utf-8")
             .splitlines()
         )
-        if not {"Name: yomihime-module-sdk", "Version: 1.5.0"} <= metadata_lines:
+        if not {"Name: yomihime-module-sdk", "Version: 1.6.0"} <= metadata_lines:
             raise ValueError("SDK wheel distribution metadata is unsupported")
         package = {name: wheel.read(name) for name in sorted(PACKAGE_ENTRY_NAMES)}
     return package

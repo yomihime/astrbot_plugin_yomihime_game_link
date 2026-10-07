@@ -20,7 +20,6 @@ from ..api.display import DisplayLimits, DisplayRenderer, Privacy
 from ..api.manifests import (
     CapabilityEffect,
     CommandDescriptor,
-    InvocationPolicy,
     ModuleManifest,
     PrivacyFloor,
     ToolDescriptor,
@@ -1050,6 +1049,10 @@ class CoreRuntime:
                 return
             await asyncio.sleep(self._pump_interval)
 
+    def stop_accepting_host_ingress(self) -> None:
+        """Synchronous shutdown fence before Host tool cleanup awaits."""
+        self._accepting = False
+
     def stop_accepting_admin_operations(self) -> None:
         self.admin_operations.stop_accepting()
         self.admin_authorization.close()
@@ -1558,7 +1561,7 @@ def _is_safe_bundled_default(
         for capability in module.capabilities:
             schema = capability.input_schema
             if (
-                capability.invocation_policy is not InvocationPolicy.COMMAND_ONLY
+                capability.effective_origins != (InvocationOrigin.COMMAND,)
                 or capability.effect is not CapabilityEffect.READ_ONLY
                 or capability.privacy_floor is not PrivacyFloor.PUBLIC
                 or capability.required_config

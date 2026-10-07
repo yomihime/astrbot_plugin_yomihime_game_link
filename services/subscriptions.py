@@ -11,7 +11,7 @@ from typing import Protocol
 
 from ..api.contexts import InvocationOrigin, InvocationView
 from ..api.display import DigestMember
-from ..api.manifests import InvocationPolicy, ModuleManifest, PrivacyFloor
+from ..api.manifests import ModuleManifest, PrivacyFloor
 from ..api.services import (
     Grant,
     GrantStatus,
@@ -263,9 +263,8 @@ class SubscriptionOperationsService(SubscriptionOperations):
             ),
             None,
         )
-        if (
-            capability is None
-            or capability.invocation_policy is not InvocationPolicy.COMMAND_ONLY
+        if capability is None or capability.effective_origins != (
+            InvocationOrigin.COMMAND,
         ):
             raise SubscriptionOperationError()
         if capability.privacy_floor is PrivacyFloor.OWNER and (

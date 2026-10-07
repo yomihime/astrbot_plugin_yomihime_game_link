@@ -8,7 +8,7 @@ from datetime import datetime
 from yomihime_sdk.api.results import CapabilityResult, ErrorCode
 
 from ..query_resolution import MarketQuery
-from .market_sources import Provenance
+from .market_sources import CatalogSnapshot, Provenance
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,3 +99,4 @@ class MarketExecution:
     truncated: bool
     result: CapabilityResult
     observed_at: datetime
+    catalog: CatalogSnapshot | None = None

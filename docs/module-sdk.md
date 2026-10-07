@@ -7,15 +7,29 @@ a compatibility forwarding surface whose exported objects retain identity
 with the canonical declarations. The SDK does not import Core runtime
 implementations or AstrBot objects.
 
-The current artifact is `yomihime-module-sdk` version `1.5.0`, carrying contract
-`1.5.0` (`R1-MODULE-PAGES`) and compatible contract versions `1.0.0`, `1.1.0`,
-`1.2.0`, `1.3.0`, `1.4.0`, and `1.5.0`.
+The current artifact is `yomihime-module-sdk` version `1.6.0`, carrying contract
+`1.6.0` (`R5-LLM-TOOLS`) and compatible contract versions `1.0.0`, `1.1.0`,
+`1.2.0`, `1.3.0`, `1.4.0`, `1.5.0`, and `1.6.0`.
 Extension declarations use manifest schema v1 and factory ABI v1. The declared
 minimum is Python 3.11 because the public API uses `StrEnum`. A local
 installed-wheel check proves the bundled SDK imports from the installed site
 directory and that compatibility exports share object identity; it does not
 prove activation inside the target AstrBot environment. Host Python selection,
 installation location, and import precedence remain W0-H evidence.
+
+Contract 1.6 adds optional `CapabilityDescriptor.invocation_origins`, an immutable
+tuple of `InvocationOrigin.COMMAND`, `WEB_PUBLIC`, and `LLM_TOOL`. Explicit sets
+must include COMMAND, contain no duplicates, preserve the legacy policy's
+entries, and expose only public read-only capabilities outside commands. Older
+package contracts reject this field. If omitted, legacy policies map exactly to
+command; command plus web; or command plus tool. Web deployment remains opt-in.
+The public `effective_origins` property is the normalized declaration.
+
+Public error facts in 1.6 require a closed `status`/`error` envelope matching the
+result's safe error code and message, with optional public `market` facts. Older
+result/fact versions and private results cannot carry this error envelope.
+LLM_TOOL cache defaults to PUBLIC and rejects USER/AUTHORIZED scope; this new
+tool-cache boundary does not change the command cache default or identity model.
 
 Contract 1.2.0 added `SourceHttpError` in the canonical
 `yomihime_sdk.api.services` module and the top-level package. It exposes stable,

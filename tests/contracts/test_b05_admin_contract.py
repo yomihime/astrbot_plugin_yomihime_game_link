@@ -32,7 +32,7 @@ class B05AdminContractTests(unittest.TestCase):
     def test_admin_revision_is_additive_to_b04_c13(self):
         self.assertEqual(ADMIN_CONTRACT_REVISION, "H-ADMIN-02")
         self.assertEqual(
-            (CONTRACT_VERSION, CONTRACT_REVISION), ("1.5.0", "R1-MODULE-PAGES")
+            (CONTRACT_VERSION, CONTRACT_REVISION), ("1.6.0", "R5-LLM-TOOLS")
         )
         self.assertIn("1.1.0", COMPATIBLE_CONTRACT_VERSIONS)
 

@@ -2,7 +2,7 @@
   "schema_version": 1,
   "package_id": "ff14",
   "package_version": "0.3.0",
-  "contract_version": "1.5.0",
+  "contract_version": "1.6.0",
   "author": "yomihime",
   "license": "AGPL-3.0-only",
   "source": "https://github.com/yomihime/astrbot_plugin_yomihime_game_link",
@@ -28,12 +28,99 @@
                 "type": "string",
                 "minLength": 1,
                 "maxLength": 512
+              },
+              "query": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 120
+              },
+              "server": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 120
+              },
+              "dc": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 120
+              },
+              "region": {
+                "type": "string",
+                "enum": [
+                  "cn",
+                  "global",
+                  "China",
+                  "North-America",
+                  "Europe",
+                  "Japan",
+                  "Oceania"
+                ]
+              },
+              "quality": {
+                "type": "string",
+                "enum": [
+                  "all",
+                  "nq",
+                  "hq"
+                ]
+              },
+              "intent": {
+                "type": "string",
+                "enum": [
+                  "overview",
+                  "min",
+                  "listings"
+                ]
               }
             },
             "required": [],
             "additionalProperties": false
           },
           "invocation_policy": "command_and_public_web",
+          "effect": "read_only",
+          "privacy_floor": "public",
+          "required_sources": [
+            "universalis_market"
+          ],
+          "invocation_origins": [
+            "command",
+            "web_public",
+            "llm_tool"
+          ]
+        },
+        {
+          "capability_id": "ff14.market.select",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "batch_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "generation": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "item_id": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 2147483647
+              }
+            },
+            "required": [
+              "batch_id",
+              "generation",
+              "item_id"
+            ],
+            "additionalProperties": false
+          },
+          "invocation_policy": "natural_language_allowed",
+          "invocation_origins": [
+            "command",
+            "llm_tool"
+          ],
           "effect": "read_only",
           "privacy_floor": "public",
           "required_sources": [
@@ -83,8 +170,8 @@
               "realm": {
                 "type": "string",
                 "enum": [
-                  "国服",
-                  "国际服",
+                  "\u56fd\u670d",
+                  "\u56fd\u9645\u670d",
                   "cn",
                   "global"
                 ]
@@ -147,8 +234,8 @@
               "realm": {
                 "type": "string",
                 "enum": [
-                  "国服",
-                  "国际服",
+                  "\u56fd\u670d",
+                  "\u56fd\u9645\u670d",
                   "cn",
                   "global"
                 ]
@@ -203,8 +290,8 @@
               "region": {
                 "type": "string",
                 "enum": [
-                  "国服",
-                  "国际服",
+                  "\u56fd\u670d",
+                  "\u56fd\u9645\u670d",
                   "cn",
                   "global"
                 ]
@@ -237,8 +324,8 @@
               "region": {
                 "type": "string",
                 "enum": [
-                  "国服",
-                  "国际服",
+                  "\u56fd\u670d",
+                  "\u56fd\u9645\u670d",
                   "cn",
                   "global"
                 ]
@@ -351,13 +438,13 @@
           "parameter_mapping": {},
           "parameter_mode": "raw_tail",
           "raw_tail_parameter": "command",
-          "help_text": "/ygl ff14 market <物品名或ID> [server=World dc=大区 region=cn|global quality=all|nq|hq intent=overview|min|listings]；名称可用引号保护，也支持显式自然查询；choose <批次> <generation> <物品ID> 续接当前候选。"
+          "help_text": "/ygl ff14 market <\u7269\u54c1\u540d\u6216ID> [server=World dc=\u5927\u533a region=cn|global quality=all|nq|hq intent=overview|min|listings]\uff1b\u540d\u79f0\u53ef\u7528\u5f15\u53f7\u4fdd\u62a4\uff0c\u4e5f\u652f\u6301\u663e\u5f0f\u81ea\u7136\u67e5\u8be2\uff1bchoose <\u6279\u6b21> <generation> <\u7269\u54c1ID> \u7eed\u63a5\u5f53\u524d\u5019\u9009\u3002"
         },
         {
           "operation_path": "status",
           "capability_id": "status",
           "parameter_mapping": {},
-          "help_text": "查看 FF14 功能状态、凭据要求与已知数据源限制。"
+          "help_text": "\u67e5\u770b FF14 \u529f\u80fd\u72b6\u6001\u3001\u51ed\u636e\u8981\u6c42\u4e0e\u5df2\u77e5\u6570\u636e\u6e90\u9650\u5236\u3002"
         },
         {
           "operation_path": "item",
@@ -365,7 +452,7 @@
           "parameter_mapping": {
             "query": "query"
           },
-          "help_text": "按物品名称或数字 ID 查询公开基础信息与已验证的获取途径。"
+          "help_text": "\u6309\u7269\u54c1\u540d\u79f0\u6216\u6570\u5b57 ID \u67e5\u8be2\u516c\u5f00\u57fa\u7840\u4fe1\u606f\u4e0e\u5df2\u9a8c\u8bc1\u7684\u83b7\u53d6\u9014\u5f84\u3002"
         },
         {
           "operation_path": "logs",
@@ -380,7 +467,7 @@
             "difficulty": "difficulty",
             "partition": "partition"
           },
-          "help_text": "/ygl ff14 logs <国服|国际服> <服务器名> <角色名> [server_hint=名称] [metric=rdps|ndps|cdps] [zone_id=N difficulty=N partition=N]。"
+          "help_text": "/ygl ff14 logs <\u56fd\u670d|\u56fd\u9645\u670d> <\u670d\u52a1\u5668\u540d> <\u89d2\u8272\u540d> [server_hint=\u540d\u79f0] [metric=rdps|ndps|cdps] [zone_id=N difficulty=N partition=N]\u3002"
         },
         {
           "operation_path": "output",
@@ -393,7 +480,7 @@
             "metric": "metric",
             "period": "period"
           },
-          "help_text": "/ygl ff14 output <国服|国际服> <副本名称> <难度> <职业> [metric=rdps] [period=latest]；FFLogs 统计页面当前因 HTTP 403 暂不可用。"
+          "help_text": "/ygl ff14 output <\u56fd\u670d|\u56fd\u9645\u670d> <\u526f\u672c\u540d\u79f0> <\u96be\u5ea6> <\u804c\u4e1a> [metric=rdps] [period=latest]\uff1bFFLogs \u7edf\u8ba1\u9875\u9762\u5f53\u524d\u56e0 HTTP 403 \u6682\u4e0d\u53ef\u7528\u3002"
         },
         {
           "operation_path": "calendar",
@@ -403,7 +490,7 @@
             "days": "days",
             "timezone": "timezone"
           },
-          "help_text": "/ygl ff14 calendar <国服|国际服> [days=7] [timezone=Asia/Shanghai]；范围为本地日期起 7 个日历日。"
+          "help_text": "/ygl ff14 calendar <\u56fd\u670d|\u56fd\u9645\u670d> [days=7] [timezone=Asia/Shanghai]\uff1b\u8303\u56f4\u4e3a\u672c\u5730\u65e5\u671f\u8d77 7 \u4e2a\u65e5\u5386\u65e5\u3002"
         },
         {
           "operation_path": "calendar subscribe",
@@ -413,7 +500,7 @@
             "timezone": "timezone",
             "time": "time"
           },
-          "help_text": "/ygl ff14 calendar subscribe <国服|国际服> [timezone=Asia/Shanghai] [time=08:00]；显式创建每日摘要订阅。"
+          "help_text": "/ygl ff14 calendar subscribe <\u56fd\u670d|\u56fd\u9645\u670d> [timezone=Asia/Shanghai] [time=08:00]\uff1b\u663e\u5f0f\u521b\u5efa\u6bcf\u65e5\u6458\u8981\u8ba2\u9605\u3002"
         },
         {
           "operation_path": "calendar subscriptions",
@@ -432,7 +519,7 @@
             "timezone": "timezone",
             "time": "time"
           },
-          "help_text": "/ygl ff14 calendar update <subscription-id> <expected-revision> [timezone=IANA] [time=HH:MM]；仅更新本人订阅并校验 revision。"
+          "help_text": "/ygl ff14 calendar update <subscription-id> <expected-revision> [timezone=IANA] [time=HH:MM]\uff1b\u4ec5\u66f4\u65b0\u672c\u4eba\u8ba2\u9605\u5e76\u6821\u9a8c revision\u3002"
         },
         {
           "operation_path": "calendar cancel",
@@ -441,29 +528,53 @@
             "subscription_id": "subscription_id",
             "expected_revision": "expected_revision"
           },
-          "help_text": "/ygl ff14 calendar cancel <subscription-id> <expected-revision>；仅取消本人订阅并校验 revision。"
+          "help_text": "/ygl ff14 calendar cancel <subscription-id> <expected-revision>\uff1b\u4ec5\u53d6\u6d88\u672c\u4eba\u8ba2\u9605\u5e76\u6821\u9a8c revision\u3002"
         }
       ],
-      "tools": [],
+      "tools": [
+        {
+          "name": "ff14_market_query",
+          "capability_id": "ff14.market.query",
+          "parameter_mapping": {
+            "query": "query",
+            "server": "server",
+            "dc": "dc",
+            "region": "region",
+            "quality": "quality",
+            "intent": "intent"
+          },
+          "description": "Query public FF14 per-item Gil prices by an item name or ID explicitly present in the current user message. Scope: server/dc/region; quality: all/nq/hq; intent: overview/min/listings. On ambiguity show candidate names and ask for one unique full name (or full name + \u90a3\u4e2a). Never guess or query a pending candidate to bypass selection; use select to preserve context. Ordinal choices are unsupported. For lowest price / where cheapest (including Chinese equivalents), prefer intent=min; overview is for general market metrics. After success or usable partial facts suffice, answer directly; do not query extra servers without a new explicit user scope. Place Universalis source, fetched/cache age, price source age and limited coverage/non-realtime caveat next to prices. Use verified world_name only; unknown stays unknown. Do not infer HQ uses, restocking or purchase advice. On errors explain briefly and await user clarification; never change query parameters to bypass confirmation."
+        },
+        {
+          "name": "ff14_market_select",
+          "capability_id": "ff14.market.select",
+          "parameter_mapping": {
+            "batch_id": "batch_id",
+            "generation": "generation",
+            "item_id": "item_id"
+          },
+          "description": "Continue the current user's pending FF14 query only after a new user message confirms a unique full candidate name: name, name + \u90a3\u4e2a, \u9009/\u9009\u62e9/\u5c31/\u5c31\u9009 + name; or \u9009\u62e9\u7269\u54c1 <ID>. Use prior batch_id/generation and the matching item_id. The module validates the real event, not model assertions. Questions, negations, multiple names, duplicate names and ordinal choices require clarification. Preserve original scope, quality, intent and configuration revisions. After success or usable partial facts suffice, answer directly with source and limited coverage/non-realtime caveat adjacent to prices; do not issue extra server queries without a new user instruction. Unknown world names remain unknown; do not infer HQ uses or restocking advice."
+        }
+      ],
       "config_fields": [
         {
           "name": "ff14_subscriptions_enabled",
           "sensitive": false,
           "required": false,
           "default": true,
-          "description": "FF14 本人订阅推送开关；暂停保留记录，恢复仅处理之后的未来窗口。"
+          "description": "FF14 \u672c\u4eba\u8ba2\u9605\u63a8\u9001\u5f00\u5173\uff1b\u6682\u505c\u4fdd\u7559\u8bb0\u5f55\uff0c\u6062\u590d\u4ec5\u5904\u7406\u4e4b\u540e\u7684\u672a\u6765\u7a97\u53e3\u3002"
         },
         {
           "name": "credential_fflogs_cn",
           "sensitive": true,
           "required": false,
-          "description": "FFLogs 国服 OAuth 客户端凭据；加密保存，未配置时仅该区战绩查询不可用。"
+          "description": "FFLogs \u56fd\u670d OAuth \u5ba2\u6237\u7aef\u51ed\u636e\uff1b\u52a0\u5bc6\u4fdd\u5b58\uff0c\u672a\u914d\u7f6e\u65f6\u4ec5\u8be5\u533a\u6218\u7ee9\u67e5\u8be2\u4e0d\u53ef\u7528\u3002"
         },
         {
           "name": "credential_fflogs_global",
           "sensitive": true,
           "required": false,
-          "description": "FFLogs 国际服 OAuth 客户端凭据；加密保存，未配置时仅该区战绩查询不可用。"
+          "description": "FFLogs \u56fd\u9645\u670d OAuth \u5ba2\u6237\u7aef\u51ed\u636e\uff1b\u52a0\u5bc6\u4fdd\u5b58\uff0c\u672a\u914d\u7f6e\u65f6\u4ec5\u8be5\u533a\u6218\u7ee9\u67e5\u8be2\u4e0d\u53ef\u7528\u3002"
         },
         {
           "name": "ff14_calendar_default_days",
@@ -475,7 +586,7 @@
             "maximum": 30
           },
           "group": "calendar",
-          "description": "日历默认天数"
+          "description": "\u65e5\u5386\u9ed8\u8ba4\u5929\u6570"
         },
         {
           "name": "ff14_calendar_default_timezone",
@@ -487,7 +598,7 @@
             "maxLength": 128
           },
           "group": "calendar",
-          "description": "日历默认时区"
+          "description": "\u65e5\u5386\u9ed8\u8ba4\u65f6\u533a"
         },
         {
           "name": "ff14_calendar_default_delivery_time",
@@ -499,7 +610,7 @@
             "maxLength": 5
           },
           "group": "calendar",
-          "description": "日历默认投递时间"
+          "description": "\u65e5\u5386\u9ed8\u8ba4\u6295\u9012\u65f6\u95f4"
         }
       ],
       "sources": [
@@ -570,8 +681,8 @@
               "region": {
                 "type": "string",
                 "enum": [
-                  "国服",
-                  "国际服",
+                  "\u56fd\u670d",
+                  "\u56fd\u9645\u670d",
                   "cn",
                   "global"
                 ]
@@ -638,7 +749,7 @@
       "pages": [
         {
           "route_id": "items",
-          "title": "物品",
+          "title": "\u7269\u54c1",
           "entry": "pages/dist/entry.js",
           "order": 10,
           "access": "public_web",
@@ -649,7 +760,7 @@
         },
         {
           "route_id": "market",
-          "title": "市场",
+          "title": "\u5e02\u573a",
           "entry": "pages/dist/entry.js",
           "order": 20,
           "access": "public_web",

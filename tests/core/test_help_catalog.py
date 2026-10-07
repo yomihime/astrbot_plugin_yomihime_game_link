@@ -5,6 +5,7 @@ from __future__ import annotations
 import unittest
 from dataclasses import replace
 
+from ygl_test_subject.api.contexts import InvocationOrigin
 from ygl_test_subject.api.display import CommandsBlock, TextBlock
 from ygl_test_subject.api.manifests import (
     CapabilityDescriptor,
@@ -99,6 +100,47 @@ def _package(package_id: str, *modules: ModuleManifest) -> PackageManifest:
 
 
 class HelpCatalogTests(unittest.TestCase):
+    def test_explicit_three_origins_keep_command_visible_with_full_entry_labels(self):
+        for policy in (
+            InvocationPolicy.NATURAL_LANGUAGE_ALLOWED,
+            InvocationPolicy.COMMAND_AND_PUBLIC_WEB,
+        ):
+            with self.subTest(policy=policy):
+                module, _, handler = _module("catalog", "catalog")
+                query, account = module.capabilities
+                query = replace(
+                    query,
+                    invocation_policy=policy,
+                    invocation_origins=(
+                        InvocationOrigin.COMMAND,
+                        InvocationOrigin.WEB_PUBLIC,
+                        InvocationOrigin.LLM_TOOL,
+                    ),
+                )
+                module = replace(module, capabilities=(query, account))
+                registry = Registry()
+                registry.register_package(
+                    _package("explicit", module),
+                    {
+                        "catalog": ModuleHandlers(
+                            {"query": handler, "account": handler}, {}, {}
+                        )
+                    },
+                )
+                catalog = HelpCatalog(active_query=lambda module: True)
+                total = catalog.total(registry.snapshot()).ordered_blocks[1].commands
+                self.assertIn("/ygl catalog 查询", total)
+                line = next(
+                    line
+                    for line in catalog.module(registry.snapshot(), "catalog")
+                    .ordered_blocks[1]
+                    .commands
+                    if line.startswith("/ygl catalog 查询 ")
+                )
+                self.assertIn("命令 / 已授权公开网页 / 普通聊天工具", line)
+                self.assertNotIn("允许自然语言", line)
+                self.assertEqual(handler.calls, 0)
+
     def test_public_web_opt_in_stays_in_command_help_without_natural_language_label(
         self,
     ) -> None:

@@ -109,6 +109,7 @@ class Registry:
 
     def __init__(self) -> None:
         self._packages: set[str] = set()
+        self._observers: set[Callable[[], None]] = set()
         self._lifecycle_owner: object | None = None
         self._is_lifecycle_active: Callable[[str], bool] | None = None
         self._snapshot = RegistrySnapshot(
@@ -117,6 +118,19 @@ class Registry:
             routes={},
             tools={},
         )
+
+    def observe(self, callback: Callable[[], None]) -> Callable[[], None]:
+        """Observe published lifecycle projections; observers cannot undo commits."""
+        self._observers.add(callback)
+        return lambda: self._observers.discard(callback)
+
+    def _notify(self) -> None:
+        for callback in tuple(self._observers):
+            try:
+                callback()
+            except Exception:
+                # The projection is already committed; observer owns recovery.
+                continue
 
     def snapshot(self) -> RegistrySnapshot:
         """Return the current snapshot object without copying or mutating it."""
@@ -204,6 +218,7 @@ class Registry:
         )
         self._packages.add(manifest.package_id)
         self._snapshot = new_snapshot
+        self._notify()
         return new_snapshot
 
     def set_enabled(self, module_id: str, enabled: bool) -> RegistrySnapshot:
@@ -240,6 +255,7 @@ class Registry:
             tools=old.tools,
         )
         self._snapshot = new_snapshot
+        self._notify()
         return new_snapshot
 
     def _bind_lifecycle_owner(
@@ -288,6 +304,7 @@ class Registry:
             tools=old.tools,
         )
         self._snapshot = updated
+        self._notify()
         return updated
 
     def _install_lifecycle_handlers(
@@ -312,6 +329,7 @@ class Registry:
             tools=old.tools,
         )
         self._snapshot = updated
+        self._notify()
         return updated
 
     @staticmethod

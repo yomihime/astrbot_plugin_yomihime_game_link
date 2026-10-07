@@ -7,6 +7,7 @@ import math
 from collections.abc import Mapping
 from typing import Any
 
+from yomihime_sdk.api.contexts import InvocationOrigin
 from yomihime_sdk.api.manifests import (
     EXTENSION_DESCRIPTOR_FIELDS,
     EXTENSION_MANIFEST_ABI,
@@ -173,6 +174,12 @@ def _map_capability(value: object) -> CapabilityDescriptor:
         required_capabilities=tuple(
             _map_reference(item) for item in _list(obj, "required_capabilities")
         ),
+        invocation_origins=tuple(
+            _enum(InvocationOrigin, item, "invocation_origins")
+            for item in _list(obj, "invocation_origins")
+        )
+        if "invocation_origins" in obj
+        else None,
     )
 
 
