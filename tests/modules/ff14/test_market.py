@@ -6,6 +6,7 @@ import asyncio
 import copy
 import json
 import unittest
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -13,6 +14,7 @@ from ygl_test_subject.adapters.astrbot.web_public import project_result
 from ygl_test_subject.infrastructure.http import SourceHttpService
 from ygl_test_subject.modules.ff14.features.market import (
     MarketClient,
+    _result,
     parse_aggregated,
     parse_listings,
 )
@@ -348,6 +350,105 @@ class MarketParserTests(unittest.TestCase):
 
 
 class MarketExecutionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_direct_prices_keep_all_source_digits_without_six_digit_rounding(
+        self,
+    ):
+        for intent in ("min", "overview"):
+            client, _ = self.client(lambda request: aggregated(price=1_234_567))
+            execution = await client.execute(query(intent=intent, quality="hq"))
+            text = "\n".join(
+                getattr(block, "text", "")
+                for block in execution.result.document.ordered_blocks
+            )
+            self.assertIn("1234567 Gil/单位", text)
+            self.assertEqual(execution.minimums[0][2].minimum, 1_234_567)
+            if intent == "overview":
+                self.assertIn("1234569.5", text)
+
+    async def test_direct_context_unknown_names_and_times_do_not_borrow_source_metadata(
+        self,
+    ):
+        client, http = self.client(lambda request: aggregated())
+        execution = await client.execute(query(intent="min", quality="hq"))
+        q = execution.query
+        for query_value, snapshot in (
+            (q, None),
+            (replace(q, scope=replace(q.scope, regions=("Japan",))), catalog()),
+            (replace(q, scope=replace(q.scope, kind="world", target=99999)), catalog()),
+            (
+                replace(q, scope=replace(q.scope, kind="dc", target="different")),
+                catalog(),
+            ),
+        ):
+            result = _result(
+                query_value,
+                execution.outcomes,
+                execution.listings,
+                execution.minimums,
+                False,
+                NOW,
+                snapshot,
+            )
+            text = "\n".join(
+                getattr(block, "text", "") for block in result.document.ordered_blocks
+            )
+            self.assertNotIn("SyntheticChina", text)
+            self.assertIn("服务器名称未知", text)
+            self.assertIn("World 90001", text)
+        quality, region, quote = execution.minimums[0]
+        unknown = replace(quote, minimum_uploaded_at=None)
+        outcome = replace(
+            execution.outcomes[0],
+            provenance=Provenance(
+                execution.outcomes[0].provenance.url, NOW - timedelta(minutes=20), True
+            ),
+        )
+        result = _result(
+            q, (outcome,), (), ((quality, region, unknown),), False, NOW, catalog()
+        )
+        row = next(
+            block.text
+            for block in result.document.ordered_blocks
+            if hasattr(block, "text") and "Gil/单位" in block.text
+        )
+        self.assertIn("World 数据上传 未知", row)
+        self.assertIn("1200 秒", row)
+        self.assertIn("缓存原获取时间", row)
+        self.assertNotIn("World 数据上传 2026", row)
+        self.assertEqual(len(http.requests), 1)
+
+    async def test_display_price_rows_keep_verified_name_and_distinct_time_semantics(
+        self,
+    ):
+        for intent in ("min", "overview", "listings"):
+            with self.subTest(intent=intent):
+                client, http = self.client(
+                    lambda request: currently(rows=[listing(100, hq=True)])
+                    if intent == "listings"
+                    else aggregated()
+                )
+                execution = await client.execute(query(intent=intent, quality="hq"))
+                lines = [
+                    getattr(block, "text", "")
+                    for block in execution.result.document.ordered_blocks
+                ]
+                row = next(
+                    line for line in lines if "Gil/单位" in line and "100" in line
+                )
+                self.assertIn("SyntheticChina", row)
+                self.assertIn("World 90001", row)
+                self.assertIn("Universalis", row)
+                self.assertIn("来源获取", row)
+                self.assertIn("World 数据上传", row)
+                self.assertNotIn("挂牌来源时间", row)
+                if intent == "listings":
+                    self.assertIn("来源最近审核", row)
+                    self.assertIn("最多 5 条", "\n".join(lines))
+                else:
+                    self.assertIn("本次返回数据中的最低挂牌", row)
+                self.assertLessEqual(len(execution.result.document.ordered_blocks), 32)
+                self.assertEqual(len(http.requests), 1)
+
     def client(self, callback, cache=None, *, clock=None, wall=lambda: NOW):
         http = FakeHttp(callback)
         session = MarketSession(

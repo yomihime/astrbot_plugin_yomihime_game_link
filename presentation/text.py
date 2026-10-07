@@ -62,8 +62,10 @@ class TextPresenter:
         if max_chars <= 0:
             raise ValueError("max_chars must be a positive integer")
 
-        lines = [f"标题: {document.title}", f"对象: {document.subject}"]
-        rendered_length = len(lines[0]) + 1 + len(lines[1])
+        lines = [document.title, document.subject]
+        if document.sources:
+            lines.append("来源：" + " / ".join(document.sources))
+        rendered_length = sum(map(len, lines)) + len(lines) - 1
         overflow = rendered_length > max_chars
         for block in document.ordered_blocks:
             if overflow:
@@ -84,29 +86,29 @@ class TextPresenter:
 
     def _render_block(self, block: Any, budget: int) -> list[str]:
         if isinstance(block, TextBlock):
-            return [f"文本: {block.text}"]
+            return [block.text]
         if isinstance(block, FieldsBlock):
-            return self._render_mapping_block("字段", block.fields, budget)
+            return self._render_mapping_block(block.fields, budget)
         if isinstance(block, MetricsBlock):
-            return self._render_mapping_block("指标", block.metrics, budget)
+            return self._render_mapping_block(block.metrics, budget)
         if isinstance(block, TableBlock):
             header = " | ".join(block.columns)
-            lines = [f"表格: {header}"]
+            lines = [header]
             lines.extend(
                 " | ".join(self._format_value(value, budget) for value in row)
                 for row in block.rows
             )
             return lines
         if isinstance(block, ItemGridBlock):
-            lines = ["网格:"]
+            lines = []
             lines.extend(self._render_grid_item(item, budget) for item in block.items)
             if not block.items and block.fallback_text is not None:
                 lines.append(block.fallback_text)
             return lines
         if isinstance(block, ImageBlock):
-            return [f"图片: {block.alt_text}"]
+            return [block.alt_text]
         if isinstance(block, SeriesBlock):
-            lines = ["序列:"]
+            lines = []
             lines.extend(
                 f"{self._format_value(when, budget)}: "
                 f"{self._format_value(value, budget)}"
@@ -116,13 +118,13 @@ class TextPresenter:
                 lines.append(block.fallback_text)
             return lines
         if isinstance(block, LinksBlock):
-            lines = ["链接:"]
+            lines = []
             lines.extend(f"{link.label}: {link.url}" for link in block.links)
             if not block.links and block.fallback_text is not None:
                 lines.append(block.fallback_text)
             return lines
         if isinstance(block, CommandsBlock):
-            lines = ["命令:"]
+            lines = []
             lines.extend(block.commands)
             if not block.commands and block.fallback_text is not None:
                 lines.append(block.fallback_text)
@@ -137,9 +139,9 @@ class TextPresenter:
         raise TypeError("document contains an unsupported display block")
 
     def _render_mapping_block(
-        self, label: str, values: Mapping[str, Any], budget: int
+        self, values: Mapping[str, Any], budget: int
     ) -> list[str]:
-        lines = [f"{label}:"]
+        lines = []
         lines.extend(
             f"{key}: {self._format_value(value, budget)}"
             for key, value in values.items()

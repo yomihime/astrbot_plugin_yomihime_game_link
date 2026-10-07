@@ -81,6 +81,11 @@ class MarketFactsTests(unittest.TestCase):
         self.assertTrue(facts["coverage_complete"])
         self.assertFalse(facts["limitations"]["complete_world_coverage"])
         self.assertFalse(facts["limitations"]["realtime_availability"])
+        self.assertIn("World数据上传", facts["answer_guidance"])
+        self.assertIn("最多5条有限样本", facts["answer_guidance"])
+        self.assertIn("标题/表头", facts["answer_guidance"])
+        self.assertIn("source.fetched_at", facts["minimums"][0]["limitation"])
+        self.assertIn("未知不互替", facts["minimums"][0]["limitation"])
 
     def test_missing_catalog_unknown_world_region_and_scope_do_not_guess(self):
         original = self.execution()

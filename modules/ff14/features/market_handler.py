@@ -35,6 +35,7 @@ from ..query_resolution import (
 )
 from .item_sources import ItemPayloadError, ItemSourceClient
 from .market import MarketClient, _diagnostic
+from .market import _world_name as _catalog_world_name
 from .market_models import MarketExecution
 from .market_sources import MarketDeadlineError, MarketPayloadError, MarketSourceClient
 
@@ -49,19 +50,7 @@ def _stamp(stamp, observed):
 
 def _world_name(execution: MarketExecution, world_id, region):
     """Use only the execution's validated snapshot and exact numeric identity."""
-    catalog, scope = execution.catalog, execution.query.scope
-    if catalog is None or not catalog.catalog.available or type(world_id) is not int:
-        return None
-    if region not in scope.regions:
-        return None
-    for entry in catalog.catalog.entries:
-        if entry.kind == "world" and entry.id == world_id and entry.region == region:
-            if scope.kind == "world" and entry.id != scope.target:
-                return None
-            if scope.kind == "dc" and entry.dc_id != scope.target:
-                return None
-            return entry.name
-    return None
+    return _catalog_world_name(execution.catalog, execution.query, world_id, region)
 
 
 def _quote_context(execution: MarketExecution, world_id, region):
@@ -88,7 +77,7 @@ def _quote_context(execution: MarketExecution, world_id, region):
             else None,
             cached=provenance.cached if provenance else None,
         ),
-        limitation="仅本次返回范围/有限样本；非全部 World 覆盖，非实时可买；Gil/件。",
+        limitation="仅本次返回数据中的最低挂牌/最多5条有限样本；非全部World覆盖，非实时可买；Gil/件。minimums.time是World数据上传，listings.reviewed是来源最近审核，uploaded是World上传，均非上架时间；source.fetched_at及获取年龄与价格来源年龄分开，未知不互替。",
     )
 
 
@@ -98,7 +87,7 @@ def _execution_facts(execution: MarketExecution) -> dict:
     facts = _query_facts(query)
     facts.update(
         fact_projection_version=3,
-        answer_guidance="成功或可用 partial 足够时直接回答；来源与范围/非实时限定紧邻价格，缺值写未知。无新用户范围不补查服务器；不推断 HQ 用途、补货或购买建议。",
+        answer_guidance="成功或可用partial足够时直接回答；标题/表头和价格紧邻注明本次返回数据中的最低挂牌，挂牌明细最多5条有限样本，不能称完整列表或实时价格。紧邻价格保留Universalis、可信服务器名、来源获取/缓存年龄与World上传年龄；minimums.time是World数据上传，listings.reviewed是来源最近审核，listings.uploaded是World上传，均非挂牌发布时间，source.fetched_at是来源获取；缺失时间写未知，不互替。无新用户范围不补查服务器，不推断HQ用途、补货或购买建议。",
         item_id=query.item_id,
         item_name=query.item_name,
         original_query=query.original_query or query.query,

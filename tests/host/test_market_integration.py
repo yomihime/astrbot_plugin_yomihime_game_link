@@ -85,6 +85,20 @@ class FixtureTransport(runtime_fixture._IdleTransport):
 
 
 class MarketHostIntegrationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_command_reply_uses_natural_renderer_and_verified_price_context(self):
+        await self.start()
+        event = runtime_fixture._Event()
+        event.message = "/ygl ff14 market 44091 region=cn quality=hq intent=min"
+        self.assertIsNone(await self.runtime.handle_event(event))
+        reply = self.context.calls[-1][1].chain[0].text
+        self.assertIn("SyntheticChina", reply)
+        self.assertIn("本次返回数据中的最低挂牌", reply)
+        self.assertIn("Universalis", reply)
+        for prefix in ("标题:", "对象:", "文本:", "字段:"):
+            self.assertNotIn(prefix, reply)
+        self.assertNotIn("synthetic-private-seller", reply)
+        self.assertEqual(len(self.transport.requests), 3)
+
     # Reuse temporary plugin/DB composition without inheriting its test methods.
     setUp = runtime_fixture.AstrBotRuntimeTests.setUp
     tearDown = runtime_fixture.AstrBotRuntimeTests.tearDown

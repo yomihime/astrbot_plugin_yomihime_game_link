@@ -70,6 +70,23 @@ def _world(
     return world_id
 
 
+def _world_name(catalog: CatalogSnapshot | None, query: MarketQuery, world_id, region):
+    """Resolve only an exact World in the execution's validated query scope."""
+    scope = query.scope
+    if catalog is None or not catalog.catalog.available or type(world_id) is not int:
+        return None
+    if region not in scope.regions:
+        return None
+    for entry in catalog.catalog.entries:
+        if entry.kind == "world" and entry.id == world_id and entry.region == region:
+            if scope.kind == "world" and entry.id != scope.target:
+                return None
+            if scope.kind == "dc" and entry.dc_id != scope.target:
+                return None
+            return entry.name
+    return None
+
+
 def _layer(metrics: Mapping, field: str, level: str) -> Mapping | None:
     metric = metrics.get(field)
     if metric is None:
@@ -362,7 +379,7 @@ def _age(stamp: datetime | None, observed: datetime) -> str:
 
 
 def _price(value: int | float | None) -> str:
-    return "未知" if value is None else f"{value:g}"
+    return "未知" if value is None else str(value)
 
 
 def _result(
@@ -372,6 +389,7 @@ def _result(
     minimums: tuple[tuple[str, str, Quote], ...],
     truncated: bool,
     observed_at: datetime,
+    catalog: CatalogSnapshot | None = None,
 ) -> CapabilityResult:
     usable = tuple(
         outcome for outcome in outcomes if outcome.data and outcome.data.has_data
@@ -403,6 +421,28 @@ def _result(
     partial = bool(
         failures or empty or any(outcome.data.incomplete for outcome in usable)
     )
+
+    def quote_context(region, world_id, uploaded_at):
+        name = _world_name(catalog, query, world_id, region)
+        world = f"{name or '服务器名称未知'}（World {world_id if world_id is not None else '未知'}）"
+        provenance = next(
+            (
+                outcome.provenance
+                for outcome in outcomes
+                if outcome.region == region and not outcome.failed
+            ),
+            None,
+        )
+        fetched = _age(provenance.fetched_at if provenance else None, observed_at)
+        cache = (
+            "缓存原获取时间"
+            if provenance and provenance.cached
+            else "本次获取"
+            if provenance
+            else "缓存状态未知"
+        )
+        return f"{world}；World 数据上传 {_age(uploaded_at, observed_at)}；Universalis 来源获取 {fetched}（{cache}）；非全部 World 覆盖，非实时可买"
+
     blocks = [
         TextBlock(
             f"物品 ID：{query.item_id}；范围：{' / '.join(query.scope.regions)} / {query.scope.target or '全区'}（{query.scope.source}）；品质：{query.quality}；意图：{query.intent}"
@@ -431,14 +471,13 @@ def _result(
     if query.intent == "listings":
         blocks.append(
             TextBlock(
-                "有限挂牌样本，按每单位 Gil 排序；数量为该条堆叠，不是全服库存或完整最低价排行。"
+                "有限挂牌样本，最多 5 条，按每单位 Gil 排序；数量为该条堆叠，不是全服库存或完整最低价排行。"
             )
         )
-        fetched = {outcome.region: observed_at for outcome in usable}
         for listing in listings:
             blocks.append(
                 TextBlock(
-                    f"{listing.region} / World {listing.world_id if listing.world_id is not None else '未知'} {'HQ' if listing.hq else 'NQ'}：{listing.price_per_unit} Gil/单位 × {listing.quantity}；挂牌来源时间 {_age(listing.reviewed_at, fetched[listing.region])}；该 World 上传 {_age(listing.uploaded_at, fetched[listing.region])}"
+                    f"{listing.region} {'HQ' if listing.hq else 'NQ'} 有限挂牌样本（最多 5 条）：{listing.price_per_unit} Gil/单位 × {listing.quantity}；{quote_context(listing.region, listing.world_id, listing.uploaded_at)}；来源最近审核 {_age(listing.reviewed_at, observed_at)}；不代表上架时间"
                 )
             )
         if truncated:
@@ -448,14 +487,13 @@ def _result(
     elif query.intent == "min":
         blocks.append(
             TextBlock(
-                "按品质列出已覆盖区域的来源最低挂牌；不代表未覆盖区域或实时可买，来源未提供该条数量与发布时间。"
+                "按品质列出本次返回数据中的最低挂牌；来源未提供该条数量与上架时间，World 上传不代表挂牌时间。"
             )
         )
         for quality, region, quote in minimums:
-            fetched = observed_at
             blocks.append(
                 TextBlock(
-                    f"{quality.upper()}：{quote.minimum:g} Gil/单位，{region} / World {quote.minimum_world if quote.minimum_world is not None else '未知'}；该 World 上传 {_age(quote.minimum_uploaded_at, fetched)}"
+                    f"{quality.upper()} 本次返回数据中的最低挂牌：{_price(quote.minimum)} Gil/单位，{region} / {quote_context(region, quote.minimum_world, quote.minimum_uploaded_at)}"
                 )
             )
         for quality in ("nq", "hq") if query.quality == "all" else (query.quality,):
@@ -474,7 +512,7 @@ def _result(
             for quote in outcome.data.quotes:
                 blocks.append(
                     TextBlock(
-                        f"{outcome.region} {quote.quality.upper()}：最低挂牌 {_price(quote.minimum)} Gil/单位（World {quote.minimum_world if quote.minimum_world is not None else '未知'}，上传 {_age(quote.minimum_uploaded_at, observed_at)}）；最近成交 {_price(quote.recent_purchase)} Gil/单位（成交时间 {_age(quote.recent_at, observed_at)}）；最近四天成交均价 {_price(quote.average_sale_price)}；最近四天日均售出数量 {_price(quote.daily_sale_velocity)}。"
+                        f"{outcome.region} {quote.quality.upper()}：本次返回数据中的最低挂牌 {_price(quote.minimum)} Gil/单位；{quote_context(outcome.region, quote.minimum_world, quote.minimum_uploaded_at)}；World 上传不代表挂牌时间；最近成交 {_price(quote.recent_purchase)} Gil/单位（成交时间 {_age(quote.recent_at, observed_at)}）；最近四天成交均价 {_price(quote.average_sale_price)}；最近四天日均售出数量 {_price(quote.daily_sale_velocity)}。"
                     )
                 )
     blocks.append(
@@ -622,7 +660,9 @@ class MarketClient:
                 minimums.append((quality, region, quote))
         minimums = tuple(minimums)
         observed_at = self.session.wall_clock()
-        result = _result(query, outcomes, listings, minimums, truncated, observed_at)
+        result = _result(
+            query, outcomes, listings, minimums, truncated, observed_at, self.catalog
+        )
         return MarketExecution(
             query,
             outcomes,

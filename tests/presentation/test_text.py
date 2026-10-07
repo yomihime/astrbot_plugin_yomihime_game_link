@@ -26,6 +26,21 @@ from ygl_test_subject.presentation.text import TextPresenter
 
 
 class TextPresenterTests(unittest.TestCase):
+    def test_natural_projection_keeps_content_and_sources_without_fixed_labels(self):
+        document = DisplayDocument(
+            "Overview",
+            "subject",
+            (TextBlock("plain"), FieldsBlock({"state": "ready"})),
+            sources=("Universalis", "fixture"),
+        )
+        rendered = TextPresenter().render(document, max_chars=500)
+        self.assertEqual(rendered.splitlines()[:2], ["Overview", "subject"])
+        self.assertIn("state: ready", rendered)
+        self.assertIn("Universalis", rendered)
+        self.assertIn("fixture", rendered)
+        self.assertNotIn("文本: plain", rendered)
+        self.assertNotIn("字段:", rendered)
+
     def test_tx01_renders_every_block_in_document_order(self):
         instant = TimeValue(datetime(2026, 9, 20, 12, 30, tzinfo=timezone.utc), "UTC")
         document = DisplayDocument(
@@ -47,8 +62,7 @@ class TextPresenterTests(unittest.TestCase):
 
         rendered = TextPresenter().render(document, max_chars=2000)
 
-        self.assertIn("标题: Overview", rendered)
-        self.assertIn("对象: record-1", rendered)
+        self.assertEqual(rendered.splitlines()[:2], ["Overview", "record-1"])
         for expected in (
             "plain text",
             "status: ready",

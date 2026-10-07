@@ -86,6 +86,42 @@ def _renderer(reader=None, backend=None, **bounds):
 
 
 class GenericDisplayRendererTests(unittest.IsolatedAsyncioTestCase):
+    async def test_visible_field_row_and_nested_limits_have_explicit_notice(self):
+        documents = (
+            DisplayDocument("Fields", "s", (FieldsBlock({"a": 1, "b": 2}),)),
+            DisplayDocument(
+                "Nested", "s", (FieldsBlock({"nested": {"a": 1, "b": 2}}),)
+            ),
+            DisplayDocument("Rows", "s", (TableBlock(("column",), ((1,), (2,))),)),
+            DisplayDocument(
+                "Grid", "s", (ItemGridBlock((GridItem("a", 1), GridItem("b", 2))),)
+            ),
+        )
+        for document in documents:
+            output = await _renderer(
+                max_fields_per_block=1, max_rows_per_block=1
+            ).render(document, limits=_limits())
+            self.assertIn("内容已截断", output.text)
+
+    async def test_natural_projection_keeps_sources_and_marks_budget_truncation(self):
+        document = DisplayDocument(
+            "Overview",
+            "subject",
+            (TextBlock("plain"), FieldsBlock({"state": "ready"})),
+            sources=("Universalis", "fixture"),
+        )
+        output = await _renderer().render(document, limits=_limits())
+        self.assertEqual(output.text.splitlines()[:2], ["Overview", "subject"])
+        self.assertIn("Universalis", output.text)
+        self.assertIn("fixture", output.text)
+        self.assertNotIn("文本: plain", output.text)
+        self.assertNotIn("字段:", output.text)
+        bounded = await _renderer(max_chars_per_page=30).render(
+            document, limits=_limits(pages=1)
+        )
+        self.assertLessEqual(len(bounded.text), 30)
+        self.assertIn("截断", bounded.text)
+
     async def test_p01_renders_all_generic_public_block_kinds_in_order(self):
         document = DisplayDocument(
             "Overview",
@@ -378,7 +414,7 @@ class GenericDisplayRendererTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(str(raised.exception), "display_render_failed")
 
-    async def test_p09_same_structure_ignores_source_and_module_metadata(self):
+    async def test_p09_same_structure_preserves_declared_sources(self):
         first = DisplayDocument("Same", "s", (TextBlock("value"),), sources=("alpha",))
         second = DisplayDocument("Same", "s", (TextBlock("value"),), sources=("beta",))
         renderer = _renderer()
@@ -386,7 +422,10 @@ class GenericDisplayRendererTests(unittest.IsolatedAsyncioTestCase):
             await renderer.render(first, limits=_limits()),
             await renderer.render(second, limits=_limits()),
         )
-        self.assertEqual(left, right)
+        self.assertIn("来源：alpha", left.text)
+        self.assertIn("来源：beta", right.text)
+        self.assertEqual(left.text.replace("alpha", "beta"), right.text)
+        self.assertEqual(left.resource_ids, right.resource_ids)
 
     async def test_p10_text_only_backend_is_supported(self):
         document = DisplayDocument(

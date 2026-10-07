@@ -189,10 +189,12 @@ class GenericDisplayRenderer:
         limits: DisplayLimits,
         max_asset_reads: int,
     ) -> tuple[list[str], list[tuple[int, str]], int]:
-        lines = [f"标题: {document.title}", f"对象: {document.subject}"]
+        lines = [document.title, document.subject]
         resources: list[tuple[int, str]] = []
         if document.schema_version != CONTRACT_VERSION:
             return [*lines, "[不支持的显示版本]"], [], 0
+        if document.sources:
+            lines.append("来源：" + " / ".join(document.sources))
         asset_reads = 0
         blocks = document.ordered_blocks[: self._bounds.max_blocks_per_document]
         for block in blocks:
@@ -256,7 +258,7 @@ class GenericDisplayRenderer:
             if block.required and block.fallback_text is None:
                 raise RenderingFailure() from None
             return self._fallback(block.fallback_text, block.alt_text), None
-        return f"图片: {block.alt_text}", block.asset_id
+        return block.alt_text, block.asset_id
 
     async def _grid_block(
         self,
@@ -266,7 +268,7 @@ class GenericDisplayRenderer:
         limits: DisplayLimits,
         remaining_asset_reads: int,
     ) -> tuple[list[str], list[tuple[int, str]], int]:
-        lines = ["网格:"]
+        lines = []
         resources: list[tuple[int, str]] = []
         reads = 0
         seen = 0
@@ -274,6 +276,10 @@ class GenericDisplayRenderer:
             if not self._visible(item.visibility, document_privacy, audience):
                 continue
             if seen >= self._bounds.max_fields_per_block:
+                if lines:
+                    lines[-1] += " " + _TRUNCATION_NOTICE
+                else:
+                    lines.append(_TRUNCATION_NOTICE)
                 break
             seen += 1
             resource_id = None
@@ -298,7 +304,7 @@ class GenericDisplayRenderer:
             lines.append(self._render_grid_item(item))
             if resource_id is not None:
                 resources.append((line_index, resource_id))
-        if len(lines) == 1:
+        if not lines:
             if block.fallback_text is not None:
                 lines.append(block.fallback_text)
             elif block.required:
@@ -335,14 +341,14 @@ class GenericDisplayRenderer:
 
     def _render_block(self, block: Any) -> list[str]:
         if isinstance(block, TextBlock):
-            return [f"文本: {block.text}"]
+            return [block.text]
         if isinstance(block, FieldsBlock):
-            return self._mapping_block("字段", block.fields)
+            return self._mapping_block(block.fields)
         if isinstance(block, MetricsBlock):
-            return self._mapping_block("指标", block.metrics)
+            return self._mapping_block(block.metrics)
         if isinstance(block, TableBlock):
             columns = block.columns[: self._bounds.max_fields_per_block]
-            lines = ["表格: " + " | ".join(columns)]
+            lines = [" | ".join(columns)]
             for row in block.rows[: self._bounds.max_rows_per_block]:
                 lines.append(
                     " | ".join(
@@ -351,42 +357,53 @@ class GenericDisplayRenderer:
                 )
             if not block.rows and block.fallback_text:
                 lines.append(block.fallback_text)
+            if (
+                len(block.columns) > len(columns)
+                or len(block.rows) > self._bounds.max_rows_per_block
+            ):
+                lines[-1] += " " + _TRUNCATION_NOTICE
             return lines
         if isinstance(block, SeriesBlock):
             if not block.points and block.required:
                 if block.fallback_text is None:
                     raise RenderingFailure()
                 return [block.fallback_text]
-            lines = ["序列:"]
+            lines = []
             lines.extend(
                 f"{self._format_value(when)}: {self._format_value(value)}"
                 for when, value in block.points[: self._bounds.max_rows_per_block]
             )
             if not block.points and block.fallback_text:
                 lines.append(block.fallback_text)
+            if len(block.points) > self._bounds.max_rows_per_block:
+                lines[-1] += " " + _TRUNCATION_NOTICE
             return lines
         if isinstance(block, LinksBlock):
             if not block.links and block.required:
                 if block.fallback_text is None:
                     raise RenderingFailure()
                 return [block.fallback_text]
-            lines = ["链接:"]
+            lines = []
             lines.extend(
                 f"{link.label}: {link.url}"
                 for link in block.links[: self._bounds.max_rows_per_block]
             )
             if not block.links and block.fallback_text:
                 lines.append(block.fallback_text)
+            if len(block.links) > self._bounds.max_rows_per_block:
+                lines[-1] += " " + _TRUNCATION_NOTICE
             return lines
         if isinstance(block, CommandsBlock):
             if not block.commands and block.required:
                 if block.fallback_text is None:
                     raise RenderingFailure()
                 return [block.fallback_text]
-            lines = ["命令:"]
+            lines = []
             lines.extend(block.commands[: self._bounds.max_rows_per_block])
             if not block.commands and block.fallback_text:
                 lines.append(block.fallback_text)
+            if len(block.commands) > self._bounds.max_rows_per_block:
+                lines[-1] += " " + _TRUNCATION_NOTICE
             return lines
         if isinstance(block, UnknownBlock):
             if block.required:
@@ -396,10 +413,12 @@ class GenericDisplayRenderer:
             return [block.fallback_text] if block.fallback_text is not None else []
         raise RenderingFailure()
 
-    def _mapping_block(self, label: str, values: Mapping[str, Any]) -> list[str]:
+    def _mapping_block(self, values: Mapping[str, Any]) -> list[str]:
         entries = list(values.items())[: self._bounds.max_fields_per_block]
-        lines = [f"{label}:"]
+        lines = []
         lines.extend(f"{key}: {self._format_value(value)}" for key, value in entries)
+        if len(values) > len(entries):
+            lines[-1] += " " + _TRUNCATION_NOTICE
         return lines
 
     def _render_grid_item(self, item: GridItem) -> str:
@@ -422,14 +441,16 @@ class GenericDisplayRenderer:
             return str(value)
         if isinstance(value, Mapping):
             pairs = list(value.items())[: self._bounds.max_fields_per_block]
-            return (
-                "{"
-                + ", ".join(f"{key}: {self._format_value(item)}" for key, item in pairs)
-                + "}"
-            )
+            rendered = [f"{key}: {self._format_value(item)}" for key, item in pairs]
+            if len(value) > len(pairs):
+                rendered.append(_TRUNCATION_NOTICE)
+            return "{" + ", ".join(rendered) + "}"
         if isinstance(value, (tuple, list)):
             values = value[: self._bounds.max_fields_per_block]
-            return "[" + ", ".join(self._format_value(item) for item in values) + "]"
+            rendered = [self._format_value(item) for item in values]
+            if len(value) > len(values):
+                rendered.append(_TRUNCATION_NOTICE)
+            return "[" + ", ".join(rendered) + "]"
         return "[不支持的值]"
 
     def _format_number(
