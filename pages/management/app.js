@@ -619,7 +619,7 @@ function P(e, t, n, { expectedPage: i = "management", container: a = e.getElemen
 			await e(t.generation);
 		} catch (e) {
 			if (!B(t.generation)) return;
-			e?.message === "revision_conflict" ? (m = !0, F.textContent = "配置已变化，请刷新并重新核对后修改。") : e?.message === "select_changes" ? F.textContent = "请选择需要修改的字段。" : e?.message === "confirm_clear" ? F.textContent = "请勾选清除确认后再提交；保持选项不会写入。" : e?.message === "secret_encryption_unavailable" ? F.textContent = "未保存：宿主缺少或未正确配置加密密钥 YGL_SECRET_KEY；请管理员配置后重试。" : e?.message === "invalid_config" ? F.textContent = "配置或输入未通过校验，请核对字段要求后刷新重试。" : e?.message === "admin_authorization_denied" ? (J(), l = null, u = null, m = !0, F.textContent = "管理授权不可用，请重新打开宿主管理页面后手动刷新。") : (m = !0, F.textContent = "未取得成功确认，请刷新核对配置与版本后重试。");
+			e?.message === "revision_conflict" || e?.message === "配置版本冲突，请刷新并重新核对后修改。" ? (m = !0, F.textContent = "配置已变化，请刷新并重新核对后修改。") : e?.message === "select_changes" ? F.textContent = "请选择需要修改的字段。" : e?.message === "confirm_clear" ? F.textContent = "请勾选清除确认后再提交；保持选项不会写入。" : e?.message === "secret_encryption_unavailable" ? F.textContent = "未保存：宿主缺少或未正确配置加密密钥 YGL_SECRET_KEY；请管理员配置后重试。" : e?.message === "invalid_config" ? F.textContent = "配置或输入未通过校验，请核对字段要求后刷新重试。" : e?.message === "admin_authorization_denied" ? (J(), l = null, u = null, m = !0, F.textContent = "管理授权不可用，请重新打开宿主管理页面后手动刷新。") : (m = !0, F.textContent = "未取得成功确认，请刷新核对配置与版本后重试。");
 		} finally {
 			C === t && (C = null, W());
 		}

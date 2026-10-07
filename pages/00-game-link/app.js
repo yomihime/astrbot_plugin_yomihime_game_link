@@ -1108,7 +1108,7 @@ function X(e, t, n, { expectedPage: i = "management", container: a = e.getElemen
 			await e(t.generation);
 		} catch (e) {
 			if (!D(t.generation)) return;
-			e?.message === "revision_conflict" ? (p = !0, S.textContent = "配置已变化，请刷新并重新核对后修改。") : e?.message === "select_changes" ? S.textContent = "请选择需要修改的字段。" : e?.message === "confirm_clear" ? S.textContent = "请勾选清除确认后再提交；保持选项不会写入。" : e?.message === "secret_encryption_unavailable" ? S.textContent = "未保存：宿主缺少或未正确配置加密密钥 YGL_SECRET_KEY；请管理员配置后重试。" : e?.message === "invalid_config" ? S.textContent = "配置或输入未通过校验，请核对字段要求后刷新重试。" : e?.message === "admin_authorization_denied" ? (V(), l = null, u = null, p = !0, S.textContent = "管理授权不可用，请重新打开宿主管理页面后手动刷新。") : (p = !0, S.textContent = "未取得成功确认，请刷新核对配置与版本后重试。");
+			e?.message === "revision_conflict" || e?.message === "配置版本冲突，请刷新并重新核对后修改。" ? (p = !0, S.textContent = "配置已变化，请刷新并重新核对后修改。") : e?.message === "select_changes" ? S.textContent = "请选择需要修改的字段。" : e?.message === "confirm_clear" ? S.textContent = "请勾选清除确认后再提交；保持选项不会写入。" : e?.message === "secret_encryption_unavailable" ? S.textContent = "未保存：宿主缺少或未正确配置加密密钥 YGL_SECRET_KEY；请管理员配置后重试。" : e?.message === "invalid_config" ? S.textContent = "配置或输入未通过校验，请核对字段要求后刷新重试。" : e?.message === "admin_authorization_denied" ? (V(), l = null, u = null, p = !0, S.textContent = "管理授权不可用，请重新打开宿主管理页面后手动刷新。") : (p = !0, S.textContent = "未取得成功确认，请刷新核对配置与版本后重试。");
 		} finally {
 			v === t && (v = null, j());
 		}
@@ -1187,153 +1187,296 @@ function X(e, t, n, { expectedPage: i = "management", container: a = e.getElemen
 }
 typeof document < "u" && document.getElementById("management-root") && X(document, window.AstrBotPluginPage, window).start();
 //#endregion
+//#region src/confirmation.ts
+function Z(e) {
+	let t = s(null), i = 0, a = !1, o = null;
+	function c(n, s, c = !1) {
+		if (t.value !== n) return;
+		let l = !!o?.contains(e.activeElement);
+		t.value = null, n.resolve(s && n.isCurrent()), c && l && r().then(() => r()).then(() => {
+			!a && i === n.id && !t.value && (n.canRestoreFocus ?? n.isCurrent)() && e.activeElement === e.body && n.trigger?.isConnected && n.trigger.focus({ preventScroll: !0 });
+		});
+	}
+	function d(e = !1) {
+		t.value && c(t.value, !1, e);
+	}
+	return {
+		ask(n) {
+			return d(), a || !n.isCurrent() ? Promise.resolve(!1) : new Promise((a) => {
+				let s = {
+					...n,
+					id: ++i,
+					trigger: n.trigger ?? e.activeElement,
+					resolve: a
+				};
+				t.value = s, r().then(() => {
+					t.value === s && s.isCurrent() && o?.querySelector("[data-confirm-cancel]")?.focus({ preventScroll: !0 });
+				});
+			});
+		},
+		cancel: d,
+		invalidate() {
+			t.value && !t.value.isCurrent() && d();
+		},
+		dispose() {
+			d(), a = !0;
+		},
+		render() {
+			let e = t.value;
+			return e ? n("section", {
+				key: e.id,
+				role: "group",
+				"aria-label": e.title,
+				"data-unload-confirm": e.kind === "unload" ? e.owner : void 0,
+				"data-confirmation": e.kind,
+				ref: (e) => {
+					o = e;
+				},
+				onKeydown: (t) => {
+					t.key === "Escape" && (t.preventDefault(), c(e, !1, !0));
+				}
+			}, [n(u, { title: e.title }, { default: () => [
+				n("p", e.message),
+				n(l, {
+					"data-action": "confirm-" + e.kind,
+					onClick: () => c(e, !0)
+				}, () => e.confirmLabel),
+				n(l, {
+					"data-action": "cancel-" + e.kind,
+					"data-confirm-cancel": "",
+					onClick: () => c(e, !1, !0)
+				}, () => "取消")
+			] })]) : null;
+		}
+	};
+}
+//#endregion
 //#region src/module-management.ts
-function Z(r, i, a, o, f, m = () => !0) {
-	let h = s([]), v = s("尚未读取模块管理状态。"), y = s(!1), b = s(!0), x = s({}), S = !1, C = !1, w = 0, T = "", E = 0, O, k = (e) => typeof e == "object" && !!e && !Array.isArray(e), A = (e) => !S && C && e === w;
-	function j(e) {
-		if (!k(e) || Object.keys(e).sort().join(",") !== "modules,registry_revision" || !Number.isSafeInteger(e.registry_revision) || !Array.isArray(e.modules) || e.modules.length > 128) throw Error("invalid_modules");
+function Q(r, i, a, o, f, m = () => !0, h, v = () => "") {
+	let y = s([]), b = s("尚未读取模块管理状态。"), x = s(!1), S = s(!0), C = h ?? Z(r.ownerDocument), w = s(null), T = s({}), E = !1, O = !1, k = 0, A = "", j = 0, M = 0, N, P = (e) => typeof e == "object" && !!e && !Array.isArray(e), F = (e) => !E && O && e === k;
+	function I(e) {
+		if (!P(e) || Object.keys(e).sort().join(",") !== "modules,registry_revision" || !Number.isSafeInteger(e.registry_revision) || !Array.isArray(e.modules) || e.modules.length > 128) throw Error("invalid_modules");
 		let t = /* @__PURE__ */ new Set();
 		for (let n of e.modules) {
-			if (!k(n) || Object.keys(n).sort().join(",") !== "enabled,epoch,health,lifecycle,module_id,reason_code,registry_revision" || typeof n.module_id != "string" || !/^[a-z][a-z0-9_]*(?:[.-][a-z0-9_]+)*\/[a-z][a-z0-9_]*(?:[.-][a-z0-9_]+)*$/.test(n.module_id) || t.has(n.module_id) || typeof n.enabled != "boolean" || !Number.isSafeInteger(n.epoch) || !Number.isSafeInteger(n.registry_revision) || typeof n.lifecycle != "string" || typeof n.health != "string" || n.reason_code !== null && typeof n.reason_code != "string") throw Error("invalid_modules");
+			if (!P(n) || Object.keys(n).sort().join(",") !== "enabled,epoch,health,lifecycle,module_id,reason_code,registry_revision" || typeof n.module_id != "string" || !/^[a-z][a-z0-9_]*(?:[.-][a-z0-9_]+)*\/[a-z][a-z0-9_]*(?:[.-][a-z0-9_]+)*$/.test(n.module_id) || t.has(n.module_id) || typeof n.enabled != "boolean" || !Number.isSafeInteger(n.epoch) || !Number.isSafeInteger(n.registry_revision) || typeof n.lifecycle != "string" || typeof n.health != "string" || n.reason_code !== null && typeof n.reason_code != "string") throw Error("invalid_modules");
 			t.add(n.module_id);
 		}
 		return e;
 	}
-	async function M() {
-		if (!C || S || y.value) return;
-		let e = w;
-		y.value = !0, b.value = !0;
+	async function L() {
+		if (!O || E || x.value) return;
+		C.cancel(), w.value = null;
+		let e = k;
+		x.value = !0, S.value = !0;
 		try {
-			let t = j(await i.apiPost("admin/modules", {}));
-			if (!A(e)) return;
-			h.value = t.modules, E = t.registry_revision, b.value = !1, v.value = "禁用保留设置；解除挂载保留配置、凭据、缓存及业务数据。";
+			let t = I(await i.apiPost("admin/modules", {}));
+			if (!F(e)) return;
+			y.value = t.modules, j = t.registry_revision, S.value = !1, b.value = "禁用保留设置；解除挂载保留配置、凭据、缓存及业务数据。";
 		} catch {
-			A(e) && (b.value = !0, v.value = "模块管理权限或状态无法确认，请重新打开页面后刷新。");
+			F(e) && (S.value = !0, b.value = "模块管理权限或状态无法确认，请重新打开页面后刷新。");
 		} finally {
-			A(e) && (y.value = !1);
+			F(e) && (x.value = !1);
 		}
 	}
-	async function N(e, t) {
-		if (!A(w) || y.value || b.value || !m() || t === "unload" && !a.confirm(`解除挂载 ${e.module_id}？配置、凭据、缓存及业务数据全部保留。`)) return;
-		let n = w;
-		y.value = !0, b.value = !0;
+	async function R(e, t) {
+		if (!F(k) || x.value || S.value || w.value || !y.value.includes(e)) return;
+		let n = k, r = j, a = v(), o = ++M;
+		w.value = o;
+		let s = () => F(n) && !x.value && !S.value && j === r && v() === a && y.value.includes(e), c = () => w.value === o && s();
 		try {
-			let r = {
-				module_id: e.module_id,
-				expected_registry_revision: E,
-				...t === "unload" ? {} : { enabled: t === "enable" }
-			}, a = await i.apiPost(t === "unload" ? "admin/module-unload" : "admin/module-enabled", r);
-			if (!A(n)) return;
-			if (!k(a) || a.module_id !== e.module_id || !Number.isSafeInteger(a.registry_revision) || t === "unload" && (a.state !== "unloaded" || a.data_retained !== !0 || a.reopen_required !== !0)) throw Error("operation_unavailable");
-			y.value = !1, await M(), f(), A(n) && (v.value = t === "enable" ? "已恢复模块。请从宿主插件详情重新打开页面，以取得新的模块资源授权。" : t === "unload" ? "模块已解除挂载，持久数据保留。恢复后请从宿主插件详情正式重开页面。" : "模块已禁用，设置与持久数据保留。");
-		} catch (e) {
-			A(n) && (v.value = e?.message === "revision_conflict" ? "模块状态已变化，请刷新后重新核对。" : "未确认清理完成；可能仍在排空或清理。请刷新核对，并重试解除挂载。不会创建替代实例。", b.value = !0);
+			if (!await m({
+				owner: e.module_id,
+				action: t,
+				revision: r,
+				isCurrent: c,
+				canRestoreFocus: s
+			}) || !c() || t === "unload" && !await C.ask({
+				kind: "unload",
+				owner: e.module_id,
+				title: `确认解除挂载 ${e.module_id}`,
+				message: `配置、凭据、缓存及业务数据全部保留。注册版本 ${r}；确认后需从宿主插件详情正式重开页面。`,
+				confirmLabel: "确认解除挂载（保留数据）",
+				isCurrent: c,
+				canRestoreFocus: s
+			}) || !c()) return;
 		} finally {
-			A(n) && (y.value = !1);
+			w.value === o && (w.value = null);
+		}
+		if (F(n) && !x.value && !S.value && j === r && v() === a && y.value.includes(e)) {
+			x.value = !0, S.value = !0;
+			try {
+				let a = {
+					module_id: e.module_id,
+					expected_registry_revision: r,
+					...t === "unload" ? {} : { enabled: t === "enable" }
+				}, o = await i.apiPost(t === "unload" ? "admin/module-unload" : "admin/module-enabled", a);
+				if (!F(n)) return;
+				if (!P(o) || o.module_id !== e.module_id || !Number.isSafeInteger(o.registry_revision) || t === "unload" && (o.state !== "unloaded" || o.data_retained !== !0 || o.reopen_required !== !0)) throw Error("operation_unavailable");
+				if (x.value = !1, await L(), !F(n)) return;
+				f(), F(n) && (b.value = t === "enable" ? "已恢复模块。请从宿主插件详情重新打开页面，以取得新的模块资源授权。" : t === "unload" ? "模块已解除挂载，持久数据保留。恢复后请从宿主插件详情正式重开页面。" : "模块已禁用，设置与持久数据保留。");
+			} catch (e) {
+				F(n) && (b.value = e?.message === "revision_conflict" ? "模块状态已变化，请刷新后重新核对。" : "未确认清理完成；可能仍在排空或清理。请刷新核对，并重试解除挂载。不会创建替代实例。", S.value = !0);
+			} finally {
+				F(n) && (x.value = !1);
+			}
 		}
 	}
-	let P = e(t({ setup() {
+	let z = e(t({ setup() {
 		return () => n(d, {
-			theme: x.value.isDark === !0 || x.value.theme === "dark" ? p : null,
-			locale: x.value.locale === "en-US" ? g : _,
+			theme: T.value.isDark === !0 || T.value.theme === "dark" ? p : null,
+			locale: T.value.locale === "en-US" ? g : _,
 			styleMountTarget: r
 		}, { default: () => n(u, {
 			title: "模块生命周期",
 			class: "module-management"
 		}, { default: () => [
 			n(c, {
-				type: b.value ? "warning" : "info",
+				type: S.value ? "warning" : "info",
 				showIcon: !1
-			}, { default: () => v.value }),
+			}, { default: () => b.value }),
 			n(l, {
-				disabled: y.value || !C,
-				onClick: M
-			}, () => y.value ? "正在处理…" : "刷新模块管理状态"),
-			...h.value.map((e) => n("section", {
+				disabled: x.value || !O,
+				onClick: L
+			}, () => x.value ? "正在处理…" : "刷新模块管理状态"),
+			...y.value.map((e) => n("section", {
 				class: "module-management-row",
 				key: e.module_id,
 				"data-module-owner": e.module_id
 			}, [
 				n("h3", e.module_id),
-				n("p", `${e.enabled ? "已启用" : "已禁用"} · ${e.lifecycle}${e.reason_code ? " · " + e.reason_code : ""} · 注册版本 ${E}`),
+				n("p", `${e.enabled ? "已启用" : "已禁用"} · ${e.lifecycle}${e.reason_code ? " · " + e.reason_code : ""} · 注册版本 ${j}`),
 				...[
 					"enable",
 					"disable",
 					"unload"
 				].map((t) => n(l, {
-					disabled: y.value || b.value || !C || t === "enable" && e.enabled || t === "disable" && !e.enabled,
-					onClick: () => N(e, t)
+					disabled: x.value || w.value !== null || S.value || !O || t === "enable" && e.enabled || t === "disable" && !e.enabled,
+					onClick: () => R(e, t)
 				}, () => ({
 					enable: "启用 / 恢复",
 					disable: "禁用",
 					unload: "解除挂载（保留数据）"
 				})[t]))
 			])),
-			n("p", n("a", {
-				href: "/#/extension/plugins",
-				target: "_top"
-			}, "前往宿主插件列表，从插件详情重新打开页面"))
+			h ? null : C.render(),
+			n("p", { "data-reopen-guidance": "" }, "请在宿主左侧点击“插件”，找到 astrbot_plugin_yomihime_game_link，在插件详情中重新打开 monitor 页面，以取得当前资源授权。")
 		] }) });
 	} }));
-	P.mount(r);
-	function F(e) {
-		if (S) return;
-		x.value = k(e) ? e : {};
+	z.mount(r);
+	function B(e) {
+		if (E) return;
+		T.value = P(e) ? e : {};
 		let t = "";
 		try {
-			if (!k(e) || e.pluginName !== "astrbot_plugin_yomihime_game_link" || e.pageName !== o) throw Error();
+			if (!P(e) || e.pluginName !== "astrbot_plugin_yomihime_game_link" || e.pageName !== o) throw Error();
 			t = D(e);
 		} catch {
-			C = !1, w++, h.value = [], y.value = !1, b.value = !0, v.value = "管理上下文无效，请正式重开页面。";
+			C.cancel(), w.value = null, O = !1, k++, y.value = [], x.value = !1, S.value = !0, b.value = "管理上下文无效，请正式重开页面。";
 			return;
 		}
-		C && t === T || (w++, T = t, C = !0, h.value = [], y.value = !1, M());
+		O && t === A || (C.cancel(), w.value = null, k++, A = t, O = !0, y.value = [], x.value = !1, L());
 	}
 	return {
 		start() {
-			O = i.onContext(F), Promise.resolve(i.ready()).then(F).catch(() => {
-				v.value = "宿主会话不可用，请正式重开页面。";
+			N = i.onContext(B), Promise.resolve(i.ready()).then(B).catch(() => {
+				b.value = "宿主会话不可用，请正式重开页面。";
 			});
 		},
-		refresh: M,
+		refresh: L,
+		cancelConfirmation() {
+			C.cancel(), w.value = null;
+		},
 		dispose() {
-			S = !0, w++, C = !1, O?.(), P.unmount();
+			C.cancel(), w.value = null, h || C.dispose(), E = !0, k++, O = !1, N?.(), z.unmount();
 		}
 	};
 }
 //#endregion
 //#region src/main.ts
-var Q = t({ setup() {
-	let e = o(0), t = o(null), r = o(null), s = o(null), c = o(null), u = null, y = null, b = null, x = !1, S = null, C = document.documentElement.dataset.pageName || "shell", w = (e) => {
-		u?.state.settings && y?.dirty() && !window.confirm("保留普通配置草稿并离开设置？取消可继续编辑。秘密输入将清空。") || e();
-	}, T = window.location.hash, E = (e) => {
-		if (x && !window.location.hash.startsWith("#/settings") && y?.dirty() && !window.confirm("保留普通配置草稿并离开设置？取消可继续编辑。秘密输入将清空。")) {
-			e.stopImmediatePropagation(), window.location.hash = T;
+var ie = t({ setup() {
+	let e = o(0), t = o(null), r = o(null), s = o(null), c = o(null), u = null, y = null, b = null, x = !1, S = null, C = document.documentElement.dataset.pageName || "shell", w = Z(document), T = window.location.hash, E = "", O = 0, k = "", A = !1, N = 0, P = 0, F = !1, I, L = () => JSON.stringify([
+		O,
+		k,
+		A,
+		N,
+		u?.state.settings,
+		u?.state.settingsOwner,
+		u?.state.selected,
+		u?.state.catalog?.catalog_revision,
+		u?.state.busy,
+		u?.state.stale,
+		window.location.hash
+	]), R = async (e) => {
+		let t = ++P, n = L();
+		w.cancel();
+		let r = () => !F && A && t === P && n === L();
+		u?.state.settings && y?.dirty() && !await w.ask({
+			kind: "navigation",
+			title: "离开当前设置？",
+			message: "保留普通配置草稿并离开设置？取消可继续编辑。秘密输入将清空。",
+			confirmLabel: "保留普通草稿并离开",
+			isCurrent: r
+		}) || r() && (e(), T = window.location.hash);
+	}, z = (e) => {
+		let t = window.location.hash;
+		if (t === E) {
+			E = "", T = t;
 			return;
 		}
-		T = window.location.hash;
+		if (t !== T) {
+			if (x && y?.dirty()) {
+				e.stopImmediatePropagation(), window.history.replaceState(null, "", T || "#/"), R(() => {
+					E = t, window.location.hash = t;
+				});
+				return;
+			}
+			w.cancel(), T = t;
+		}
+	}, B = (e) => {
+		s.value?.contains(e.target) && (N++, w.cancel(), b?.cancelConfirmation());
 	};
-	function D() {
-		e.value++;
+	function V() {
+		w.invalidate(), e.value++;
 		let t = u?.state.settings || !1;
 		t && !y && s.value && c.value ? (y = X(document, window.AstrBotPluginPage, window, {
 			expectedPage: C,
 			container: s.value
-		}), y.start(), b = Z(c.value, window.AstrBotPluginPage, window, C, () => {
+		}), y.start(), b = Q(c.value, window.AstrBotPluginPage, window, C, () => {
 			u?.refresh(), y?.resume();
-		}, () => !y?.dirty() || window.confirm("存在未提交的配置草稿。模块状态变化可能撤销其字段，继续执行？取消可先保存草稿。")), b.start()) : t && !x ? (y?.resume(), b?.refresh()) : t && x && S !== u?.state.settingsOwner ? (y?.suspend(), y?.resume()) : !t && x && y?.suspend(), S = u?.state.settingsOwner || null, t && y?.selectOwner(u?.state.settingsOwner || "game_link/core"), x = t;
+		}, (e) => {
+			let t = L();
+			return !y?.dirty() || w.ask({
+				kind: "module-draft",
+				owner: e.owner,
+				title: "确认模块操作 " + e.owner,
+				message: `存在未提交的配置草稿。模块状态变化可能撤销其字段，继续执行？取消可先保存草稿。注册版本 ${e.revision}。`,
+				confirmLabel: "保留草稿并继续核对",
+				isCurrent: () => t === L() && e.isCurrent(),
+				canRestoreFocus: () => t === L() && e.canRestoreFocus()
+			});
+		}, w, L), b.start()) : t && !x ? (y?.resume(), b?.refresh()) : t && x && S !== u?.state.settingsOwner ? (y?.suspend(), y?.resume()) : !t && x && y?.suspend(), S = u?.state.settingsOwner || null, t && y?.selectOwner(u?.state.settingsOwner || "game_link/core"), x = t;
 	}
 	return a(() => {
-		window.addEventListener("hashchange", E), u = j({
+		document.addEventListener("input", B), document.addEventListener("change", B), I = window.AstrBotPluginPage?.onContext((e) => {
+			let t = "";
+			try {
+				if (e.pluginName !== "astrbot_plugin_yomihime_game_link" || e.pageName !== C) throw Error();
+				t = D(e);
+			} catch {
+				A = !1, O++, w.cancel(), b?.cancelConfirmation();
+				return;
+			}
+			t !== k && (O++, k = t, w.cancel(), b?.cancelConfirmation()), A = !0;
+		}), window.addEventListener("hashchange", z), u = j({
 			bridge: window.AstrBotPluginPage,
 			container: t.value,
 			window,
 			loadPage: v,
 			expectedPage: document.documentElement.dataset.pageName || "shell",
-			changed: D
+			changed: V
 		}), u.start();
 	}), i(() => {
-		window.removeEventListener("hashchange", E), y?.dispose(), b?.dispose(), u?.dispose();
+		F = !0, O++, w.dispose(), I?.(), document.removeEventListener("input", B), document.removeEventListener("change", B), window.removeEventListener("hashchange", z), y?.dispose(), b?.dispose(), u?.dispose();
 	}), () => {
 		e.value;
 		let i = u?.state, a = u?.selected(), o = i?.catalog?.modules || [], v = o.flatMap((e) => e.pages.map((t) => ({
@@ -1341,7 +1484,7 @@ var Q = t({ setup() {
 			page: t
 		}))), y = i?.busy || !1, b = o.find((e) => e.module_id === (i?.settingsOwner || i?.selected?.owner)), x = (e) => {
 			let t = o.find((t) => t.module_id === e.target.value);
-			t && w(() => i?.settings || !t.pages[0] ? u.selectSettings(t.module_id) : u.select(t.module_id, t.pages[0].route_id));
+			t && R(() => i?.settings || !t.pages[0] ? u.selectSettings(t.module_id) : u.select(t.module_id, t.pages[0].route_id));
 		}, S = (e) => n("div", { class: "shell-field" }, [n("label", { for: e }, "模块"), n("select", {
 			id: e,
 			value: b?.module_id || "",
@@ -1352,7 +1495,7 @@ var Q = t({ setup() {
 			value: i?.settings ? "" : i?.selected?.route || "",
 			disabled: !b?.pages.length,
 			onChange: (e) => {
-				b && w(() => u.select(b.module_id, e.target.value));
+				b && R(() => u.select(b.module_id, e.target.value));
 			}
 		}, [a ? null : n("option", { value: "" }, i?.settings ? "模块设置 · 选择页面返回查询" : "请先选择模块"), ...b?.pages.map((e) => n("option", { value: e.route_id }, e.title)) || []])]);
 		return n(d, {
@@ -1376,14 +1519,14 @@ var Q = t({ setup() {
 			n("nav", { "aria-label": "模块页面" }, v.map(({ module: e, page: t }) => n("a", {
 				href: `#/module/${encodeURIComponent(e.module_id)}/${t.route_id}`,
 				onClick: (n) => {
-					n.preventDefault(), w(() => u.select(e.module_id, t.route_id));
+					n.preventDefault(), R(() => u.select(e.module_id, t.route_id));
 				},
 				"aria-current": i?.selected?.owner === e.module_id && i.selected.route === t.route_id ? "page" : void 0
 			}, t.title))),
 			n("nav", { "aria-label": "模块设置" }, o.map((e) => n("a", {
 				href: "#/settings/module/" + encodeURIComponent(e.module_id),
 				onClick: (t) => {
-					t.preventDefault(), w(() => u.selectSettings(e.module_id));
+					t.preventDefault(), R(() => u.selectSettings(e.module_id));
 				},
 				"aria-current": i?.settingsOwner === e.module_id ? "page" : void 0
 			}, e.module_id + " · 模块设置"))),
@@ -1391,15 +1534,15 @@ var Q = t({ setup() {
 				class: "shell-settings",
 				type: "button",
 				"aria-current": i?.settings ? "page" : void 0,
-				onClick: () => u?.selectSettings()
+				onClick: () => R(() => u?.selectSettings())
 			}, "全局设置"), n("p", { class: "shell-note" }, "设置使用独立管理鉴权。模块声明不授予读写权限。")])
 		]), n("div", { class: "shell-content" }, [
 			n("div", { class: "shell-mobile" }, [
 				n("p", { class: "shell-brand" }, "游戏连结"),
 				S("module-select-mobile"),
 				C,
-				b ? n(l, { onClick: () => w(() => u?.selectSettings(b.module_id)) }, () => "模块设置") : null,
-				n(l, { onClick: () => u?.selectSettings() }, () => "全局设置")
+				b ? n(l, { onClick: () => R(() => u?.selectSettings(b.module_id)) }, () => "模块设置") : null,
+				n(l, { onClick: () => R(() => u?.selectSettings()) }, () => "全局设置")
 			]),
 			n("main", {
 				ref: r,
@@ -1408,8 +1551,11 @@ var Q = t({ setup() {
 				"aria-labelledby": "page-title"
 			}, [
 				n("header", { class: "shell-heading" }, [n("div", [n("p", { class: "shell-eyebrow" }, i?.settings ? "Core 管理" : a?.module.module_id || "模块目录"), n("h1", { id: "page-title" }, i?.settings ? i.settingsOwner ? i.settingsOwner + " · 模块设置" : "全局设置" : a?.page.title || "游戏连结")]), n(l, {
-					onClick: () => u?.refresh(),
-					disabled: y,
+					onClick: () => {
+						u?.state.busy || u?.refresh();
+					},
+					"aria-disabled": String(y),
+					"aria-busy": String(y),
 					"aria-label": "刷新模块状态"
 				}, () => y ? "正在刷新…" : "刷新状态")]),
 				n("div", {
@@ -1421,6 +1567,7 @@ var Q = t({ setup() {
 					size: "small"
 				}, () => i?.stale ? "旧状态" : y ? "读取中" : "只读"), n("span", i?.message || "正在准备页面。")]),
 				i?.cleanupPending ? n(l, { onClick: () => u?.retryCleanup() }, () => "重试页面清理") : null,
+				w.render(),
 				n("div", {
 					ref: t,
 					id: "module-container",
@@ -1441,6 +1588,6 @@ var Q = t({ setup() {
 			n("footer", "只读目录与手动查询 · 来源与缺项以本次结果为准")
 		])])] });
 	};
-} }), ie = e(Q);
-ie.mount("#app"), window.addEventListener("pagehide", () => ie.unmount(), { once: !0 });
+} }), ae = e(ie);
+ae.mount("#app"), window.addEventListener("pagehide", () => ae.unmount(), { once: !0 });
 //#endregion

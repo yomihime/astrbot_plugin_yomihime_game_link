@@ -47,11 +47,11 @@
 
 | 需求 | 当前正式能力 | 验收边界 |
 | --- | --- | --- |
-| REQ01 | 壳底部固定全局设置，空目录或 FF14 未加载仍可进入 Core 设置 | 最终 ZIP 的固定 Host 重写与窄屏可见交互另行验收 |
+| REQ01 | 壳底部固定全局设置，空目录或 FF14 未加载仍可进入 Core 设置 | 真实 monitor 入口、Core 往返/CAS、解除挂载 FF14 后全局设置可用已验证 |
 | REQ02 | 公共表单按 owner/group 显示；全局只选 Core，各模块导航有自己的设置入口；普通值与凭据接口分离，保存采用 revision CAS | schema/catalog 只描述 UI；资源权来自显式部署政策和逐请求鉴权，不能从声明自动获得 |
 | REQ03 | 当前注入 KeyProvider/codec 提供无秘密 readiness；未就绪或未知时禁止填写/替换；已受权 clear 仍须确认并通过最新 catalog/CAS，keep 零写；FFLogs cn/global 独立操作 | 仅接入现有 external/env 密钥提供者（默认 `YGL_SECRET_KEY`）；没有持久主钥生成或自动轮换实现，预检不读取旧 secret |
 | REQ04 | 公共调用使用闭合 owner/page/capability_id/parameters 信封；Host 不分派行情业务，FF14 解释输入并验证行情事实 | 保留受信 allowlist、epoch、准入、只读/隐私检查与 32 blocks/512 nodes 总预算 |
-| REQ05 | Logs/日历使用模块 Vue 页及现有客户端、错误和恢复语义；旧业务 renderer 已移除 | 旧兼容入口仅定位到宿主插件列表；真实查询与最终宿主浏览器尚须独立验收 |
+| REQ05 | Logs/日历使用模块 Vue 页及现有客户端、错误和恢复语义；旧业务 renderer 已移除 | 旧兼容入口仅指引使用宿主插件菜单正式重开；真实未配置/来源失败处理已验证，真实 FFLogs 和日历内容仍待外部条件 |
 | REQ06 | exact owner disable/unload/restore；停用保留设置；卸载先 fence、排空与 cleanup，再撤销工具对象、许可、来源及 Registry 注册 | pending 保留可重试所有权；配置、秘密、缓存和 data 均保留。恢复只使用受信原候选；旧壳不自动续资产证明，应从宿主正式重开 |
 | REQ07 | 隔离中性模块有普通配置、公共只读能力和页面；正式 Host→Core 链验证同名页面隔离、声明不授信与持久数据恢复 | fixture 不入发布包；不等于任意第三方生产包安装验收 |
 
@@ -59,7 +59,11 @@ Core 与模块的命名空间配置是当前读写权威；Core 目录不依赖 
 
 `disable` 关闭业务准入，继续允许模块设置与启用管理。显式 `unload` 退出 active 普通/凭据目录、页面、来源、工具和 owner 注册，但模块管理仍显示可信恢复候选；保留最大部署政策不允许旧请求在卸载后提交。SDK 1.7 的生命周期 marker 仅用于精确 owner 管理操作，不能据此读写任何配置字段。
 
-当前发布使用 `yomihime_module_sdk-1.7.0-py3-none-any.whl`，实际摘要与 pin 由正式发布构建核对；1.0–1.6 的兼容闭合集合保留，已发布 1.6 字节不改。升级固定 SDK 需要保留数据的宿主卸载与冷加载，以退出旧进程中已导入的 SDK；不能以同壳恢复模拟该步骤。本批尚未执行真实安装、凭据查询、SDK 冷加载或 IM 投递验收。
+当前发布构建使用 `yomihime_module_sdk-1.7.0-py3-none-any.whl`，实际摘要与 pin 由构建核对；1.0–1.6 的兼容闭合集合保留，已发布 1.6 字节不改。升级固定 SDK 需要保留数据的宿主卸载与冷加载，以退出旧进程中已导入的 SDK；不能以同壳恢复模拟该步骤。本批已验证授权独立实例的安装、SDK 首次冷加载、最小公开查询、普通管理读写及模块保留数据解除挂载/恢复；真实凭据查询、IM 投递和新版本真实模型仍未验证。
+
+固定宿主 iframe 不允许原生 `confirm` 或顶层导航。现有草稿与模块生命周期守卫使用有归属的页面内确认，保留操作、owner、revision 与生命周期检查；取消等待按钮解除禁用后才安全恢复焦点，不抢新页面或用户已转移的焦点。需要新资源投影时，使用宿主左侧“插件”菜单和目标 monitor 正式重开；页面内文字指引不承诺自动跳转、无刷新热加载或资源授权续期。
+
+目录刷新按钮忙碌时保持原可聚焦节点，用 `aria-disabled`、`aria-busy` 和读取提示表达状态；实时忙碌检查与既有生命周期准入继续拒绝重复或失效请求。刷新结束不主动抢回焦点，切页与用户主动移焦点遵循各自原有行为。
 
 对应检查入口：声明与工厂见 [磁盘解析测试](../tests/extensions/test_disk_manifest.py)、[工厂解析测试](../tests/extensions/test_factory_resolver.py) 和 [扩展生命周期测试](../tests/services/test_extension_runtime.py)；第二模块 fixture 见 [壳生命周期测试](../tests/pages/shell/lifecycle.test.mjs)、[配置目录测试](../tests/services/test_configuration_catalog.py) 和 [宿主工具测试](../tests/host/test_llm_tools.py)。凭据正反例见 [受管凭据测试](../tests/host/test_managed_credentials.py) 与 [来源凭据测试](../tests/services/test_source_credentials.py)。这些是定位与运行入口，实际通过范围仍以对应冻结版本的报告为准。
 

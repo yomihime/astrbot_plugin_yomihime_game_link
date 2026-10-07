@@ -200,7 +200,8 @@ export function createManagementPage(document,bridge,window,{expectedPage='manag
   async function run(action){
     if(active||closed||!ready)return;const operation={generation};active=operation;buttons();status.textContent='管理操作正在执行。';
     try{await action(operation.generation);}catch(error){if(!current(operation.generation))return;
-      if(error?.message==='revision_conflict'){stale=true;status.textContent='配置已变化，请刷新并重新核对后修改。';}
+      // Host bridge retains only the controlled message, not HTTP status or code.
+      if(error?.message==='revision_conflict'||error?.message==='配置版本冲突，请刷新并重新核对后修改。'){stale=true;status.textContent='配置已变化，请刷新并重新核对后修改。';}
       else if(error?.message==='select_changes')status.textContent='请选择需要修改的字段。';
       else if(error?.message==='confirm_clear')status.textContent='请勾选清除确认后再提交；保持选项不会写入。';
       else if(error?.message==='secret_encryption_unavailable')status.textContent='未保存：宿主缺少或未正确配置加密密钥 YGL_SECRET_KEY；请管理员配置后重试。';

@@ -1,7 +1,7 @@
 // Actual built shell DOM, with an isolated catalog/management bridge fixture.
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdir,copyFile,writeFile} from 'node:fs/promises';
+import {mkdir,copyFile,writeFile,readFile} from 'node:fs/promises';
 import {resolve} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {JSDOM} from '../../../pages/frontend/node_modules/jsdom/lib/api.js';
@@ -31,6 +31,17 @@ test('built mobile navigation retains settings owner and exposes pages or pagele
   const append=window.document.head.append.bind(window.document.head);window.document.head.append=(...nodes)=>{append(...nodes);for(const node of nodes)if(node.matches?.('link[data-module-style]'))queueMicrotask(()=>node.dispatchEvent(new window.Event('load')));};
   const template=window.document.getElementById('module-style-assets');for(const path of data.modules[0].pages[0].styles){const link=window.document.createElement('link');link.rel='stylesheet';link.dataset.resource=path;link.href='./'+path;template.content.append(link);}
   page.value='market';page.dispatchEvent(new window.Event('change',{bubbles:true}));await flush();assert.equal(window.location.hash,'#/module/ff14%2Fff14/market');assert.equal(module.value,'ff14/ff14');assert.equal(page.value,'market');assert.equal(calls.filter(call=>call.endpoint==='admin/credential-update').length,0);
-  const reopen=window.document.querySelector('#module-management-container a');assert.equal(reopen.getAttribute('href'),'/#/extension/plugins');assert.equal(reopen.target,'_top');
+  const reopen=window.document.querySelector('#module-management-container [data-reopen-guidance]');assert.ok(reopen,'sandboxed management must provide host menu instructions');assert.match(reopen.textContent,/宿主左侧.*插件.*astrbot_plugin_yomihime_game_link.*monitor/);assert.equal(window.document.querySelector('#module-management-container a[target="_top"]'),null);assert.equal(window.document.querySelector('#module-management-container a[href="/#/extension/plugins"]'),null);
  }finally{window.dispatchEvent(new window.Event('pagehide'));dom.window.close();}
+});
+
+test('retired FF14 locator gives manual host-menu instructions without forbidden top navigation',async()=>{
+ // The supported Host iframe has allow-scripts/forms/downloads but no
+ // allow-top-navigation or allow-top-navigation-by-user-activation.
+ const sandbox='allow-scripts allow-forms allow-downloads';
+ assert.equal(sandbox.split(' ').some(token=>token.startsWith('allow-top-navigation')),false);
+ for(const path of ['modules/ff14/pages/compat/index.html','pages/ff14/index.html']){
+  const dom=new JSDOM(await readFile(resolve(path),'utf8'));
+  try{const guidance=dom.window.document.querySelector('[data-reopen-guidance]');assert.ok(guidance,path);assert.match(guidance.textContent,/宿主左侧.*插件.*astrbot_plugin_yomihime_game_link.*monitor/);assert.equal(dom.window.document.querySelector('a'),null);assert.equal(dom.window.document.querySelector('script').getAttribute('src'),'./app.js');}finally{dom.window.close();}
+ }
 });

@@ -153,3 +153,22 @@ test('embedded shell management keeps exact context and scoped container; resume
  const bridge={onContext(fn){fn(binding);return()=>{};},ready:()=>Promise.resolve(binding),apiPost(endpoint){calls.push(endpoint);return Promise.resolve(endpoint==='admin/catalog'?catalog():endpoint==='admin/read'?snapshot():endpoint==='admin/credential-catalog'?credentialCatalog():endpoint==='admin/credential-status'?credentialStatus():{ready:false,state:'unavailable',reason_code:'secret_encryption_unavailable'});}};
  const container=dom.window.document.getElementById('embedded'),page=createManagementPage(dom.window.document,bridge,dom.window,{expectedPage:'00-game-link',container});page.start();await flush();try{assert.equal(dom.window.document.getElementById('management-root').textContent,'outside');assert.ok(container.querySelector('[data-owner="game_link/core"]'));page.selectOwner('game_link/core');await flush();assert.equal(container.querySelector('#fields [data-owner="ff14/ff14"]').hidden,true);page.suspend();page.resume();await flush();assert.doesNotMatch(container.querySelector('#status').textContent,/正在执行/);assert.match(container.querySelector('#status').textContent,/已读取配置目录/);assert.equal(calls.filter(x=>x==='admin/catalog').length,2);}finally{page.dispose();dom.window.close();}
 });
+
+// Host 4.28.2 PluginPagePage forwards response.data.message for HTTP errors;
+// plugin_page_bridge.js then rejects Error(message.error), without code/status.
+test('Host bridge conflict text preserves the Core draft and requires a fresh revision before retry',async()=>{
+  const f=fixture();try{
+    await load(f,catalog(),snapshot(8));mode(f,region,'replace');const node=input(f,region);node.value='0';save(f,'game_link/core').click();
+    const rejected=pending(f,'update');assert.deepEqual(rejected.body,{module_id:'game_link/core',expected_revision:8,updates:[{field:region,mode:'replace',value:'cn'}]});
+    const error=Error('配置版本冲突，请刷新并重新核对后修改。');assert.equal(error.code,undefined);assert.equal(error.response,undefined);rejected.reject(error);await flush();
+    assert.match(status(f),/配置已变化/);assert.equal(input(f,region),node);assert.equal(node.value,'0');assert.equal(field(f,region).querySelector('[data-role=mode]').value,'replace');assert.match(f.document.querySelector('section[data-owner="game_link/core"]').textContent,/配置版本：8/);assert.equal(save(f,'game_link/core').getAttribute('aria-disabled'),'true');assert.equal(f.calls.length,3);
+    save(f,'game_link/core').dispatchEvent(new f.dom.window.Event('click'));await flush();assert.equal(f.calls.length,3);
+    click(f,'refresh');const latest=snapshot(9);latest['game_link/core'].fields.default_region.value='global';await load(f,catalog(),latest);assert.equal(input(f,region),node);assert.equal(node.value,'0');assert.equal(save(f,'game_link/core').getAttribute('aria-disabled'),'false');
+    save(f,'game_link/core').click();assert.equal(pending(f,'update').body.expected_revision,9);pending(f,'update').resolve({module_id:'game_link/core',revision:10});await flush();await load(f,catalog(),snapshot(10));assert.match(status(f),/配置已保存/);assert.equal(field(f,region).querySelector('[data-role=mode]').value,'keep');
+  }finally{f.close();}
+});
+test('unknown bridge errors and decorated conflict text stay redacted and gate Core writes',async()=>{
+  for(const error of [Error('Request failed with status code 409'),Error('PRIVATE 配置版本冲突，请刷新并重新核对后修改。'),Error('配置版本冲突，请刷新并重新核对后修改。 PRIVATE'),{message:'PRIVATE',code:'revision_conflict'},{response:{status:409,data:{code:'revision_conflict',message:'PRIVATE'}}}]){
+    const f=fixture();try{await load(f,catalog(),snapshot(8));mode(f,region,'replace');const node=input(f,region);node.value='0';save(f,'game_link/core').click();pending(f,'update').reject(error);await flush();assert.match(status(f),/未取得成功确认/);assert.doesNotMatch(status(f),/PRIVATE|配置已变化|配置已保存/);assert.equal(input(f,region),node);assert.equal(node.value,'0');assert.equal(save(f,'game_link/core').getAttribute('aria-disabled'),'true');assert.equal(f.calls.length,3);}finally{f.close();}
+  }
+});
