@@ -100,6 +100,9 @@ from yomihime_sdk.api.manifests import (
     ModuleCategory as ModuleCategory,
 )
 from yomihime_sdk.api.manifests import (
+    ModuleDisplay as ModuleDisplay,
+)
+from yomihime_sdk.api.manifests import (
     ModuleManifest as ModuleManifest,
 )
 from yomihime_sdk.api.manifests import (

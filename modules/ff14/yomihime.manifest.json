@@ -2,7 +2,7 @@
   "schema_version": 1,
   "package_id": "ff14",
   "package_version": "0.3.0",
-  "contract_version": "1.6.0",
+  "contract_version": "1.8.0",
   "author": "yomihime",
   "license": "AGPL-3.0-only",
   "source": "https://github.com/yomihime/astrbot_plugin_yomihime_game_link",
@@ -803,7 +803,15 @@
           "path": "pages/dist/styles.css",
           "sha256": "7277ccfc270360e4df8a889815b20beac99840f9911369dd8ff090cc84cc7557"
         }
-      ]
+      ],
+      "display": {
+        "default_name": "最终幻想 XIV",
+        "localized_names": {
+          "zh": "最终幻想 XIV",
+          "en": "FINAL FANTASY XIV"
+        },
+        "short_name": "FF14"
+      }
     }
   ]
 }

@@ -129,8 +129,8 @@ class CapabilityResult:
             self.status is ResultStatus.ERROR
             and self.model_facts is not None
             and (
-                self.schema_version not in ("1.6.0", "1.7.0")
-                or self.model_facts.schema_version not in ("1.6.0", "1.7.0")
+                self.schema_version not in ("1.6.0", "1.7.0", "1.8.0")
+                or self.model_facts.schema_version not in ("1.6.0", "1.7.0", "1.8.0")
                 or self.privacy is not Privacy.PUBLIC
             )
         ):

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "yomihime-module-sdk"
-version = "1.7.0"
+version = "1.8.0"
 description = "Host-independent public contracts and resources for Yomihime modules"
 readme = "docs/module-sdk.md"
 requires-python = ">=3.11"

@@ -90,6 +90,7 @@ from .api.manifests import (
     ExtensionManifestABI,
     InvocationPolicy,
     ModuleCategory,
+    ModuleDisplay,
     ModuleManifest,
     PackageManifest,
     PageDescriptor,
@@ -268,7 +269,7 @@ from .api.version import (
     CONTRACT_VERSION,
 )
 
-__version__ = "1.7.0"
+__version__ = "1.8.0"
 
 __all__ = [
     "__version__",
@@ -433,6 +434,7 @@ __all__ = [
     "ModuleHealth",
     "ModuleInstance",
     "ModuleLifecycle",
+    "ModuleDisplay",
     "ModuleManifest",
     "ModuleRecords",
     "ModuleServices",

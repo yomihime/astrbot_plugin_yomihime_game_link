@@ -86,6 +86,15 @@ def project_module_catalog(
                 "route": manifest.route,
                 "category": manifest.category.value,
                 "version": manifest.module_version,
+                "display": (
+                    {
+                        "default_name": manifest.display.default_name,
+                        "localized_names": dict(manifest.display.localized_names),
+                        "short_name": manifest.display.short_name,
+                    }
+                    if manifest.display is not None
+                    else None
+                ),
                 "enabled": module.enabled,
                 "lifecycle": state.lifecycle.value,
                 "state": availability,

@@ -7,15 +7,28 @@ a compatibility forwarding surface whose exported objects retain identity
 with the canonical declarations. The SDK does not import Core runtime
 implementations or AstrBot objects.
 
-The current artifact is `yomihime-module-sdk` version `1.7.0`, carrying contract
-`1.7.0` (`MODULE-LIFECYCLE-01`) and compatible contract versions `1.0.0`, `1.1.0`,
-`1.2.0`, `1.3.0`, `1.4.0`, `1.5.0`, `1.6.0`, and `1.7.0`.
+The current artifact is `yomihime-module-sdk` version `1.8.0`, carrying contract
+`1.8.0` (`MODULE-DISPLAY-01`) and compatible contract versions `1.0.0`, `1.1.0`,
+`1.2.0`, `1.3.0`, `1.4.0`, `1.5.0`, `1.6.0`, `1.7.0`, and `1.8.0`.
 Extension declarations use manifest schema v1 and factory ABI v1. The declared
 minimum is Python 3.11 because the public API uses `StrEnum`. A local
 installed-wheel check proves the bundled SDK imports from the installed site
 directory and that compatibility exports share object identity; it does not
 prove activation inside the target AstrBot environment. Host Python selection,
 installation location, and import precedence remain W0-H evidence.
+
+Contract 1.8 adds optional `ModuleManifest.display`: `ModuleDisplay(default_name,
+localized_names={}, short_name=None)`. Names are non-empty plain text (128
+characters; 32 for the compact name), with no control or formatting characters.
+At most 16 locale keys are accepted: BCP47 language, optional script/region and
+up to four variants, without extensions or private-use tags. Locale keys and
+subtags must not repeat ignoring case; translations use the same name limit.
+The copied translation map is immutable. Disk `display` accepts only these
+three fields and requires `default_name`; its presence requires contract 1.8.
+Contracts 1.0 through 1.7 retain their existing declarations without display.
+Display names do not change package/module identity, command routes, ownership,
+configuration or storage. The public catalog copies only this trusted metadata
+and does not call a module factory or business handler.
 
 Contract 1.6 adds optional `CapabilityDescriptor.invocation_origins`, an immutable
 tuple of `InvocationOrigin.COMMAND`, `WEB_PUBLIC`, and `LLM_TOOL`. Explicit sets

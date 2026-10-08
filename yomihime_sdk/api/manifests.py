@@ -6,6 +6,7 @@ import math
 import re
 import unicodedata
 from dataclasses import dataclass
+from dataclasses import field as _dataclass_field
 from enum import StrEnum
 from types import MappingProxyType
 from typing import Mapping
@@ -64,8 +65,10 @@ EXTENSION_DESCRIPTOR_FIELDS: Mapping[str, frozenset[str]] = MappingProxyType(
                 "collections",
                 "pages",
                 "resources",
+                "display",
             }
         ),
+        "module_display": frozenset({"default_name", "localized_names", "short_name"}),
         "capability": frozenset(
             {
                 "capability_id",
@@ -527,6 +530,51 @@ class ToolDescriptor:
         object.__setattr__(self, "parameter_mapping", mapping)
 
 
+def _display_name(value: object, label: str, limit: int) -> None:
+    if (
+        type(value) is not str
+        or not value.strip()
+        or len(value) > limit
+        or any(
+            unicodedata.category(character) in {"Cc", "Cf", "Cs"} for character in value
+        )
+    ):
+        raise ValueError(f"{label} must be bounded, non-empty plain text")
+
+
+@dataclass(frozen=True, slots=True)
+class ModuleDisplay:
+    """Optional translated plain-text names; never identity or authority."""
+
+    default_name: str
+    localized_names: Mapping[str, str] = _dataclass_field(default_factory=dict)
+    short_name: str | None = None
+
+    def __post_init__(self) -> None:
+        _display_name(self.default_name, "default_name", 128)
+        if self.short_name is not None:
+            _display_name(self.short_name, "short_name", 32)
+        if not isinstance(self.localized_names, Mapping):
+            raise TypeError("localized_names must be a mapping")
+        if len(self.localized_names) > 16:
+            raise ValueError("localized_names exceeds locale budget")
+        names = {}
+        folded = set()
+        # BCP47 subset: language, optional script/region, bounded variants.
+        # Extensions and private-use tags are deliberately outside this ABI.
+        pattern = r"[A-Za-z]{2,8}(?:-[A-Za-z]{4})?(?:-(?:[A-Za-z]{2}|[0-9]{3}))?(?:-(?:[A-Za-z0-9]{5,8}|[0-9][A-Za-z0-9]{3})){0,4}"
+        for locale, name in self.localized_names.items():
+            if type(locale) is not str or re.fullmatch(pattern, locale) is None:
+                raise ValueError("invalid display locale")
+            key = locale.casefold()
+            if key in folded or len(key.split("-")) != len(set(key.split("-"))):
+                raise ValueError("duplicate display locale or subtag")
+            _display_name(name, "localized name", 128)
+            folded.add(key)
+            names[locale] = name
+        object.__setattr__(self, "localized_names", MappingProxyType(names))
+
+
 @dataclass(frozen=True, slots=True)
 class ModuleManifest:
     module_id: str
@@ -544,6 +592,7 @@ class ModuleManifest:
     collections: tuple[CollectionDescriptor, ...] = ()
     pages: tuple[PageDescriptor, ...] = ()
     resources: tuple[PageResource, ...] = ()
+    display: ModuleDisplay | None = None
 
     def __post_init__(self) -> None:
         _identifier(self.module_id, "module_id")
@@ -552,6 +601,8 @@ class ModuleManifest:
             raise TypeError("category must be a ModuleCategory")
         _entry_point(self.factory_entry)
         _version(self.module_version, "module_version")
+        if self.display is not None and type(self.display) is not ModuleDisplay:
+            raise TypeError("display must be a ModuleDisplay")
         _descriptor_tuple(self.capabilities, CapabilityDescriptor, "capabilities")
         _descriptor_tuple(self.commands, CommandDescriptor, "commands")
         _descriptor_tuple(self.tools, ToolDescriptor, "tools")
@@ -700,7 +751,11 @@ class PackageManifest:
         if self.contract_version not in COMPATIBLE_CONTRACT_VERSIONS:
             raise ValueError("contract_version is not compatible with this runtime")
         _descriptor_tuple(self.modules, ModuleManifest, "modules")
-        if self.contract_version not in ("1.6.0", "1.7.0") and any(
+        if self.contract_version != "1.8.0" and any(
+            module.display is not None for module in self.modules
+        ):
+            raise ValueError("display requires contract 1.8.0")
+        if self.contract_version not in ("1.6.0", "1.7.0", "1.8.0") and any(
             capability.invocation_origins is not None
             for module in self.modules
             for capability in module.capabilities
