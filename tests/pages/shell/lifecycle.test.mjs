@@ -25,8 +25,8 @@ test('explicit skip focuses without implicit scroll then reveals the main start'
  skipToMain(null);assert.equal(calls.length,0);skipToMain(main);
  assert.deepEqual(calls,[['focus',{preventScroll:true}],['scroll',{block:'start',inline:'nearest',behavior:'instant'}]]);dom.window.close();
 });
-function harness({data=catalog(),loader,initialContext,readyTask,expectedPage='shell',assetEvent=()=> 'load'}={}) {
-  const dom=new JSDOM('<template id="module-style-assets"></template><div id="container"></div>',{url:'http://localhost/#/module/ff14%2Fff14/items'}),window=dom.window,container=window.document.getElementById('container');
+function harness({data=catalog(),loader,initialContext,readyTask,expectedPage='shell',assetEvent=()=> 'load',hash='#/module/ff14%2Fff14/items'}={}) {
+  const dom=new JSDOM('<template id="module-style-assets"></template><div id="container"></div>',{url:'http://localhost/'+hash}),window=dom.window,container=window.document.getElementById('container');
   for(const module of data.modules || []) for(const page of module.pages) for(const path of page.styles) {const link=window.document.createElement('link');link.rel='stylesheet';link.dataset.resource=path;link.setAttribute('href','./'+path+'?fixture-authorized');window.document.getElementById('module-style-assets').content.append(link);}
   const styleRequests=[],imports=[],append=window.document.head.append.bind(window.document.head);
   window.document.head.append=(...nodes)=>{append(...nodes);for(const node of nodes)if(node.matches?.('link[data-module-style]')){styleRequests.push(node);const event=assetEvent(node);if(event)queueMicrotask(()=>node.dispatchEvent(new window.Event(event)));}};
@@ -136,6 +136,16 @@ test('expired authorization never reloads already loaded owner CSS or shared ite
   assert.equal(h.styleRequests.length,requests);assert.equal(h.imports.length,imports);assert.equal(h.posts.length,0);
   h.shell.select('ff14/ff14','items');await flush();assert.equal(h.shell.state.mounted,true);assert.equal(ffStyle.isConnected,true);assert.equal(h.imports.length,imports);
  } finally {h.close();}
+});
+
+test('default home delayed first query fails expired projection once with zero invoke and no automatic retry',async()=>{
+ let now=0;const h=harness({hash:'#/',assetEvent:()=>now<60000?'load':'error',loader:async()=>{if(now>=60000)throw Error('expired-resource');return{mount(){throw Error('no eager mount');}};}});
+ try{await h.start();assert.equal(h.shell.state.home,true);assert.equal(h.imports.length,0);assert.equal(h.styleRequests.length,0);now=61000;h.shell.select('ff14/ff14','items');await flush();assert.equal(h.mounts.length,0);assert.equal(h.shell.state.mounted,false);assert.match(h.shell.state.message,/宿主插件详情重新打开/);assert.equal(h.posts.length,0);const imports=h.imports.length,styles=h.styleRequests.length;h.shell.selectHome();await flush();h.shell.select('ff14/ff14','market');await flush();assert.equal(h.imports.length,imports);assert.equal(h.styleRequests.length,styles);assert.equal(h.posts.length,0);}finally{h.close();}
+});
+
+test('loaded owner survives home and settings across TTL while an expired other owner stays fenced',async()=>{
+ let now=0;const data=catalog();data.modules.push(...catalog('micro/demo').modules);const h=harness({hash:'#/',data,assetEvent:()=>now<60000?'load':'error'});
+ try{await h.start();h.shell.select('micro/demo','items');await flush();const style=h.styleRequests[0];h.shell.selectHome();await flush();h.shell.selectSettings();await flush();now=61000;h.shell.select('ff14/ff14','items');await flush();assert.equal(h.shell.state.mounted,false);const imports=h.imports.length,styles=h.styleRequests.length;h.shell.selectHome();await flush();h.shell.selectSettings('micro/demo');await flush();h.shell.select('micro/demo','market');await flush();assert.equal(h.shell.state.mounted,true);assert.equal(style.isConnected,true);assert.equal(h.imports.length,imports);assert.equal(h.styleRequests.length,styles);assert.equal(h.posts.length,0);}finally{h.close();}
 });
 
 test('CSS success requires a load event; error with a sheet pointer and missing event both fail closed',async()=>{

@@ -1,5 +1,6 @@
 export interface PageDescriptor {route_id: string; title: string; order: number; access: 'public_web'; capability_id: string | null; entry: string; styles: string[]}
-export interface ModuleDescriptor {module_id: string; route: string; state: string; module_epoch: number; runtime_id: string | null; asset_version: string; pages: PageDescriptor[]; resources: {path: string; sha256: string}[]}
+export interface ModuleDisplay {default_name: string; localized_names: Record<string,string>; short_name: string | null}
+export interface ModuleDescriptor {display?: ModuleDisplay | null;module_id: string; route: string; state: string; module_epoch: number; runtime_id: string | null; asset_version: string; pages: PageDescriptor[]; resources: {path: string; sha256: string}[]}
 export interface Catalog {schema_version: number; catalog_revision: number | null; runtime: {state: string}; modules: ModuleDescriptor[] | null}
 export interface PageContext {readonly theme: 'light' | 'dark'; readonly locale: string; readonly available: boolean; readonly owner: string; readonly runtimeId: string; readonly epoch: number; readonly boundary: string}
 export interface ResourceScope {readonly signal: AbortSignal; isCurrent(): boolean; onDispose(callback: () => void): () => void}

@@ -6,10 +6,10 @@ import type {Bridge} from './contracts';
 
 type Status={module_id:string;enabled:boolean;lifecycle:string;health:string;epoch:number;registry_revision:number;reason_code:string|null};
 export type ModuleOperation={owner:string;action:'enable'|'disable'|'unload';revision:number;isCurrent():boolean;canRestoreFocus():boolean};
-export function createModuleManagement(container:HTMLElement,bridge:Bridge,window:Window,expectedPage:string,onChanged:()=>void,beforeOperate:(operation:ModuleOperation)=>boolean|Promise<boolean>=()=>true,sharedConfirmation?:InlineConfirmation,interactionKey:()=>string=()=>'' ) {
+export function createModuleManagement(container:HTMLElement,bridge:Bridge,window:Window,expectedPage:string,onChanged:()=>void,beforeOperate:(operation:ModuleOperation)=>boolean|Promise<boolean>=()=>true,sharedConfirmation?:InlineConfirmation,interactionKey:()=>string=()=>'', home?:{onSettings(owner:string):void;labels():Map<string,string>;catalog(value:unknown):{fields:{module_id:string;name:string;readable:boolean;editable:boolean}[]};snapshot(value:unknown,catalog:unknown):Record<string,{fields:Record<string,{state:string}>}>} ) {
   const rows=shallowRef<Status[]>([]),message=shallowRef('尚未读取模块管理状态。'),busy=shallowRef(false),stale=shallowRef(true);
   const confirmation=sharedConfirmation??createInlineConfirmation(container.ownerDocument),waiting=shallowRef<number|null>(null);
-  const presentation=shallowRef<Record<string,unknown>>({});
+  const presentation=shallowRef<Record<string,unknown>>({}),labels=shallowRef<Map<string,string>>(new Map()),configuration=shallowRef<Record<string,string>>({});
   let closed=false,ready=false,generation=0,boundary='',registryRevision=0,operationSerial=0,off:(()=>void)|undefined;
   const valid=(value:unknown):value is Record<string,unknown>=>value!==null&&typeof value==='object'&&!Array.isArray(value);
   const current=(version:number)=>!closed&&ready&&version===generation;
@@ -25,7 +25,8 @@ export function createModuleManagement(container:HTMLElement,bridge:Bridge,windo
   async function refresh() {
     if(!ready||closed||busy.value)return;
     confirmation.cancel();waiting.value=null;const version=generation;busy.value=true;stale.value=true;
-    try {const result=decode(await bridge.apiPost('admin/modules',{}));if(!current(version))return;rows.value=result.modules;registryRevision=result.registry_revision;stale.value=false;message.value='禁用保留设置；解除挂载保留配置、凭据、缓存及业务数据。';}
+    try {const result=decode(await bridge.apiPost('admin/modules',{}));if(!current(version))return;rows.value=result.modules;registryRevision=result.registry_revision;stale.value=false;message.value='状态已更新。';
+      if(home){configuration.value={};try{const declarations=home.catalog(await bridge.apiPost('admin/catalog',{})),snapshot=home.snapshot(await bridge.apiPost('admin/read',{}),declarations);if(!current(version))return;const values:Record<string,string>={};for(const row of result.modules){const fields=declarations.fields.filter((field:{module_id:string})=>field.module_id===row.module_id),stored=snapshot[row.module_id];values[row.module_id]=fields.length&&stored&&fields.every((field:{name:string;readable:boolean;editable:boolean})=>field.readable&&field.editable&&stored.fields[field.name]?.state==='valid')?'普通设置已校验':stored?'普通设置待处理':'普通设置未核对';}configuration.value=values;}catch{if(!current(version))return;configuration.value={};}labels.value=home.labels();}}
     catch {if(current(version)){stale.value=true;message.value='模块管理权限或状态无法确认，请重新打开页面后刷新。';}}
     finally {if(current(version))busy.value=false;}
   }
@@ -51,17 +52,17 @@ export function createModuleManagement(container:HTMLElement,bridge:Bridge,windo
     } catch(error) {if(current(version)){message.value=(error as Error)?.message==='revision_conflict'?'模块状态已变化，请刷新后重新核对。':'未确认清理完成；可能仍在排空或清理。请刷新核对，并重试解除挂载。不会创建替代实例。';stale.value=true;}}
     finally {if(current(version))busy.value=false;}
   }
-  const app=createApp(defineComponent({setup(){return()=>h(NConfigProvider,{theme:presentation.value.isDark===true||presentation.value.theme==='dark'?darkTheme:null,locale:presentation.value.locale==='en-US'?enUS:zhCN,styleMountTarget:container},{default:()=>h(NCard,{title:'模块生命周期',class:'module-management'}, {default:()=>[
+  const app=createApp(defineComponent({setup(){return()=>h(NConfigProvider,{preflightStyleDisabled:true,theme:presentation.value.isDark===true||presentation.value.theme==='dark'?darkTheme:null,locale:presentation.value.locale==='en-US'?enUS:zhCN,styleMountTarget:container},{default:()=>h(NCard,{title:'模块',class:'module-management'}, {default:()=>[
     h(NAlert,{type:stale.value?'warning':'info',showIcon:false},{default:()=>message.value}),
     h(NButton,{disabled:busy.value||!ready,onClick:refresh},()=>busy.value?'正在处理…':'刷新模块管理状态'),
-    ...rows.value.map(row=>h('section',{class:'module-management-row',key:row.module_id,'data-module-owner':row.module_id},[
-      h('h3',row.module_id),h('p',`${row.enabled?'已启用':'已禁用'} · ${row.lifecycle}${row.reason_code?' · '+row.reason_code:''} · 注册版本 ${registryRevision}`),
+    !rows.value.length&&!stale.value?h('p','尚无已注册模块。全局设置仍可使用。'):null,...rows.value.map(row=>h('section',{class:'module-management-row',key:row.module_id,'data-module-owner':row.module_id},[
+      h('h3',labels.value.get(row.module_id)||row.module_id),h('p',{class:'module-status'},`${row.enabled?'已启用':'已禁用'} · ${({'active':'运行中','stopped':'已停止','failed':'运行失败','unloaded':'已解除挂载','discovered':'待启动','starting':'启动中','stopping':'停止中'} as Record<string,string>)[row.lifecycle]||row.lifecycle}`),home?h('p',{class:'config-readiness'},configuration.value[row.module_id]||'普通设置未核对'):null,row.reason_code?h('p',{role:'status'},'需要处理：'+row.reason_code):null,home?h(NButton,{onClick:()=>home.onSettings(row.module_id)},()=> '进入设置'):null,
       ...(['enable','disable','unload'] as const).map(action=>h(NButton,{disabled:busy.value||waiting.value!==null||stale.value||!ready||(action==='enable'&&row.enabled)||(action==='disable'&&!row.enabled),onClick:()=>operate(row,action)},()=>({enable:'启用 / 恢复',disable:'禁用',unload:'解除挂载（保留数据）'})[action])),
-    ])),!sharedConfirmation?confirmation.render():null,h('p',{'data-reopen-guidance':''},'请在宿主左侧点击“插件”，找到 astrbot_plugin_yomihime_game_link，在插件详情中重新打开 monitor 页面，以取得当前资源授权。'),
+    ])),!sharedConfirmation?confirmation.render():null,h('details',{class:'technical-details'},[h('summary','高级详情与操作说明'),h('p','禁用仍可配置；解除挂载退出活动入口并保留配置、凭据、缓存及业务数据。恢复后须正式重开。'),...rows.value.map(row=>h('p',`${row.module_id} · ${row.lifecycle} · ${row.health} · 注册版本 ${registryRevision}`)),h('p',{'data-reopen-guidance':''},'请在宿主左侧点击“插件”，找到 astrbot_plugin_yomihime_game_link，在插件详情中重新打开 monitor 页面，以取得当前资源授权。')]),
   ]})});}}));app.mount(container);
   function accept(context:Record<string,unknown>) {
     if(closed)return;presentation.value=valid(context)?context:{};let next='';try {if(!valid(context)||context.pluginName!=='astrbot_plugin_yomihime_game_link'||context.pageName!==expectedPage)throw Error();next=contextBoundary(context);}catch {confirmation.cancel();waiting.value=null;ready=false;generation++;rows.value=[];busy.value=false;stale.value=true;message.value='管理上下文无效，请正式重开页面。';return;}
     if(ready&&next===boundary)return;confirmation.cancel();waiting.value=null;generation++;boundary=next;ready=true;rows.value=[];busy.value=false;void refresh();
   }
-  return {start(){off=bridge.onContext(accept);Promise.resolve(bridge.ready()).then(accept).catch(()=>{message.value='宿主会话不可用，请正式重开页面。';});},refresh,cancelConfirmation(){confirmation.cancel();waiting.value=null;},dispose(){confirmation.cancel();waiting.value=null;if(!sharedConfirmation)confirmation.dispose();closed=true;generation++;ready=false;off?.();app.unmount();}};
+  return {start(){off=bridge.onContext(accept);Promise.resolve(bridge.ready()).then(accept).catch(()=>{message.value='宿主会话不可用，请正式重开页面。';});},refresh,presentationLabels(value:Map<string,string>){labels.value=value;},cancelConfirmation(){confirmation.cancel();waiting.value=null;},dispose(){confirmation.cancel();waiting.value=null;if(!sharedConfirmation)confirmation.dispose();closed=true;generation++;ready=false;off?.();app.unmount();}};
 }

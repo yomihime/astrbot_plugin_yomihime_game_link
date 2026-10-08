@@ -3,6 +3,7 @@
 import json
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 from ygl_test_subject.adapters.astrbot.web_public import (
     WebPublicRejected,
@@ -13,6 +14,8 @@ from ygl_test_subject.modules.ff14.config import (
     FF14ConfigError,
     ff14_config_snapshot,
 )
+
+from tests.host.astrbot_contract import host_plugin_config_display, validate_host_source
 
 
 class ConfigAdapterTests(unittest.TestCase):
@@ -68,7 +71,28 @@ class ConfigAdapterTests(unittest.TestCase):
         }
         self.assertEqual(defaults, dict(ff14_config_snapshot(None).as_values()))
         self.assertEqual(schema["ff14_default_region"]["options"], ["cn", "global"])
-        self.assertTrue(all("迁移完成后本字段不再生效" in field["hint"] for name, field in schema.items() if name != "web_public_origin"))
+        self.assertEqual(
+            {name: field["type"] for name, field in schema.items()},
+            {
+                "ff14_default_region": "string",
+                "ff14_calendar_default_days": "int",
+                "ff14_calendar_default_timezone": "string",
+                "ff14_calendar_default_delivery_time": "string",
+                "web_public_origin": "string",
+            },
+        )
+        display = host_plugin_config_display(SimpleNamespace(schema=schema))
+        items = display["metadata"]["game_link"]["items"]
+        self.assertEqual(
+            {name for name, field in items.items() if field.get("invisible") is True},
+            set(defaults),
+        )
+        self.assertFalse(items["web_public_origin"].get("invisible", False))
+        _, sources = validate_host_source()
+        self.assertIn(
+            "!metadata[metadataKey].items[key]?.invisible && shouldShowItem",
+            sources["dashboard/src/components/shared/AstrBotConfig.vue"],
+        )
         self.assertIn("重载", schema["web_public_origin"]["hint"])
         self.assertFalse(any("secret" in field for field in schema.values()))
         self.assertEqual(

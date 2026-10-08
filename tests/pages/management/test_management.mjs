@@ -28,6 +28,18 @@ const status=f=>f.document.getElementById('status').textContent;
 const click=(f,id)=>f.document.getElementById(id).click();
 const region='default_region',zone='ff14_calendar_default_timezone',days='ff14_calendar_default_days';
 
+test('ordinary current values edit directly; discard is local and hidden modes are not menus',async()=>{
+ const f=fixture();try{await load(f);const node=input(f,zone),baseline=node.value,control=field(f,zone);assert.equal(control.querySelector('[data-role="mode"]').type,'hidden');assert.equal(node.disabled,false);node.value='Europe/London';node.dispatchEvent(new f.dom.window.Event('input'));assert.equal(control.querySelector('[data-role="mode"]').value,'replace');const writes=f.calls.filter(c=>c.endpoint==='admin/update').length;f.document.querySelector('section[data-owner="ff14/ff14"] [data-action="discard"]').click();await flush();assert.equal(node.value,baseline);assert.equal(control.querySelector('[data-role="mode"]').value,'keep');assert.equal(f.calls.filter(c=>c.endpoint==='admin/update').length,writes);}finally{f.close();}
+});
+
+test('restore default is one exact field clear draft and writes only after explicit CAS save',async()=>{
+ const f=fixture();try{await load(f);field(f,zone).querySelector('[data-action="default"]').click();assert.equal(field(f,zone).querySelector('[data-role="mode"]').value,'clear');assert.equal(f.calls.filter(c=>c.endpoint==='admin/update').length,0);save(f,'ff14/ff14').click();assert.deepEqual(pending(f,'update').body,{module_id:'ff14/ff14',expected_revision:1,updates:[{field:zone,mode:'clear'}]});}finally{f.close();}
+});
+
+test('switching settings owner fences hidden old controls without clearing their ordinary draft',async()=>{
+ const f=fixture();try{await load(f);const node=input(f,zone);node.value='Europe/London';node.dispatchEvent(new f.dom.window.Event('input'));const old=save(f,'ff14/ff14');f.app.selectOwner('game_link/core');await flush();assert.equal(old.getAttribute('aria-disabled'),'true');old.dispatchEvent(new f.dom.window.Event('click'));assert.equal(f.calls.filter(c=>c.endpoint==='admin/update').length,0);f.app.selectOwner('ff14/ff14');await flush();assert.equal(node.value,'Europe/London');assert.equal(field(f,zone).querySelector('[data-role="mode"]').value,'replace');assert.equal(node.disabled,false);}finally{f.close();}
+});
+
 test('production status and actual Naive content node explicitly override their own color transitions',async()=>{
   const f=fixture();try{
     await load(f);const node=f.document.getElementById('status'),content=node.closest('.n-alert-body__content'),alert=node.closest('.n-alert');assert.ok(content);assert.ok(alert);
@@ -93,12 +105,12 @@ test('unrepresentable unknown lifecycle fields reject instead of collapsing the 
 });
 test('exact update/CAS body and explicit clear, then catalog/read refresh; no implicit recover',async()=>{
   const f=fixture();try{await load(f);mode(f,region,'clear');save(f,'game_link/core').click();assert.deepEqual(pending(f,'update').body,{module_id:'game_link/core',expected_revision:1,updates:[{field:region,mode:'clear'}]});
-    pending(f,'update').resolve({module_id:'game_link/core',revision:2});await flush();await load(f,catalog(),snapshot(2));assert.match(status(f),/配置已保存/);assert.equal(f.calls.filter(c=>c.endpoint==='admin/recover').length,0);assert.equal(field(f,region).querySelector('[data-role=mode]').value,'keep');
+    pending(f,'update').resolve({module_id:'game_link/core',revision:2});await flush();await load(f,catalog(),snapshot(2));assert.match(status(f),/设置已保存/);assert.equal(f.calls.filter(c=>c.endpoint==='admin/recover').length,0);assert.equal(field(f,region).querySelector('[data-role=mode]').value,'keep');
   }finally{f.close();}
 });
 test('invalid stored values are hidden and repair uses schema conversion with no fabricated value',async()=>{
   const f=fixture(),values=snapshot();values['ff14/ff14'].fields[days]={value:null,state:'invalid',present:true,source:'sqlite'};
-  try{await load(f,catalog(),values);assert.equal(input(f,days).value,'');assert.match(field(f,days).textContent,/无效存量/);mode(f,days,'replace');input(f,days).value='12';save(f,'ff14/ff14').click();assert.deepEqual(pending(f,'update').body.updates,[{field:days,mode:'replace',value:12}]);pending(f,'update').reject(Error('revision_conflict'));await flush();assert.match(status(f),/配置已变化/);assert.equal(input(f,days).value,'12');assert.equal(save(f,'ff14/ff14').disabled,true);}finally{f.close();}
+  try{await load(f,catalog(),values);assert.equal(input(f,days).value,'');assert.match(field(f,days).textContent,/当前值无效/);mode(f,days,'replace');input(f,days).value='12';save(f,'ff14/ff14').click();assert.deepEqual(pending(f,'update').body.updates,[{field:days,mode:'replace',value:12}]);pending(f,'update').reject(Error('revision_conflict'));await flush();assert.match(status(f),/配置已变化/);assert.equal(input(f,days).value,'12');assert.equal(save(f,'ff14/ff14').disabled,true);}finally{f.close();}
 });
 test('client input failure posts nothing; server authorization/validation failures never show success',async()=>{
   const f=fixture();try{await load(f);mode(f,days,'replace');input(f,days).value='31';save(f,'ff14/ff14').click();await flush();assert.equal(f.calls.length,2);assert.match(status(f),/未通过校验/);
@@ -107,12 +119,12 @@ test('client input failure posts nothing; server authorization/validation failur
 });
 test('missing semantic validator blocks replace/clear/recovery and preserves readable values',async()=>{
   const f=fixture(),declarations=catalog();Object.assign(declarations.fields.find(f=>f.name===zone),{editable:false,blocked_reason:'semantic_validator_unavailable'});
-  try{await load(f,declarations);assert.equal(input(f,zone).value,'Asia/Shanghai');assert.equal(field(f,zone).querySelector('[data-role=mode]').disabled,true);assert.equal(f.document.getElementById('recover').disabled,true);assert.match(field(f,zone).textContent,/语义校验器不可用/);assert.throws(()=>updateBody('ff14/ff14',1,{[zone]:{mode:'clear'}},validateCatalog(declarations)));assert.equal(f.calls.length,2);}finally{f.close();}
+  try{await load(f,declarations);assert.equal(input(f,zone).value,'Asia/Shanghai');assert.equal(field(f,zone).querySelector('[data-role=mode]').disabled,true);assert.equal(f.document.getElementById('recover').disabled,true);assert.match(field(f,zone).textContent,/当前不可修改/);assert.throws(()=>updateBody('ff14/ff14',1,{[zone]:{mode:'clear'}},validateCatalog(declarations)));assert.equal(f.calls.length,2);}finally{f.close();}
 });
 test('unsupported object schema is explicitly readonly and an added declaration needs no app edit',async()=>{
   const f=fixture(),declarations=catalog();declarations.fields.push({...declarations.fields[0],name:'new_number',description:'新增数字',value_schema:{type:'integer',minimum:0},default:2});
   declarations.fields[0].value_schema={type:'object',properties:{label:{type:'string'}},required:['label'],additionalProperties:false};declarations.fields[0].default={label:'example'};
-  try{await load(f,declarations);assert.match(field(f,'sample').textContent,/schema 暂不支持编辑/);assert.equal(input(f,'sample').disabled,true);assert.equal(input(f,'new_number').type,'number');assert.equal(input(f,'new_number').value,'');assert.equal(save(f,'example/demo').disabled,true);}finally{f.close();}
+  try{await load(f,declarations);assert.match(field(f,'sample').textContent,/无存量读取与修改授权|此类型暂不支持编辑/);assert.equal(input(f,'sample').disabled,true);assert.equal(input(f,'new_number').type,'number');assert.equal(input(f,'new_number').value,'');assert.equal(save(f,'example/demo').disabled,true);}finally{f.close();}
 });
 test('recover/rollback retain old exact bodies and only exact successful confirmations claim success',async()=>{
   const f=fixture();try{await load(f);f.document.getElementById('replacement').checked=true;click(f,'recover');assert.deepEqual(pending(f,'recover').body,{expected_revisions:{'game_link/core':1,'ff14/ff14':1},complete_from_current:true});pending(f,'recover').resolve({recovered:true});await flush();await load(f,catalog(),snapshot(2));assert.match(status(f),/业务运行已恢复/);
@@ -141,17 +153,17 @@ test('blocked writes and recover cannot be posted by forced events after refresh
   }finally{f.close();}
 });
 test('invalid catalog fails before any value read and missing schema stays visibly readonly',async()=>{
-  const f=fixture();try{pending(f,'catalog').resolve({schema_version:1,fields:[],extra:true});await flush();assert.equal(f.calls.length,1);assert.equal(f.document.querySelectorAll('.config-field').length,0);click(f,'refresh');const declarations=catalog();declarations.fields[0].value_schema=null;await load(f,declarations);assert.equal(input(f,'sample').disabled,true);assert.match(field(f,'sample').textContent,/schema 暂不支持编辑/);}finally{f.close();}
+  const f=fixture();try{pending(f,'catalog').resolve({schema_version:1,fields:[],extra:true});await flush();assert.equal(f.calls.length,1);assert.equal(f.document.querySelectorAll('.config-field').length,0);click(f,'refresh');const declarations=catalog();declarations.fields[0].value_schema=null;await load(f,declarations);assert.equal(input(f,'sample').disabled,true);assert.match(field(f,'sample').textContent,/无存量读取与修改授权|此类型暂不支持编辑/);}finally{f.close();}
 });
 test('ungranted metadata beside an authorized field is never read or submitted and does not break save confirmation',async()=>{
   const f=fixture(),declarations=catalog();declarations.fields.push({...declarations.fields[0],module_id:'game_link/core',name:'extra_declared'});
-  try{await load(f,declarations);assert.equal(input(f,'extra_declared').value,'');assert.equal(input(f,'extra_declared').disabled,true);mode(f,region,'clear');save(f,'game_link/core').click();assert.deepEqual(pending(f,'update').body.updates,[{field:region,mode:'clear'}]);pending(f,'update').resolve({module_id:'game_link/core',revision:2});await flush();await load(f,declarations,snapshot(2));assert.match(status(f),/配置已保存/);assert.equal(input(f,'extra_declared').value,'');}finally{f.close();}
+  try{await load(f,declarations);assert.equal(input(f,'extra_declared').value,'');assert.equal(input(f,'extra_declared').disabled,true);mode(f,region,'clear');save(f,'game_link/core').click();assert.deepEqual(pending(f,'update').body.updates,[{field:region,mode:'clear'}]);pending(f,'update').resolve({module_id:'game_link/core',revision:2});await flush();await load(f,declarations,snapshot(2));assert.match(status(f),/设置已保存/);assert.equal(input(f,'extra_declared').value,'');}finally{f.close();}
 });
 
 test('embedded shell management keeps exact context and scoped container; resume clears pending status',async()=>{
  const dom=new JSDOM('<div id="management-root">outside</div><div id="embedded"></div>',{pretendToBeVisual:true}),calls=[];const binding={...context,pageName:'00-game-link'};
  const bridge={onContext(fn){fn(binding);return()=>{};},ready:()=>Promise.resolve(binding),apiPost(endpoint){calls.push(endpoint);return Promise.resolve(endpoint==='admin/catalog'?catalog():endpoint==='admin/read'?snapshot():endpoint==='admin/credential-catalog'?credentialCatalog():endpoint==='admin/credential-status'?credentialStatus():{ready:false,state:'unavailable',reason_code:'secret_encryption_unavailable'});}};
- const container=dom.window.document.getElementById('embedded'),page=createManagementPage(dom.window.document,bridge,dom.window,{expectedPage:'00-game-link',container});page.start();await flush();try{assert.equal(dom.window.document.getElementById('management-root').textContent,'outside');assert.ok(container.querySelector('[data-owner="game_link/core"]'));page.selectOwner('game_link/core');await flush();assert.equal(container.querySelector('#fields [data-owner="ff14/ff14"]').hidden,true);page.suspend();page.resume();await flush();assert.doesNotMatch(container.querySelector('#status').textContent,/正在执行/);assert.match(container.querySelector('#status').textContent,/已读取配置目录/);assert.equal(calls.filter(x=>x==='admin/catalog').length,2);}finally{page.dispose();dom.window.close();}
+ const container=dom.window.document.getElementById('embedded'),page=createManagementPage(dom.window.document,bridge,dom.window,{expectedPage:'00-game-link',container});page.start();await flush();try{assert.equal(dom.window.document.getElementById('management-root').textContent,'outside');assert.ok(container.querySelector('[data-owner="game_link/core"]'));page.selectOwner('game_link/core');await flush();assert.equal(container.querySelector('#fields [data-owner="ff14/ff14"]').hidden,true);page.suspend();page.resume();await flush();assert.doesNotMatch(container.querySelector('#status').textContent,/正在执行/);assert.match(container.querySelector('#status').textContent,/设置已更新/);assert.equal(calls.filter(x=>x==='admin/catalog').length,2);}finally{page.dispose();dom.window.close();}
 });
 
 // Host 4.28.2 PluginPagePage forwards response.data.message for HTTP errors;
@@ -164,11 +176,24 @@ test('Host bridge conflict text preserves the Core draft and requires a fresh re
     assert.match(status(f),/配置已变化/);assert.equal(input(f,region),node);assert.equal(node.value,'0');assert.equal(field(f,region).querySelector('[data-role=mode]').value,'replace');assert.match(f.document.querySelector('section[data-owner="game_link/core"]').textContent,/配置版本：8/);assert.equal(save(f,'game_link/core').getAttribute('aria-disabled'),'true');assert.equal(f.calls.length,3);
     save(f,'game_link/core').dispatchEvent(new f.dom.window.Event('click'));await flush();assert.equal(f.calls.length,3);
     click(f,'refresh');const latest=snapshot(9);latest['game_link/core'].fields.default_region.value='global';await load(f,catalog(),latest);assert.equal(input(f,region),node);assert.equal(node.value,'0');assert.equal(save(f,'game_link/core').getAttribute('aria-disabled'),'false');
-    save(f,'game_link/core').click();assert.equal(pending(f,'update').body.expected_revision,9);pending(f,'update').resolve({module_id:'game_link/core',revision:10});await flush();await load(f,catalog(),snapshot(10));assert.match(status(f),/配置已保存/);assert.equal(field(f,region).querySelector('[data-role=mode]').value,'keep');
+    save(f,'game_link/core').click();assert.equal(pending(f,'update').body.expected_revision,9);pending(f,'update').resolve({module_id:'game_link/core',revision:10});await flush();await load(f,catalog(),snapshot(10));assert.match(status(f),/设置已保存/);assert.equal(field(f,region).querySelector('[data-role=mode]').value,'keep');
   }finally{f.close();}
 });
 test('unknown bridge errors and decorated conflict text stay redacted and gate Core writes',async()=>{
   for(const error of [Error('Request failed with status code 409'),Error('PRIVATE 配置版本冲突，请刷新并重新核对后修改。'),Error('配置版本冲突，请刷新并重新核对后修改。 PRIVATE'),{message:'PRIVATE',code:'revision_conflict'},{response:{status:409,data:{code:'revision_conflict',message:'PRIVATE'}}}]){
     const f=fixture();try{await load(f,catalog(),snapshot(8));mode(f,region,'replace');const node=input(f,region);node.value='0';save(f,'game_link/core').click();pending(f,'update').reject(error);await flush();assert.match(status(f),/未取得成功确认/);assert.doesNotMatch(status(f),/PRIVATE|配置已变化|配置已保存/);assert.equal(input(f,region),node);assert.equal(node.value,'0');assert.equal(save(f,'game_link/core').getAttribute('aria-disabled'),'true');assert.equal(f.calls.length,3);}finally{f.close();}
   }
+});
+
+
+test('neutral owner groups form separate labeled fieldsets and share one exact CAS save',async()=>{
+ const f=fixture(),declarations=catalog(),prototype=declarations.fields.find(field=>field.name==='sample');
+ const a={...prototype,name:'frequency',description:'同步频率',group:'alpha',readable:true,editable:true,blocked_reason:null},b={...a,name:'appearance',description:'展示方式',group:'beta'};
+ declarations.fields=declarations.fields.filter(field=>field.module_id!=='example/demo').concat([b,a]);
+ const values=snapshot();values['example/demo']={revision:7,fields:{frequency:{value:'daily',state:'valid',present:true,source:'sqlite'},appearance:{value:'compact',state:'valid',present:true,source:'sqlite'}}};
+ try{await load(f,declarations,values);const card=f.document.querySelector('section.card[data-owner="example/demo"]'),groups=[...card.querySelectorAll('fieldset.config-group')];
+  assert.equal(groups.length,2);assert.deepEqual(groups.map(group=>group.dataset.group),['beta','alpha']);assert.deepEqual(groups.map(group=>group.querySelector('legend').textContent),['设置组 1','设置组 2']);assert.ok(groups.every(group=>group.querySelector('legend')?.textContent));assert.deepEqual(groups.map(group=>[...group.querySelectorAll('[data-field]')].map(field=>field.dataset.field)),[['appearance'],['frequency']]);
+  for(const [name,value] of [['frequency','weekly'],['appearance','expanded']]){const node=input(f,name);node.value=value;node.dispatchEvent(new f.dom.window.Event('input'));}
+  assert.equal(card.querySelectorAll('[data-action=save]').length,1);save(f,'example/demo').click();assert.equal(f.calls.filter(call=>call.endpoint==='admin/update').length,1);assert.deepEqual(pending(f,'update').body,{module_id:'example/demo',expected_revision:7,updates:[{field:'appearance',mode:'replace',value:'expanded'},{field:'frequency',mode:'replace',value:'weekly'}]});
+ }finally{f.close();}
 });
