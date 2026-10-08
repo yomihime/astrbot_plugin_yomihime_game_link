@@ -24,6 +24,7 @@ HOST_COMMIT = "3c7adafa1397e182d60b1016bf88759265113c8a"
 HOST_REPOSITORY = "https://github.com/AstrBotDevs/AstrBot"
 # SHA256 of UTF-8 source with universal newlines (LF), identical on Windows/Linux.
 SOURCE_SHA256 = {
+    "astrbot/dashboard/services/config_service.py": "f9efc39d92432dec56180f3593b2f2211584a09ee00ed6fce4738e17187cf472",
     "astrbot/core/pipeline/process_stage/stage.py": "b4e83a1d81955351a863ddb56016153b531333b6b9e4cd0df2e07db4ea13a268",
     "astrbot/core/star/context.py": "a9a2772080b463583af2c3082b4c13e3612ebd9fda0d234147be462394a1ba2e",
     "astrbot/core/star/register/star_handler.py": "8eeeb59901d9944f10e326bfa10f76eee0629c3f380ed1fb7c5c47b3e50dc266",
@@ -47,6 +48,11 @@ SOURCE_SHA256 = {
     "astrbot/dashboard/api/plugins.py": "b2db96766684bff2af4e652fab37ba2b2cee8d1796fd0ef3e35a4dac7b5ccd86",
     "astrbot/dashboard/services/auth_service.py": "9ef9124915d99eba5c1754b5c6efdc6cb508991140309fb57d0c6c1f0c216ba8",
 }
+SOURCE_OBJECT_SHA256 = {
+    "dashboard/src/components/shared/AstrBotConfig.vue": "92fd19c409c7b194a66df6e4c2ad0f89e3c98b10be55d4f762c456f4afd0bce1",
+    "dashboard/src/views/ExtensionPage.vue": "2fdc98b9e0291e14fed0d888081caf8cbb5ad7d5d552db73a006fad5e1c3526a",
+}
+
 TEST_DEPENDENCIES = {
     "PyJWT": "2.10.1",
     "fastapi": "0.135.2",
@@ -142,6 +148,23 @@ def validate_host_source():
         raise _environment_error(
             "related Host source has staged, unstaged or untracked changes"
         )
+    for relative, expected in SOURCE_OBJECT_SHA256.items():
+        try:
+            actual = subprocess.run(
+                ["git", "-C", str(root), "show", f"{HOST_COMMIT}:{relative}"],
+                check=True,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                timeout=30,
+            ).stdout
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise _environment_error(
+                f"required Host Git object is unavailable: {relative}"
+            ) from exc
+        if hashlib.sha256(actual.encode("utf-8")).hexdigest() != expected:
+            raise _environment_error(f"Host Git object SHA256 mismatch: {relative}")
+        sources[relative] = actual
     return source, sources
 
 
@@ -169,6 +192,39 @@ def host_config_integrity():
         namespace,
     )
     return type("ActualHostConfigMethod", (), {method.name: namespace[method.name]})()
+
+
+def host_plugin_config_display(config):
+    """Execute fixed upstream wrapper against a synthetic plugin config only."""
+    from types import SimpleNamespace
+
+    _, sources = validate_host_source()
+    tree = ast.parse(sources["astrbot/dashboard/services/config_service.py"])
+    owner = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "ConfigDisplayService"
+    )
+    method = next(
+        node
+        for node in owner.body
+        if isinstance(node, ast.FunctionDef) and node.name == "get_plugin_config"
+    )
+    namespace = {
+        "star_registry": [SimpleNamespace(name="game_link", config=config, i18n={})]
+    }
+    exec(
+        compile(
+            ast.Module(body=[method], type_ignores=[]),
+            "actual_host_config_display",
+            "exec",
+        ),
+        namespace,
+    )
+    service = type(
+        "ActualHostConfigDisplay", (), {method.name: namespace[method.name]}
+    )()
+    return service.get_plugin_config("game_link")
 
 
 def validate_test_dependencies():

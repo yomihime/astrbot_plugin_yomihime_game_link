@@ -1193,6 +1193,14 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(module["module_id"], "ff14/ff14")
             self.assertEqual(module["state"], "loaded")
             self.assertEqual(
+                module["display"],
+                {
+                    "default_name": "最终幻想 XIV",
+                    "localized_names": {"zh": "最终幻想 XIV", "en": "FINAL FANTASY XIV"},
+                    "short_name": "FF14",
+                },
+            )
+            self.assertEqual(
                 set(module),
                 {
                     "module_id",
@@ -1210,6 +1218,7 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
                     "module_epoch",
                     "runtime_id",
                     "asset_version",
+                    "display",
                 },
             )
             self.assertTrue(

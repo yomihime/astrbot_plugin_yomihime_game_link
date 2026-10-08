@@ -79,6 +79,7 @@ from ...api.subscriptions import (
     SubscriptionStatus,
     digest_envelope_idempotency_key,
 )
+from ...api.version import CONTRACT_VERSION
 from ...core.ports import (
     CollectionRunRequest,
     EvaluationCheckpoint,
@@ -216,7 +217,25 @@ def _decode(value: Any) -> Any:
             return Decimal(value["$decimal"])
         if "$type" in value:
             cls = _DATACLASSES[value["$type"]]
-            return cls(**{key: _decode(item) for key, item in value["fields"].items()})
+            stored_fields = value["fields"]
+            if cls is DisplayDocument:
+                # Only the frozen 1.7 document shape is wire-compatible with
+                # 1.8. Reconstruct current DTOs here, leaving public SDK and
+                # renderer version checks strict and persisted bytes untouched.
+                version = stored_fields["schema_version"]
+                if version == "1.7.0" and CONTRACT_VERSION == "1.8.0":
+                    if set(stored_fields) != {
+                        "title",
+                        "subject",
+                        "ordered_blocks",
+                        "sources",
+                        "timestamps",
+                        "privacy",
+                        "schema_version",
+                    }:
+                        raise ValueError("invalid stored 1.7 display shape")
+                    stored_fields = {**stored_fields, "schema_version": CONTRACT_VERSION}
+            return cls(**{key: _decode(item) for key, item in stored_fields.items()})
         return {key: _decode(item) for key, item in value.items()}
     return value
 

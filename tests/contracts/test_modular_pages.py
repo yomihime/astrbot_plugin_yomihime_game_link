@@ -286,8 +286,10 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
                 "resources",
                 "capabilities",
                 "config_fields",
+                "display",
             },
         )
+        self.assertIsNone(projected["display"])
         self.assertEqual(projected["pages"], [])
         self.assertEqual(projected["resources"], [])
         self.assertIsNone(projected["runtime_id"])

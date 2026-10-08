@@ -22,6 +22,7 @@ from yomihime_sdk.api.manifests import (
     ConfigField,
     InvocationPolicy,
     ModuleCategory,
+    ModuleDisplay,
     ModuleManifest,
     PackageManifest,
     PageDescriptor,
@@ -183,7 +184,7 @@ def _map_capability(value: object) -> CapabilityDescriptor:
     )
 
 
-def _map_module(value: object) -> ModuleManifest:
+def _map_module(value: object, contract_version: str) -> ModuleManifest:
     obj = _keys(
         value,
         "module",
@@ -196,6 +197,12 @@ def _map_module(value: object) -> ModuleManifest:
             "capabilities",
         },
     )
+    display = None
+    if "display" in obj:
+        if contract_version != "1.8.0":
+            raise ManifestError("display requires contract 1.8.0")
+        raw_display = _keys(obj["display"], "module_display", {"default_name"})
+        display = ModuleDisplay(**raw_display)
     commands = []
     for raw in _list(obj, "commands"):
         item = _keys(
@@ -324,6 +331,7 @@ def _map_module(value: object) -> ModuleManifest:
             PageResource(**_keys(item, "page_resource", {"path", "sha256"}))
             for item in _list(obj, "resources")
         ),
+        display=display,
     )
 
 
@@ -374,7 +382,9 @@ def parse_manifest(data: bytes | bytearray | memoryview) -> PackageManifest:
             contract_version=_shape(
                 root["contract_version"], "string", "contract_version"
             ),
-            modules=tuple(_map_module(item) for item in modules_raw),
+            modules=tuple(
+                _map_module(item, root["contract_version"]) for item in modules_raw
+            ),
             author=_shape(root["author"], "string", "author"),
             license=_shape(root["license"], "string", "license"),
             source=_shape(root["source"], "string", "source"),

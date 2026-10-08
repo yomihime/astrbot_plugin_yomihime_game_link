@@ -71,12 +71,22 @@ class PublicExportTests(unittest.TestCase):
     def test_owner_floor_and_contract_compatibility_are_public(self) -> None:
         import yomihime_sdk as sdk
 
-        self.assertEqual(sdk.__version__, "1.7.0")
-        self.assertEqual(sdk.CONTRACT_VERSION, "1.7.0")
-        self.assertEqual(sdk.CONTRACT_REVISION, "MODULE-LIFECYCLE-01")
+        self.assertEqual(sdk.__version__, "1.8.0")
+        self.assertEqual(sdk.CONTRACT_VERSION, "1.8.0")
+        self.assertEqual(sdk.CONTRACT_REVISION, "MODULE-DISPLAY-01")
         self.assertEqual(
             sdk.COMPATIBLE_CONTRACT_VERSIONS,
-            ("1.0.0", "1.1.0", "1.2.0", "1.3.0", "1.4.0", "1.5.0", "1.6.0", "1.7.0"),
+            (
+                "1.0.0",
+                "1.1.0",
+                "1.2.0",
+                "1.3.0",
+                "1.4.0",
+                "1.5.0",
+                "1.6.0",
+                "1.7.0",
+                "1.8.0",
+            ),
         )
         self.assertIs(sdk.PrivacyFloor.OWNER, sdk.PrivacyFloor("owner"))
         self.assertTrue(

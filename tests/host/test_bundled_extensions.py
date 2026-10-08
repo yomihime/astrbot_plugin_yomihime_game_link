@@ -70,6 +70,7 @@ class BundledExtensionTests(unittest.IsolatedAsyncioTestCase):
         # A real legacy declaration: R5 native fields/selection/tools/origins
         # did not exist in the historical package being upgraded.
         old_module = old["modules"][0]
+        old_module.pop("display")
         old_module["tools"] = []
         old_module["capabilities"] = [
             capability
@@ -112,7 +113,7 @@ class BundledExtensionTests(unittest.IsolatedAsyncioTestCase):
                 if path.is_file()
             },
         )
-        self.assertEqual(current["contract_version"], "1.6.0")
+        self.assertEqual(current["contract_version"], "1.8.0")
         self.assertEqual(
             (replacement.package_dir / "yomihime.manifest.json").read_bytes(),
             current_bytes,

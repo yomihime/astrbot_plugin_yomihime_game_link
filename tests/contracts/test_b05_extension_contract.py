@@ -142,7 +142,7 @@ class B05ExtensionContractTests(unittest.TestCase):
             ("config", "identities", "accounts", "subscriptions", "scopes", "storage"),
         )
         self.assertIsNone(signature.parameters["storage"].default)
-        self.assertEqual(CONTRACT_VERSION, "1.7.0")
+        self.assertEqual(CONTRACT_VERSION, "1.8.0")
         self.assertIn("1.4.0", COMPATIBLE_CONTRACT_VERSIONS)
         # The five positional handles used by old factories remain valid.
         handles = tuple(object() for _ in range(5))

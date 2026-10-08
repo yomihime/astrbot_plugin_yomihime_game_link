@@ -7,25 +7,25 @@
       "cn",
       "global"
     ],
-    "hint": "仅保留旧配置兼容与回退材料；迁移完成后本字段不再生效。新默认值由 Core 与 FF14 模块配置管理；迁移前停止实例并使用迁移准备脚本保存原始配置。"
+    "invisible": true
   },
   "ff14_calendar_default_days": {
     "description": "日历默认查询天数",
     "type": "int",
     "default": 7,
-    "hint": "仅保留旧配置兼容与回退材料；迁移完成后本字段不再生效。新默认值由 FF14 模块配置管理；迁移前停止实例并保存原始配置。"
+    "invisible": true
   },
   "ff14_calendar_default_timezone": {
     "description": "日历默认时区",
     "type": "string",
     "default": "Asia/Shanghai",
-    "hint": "仅保留旧配置兼容与回退材料；迁移完成后本字段不再生效。新默认值由 FF14 模块配置管理；迁移前停止实例并保存原始配置。"
+    "invisible": true
   },
   "ff14_calendar_default_delivery_time": {
     "description": "新订阅每日摘要时间",
     "type": "string",
     "default": "08:00",
-    "hint": "仅保留旧配置兼容与回退材料；迁移完成后本字段不再生效。新默认值由 FF14 模块配置管理；迁移前停止实例并保存原始配置。"
+    "invisible": true
   },
   "web_public_origin": {
     "description": "网页访问地址（可选）",

@@ -9,8 +9,8 @@ import sys
 from pathlib import Path
 from types import ModuleType
 
-SDK_VERSION = "1.7.0"
-SDK_CONTRACT_REVISION = "MODULE-LIFECYCLE-01"
+SDK_VERSION = "1.8.0"
+SDK_CONTRACT_REVISION = "MODULE-DISPLAY-01"
 SDK_COMPATIBLE_CONTRACT_VERSIONS = (
     "1.0.0",
     "1.1.0",
@@ -20,10 +20,11 @@ SDK_COMPATIBLE_CONTRACT_VERSIONS = (
     "1.5.0",
     "1.6.0",
     "1.7.0",
+    "1.8.0",
 )
 
 SDK_PACKAGE_MANIFEST = {
-    "__init__.py": "50a16eba8e5f8e3223f5f1b265fac6094ea09c70f21b9ef7c1309e62be3a7024",
+    "__init__.py": "e9e018fe25f9be511d8f3ee559fdbe6f10c744b378e455f9d6ae4862f9e46b85",
     "py.typed": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
     "_examples/empty_module/README.md": "54f44691207b27a1e6ee818cd55e14c30086cd3c685176e470b147ffd5203957",
     "_examples/empty_module/manifest.json": "27ed02b89a99fbea400dd75a1a405db27929f31acb4ceb582b83e8af1e61b1a8",
@@ -35,14 +36,14 @@ SDK_PACKAGE_MANIFEST = {
     "api/administration.py": "33eb1c275f6c673feff6c034255465cfa1f6a269d7ae627c6fa4115ceb49159e",
     "api/contexts.py": "a44dfabab4e42d7a30ff7aaa3a1239c5ae4b588abfee4dab9d1fe9e7bcc0dbef",
     "api/display.py": "4fe9438bf3016ca4ac6b97a17c0e20157e77d0b8b66dd4c1ff3054e901d65c03",
-    "api/manifests.py": "2fa294412f8ebb057226b654b2bb5f22ae9f2a188550dec11662652b8447d93b",
-    "api/results.py": "1fe77827fa4446d94023c400acc78a4ef90988d4a437172f7ffeedb2a2aa558f",
+    "api/manifests.py": "19cca36cba1291f4f26e61dc39d0bbdac519567d240e398f0d1db6f2e6f1d5c5",
+    "api/results.py": "2a03308fb31d190d25295ce54b5fdf8cf827577c798cb06171709e8716bab98e",
     "api/schema.py": "46628cb51be0e4a44df3606af2cbe841120cacf576f193ce57bc1af4b8a3d626",
     "api/services.py": "bebd90c9fe24581af816a4bb7e75367cea403f4eb615065bf5dbb79c684e9348",
     "api/storage.py": "bbe6e241a26727d56c1609bb8d6fa15173b04befa67f8305a2c39e3fc9491962",
     "api/subscriptions.py": "dddf75abfea96f8a88eecd71d6d6bb7d5f3327a52cb08185035fa2f5e0e6347a",
     "api/validation.py": "b6e0b2e16b8fae127c4cb8bf31efd0fce83c8b5b7ccf58256b01379fbf998e6c",
-    "api/version.py": "2612079478bd6888df99c4afae76eb6c95a21a388896228f643158b225593089",
+    "api/version.py": "0b870fd7a5f1c81204cb6e3a164812f9bfbb69e367e9a647d34a9a7db5755146",
 }
 
 SDK_API_MODULES = {

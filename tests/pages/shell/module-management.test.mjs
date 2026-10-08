@@ -17,20 +17,26 @@ const {createInlineConfirmation}=await import(confirmationURL);
 let source=stripTypeScriptTypes(await readFile(new URL('pages/frontend/src/module-management.ts',root),'utf8'),{mode:'strip'});
 source=source.replace("from 'vue'",'from '+JSON.stringify(runtimeURL)).replace("from 'naive-ui'",'from '+JSON.stringify(runtimeURL)).replace("from './lifecycle'",'from '+JSON.stringify(new URL('pages/frontend/src/lifecycle.ts',root).href)).replace("from './confirmation'",'from '+JSON.stringify(confirmationURL));
 const {createModuleManagement}=await import('data:text/javascript;base64,'+Buffer.from(source).toString('base64'));
+const {validateCatalog:configurationCatalog,validateSnapshot:configurationSnapshot}=await import(new URL('pages/management/app.js',root));
+const configurationFixture=await import('../management/fixtures.mjs');
 const flush=async()=>{for(let i=0;i<20;i++){await Promise.resolve();await runtime.nextTick();}};
 const deferred=()=>{let resolve,reject;const promise=new Promise((a,b)=>{resolve=a;reject=b;});return {promise,resolve,reject};};
 const context={pluginName:'astrbot_plugin_yomihime_game_link',pageName:'00-game-link',session:'one'};
 const status=(revision=5,epoch=2)=>({registry_revision:revision,modules:[{module_id:'ff14/ff14',enabled:false,lifecycle:'stopped',health:'ready',epoch,registry_revision:revision,reason_code:null}]});
-function fixture(beforeOperate,interactionKey){
+function fixture(beforeOperate,interactionKey,home){
  const container=dom.window.document.createElement('div');dom.window.document.body.append(container);const calls=[];let emit,changed=0,confirmCalls=0;
  const window={...dom.window,confirm(){confirmCalls++;return false;}};
  const bridge={onContext(fn){emit=fn;fn(context);return()=>{emit=null;};},ready:()=>Promise.resolve(context),apiPost(endpoint,body){const d=deferred();calls.push({endpoint,body,...d});return d.promise;}};
- const view=createModuleManagement(container,bridge,window,'00-game-link',()=>{changed++;},beforeOperate,undefined,interactionKey);view.start();
+ const view=createModuleManagement(container,bridge,window,'00-game-link',()=>{changed++;},beforeOperate,undefined,interactionKey,home);view.start();
  return {container,calls,view,emit(value){emit?.(value);},get changed(){return changed;},get confirmCalls(){return confirmCalls;},close(){view.dispose();container.remove();}};
 }
 const button=(f,text)=>{const node=[...f.container.querySelectorAll('button')].find(n=>n.textContent===text);assert.ok(node,'button '+text);return node;};
 const pending=(f,endpoint)=>{const call=f.calls.filter(c=>c.endpoint===endpoint).at(-1);assert.ok(call);return call;};
 async function load(f,value=status()){pending(f,'admin/modules').resolve(value);await flush();}
+test('home ordinary settings status uses authorized catalog/read and never claims overall or upstream readiness',async()=>{
+ const options={onSettings(){},labels:()=>new Map([['ff14/ff14','最终幻想 XIV']]),catalog:configurationCatalog,snapshot:configurationSnapshot},f=fixture(undefined,undefined,options);
+ try{await load(f);assert.match(f.container.textContent,/普通设置未核对/);pending(f,'admin/catalog').resolve(configurationFixture.catalog());await flush();pending(f,'admin/read').resolve(configurationFixture.snapshot());await flush();assert.match(f.container.textContent,/普通设置已校验/);assert.match(f.container.textContent,/最终幻想 XIV/);assert.doesNotMatch(f.container.textContent,/上游可用|配置已就绪/);assert.deepEqual(f.calls.map(call=>call.endpoint),['admin/modules','admin/catalog','admin/read']);const refresh=f.view.refresh();await load(f);pending(f,'admin/catalog').reject(Error('admin_authorization_denied'));await refresh;await flush();assert.match(f.container.textContent,/普通设置未核对/);assert.doesNotMatch(f.container.textContent,/普通设置已校验/);assert.equal(f.calls.filter(call=>['admin/module-enabled','admin/module-unload','admin/update','admin/credential-update'].includes(call.endpoint)).length,0);}finally{f.close();}
+});
 const open=async f=>{button(f,'解除挂载（保留数据）').click();await flush();};
 const confirm=f=>f.container.querySelector('[data-action="confirm-unload"]');
 const cancel=f=>f.container.querySelector('[data-action="cancel-unload"]');

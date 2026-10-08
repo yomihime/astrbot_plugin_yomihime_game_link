@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -18,6 +19,14 @@ from extensions.loader import (
 
 
 def has_safe_scan() -> bool:
+    if os.name == "nt":
+        from extensions.windows_fs import WindowsScanError, _check_runtime
+
+        try:
+            _check_runtime()
+        except WindowsScanError:
+            return False
+        return True
     try:
         _require_handle_relative_support()
     except DiscoveryRootError:
