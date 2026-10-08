@@ -42,8 +42,8 @@ export function createManagementView(document:Document,container:HTMLElement=doc
           h('p',c.detail),
           h('label',{for:id+'-mode'},'本次操作'),h('select',{id:id+'-mode','data-role':'credential-mode',ref:(node:unknown)=>{c.mode=node as HTMLSelectElement;},onChange:()=>{edit();if(c.mode?.value!=='replace'){if(c.clientId)c.clientId.value='';if(c.clientSecret)c.clientSecret.value='';}if(c.confirm)c.confirm.checked=false;changed();}},[['keep','保持（不写入）'],['replace','替换完整凭据对'],['clear','清除已保存凭据']].map(([value,text])=>h('option',{value},text))),
           ...(['client_id','client_secret'] as const).map(name=>h('div',{class:'credential-field',key:name},[
-            h('label',{for:id+'-'+name},name==='client_id'?'Client ID':'Client Secret'),h('input',{id:id+'-'+name,type:'password',autocomplete:'off',maxlength:512,'data-role':name,ref:(node:unknown)=>{if(name==='client_id')c.clientId=node as HTMLInputElement;else c.clientSecret=node as HTMLInputElement;},onInput:edit,onChange:edit}),
-          ])),h('label',[h('input',{type:'checkbox','data-role':'credential-clear-confirm',ref:(node:unknown)=>{c.confirm=node as HTMLInputElement;},onChange:edit}),'确认清除本组已保存凭据']),
+            h('label',{for:id+'-'+name},name==='client_id'?'Client ID':'Client Secret'),h('input',{id:id+'-'+name,type:'password',autocomplete:'off',maxlength:512,'data-role':name,ref:(node:unknown)=>{if(name==='client_id')c.clientId=node as HTMLInputElement;else c.clientSecret=node as HTMLInputElement;},onInput:()=>{edit();changed();},onChange:()=>{edit();changed();}}),
+          ])),h('label',[h('input',{type:'checkbox','data-role':'credential-clear-confirm',ref:(node:unknown)=>{c.confirm=node as HTMLInputElement;},onChange:()=>{edit();changed();}}),'确认清除本组已保存凭据']),
           h('button',{type:'button','data-action':'credential-save',disabled:true,ref:(node:unknown)=>{c.save=node as HTMLButtonElement;},onClick:c.onSave},'提交本组操作'),
         ]});
       })),

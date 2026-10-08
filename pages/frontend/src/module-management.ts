@@ -11,8 +11,28 @@ export function createModuleManagement(container:HTMLElement,bridge:Bridge,windo
   const confirmation=sharedConfirmation??createInlineConfirmation(container.ownerDocument),waiting=shallowRef<number|null>(null);
   const presentation=shallowRef<Record<string,unknown>>({}),labels=shallowRef<Map<string,string>>(new Map()),configuration=shallowRef<Record<string,string>>({});
   let closed=false,ready=false,generation=0,boundary='',registryRevision=0,operationSerial=0,off:(()=>void)|undefined;
+  let configurationVersion=0,configurationDirty=true,configurationAttempted=false,homeVisible=false,configurationFlight:Promise<void>|null=null;
   const valid=(value:unknown):value is Record<string,unknown>=>value!==null&&typeof value==='object'&&!Array.isArray(value);
   const current=(version:number)=>!closed&&ready&&version===generation;
+  function invalidateConfiguration(refreshVisible=true){configurationVersion++;configurationDirty=true;configurationAttempted=false;configuration.value={};if(refreshVisible&&homeVisible)void refreshConfiguration();}
+  function refreshConfiguration(allowHidden=false):Promise<void>{
+    if(configurationFlight)return configurationFlight;
+    if(!home||!ready||closed||!configurationDirty||configurationAttempted||!allowHidden&&(!homeVisible||busy.value))return Promise.resolve();
+    const version=generation,ticket=configurationVersion;configurationAttempted=true;
+    const work=async()=>{
+      try{
+        const declarations=home.catalog(await bridge.apiPost('admin/catalog',{}));
+        if(!current(version)||ticket!==configurationVersion)return;
+        const snapshot=home.snapshot(await bridge.apiPost('admin/read',{}),declarations);
+        if(!current(version)||ticket!==configurationVersion)return;
+        const values:Record<string,string>={};
+        for(const row of rows.value){const fields=declarations.fields.filter(field=>field.module_id===row.module_id),stored=snapshot[row.module_id];values[row.module_id]=fields.length&&stored&&fields.every(field=>field.readable&&field.editable&&stored.fields[field.name]?.state==='valid')?'普通设置已校验':stored?'普通设置待处理':'普通设置未核对';}
+        configuration.value=values;configurationDirty=false;
+      }catch{if(current(version)&&ticket===configurationVersion)configuration.value={};}
+    };
+    configurationFlight=work().finally(()=>{configurationFlight=null;if(homeVisible&&configurationDirty&&!configurationAttempted)void refreshConfiguration();});
+    return configurationFlight;
+  }
   function decode(value:unknown) {
     if(!valid(value)||Object.keys(value).sort().join(',')!=='modules,registry_revision'||!Number.isSafeInteger(value.registry_revision)||!Array.isArray(value.modules)||value.modules.length>128)throw Error('invalid_modules');
     const seen=new Set<string>();
@@ -24,11 +44,11 @@ export function createModuleManagement(container:HTMLElement,bridge:Bridge,windo
   }
   async function refresh() {
     if(!ready||closed||busy.value)return;
-    confirmation.cancel();waiting.value=null;const version=generation;busy.value=true;stale.value=true;
+    confirmation.cancel();waiting.value=null;const version=generation;busy.value=true;stale.value=true;invalidateConfiguration(false);
     try {const result=decode(await bridge.apiPost('admin/modules',{}));if(!current(version))return;rows.value=result.modules;registryRevision=result.registry_revision;stale.value=false;message.value='状态已更新。';
-      if(home){configuration.value={};try{const declarations=home.catalog(await bridge.apiPost('admin/catalog',{})),snapshot=home.snapshot(await bridge.apiPost('admin/read',{}),declarations);if(!current(version))return;const values:Record<string,string>={};for(const row of result.modules){const fields=declarations.fields.filter((field:{module_id:string})=>field.module_id===row.module_id),stored=snapshot[row.module_id];values[row.module_id]=fields.length&&stored&&fields.every((field:{name:string;readable:boolean;editable:boolean})=>field.readable&&field.editable&&stored.fields[field.name]?.state==='valid')?'普通设置已校验':stored?'普通设置待处理':'普通设置未核对';}configuration.value=values;}catch{if(!current(version))return;configuration.value={};}labels.value=home.labels();}}
+      if(home){await refreshConfiguration(true);if(!current(version))return;labels.value=home.labels();}}
     catch {if(current(version)){stale.value=true;message.value='模块管理权限或状态无法确认，请重新打开页面后刷新。';}}
-    finally {if(current(version))busy.value=false;}
+    finally {if(current(version)){busy.value=false;if(homeVisible&&configurationDirty&&!configurationAttempted)void refreshConfiguration();}}
   }
   async function operate(row:Status,action:'enable'|'disable'|'unload') {
     if(!current(generation)||busy.value||stale.value||waiting.value||!rows.value.includes(row))return;
@@ -64,5 +84,5 @@ export function createModuleManagement(container:HTMLElement,bridge:Bridge,windo
     if(closed)return;presentation.value=valid(context)?context:{};let next='';try {if(!valid(context)||context.pluginName!=='astrbot_plugin_yomihime_game_link'||context.pageName!==expectedPage)throw Error();next=contextBoundary(context);}catch {confirmation.cancel();waiting.value=null;ready=false;generation++;rows.value=[];busy.value=false;stale.value=true;message.value='管理上下文无效，请正式重开页面。';return;}
     if(ready&&next===boundary)return;confirmation.cancel();waiting.value=null;generation++;boundary=next;ready=true;rows.value=[];busy.value=false;void refresh();
   }
-  return {start(){off=bridge.onContext(accept);Promise.resolve(bridge.ready()).then(accept).catch(()=>{message.value='宿主会话不可用，请正式重开页面。';});},refresh,presentationLabels(value:Map<string,string>){labels.value=value;},cancelConfirmation(){confirmation.cancel();waiting.value=null;},dispose(){confirmation.cancel();waiting.value=null;if(!sharedConfirmation)confirmation.dispose();closed=true;generation++;ready=false;off?.();app.unmount();}};
+  return {start(){off=bridge.onContext(accept);Promise.resolve(bridge.ready()).then(accept).catch(()=>{message.value='宿主会话不可用，请正式重开页面。';});},refresh,invalidateConfiguration,setHomeVisible(value:boolean){homeVisible=value;if(value)void refreshConfiguration();},presentationLabels(value:Map<string,string>){labels.value=value;},cancelConfirmation(){confirmation.cancel();waiting.value=null;},dispose(){confirmation.cancel();waiting.value=null;if(!sharedConfirmation)confirmation.dispose();closed=true;generation++;ready=false;off?.();app.unmount();}};
 }

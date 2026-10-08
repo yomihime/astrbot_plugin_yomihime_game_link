@@ -1,0 +1,17 @@
+{
+  "baseline": "da16405f613a01de5b8844d7bdb6b96156c4a098",
+  "files": {
+    "yomihime_sdk/api/version.py": "2612079478bd6888df99c4afae76eb6c95a21a388896228f643158b225593089",
+    "yomihime_sdk/api/display.py": "4fe9438bf3016ca4ac6b97a17c0e20157e77d0b8b66dd4c1ff3054e901d65c03",
+    "yomihime_sdk/api/subscriptions.py": "dddf75abfea96f8a88eecd71d6d6bb7d5f3327a52cb08185035fa2f5e0e6347a",
+    "yomihime_sdk/api/storage.py": "bbe6e241a26727d56c1609bb8d6fa15173b04befa67f8305a2c39e3fc9491962",
+    "yomihime_sdk/api/contexts.py": "a44dfabab4e42d7a30ff7aaa3a1239c5ae4b588abfee4dab9d1fe9e7bcc0dbef",
+    "yomihime_sdk/api/schema.py": "46628cb51be0e4a44df3606af2cbe841120cacf576f193ce57bc1af4b8a3d626"
+  },
+  "serializer_repository_sha256": "65960cd8c6861f591a5f8e96e5ffa061feaa40144d751e40e139240526a46551",
+  "selected_functions": [
+    "_encode",
+    "_dump"
+  ],
+  "events_sha256": "eea978abb2bce0c6d3daffda88eda31d3920a938173599c7c310222ffc801d1c"
+}

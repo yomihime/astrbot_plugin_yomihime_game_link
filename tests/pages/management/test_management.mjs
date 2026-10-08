@@ -10,12 +10,12 @@ import {catalog,snapshot,context,credentialCatalog,credentialStatus} from './fix
 const html=await readFile(new URL('../../../pages/management/index.html',import.meta.url),'utf8');
 const flush=async()=>{for(let i=0;i<35;i++)await Promise.resolve();};
 const deferred=()=>{let resolve,reject;const promise=new Promise((a,b)=>{resolve=a;reject=b;});return {promise,resolve,reject};};
-function fixture(initial=context,resolveReady=true){
+function fixture(initial=context,resolveReady=true,options={}){
   const dom=new JSDOM(html,{pretendToBeVisual:true,url:'http://localhost/management/'}),calls=[],ready=deferred();let callback=null;
   // Ordinary request counts remain scoped to ordinary endpoints;
   // independent credential tests capture their own requests and assertions.
   const bridge={onContext(fn){callback=fn;if(initial)fn(initial);return()=>{callback=null;};},ready:()=>ready.promise,apiPost(endpoint,body){if(endpoint==='admin/credential-readiness')return Promise.resolve({ready:true,state:'ready',reason_code:'ready'});if(endpoint==='admin/credential-catalog')return Promise.resolve(credentialCatalog());if(endpoint==='admin/credential-status')return Promise.resolve(credentialStatus());const d=deferred(),call={endpoint,body,settled:false,promise:d.promise,resolve(value){this.settled=true;d.resolve(value);},reject(value){this.settled=true;d.reject(value);}};calls.push(call);return d.promise;}};
-  const app=createManagementPage(dom.window.document,bridge,dom.window);app.start();if(resolveReady)ready.resolve(initial||context);
+  const app=createManagementPage(dom.window.document,bridge,dom.window,options);app.start();if(resolveReady)ready.resolve(initial||context);
   return {dom,app,calls,ready,context(value){callback?.(value);},get document(){return dom.window.document;},close(){app.close();dom.window.close();}};
 }
 const pending=(f,endpoint)=>{const call=f.calls.find(c=>c.endpoint===`admin/${endpoint}`&&!c.settled);assert.ok(call,'pending '+endpoint);return call;};
@@ -27,6 +27,40 @@ const save=(f,target)=>f.document.querySelector(`section[data-owner="${target}"]
 const status=f=>f.document.getElementById('status').textContent;
 const click=(f,id)=>f.document.getElementById(id).click();
 const region='default_region',zone='ff14_calendar_default_timezone',days='ff14_calendar_default_days';
+
+test('semantic draft notifications cover edit/default/discard/save while initialization and theme stay silent',async()=>{
+ let edits=0,saved=0;const f=fixture(context,true,{onDraftMutation(){edits++;},onConfigurationSaved(){saved++;}});
+ try{
+  await load(f);assert.equal(edits,0);f.context({...context,isDark:true,locale:'en-US'});await flush();assert.equal(edits,0);
+  const node=input(f,zone);node.value='Europe/London';node.dispatchEvent(new f.dom.window.Event('input'));node.dispatchEvent(new f.dom.window.Event('change'));assert.equal(edits,1);
+  field(f,zone).querySelector('[data-action="default"]').click();assert.equal(edits,2);field(f,zone).querySelector('[data-action="default"]').click();assert.equal(edits,2);
+  f.document.querySelector('section[data-owner="ff14/ff14"] [data-action="discard"]').click();assert.equal(edits,3);
+  f.document.querySelector('section[data-owner="ff14/ff14"] [data-action="discard"]').click();assert.equal(edits,3);
+  field(f,zone).querySelector('[data-action="default"]').click();save(f,'ff14/ff14').click();pending(f,'update').resolve({module_id:'ff14/ff14',revision:2});await flush();assert.equal(saved,1);assert.equal(edits,4);await load(f,catalog(),snapshot(2));assert.equal(edits,5);assert.equal(f.app.dirty(),false);
+ }finally{f.close();}
+});
+
+test('validated ordinary ACK notifies before failed readback; conflict and stale ACK do not notify',async()=>{
+ for(const outcome of ['read-failure','conflict','stale','malformed']){
+  let saved=0;const f=fixture(context,true,{onConfigurationSaved(){saved++;}});
+  try{
+   await load(f);field(f,zone).querySelector('[data-action="default"]').click();save(f,'ff14/ff14').click();const update=pending(f,'update');
+   if(outcome==='conflict')update.reject(Error('revision_conflict'));
+   else if(outcome==='stale'){f.context({...context,session:'new'});update.resolve({module_id:'ff14/ff14',revision:2});}
+   else if(outcome==='malformed')update.resolve({module_id:'ff14/ff14',revision:1});
+   else{update.resolve({module_id:'ff14/ff14',revision:2});await flush();assert.equal(saved,1);pending(f,'catalog').reject(Error('controlled_read_failure'));}
+   await flush();assert.equal(saved,outcome==='read-failure'?1:0);
+  }finally{f.close();}
+ }
+});
+
+test('credential edits and successful secret clearing notify drafts without invalidating ordinary home state',async()=>{
+ let edits=0,saved=0;const f=fixture(context,true,{onDraftMutation(){edits++;},onConfigurationSaved(){saved++;}});
+ try{
+  await load(f);assert.equal(edits,0);const card=f.document.querySelector('[data-credential="credential_fflogs_cn"]'),select=card.querySelector('[data-role="credential-mode"]');select.value='clear';select.dispatchEvent(new f.dom.window.Event('change'));assert.equal(edits,1);
+  card.querySelector('[data-role="credential-clear-confirm"]').click();assert.equal(edits,2);card.querySelector('[data-action="credential-save"]').click();pending(f,'credential-update').resolve({module_id:'ff14/ff14',revision:2});await flush();await load(f,catalog(),snapshot(2));assert.equal(edits,3);assert.equal(saved,0);assert.equal(select.value,'keep');
+ }finally{f.close();}
+});
 
 test('ordinary current values edit directly; discard is local and hidden modes are not menus',async()=>{
  const f=fixture();try{await load(f);const node=input(f,zone),baseline=node.value,control=field(f,zone);assert.equal(control.querySelector('[data-role="mode"]').type,'hidden');assert.equal(node.disabled,false);node.value='Europe/London';node.dispatchEvent(new f.dom.window.Event('input'));assert.equal(control.querySelector('[data-role="mode"]').value,'replace');const writes=f.calls.filter(c=>c.endpoint==='admin/update').length;f.document.querySelector('section[data-owner="ff14/ff14"] [data-action="discard"]').click();await flush();assert.equal(node.value,baseline);assert.equal(control.querySelector('[data-role="mode"]').value,'keep');assert.equal(f.calls.filter(c=>c.endpoint==='admin/update').length,writes);}finally{f.close();}
