@@ -74,6 +74,7 @@ class OrdinaryAdminTests(unittest.IsolatedAsyncioTestCase):
             host_ingress_validator=lambda *_: False,
             config_principal_id="fixture",
             identity_namespace="fixture",
+            ordinary_config_resources={self.coretarget: {DEFAULT_REGION.name}, self.ff14target: {field.name for field in CALENDAR_CONFIG_FIELDS}},
             ordinary_migration_fields=self.fields,
             ordinary_migration_source=lambda: self.raw,
             module_config_validators={"ff14/ff14": CALENDAR_VALUE_VALIDATORS},

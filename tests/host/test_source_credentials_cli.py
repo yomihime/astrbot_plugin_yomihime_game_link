@@ -941,6 +941,59 @@ class SourceCredentialCliTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("set", completed.stdout)
         self.assertNotIn("client_secret", completed.stdout)
 
+    def test_both_official_clis_keep_exact_sdk_path_version_revision_pins(self):
+        code = r"""
+import importlib, sys
+from pathlib import Path
+root, module, mismatch = sys.argv[1:]
+sys.path.insert(0, root)
+import yomihime_sdk as sdk
+from yomihime_sdk.api import version
+if mismatch == 'version':
+    sdk.__version__ = version.CONTRACT_VERSION = '1.6.0'
+elif mismatch == 'revision':
+    version.CONTRACT_REVISION = 'R5-LLM-TOOLS'
+elif mismatch == 'path':
+    sdk.__file__ = str(Path(root).parent / 'foreign-sdk' / '__init__.py')
+elif mismatch == 'compatibility':
+    version.COMPATIBLE_CONTRACT_VERSIONS = version.COMPATIBLE_CONTRACT_VERSIONS[:-1]
+else:
+    raise AssertionError('unknown probe')
+try:
+    importlib.import_module(module)
+except RuntimeError as exc:
+    assert str(exc) == 'the pinned plugin-local SDK is unavailable'
+    print('EXACT_PIN_REJECTED')
+else:
+    raise AssertionError('unreviewed SDK was accepted')
+"""
+        for cli_name in ("admin_credentials", "configure_source_credentials"):
+            module = f"{ROOT.name}.scripts.{cli_name}"
+            with self.subTest(cli=cli_name, operation="help"):
+                help_result = subprocess.run(
+                    [sys.executable, "-m", module, "--help"],
+                    cwd=ROOT.parent,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                self.assertEqual(help_result.returncode, 0, help_result.stderr)
+                self.assertIn("usage:", help_result.stdout)
+            mismatches = ["version", "revision", "path"]
+            if cli_name == "admin_credentials":
+                mismatches.append("compatibility")
+            for mismatch in mismatches:
+                with self.subTest(cli=cli_name, mismatch=mismatch):
+                    result = subprocess.run(
+                        [sys.executable, "-c", code, str(ROOT), module, mismatch],
+                        cwd=ROOT.parent,
+                        capture_output=True,
+                        text=True,
+                        timeout=30,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertIn("EXACT_PIN_REJECTED", result.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

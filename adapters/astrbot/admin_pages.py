@@ -14,7 +14,6 @@ from ...api.services import (
     ConfigTarget,
 )
 from ...core.ports import RevisionConflict
-from ...infrastructure.key_provider import EnvironmentKeyProvider, SecretKeyUnavailable
 from ...infrastructure.secret_store import SecretStoreUnavailable
 from .runtime import PLUGIN_NAME
 from .web_admin import bounded_body, verified_dashboard_request
@@ -28,6 +27,10 @@ _OPERATIONS = {
     "credential-catalog": AdminOperation.READ_CONFIG,
     "credential-status": AdminOperation.READ_CONFIG,
     "credential-update": AdminOperation.UPDATE_CONFIG,
+    "credential-readiness": AdminOperation.READ_CONFIG,
+    "modules": AdminOperation.LIST_MODULES,
+    "module-enabled": AdminOperation.SET_ENABLED,
+    "module-unload": AdminOperation.UNLOAD_MODULE,
 }
 
 
@@ -94,10 +97,15 @@ class AdminPages:
                 concrete = request._get_current()
                 raw, subject, expiry = verified_dashboard_request(concrete, legacy)
                 credentials = endpoint.startswith("credential-")
-                core, source = self.runtime.management_entry(credentials=credentials)
+                modules = endpoint.startswith("module")
+                core, source = self.runtime.management_entry(
+                    credentials=credentials, modules=modules
+                )
                 resources = (
                     core.admin_operations.credential_resources()
                     if credentials
+                    else core.admin_operations.module_resources()
+                    if modules
                     else core.admin_operations.ordinary_resources()
                 )
                 alive = {"value": True}
@@ -105,7 +113,9 @@ class AdminPages:
                     subject=subject,
                     request=raw,
                     expiry=expiry,
-                    operations={_OPERATIONS[endpoint]},
+                    operations={_OPERATIONS[endpoint], AdminOperation.SET_ENABLED}
+                    if endpoint == "module-unload"
+                    else {_OPERATIONS[endpoint]},
                     resources=resources,
                     live=lambda actual: alive["value"]
                     and actual is raw
@@ -151,11 +161,7 @@ class AdminPages:
             except AdminAuthorizationDenied:
                 code, status = "admin_authorization_denied", 403
             except SecretStoreUnavailable:
-                code, status = "operation_unavailable", 503
-                try:
-                    EnvironmentKeyProvider("YGL_SECRET_KEY").get_key()
-                except SecretKeyUnavailable:
-                    code = "secret_encryption_unavailable"
+                code, status = "secret_encryption_unavailable", 503
             except (ValueError, TypeError):
                 code, status = "invalid_config", 400
             except Exception:
@@ -186,6 +192,42 @@ class AdminPages:
 
     async def _invoke(self, endpoint, core, data, context):
         ops = core.admin_operations
+        if endpoint in ("modules", "module-enabled", "module-unload"):
+            from dataclasses import asdict
+
+            if endpoint == "modules":
+                if data:
+                    raise ValueError("module list parameters must be empty")
+                snapshots = await ops.list_modules(None, authorization=context)
+                return {
+                    "registry_revision": core.registry.snapshot().revision,
+                    "modules": [asdict(item.status) for item in snapshots],
+                }
+            keys = {"module_id", "expected_registry_revision"}
+            if endpoint == "module-enabled":
+                keys.add("enabled")
+            if set(data) != keys:
+                raise ValueError("invalid module operation")
+            if endpoint == "module-unload":
+                return await ops.unload_module(
+                    None,
+                    data["module_id"],
+                    expected_registry_revision=data["expected_registry_revision"],
+                    authorization=context,
+                )
+            return asdict(
+                await ops.set_enabled(
+                    None,
+                    data["module_id"],
+                    data["enabled"],
+                    expected_registry_revision=data["expected_registry_revision"],
+                    authorization=context,
+                )
+            )
+        if endpoint == "credential-readiness":
+            if data:
+                raise ValueError("readiness parameters must be empty")
+            return await ops.credential_readiness(authorization=context)
         if endpoint in ("credential-catalog", "credential-status"):
             if data:
                 raise ValueError("credential read parameters must be empty")
@@ -208,18 +250,14 @@ class AdminPages:
             if (
                 set(data) != {"module_id", "expected_revision", "updates"}
                 or type(data["updates"]) is not list
-                or not 1 <= len(data["updates"]) <= 3
+                or not 1 <= len(data["updates"]) <= 128
             ):
                 raise ValueError("invalid update")
             resources = ops.ordinary_resources()
             target = ConfigTarget(ops.config_principal_id, data["module_id"])
             if target not in resources:
                 raise ValueError("invalid target")
-            declarations = tuple(
-                f.declaration
-                for f in ops._ordinary_migration.fields
-                if f.target == target
-            )
+            declarations = ops.ordinary_declarations(target)
             updates = []
             for update in data["updates"]:
                 if (

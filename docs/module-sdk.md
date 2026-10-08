@@ -7,9 +7,9 @@ a compatibility forwarding surface whose exported objects retain identity
 with the canonical declarations. The SDK does not import Core runtime
 implementations or AstrBot objects.
 
-The current artifact is `yomihime-module-sdk` version `1.6.0`, carrying contract
-`1.6.0` (`R5-LLM-TOOLS`) and compatible contract versions `1.0.0`, `1.1.0`,
-`1.2.0`, `1.3.0`, `1.4.0`, `1.5.0`, and `1.6.0`.
+The current artifact is `yomihime-module-sdk` version `1.7.0`, carrying contract
+`1.7.0` (`MODULE-LIFECYCLE-01`) and compatible contract versions `1.0.0`, `1.1.0`,
+`1.2.0`, `1.3.0`, `1.4.0`, `1.5.0`, `1.6.0`, and `1.7.0`.
 Extension declarations use manifest schema v1 and factory ABI v1. The declared
 minimum is Python 3.11 because the public API uses `StrEnum`. A local
 installed-wheel check proves the bundled SDK imports from the installed site
@@ -163,7 +163,7 @@ no runtime dependencies.
 
 The 2026-10-05 product decision replaces the universal independent-credential requirement. Core authorization is host independent: explicitly trusted authorities attest subjects, authentication sources, exact operations/resources, and live request lifetimes. Native Core credentials remain one source with their own durable ACTIVE/generation checks; a trusted Host source uses its own ownership/epoch/expiry and never fabricates a native key.
 
-In AstrBot deployment, the normal formally authenticated management user needs no second Core credential. The Adapter attests a server-owned request; JSON roles, page assets, ordinary API keys and public-query proofs cannot mint administrative grants. Core checks the bounded policy again before effects and inside configuration/rollback transactions. Only the four declared ordinary fields are opened; no lifecycle, secret, subscription or future-module permissions follow automatically.
+In AstrBot deployment, the normal formally authenticated management user needs no second Core credential. The Adapter attests a server-owned request; JSON roles, page assets, ordinary API keys and public-query proofs cannot mint administrative grants. Core checks the bounded policy again before effects and inside configuration/rollback transactions. Ordinary fields are opened only by the explicit reviewed deployment resource policy. Module declarations do not grant ordinary, credential, lifecycle, subscription or future-module permissions.
 
 SDK descriptive IDs and data classes are not authorization evidence. Tests must retain forged, wrong-source/resource, ended/expired/cancelled requests, transaction fencing, revision conflict and recovery rejection cases. Core standalone/test adapters require no AstrBot import or FF14/config-service changes. The exact contract and startup-failure boundaries are frozen in [host-management-authorization-contract.md](host-management-authorization-contract.md). Artifact/source pins must be rebuilt and statically updated for the final implementation; source presence does not claim runtime acceptance.
 
@@ -174,3 +174,29 @@ SDK descriptive IDs and data classes are not authorization evidence. Tests must 
 `ModuleManifest.pages` and `resources` default to empty tuples. `PageDescriptor(route_id, title, entry, order=0, access="public_web", capability_id=None, styles=())` references `PageResource(path, sha256)` declarations. These are trusted local relative assets with bounded reads and SHA-256 verification; public declarations grant no user authority. Lifecycle ACTIVE and the existing run identity fence callable page catalog entries. SDK 1.4.0 and older examples remain supported.
 
 Optional `ModuleServices.storage` contains read-only `ModuleStoragePaths` describing stable module ownership directories. Existing SQLite config, cache, secrets and records retain their shared transactions. Stop/uninstall never deletes these paths or records.
+
+
+### SDK 1.7 module lifecycle management
+
+SDK 1.7 adds `AdminOperation.UNLOAD_MODULE` and `AdminOperations.unload_module`.
+Previous 1.0 through 1.6 declarations, factories, single-capability public pages
+and invocation policies remain supported. Published 1.6 artifacts are unchanged.
+
+Deployment explicitly registers lifecycle resources as an exact `ConfigTarget`
+with the reserved policy marker `__module_lifecycle__`. This marker is never a
+configuration field and grants no ordinary or sensitive value access.
+`LIST_MODULES` is scoped to the deployment-approved owners. Unload requires both
+`UNLOAD_MODULE` and `SET_ENABLED` for its exact owner, disables and drains that
+instance before Registry detachment, and retains persistent configuration,
+secrets, cache and business data. Failed cleanup retains retryable ownership and
+blocks a replacement instance. A retained trusted candidate may be enabled again;
+the web shell must be reopened for a fresh Host resource projection.
+
+Ordinary configuration authority is injected through `ordinary_config_resources`,
+independently of migration fields. Config schema/group metadata alone never grants
+read/write access. Credential management uses a separate source. Its readiness
+preflight only probes the current injected codec in memory, never existing secret
+files or real key initialization. Readiness does not establish old-ciphertext
+compatibility or OAuth validity.
+
+The SET_ENABLED call signature and closed legacy 1.0-1.6 schemas remain compatible. A legacy Host proof with empty resources or without the exact lifecycle marker does not gain owner management authority. A lifecycle marker grant cannot read or modify ordinary or credential fields.

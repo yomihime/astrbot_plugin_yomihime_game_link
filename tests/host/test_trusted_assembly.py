@@ -32,7 +32,7 @@ class TrustedAssemblyTests(unittest.TestCase):
         self.assertIn("assembly.json", captured.files)
         for name in ("app.js", "index.html", "styles.css"):
             self.assertEqual(
-                captured.files[f"pages/legacy/{name}"],
+                captured.files[f"pages/compat/{name}"],
                 (ROOT / "pages/ff14" / name).read_bytes(),
             )
         before = captured.files["assembly.json"]

@@ -1281,24 +1281,10 @@ async def _require_public_fact_resources(
     registered IDs and scopes.
     """
 
-    max_nodes = 512
-    max_depth = 16
-    max_string_length = 4096
-    seen: set[str] = set()
-    pending: list[tuple[object, int]] = [(facts.facts, 0)]
-    pending.extend((source, 0) for source in facts.sources)
-    visited = 0
-    while pending:
-        value, depth = pending.pop()
-        visited += 1
-        if visited > max_nodes or depth > max_depth:
-            raise _OutputFailure("tool_facts_exceed_limits")
-        if isinstance(value, str):
-            if len(value) > max_string_length:
-                raise _OutputFailure("tool_facts_exceed_limits")
-            if value in seen:
-                continue
-            seen.add(value)
+    from ..core.public_result import public_fact_strings
+
+    try:
+        for value in public_fact_strings(facts):
             try:
                 is_private = await probe.contains_non_public_resource_reference(value)
             except Exception:
@@ -1307,11 +1293,8 @@ async def _require_public_fact_resources(
                 raise _OutputFailure("tool_resource_visibility_unavailable")
             if is_private:
                 raise _OutputFailure("tool_result_not_public")
-        elif isinstance(value, Mapping):
-            pending.extend((key, depth + 1) for key in value)
-            pending.extend((item, depth + 1) for item in value.values())
-        elif isinstance(value, (tuple, list)):
-            pending.extend((item, depth + 1) for item in value)
+    except ValueError:
+        raise _OutputFailure("tool_facts_exceed_limits") from None
 
 
 _ERROR_MESSAGES = {

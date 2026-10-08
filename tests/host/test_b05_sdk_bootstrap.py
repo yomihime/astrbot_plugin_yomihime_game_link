@@ -393,7 +393,7 @@ class SDKBootstrapTests(unittest.TestCase):
                 shutil.copyfile(ROOT / "pages" / page / relative, target)
         for name in ("app.js", "index.html", "styles.css"):
             shutil.copyfile(
-                repository / "modules/ff14/pages/legacy" / name,
+                repository / "modules/ff14/pages/compat" / name,
                 repository / "pages/ff14" / name,
             )
         runtime_file = repository / "core" / "snapshot.py"
@@ -470,13 +470,97 @@ class SDKBootstrapTests(unittest.TestCase):
             )
         self.assertFalse(incomplete_archive.exists())
 
-    def test_legacy_html_projects_current_independent_management_hint(self) -> None:
-        canonical = (ROOT / "modules/ff14/pages/legacy/index.html").read_bytes()
+    def test_legacy_html_projects_manual_host_reopening_locator(self) -> None:
+        from html.parser import HTMLParser
+
+        class LocatorHTML(HTMLParser):
+            def __init__(self) -> None:
+                super().__init__()
+                self.elements: list[tuple[str, dict[str, str | None]]] = []
+                self.heading: list[str] = []
+                self.guidance: list[str] = []
+                self.inline_script: list[str] = []
+                self.capture_tag: str | None = None
+                self.capture: list[str] | None = None
+
+            def handle_starttag(
+                self, tag: str, attrs: list[tuple[str, str | None]]
+            ) -> None:
+                attributes = dict(attrs)
+                self.elements.append((tag, attributes))
+                if tag in ("h1", "script") or "data-reopen-guidance" in attributes:
+                    self.capture_tag = tag
+                    if tag == "h1":
+                        self.capture = self.heading
+                    elif tag == "script":
+                        self.capture = self.inline_script
+                    else:
+                        self.capture = self.guidance
+
+            def handle_endtag(self, tag: str) -> None:
+                if tag == self.capture_tag:
+                    self.capture_tag = None
+                    self.capture = None
+
+            def handle_data(self, data: str) -> None:
+                if self.capture is not None:
+                    self.capture.append(data)
+
+        canonical = (ROOT / "modules/ff14/pages/compat/index.html").read_bytes()
         self.assertEqual((ROOT / "pages/ff14/index.html").read_bytes(), canonical)
         text = canonical.decode("utf-8")
-        self.assertIn("普通四字段和 FFLogs 来源凭据", text)
-        self.assertIn("插件管理中的独立授权配置页", text)
-        self.assertNotIn("FFLogs 凭据管理尚未接通", text)
+        locator = LocatorHTML()
+        locator.feed(text)
+        for term in ("FF14", "退役"):
+            self.assertIn(term, "".join(locator.heading))
+        for term in (
+            "插件",
+            "astrbot_plugin_yomihime_game_link",
+            "插件详情",
+            "重新打开",
+            "monitor",
+        ):
+            self.assertIn(term, "".join(locator.guidance))
+        for tag, attrs in locator.elements:
+            self.assertNotIn((attrs.get("target") or "").lower(), ("_top", "_parent"))
+            self.assertFalse(
+                tag == "meta" and (attrs.get("http-equiv") or "").lower() == "refresh"
+            )
+            self.assertNotIn(tag, ("a", "form", "iframe"))
+            self.assertFalse(any(name.startswith("on") for name in attrs))
+            if tag == "script":
+                self.assertEqual(attrs.get("src"), "./app.js")
+                self.assertEqual(attrs.get("type"), "module")
+            for attribute in ("href", "src"):
+                if attribute in attrs:
+                    self.assertIn(attrs[attribute], ("./styles.css", "./app.js"))
+        self.assertFalse("".join(locator.inline_script).strip())
+        script = (ROOT / "modules/ff14/pages/compat/app.js").read_text(encoding="utf-8")
+        self.assertEqual((ROOT / "pages/ff14/app.js").read_text(encoding="utf-8"), script)
+        # The retired locator is static guidance, not a second business entry point.
+        self.assertFalse(
+            [
+                line
+                for line in script.splitlines()
+                if line.strip() and not line.lstrip().startswith("//")
+            ]
+        )
+        for forbidden in (
+            "queries/",
+            "apiGet",
+            "apiPost",
+            "URLSearchParams",
+            "location.search",
+            "../00-game-link",
+            "?token=",
+            "?authorization=",
+            "fetch(",
+            "XMLHttpRequest",
+            "window.top",
+            "top.location",
+            "parent.location",
+        ):
+            self.assertNotIn(forbidden, text + script)
 
     def test_builder_rejects_modified_wheel_even_with_a_self_reported_digest(
         self,

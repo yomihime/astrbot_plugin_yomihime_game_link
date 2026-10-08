@@ -55,6 +55,20 @@ class ReviewedAssembly:
     def public_capabilities(self):
         return frozenset(self.public_bindings.values())
 
+    def ordinary_resources(self, principal_id):
+        """Reviewed executable policy, separate from migration/declaration metadata."""
+        names = frozenset(getattr(self.support, "ordinary_config_fields", ()))
+        if not names:
+            return {}
+        declared = {
+            f.name
+            for f in self.manifests[self.module_id].config_fields
+            if not f.sensitive
+        }
+        if not names <= declared:
+            raise ValueError("reviewed ordinary policy mismatches declaration")
+        return {ConfigTarget(principal_id, self.module_id): names}
+
 
 @dataclass(frozen=True, slots=True)
 class LegacyAssemblySupport:
@@ -65,17 +79,6 @@ class LegacyAssemblySupport:
     def ordinary_snapshot(self, _values, _defaults):
         return None
 
-    def page_state(self, *, runtime, registered, enabled, ordinary, gate, declared):
-        del declared
-        return {
-            "schema_version": 2,
-            "runtime": runtime,
-            "module": {"registered": registered, "enabled": enabled},
-            "ordinary_config": ordinary,
-            "credentials": {},
-            "subscription_gate": gate,
-            "sources": [],
-        }
 
 
 def _object(pairs):

@@ -61,6 +61,7 @@ from ygl_test_subject.services.admin_authorization import (
     _digest,
 )
 from ygl_test_subject.services.extension_runtime import (
+    ExtensionCandidateStale,
     ExtensionCleanupPending,
     ExtensionRuntime,
     ExtensionRuntimeError,
@@ -240,8 +241,9 @@ class _CloseBudgetClock:
         self.active = True
         # Frozen/explicit time has no early timer window. Keeping Windows'
         # 15.625ms resolution would fire the original 10ms timers before entry.
-        with patch.object(loop, "time", self.time), patch.object(
-            loop, "_clock_resolution", 0.0
+        with (
+            patch.object(loop, "time", self.time),
+            patch.object(loop, "_clock_resolution", 0.0),
         ):
             try:
                 yield self
@@ -410,6 +412,54 @@ class ExtensionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(runtime.closed)
         self.assertEqual(instance.stopped, 2)
         self.assertEqual(source.leases[0].release_calls, 1)
+
+    async def test_candidate_detach_does_not_build_and_restore_requires_exact_source(
+        self,
+    ):
+        runtime, candidate, source = await self._runtime()
+        runtime.scan()
+        async with self.lifecycle.admission.mutation("test-candidate-detach"):
+            await runtime.prepare_detach("sample/mod")
+            runtime.detached("sample/mod")
+        self.assertEqual((source.capture_calls, source.factory.create_calls), (0, 0))
+        self.assertEqual(dict(self.registry.snapshot().modules), {})
+        self.assertIs(runtime._detached_candidates["sample/mod"], candidate)
+        self.assertEqual(runtime.owner_generation("sample/mod"), 1)
+        runtime.detached("sample/mod")
+        self.assertEqual(runtime.owner_generation("sample/mod"), 1)
+        runtime._catalog["sample"] = replace(candidate)
+        with self.assertRaises(ExtensionCandidateStale):
+            await self._enable(runtime, 0)
+        self.assertEqual(source.capture_calls, 0)
+        runtime._catalog["sample"] = candidate
+        await self._enable(runtime, 0)
+        self.assertTrue(self.registry.is_active("sample/mod"))
+        self.assertEqual(runtime.owner_generation("sample/mod"), 1)
+        self.assertIs(source.candidates[0], candidate)
+
+    async def test_candidate_cleanup_pending_blocks_restore_until_retry(self):
+        runtime, _candidate, source = await self._runtime()
+        runtime.scan()
+        services = runtime.module_services
+        retire = type(services).retire_module_credentials
+
+        async def fail_cleanup(_services, *_args, **_kwargs):
+            raise RuntimeError("injected cleanup failure")
+
+        with patch.object(type(services), "retire_module_credentials", fail_cleanup):
+            async with self.lifecycle.admission.mutation("test-candidate-detach"):
+                with self.assertRaises(RuntimeError):
+                    await runtime.prepare_detach("sample/mod")
+        with self.assertRaises(ExtensionCleanupPending):
+            await self._enable(runtime, 0)
+        self.assertEqual((source.capture_calls, source.factory.create_calls), (0, 0))
+        self.assertNotIn("sample/mod", runtime.unloaded_owners)
+        self.assertIs(type(services).retire_module_credentials, retire)
+        async with self.lifecycle.admission.mutation("test-candidate-detach-retry"):
+            await runtime.prepare_detach("sample/mod")
+            runtime.detached("sample/mod")
+        await self._enable(runtime, 0)
+        self.assertTrue(self.registry.is_active("sample/mod"))
 
     async def test_concurrent_same_direction_requests_join_one_build_and_start(self):
         factory = _Factory(block_create=True)
@@ -828,10 +878,12 @@ class ExtensionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         second_authorizations = 0
         second_authorized = asyncio.Event()
 
-        async def observe_second_authorization(operation, *, invocation, context):
+        async def observe_second_authorization(
+            operation, *, invocation, context, resources=None
+        ):
             nonlocal second_authorizations
             grant = await original_authorize(
-                operation, invocation=invocation, context=context
+                operation, invocation=invocation, context=context, resources=resources
             )
             if context is second_context:
                 second_authorizations += 1
@@ -1055,9 +1107,12 @@ class ExtensionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         return runtime, source, sibling, factory.instances[2]
 
     async def test_close_deadline_bounds_retained_repair_candidate_and_retry(self):
-        runtime, source, sibling, repair_candidate = (
-            await self._retained_repair_candidate()
-        )
+        (
+            runtime,
+            source,
+            sibling,
+            repair_candidate,
+        ) = await self._retained_repair_candidate()
         close_clock = _CloseBudgetClock()
         repair_entered = asyncio.Event()
         repair_cancelled = asyncio.Event()
@@ -1197,9 +1252,12 @@ class ExtensionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([instance.stopped for instance in factory.instances], [2, 2])
 
     async def test_close_exhausted_budget_retains_repair_candidate_before_stop(self):
-        runtime, source, sibling, repair_candidate = (
-            await self._retained_repair_candidate()
-        )
+        (
+            runtime,
+            source,
+            sibling,
+            repair_candidate,
+        ) = await self._retained_repair_candidate()
         repair_id, flight = next(iter(runtime._repair_flights.items()))
         key = ("sample", "sample/other", repair_id)
         record = self.lifecycle._candidates[key][0]
@@ -1215,8 +1273,9 @@ class ExtensionRuntimeTests(unittest.IsolatedAsyncioTestCase):
             close_clock.advance(0.011)
             return await discard(selected, deadline=deadline)
 
-        with close_clock.control(), patch.object(
-            runtime, "_discard_flight_candidates", exhaust_before_cleanup
+        with (
+            close_clock.control(),
+            patch.object(runtime, "_discard_flight_candidates", exhaust_before_cleanup),
         ):
             with self.assertRaises(ExtensionCleanupPending):
                 await runtime.close(timeout=0.01)
@@ -1268,8 +1327,9 @@ class ExtensionRuntimeTests(unittest.IsolatedAsyncioTestCase):
             close_clock.advance(0.011)
             return await discard(selected, deadline=deadline)
 
-        with close_clock.control(), patch.object(
-            runtime, "_discard_flight_candidates", exhaust_before_cleanup
+        with (
+            close_clock.control(),
+            patch.object(runtime, "_discard_flight_candidates", exhaust_before_cleanup),
         ):
             with self.assertRaises(ExtensionCleanupPending):
                 await runtime.close(timeout=0.01)

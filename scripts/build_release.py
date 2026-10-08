@@ -177,7 +177,7 @@ def build_release(
         Path(output_dir) if output_dir is not None else repository_root / "dist"
     )
     zip_name = f"{plugin_name}-{metadata_version}.zip"
-    wheel_name = "yomihime_module_sdk-1.6.0-py3-none-any.whl"
+    wheel_name = "yomihime_module_sdk-1.7.0-py3-none-any.whl"
 
     with tempfile.TemporaryDirectory(prefix="yomihime-release-build-") as temporary:
         work_root = Path(temporary)

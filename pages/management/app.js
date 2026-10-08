@@ -1,14 +1,14 @@
 import { createApp as e, defineComponent as t, h as n, nextTick as r, shallowRef as i } from "./runtime.js";
 import { NAlert as a, NCard as o, NConfigProvider as s, darkTheme as c, dateEnUS as l, dateZhCN as u, enUS as d, zhCN as f } from "./runtime.js";
 //#region src/management-view.ts
-function p(r) {
-	let p = i([]), m = i({}), h = () => {}, g = i([]), _ = i(""), v = (e, t) => n("button", {
+function p(r, p = r.getElementById("management-root")) {
+	let m = i([]), h = i({}), g = () => {}, _ = i([]), v = i(""), y = i(null), b = (e, t) => n("button", {
 		id: e,
 		type: "button",
 		disabled: !0
-	}, t), y = t({ setup() {
+	}, t), x = t({ setup() {
 		return () => {
-			let e = m.value.isDark === !0 || m.value.theme === "dark", t = String(m.value.locale || "").startsWith("en");
+			let e = h.value.isDark === !0 || h.value.theme === "dark", t = String(h.value.locale || "").startsWith("en");
 			return n(s, {
 				theme: e ? c : null,
 				locale: t ? d : f,
@@ -17,7 +17,7 @@ function p(r) {
 			}, { default: () => n("main", { class: "management" }, [
 				n("p", { class: "brand" }, "如月怜的游戏连结"),
 				n("h1", "配置目录与管理"),
-				n("p", "目录来自可信 Core 与模块声明。普通四字段与来源凭据分别限定授权；字段注册不授予存量读取或修改权限，写操作仍由后端逐请求鉴权。"),
+				n("p", "目录来自可信 Core 与模块声明。普通配置与来源凭据分别限定授权；字段注册不授予存量读取或修改权限，写操作仍由后端逐请求鉴权。"),
 				n("p", "保存只修改所选配置。客户端检查用于辅助输入，模块语义校验与配置版本以服务端为准。启动失败时，修复后需单独点击恢复运行。"),
 				n(a, {
 					type: "info",
@@ -27,67 +27,72 @@ function p(r) {
 					role: "status",
 					"aria-live": "polite"
 				}, "正在连接宿主管理页面。") }),
-				v("refresh", "刷新配置与版本"),
+				b("refresh", "刷新配置与版本"),
 				n("section", {
 					id: "fields",
 					"aria-label": "普通配置"
-				}, p.value.map((e) => n("section", {
+				}, m.value.map((e) => n("section", {
 					class: "card",
 					key: e.target,
-					"data-owner": e.target
+					"data-owner": e.target,
+					hidden: y.value !== null && y.value !== e.target
 				}, [n(o, { title: e.target }, { default: () => [
 					n("p", e.revision),
-					n("div", e.controls.map((e) => {
-						let t = e.field, r = t.value_schema, i = `config-${encodeURIComponent(t.module_id)}-${encodeURIComponent(t.name)}`, a = r?.enum || (r?.type === "boolean" ? [!1, !0] : null);
+					n("div", e.controls.map((t, r) => {
+						let i = t.field, a = i.value_schema, o = `config-${encodeURIComponent(i.module_id)}-${encodeURIComponent(i.name)}`, s = a?.enum || (a?.type === "boolean" ? [!1, !0] : null);
 						return n("div", {
 							class: "config-field",
-							key: e.signature,
-							"data-field": t.name,
-							"data-owner": t.module_id
+							key: t.signature,
+							"data-field": i.name,
+							"data-owner": i.module_id
 						}, [
-							n("label", { for: i }, t.description || t.name),
+							r === 0 || i.group !== e.controls[r - 1].field.group ? n("h3", {
+								class: "config-group",
+								"data-group": i.group || "general"
+							}, i.group || "常规") : null,
+							n("label", { for: o }, i.description || i.name),
 							n("p", {
 								class: "field-detail",
-								id: i + "-detail"
-							}, e.detail),
+								id: o + "-detail"
+							}, t.detail),
 							n("select", {
 								"data-role": "mode",
-								"aria-label": `${t.description || t.name}修改方式`,
-								ref: (t) => {
-									e.mode = t;
+								"aria-label": `${i.description || i.name}修改方式`,
+								ref: (e) => {
+									t.mode = e;
 								},
 								onChange: () => {
-									e.draftVersion++, h();
+									t.draftVersion++, g();
 								}
 							}, [
 								["keep", "保持"],
 								["replace", "替换 / 修复"],
 								["clear", "清除显式值"]
 							].map(([e, t]) => n("option", { value: e }, t))),
-							n(a ? "select" : "input", {
-								id: i,
+							n(s ? "select" : "input", {
+								id: o,
 								"data-role": "value",
-								"aria-describedby": i + "-detail",
+								"aria-describedby": o + "-detail",
 								onInput: () => {
-									e.draftVersion++;
+									t.draftVersion++;
 								},
 								onChange: () => {
-									e.draftVersion++;
+									t.draftVersion++;
 								},
-								ref: (t) => {
-									e.input = t;
+								ref: (e) => {
+									t.input = e;
 								},
-								...a ? {} : {
-									type: ["integer", "number"].includes(r?.type || "") ? "number" : "text",
-									min: r?.minimum,
-									max: r?.maximum,
-									step: r?.type === "integer" ? "1" : "any",
-									maxlength: r?.maxLength
+								...s ? {} : {
+									type: ["integer", "number"].includes(a?.type || "") ? "number" : "text",
+									min: a?.minimum,
+									max: a?.maximum,
+									step: a?.type === "integer" ? "1" : "any",
+									maxlength: a?.maxLength
 								}
-							}, a ? [n("option", {
+							}, s ? [n("option", {
 								value: "",
 								disabled: !0
-							}, "请选择有效值"), ...a.map((e, t) => n("option", { value: String(t) }, String(e)))] : void 0)
+							}, "请选择有效值"), ...s.map((e, t) => n("option", { value: String(t) }, String(e)))] : void 0)
 						]);
 					})),
 					n("button", {
@@ -104,11 +109,11 @@ function p(r) {
 					id: "credential-status",
 					role: "status",
 					"aria-live": "polite"
-				}, _.value),
+				}, v.value),
 				n("section", {
 					id: "credentials",
 					"aria-label": "来源凭据"
-				}, g.value.map((e) => {
+				}, _.value.map((e) => {
 					let t = `credential-${encodeURIComponent(e.field.module_id)}-${encodeURIComponent(e.field.name)}`, r = () => {
 						e.draftVersion++;
 					};
@@ -117,10 +122,11 @@ function p(r) {
 						key: e.signature,
 						title: e.field.description,
 						"data-credential": e.field.name,
-						"data-owner": e.field.module_id
+						"data-owner": e.field.module_id,
+						hidden: y.value !== null && y.value !== e.field.module_id
 					}, { default: () => [
 						n("p", `${e.field.module_id} · ${e.detail}`),
-						n("p", "只显示保存状态，不回读 Client ID / Client Secret。保存不代表 FFLogs 可连通；公开查询请从 FF14 查询页手动发起。"),
+						n("p", "只显示保存状态，不回读 Client ID / Client Secret。保存不代表上游可连通；业务查询请从所属模块页面手动发起。"),
 						n("label", { for: t + "-mode" }, "本次操作"),
 						n("select", {
 							id: t + "-mode",
@@ -129,7 +135,7 @@ function p(r) {
 								e.mode = t;
 							},
 							onChange: () => {
-								r(), e.mode?.value !== "replace" && (e.clientId && (e.clientId.value = ""), e.clientSecret && (e.clientSecret.value = "")), e.confirm && (e.confirm.checked = !1), h();
+								r(), e.mode?.value !== "replace" && (e.clientId && (e.clientId.value = ""), e.clientSecret && (e.clientSecret.value = "")), e.confirm && (e.confirm.checked = !1), g();
 							}
 						}, [
 							["keep", "保持（不写入）"],
@@ -167,33 +173,36 @@ function p(r) {
 						}, "提交本组操作")
 					] });
 				})),
-				n(o, {
+				n("details", { class: "advanced-maintenance" }, [n("summary", "高级维护与启动修复"), n(o, {
 					class: "card",
 					title: "限定恢复"
 				}, { default: () => [
-					n("p", "回退仅处理本次四字段迁移；配置发生后续修改时会拒绝回退。订阅等其它数据继续保留。"),
-					v("rollback", "回退四字段迁移"),
+					n("p", "回退仅处理受审普通配置迁移；配置发生后续修改时会拒绝回退。订阅等其它数据继续保留。"),
+					b("rollback", "回退受审迁移"),
 					n("p", n("label", [n("input", {
 						id: "replacement",
 						type: "checkbox"
-					}), "以四个已显式保存的有效新值完成恢复（缺少旧准备材料时）"])),
-					v("recover", "重新校验并恢复运行")
-				] })
+					}), "以全部迁移字段已显式保存的有效新值完成恢复（缺少旧准备材料时）"])),
+					b("recover", "重新校验并恢复运行")
+				] })])
 			]) });
 		};
-	} }), b = e(y);
-	return b.mount(r.getElementById("management-root")), {
+	} }), S = e(x);
+	return S.mount(p), {
+		owner(e) {
+			y.value = e;
+		},
 		fields(e, t) {
-			h = t, p.value = e;
+			g = t, m.value = e;
 		},
 		credentials(e, t, n = "") {
-			h = t, g.value = e, _.value = n;
+			g = t, _.value = e, v.value = n;
 		},
 		context(e) {
-			m.value = e || {};
+			h.value = e || {};
 		},
 		dispose() {
-			b.unmount();
+			S.unmount();
 		}
 	};
 }
@@ -415,49 +424,56 @@ var M = /* @__PURE__ */ new Set([
 	"displayName",
 	"pageTitle"
 ]);
-function N(e) {
-	(!m(e) || !Object.hasOwn(e, "pluginName") || !Object.hasOwn(e, "pageName") || e.pluginName !== "astrbot_plugin_yomihime_game_link" || e.pageName !== "management") && _("invalid_context");
-	let t = Object.fromEntries(Object.entries(e).filter(([e]) => !M.has(e)));
-	x(t);
-	let n = (e) => {
-		if (typeof e == "number" && Object.is(e, -0) && _("invalid_context"), e && typeof e == "object") for (let t of Object.values(e)) n(t);
+function N(e, t) {
+	(!m(e) || !Object.hasOwn(e, "pluginName") || !Object.hasOwn(e, "pageName") || e.pluginName !== "astrbot_plugin_yomihime_game_link" || e.pageName !== t) && _("invalid_context");
+	let n = Object.fromEntries(Object.entries(e).filter(([e]) => !M.has(e)));
+	x(n);
+	let r = (e) => {
+		if (typeof e == "number" && Object.is(e, -0) && _("invalid_context"), e && typeof e == "object") for (let t of Object.values(e)) r(t);
 	};
-	n(t);
-	let r = (e) => Array.isArray(e) ? e.map(r) : m(e) ? Object.fromEntries(Object.keys(e).sort().map((t) => [t, r(e[t])])) : e;
-	return JSON.stringify(r(t));
+	r(n);
+	let i = (e) => Array.isArray(e) ? e.map(i) : m(e) ? Object.fromEntries(Object.keys(e).sort().map((t) => [t, i(e[t])])) : e;
+	return JSON.stringify(i(n));
 }
-function P(e, t, n) {
-	let i = null, a = null, o = null, s = null, c = !1, l = !1, u = !0, d = 0, f = null, m = !1, g = null, b = null, x = p(e), S = /* @__PURE__ */ new Map(), C = /* @__PURE__ */ new Map(), D = e.getElementById("status"), M = /* @__PURE__ */ new Map(), P = (e) => !l && c && d === e, F = (e) => e.readable && e.editable && E(e), I = (e) => e.disabled || e.getAttribute("aria-disabled") === "true";
-	function L(t, n) {
-		t.setAttribute("aria-disabled", String(n)), t.disabled = n && (l || !c || e.activeElement !== t);
+function P(e, t, n, { expectedPage: i = "management", container: a = e.getElementById("management-root") } = {}) {
+	a || _("invalid_container");
+	let o = (e) => Array.from(a.querySelectorAll("[id]")).find((t) => t.id === e) || null, s = null, c = null, l = null, u = null, d = !1, f = !1, m = !0, g = 0, b = null, x = !1, S = null, C = null, D = p(e, a), M = /* @__PURE__ */ new Map(), P = /* @__PURE__ */ new Map(), F = o("status"), I = /* @__PURE__ */ new Map(), L = !1, R = null, z = null, B = (e) => !f && d && g === e, V = (e) => e.readable && e.editable && E(e), H = (e) => e.disabled || e.getAttribute("aria-disabled") === "true";
+	function U(t, n) {
+		t.setAttribute("aria-disabled", String(n)), t.disabled = n && (f || !d || e.activeElement !== t);
 	}
-	function R() {
-		L(e.getElementById("refresh"), l || !c || b !== null);
-		let t = !l && c && !u && a !== null && Object.keys(a).length > 0 && b === null;
-		L(e.getElementById("rollback"), !t), L(e.getElementById("recover"), !t || i.fields.some((e) => e.readable && !e.editable)), e.getElementById("replacement").disabled = I(e.getElementById("recover"));
-		for (let [e, n] of S) L(n.save, !t || !i || !y(i, e).some(F));
-		for (let e of C.values()) {
-			let t = !l && c && F(e.field);
+	function W() {
+		U(o("refresh"), f || !d || C !== null);
+		let e = !f && d && !m && c !== null && Object.keys(c).length > 0 && C === null;
+		U(o("rollback"), !e), U(o("recover"), !e || s.fields.some((e) => e.readable && !e.editable)), o("replacement").disabled = H(o("recover"));
+		for (let [t, n] of M) U(n.save, !e || !s || !y(s, t).some(V));
+		for (let e of P.values()) {
+			let t = !f && d && V(e.field);
 			e.mode.disabled = !t, e.input.disabled = !t || e.mode.value !== "replace";
 		}
-		for (let e of M.values()) {
-			let t = !l && c && s !== null && o !== null && o.fields.some((t) => v(t) === v(e.field) && JSON.stringify(t) === e.signature);
-			e.save && L(e.save, !t || u || b !== null), e.mode && (e.mode.disabled = !t);
-			for (let n of [e.clientId, e.clientSecret]) n && (n.disabled = !t || e.mode?.value !== "replace");
+		for (let e of I.values()) {
+			let t = !f && d && (z === null || z === e.field.module_id) && u !== null && l !== null && l.fields.some((t) => v(t) === v(e.field) && JSON.stringify(t) === e.signature);
+			e.save && U(e.save, !t || m || C !== null || e.mode?.value === "replace" && !L), e.mode && (e.mode.disabled = !t);
+			let n = e.mode?.querySelector("option[value=\"replace\"]");
+			n && (n.disabled = !t || !L);
+			for (let n of [e.clientId, e.clientSecret]) n && (n.disabled = !t || !L || e.mode?.value !== "replace");
 			e.confirm && (e.confirm.disabled = !t || e.mode?.value !== "clear");
 		}
 	}
-	async function z(e, n, r) {
-		P(r) || _("stale_context");
+	async function G(e, n, r) {
+		B(r) || _("stale_context");
 		let i = await t.apiPost(`admin/${e}`, n);
-		return P(r) || _("stale_context"), e === "catalog" ? w(i) : e === "read" ? i : e === "credential-catalog" ? k(i) : ((e === "update" || e === "credential-update") && (!h(i, ["module_id", "revision"]) || i.module_id !== n.module_id || !Number.isSafeInteger(i.revision) || i.revision <= n.expected_revision) && _("operation_unavailable"), e === "rollback" && (!h(i, ["rolled_back"]) || i.rolled_back !== !0) && _("operation_unavailable"), e === "recover" && (!h(i, ["recovered"]) || i.recovered !== !0) && _("operation_unavailable"), i);
+		return B(r) || _("stale_context"), e === "catalog" ? w(i) : e === "read" ? i : e === "credential-catalog" ? k(i) : e === "credential-readiness" ? ((!h(i, [
+			"ready",
+			"state",
+			"reason_code"
+		]) || typeof i.ready != "boolean" || !["ready", "unavailable"].includes(i.state) || i.state === "ready" !== i.ready || !["ready", "secret_encryption_unavailable"].includes(i.reason_code)) && _("operation_unavailable"), i) : ((e === "update" || e === "credential-update") && (!h(i, ["module_id", "revision"]) || i.module_id !== n.module_id || !Number.isSafeInteger(i.revision) || i.revision <= n.expected_revision) && _("operation_unavailable"), e === "rollback" && (!h(i, ["rolled_back"]) || i.rolled_back !== !0) && _("operation_unavailable"), e === "recover" && (!h(i, ["recovered"]) || i.recovered !== !0) && _("operation_unavailable"), i);
 	}
-	function B(e, t) {
+	function K(e, t) {
 		if (t === null) return "";
 		let n = e.value_schema?.enum || (e.value_schema?.type === "boolean" ? [!1, !0] : null);
 		return String(n ? n.findIndex((e) => e === t) : t);
 	}
-	function V(e) {
+	function q(e) {
 		return {
 			field: e,
 			signature: JSON.stringify(e),
@@ -467,51 +483,51 @@ function P(e, t, n) {
 			input: null
 		};
 	}
-	function H(e) {
-		let t = S.get(e).save;
-		I(t) || J(async (t) => {
-			let n = Object.fromEntries(y(i, e).map((e) => {
-				let t = C.get(v(e));
+	function ee(e) {
+		let t = M.get(e).save;
+		H(t) || X(async (t) => {
+			let n = Object.fromEntries(y(s, e).map((e) => {
+				let t = P.get(v(e));
 				return [e.name, {
 					mode: t.mode.value,
 					value: t.input.value,
 					draftVersion: t.draftVersion
 				}];
 			}));
-			await z("update", O(e, a[e].revision, n, i), t), await q(t);
+			await G("update", O(e, c[e].revision, n, s), t), await Y(t);
 			for (let [t, r] of Object.entries(n)) {
 				if (r.mode === "keep") continue;
-				let n = C.get(JSON.stringify([e, t])), i = a[e]?.fields[t];
-				n && i && n.draftVersion === r.draftVersion && n.mode.value === r.mode && n.input.value === r.value && (n.mode.value = "keep", n.input.value = B(n.field, i.value));
+				let n = P.get(JSON.stringify([e, t])), i = c[e]?.fields[t];
+				n && i && n.draftVersion === r.draftVersion && n.mode.value === r.mode && n.input.value === r.value && (n.mode.value = "keep", n.input.value = K(n.field, i.value));
 			}
-			D.textContent = "配置已保存；需要恢复时请单独执行恢复运行。";
+			F.textContent = "配置已保存；需要恢复时请单独执行恢复运行。";
 		});
 	}
-	function U() {
-		for (let e of M.values()) {
+	function J() {
+		for (let e of I.values()) {
 			for (let t of [e.clientId, e.clientSecret]) t && (t.value = "");
 			e.confirm && (e.confirm.checked = !1), e.mode && (e.mode.value = "keep"), e.draftVersion++;
 		}
 	}
-	function W(e) {
-		I(e.save) || J(async (t) => {
+	function te(e) {
+		H(e.save) || e.mode.value === "replace" && !L || X(async (t) => {
 			let n = e.mode.value;
 			n === "keep" && _("select_changes"), n === "clear" && !e.confirm.checked && _("confirm_clear");
 			let r = e.draftVersion, i = {
 				client_id: e.clientId.value,
 				client_secret: e.clientSecret.value
 			};
-			await z("credential-update", j(e.field.module_id, s[e.field.module_id].revision, e.field.name, n, i, o), t), await q(t), e.draftVersion === r && e.mode.value === n && e.clientId.value === i.client_id && e.clientSecret.value === i.client_secret && (e.clientId.value = "", e.clientSecret.value = "", e.mode.value = "keep", e.confirm.checked = !1), R(), D.textContent = n === "clear" ? "已清除所选来源凭据；公开查询需要重新配置该组凭据。" : "来源凭据已加密保存；尚未验证 FFLogs 上游。";
+			await G("credential-update", j(e.field.module_id, u[e.field.module_id].revision, e.field.name, n, i, l), t), await Y(t), e.draftVersion === r && e.mode.value === n && e.clientId.value === i.client_id && e.clientSecret.value === i.client_secret && (e.clientId.value = "", e.clientSecret.value = "", e.mode.value = "keep", e.confirm.checked = !1), W(), F.textContent = n === "clear" ? "已清除所选来源凭据；业务查询需要重新配置该组凭据。" : "来源凭据已加密保存；尚未验证所属上游。";
 		});
 	}
-	async function G() {
-		let e = new Set(o.fields.map(v));
-		for (let [t, n] of M) if (!e.has(t)) {
+	async function ne() {
+		let e = new Set(l.fields.map(v));
+		for (let [t, n] of I) if (!e.has(t)) {
 			for (let e of [n.clientId, n.clientSecret]) e && (e.value = "");
-			M.delete(t);
+			I.delete(t);
 		}
-		for (let e of o.fields) {
-			let t = v(e), n = JSON.stringify(e), r = M.get(t);
+		for (let e of l.fields) {
+			let t = v(e), n = JSON.stringify(e), r = I.get(t);
 			if (!r || r.signature !== n) {
 				if (r) for (let e of [r.clientId, r.clientSecret]) e && (e.value = "");
 				r = {
@@ -525,123 +541,159 @@ function P(e, t, n) {
 					save: null,
 					detail: "",
 					onSave: null
-				}, r.onSave = () => W(r), M.set(t, r);
+				}, r.onSave = () => te(r), I.set(t, r);
 			}
-			let i = s[e.module_id].fields[e.name];
-			r.detail = (i === "unset" ? "未配置" : i === "configured" ? "已保存 · 尚未验证上游" : "已配置但暂不可用") + ` · 配置版本：${s[e.module_id].revision}`;
+			let i = u[e.module_id].fields[e.name];
+			r.detail = (i === "unset" ? "未配置" : i === "configured" ? "已保存 · 尚未验证上游" : "已配置但暂不可用") + ` · 配置版本：${u[e.module_id].revision}`;
 		}
-		x.credentials([...M.values()], R), await r(), R();
+		D.credentials([...I.values()], W), await r(), W();
 	}
-	async function K() {
-		let e = [...new Set(i.fields.map((e) => e.module_id))], t = new Set(i.fields.map(v));
-		for (let e of C.keys()) t.has(e) || C.delete(e);
-		for (let t of S.keys()) e.includes(t) || S.delete(t);
+	async function re() {
+		let e = [...new Set(s.fields.map((e) => e.module_id))], t = new Set(s.fields.map(v));
+		for (let e of P.keys()) t.has(e) || P.delete(e);
+		for (let t of M.keys()) e.includes(t) || M.delete(t);
 		let n = [];
 		for (let t of e) {
-			let e = S.get(t);
+			let e = M.get(t);
 			e || (e = {
 				target: t,
 				revision: "",
 				controls: [],
 				save: null,
-				onSave: () => H(t)
-			}, S.set(t, e)), e.revision = a[t] ? `配置版本：${a[t].revision}` : "仅声明目录；未读取该模块存量值。", e.controls = [];
-			for (let r of y(i, t)) {
-				let i = v(r), o = JSON.stringify(r), s = C.get(i);
-				(!s || s.signature !== o) && (s = V(r), C.set(i, s));
-				let c = r.readable ? a[t].fields[r.name] : null, l = [
+				onSave: () => ee(t)
+			}, M.set(t, e)), e.revision = c[t] ? `配置版本：${c[t].revision}` : "仅声明目录；未读取该模块存量值。", e.controls = [];
+			for (let r of y(s, t)) {
+				let i = v(r), a = JSON.stringify(r), o = P.get(i);
+				(!o || o.signature !== a) && (o = q(r), P.set(i, o));
+				let s = r.readable ? c[t].fields[r.name] : null, l = [
 					`字段：${r.name}`,
 					r.group ? `分组：${r.group}` : "未分组",
 					r.required ? "必需配置" : "可选配置",
 					`声明默认值：${JSON.stringify(r.default)}`
 				];
-				c ? l.push(c.state === "valid" ? "有效" : "无效存量，原值不显示", c.present ? "已有显式值" : "未设置", c.source === "sqlite" ? "Core 配置" : "默认值") : l.push("无存量读取与修改授权"), r.blocked_reason === "semantic_validator_unavailable" && l.push("模块语义校验器不可用，禁止修改与清除"), E(r) || l.push("此 schema 暂不支持编辑，仅显示声明与已授权值"), s.detail = l.join(" · "), E(r) ? (!s.mode || s.mode.value === "keep") && n.push([
-					s,
-					c ? B(r, c.value) : "",
-					s.mode?.value,
-					s.input?.value,
-					s.draftVersion
+				s ? l.push(s.state === "valid" ? "有效" : "无效存量，原值不显示", s.present ? "已有显式值" : "未设置", s.source === "sqlite" ? "Core 配置" : "默认值") : l.push("无存量读取与修改授权"), r.blocked_reason === "semantic_validator_unavailable" && l.push("模块语义校验器不可用，禁止修改与清除"), E(r) || l.push("此 schema 暂不支持编辑，仅显示声明与已授权值"), o.detail = l.join(" · "), E(r) ? (!o.mode || o.mode.value === "keep") && n.push([
+					o,
+					s ? K(r, s.value) : "",
+					o.mode?.value,
+					o.input?.value,
+					o.draftVersion
 				]) : n.push([
-					s,
-					c?.state === "valid" ? JSON.stringify(c.value) : "",
-					s.mode?.value,
-					s.input?.value,
-					s.draftVersion
-				]), e.controls.push(s);
+					o,
+					s?.state === "valid" ? JSON.stringify(s.value) : "",
+					o.mode?.value,
+					o.input?.value,
+					o.draftVersion
+				]), e.controls.push(o);
 			}
 		}
-		x.fields([...S.values()], R), await r();
+		for (let e of M.values()) e.controls.sort((e, t) => (e.field.group || "").localeCompare(t.field.group || ""));
+		D.fields([...M.values()], W), await r();
 		for (let [e, t, r, i, a] of n) e.input && e.draftVersion === a && (r === void 0 || e.mode.value === r && e.input.value === i) && (e.input.value = t);
-		R();
+		W();
 	}
-	async function q(e) {
-		u = !0, R();
-		let t = await z("catalog", {}, e), n = T(await z("read", {}, e), t);
-		P(e) || _("stale_context"), i = t, a = n;
-		let r = "";
+	async function Y(e) {
+		m = !0, W();
+		let t = await G("catalog", {}, e), n = T(await G("read", {}, e), t);
+		B(e) || _("stale_context"), s = t, c = n;
+		let i = "";
 		try {
-			let t = await z("credential-catalog", {}, e), n = A(await z("credential-status", {}, e), t);
-			P(e) || _("stale_context"), o = t, s = n;
+			let t = await G("credential-catalog", {}, e), n = A(await G("credential-status", {}, e), t);
+			B(e) || _("stale_context"), l = t, u = n, L = !1;
+			try {
+				L = (await G("credential-readiness", {}, e)).ready, i = L ? "加密设施预检已通过；旧密文与上游授权尚未验证。" : "加密设施未就绪：禁止填写和替换；已授权的清除仍需确认。请管理员配置当前部署的外部密钥（默认 YGL_SECRET_KEY），再刷新；此页不会初始化或轮换密钥。";
+			} catch {
+				B(e) || _("stale_context"), i = "无法确认加密设施：禁止填写和替换；已授权的清除仍需确认。请管理员检查当前密钥 provider / codec 后刷新。";
+			}
+			L || J();
 		} catch (t) {
-			if (!P(e)) throw t;
-			t?.message === "admin_authorization_denied" && U(), o = null, s = null, r = t?.message === "admin_authorization_denied" ? "来源凭据管理授权不可用；请重新打开宿主管理页面后刷新。" : "来源凭据状态暂不可用；未读取旧值，请刷新核对后再提交。";
+			if (!B(e)) throw t;
+			t?.message === "admin_authorization_denied" && J(), l = null, u = null, i = t?.message === "admin_authorization_denied" ? "来源凭据管理授权不可用；请重新打开宿主管理页面后刷新。" : "来源凭据状态暂不可用；未读取旧值，请刷新核对后再提交。";
 		}
-		u = !1, await K(), o ? await G() : x.credentials([...M.values()], R, r), P(e) || _("stale_context");
+		m = !1, await re(), l ? (await ne(), D.credentials([...I.values()], W, i), await r(), W()) : D.credentials([...I.values()], W, i), B(e) || _("stale_context");
 	}
-	async function J(e) {
-		if (b || l || !c) return;
-		let t = { generation: d };
-		b = t, R(), D.textContent = "管理操作正在执行。";
+	async function X(e) {
+		if (C || f || !d) return;
+		let t = { generation: g };
+		C = t, W(), F.textContent = "管理操作正在执行。";
 		try {
 			await e(t.generation);
 		} catch (e) {
-			if (!P(t.generation)) return;
-			e?.message === "revision_conflict" ? (u = !0, D.textContent = "配置已变化，请刷新并重新核对后修改。") : e?.message === "select_changes" ? D.textContent = "请选择需要修改的字段。" : e?.message === "confirm_clear" ? D.textContent = "请勾选清除确认后再提交；保持选项不会写入。" : e?.message === "secret_encryption_unavailable" ? D.textContent = "未保存：宿主缺少或未正确配置加密密钥 YGL_SECRET_KEY；请管理员配置后重试。" : e?.message === "invalid_config" ? D.textContent = "配置或输入未通过校验，请核对字段要求后刷新重试。" : e?.message === "admin_authorization_denied" ? (U(), o = null, s = null, u = !0, D.textContent = "管理授权不可用，请重新打开宿主管理页面后手动刷新。") : (u = !0, D.textContent = "未取得成功确认，请刷新核对配置与版本后重试。");
+			if (!B(t.generation)) return;
+			e?.message === "revision_conflict" || e?.message === "配置版本冲突，请刷新并重新核对后修改。" ? (m = !0, F.textContent = "配置已变化，请刷新并重新核对后修改。") : e?.message === "select_changes" ? F.textContent = "请选择需要修改的字段。" : e?.message === "confirm_clear" ? F.textContent = "请勾选清除确认后再提交；保持选项不会写入。" : e?.message === "secret_encryption_unavailable" ? F.textContent = "未保存：宿主缺少或未正确配置加密密钥 YGL_SECRET_KEY；请管理员配置后重试。" : e?.message === "invalid_config" ? F.textContent = "配置或输入未通过校验，请核对字段要求后刷新重试。" : e?.message === "admin_authorization_denied" ? (J(), l = null, u = null, m = !0, F.textContent = "管理授权不可用，请重新打开宿主管理页面后手动刷新。") : (m = !0, F.textContent = "未取得成功确认，请刷新核对配置与版本后重试。");
 		} finally {
-			b === t && (b = null, R());
+			C === t && (C = null, W());
 		}
 	}
-	let Y = () => Object.fromEntries(Object.entries(a).map(([e, t]) => [e, t.revision]));
-	e.getElementById("refresh").addEventListener("click", () => !I(e.getElementById("refresh")) && J(async (e) => {
-		await q(e), D.textContent = "已读取配置目录与授权范围内的值；写操作仍逐请求鉴权。";
-	})), e.getElementById("rollback").addEventListener("click", () => !I(e.getElementById("rollback")) && J(async (e) => {
-		await z("rollback", { expected_revisions: Y() }, e), await q(e), D.textContent = "四字段迁移已限定回退，其他数据保留。";
-	})), e.getElementById("recover").addEventListener("click", () => !I(e.getElementById("recover")) && J(async (t) => {
-		await z("recover", {
-			expected_revisions: Y(),
-			complete_from_current: e.getElementById("replacement").checked
-		}, t), await q(t), D.textContent = "配置已重新校验，业务运行已恢复。";
+	let Z = () => Object.fromEntries(Object.entries(c).map(([e, t]) => [e, t.revision]));
+	o("refresh").addEventListener("click", () => !H(o("refresh")) && X(async (e) => {
+		await Y(e), F.textContent = "已读取配置目录与授权范围内的值；写操作仍逐请求鉴权。";
+	})), o("rollback").addEventListener("click", () => !H(o("rollback")) && X(async (e) => {
+		await G("rollback", { expected_revisions: Z() }, e), await Y(e), F.textContent = "受审迁移已限定回退，其他数据保留。";
+	})), o("recover").addEventListener("click", () => !H(o("recover")) && X(async (e) => {
+		await G("recover", {
+			expected_revisions: Z(),
+			complete_from_current: o("replacement").checked
+		}, e), await Y(e), F.textContent = "配置已重新校验，业务运行已恢复。";
 	}));
-	function X(t) {
-		if (l) return;
-		x.context(t), e.documentElement.dataset.theme = t?.isDark === !0 || t?.theme === "dark" ? "dark" : "light", e.documentElement.lang = typeof t?.locale == "string" ? t.locale : "zh-CN";
+	function Q(t) {
+		if (f) return;
+		D.context(t), e.documentElement.dataset.theme = t?.isDark === !0 || t?.theme === "dark" ? "dark" : "light", e.documentElement.lang = typeof t?.locale == "string" ? t.locale : "zh-CN";
 		let n;
 		try {
-			n = N(t);
+			n = N(t, i);
 		} catch {
-			U(), m = !0, d++, c = !1, u = !0, b = null, f = null, i = null, a = null, o = null, s = null, x.fields([], R), x.credentials([], R), S.clear(), C.clear(), M.clear(), R(), D.textContent = "宿主管理上下文无效，请重新打开页面。";
+			J(), x = !0, g++, d = !1, m = !0, C = null, b = null, s = null, c = null, l = null, u = null, D.fields([], W), D.credentials([], W), M.clear(), P.clear(), I.clear(), W(), F.textContent = "宿主管理上下文无效，请重新打开页面。";
 			return;
 		}
-		m = !0, !(c && n === f) && (U(), d++, f = n, c = !0, u = !0, b = null, i = null, a = null, o = null, s = null, x.fields([], R), x.credentials([], R), S.clear(), C.clear(), M.clear(), R(), J(async (e) => {
-			await q(e), D.textContent = "已读取配置目录与授权范围内的值；写操作仍逐请求鉴权。";
+		x = !0, !(d && n === b) && (J(), g++, b = n, d = !0, m = !0, C = null, s = null, c = null, l = null, u = null, D.fields([], W), D.credentials([], W), M.clear(), P.clear(), I.clear(), W(), X(async (e) => {
+			await Y(e), F.textContent = "已读取配置目录与授权范围内的值；写操作仍逐请求鉴权。";
 		}));
 	}
-	function Z() {
-		l || (U(), l = !0, d++, c = !1, b = null, i = null, a = null, o = null, s = null, g?.(), R());
+	let ie = () => [...P.values()].some((e) => e.mode?.value !== "keep") || [...I.values()].some((e) => e.mode?.value !== "keep" || e.clientId?.value || e.clientSecret?.value);
+	function ae() {
+		let t = e.activeElement;
+		R = a.contains(t) && t?.id ? {
+			id: t.id,
+			start: t.selectionStart,
+			end: t.selectionEnd
+		} : null, J(), g++, C = null, m = !0, W();
+	}
+	function oe() {
+		!f && d && X(async (e) => {
+			if (await Y(e), F.textContent = "已读取配置目录与授权范围内的值；写操作仍逐请求鉴权。", R) {
+				let e = o(R.id);
+				if (e?.focus({ preventScroll: !0 }), e && R.start !== null && e.setSelectionRange) try {
+					e.setSelectionRange(R.start, R.end);
+				} catch {}
+				R = null;
+			}
+		});
+	}
+	function $() {
+		f || (J(), f = !0, g++, d = !1, C = null, s = null, c = null, l = null, u = null, S?.(), W());
 	}
 	return {
 		start() {
 			if (!t || typeof t.apiPost != "function" || typeof t.ready != "function" || typeof t.onContext != "function") {
-				D.textContent = "请从宿主插件管理页面打开此页。";
+				F.textContent = "请从宿主插件管理页面打开此页。";
 				return;
 			}
-			g = t.onContext(X), Promise.resolve(t.ready()).then((e) => {
-				m || X(e);
+			S = t.onContext(Q), Promise.resolve(t.ready()).then((e) => {
+				x || Q(e);
 			}).catch(() => {
-				!m && !l && (c = !1, D.textContent = "宿主管理会话不可用。", R());
-			}), n?.addEventListener("pagehide", Z, { once: !0 });
+				!x && !f && (d = !1, F.textContent = "宿主管理会话不可用。", W());
+			}), n?.addEventListener("pagehide", $, { once: !0 });
 		},
-		close: Z
+		close: $,
+		dirty: ie,
+		suspend: ae,
+		resume: oe,
+		selectOwner(e) {
+			z = e, D.owner(e), W();
+		},
+		dispose() {
+			$(), n?.removeEventListener("pagehide", $), D.dispose();
+		}
 	};
 }
 typeof document < "u" && document.getElementById("management-root") && P(document, window.AstrBotPluginPage, window).start();

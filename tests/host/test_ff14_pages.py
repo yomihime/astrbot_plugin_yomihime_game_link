@@ -145,9 +145,8 @@ class PublicWebPagesTests(unittest.IsolatedAsyncioTestCase):
             patch.dict(sys.modules, {"astrbot.api.web": web}),
             web.bind_request_context(request),
         ):
-            return await pages._registrations[
-                4 + list(("items", "character", "calendar")).index(endpoint)
-            ][1]()
+            handler = next(handler for route, handler in pages._registrations if route == f"/{PLUGIN_NAME}/queries/{endpoint}")
+            return await handler()
 
     async def test_three_exact_queries_and_unconfigured_web_leave_chat_runtime_ready(
         self,
@@ -615,6 +614,9 @@ class _PublicRuntime:
             "entry_ready": False,
         }
 
+    def compatibility_query_routes(self):
+        return ("items", "character", "calendar", "market")
+
     @property
     def core_runtime(self):
         raise AssertionError("page adapter must not read Core")
@@ -626,13 +628,14 @@ class FF14PagesTests(unittest.IsolatedAsyncioTestCase):
         pages = FF14Pages(context, runtime)
         pages.register()
         pages.register()
-        self.assertEqual(len(context.registered_web_apis), 8)
+        self.assertEqual(len(context.registered_web_apis), 9)
         self.assertEqual(
             [(entry[0], entry[2]) for entry in context.registered_web_apis],
             [
                 (f"/{PLUGIN_NAME}/{endpoint}", ["GET"])
                 for endpoint in ("overview", "settings", "catalog", "web-status")
             ]
+            + [(f"/{PLUGIN_NAME}/invoke", ["POST"])]
             + [
                 (f"/{PLUGIN_NAME}/queries/{endpoint}", ["POST"])
                 for endpoint in ("items", "character", "calendar", "market")
@@ -646,7 +649,7 @@ class FF14PagesTests(unittest.IsolatedAsyncioTestCase):
             result = await entry[1]()
             self.assertEqual(result["status"], "ok")
             self.assertEqual(result["data"]["schema_version"], 1)
-        self.assertEqual(runtime.calls, [False, True, "catalog"])
+        self.assertEqual(runtime.calls, ["catalog"])
         pages.close()
         self.assertEqual(context.registered_web_apis, [])
 
@@ -655,7 +658,7 @@ class FF14PagesTests(unittest.IsolatedAsyncioTestCase):
         pages = FF14Pages(context, runtime)
         pages.register()
         runtime.fail = True
-        result = await context.registered_web_apis[0][1]()
+        result = await context.registered_web_apis[2][1]()
         self.assertEqual(
             result,
             {
@@ -715,38 +718,26 @@ class FF14PagesTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(runtime.calls, [])
         pages.close()
 
-    async def test_close_fences_late_success_and_late_error(self):
-        import asyncio
-
-        for fails in (False, True):
-            with self.subTest(fails=fails):
-                entered, release = asyncio.Event(), asyncio.Event()
-
-                class Runtime:
-                    async def public_ff14_page_state(self, **_):
-                        entered.set()
-                        await release.wait()
-                        if fails:
-                            raise RuntimeError("private detail")
-                        return {"schema_version": 2}
-
-                pages = FF14Pages(_Context(), Runtime())
-                pages.register()
-                task = asyncio.create_task(pages._registrations[0][1]())
-                await entered.wait()
-                pages.close()
-                pages.register()
-                release.set()
-                result = await task
-                self.assertEqual(
-                    result,
-                    {
-                        "status": "error",
-                        "message": "页面状态读取已停止，请重新打开插件页面。",
-                        "data": {},
-                    },
-                )
-                pages.close()
+    async def test_close_fences_compat_locators_without_calling_old_business_state(self):
+        runtime = _PublicRuntime()
+        pages = FF14Pages(_Context(), runtime)
+        pages.register()
+        old = pages._registrations[0][1]
+        self.assertEqual(
+            (await old())["data"],
+            {
+                "schema_version": 1,
+                "state": "retired",
+                "reopen_required": True,
+                "host_path": "/#/extension/plugins",
+            },
+        )
+        self.assertEqual(runtime.calls, [])
+        pages.close()
+        pages.register()
+        self.assertEqual((await old())["status"], "error")
+        self.assertEqual(runtime.calls, [])
+        pages.close()
 
     def test_failed_registration_rolls_back_even_after_host_insertion(self):
         context = _Context(fail_second=True)

@@ -842,6 +842,32 @@ class LifecycleController:
         except KeyError as exc:
             raise ModuleNotFound("module has no installed instance") from exc
 
+    def detach_stopped(self, module_id: str) -> None:
+        """Detach only a fully drained exact instance; retain monotonic epochs."""
+        state = self.state(module_id)
+        record = self._instances.get(module_id)
+        if (
+            state.enabled
+            or state.lifecycle is not ModuleLifecycle.STOPPED
+            or state.cleanup_pending
+            or state.scope is not None
+            or self._candidates_for_module(module_id)
+            or (record is not None and not record.stop_completed)
+        ):
+            raise LifecycleError("module cleanup has not completed")
+        self.registry._detach_lifecycle_module(self, module_id)
+        self._instances.pop(module_id, None)
+        self._states.pop(module_id, None)
+        self._operations.pop(module_id, None)
+
+    def restore_registration(self, package_id, manifest, handlers):
+        module_id = f"{package_id}/{manifest.module_id}"
+        if module_id in self._instances or module_id in self._states:
+            raise LifecycleError("previous module ownership remains")
+        return self.registry._restore_lifecycle_module(
+            self, package_id, manifest, handlers
+        )
+
     def handlers(self, module_id: str) -> ModuleHandlers:
         """Return handlers captured from the installed instance."""
         try:

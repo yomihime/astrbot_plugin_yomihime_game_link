@@ -65,6 +65,7 @@ class _ManifestSelection:
     package_id: str
     candidate: ExtensionCandidate | None
     registered: RegisteredModule | None
+    owner_generation: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,6 +116,9 @@ class AdminOperationsService(AdminOperations):
         module_config_validators: Mapping[str, Mapping[str, object]] | None = None,
         ordinary_migration=None,
         managed_source_credentials=(),
+        ordinary_config_resources=None,
+        managed_module_owners=(),
+        owner_cleanup=None,
     ) -> None:
         if not isinstance(authorization, AdminAuthorizationService):
             raise TypeError("authorization must be AdminAuthorizationService")
@@ -163,10 +167,86 @@ class AdminOperationsService(AdminOperations):
         if len({(p.module_id, p.name) for p in policies}) != len(policies):
             raise ValueError("duplicate managed credential policy")
         self._managed_source_credentials = policies
+        self._ordinary_config_resources = MappingProxyType(
+            {
+                target: frozenset(fields)
+                for target, fields in (ordinary_config_resources or {}).items()
+            }
+        )
+        for target, fields in self._ordinary_config_resources.items():
+            ConfigTarget.validate(target)
+            if (
+                target.principal_id != config_principal_id
+                or not fields
+                or any(type(f) is not str or not f for f in fields)
+            ):
+                raise ValueError("invalid ordinary resource policy")
+        self._managed_module_owners = frozenset(managed_module_owners)
+        self._owner_cleanup = owner_cleanup
+        for owner in self._managed_module_owners:
+            ConfigTarget(config_principal_id, owner)
 
-    def credential_resources(self):
+    def module_resources(self, module_id=None):
+        owners = self._managed_module_owners if module_id is None else {module_id}
+        if not owners or not owners <= self._managed_module_owners:
+            raise AdminAuthorizationDenied
+        return {
+            ConfigTarget(self.config_principal_id, owner): {"__module_lifecycle__"}
+            for owner in owners
+        }
+
+    def ordinary_declarations(self, target):
+        if target not in self.ordinary_resources():
+            raise AdminAuthorizationDenied
+        declarations = (
+            CORE_CONFIG_FIELDS
+            if target.module_id == CORE_MODULE_ID
+            else self._selection(
+                target.module_id, self.registry.snapshot()
+            ).manifest.config_fields
+        )
+        return tuple(
+            field
+            for field in declarations
+            if not field.sensitive
+            and field.name in self._ordinary_config_resources[target]
+        )
+
+    @_tracked_admin_request
+    async def credential_readiness(self, *, authorization):
+        grant = await self.authorization.authorize(
+            AdminOperation.READ_CONFIG,
+            invocation=None,
+            context=authorization,
+            resources=self.credential_resources(),
+        )
+        async with self.lifecycle.admission.mutation("admin-encryption-readiness"):
+            await self.authorization.validate_generation(
+                grant, operation=AdminOperation.READ_CONFIG
+            )
+            self._require_accepting()
+            result = self.secret_store.encryption_readiness()
+            await self.authorization.validate_generation(
+                grant, operation=AdminOperation.READ_CONFIG
+            )
+            self._require_accepting()
+            return result
+
+    def _active_credential_policies(self):
+        return tuple(
+            policy
+            for policy in self._managed_source_credentials
+            if policy.module_id not in self.extension_runtime.unloaded_owners
+        )
+
+    def credential_resources(self, *, active=False):
         resources = {}
-        for policy in self._managed_source_credentials:
+        policies = (
+            self._active_credential_policies()
+            if active
+            else self._managed_source_credentials
+        )
+        for policy in policies:
             resources.setdefault(
                 ConfigTarget(self.config_principal_id, policy.module_id), set()
             ).add(policy.name)
@@ -176,9 +256,9 @@ class AdminOperationsService(AdminOperations):
         snapshot = self.registry.snapshot()
         selections = {
             p.module_id: self._selection(p.module_id, snapshot)
-            for p in self._managed_source_credentials
+            for p in self._active_credential_policies()
         }
-        for policy in self._managed_source_credentials:
+        for policy in self._active_credential_policies():
             policy.validate_declaration(selections[policy.module_id].manifest)
         return snapshot, selections
 
@@ -198,7 +278,7 @@ class AdminOperationsService(AdminOperations):
             registry, selections = self._credential_selections()
             result = {
                 "schema_version": 1,
-                "fields": [p.project() for p in self._managed_source_credentials],
+                "fields": [p.project() for p in self._active_credential_policies()],
             }
             if len(json.dumps(result, ensure_ascii=False).encode("utf-8")) > 262144:
                 raise ValueError("managed credential catalog exceeds budget")
@@ -214,12 +294,11 @@ class AdminOperationsService(AdminOperations):
 
     @_tracked_admin_request
     async def credential_status(self, *, authorization):
-        resources = self.credential_resources()
         grant = await self.authorization.authorize(
             AdminOperation.READ_CONFIG,
             invocation=None,
             context=authorization,
-            resources=resources,
+            resources=self.credential_resources(),
         )
         result = {}
         async with self.lifecycle.admission.mutation("admin-credential-status"):
@@ -227,6 +306,7 @@ class AdminOperationsService(AdminOperations):
                 grant, operation=AdminOperation.READ_CONFIG
             )
             self._require_accepting()
+            resources = self.credential_resources(active=True)
             registry, selections = self._credential_selections()
             for target, fields in resources.items():
                 await self.authorization.validate_generation(
@@ -265,7 +345,10 @@ class AdminOperationsService(AdminOperations):
             self._require_accepting()
             for selection in selections.values():
                 self._require_same_selection(selection)
-            if self.registry.snapshot() is not registry:
+            if (
+                self.registry.snapshot() is not registry
+                or self.credential_resources(active=True) != resources
+            ):
                 raise AdminAuthorizationDenied
         return result
 
@@ -296,7 +379,7 @@ class AdminOperationsService(AdminOperations):
             names.add(item["field"])
         policies = {
             p.name: p
-            for p in self._managed_source_credentials
+            for p in self._active_credential_policies()
             if p.module_id == target.module_id
         }
         if not names <= policies.keys():
@@ -321,6 +404,13 @@ class AdminOperationsService(AdminOperations):
             )
             for item in raw
         )
+        if (
+            any(item["mode"] == "replace" for item in raw)
+            and not self.secret_store.encryption_readiness()["ready"]
+        ):
+            from ..infrastructure.secret_store import SecretStoreUnavailable
+
+            raise SecretStoreUnavailable
         patch = ConfigPatch(
             data["expected_revision"], updates, selection.manifest.config_fields
         )
@@ -333,13 +423,13 @@ class AdminOperationsService(AdminOperations):
         return {"module_id": target.module_id, "revision": config.revision}
 
     def ordinary_resources(self):
-        migration = self._ordinary_migration
-        if migration is None:
+        if not self._ordinary_config_resources:
             raise AdminAuthorizationDenied
-        result = {}
-        for field in migration.fields:
-            result.setdefault(field.target, set()).add(field.declaration.name)
-        return result
+        return {
+            target: set(fields)
+            for target, fields in self._ordinary_config_resources.items()
+            if target.module_id not in self.extension_runtime.unloaded_owners
+        }
 
     def require_ordinary_validators(self, resources=None):
         if self._ordinary_migration is not None:
@@ -369,6 +459,8 @@ class AdminOperationsService(AdminOperations):
                     continue
                 for manifest in package.manifest.modules:
                     module_id = f"{package.package_id}/{manifest.module_id}"
+                    if module_id in self.extension_runtime.unloaded_owners:
+                        continue
                     if module_id not in selections:
                         selections[module_id] = self._selection(module_id, snapshot)
             declarations = {CORE_MODULE_ID: CORE_CONFIG_FIELDS}
@@ -414,17 +506,19 @@ class AdminOperationsService(AdminOperations):
                     grant, operation=AdminOperation.READ_CONFIG
                 )
                 projection = {}
-                for field in self._ordinary_migration.fields:
-                    if field.target != target:
-                        continue
-                    name = field.declaration.name
+                for field in self.ordinary_declarations(target):
+                    name = field.name
                     present = name in snapshot.values
-                    value = snapshot.values.get(name, field.declaration.default)
+                    value = snapshot.values.get(name, field.default)
                     try:
                         if any(m.field == name for m in snapshot.secret_metadata):
                             raise ValueError("ordinary metadata")
                         validate_configuration_value(
-                            field.declaration, value, field.validator
+                            field,
+                            value,
+                            self._module_config_validators.get(
+                                target.module_id, {}
+                            ).get(name),
                         )
                     except (ValueError, TypeError):
                         state, value = "invalid", None
@@ -538,9 +632,13 @@ class AdminOperationsService(AdminOperations):
         )
 
         async def validate(grant: AdminAuthorizationGrant) -> None:
+            if target.module_id in self.extension_runtime.unloaded_owners:
+                raise AdminAuthorizationDenied
             await self.authorization.validate_generation(
                 grant, operation=AdminOperation.UPDATE_CONFIG
             )
+            if target.module_id in self.extension_runtime.unloaded_owners:
+                raise AdminAuthorizationDenied
             self._require_same_selection(selection)
 
         def publish_config(
@@ -579,7 +677,13 @@ class AdminOperationsService(AdminOperations):
             package_id, local_id = module_id.split("/", 1)
             if registered.manifest.module_id != local_id:
                 raise AdminAuthorizationDenied from None
-            return _ManifestSelection(registered.manifest, package_id, None, registered)
+            return _ManifestSelection(
+                registered.manifest,
+                package_id,
+                None,
+                registered,
+                self.extension_runtime.owner_generation(module_id),
+            )
         package_id, separator, local_id = module_id.partition("/")
         if not separator or not local_id:
             raise AdminAuthorizationDenied from None
@@ -599,10 +703,21 @@ class AdminOperationsService(AdminOperations):
         )
         if selected is None:
             raise AdminAuthorizationDenied from None
-        return _ManifestSelection(selected, package_id, candidate, None)
+        return _ManifestSelection(
+            selected,
+            package_id,
+            candidate,
+            None,
+            self.extension_runtime.owner_generation(module_id),
+        )
 
     def _require_same_selection(self, selection: _ManifestSelection) -> None:
         module_id = f"{selection.package_id}/{selection.manifest.module_id}"
+        if (
+            self.extension_runtime.owner_generation(module_id)
+            != selection.owner_generation
+        ):
+            raise AdminAuthorizationDenied from None
         registered = self.registry.snapshot().modules.get(module_id)
         if selection.registered is not None:
             if registered is not selection.registered:
@@ -746,7 +861,11 @@ class AdminOperationsService(AdminOperations):
             for module in manifest.modules:
                 module_id = f"{package.package_id}/{module.module_id}"
                 selection = _ManifestSelection(
-                    module, package.package_id, candidate, None
+                    module,
+                    package.package_id,
+                    candidate,
+                    None,
+                    self.extension_runtime.owner_generation(module_id),
                 )
                 try:
                     coordinator = await self._configuration(selection)
@@ -767,8 +886,11 @@ class AdminOperationsService(AdminOperations):
         *,
         authorization: AdminAuthorizationContext | None = None,
     ) -> tuple[ModuleAdminSnapshot, ...]:
-        grant = await self._authorize(
-            AdminOperation.LIST_MODULES, invocation, authorization
+        grant = await self.authorization.authorize(
+            AdminOperation.LIST_MODULES,
+            invocation=invocation,
+            context=authorization,
+            resources=self.module_resources() if self._managed_module_owners else None,
         )
         async with self.lifecycle.admission.mutation("admin-list-modules"):
             self._require_accepting()
@@ -778,7 +900,11 @@ class AdminOperationsService(AdminOperations):
             registry_snapshot = self.registry.snapshot()
             selections: dict[str, _ManifestSelection] = {
                 module_id: _ManifestSelection(
-                    registered.manifest, module_id.split("/", 1)[0], None, registered
+                    registered.manifest,
+                    module_id.split("/", 1)[0],
+                    None,
+                    registered,
+                    self.extension_runtime.owner_generation(module_id),
                 )
                 for module_id, registered in registry_snapshot.modules.items()
             }
@@ -791,14 +917,26 @@ class AdminOperationsService(AdminOperations):
                     module_id = f"{package.package_id}/{module.module_id}"
                     selections.setdefault(
                         module_id,
-                        _ManifestSelection(module, package.package_id, candidate, None),
+                        _ManifestSelection(
+                            module,
+                            package.package_id,
+                            candidate,
+                            None,
+                            self.extension_runtime.owner_generation(module_id),
+                        ),
                     )
             snapshots = tuple(
                 [
                     await self._snapshot(
-                        selection, registry_snapshot.modules.get(module_id)
+                        selection,
+                        registry_snapshot.modules.get(module_id),
+                        allowed_fields=frozenset()
+                        if self._managed_module_owners
+                        else None,
                     )
                     for module_id, selection in sorted(selections.items())
+                    if not self._managed_module_owners
+                    or module_id in self._managed_module_owners
                 ]
             )
             await self.authorization.validate_generation(
@@ -894,8 +1032,17 @@ class AdminOperationsService(AdminOperations):
         expected_registry_revision: int,
         authorization: AdminAuthorizationContext | None = None,
     ) -> ModuleStatus:
-        grant = await self._authorize(
-            AdminOperation.SET_ENABLED, invocation, authorization
+        grant = await self.authorization.authorize(
+            AdminOperation.SET_ENABLED,
+            invocation=invocation,
+            context=authorization,
+            resources=self.module_resources(module_id)
+            if self._managed_module_owners
+            else {
+                ConfigTarget(self.config_principal_id, module_id): {
+                    "__module_lifecycle__"
+                }
+            },
         )
         self._require_accepting()
         await self.authorization.validate_generation(
@@ -912,6 +1059,72 @@ class AdminOperationsService(AdminOperations):
             grant, operation=AdminOperation.SET_ENABLED
         )
         return result
+
+    @_tracked_admin_request
+    async def unload_module(
+        self, invocation, module_id, *, expected_registry_revision, authorization=None
+    ):
+        resources = self.module_resources(module_id)
+        grant = await self.authorization.authorize(
+            AdminOperation.UNLOAD_MODULE,
+            invocation=invocation,
+            context=authorization,
+            resources=resources,
+        )
+        status = await self.set_enabled(
+            invocation,
+            module_id,
+            False,
+            expected_registry_revision=expected_registry_revision,
+            authorization=authorization,
+        )
+        async with self.lifecycle.admission.mutation(f"admin-unload:{module_id}"):
+            self._require_accepting()
+            await self.authorization.validate_generation(
+                grant, operation=AdminOperation.UNLOAD_MODULE
+            )
+            snapshot = self.registry.snapshot()
+            if snapshot.revision != status.registry_revision:
+                raise RevisionConflict(
+                    "registry", status.registry_revision, snapshot.revision
+                )
+            if module_id not in self.extension_runtime.unloaded_owners:
+                selection = self._selection(module_id, snapshot)
+                await self.extension_runtime.prepare_detach(module_id)
+                if self._owner_cleanup is not None:
+                    self._owner_cleanup(module_id)
+                await self.authorization.validate_generation(
+                    grant, operation=AdminOperation.UNLOAD_MODULE
+                )
+                if self.registry.snapshot() is not snapshot:
+                    raise RevisionConflict(
+                        "registry", snapshot.revision, self.registry.snapshot().revision
+                    )
+                self._require_same_selection(selection)
+                from contextlib import nullcontext
+
+                from .admin_authorization import _grant_effect
+
+                effect = _grant_effect(grant)
+                effect.check_lifetime()
+                fence = (
+                    effect.source.fence(
+                        effect.context, effect.operation, effect.resources
+                    )
+                    if effect.source is not None
+                    else nullcontext()
+                )
+                with fence:
+                    if module_id in snapshot.modules:
+                        self.lifecycle.detach_stopped(module_id)
+                    self.extension_runtime.detached(module_id)
+            return {
+                "module_id": module_id,
+                "state": "unloaded",
+                "registry_revision": self.registry.snapshot().revision,
+                "data_retained": True,
+                "reopen_required": True,
+            }
 
     @_tracked_admin_request
     async def update_config(
