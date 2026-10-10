@@ -10,14 +10,16 @@ from ygl_test_subject.adapters.astrbot.command_bridge import (
     CommandHelp,
     CommandInvocation,
 )
-from ygl_test_subject.api.manifests import (
+from ygl_test_subject.core.contracts.validation_boundary import validate_contract
+from ygl_test_subject.core.registry import Registry as CoreRegistry
+from ygl_test_subject.tests.fixtures.minimal_module import build_package
+
+from yomihime_game_link_sdk.declarations import (
     CapabilityDescriptor,
     CapabilityEffect,
     CommandDescriptor,
     InvocationPolicy,
 )
-from ygl_test_subject.core.registry import Registry as CoreRegistry
-from ygl_test_subject.tests.fixtures.minimal_module import build_package
 
 
 class Registry(CoreRegistry):
@@ -202,22 +204,26 @@ class AstrBotCommandBridgeTests(unittest.TestCase):
         self.assertIn("/ygl demo", response)
 
     def test_multword_required_tail_keeps_optional_prefix_unambiguous(self) -> None:
-        capability = CapabilityDescriptor(
-            "lookup",
-            {
-                "type": "object",
-                "properties": {
-                    "optional": {"type": "string"},
-                    "query": {"type": "string"},
+        capability = validate_contract(
+            CapabilityDescriptor(
+                "lookup",
+                {
+                    "type": "object",
+                    "properties": {
+                        "optional": {"type": "string"},
+                        "query": {"type": "string"},
+                    },
+                    "required": ["query"],
+                    "additionalProperties": False,
                 },
-                "required": ["query"],
-                "additionalProperties": False,
-            },
-            InvocationPolicy.COMMAND_ONLY,
-            CapabilityEffect.READ_ONLY,
+                InvocationPolicy.COMMAND_ONLY,
+                CapabilityEffect.READ_ONLY,
+            )
         )
-        command = CommandDescriptor(
-            "lookup", "lookup", {"optional": "optional", "query": "query"}, "lookup"
+        command = validate_contract(
+            CommandDescriptor(
+                "lookup", "lookup", {"optional": "optional", "query": "query"}, "lookup"
+            )
         )
 
         self.assertEqual(
@@ -234,25 +240,29 @@ class AstrBotCommandBridgeTests(unittest.TestCase):
         )
 
     def test_optional_positionals_are_single_tokens_and_assignments_are_exact(self):
-        capability = CapabilityDescriptor(
-            "manage",
-            {
-                "type": "object",
-                "properties": {
-                    "timezone": {"type": "string"},
-                    "time": {"type": "string"},
+        capability = validate_contract(
+            CapabilityDescriptor(
+                "manage",
+                {
+                    "type": "object",
+                    "properties": {
+                        "timezone": {"type": "string"},
+                        "time": {"type": "string"},
+                    },
+                    "required": [],
+                    "additionalProperties": False,
                 },
-                "required": [],
-                "additionalProperties": False,
-            },
-            InvocationPolicy.COMMAND_ONLY,
-            CapabilityEffect.READ_ONLY,
+                InvocationPolicy.COMMAND_ONLY,
+                CapabilityEffect.READ_ONLY,
+            )
         )
-        command = CommandDescriptor(
-            "subscribe",
-            "subscribe",
-            {"timezone": "timezone", "time": "time"},
-            "manage",
+        command = validate_contract(
+            CommandDescriptor(
+                "subscribe",
+                "subscribe",
+                {"timezone": "timezone", "time": "time"},
+                "manage",
+            )
         )
 
         self.assertEqual(
@@ -291,36 +301,40 @@ class AstrBotCommandBridgeTests(unittest.TestCase):
         self.assertNotIsInstance(invocation, CommandInvocation)
 
     def test_quoted_non_tail_text_and_assignment_values_keep_spaces(self):
-        capability = CapabilityDescriptor(
-            "output",
-            {
-                "type": "object",
-                "properties": {
-                    "realm": {"type": "string", "enum": ["global", "cn"]},
-                    "encounter": {"type": "string", "minLength": 1},
-                    "difficulty": {"type": "string", "minLength": 1},
-                    "job": {"type": "string", "minLength": 1},
-                    "metric": {"type": "string", "enum": ["rdps", "ndps"]},
-                    "period": {"type": "string", "enum": ["latest"]},
+        capability = validate_contract(
+            CapabilityDescriptor(
+                "output",
+                {
+                    "type": "object",
+                    "properties": {
+                        "realm": {"type": "string", "enum": ["global", "cn"]},
+                        "encounter": {"type": "string", "minLength": 1},
+                        "difficulty": {"type": "string", "minLength": 1},
+                        "job": {"type": "string", "minLength": 1},
+                        "metric": {"type": "string", "enum": ["rdps", "ndps"]},
+                        "period": {"type": "string", "enum": ["latest"]},
+                    },
+                    "required": ["realm", "encounter", "difficulty", "job"],
+                    "additionalProperties": False,
                 },
-                "required": ["realm", "encounter", "difficulty", "job"],
-                "additionalProperties": False,
-            },
-            InvocationPolicy.COMMAND_ONLY,
-            CapabilityEffect.READ_ONLY,
+                InvocationPolicy.COMMAND_ONLY,
+                CapabilityEffect.READ_ONLY,
+            )
         )
-        command = CommandDescriptor(
-            "output",
-            "output",
-            {
-                "realm": "realm",
-                "encounter": "encounter",
-                "difficulty": "difficulty",
-                "job": "job",
-                "metric": "metric",
-                "period": "period",
-            },
-            "output",
+        command = validate_contract(
+            CommandDescriptor(
+                "output",
+                "output",
+                {
+                    "realm": "realm",
+                    "encounter": "encounter",
+                    "difficulty": "difficulty",
+                    "job": "job",
+                    "metric": "metric",
+                    "period": "period",
+                },
+                "output",
+            )
         )
         tokens = AstrBotCommandBridge._tokenize(
             '/ygl output global "The Minstrel\'s Ballad" savage Paladin '

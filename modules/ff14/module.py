@@ -2,17 +2,17 @@
 
 from __future__ import annotations
 
-from yomihime_sdk.api.contexts import InvocationView
-from yomihime_sdk.api.display import DisplayDocument, Privacy, TextBlock
-from yomihime_sdk.api.results import CapabilityResult, ResultStatus
-from yomihime_sdk.api.services import (
+from yomihime_game_link_sdk.contexts import InvocationView
+from yomihime_game_link_sdk.display import DisplayDocument, Privacy, TextBlock
+from yomihime_game_link_sdk.results import CapabilityResult, ResultStatus
+from yomihime_game_link_sdk.services import (
     CapabilityHealth,
     HealthReport,
     HealthStatus,
     ModuleHandlers,
     ModuleServices,
 )
-from yomihime_sdk.api.storage import JsonObject
+from yomihime_game_link_sdk.storage import JsonObject
 
 from .config import FF14ConfigSnapshot
 from .features.calendar import CalendarCollector, CalendarQuery

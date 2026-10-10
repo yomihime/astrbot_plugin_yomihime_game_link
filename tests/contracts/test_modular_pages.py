@@ -14,6 +14,7 @@ from ygl_test_subject.adapters.astrbot.command_bridge import (
     CommandHelp,
     CommandInvocation,
 )
+from ygl_test_subject.core.contracts.validation_boundary import validate_contract
 from ygl_test_subject.core.help_catalog import HelpCatalog
 from ygl_test_subject.core.lifecycle import LifecycleController
 from ygl_test_subject.core.registry import Registry
@@ -25,8 +26,7 @@ from ygl_test_subject.services.module_catalog import project_module_catalog
 from ygl_test_subject.services.module_storage import ModuleStorageRouter
 
 from tests.core.test_lifecycle import _Instance
-from yomihime_sdk import PageDescriptor, PageResource
-from yomihime_sdk.api.manifests import (
+from yomihime_game_link_sdk.declarations import (
     CapabilityDescriptor,
     CapabilityEffect,
     CommandDescriptor,
@@ -34,8 +34,10 @@ from yomihime_sdk.api.manifests import (
     ModuleCategory,
     ModuleManifest,
     PackageManifest,
+    PageDescriptor,
+    PageResource,
 )
-from yomihime_sdk.api.services import (
+from yomihime_game_link_sdk.services import (
     CapabilityHealth,
     HealthReport,
     HealthStatus,
@@ -44,36 +46,50 @@ from yomihime_sdk.api.services import (
 
 
 def package():
-    capability = CapabilityDescriptor(
-        "query",
-        {
-            "type": "object",
-            "properties": {"text": {"type": "string"}},
-            "required": ["text"],
-            "additionalProperties": False,
-        },
-        InvocationPolicy.COMMAND_AND_PUBLIC_WEB,
-        CapabilityEffect.READ_ONLY,
+    capability = validate_contract(
+        CapabilityDescriptor(
+            "query",
+            {
+                "type": "object",
+                "properties": {"text": {"type": "string"}},
+                "required": ["text"],
+                "additionalProperties": False,
+            },
+            InvocationPolicy.COMMAND_AND_PUBLIC_WEB,
+            CapabilityEffect.READ_ONLY,
+        )
     )
-    raw = CommandDescriptor("search", "query", {}, "Search", "raw_tail", "text")
-    structured = CommandDescriptor("search exact", "query", {"query": "text"}, "Exact")
+    raw = validate_contract(
+        CommandDescriptor("search", "query", {}, "Search", "raw_tail", "text")
+    )
+    structured = validate_contract(
+        CommandDescriptor("search exact", "query", {"query": "text"}, "Exact")
+    )
     content = b"export const mount = () => {};\n"
-    resource = PageResource("pages/dist/entry.js", hashlib.sha256(content).hexdigest())
-    module = ModuleManifest(
-        "demo",
-        "demo",
-        ModuleCategory.GAME,
-        "module:Factory",
-        "1.0.0",
-        (capability,),
-        commands=(raw, structured),
-        pages=(
-            PageDescriptor("search", "Search", resource.path, capability_id="query"),
-        ),
-        resources=(resource,),
+    resource = validate_contract(
+        PageResource("pages/dist/entry.js", hashlib.sha256(content).hexdigest())
     )
-    return PackageManifest(
-        "sample", "1.0.0", "1.5.0", (module,), "Tests", "MIT", "offline"
+    module = validate_contract(
+        ModuleManifest(
+            "demo",
+            "demo",
+            ModuleCategory.GAME,
+            "module:Factory",
+            "1.0.0",
+            (capability,),
+            commands=(raw, structured),
+            pages=(
+                validate_contract(
+                    PageDescriptor(
+                        "search", "Search", resource.path, capability_id="query"
+                    )
+                ),
+            ),
+            resources=(resource,),
+        )
+    )
+    return validate_contract(
+        PackageManifest("sample", "1.0.0", "2.0", (module,), "Tests", "MIT", "offline")
     ), content
 
 
@@ -90,7 +106,7 @@ class ContractTests(unittest.IsolatedAsyncioTestCase):
                 raise AssertionError("help invoked a business handler")
 
         handler = Handler()
-        handlers = ModuleHandlers({"query": handler}, {}, {})
+        handlers = validate_contract(ModuleHandlers({"query": handler}, {}, {}))
         registry.register_package(manifest, {"demo": handlers})
         lifecycle = LifecycleController(registry, runtime_id="raw-tail-contract")
         bridge = AstrBotCommandBridge(registry)
@@ -113,7 +129,15 @@ class ContractTests(unittest.IsolatedAsyncioTestCase):
 
         class Instance(_Instance):
             async def check_health(self):
-                return HealthReport({"query": CapabilityHealth(HealthStatus.AVAILABLE)})
+                return validate_contract(
+                    HealthReport(
+                        {
+                            "query": validate_contract(
+                                CapabilityHealth(HealthStatus.AVAILABLE)
+                            )
+                        }
+                    )
+                )
 
         instance = Instance(handlers)
         lifecycle.adopt_candidate("sample", manifest.modules[0], "install", instance)
@@ -148,17 +172,22 @@ class ContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(handler.calls, 0)
 
     def test_raw_tail_cannot_bypass_schema_or_mapping(self):
+        unchecked_replace = replace
+
+        def checked_replace(*args, **kwargs):
+            return validate_contract(unchecked_replace(*args, **kwargs))
+
         manifest, _ = package()
         module = manifest.modules[0]
         with self.assertRaises(ValueError):
-            replace(module.commands[0], parameter_mapping={"text": "text"})
+            checked_replace(module.commands[0], parameter_mapping={"text": "text"})
         with self.assertRaises(ValueError):
-            replace(
+            checked_replace(
                 module,
                 commands=(replace(module.commands[0], raw_tail_parameter="unknown"),),
             )
         with self.assertRaises(ValueError):
-            replace(
+            checked_replace(
                 module,
                 capabilities=(
                     replace(
@@ -173,6 +202,11 @@ class ContractTests(unittest.IsolatedAsyncioTestCase):
             )
 
     def test_paths_hashes_references_and_namespace_are_closed(self):
+        unchecked_replace = replace
+
+        def checked_replace(*args, **kwargs):
+            return validate_contract(unchecked_replace(*args, **kwargs))
+
         manifest, _ = package()
         for path in (
             "../entry.js",
@@ -186,14 +220,14 @@ class ContractTests(unittest.IsolatedAsyncioTestCase):
             "entry.js.map",
         ):
             with self.subTest(path=path), self.assertRaises(ValueError):
-                PageResource(path, "a" * 64)
+                validate_contract(PageResource(path, "a" * 64))
         with self.assertRaises(ValueError):
-            PageResource("entry.js", "A" * 64)
+            validate_contract(PageResource("entry.js", "A" * 64))
         module = manifest.modules[0]
         with self.assertRaises(ValueError):
-            replace(module, resources=())
+            checked_replace(module, resources=())
         with self.assertRaises(ValueError):
-            replace(
+            checked_replace(
                 manifest,
                 modules=(module, replace(module, module_id="second", route="second")),
             )
@@ -246,7 +280,7 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
             resources=(),
             commands=(manifest.modules[0].commands[1],),
         )
-        legacy = replace(manifest, contract_version="1.4.0", modules=(module,))
+        legacy = replace(manifest, contract_version="2.0", modules=(module,))
 
         class Handler:
             async def invoke(self, *args):
@@ -254,7 +288,8 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
 
         registry = Registry()
         registry.register_package(
-            legacy, {"demo": ModuleHandlers({"query": Handler()}, {}, {})}
+            legacy,
+            {"demo": validate_contract(ModuleHandlers({"query": Handler()}, {}, {}))},
         )
         lifecycle = LifecycleController(registry, runtime_id="legacy-test")
         catalog = project_module_catalog(
@@ -302,7 +337,7 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
             async def invoke(self, *args):
                 return None
 
-        handlers = ModuleHandlers({"query": Handler()}, {}, {})
+        handlers = validate_contract(ModuleHandlers({"query": Handler()}, {}, {}))
         registry = Registry()
         registry.register_package(manifest, {"demo": handlers})
         lifecycle = LifecycleController(registry, runtime_id="test-runtime")
@@ -321,7 +356,15 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
 
         class Instance(_Instance):
             async def check_health(self):
-                return HealthReport({"query": CapabilityHealth(HealthStatus.AVAILABLE)})
+                return validate_contract(
+                    HealthReport(
+                        {
+                            "query": validate_contract(
+                                CapabilityHealth(HealthStatus.AVAILABLE)
+                            )
+                        }
+                    )
+                )
 
         instance = Instance(handlers)
         lifecycle.adopt_candidate("sample", manifest.modules[0], "install", instance)

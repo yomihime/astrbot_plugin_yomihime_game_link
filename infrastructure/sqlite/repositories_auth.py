@@ -13,13 +13,16 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from ...api.services import (
+from yomihime_game_link_sdk.storage import SecretRef
+
+from ...core.contracts.services import (
     Grant,
     GrantStatus,
     LoginSession,
     LoginSessionStatus,
 )
-from ...api.storage import SecretRef, validate_module_id
+from ...core.contracts.storage import validate_module_id
+from ...core.contracts.validation_boundary import validate_contract
 from ...core.ports import RevisionConflict, UniqueConstraintViolation
 from .database import SQLiteDatabase
 
@@ -65,12 +68,14 @@ def _module_id(value: object, label: str = "module_id") -> str:
 def _grant(row: sqlite3.Row) -> Grant:
     secret = None
     if row["secret_token"] is not None:
-        secret = SecretRef(
-            row["secret_token"],
-            row["secret_principal_id"],
-            row["secret_module_id"],
-            row["secret_field"],
-            row["secret_operation_id"],
+        secret = validate_contract(
+            SecretRef(
+                row["secret_token"],
+                row["secret_principal_id"],
+                row["secret_module_id"],
+                row["secret_field"],
+                row["secret_operation_id"],
+            )
         )
     return Grant(
         row["grant_id"],
@@ -97,12 +102,14 @@ def _session(row: sqlite3.Row) -> LoginSession:
 
 
 def _ref(row: sqlite3.Row) -> SecretRef:
-    return SecretRef(
-        row["secret_token"],
-        row["principal_id"],
-        row["module_id"],
-        row["field"],
-        row["operation_id"],
+    return validate_contract(
+        SecretRef(
+            row["secret_token"],
+            row["principal_id"],
+            row["module_id"],
+            row["field"],
+            row["operation_id"],
+        )
     )
 
 

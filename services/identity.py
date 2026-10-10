@@ -11,18 +11,22 @@ from collections.abc import Iterable
 from typing import Final
 from uuid import uuid4
 
-from ..api.contexts import InvocationOrigin, InvocationView
-from ..api.services import (
-    Binding,
-    BindingDefaultSnapshot,
+from yomihime_game_link_sdk.contexts import InvocationOrigin, InvocationView
+from yomihime_game_link_sdk.services import (
     BindingView,
-    ConversationKey,
     IdentityResolver,
-    Principal,
     ResolvedIdentity,
 )
-from ..api.subscriptions import ConversationRef
+from yomihime_game_link_sdk.subscriptions import ConversationRef
+
 from ..core.context_issuer import ContextIssuer, InvalidInvocation
+from ..core.contracts.services import (
+    Binding,
+    BindingDefaultSnapshot,
+    ConversationKey,
+    Principal,
+)
+from ..core.contracts.validation_boundary import validate_contract
 from ..core.ports import (
     AdmissionLease,
     AdmissionPort,
@@ -163,6 +167,7 @@ class InvocationPrincipalResolver:
     async def principal_id(self, invocation: InvocationView) -> str:
         """Return the durable owner for an exact active issuer-owned view."""
 
+        validate_contract(invocation)
         try:
             trusted = self._issuer.require(invocation)
         except Exception:
@@ -222,6 +227,7 @@ class InvocationPrincipalResolver:
         raise PrincipalResolutionDenied()
 
     def _check_lease(self, invocation: InvocationView, lease: object | None) -> None:
+        validate_contract(invocation)
         if self._admission is None:
             return
         if not isinstance(lease, (AdmissionLease, ScheduledLease)):
@@ -294,14 +300,17 @@ class TrustedRoutePublisher:
     async def publish(self, reference: ConversationRef) -> ConversationRef:
         """Persist a route supplied by a trusted host adapter under the gate."""
 
+        validate_contract(reference)
         if not isinstance(reference, ConversationRef):
             raise TypeError("route publisher requires a ConversationRef")
         try:
-            checked = ConversationRef(
-                reference.adapter_id,
-                reference.kind,
-                reference.conversation_id,
-                reference.delivery_route,
+            checked = validate_contract(
+                ConversationRef(
+                    reference.adapter_id,
+                    reference.kind,
+                    reference.conversation_id,
+                    reference.delivery_route,
+                )
             )
         except (AttributeError, TypeError, ValueError):
             raise IdentityBindingPermissionError() from None
@@ -312,11 +321,13 @@ class TrustedRoutePublisher:
                 saved = await self._conversations.save(checked)
                 if not isinstance(saved, ConversationRef):
                     raise TypeError
-                persisted = ConversationRef(
-                    saved.adapter_id,
-                    saved.kind,
-                    saved.conversation_id,
-                    saved.delivery_route,
+                persisted = validate_contract(
+                    ConversationRef(
+                        saved.adapter_id,
+                        saved.kind,
+                        saved.conversation_id,
+                        saved.delivery_route,
+                    )
                 )
             except Exception:
                 raise IdentityBindingUnavailable() from None
@@ -392,6 +403,8 @@ class _IdentityScope:
         *,
         origins: Iterable[InvocationOrigin],
     ) -> tuple[InvocationView, str, str, ConversationKey]:
+        validate_contract(invocation)
+        validate_contract(origins)
         try:
             checked = self.issuer.require_adapter(invocation)
         except InvalidInvocation:
@@ -482,8 +495,10 @@ class _IdentityScope:
         identity = await self.identity_for_binding(
             binding, principal_id, module_id, conversation
         )
-        return BindingView(
-            binding.binding_id, binding.revision, identity, binding.is_default
+        return validate_contract(
+            BindingView(
+                binding.binding_id, binding.revision, identity, binding.is_default
+            )
         )
 
 
@@ -516,6 +531,7 @@ class IdentityResolverService(IdentityResolver):
     async def default_identity(
         self, invocation: InvocationView
     ) -> ResolvedIdentity | None:
+        validate_contract(invocation)
         _, principal_id, module_id, conversation = await self._scope.invocation(
             invocation,
             origins=(InvocationOrigin.COMMAND,),

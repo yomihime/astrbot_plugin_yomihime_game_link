@@ -21,9 +21,12 @@ class EmptyTemplateTests(unittest.TestCase):
                 elif isinstance(node, ast.ImportFrom) and node.module is not None:
                     roots.add(node.module.split(".", 1)[0])
             with self.subTest(example=name):
-                # offline_sample uses datetime only for its fixed aware SDK
+                # offline_sample uses datetime and asyncio for aware SDK
                 # Observation timestamp; it must not import Core or host code.
-                self.assertLessEqual(roots, {"__future__", "datetime", "yomihime_sdk"})
+                self.assertLessEqual(
+                    roots,
+                    {"__future__", "datetime", "asyncio", "yomihime_game_link_sdk"},
+                )
 
 
 if __name__ == "__main__":

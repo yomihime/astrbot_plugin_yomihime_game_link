@@ -9,10 +9,11 @@ from ygl_test_subject.adapters.astrbot.web_public import (
     WebPublicRejected,
     project_result,
 )
-from ygl_test_subject.api.display import DisplayDocument, TextBlock
-from ygl_test_subject.api.results import CapabilityResult, ResultStatus
+from ygl_test_subject.core.contracts.validation_boundary import validate_contract
 
 from tests.fixtures.ff14.item_display import lookup_result, source_snapshot
+from yomihime_game_link_sdk.display import DisplayDocument, TextBlock
+from yomihime_game_link_sdk.results import CapabilityResult, ResultStatus
 
 
 class ItemDisplayBudgetTests(unittest.IsolatedAsyncioTestCase):
@@ -50,14 +51,21 @@ class ItemDisplayBudgetTests(unittest.IsolatedAsyncioTestCase):
                     self.assertIn("获取途径总数已截断。", text)
 
     def test_public_projection_keeps_exact_32_limit_and_rejects_33(self):
-        result = CapabilityResult(
-            "budget-boundary",
-            ResultStatus.SUCCESS,
-            DisplayDocument(
-                "Boundary",
-                "Synthetic public result",
-                tuple(TextBlock(str(index)) for index in range(32)),
-            ),
+        result = validate_contract(
+            CapabilityResult(
+                "budget-boundary",
+                ResultStatus.SUCCESS,
+                validate_contract(
+                    DisplayDocument(
+                        "Boundary",
+                        "Synthetic public result",
+                        tuple(
+                            validate_contract(TextBlock(str(index)))
+                            for index in range(32)
+                        ),
+                    )
+                ),
+            )
         )
         self.assertEqual(len(project_result(result)["document"]["blocks"]), 32)
         oversized = replace(
@@ -65,7 +73,7 @@ class ItemDisplayBudgetTests(unittest.IsolatedAsyncioTestCase):
             document=replace(
                 result.document,
                 ordered_blocks=result.document.ordered_blocks
-                + (TextBlock("overflow"),),
+                + (validate_contract(TextBlock("overflow")),),
             ),
         )
         with self.assertRaises(WebPublicRejected):

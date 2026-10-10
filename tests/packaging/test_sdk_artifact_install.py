@@ -13,15 +13,16 @@ import zipfile
 from importlib.metadata import version
 from pathlib import Path
 
-from extensions.disk_manifest import parse_manifest
+from ygl_test_subject.extensions.disk_manifest import parse_manifest
+
 from scripts.build_release import build_release
 
 ROOT = Path(__file__).resolve().parents[2]
 EXPECTED_WHEEL_SHA256 = (
-    "84cd029d271c1dce09935a7eba26a1b0f3229fa44369ee618d82ce03774ad73e"
+    "54d5a0766ae5b626e575ff0d1936b49ce14a7d7f57b6db1f62882653eea9c81e"
 )
 EXPECTED_RESOURCES = {
-    f"yomihime_sdk/_examples/{example}/{filename}"
+    f"yomihime_game_link_sdk/_examples/{example}/{filename}"
     for example in ("empty_module", "offline_sample")
     for filename in ("manifest.json", "module.py", "README.md")
 }
@@ -54,13 +55,13 @@ sdk_manifest = next(
         for target in statement.targets
     )
 )
-installed_sdk_root = site_root / "yomihime_sdk"
+installed_sdk_root = site_root / "yomihime_game_link_sdk"
 installed_payload = {
     path.relative_to(installed_sdk_root).as_posix()
     for path in installed_sdk_root.rglob("*")
     if path.is_file() and "__pycache__" not in path.parts
 }
-assert len(sdk_manifest) == 20
+assert len(sdk_manifest) == 17
 assert installed_payload == set(sdk_manifest)
 for relative, expected_digest in sdk_manifest.items():
     assert hashlib.sha256(
@@ -77,32 +78,52 @@ plugin = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = plugin
 spec.loader.exec_module(plugin)
 
-import yomihime_sdk as sdk
+import importlib.abc
+class SDKOnly(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.split(".")[0] in {"core", "services", "adapters", "astrbot", "modules", "ygl_artifact_subject"}:
+            raise AssertionError("SDK reverse dependency: " + fullname)
+import_phase = [True]
+def import_audit(event, args):
+    if import_phase[0] and event in {"socket.connect", "socket.bind", "subprocess.Popen", "os.system"}:
+        raise AssertionError("SDK import performed external work")
+    if import_phase[0] and event == "open" and isinstance(args[0], (str, bytes)):
+        filename = os.fsdecode(args[0]).lower()
+        if filename.endswith((".json", ".yaml", ".yml", ".sqlite", ".sqlite3", ".db", ".toml")):
+            raise AssertionError("SDK import read product configuration")
+sys.addaudithook(import_audit)
+guard = SDKOnly(); sys.meta_path.insert(0, guard)
+threads_before_import = {thread.ident for thread in threading.enumerate()}
+import yomihime_game_link_sdk as sdk
+import_phase[0] = False; sys.meta_path.remove(guard)
+assert {thread.ident for thread in threading.enumerate()} == threads_before_import
 assert Path(sdk.__file__).resolve() == installed_sdk_root / "__init__.py"
 assert len(sdk.__path__) == 1
 assert Path(sdk.__path__[0]).resolve() == installed_sdk_root
-from yomihime_sdk.api.display import DisplayDocument as CanonicalDisplayDocument
-from yomihime_sdk.api.results import CapabilityResult as CanonicalCapabilityResult
-from yomihime_sdk.api.results import FactDocument as CanonicalFactDocument
-from yomihime_sdk.api.results import ResultStatus as CanonicalResultStatus
-from yomihime_sdk.api.services import ModuleHandlers as CanonicalModuleHandlers
-from yomihime_sdk.api.services import ModuleServices as CanonicalModuleServices
-from yomihime_sdk.api.display import TextBlock as CanonicalTextBlock
-from yomihime_sdk.api.services import HealthStatus as CanonicalHealthStatus
-from yomihime_sdk.api.services import SourceHttpError as CanonicalSourceHttpError
+from yomihime_game_link_sdk.display import DisplayDocument as CanonicalDisplayDocument
+from yomihime_game_link_sdk.results import CapabilityResult as CanonicalCapabilityResult
+from yomihime_game_link_sdk.results import FactDocument as CanonicalFactDocument
+from yomihime_game_link_sdk.results import ResultStatus as CanonicalResultStatus
+from yomihime_game_link_sdk.services import ModuleHandlers as CanonicalModuleHandlers
+from yomihime_game_link_sdk.services import ModuleServices as CanonicalModuleServices
+from yomihime_game_link_sdk.display import TextBlock as CanonicalTextBlock
+from yomihime_game_link_sdk.services import HealthStatus as CanonicalHealthStatus
+from yomihime_game_link_sdk.errors import SourceHttpError as CanonicalSourceHttpError
 
-from ygl_artifact_subject.api.display import TextBlock as ShimTextBlock
-from ygl_artifact_subject.api.results import CapabilityResult as ShimCapabilityResult
-from ygl_artifact_subject.api.results import FactDocument as ShimFactDocument
-from ygl_artifact_subject.api.results import ResultStatus as ShimResultStatus
-from ygl_artifact_subject.api.services import ModuleHandlers as ShimModuleHandlers
-from ygl_artifact_subject.api.services import ModuleServices as ShimModuleServices
-from ygl_artifact_subject.api.services import HealthStatus as ShimHealthStatus
+from ygl_artifact_subject.core.contracts.display import TextBlock as ShimTextBlock
+from ygl_artifact_subject.core.contracts.results import CapabilityResult as ShimCapabilityResult
+from ygl_artifact_subject.core.contracts.results import FactDocument as ShimFactDocument
+from ygl_artifact_subject.core.contracts.results import ResultStatus as ShimResultStatus
+from ygl_artifact_subject.core.contracts.services import ModuleHandlers as ShimModuleHandlers
+from ygl_artifact_subject.core.contracts.services import ModuleServices as ShimModuleServices
+from ygl_artifact_subject.core.contracts.services import HealthStatus as ShimHealthStatus
 from ygl_artifact_subject.core.invocation import CapabilityResult as GatewayResultType
 from ygl_artifact_subject.core.invocation import Gateway
+from ygl_artifact_subject.core.contracts.validation_boundary import validate_contract
 from ygl_artifact_subject.services.module_services import ModuleServices as RuntimeModuleServices
 from ygl_artifact_subject.services.output import CapabilityResult as OutputResultType
 from ygl_artifact_subject.extensions.disk_manifest import parse_manifest
+from ygl_artifact_subject.core.registry import Registry
 
 assert sdk.CapabilityResult is CanonicalCapabilityResult is ShimCapabilityResult
 assert sdk.ModuleServices is CanonicalModuleServices is ShimModuleServices
@@ -117,16 +138,8 @@ assert sdk.SourceHttpError is CanonicalSourceHttpError
 assert GatewayResultType is sdk.CapabilityResult
 assert OutputResultType is sdk.CapabilityResult
 
-assert sdk.__version__ == "1.8.0"
-assert sdk.CONTRACT_VERSION == "1.8.0"
-assert sdk.CONTRACT_REVISION == "MODULE-DISPLAY-01"
-assert sdk.COMPATIBLE_CONTRACT_VERSIONS == (
-    "1.0.0", "1.1.0", "1.2.0", "1.3.0", "1.4.0", "1.5.0", "1.6.0", "1.7.0", "1.8.0"
-)
-assert all(
-    sdk.is_compatible_contract_version(version)
-    for version in ("1.0.0", "1.1.0", "1.2.0", "1.3.0")
-)
+assert sdk.__version__ == "0.1.0a6"
+assert sdk.MODULE_ABI_VERSION == "2.0"
 assert sdk.PrivacyFloor.OWNER.value == "owner"
 assert sdk.InvocationOrigin("web_public") is sdk.InvocationOrigin.WEB_PUBLIC
 assert sdk.InvocationPolicy("command_and_public_web") is sdk.InvocationPolicy.COMMAND_AND_PUBLIC_WEB
@@ -142,11 +155,11 @@ for privacy, effect in (
     (sdk.PrivacyFloor.PUBLIC, sdk.CapabilityEffect.WRITE),
 ):
     try:
-        sdk.CapabilityDescriptor(
+        validate_contract(sdk.CapabilityDescriptor(
             "rejected_web", {"type": "object"},
             sdk.InvocationPolicy.COMMAND_AND_PUBLIC_WEB,
             effect, privacy_floor=privacy,
-        )
+        ))
     except ValueError:
         pass
     else:
@@ -160,13 +173,13 @@ owner_capability = sdk.CapabilityDescriptor(
 )
 assert owner_capability.privacy_floor is sdk.PrivacyFloor.OWNER
 try:
-    sdk.CapabilityDescriptor(
+    validate_contract(sdk.CapabilityDescriptor(
         "owner_read",
         {"type": "object"},
         sdk.InvocationPolicy.NATURAL_LANGUAGE_ALLOWED,
         sdk.CapabilityEffect.READ_ONLY,
         privacy_floor=sdk.PrivacyFloor.OWNER,
-    )
+    ))
 except ValueError as exc:
     assert "command_only" in str(exc)
 else:
@@ -175,12 +188,13 @@ assert len(sdk.__all__) == len(set(sdk.__all__))
 assert all(hasattr(sdk, name) for name in sdk.__all__)
 assert inspect.iscoroutinefunction(sdk.ModuleFactory.create)
 assert tuple(sdk.ModuleServices.__annotations__) == (
-    "config", "identities", "accounts", "subscriptions", "scopes", "storage"
+    "config", "identities", "accounts", "subscriptions", "scopes"
 )
 before_threads = {thread.ident for thread in threading.enumerate()}
 
 class _ConfigDouble:
-    pass
+    async def current(self):
+        return sdk.ConfigSnapshot(1, {"region": "cn"})
 
 class _IdentityDouble:
     pass
@@ -203,7 +217,7 @@ services = sdk.ModuleServices(
 )
 
 for example in ("empty_module", "offline_sample"):
-    package = importlib.import_module(f"yomihime_sdk._examples.{example}")
+    package = importlib.import_module(f"yomihime_game_link_sdk._examples.{example}")
     resource = importlib.resources.files(package)
     output = extraction_root / example
     output.mkdir(parents=True)
@@ -245,6 +259,7 @@ for example in ("empty_module", "offline_sample"):
             "status", "from_source", "configured_status", "account_bind",
             "account_list", "account_unbind", "subscription_create",
             "subscription_list", "subscription_cancel", "private_status",
+            "state", "message", "public_error", "subscription_revise",
         }
         assert set(handlers.collectors) == {"public_catalog", "private_catalog"}
         assert set(handlers.evaluators) == {"sample_matcher"}
@@ -254,9 +269,12 @@ for example in ("empty_module", "offline_sample"):
         manifest = parse_manifest(manifest_path.read_bytes())
         declared = {item.module_id: item for item in manifest.modules}
         assert set(declared) == {"status", "source"}
+        registry = Registry()
+        registered = registry.register_package(manifest, {"status": handlers, "source": source_handlers})
+        assert registered.module(manifest.package_id + "/status").handlers.capabilities["status"] is handlers.capabilities["status"]
         status = declared["status"]
         source = declared["source"]
-        assert (len(status.commands), len(status.tools)) == (10, 2)
+        assert (len(status.commands), len(status.tools)) == (14, 3)
         assert (len(status.schedules), len(status.subscriptions)) == (2, 2)
         assert len(status.config_fields) == 3
         assert (len(source.commands), len(source.tools)) == (1, 0)
@@ -304,8 +322,8 @@ class InstalledArtifactTests(unittest.TestCase):
                 ROOT / "docs/module-sdk.md", source_root / "docs/module-sdk.md"
             )
             shutil.copytree(
-                ROOT / "yomihime_sdk",
-                source_root / "yomihime_sdk",
+                ROOT / "yomihime_game_link_sdk",
+                source_root / "yomihime_game_link_sdk",
                 ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
             )
             for example in ("empty_module", "offline_sample"):
@@ -347,7 +365,9 @@ class InstalledArtifactTests(unittest.TestCase):
             wheel = build_wheel(wheelhouse)
             wheel_digest = hashlib.sha256(wheel.read_bytes()).hexdigest()
             self.assertEqual(wheel_digest, EXPECTED_WHEEL_SHA256)
-            self.assertEqual(wheel.name, "yomihime_module_sdk-1.8.0-py3-none-any.whl")
+            self.assertEqual(
+                wheel.name, "yomihime_game_link_sdk-0.1.0a6-py3-none-any.whl"
+            )
             with zipfile.ZipFile(wheel) as archive:
                 entries = set(archive.namelist())
                 self.assertFalse(
@@ -357,12 +377,15 @@ class InstalledArtifactTests(unittest.TestCase):
                     )
                 )
                 self.assertTrue(EXPECTED_RESOURCES <= entries)
-                self.assertIn("yomihime_sdk/__init__.py", entries)
-                self.assertIn("yomihime_sdk/py.typed", entries)
-                self.assertIn("yomihime_sdk/api/results.py", entries)
-                self.assertIn("yomihime_sdk/api/services.py", entries)
+                self.assertIn("yomihime_game_link_sdk/__init__.py", entries)
+                self.assertIn("yomihime_game_link_sdk/py.typed", entries)
+                self.assertIn("yomihime_game_link_sdk/results.py", entries)
+                self.assertIn("yomihime_game_link_sdk/services.py", entries)
                 self.assertFalse(
-                    any(name.startswith("yomihime_sdk/_api/") for name in entries)
+                    any(
+                        name.startswith("yomihime_game_link_sdk/_api/")
+                        for name in entries
+                    )
                 )
                 self.assertFalse(any(name.startswith("api/") for name in entries))
                 metadata_name = next(
@@ -412,7 +435,7 @@ class InstalledArtifactTests(unittest.TestCase):
 
             # Install the reviewed wheel into the extracted plugin root, the
             # same location from which the host bootstrap loads its pinned SDK.
-            shutil.rmtree(plugin_root / "yomihime_sdk")
+            shutil.rmtree(plugin_root / "yomihime_game_link_sdk")
             install_result = subprocess.run(
                 [
                     sys.executable,
@@ -477,8 +500,8 @@ except SystemExit as exc:
 else:
     raise AssertionError("--help did not exit")
 plugin_root = parent / module_name.split(".", 1)[0]
-import yomihime_sdk
-assert pathlib.Path(yomihime_sdk.__file__).resolve() == plugin_root / "yomihime_sdk" / "__init__.py"
+import yomihime_game_link_sdk
+assert pathlib.Path(yomihime_game_link_sdk.__file__).resolve() == plugin_root / "yomihime_game_link_sdk" / "__init__.py"
 assert "astrbot_plugin_yomihime_game_link.main" not in sys.modules
 """
             external_sdk_probe = """
@@ -488,8 +511,8 @@ module_name = sys.argv[2]
 external_root = pathlib.Path(sys.argv[3]).resolve()
 sys.path.insert(0, str(parent))
 sys.path.insert(0, str(external_root))
-import yomihime_sdk
-assert pathlib.Path(yomihime_sdk.__file__).resolve().is_relative_to(external_root)
+import yomihime_game_link_sdk
+assert pathlib.Path(yomihime_game_link_sdk.__file__).resolve().is_relative_to(external_root)
 sys.argv = [module_name, "--help"]
 try:
     runpy.run_module(module_name, run_name="__main__")
@@ -536,7 +559,8 @@ assert "astrbot_plugin_yomihime_game_link.main" not in sys.modules
                 )
                 external_root = workdir / f"external-{module_name.rsplit('.', 1)[-1]}"
                 shutil.copytree(
-                    plugin_root / "yomihime_sdk", external_root / "yomihime_sdk"
+                    plugin_root / "yomihime_game_link_sdk",
+                    external_root / "yomihime_game_link_sdk",
                 )
                 external_result = subprocess.run(
                     [
@@ -599,7 +623,7 @@ assert "astrbot_plugin_yomihime_game_link.main" not in sys.modules
                     len(status.schedules),
                     len(status.subscriptions),
                 ),
-                (10, 10, 2, 3, 2, 2),
+                (14, 14, 3, 3, 2, 2),
             )
             self.assertEqual(
                 (

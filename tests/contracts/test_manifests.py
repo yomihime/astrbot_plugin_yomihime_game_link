@@ -7,7 +7,12 @@ import unittest
 from dataclasses import FrozenInstanceError
 from types import MappingProxyType
 
-from ygl_test_subject.api.manifests import (
+from ygl_test_subject.core.contracts.manifests import ConfigField_validate_value
+from ygl_test_subject.core.contracts.schema import freeze_input_schema
+from ygl_test_subject.core.contracts.validation_boundary import validate_contract
+from ygl_test_subject.examples.contracts import example_package
+
+from yomihime_game_link_sdk.declarations import (
     CapabilityDescriptor,
     CapabilityEffect,
     CommandDescriptor,
@@ -19,17 +24,15 @@ from ygl_test_subject.api.manifests import (
     PrivacyFloor,
     ToolDescriptor,
 )
-from ygl_test_subject.api.schema import freeze_input_schema
-from ygl_test_subject.api.storage import OwnerScope, OwnershipKind
-from ygl_test_subject.api.subscriptions import (
+from yomihime_game_link_sdk.storage import OwnerScope, OwnershipKind
+from yomihime_game_link_sdk.subscriptions import (
     CollectionKey,
     NormalizedInput,
     ScheduleDescriptor,
     ScheduleTrigger,
     SubscriptionDescriptor,
 )
-from ygl_test_subject.api.version import CONTRACT_VERSION
-from ygl_test_subject.examples.contracts import example_package
+from yomihime_game_link_sdk.version import MODULE_ABI_VERSION
 
 
 def _capability(
@@ -47,7 +50,7 @@ def _capability(
         "privacy_floor": PrivacyFloor.PUBLIC,
     }
     values.update(changes)
-    return CapabilityDescriptor(**values)  # type: ignore[arg-type]
+    return validate_contract(CapabilityDescriptor(**values))  # type: ignore[arg-type]
 
 
 def _module(**changes: object) -> ModuleManifest:
@@ -60,40 +63,50 @@ def _module(**changes: object) -> ModuleManifest:
         "capabilities": (_capability(),),
     }
     values.update(changes)
-    return ModuleManifest(**values)  # type: ignore[arg-type]
+    return validate_contract(ModuleManifest(**values))  # type: ignore[arg-type]
 
 
 class ManifestContractTests(unittest.TestCase):
     def test_optional_config_value_schema_is_frozen_and_backward_compatible(self):
-        self.assertIsNone(ConfigField("mode").group)
-        self.assertEqual(ConfigField("days", group="calendar").group, "calendar")
+        self.assertIsNone(validate_contract(ConfigField("mode")).group)
+        self.assertEqual(
+            validate_contract(ConfigField("days", group="calendar")).group, "calendar"
+        )
         for invalid in ("", 1, "bad/group"):
             with self.assertRaises((ValueError, TypeError)):
-                ConfigField("days", group=invalid)
-        legacy = ConfigField("mode", default="anything")
+                validate_contract(ConfigField("days", group=invalid))
+        legacy = validate_contract(ConfigField("mode", default="anything"))
         self.assertIsNone(legacy.value_schema)
-        legacy.validate_value(None)
+        ConfigField_validate_value(legacy, None)
         schema = {"type": "integer", "minimum": 1, "maximum": 30}
-        field = ConfigField("days", default=7, value_schema=schema)
+        field = validate_contract(ConfigField("days", default=7, value_schema=schema))
         schema["maximum"] = 999
         self.assertEqual(field.value_schema["maximum"], 30)
         for invalid in (None, True, 0, 31, "7"):
             with self.assertRaises(ValueError):
-                field.validate_value(invalid)
+                ConfigField_validate_value(field, invalid)
         with self.assertRaises(TypeError):
             field.value_schema["maximum"] = 999
         with self.assertRaises(ValueError):
-            ConfigField("days", default=True, value_schema={"type": "integer"})
+            validate_contract(
+                ConfigField("days", default=True, value_schema={"type": "integer"})
+            )
         with self.assertRaises(ValueError):
-            ConfigField("token", sensitive=True, value_schema={"type": "string"})
+            validate_contract(
+                ConfigField("token", sensitive=True, value_schema={"type": "string"})
+            )
         with self.assertRaises(ValueError):
-            ConfigField("mode", value_schema={"type": "string", "pattern": ".*"})
+            validate_contract(
+                ConfigField("mode", value_schema={"type": "string", "pattern": ".*"})
+            )
 
     def test_public_web_opt_in_is_read_only_public_and_not_a_tool(self) -> None:
         policy = InvocationPolicy.COMMAND_AND_PUBLIC_WEB
-        self.assertIs(InvocationPolicy(policy.value), policy)
+        self.assertIs(validate_contract(InvocationPolicy(policy.value)), policy)
         capability = _capability(invocation_policy=policy)
-        command = CommandDescriptor("search", "lookup", {"query": "query"}, "Search")
+        command = validate_contract(
+            CommandDescriptor("search", "lookup", {"query": "query"}, "Search")
+        )
         module = _module(capabilities=(capability,), commands=(command,))
         self.assertIs(module.capabilities[0].invocation_policy, policy)
         for privacy, effect in (
@@ -106,7 +119,9 @@ class ManifestContractTests(unittest.TestCase):
                     _capability(
                         invocation_policy=policy, privacy_floor=privacy, effect=effect
                     )
-        tool = ToolDescriptor("lookup", "lookup", {"query": "query"}, "Search")
+        tool = validate_contract(
+            ToolDescriptor("lookup", "lookup", {"query": "query"}, "Search")
+        )
         with self.assertRaisesRegex(ValueError, "natural_language_allowed"):
             _module(capabilities=(capability,), tools=(tool,))
         self.assertIs(
@@ -118,12 +133,26 @@ class ManifestContractTests(unittest.TestCase):
         parameters = {"query": "query"}
         module = _module(
             commands=(
-                CommandDescriptor("catalog search", "lookup", parameters, "Search"),
+                validate_contract(
+                    CommandDescriptor("catalog search", "lookup", parameters, "Search")
+                ),
             ),
-            tools=(ToolDescriptor("catalog_search", "lookup", parameters, "Search"),),
+            tools=(
+                validate_contract(
+                    ToolDescriptor("catalog_search", "lookup", parameters, "Search")
+                ),
+            ),
         )
-        package = PackageManifest(
-            "yomihime", "1.0.0", CONTRACT_VERSION, (module,), "YGL", "GPL-3.0", "local"
+        package = validate_contract(
+            PackageManifest(
+                "yomihime",
+                "1.0.0",
+                MODULE_ABI_VERSION,
+                (module,),
+                "YGL",
+                "GPL-3.0",
+                "local",
+            )
         )
         parameters["changed"] = "changed"
         self.assertIsInstance(
@@ -141,41 +170,61 @@ class ManifestContractTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             _module(route="help")
         with self.assertRaises(ValueError):
-            CommandDescriptor("catalog help", "lookup", {}, "Help")
+            validate_contract(CommandDescriptor("catalog help", "lookup", {}, "Help"))
         with self.assertRaises(ValueError):
-            PackageManifest("yomihime", "1.0", CONTRACT_VERSION, (), "a", "b", "c")
+            validate_contract(
+                PackageManifest(
+                    "yomihime", "1.0", MODULE_ABI_VERSION, (), "a", "b", "c"
+                )
+            )
         with self.assertRaises(ValueError):
-            PackageManifest("yomihime", "1.0.0", "2.0.0", (), "a", "b", "c")
+            validate_contract(
+                PackageManifest("yomihime", "1.0.0", "2.0.0", (), "a", "b", "c")
+            )
         with self.assertRaises(TypeError):
             _module(category="catalogue")  # type: ignore[arg-type]
 
     def test_commands_are_unique_per_route_and_allow_localized_tokens(self) -> None:
-        command = CommandDescriptor("查询 玩家", "lookup", {"玩家": "query"}, "Search")
+        command = validate_contract(
+            CommandDescriptor("查询 玩家", "lookup", {"玩家": "query"}, "Search")
+        )
         steam = _module(commands=(command,))
         dota = _module(module_id="dota", route="dota", commands=(command,))
-        package = PackageManifest(
-            "yomihime", "1.0.0", CONTRACT_VERSION, (steam, dota), "a", "b", "c"
+        package = validate_contract(
+            PackageManifest(
+                "yomihime", "1.0.0", MODULE_ABI_VERSION, (steam, dota), "a", "b", "c"
+            )
         )
         self.assertEqual("yomihime/catalog", package.global_module_id("catalog"))
         with self.assertRaises(ValueError):
-            CommandDescriptor("/catalog query", "lookup", {}, "Search")
+            validate_contract(
+                CommandDescriptor("/catalog query", "lookup", {}, "Search")
+            )
 
     def test_duplicate_declarations_and_unknown_references_are_rejected(self) -> None:
         with self.assertRaises(ValueError):
             _module(capabilities=(_capability(), _capability()))
         with self.assertRaises(ValueError):
             _module(
-                commands=(CommandDescriptor("catalog search", "missing", {}, "Search"),)
+                commands=(
+                    validate_contract(
+                        CommandDescriptor("catalog search", "missing", {}, "Search")
+                    ),
+                )
             )
         one = _module()
         two = _module(module_id="other", route="catalog")
         with self.assertRaises(ValueError):
-            PackageManifest(
-                "yomihime", "1.0.0", CONTRACT_VERSION, (one, two), "a", "b", "c"
+            validate_contract(
+                PackageManifest(
+                    "yomihime", "1.0.0", MODULE_ABI_VERSION, (one, two), "a", "b", "c"
+                )
             )
 
     def test_tool_cannot_expose_write_or_command_only_capability(self) -> None:
-        tool = ToolDescriptor("catalog_change", "change", {}, "Change")
+        tool = validate_contract(
+            ToolDescriptor("catalog_change", "change", {}, "Change")
+        )
         with self.assertRaisesRegex(ValueError, "write"):
             _module(
                 capabilities=(_capability("change", effect=CapabilityEffect.WRITE),),
@@ -197,8 +246,10 @@ class ManifestContractTests(unittest.TestCase):
             invocation_policy=InvocationPolicy.COMMAND_ONLY,
             privacy_floor=PrivacyFloor.PRIVATE,
         )
-        tool = ToolDescriptor(
-            "private_lookup", "private_lookup", {"query": "query"}, "Lookup"
+        tool = validate_contract(
+            ToolDescriptor(
+                "private_lookup", "private_lookup", {"query": "query"}, "Lookup"
+            )
         )
         with self.assertRaisesRegex(ValueError, "private"):
             _module(capabilities=(private,), tools=(tool,))
@@ -214,17 +265,21 @@ class ManifestContractTests(unittest.TestCase):
         module = _module(
             capabilities=(owner,),
             commands=(
-                CommandDescriptor("read", "owner_read", {"query": "query"}, "Read"),
+                validate_contract(
+                    CommandDescriptor("read", "owner_read", {"query": "query"}, "Read")
+                ),
             ),
         )
-        package = PackageManifest(
-            "owner-tests",
-            "1.0.0",
-            CONTRACT_VERSION,
-            (module,),
-            "Tests",
-            "MIT",
-            "offline",
+        package = validate_contract(
+            PackageManifest(
+                "owner-tests",
+                "1.0.0",
+                MODULE_ABI_VERSION,
+                (module,),
+                "Tests",
+                "MIT",
+                "offline",
+            )
         )
         self.assertIs(
             package.modules[0].capabilities[0].privacy_floor, PrivacyFloor.OWNER
@@ -233,7 +288,9 @@ class ManifestContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "command_only"):
             _capability("owner_read", privacy_floor=PrivacyFloor.OWNER)
 
-        tool = ToolDescriptor("owner_read", "owner_read", {"query": "query"}, "Read")
+        tool = validate_contract(
+            ToolDescriptor("owner_read", "owner_read", {"query": "query"}, "Read")
+        )
         with self.assertRaisesRegex(ValueError, "owner"):
             _module(capabilities=(owner,), tools=(tool,))
 
@@ -250,17 +307,24 @@ class ManifestContractTests(unittest.TestCase):
                 "required": ["query", "region"],
             }
         )
-        missing = CommandDescriptor(
-            "catalog search", "lookup", {"term": "query"}, "Search"
+        missing = validate_contract(
+            CommandDescriptor("catalog search", "lookup", {"term": "query"}, "Search")
         )
-        unknown = CommandDescriptor(
-            "catalog search", "lookup", {"term": "unknown", "area": "region"}, "Search"
+        unknown = validate_contract(
+            CommandDescriptor(
+                "catalog search",
+                "lookup",
+                {"term": "unknown", "area": "region"},
+                "Search",
+            )
         )
-        repeated = CommandDescriptor(
-            "catalog search",
-            "lookup",
-            {"term": "query", "again": "query", "area": "region"},
-            "Search",
+        repeated = validate_contract(
+            CommandDescriptor(
+                "catalog search",
+                "lookup",
+                {"term": "query", "again": "query", "area": "region"},
+                "Search",
+            )
         )
         for descriptor in (missing, unknown, repeated):
             with self.subTest(descriptor=descriptor):
@@ -294,17 +358,19 @@ def _schedule(
     config_key: str | None = "prices_interval",
     input_schema: dict[str, object] | None = None,
 ) -> ScheduleDescriptor:
-    return ScheduleDescriptor(
-        collector_id,
-        1,
-        "catalog",
-        1,
-        input_schema or {"type": "object", "properties": {}, "required": []},
-        OwnershipKind.PUBLIC,
-        trigger,
-        minimum,
-        default,
-        config_key,
+    return validate_contract(
+        ScheduleDescriptor(
+            collector_id,
+            1,
+            "catalog",
+            1,
+            input_schema or {"type": "object", "properties": {}, "required": []},
+            OwnershipKind.PUBLIC,
+            trigger,
+            minimum,
+            default,
+            config_key,
+        )
     )
 
 
@@ -315,17 +381,19 @@ def _subscription(
     filter_schema: dict[str, object] | None = None,
     notification_modes: tuple[str, ...] = ("instant",),
 ) -> SubscriptionDescriptor:
-    return SubscriptionDescriptor(
-        type_id,
-        collector_id,
-        "price_matcher",
-        filter_schema
-        or {
-            "type": "object",
-            "properties": {"threshold": {"type": "number"}},
-            "required": ["threshold"],
-        },
-        notification_modes,
+    return validate_contract(
+        SubscriptionDescriptor(
+            type_id,
+            collector_id,
+            "price_matcher",
+            filter_schema
+            or {
+                "type": "object",
+                "properties": {"threshold": {"type": "number"}},
+                "required": ["threshold"],
+            },
+            notification_modes,
+        )
     )
 
 
@@ -425,38 +493,46 @@ class ScheduleRegistrationTests(unittest.TestCase):
             notification_modes=("digest",),
         )
         self.assertNotEqual(first.filter_schema, second.filter_schema)
-        public_key_first = CollectionKey(
-            "example/steam",
-            "prices",
-            1,
-            "steam",
-            NormalizedInput({"app": 1}),
-            OwnerScope.public(),
+        public_key_first = validate_contract(
+            CollectionKey(
+                "example/steam",
+                "prices",
+                1,
+                "steam",
+                validate_contract(NormalizedInput({"app": 1})),
+                OwnerScope.public(),
+            )
         )
-        public_key_second = CollectionKey(
-            "example/steam",
-            "prices",
-            1,
-            "steam",
-            NormalizedInput({"app": 1}),
-            OwnerScope.public(),
+        public_key_second = validate_contract(
+            CollectionKey(
+                "example/steam",
+                "prices",
+                1,
+                "steam",
+                validate_contract(NormalizedInput({"app": 1})),
+                OwnerScope.public(),
+            )
         )
         self.assertEqual(public_key_first, public_key_second)
-        private_key_first = CollectionKey(
-            "example/steam",
-            "prices",
-            1,
-            "steam",
-            NormalizedInput({"app": 1}),
-            OwnerScope.user("owner-1"),
+        private_key_first = validate_contract(
+            CollectionKey(
+                "example/steam",
+                "prices",
+                1,
+                "steam",
+                validate_contract(NormalizedInput({"app": 1})),
+                OwnerScope.user("owner-1"),
+            )
         )
-        private_key_second = CollectionKey(
-            "example/steam",
-            "prices",
-            1,
-            "steam",
-            NormalizedInput({"app": 1}),
-            OwnerScope.user("owner-2"),
+        private_key_second = validate_contract(
+            CollectionKey(
+                "example/steam",
+                "prices",
+                1,
+                "steam",
+                validate_contract(NormalizedInput({"app": 1})),
+                OwnerScope.user("owner-2"),
+            )
         )
         self.assertNotEqual(private_key_first, private_key_second)
 

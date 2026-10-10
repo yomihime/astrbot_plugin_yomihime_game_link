@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 
-from ...api.subscriptions import ConversationKind
+from yomihime_game_link_sdk.subscriptions import ConversationKind
+
 from ...core.ports import MessageReceipt, MessageStatus, MessageTarget, RenderedMessage
 
 PlainFactory = Callable[[str], object]

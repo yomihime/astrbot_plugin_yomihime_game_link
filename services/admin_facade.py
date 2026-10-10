@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ..api.administration import (
+from yomihime_game_link_sdk.contexts import InvocationView
+
+from ..core.contracts.administration import (
     AdminAuthorizationContext,
     AdminAuthorizationDenied,
     AdminAuthorizationGrant,
@@ -15,8 +17,8 @@ from ..api.administration import (
     ModuleAdminSnapshot,
     ModuleStatus,
 )
-from ..api.contexts import InvocationView
-from ..api.services import ConfigPatch
+from ..core.contracts.services import ConfigPatch
+from ..core.contracts.validation_boundary import validate_contract
 from ..core.ports import AdminAuthorizationPort
 
 
@@ -64,6 +66,7 @@ class AdminFacade:
         invocation: InvocationView | None,
         context: AdminAuthorizationContext | None,
     ) -> AdminAuthorizationGrant:
+        validate_contract(invocation)
         trusted_context = self._require_context(context)
         return await self._authorization.authorize(
             operation, invocation=invocation, context=trusted_context
@@ -75,6 +78,7 @@ class AdminFacade:
         *,
         authorization: AdminAuthorizationContext | None = None,
     ) -> ModuleListProjection:
+        validate_contract(invocation)
         context = self._require_context(authorization)
         await self._authorize(AdminOperation.LIST_MODULES, invocation, context)
         modules = await self._operations.list_modules(invocation, authorization=context)
@@ -87,6 +91,7 @@ class AdminFacade:
         *,
         authorization: AdminAuthorizationContext | None = None,
     ) -> ModuleAdminSnapshot:
+        validate_contract(invocation)
         context = self._require_context(authorization)
         await self._authorize(AdminOperation.MODULE_SNAPSHOT, invocation, context)
         return await self._operations.module_snapshot(
@@ -94,12 +99,18 @@ class AdminFacade:
         )
 
     async def config_snapshot(
-        self, invocation: InvocationView | None, module_id: str, *,
+        self,
+        invocation: InvocationView | None,
+        module_id: str,
+        *,
         authorization: AdminAuthorizationContext | None = None,
     ) -> CoreConfigSummary:
+        validate_contract(invocation)
         context = self._require_context(authorization)
         await self._authorize(AdminOperation.MODULE_SNAPSHOT, invocation, context)
-        return await self._operations.config_snapshot(invocation, module_id, authorization=context)
+        return await self._operations.config_snapshot(
+            invocation, module_id, authorization=context
+        )
 
     async def set_enabled(
         self,
@@ -110,6 +121,7 @@ class AdminFacade:
         expected_registry_revision: int,
         authorization: AdminAuthorizationContext | None = None,
     ) -> ModuleStatus:
+        validate_contract(invocation)
         context = self._require_context(authorization)
         await self._authorize(AdminOperation.SET_ENABLED, invocation, context)
         return await self._operations.set_enabled(
@@ -128,6 +140,7 @@ class AdminFacade:
         *,
         authorization: AdminAuthorizationContext | None = None,
     ) -> ConfigSummary:
+        validate_contract(invocation)
         context = self._require_context(authorization)
         await self._authorize(AdminOperation.UPDATE_CONFIG, invocation, context)
         # ConfigPatch carries its expected revision and explicit keep/replace/clear

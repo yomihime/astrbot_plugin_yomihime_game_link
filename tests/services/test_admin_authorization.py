@@ -11,13 +11,13 @@ from secrets import token_urlsafe
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from ygl_test_subject.api.administration import (
+from ygl_test_subject.core.admission import AdmissionController
+from ygl_test_subject.core.context_issuer import ContextIssuer
+from ygl_test_subject.core.contracts.administration import (
     AdminAuthorizationDenied,
     AdminOperation,
 )
-from ygl_test_subject.api.services import CapabilityHealth, HealthStatus
-from ygl_test_subject.core.admission import AdmissionController
-from ygl_test_subject.core.context_issuer import ContextIssuer
+from ygl_test_subject.core.contracts.validation_boundary import validate_contract
 from ygl_test_subject.core.registry import Registry
 from ygl_test_subject.infrastructure.sqlite.database import SQLiteDatabase
 from ygl_test_subject.infrastructure.sqlite.repositories_admin_credentials import (
@@ -34,6 +34,8 @@ from ygl_test_subject.services.admin_authorization import (
     AdminCredentialOperation,
     _digest,
 )
+
+from yomihime_game_link_sdk.services import CapabilityHealth, HealthStatus
 
 
 class _Context:
@@ -57,7 +59,7 @@ class AdminAuthorizationServiceTests(unittest.IsolatedAsyncioTestCase):
             current_run=lambda _module_id: None,
             is_active=lambda _identity: False,
             health_query=lambda _module_id, _capability_id: (
-                CapabilityHealth(HealthStatus.UNKNOWN),
+                validate_contract(CapabilityHealth(HealthStatus.UNKNOWN)),
                 0,
             ),
         )
@@ -369,6 +371,13 @@ class AdminAuthorizationServiceTests(unittest.IsolatedAsyncioTestCase):
             return_value=False,
         ):
             with (
+                patch("ygl_test_subject.scripts.admin_credentials._POSIX", True),
+                patch(
+                    "ygl_test_subject.scripts.admin_credentials.os",
+                    SimpleNamespace(
+                        name="posix", getuid=lambda: 1234, geteuid=lambda: 1234
+                    ),
+                ),
                 input_prompt as prompt,
                 self.assertRaises(LocalMaintenanceAuthorizationError),
             ):
@@ -399,24 +408,19 @@ class AdminAuthorizationServiceTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch("ygl_test_subject.scripts.admin_credentials._POSIX", True),
             patch(
-                "ygl_test_subject.scripts.admin_credentials.os.getuid",
-                return_value=owner_id,
-                create=True,
-            ),
-            patch(
-                "ygl_test_subject.scripts.admin_credentials.os.geteuid",
-                return_value=owner_id,
-                create=True,
+                "ygl_test_subject.scripts.admin_credentials.os",
+                SimpleNamespace(
+                    name="posix",
+                    getuid=lambda: owner_id,
+                    geteuid=lambda: owner_id,
+                    access=lambda *_: True,
+                ),
             ),
             patch(
                 "ygl_test_subject.scripts.admin_credentials.sys.stdin.isatty",
                 return_value=True,
             ),
             patch("ygl_test_subject.scripts.admin_credentials.Path.stat", fake_stat),
-            patch(
-                "ygl_test_subject.scripts.admin_credentials.os.access",
-                return_value=True,
-            ),
             patch(
                 "ygl_test_subject.scripts.admin_credentials.getpass.getpass"
             ) as prompt,

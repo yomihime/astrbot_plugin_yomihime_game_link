@@ -14,18 +14,9 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import MappingProxyType
 
-from ...api.administration import (
-    AdminAuthorizationDenied,
-    AdminAuthorizationGrant,
-    AdminOperation,
-)
-from ...api.services import (
-    ConfigPatchMode,
-    ConfigSnapshot,
-    ConfigTarget,
-    PersistedConfigPatch,
-)
-from ...api.storage import (
+from yomihime_game_link_sdk.declarations import ConfigUpdateMode
+from yomihime_game_link_sdk.services import ConfigSnapshot, ConfigTarget
+from yomihime_game_link_sdk.storage import (
     CollectionDescriptor,
     DeclaredIndexQuery,
     OwnerScope,
@@ -36,8 +27,21 @@ from ...api.storage import (
     SecretMetadataState,
     SecretRef,
     VersionedRecord,
+)
+
+from ...core.contracts.administration import (
+    AdminAuthorizationDenied,
+    AdminAuthorizationGrant,
+    AdminOperation,
+)
+from ...core.contracts.services import ConfigTarget_validate, PersistedConfigPatch
+from ...core.contracts.storage import (
+    CollectionDescriptor_validate,
+    OwnerScope_validate,
+    _record_cursor_offset,
     freeze_json,
 )
+from ...core.contracts.validation_boundary import validate_contract
 from ...core.ports import (
     ModuleNotRegistered,
     ModuleRegistrationLookup,
@@ -115,7 +119,8 @@ def _module_id(value: str) -> str:
 
 
 def _config_target(value: ConfigTarget) -> ConfigTarget:
-    return ConfigTarget.validate(value)
+    validate_contract(value)
+    return ConfigTarget_validate(value)
 
 
 def _secret_metadata(row: sqlite3.Row) -> SecretMetadata:
@@ -124,18 +129,22 @@ def _secret_metadata(row: sqlite3.Row) -> SecretMetadata:
     state = row["secret_state"]
     if token is not None:
         try:
-            ref = SecretRef(
-                token,
-                row["secret_principal_id"],
-                row["secret_module_id"],
-                row["secret_field"],
-                row["secret_operation_id"],
+            ref = validate_contract(
+                SecretRef(
+                    token,
+                    row["secret_principal_id"],
+                    row["secret_module_id"],
+                    row["secret_field"],
+                    row["secret_operation_id"],
+                )
             )
         except (TypeError, ValueError):
             raise ValueError("stored secret metadata is invalid") from None
     try:
-        metadata_state = SecretMetadataState(state)
-        return SecretMetadata(row["field"], ref, int(row["revision"]), metadata_state)
+        metadata_state = validate_contract(SecretMetadataState(state))
+        return validate_contract(
+            SecretMetadata(row["field"], ref, int(row["revision"]), metadata_state)
+        )
     except (TypeError, ValueError):
         raise ValueError("stored secret metadata is invalid") from None
 
@@ -150,6 +159,7 @@ class SQLiteConfigRepository:
         subscription_gate_fields: Mapping[ConfigTarget, tuple[str, ...]] | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
+        validate_contract(subscription_gate_fields)
         self.database = _database(database)
         if subscription_gate_fields is not None and not isinstance(
             subscription_gate_fields, Mapping
@@ -322,6 +332,7 @@ class SQLiteConfigRepository:
     async def current(
         self, target: ConfigTarget, *, grant=None, operation=None
     ) -> ConfigSnapshot:
+        validate_contract(target)
         target = _config_target(target)
 
         def read(unit: SQLiteUnitOfWork) -> ConfigSnapshot:
@@ -350,6 +361,7 @@ class SQLiteConfigRepository:
     async def update(
         self, target: ConfigTarget, patch: PersistedConfigPatch
     ) -> ConfigSnapshot:
+        validate_contract(target)
         target = _config_target(target)
         patch = PersistedConfigPatch.validate_for(target, patch)
         return await self._run_update(target, patch)
@@ -360,6 +372,7 @@ class SQLiteConfigRepository:
         patch: PersistedConfigPatch,
         grant: AdminAuthorizationGrant,
     ) -> ConfigSnapshot:
+        validate_contract(target)
         target = _config_target(target)
         patch = PersistedConfigPatch.validate_for(target, patch)
         if not isinstance(grant, AdminAuthorizationGrant):
@@ -373,6 +386,8 @@ class SQLiteConfigRepository:
         *,
         grant: AdminAuthorizationGrant | None = None,
     ) -> ConfigSnapshot:
+        validate_contract(target)
+
         def apply(unit: SQLiteUnitOfWork) -> ConfigSnapshot:
             if grant is not None:
                 assert_generation_current(unit, grant, AdminOperation.UPDATE_CONFIG)
@@ -413,6 +428,7 @@ class SQLiteConfigRepository:
     def _update_in_unit(
         self, unit: SQLiteUnitOfWork, target: ConfigTarget, patch: PersistedConfigPatch
     ) -> ConfigSnapshot:
+        validate_contract(target)
         gate_fields = self._subscription_gate_fields.get(target, ())
         for update in patch.updates:
             if update.field not in gate_fields:
@@ -420,12 +436,12 @@ class SQLiteConfigRepository:
             declaration = next(
                 field for field in patch.declared_fields if field.name == update.field
             )
-            if declaration.sensitive or update.mode is ConfigPatchMode.CLEAR:
+            if declaration.sensitive or update.mode is ConfigUpdateMode.CLEAR:
                 raise ValueError(
                     "subscription gate requires KEEP or strict bool REPLACE"
                 )
             if (
-                update.mode is ConfigPatchMode.REPLACE
+                update.mode is ConfigUpdateMode.REPLACE
                 and type(update.value) is not bool
             ):
                 raise ValueError(
@@ -449,7 +465,7 @@ class SQLiteConfigRepository:
             declaration = next(
                 field for field in patch.declared_fields if field.name == update.field
             )
-            if update.mode is ConfigPatchMode.KEEP:
+            if update.mode is ConfigUpdateMode.KEEP:
                 continue
             if update.field in gate_fields:
                 existing = unit.execute(
@@ -478,7 +494,7 @@ class SQLiteConfigRepository:
                     ),
                 )
                 continue
-            if update.mode is ConfigPatchMode.CLEAR:
+            if update.mode is ConfigUpdateMode.CLEAR:
                 if declaration.sensitive:
                     unit.execute(
                         "INSERT INTO config_entries "
@@ -577,6 +593,7 @@ class SQLiteConfigRepository:
         return self._snapshot(target, next_revision, rows)
 
     async def metadata(self, target: ConfigTarget, field: str) -> SecretMetadata | None:
+        validate_contract(target)
         target = _config_target(target)
         field = _bounded(field, "config field")
 
@@ -593,6 +610,7 @@ class SQLiteConfigRepository:
 
     @staticmethod
     def _ensure_state(unit: SQLiteUnitOfWork, target: ConfigTarget) -> None:
+        validate_contract(target)
         unit.execute(
             "INSERT INTO config_state(principal_id,module_id,revision) VALUES (?,?,1) "
             "ON CONFLICT(principal_id,module_id) DO NOTHING",
@@ -603,6 +621,7 @@ class SQLiteConfigRepository:
     def _snapshot(
         target: ConfigTarget, revision: int, rows: list[sqlite3.Row]
     ) -> ConfigSnapshot:
+        validate_contract(target)
         values: dict[str, object] = {}
         metadata: list[SecretMetadata] = []
         for row in rows:
@@ -612,11 +631,14 @@ class SQLiteConfigRepository:
                 )
             elif row["secret_state"] is not None:
                 metadata.append(_secret_metadata(row))
-        return ConfigSnapshot(revision, values, tuple(metadata), target)
+        return validate_contract(
+            ConfigSnapshot(revision, values, tuple(metadata), target)
+        )
 
 
 def _scope_key(scope: OwnerScope) -> tuple[str, str, str, int]:
-    scope = OwnerScope.validate(scope)
+    validate_contract(scope)
+    scope = OwnerScope_validate(scope)
     if scope.kind is OwnershipKind.PUBLIC:
         return (scope.kind.value, "", "", 0)
     if scope.kind is OwnershipKind.USER:
@@ -628,10 +650,11 @@ def _scope_key(scope: OwnerScope) -> tuple[str, str, str, int]:
 
 
 def _descriptor(value: CollectionDescriptor) -> CollectionDescriptor:
+    validate_contract(value)
     if not isinstance(value, CollectionDescriptor):
         raise TypeError("collection descriptor is required")
     try:
-        return CollectionDescriptor.validate(value)
+        return CollectionDescriptor_validate(value)
     except (AttributeError, TypeError, ValueError):
         raise ValueError("collection descriptor is invalid") from None
 
@@ -663,6 +686,8 @@ class SQLiteRecordRepository:
     async def collection(
         self, module_id: str, descriptor: CollectionDescriptor, owner: OwnerScope
     ) -> "SQLiteRecordCollection":
+        validate_contract(descriptor)
+        validate_contract(owner)
         module_id = _module_id(module_id)
         if module_id != self.module_id:
             raise ValueError("collection module is outside repository binding")
@@ -676,7 +701,7 @@ class SQLiteRecordRepository:
         if declared is None or declared != descriptor:
             raise ValueError("collection is not declared for this module")
         descriptor = declared
-        owner = OwnerScope.validate(owner)
+        owner = OwnerScope_validate(owner)
         if descriptor.owner_kind is not owner.kind:
             raise ValueError("collection owner scope does not match declaration")
         indexes = {index.name: index.field for index in descriptor.indexes}
@@ -710,7 +735,7 @@ class SQLiteRecordRepository:
                 try:
                     existing = (
                         int(row["schema_version"]),
-                        OwnershipKind(row["owner_kind"]),
+                        validate_contract(OwnershipKind(row["owner_kind"])),
                         _load_json(row["indexes_json"]),
                     )
                 except (TypeError, ValueError):
@@ -772,10 +797,12 @@ class SQLiteRecordCollection:
         registration_lookup: ModuleRegistrationLookup,
         registration: ModuleRegistrationSnapshot,
     ) -> None:
+        validate_contract(descriptor)
+        validate_contract(owner)
         self.database = database
         self.module_id = module_id
         self.descriptor = descriptor
-        self._scope = OwnerScope.validate(owner)
+        self._scope = OwnerScope_validate(owner)
         self._owner = _scope_key(self._scope)
         self.registration_lookup = registration_lookup
         self._registration = registration
@@ -797,7 +824,7 @@ class SQLiteRecordCollection:
     async def create(self, key: str, value: Mapping[str, object]) -> VersionedRecord:
         await self._ensure_registration()
         key = _bounded(key, "record key")
-        record = VersionedRecord(key, 1, value)
+        record = validate_contract(VersionedRecord(key, 1, value))
 
         def _worker(unit):
             try:
@@ -827,7 +854,7 @@ class SQLiteRecordCollection:
             raise TypeError("expected revision must be an integer")
         if expected_revision < 1:
             raise ValueError("expected revision must be positive")
-        record = VersionedRecord(key, expected_revision + 1, value)
+        record = validate_contract(VersionedRecord(key, expected_revision + 1, value))
 
         def _worker(unit):
             cursor = unit.execute(
@@ -852,16 +879,19 @@ class SQLiteRecordCollection:
         )
 
     async def query(self, query: DeclaredIndexQuery) -> RecordPage:
+        validate_contract(query)
         await self._ensure_registration()
         if not isinstance(query, DeclaredIndexQuery):
             raise TypeError("query must be a DeclaredIndexQuery")
         try:
-            query = DeclaredIndexQuery(
-                query.index_name,
-                query.operator,
-                query.value,
-                query.limit,
-                query.cursor,
+            query = validate_contract(
+                DeclaredIndexQuery(
+                    query.index_name,
+                    query.operator,
+                    query.value,
+                    query.limit,
+                    query.cursor,
+                )
             )
         except (AttributeError, TypeError, ValueError):
             raise ValueError("query is invalid") from None
@@ -909,7 +939,7 @@ class SQLiteRecordCollection:
 
         records = await self.database.executor.run_read(read)
         next_cursor = str(offset + query.limit) if len(records) > query.limit else None
-        return RecordPage(records[: query.limit], next_cursor)
+        return validate_contract(RecordPage(records[: query.limit], next_cursor))
 
     async def delete(self, key: str, *, expected_revision: int) -> None:
         await self._ensure_registration()
@@ -964,6 +994,7 @@ class SQLiteRecordCollection:
         return (self.module_id, self.descriptor.name, *self._owner)
 
     def _params(self, record: VersionedRecord) -> tuple[object, ...]:
+        validate_contract(record)
         return (
             *self._owner_prefix(),
             record.key,
@@ -984,7 +1015,9 @@ class SQLiteRecordCollection:
     def _record(row: sqlite3.Row) -> VersionedRecord:
         try:
             value = _load_json(row["payload_json"])
-            return VersionedRecord(row["record_key"], int(row["revision"]), value)
+            return validate_contract(
+                VersionedRecord(row["record_key"], int(row["revision"]), value)
+            )
         except (TypeError, ValueError, KeyError):
             raise ValueError("stored record is invalid") from None
 
@@ -997,17 +1030,7 @@ class SQLiteRecordCollection:
 
     @staticmethod
     def _cursor(cursor: str | None) -> int:
-        if cursor is None:
-            return 0
-        if not isinstance(cursor, str) or not cursor.isdigit():
-            raise ValueError("cursor is invalid")
-        try:
-            offset = int(cursor)
-        except ValueError:
-            raise ValueError("cursor is invalid") from None
-        if offset < 0 or offset > 2**31:
-            raise ValueError("cursor is invalid")
-        return offset
+        return _record_cursor_offset(cursor)
 
 
 # Stable descriptive aliases make the implementation discoverable without

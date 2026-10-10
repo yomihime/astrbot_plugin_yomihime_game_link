@@ -5,9 +5,12 @@ from __future__ import annotations
 import unittest
 from dataclasses import replace
 
-from ygl_test_subject.api.contexts import InvocationOrigin
-from ygl_test_subject.api.display import CommandsBlock, TextBlock
-from ygl_test_subject.api.manifests import (
+from ygl_test_subject.core.contracts.validation_boundary import validate_contract
+from ygl_test_subject.core.help_catalog import HelpCatalog
+from ygl_test_subject.core.registry import Registry as CoreRegistry
+
+from yomihime_game_link_sdk.contexts import InvocationOrigin
+from yomihime_game_link_sdk.declarations import (
     CapabilityDescriptor,
     CapabilityEffect,
     CommandDescriptor,
@@ -17,10 +20,9 @@ from ygl_test_subject.api.manifests import (
     PackageManifest,
     PrivacyFloor,
 )
-from ygl_test_subject.api.services import ModuleHandlers
-from ygl_test_subject.api.version import CONTRACT_VERSION
-from ygl_test_subject.core.help_catalog import HelpCatalog
-from ygl_test_subject.core.registry import Registry as CoreRegistry
+from yomihime_game_link_sdk.display import CommandsBlock, TextBlock
+from yomihime_game_link_sdk.services import ModuleHandlers
+from yomihime_game_link_sdk.version import MODULE_ABI_VERSION
 
 
 class Registry(CoreRegistry):
@@ -50,52 +52,64 @@ def _module(
     command_only_operation: str = "绑定",
     handler: _Handler | None = None,
 ) -> tuple[ModuleManifest, ModuleHandlers, _Handler]:
-    query = CapabilityDescriptor(
-        "query",
-        {"type": "object", "additionalProperties": False},
-        InvocationPolicy.NATURAL_LANGUAGE_ALLOWED,
-        CapabilityEffect.READ_ONLY,
+    query = validate_contract(
+        CapabilityDescriptor(
+            "query",
+            {"type": "object", "additionalProperties": False},
+            InvocationPolicy.NATURAL_LANGUAGE_ALLOWED,
+            CapabilityEffect.READ_ONLY,
+        )
     )
-    account = CapabilityDescriptor(
-        "account",
-        {"type": "object", "additionalProperties": False},
-        InvocationPolicy.COMMAND_ONLY,
-        CapabilityEffect.READ_ONLY,
+    account = validate_contract(
+        CapabilityDescriptor(
+            "account",
+            {"type": "object", "additionalProperties": False},
+            InvocationPolicy.COMMAND_ONLY,
+            CapabilityEffect.READ_ONLY,
+        )
     )
-    query_command = CommandDescriptor(operation_prefix, "query", {}, "普通查询")
-    account_command = CommandDescriptor(
-        command_only_operation, "account", {}, "命令操作"
+    query_command = validate_contract(
+        CommandDescriptor(operation_prefix, "query", {}, "普通查询")
     )
-    module = ModuleManifest(
-        module_id,
-        route,
-        ModuleCategory.GAME,
-        "test.module:Factory",
-        "1.0.0",
-        (query, account),
-        (query_command, account_command),
+    account_command = validate_contract(
+        CommandDescriptor(command_only_operation, "account", {}, "命令操作")
+    )
+    module = validate_contract(
+        ModuleManifest(
+            module_id,
+            route,
+            ModuleCategory.GAME,
+            "test.module:Factory",
+            "1.0.0",
+            (query, account),
+            (query_command, account_command),
+        )
     )
     actual_handler = handler or _Handler()
     return (
         module,
-        ModuleHandlers(
-            capabilities={"query": actual_handler, "account": actual_handler},
-            collectors={},
-            evaluators={},
+        validate_contract(
+            ModuleHandlers(
+                capabilities={"query": actual_handler, "account": actual_handler},
+                collectors={},
+                evaluators={},
+            )
         ),
         actual_handler,
     )
 
 
 def _package(package_id: str, *modules: ModuleManifest) -> PackageManifest:
-    return PackageManifest(
-        package_id,
-        "1.0.0",
-        CONTRACT_VERSION,
-        modules,
-        "Tests",
-        "AGPL-3.0",
-        "offline tests",
+    return validate_contract(
+        PackageManifest(
+            package_id,
+            "1.0.0",
+            MODULE_ABI_VERSION,
+            modules,
+            "Tests",
+            "AGPL-3.0",
+            "offline tests",
+        )
     )
 
 
@@ -141,8 +155,10 @@ class HelpCatalogTests(unittest.TestCase):
                 registry.register_package(
                     _package("explicit", module),
                     {
-                        "catalog": ModuleHandlers(
-                            {"query": handler, "account": handler}, {}, {}
+                        "catalog": validate_contract(
+                            ModuleHandlers(
+                                {"query": handler, "account": handler}, {}, {}
+                            )
                         )
                     },
                 )
@@ -164,26 +180,30 @@ class HelpCatalogTests(unittest.TestCase):
         self,
     ) -> None:
         module, _, handler = _module("catalog", "catalog")
-        web = CapabilityDescriptor(
-            "web_read",
-            {"type": "object", "additionalProperties": False},
-            InvocationPolicy.COMMAND_AND_PUBLIC_WEB,
-            CapabilityEffect.READ_ONLY,
+        web = validate_contract(
+            CapabilityDescriptor(
+                "web_read",
+                {"type": "object", "additionalProperties": False},
+                InvocationPolicy.COMMAND_AND_PUBLIC_WEB,
+                CapabilityEffect.READ_ONLY,
+            )
         )
         module = replace(
             module,
             capabilities=module.capabilities + (web,),
             commands=module.commands
-            + (CommandDescriptor("web", "web_read", {}, "Read"),),
+            + (validate_contract(CommandDescriptor("web", "web_read", {}, "Read")),),
         )
         registry = Registry()
         registry.register_package(
             _package("web-tests", module),
             {
-                "catalog": ModuleHandlers(
-                    {item.capability_id: handler for item in module.capabilities},
-                    {},
-                    {},
+                "catalog": validate_contract(
+                    ModuleHandlers(
+                        {item.capability_id: handler for item in module.capabilities},
+                        {},
+                        {},
+                    )
                 )
             },
         )
@@ -300,27 +320,39 @@ class HelpCatalogTests(unittest.TestCase):
         self.assertEqual(handler.calls, 0)
 
     def test_hp06_owner_floor_is_described_as_private_direct_use(self) -> None:
-        owner = CapabilityDescriptor(
-            "owner_read",
-            {"type": "object", "additionalProperties": False},
-            InvocationPolicy.COMMAND_ONLY,
-            CapabilityEffect.READ_ONLY,
-            privacy_floor=PrivacyFloor.OWNER,
+        owner = validate_contract(
+            CapabilityDescriptor(
+                "owner_read",
+                {"type": "object", "additionalProperties": False},
+                InvocationPolicy.COMMAND_ONLY,
+                CapabilityEffect.READ_ONLY,
+                privacy_floor=PrivacyFloor.OWNER,
+            )
         )
         handler = _Handler()
-        module = ModuleManifest(
-            "owner",
-            "owner",
-            ModuleCategory.PLATFORM,
-            "test.module:Factory",
-            "1.0.0",
-            (owner,),
-            (CommandDescriptor("list", "owner_read", {}, "List mine"),),
+        module = validate_contract(
+            ModuleManifest(
+                "owner",
+                "owner",
+                ModuleCategory.PLATFORM,
+                "test.module:Factory",
+                "1.0.0",
+                (owner,),
+                (
+                    validate_contract(
+                        CommandDescriptor("list", "owner_read", {}, "List mine")
+                    ),
+                ),
+            )
         )
         registry = Registry()
         registry.register_package(
             _package("owner-tests", module),
-            {"owner": ModuleHandlers({"owner_read": handler}, {}, {})},
+            {
+                "owner": validate_contract(
+                    ModuleHandlers({"owner_read": handler}, {}, {})
+                )
+            },
         )
 
         document = HelpCatalog(active_query=lambda module_id: True).module(

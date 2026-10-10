@@ -6,7 +6,7 @@ import json
 import re
 from time import time
 
-from ...api.administration import AdminAuthorizationDenied
+from ...core.contracts.administration import AdminAuthorizationDenied
 from .web_public import normalize_origin
 
 HOST_VERSION = "4.28.2"

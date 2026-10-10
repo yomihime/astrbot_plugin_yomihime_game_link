@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 
-from yomihime_sdk.api.results import CapabilityResult, ErrorCode
+from yomihime_game_link_sdk.results import CapabilityResult, ErrorCode
 
 from ..query_resolution import MarketQuery
 from .market_sources import CatalogSnapshot, Provenance

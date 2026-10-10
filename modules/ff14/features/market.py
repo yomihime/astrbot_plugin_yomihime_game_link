@@ -6,20 +6,20 @@ import asyncio
 from collections.abc import Mapping
 from datetime import datetime
 
-from yomihime_sdk.api.display import (
+from yomihime_game_link_sdk.display import (
     DisplayDocument,
     Link,
     LinksBlock,
     Privacy,
     TextBlock,
 )
-from yomihime_sdk.api.results import (
+from yomihime_game_link_sdk.errors import SourceHttpError
+from yomihime_game_link_sdk.results import (
     CapabilityResult,
     ErrorCode,
     ErrorDetail,
     ResultStatus,
 )
-from yomihime_sdk.api.services import SourceHttpError
 
 from ..query_resolution import (
     SUPPORTED_REGIONS,

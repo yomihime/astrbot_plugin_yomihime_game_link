@@ -10,12 +10,12 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from ygl_test_subject.api.administration import (
+from ygl_test_subject.core.contracts.administration import (
     AdminAuthorizationDenied,
     AdminAuthorizationGrant,
     AdminOperation,
 )
-from ygl_test_subject.api.services import ConfigTarget
+from ygl_test_subject.core.contracts.validation_boundary import validate_contract
 from ygl_test_subject.infrastructure.sqlite.database import SQLiteDatabase
 from ygl_test_subject.infrastructure.sqlite.repositories_admin_credentials import (
     SQLiteAdminCredentialRepository,
@@ -26,6 +26,8 @@ from ygl_test_subject.services.admin_authorization import (
     _digest,
 )
 
+from yomihime_game_link_sdk.services import ConfigTarget
+
 
 class AdminSourceTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
@@ -34,7 +36,7 @@ class AdminSourceTests(unittest.IsolatedAsyncioTestCase):
         await self.db.executor.initialize()
         self.repo = SQLiteAdminCredentialRepository(self.db)
         self.auth = AdminAuthorizationService(self.repo)
-        self.target = ConfigTarget("host", "game_link/core")
+        self.target = validate_contract(ConfigTarget("host", "game_link/core"))
         self.resources = {self.target: {"default_region"}}
         self.source = self.auth.register_source(
             "test-host",
@@ -107,7 +109,11 @@ class AdminSourceTests(unittest.IsolatedAsyncioTestCase):
             (
                 real,
                 AdminOperation.UPDATE_CONFIG,
-                {ConfigTarget("other", "game_link/core"): {"default_region"}},
+                {
+                    validate_contract(ConfigTarget("other", "game_link/core")): {
+                        "default_region"
+                    }
+                },
             ),
         ):
             with self.assertRaises(AdminAuthorizationDenied):

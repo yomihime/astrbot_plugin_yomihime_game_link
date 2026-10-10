@@ -10,9 +10,11 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import uuid4
 
-from ..api.contexts import InvocationView
-from ..api.manifests import CapabilityReference, ModuleManifest
-from ..api.services import CapabilityHealth, HealthReport, HealthStatus
+from yomihime_game_link_sdk.contexts import InvocationView
+from yomihime_game_link_sdk.declarations import CapabilityReference, ModuleManifest
+from yomihime_game_link_sdk.services import CapabilityHealth, HealthReport, HealthStatus
+
+from ..core.contracts.validation_boundary import validate_contract
 from .context_issuer import ContextIssuer, InvalidInvocation
 from .ports import (
     AdmissionLease,
@@ -121,6 +123,7 @@ class AdmissionController(AdmissionPort):
 
     def admit(self, view: InvocationView, capability_id: str) -> AdmissionLease:
         """Issue a root lease from an exact active issuer-owned view."""
+        validate_contract(view)
         try:
             trusted = self.issuer.require(view)
         except InvalidInvocation as exc:
@@ -293,6 +296,7 @@ class AdmissionController(AdmissionPort):
 
     def activate(self, identity: RunIdentity, health: HealthReport) -> None:
         """Open a gate only after Lifecycle published its active projection."""
+        validate_contract(health)
         if not isinstance(identity, RunIdentity) or not isinstance(
             health, HealthReport
         ):
@@ -434,6 +438,7 @@ class AdmissionController(AdmissionPort):
         return identity
 
     def _capability(self, manifest: ModuleManifest, capability_id: str):
+        validate_contract(manifest)
         descriptor = next(
             (
                 item
@@ -468,6 +473,7 @@ class AdmissionController(AdmissionPort):
     def _dependencies(
         self, module_id: str, manifest: ModuleManifest, descriptor
     ) -> tuple[DependencyIdentity, ...]:
+        validate_contract(manifest)
         dependencies: list[DependencyIdentity] = []
         for required in descriptor.required_capabilities:
             if isinstance(required, CapabilityReference):
@@ -498,6 +504,7 @@ class AdmissionController(AdmissionPort):
         )
 
     def _schedule(self, manifest: ModuleManifest, collector_id: str, key_version: int):
+        validate_contract(manifest)
         schedule = next(
             (
                 item
@@ -520,6 +527,7 @@ class AdmissionController(AdmissionPort):
         collector_id: str | None = None,
         execution: ExecutionLease | None = None,
     ) -> None:
+        validate_contract(view)
         if lease.lease_id in self._leases:
             raise RuntimeError("lease identifier collision")
         dependencies = getattr(lease, "dependencies", ())
@@ -560,6 +568,7 @@ class AdmissionController(AdmissionPort):
         return value.astimezone(UTC)
 
     def _on_invocation_release(self, view: InvocationView) -> None:
+        validate_contract(view)
         lease_id = self._view_leases.get(view.invocation_id)
         if lease_id is not None:
             self._forget(lease_id)

@@ -5,7 +5,7 @@ from __future__ import annotations
 import unittest
 from typing import cast
 
-from ygl_test_subject.api.administration import (
+from ygl_test_subject.core.contracts.administration import (
     AdminAuthorizationContext,
     AdminAuthorizationDenied,
     AdminAuthorizationGrant,
@@ -17,10 +17,11 @@ from ygl_test_subject.api.administration import (
     ModuleLifecycle,
     ModuleStatus,
 )
-from ygl_test_subject.api.manifests import ConfigUpdateMode
-from ygl_test_subject.api.services import ConfigFieldUpdate, ConfigPatch
+from ygl_test_subject.core.contracts.services import ConfigFieldUpdate, ConfigPatch
 from ygl_test_subject.core.ports import AdminAuthorizationPort
 from ygl_test_subject.services.admin_facade import AdminFacade
+
+from yomihime_game_link_sdk.declarations import ConfigUpdateMode
 
 
 class _Context:

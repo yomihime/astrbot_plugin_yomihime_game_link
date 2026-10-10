@@ -9,43 +9,43 @@ from datetime import UTC, datetime
 from math import isfinite
 from typing import Protocol
 
-from ..api.contexts import InvocationOrigin, InvocationView
-from ..api.display import DigestMember
-from ..api.manifests import ModuleManifest, PrivacyFloor
-from ..api.services import (
-    Grant,
-    GrantStatus,
-    SubscriptionOperations,
-    SubscriptionUnavailable,
-    SubscriptionView,
-)
-from ..api.storage import GrantReference, OwnerScope, OwnershipKind
-from ..api.subscriptions import (
+from yomihime_game_link_sdk.contexts import InvocationOrigin, InvocationView
+from yomihime_game_link_sdk.declarations import ModuleManifest, PrivacyFloor
+from yomihime_game_link_sdk.display import DigestMember
+from yomihime_game_link_sdk.services import SubscriptionOperations
+from yomihime_game_link_sdk.storage import GrantReference, OwnerScope, OwnershipKind
+from yomihime_game_link_sdk.subscriptions import (
     CollectionKey,
     ConversationKind,
     ConversationRef,
-    DeliveryEvent,
-    DeliveryState,
-    DigestMemberAssociation,
-    DigestWindowSelector,
     EvaluationState,
     NormalizedInput,
     Observation,
     ObservationCompleteness,
+    ScheduleDescriptor,
+    SubscriptionRequest,
+    SubscriptionView,
+)
+
+from ..core.context_issuer import ContextIssuer
+from ..core.contracts.services import Grant, GrantStatus
+from ..core.contracts.subscriptions import (
+    DeliveryEvent,
+    DeliveryState,
+    DigestMemberAssociation,
+    DigestWindowSelector,
     ObservationCursor,
     ObservationEvaluationCommit,
-    ScheduleDescriptor,
     SubscriptionEvaluationCommit,
     SubscriptionJobAssociation,
     SubscriptionJobChange,
     SubscriptionJobChangeKind,
     SubscriptionRecord,
-    SubscriptionRequest,
     SubscriptionStatus,
     delivery_idempotency_key,
     validate_evaluation_decision,
 )
-from ..core.context_issuer import ContextIssuer
+from ..core.contracts.validation_boundary import validate_contract
 from ..core.ports import (
     AdmissionLease,
     AdmissionPort,
@@ -221,6 +221,7 @@ class SubscriptionOperationsService(SubscriptionOperations):
     def _command(
         self, invocation: InvocationView
     ) -> tuple[InvocationView, RegisteredModule]:
+        validate_contract(invocation)
         view = self._issuer.require(invocation)
         lease = self._issuer.lease_for(view)
         if not isinstance(lease, AdmissionLease):
@@ -280,6 +281,7 @@ class SubscriptionOperationsService(SubscriptionOperations):
         return view, module
 
     def _check_command_current(self, invocation: InvocationView) -> None:
+        validate_contract(invocation)
         view = self._issuer.require(invocation)
         lease = self._issuer.lease_for(view)
         if not isinstance(lease, AdmissionLease):
@@ -295,8 +297,10 @@ class SubscriptionOperationsService(SubscriptionOperations):
     async def _recipient(
         self, invocation: InvocationView, owner_scope: OwnershipKind
     ) -> ConversationRef:
+        validate_contract(invocation)
+        validate_contract(owner_scope)
         if owner_scope is OwnershipKind.AUTHORIZED:
-            from ..api.services import resolve_authorized_recipient
+            from ..core.contracts.services import resolve_authorized_recipient
 
             resolved = await resolve_authorized_recipient(invocation, self._resolver)
             if resolved.conversation is None:
@@ -338,6 +342,7 @@ class SubscriptionOperationsService(SubscriptionOperations):
     async def _validate_grant(
         self, reference: GrantReference, *, owner_id: str, module_id: str
     ) -> GrantReference:
+        validate_contract(reference)
         try:
             grant = await self._grants.current_grant(reference.grant_id)
         except Exception:
@@ -355,16 +360,20 @@ class SubscriptionOperationsService(SubscriptionOperations):
             )
         ):
             raise SubscriptionOperationError("authorization is no longer active")
-        return GrantReference(grant.grant_id, grant.revision)
+        return validate_contract(GrantReference(grant.grant_id, grant.revision))
 
     async def _require_grant(
         self, invocation: InvocationView, scope: OwnershipKind, *, owner_id: str
     ) -> GrantReference | None:
+        validate_contract(invocation)
+        validate_contract(scope)
         if scope is not OwnershipKind.AUTHORIZED:
             return None
         if invocation.grant_id is None or invocation.grant_revision is None:
             raise SubscriptionOperationError()
-        reference = GrantReference(invocation.grant_id, invocation.grant_revision)
+        reference = validate_contract(
+            GrantReference(invocation.grant_id, invocation.grant_revision)
+        )
         return await self._validate_grant(
             reference,
             owner_id=owner_id,
@@ -372,6 +381,7 @@ class SubscriptionOperationsService(SubscriptionOperations):
         )
 
     async def _principal_id(self, invocation: InvocationView) -> str:
+        validate_contract(invocation)
         self._check_command_current(invocation)
         try:
             module = self._registry.snapshot().module(invocation.module_id)
@@ -399,6 +409,7 @@ class SubscriptionOperationsService(SubscriptionOperations):
         return principal_id
 
     async def _owner_proof_current(self, invocation: InvocationView) -> str:
+        validate_contract(invocation)
         try:
             if self._owner_authority is None:
                 raise SubscriptionOperationError()
@@ -410,6 +421,7 @@ class SubscriptionOperationsService(SubscriptionOperations):
 
     @staticmethod
     def _owner_floor(module: RegisteredModule, invocation: InvocationView) -> bool:
+        validate_contract(invocation)
         return any(
             item.capability_id == invocation.capability_id
             and item.privacy_floor is PrivacyFloor.OWNER
@@ -461,6 +473,8 @@ class SubscriptionOperationsService(SubscriptionOperations):
         subscription_id: str,
         revision: int,
     ) -> tuple[SubscriptionRecord, SubscriptionJobAssociation]:
+        validate_contract(invocation)
+        validate_contract(request)
         owner = await self._principal_id(invocation)
         descriptor, schedule = self._declarations(module, request.type_id)
         if self._owner_floor(module, invocation) and (
@@ -511,13 +525,15 @@ class SubscriptionOperationsService(SubscriptionOperations):
             if inspect.iscoroutine(normalized):
                 normalized.close()
             raise SubscriptionOperationError("collector parameters are invalid")
-        key = CollectionKey(
-            invocation.module_id,
-            schedule.collector_id,
-            schedule.key_version,
-            schedule.source_id,
-            normalized,
-            scope,
+        key = validate_contract(
+            CollectionKey(
+                invocation.module_id,
+                schedule.collector_id,
+                schedule.key_version,
+                schedule.source_id,
+                normalized,
+                scope,
+            )
         )
         try:
             cadence_seconds, config_revision = self._cadence.resolve(
@@ -561,18 +577,22 @@ class SubscriptionOperationsService(SubscriptionOperations):
 
     @staticmethod
     def _view(record: SubscriptionRecord) -> SubscriptionView:
-        return SubscriptionView(
-            record.subscription_id,
-            record.revision,
-            record.owner_id,
-            record.grant,
-            record.recipient.conversation_id,
-            record.filters,
+        return validate_contract(
+            SubscriptionView(
+                record.subscription_id,
+                record.revision,
+                record.owner_id,
+                record.grant,
+                record.recipient.conversation_id,
+                record.filters,
+            )
         )
 
     async def create_request(
         self, invocation: InvocationView, request: SubscriptionRequest
     ) -> SubscriptionView:
+        validate_contract(invocation)
+        validate_contract(request)
         view, module = self._command(invocation)
         if not isinstance(request, SubscriptionRequest):
             raise TypeError("request must be a SubscriptionRequest")
@@ -651,6 +671,8 @@ class SubscriptionOperationsService(SubscriptionOperations):
     async def revise_request(
         self, invocation: InvocationView, request: SubscriptionRequest
     ) -> SubscriptionView:
+        validate_contract(invocation)
+        validate_contract(request)
         view, module = self._command(invocation)
         if (
             not isinstance(request, SubscriptionRequest)
@@ -760,6 +782,7 @@ class SubscriptionOperationsService(SubscriptionOperations):
     async def list_current(
         self, invocation: InvocationView
     ) -> tuple[SubscriptionView, ...]:
+        validate_contract(invocation)
         view, module = self._command(invocation)
         owner_floor = self._owner_floor(module, view)
         owner_id = await self._principal_id(view)
@@ -808,6 +831,7 @@ class SubscriptionOperationsService(SubscriptionOperations):
         *,
         owner_floor: bool = False,
     ) -> bool:
+        validate_contract(invocation)
         base = bool(
             record is not None
             and record.status is SubscriptionStatus.ACTIVE
@@ -832,6 +856,7 @@ class SubscriptionOperationsService(SubscriptionOperations):
         self, invocation: InvocationView, record: SubscriptionRecord
     ) -> None:
         """Require the current trusted route to equal the saved AUTHORIZED route."""
+        validate_contract(invocation)
         recipient = await self._recipient(invocation, OwnershipKind.AUTHORIZED)
         if recipient != record.recipient:
             raise PrivateRecipientRequired()
@@ -843,6 +868,7 @@ class SubscriptionOperationsService(SubscriptionOperations):
         *,
         expected_revision: int,
     ) -> None:
+        validate_contract(invocation)
         view, module = self._command(invocation)
         owner_floor = self._owner_floor(module, view)
         current = await self._subscriptions.current(subscription_id)
@@ -921,18 +947,6 @@ class SubscriptionOperationsService(SubscriptionOperations):
             if owner_floor:
                 await self._owner_proof_current(view)
 
-    async def create(
-        self, invocation: InvocationView, subscription: SubscriptionView
-    ) -> SubscriptionView:
-        self._command(invocation)
-        raise SubscriptionUnavailable()
-
-    async def revise(
-        self, invocation: InvocationView, subscription: SubscriptionView
-    ) -> SubscriptionView:
-        self._command(invocation)
-        raise SubscriptionUnavailable()
-
     async def prepare_evaluations(
         self, lease: ExecutionLease, observation: Observation
     ) -> ObservationEvaluationCommit:
@@ -942,6 +956,7 @@ class SubscriptionOperationsService(SubscriptionOperations):
         The scheduler must commit the returned value once, together with this
         exact observation and lease, using ``commit_observation_with_evaluations``.
         """
+        validate_contract(observation)
         if lease.key != observation.key:
             raise SubscriptionOperationError(
                 "collection lease does not match observation"
@@ -1035,11 +1050,13 @@ class SubscriptionOperationsService(SubscriptionOperations):
                 raise SubscriptionOperationError(
                     "subscription evaluation is invalid"
                 ) from None
-            next_state = EvaluationState(
-                1
-                if checkpoint.expected_state_revision is None
-                else checkpoint.expected_state_revision + 1,
-                decision.state,
+            next_state = validate_contract(
+                EvaluationState(
+                    1
+                    if checkpoint.expected_state_revision is None
+                    else checkpoint.expected_state_revision + 1,
+                    decision.state,
+                )
             )
             events: tuple[DeliveryEvent, ...] = ()
             digest_members: tuple[DigestMemberAssociation, ...] = ()
@@ -1085,11 +1102,13 @@ class SubscriptionOperationsService(SubscriptionOperations):
                         or window.schedule_recipient != record.recipient
                     ):
                         raise DigestWindowUnavailable()
-                    member = DigestMember(
-                        record.subscription_id,
-                        record.revision,
-                        event.event_key,
-                        event.event_version,
+                    member = validate_contract(
+                        DigestMember(
+                            record.subscription_id,
+                            record.revision,
+                            event.event_key,
+                            event.event_version,
+                        )
                     )
                     digest_members = (
                         DigestMemberAssociation(

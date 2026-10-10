@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import os
-import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -13,7 +12,7 @@ from pathlib import Path
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 EXPECTED_WHEEL_SHA256 = (
-    "84cd029d271c1dce09935a7eba26a1b0f3229fa44369ee618d82ce03774ad73e"
+    "54d5a0766ae5b626e575ff0d1936b49ce14a7d7f57b6db1f62882653eea9c81e"
 )
 
 
@@ -34,59 +33,22 @@ def build_and_install_pinned_sdk(work_root: Path) -> InstalledSdk:
             "R preflight requires the K-reviewed local build tool versions"
         )
 
+    from ygl_test_subject.scripts.build_dashboard_zip import validate_wheel
+    from ygl_test_subject.scripts.build_release import build_sdk_wheel
+
     work = Path(work_root)
-    source = work / "sdk-source"
-    wheelhouse = work / "wheelhouse"
     site_root = work / "installed-sdk"
-    for path in (source, wheelhouse, site_root):
-        path.mkdir()
-
-    for filename in ("LICENSE", "pyproject.toml", "setup.py"):
-        shutil.copy2(REPOSITORY_ROOT / filename, source / filename)
-    (source / "docs").mkdir()
-    shutil.copy2(
-        REPOSITORY_ROOT / "docs" / "module-sdk.md", source / "docs" / "module-sdk.md"
+    site_root.mkdir()
+    wheel_input = os.environ.get("YGL_TEST_SDK_WHEEL")
+    wheel = (
+        Path(wheel_input).resolve(strict=True)
+        if wheel_input
+        else build_sdk_wheel(work / "sdk-build", REPOSITORY_ROOT)
     )
-    shutil.copytree(
-        REPOSITORY_ROOT / "yomihime_sdk",
-        source / "yomihime_sdk",
-        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
-    )
-    for example in ("empty_module", "offline_sample"):
-        shutil.copytree(
-            REPOSITORY_ROOT / "examples" / example,
-            source / "examples" / example,
-            ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
-        )
-
-    environment = os.environ.copy()
-    environment["SOURCE_DATE_EPOCH"] = "315532800"
-    subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "pip",
-            "wheel",
-            "--no-cache-dir",
-            "--no-index",
-            "--no-deps",
-            "--no-build-isolation",
-            "--wheel-dir",
-            str(wheelhouse),
-            str(source),
-        ],
-        check=True,
-        cwd=source,
-        env=environment,
-        capture_output=True,
-        text=True,
-    )
-    wheels = tuple(wheelhouse.glob("*.whl"))
-    if len(wheels) != 1:
-        raise RuntimeError("SDK build did not produce exactly one wheel")
-    wheel = wheels[0]
+    # An invalid supplied artifact is an error, never a reason to rebuild.
+    validate_wheel(wheel)
     digest = hashlib.sha256(wheel.read_bytes()).hexdigest()
-    if wheel.name != "yomihime_module_sdk-1.8.0-py3-none-any.whl":
+    if wheel.name != "yomihime_game_link_sdk-0.1.0a6-py3-none-any.whl":
         raise RuntimeError(
             "SDK wheel name or version does not match the reviewed artifact"
         )
@@ -136,7 +98,7 @@ plugin = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = plugin
 spec.loader.exec_module(plugin)
 
-import yomihime_sdk
+import yomihime_game_link_sdk
 from ygl_r_preflight_subject.extensions.discovery import DiscoveryRootError
 from ygl_r_preflight_subject.extensions.loader import CandidateState, ExtensionLoader
 from ygl_r_preflight_subject.core.registry import Registry
@@ -144,8 +106,8 @@ from ygl_r_preflight_subject.services.b05_runtime import (
     extract_installed_sdk_examples,
 )
 
-assert Path(yomihime_sdk.__file__).resolve().is_relative_to(site_root.resolve())
-assert importlib.metadata.version("yomihime-module-sdk") == "1.8.0"
+assert Path(yomihime_game_link_sdk.__file__).resolve().is_relative_to(site_root.resolve())
+assert importlib.metadata.version("yomihime-game-link-sdk") == "0.1.0a6"
 before_threads = {thread.ident for thread in threading.enumerate()}
 registry = Registry()
 before_snapshot = registry.snapshot()
@@ -215,9 +177,9 @@ expected_modules = {
     "offline_sample": [
         {
             "module_id": "status",
-            "capabilities": 10,
-            "commands": 10,
-            "tools": 2,
+            "capabilities": 14,
+            "commands": 14,
+            "tools": 3,
             "config_fields": 3,
             "schedules": 2,
             "subscriptions": 2,

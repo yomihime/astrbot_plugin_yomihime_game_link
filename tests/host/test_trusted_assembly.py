@@ -186,7 +186,7 @@ class TrustedAssemblyTests(unittest.TestCase):
             "schema_version": 1,
             "package_id": "neutral",
             "package_version": "1.0.0",
-            "contract_version": "1.6.0",
+            "contract_version": "2.0",
             "author": "fixture",
             "license": "MIT",
             "source": "https://example.test/fixture",
@@ -203,7 +203,7 @@ class TrustedAssemblyTests(unittest.TestCase):
                             "input_schema": {"type": "object"},
                             "invocation_policy": "command_and_public_web",
                             "effect": "read_only",
-                            "output_version": "1.0.0",
+                            "output_version": "1.8.0",
                             "privacy_floor": "public",
                         }
                     ],

@@ -10,13 +10,14 @@ import unittest
 from types import SimpleNamespace
 
 from ygl_test_subject.adapters.astrbot.tool_publisher import ToolPublicationError
+from ygl_test_subject.core.contracts.validation_boundary import validate_contract
 from ygl_test_subject.infrastructure.sqlite.executor import SQLiteExecutorClosedError
 from ygl_test_subject.modules.ff14.query_resolution import TrustedOwner
 from ygl_test_subject.services.core_runtime import CoreRuntimeCleanupPending
 
-from yomihime_sdk.api.contexts import InvocationOrigin
-from yomihime_sdk.api.display import Privacy
-from yomihime_sdk.api.results import (
+from yomihime_game_link_sdk.contexts import InvocationOrigin
+from yomihime_game_link_sdk.display import Privacy
+from yomihime_game_link_sdk.results import (
     CapabilityResult,
     ErrorCode,
     ErrorDetail,
@@ -85,6 +86,10 @@ class ControlledProvider:
                 + ", ".join(item["name"] for item in facts["selection"]["candidates"])
             )
         else:
+            if facts["status"] != "success":
+                raise AssertionError(
+                    f"controlled provider expected market success: {facts}"
+                )
             limits = facts["market"]["limitations"]
             reply = str(facts["market"]["minimums"])
             if limits["minimum_scope"] == "available_returned_scopes":
@@ -445,8 +450,7 @@ class LLMToolTests(unittest.IsolatedAsyncioTestCase):
     async def test_generic_publisher_query_is_not_an_item_contract(self):
         from uuid import uuid4
 
-        from yomihime_sdk.api.display import DisplayDocument, TextBlock
-        from yomihime_sdk.api.manifests import (
+        from yomihime_game_link_sdk.declarations import (
             CapabilityDescriptor,
             CapabilityEffect,
             InvocationPolicy,
@@ -455,56 +459,73 @@ class LLMToolTests(unittest.IsolatedAsyncioTestCase):
             PackageManifest,
             ToolDescriptor,
         )
-        from yomihime_sdk.api.results import FactDocument
-        from yomihime_sdk.api.services import (
+        from yomihime_game_link_sdk.display import DisplayDocument, TextBlock
+        from yomihime_game_link_sdk.results import FactDocument
+        from yomihime_game_link_sdk.services import (
             CapabilityHealth,
             HealthReport,
             HealthStatus,
             ModuleHandlers,
         )
-        from yomihime_sdk.api.version import CONTRACT_VERSION
+        from yomihime_game_link_sdk.version import MODULE_ABI_VERSION
 
         await self.start()
-        descriptor = ToolDescriptor(
-            name="generic_query",
-            description="generic",
-            capability_id="read",
-            parameter_mapping={"query": "text"},
+        descriptor = validate_contract(
+            ToolDescriptor(
+                name="generic_query",
+                description="generic",
+                capability_id="read",
+                parameter_mapping={"query": "text"},
+            )
         )
-        capability = CapabilityDescriptor(
-            capability_id="read",
-            invocation_policy=InvocationPolicy.NATURAL_LANGUAGE_ALLOWED,
-            effect=CapabilityEffect.READ_ONLY,
-            input_schema={
-                "type": "object",
-                "properties": {"text": {"type": "string"}},
-                "required": ["text"],
-                "additionalProperties": False,
-            },
+        capability = validate_contract(
+            CapabilityDescriptor(
+                capability_id="read",
+                invocation_policy=InvocationPolicy.NATURAL_LANGUAGE_ALLOWED,
+                effect=CapabilityEffect.READ_ONLY,
+                input_schema={
+                    "type": "object",
+                    "properties": {"text": {"type": "string"}},
+                    "required": ["text"],
+                    "additionalProperties": False,
+                },
+            )
         )
-        manifest = ModuleManifest(
-            module_id="module",
-            route="generic",
-            category=ModuleCategory.GAME,
-            factory_entry="synthetic:Factory",
-            module_version="1.0.0",
-            capabilities=(capability,),
-            tools=(descriptor,),
-            commands=(),
+        manifest = validate_contract(
+            ModuleManifest(
+                module_id="module",
+                route="generic",
+                category=ModuleCategory.GAME,
+                factory_entry="synthetic:Factory",
+                module_version="1.0.0",
+                capabilities=(capability,),
+                tools=(descriptor,),
+                commands=(),
+            )
         )
         seen = []
 
         class Handler:
             async def invoke(self, context, parameters):
                 seen.append(dict(parameters))
-                return CapabilityResult(
-                    "generic",
-                    ResultStatus.SUCCESS,
-                    DisplayDocument("Generic", "generic", (TextBlock("ok"),)),
-                    model_facts=FactDocument({"answer": parameters["text"]}),
+                return validate_contract(
+                    CapabilityResult(
+                        "generic",
+                        ResultStatus.SUCCESS,
+                        validate_contract(
+                            DisplayDocument(
+                                "Generic",
+                                "generic",
+                                (validate_contract(TextBlock("ok")),),
+                            )
+                        ),
+                        model_facts=validate_contract(
+                            FactDocument({"answer": parameters["text"]})
+                        ),
+                    )
                 )
 
-        handlers = ModuleHandlers({"read": Handler()}, {}, {})
+        handlers = validate_contract(ModuleHandlers({"read": Handler()}, {}, {}))
 
         class Instance:
             def handlers(self):
@@ -517,18 +538,28 @@ class LLMToolTests(unittest.IsolatedAsyncioTestCase):
                 pass
 
             async def check_health(self):
-                return HealthReport({"read": CapabilityHealth(HealthStatus.AVAILABLE)})
+                return validate_contract(
+                    HealthReport(
+                        {
+                            "read": validate_contract(
+                                CapabilityHealth(HealthStatus.AVAILABLE)
+                            )
+                        }
+                    )
+                )
 
         core = self.runtime.core_runtime
         core.registry.register_package(
-            PackageManifest(
-                package_id="generic",
-                package_version="1.0.0",
-                contract_version=CONTRACT_VERSION,
-                modules=(manifest,),
-                author="Tests",
-                license="AGPL-3.0",
-                source="synthetic fixture",
+            validate_contract(
+                PackageManifest(
+                    package_id="generic",
+                    package_version="1.0.0",
+                    contract_version=MODULE_ABI_VERSION,
+                    modules=(manifest,),
+                    author="Tests",
+                    license="AGPL-3.0",
+                    source="synthetic fixture",
+                )
             ),
             {"module": handlers},
         )
@@ -1042,7 +1073,7 @@ class LLMToolTests(unittest.IsolatedAsyncioTestCase):
             .module("ff14/ff14")
             .handlers.capabilities["ff14.market.query"]
         )
-        self.assertIsNone(handler._tool_event.get())
+        self.assertFalse(hasattr(handler, "_tool_event"))
 
     async def test_bound_event_reset_after_exception_and_concurrent_owners(self):
         await self.start()
@@ -1054,7 +1085,8 @@ class LLMToolTests(unittest.IsolatedAsyncioTestCase):
         invoke = handler.invoke
 
         async def fail(*args):
-            self.assertIsNotNone(handler._tool_event.get())
+            scope = await handler.services.scopes.bind(args[0])
+            self.assertTrue((await scope.message.read()).event_ref)
             raise RuntimeError("synthetic handler failure")
 
         handler.invoke = fail
@@ -1065,19 +1097,20 @@ class LLMToolTests(unittest.IsolatedAsyncioTestCase):
                 await self.call()
         finally:
             handler.invoke = invoke
-        self.assertIsNone(handler._tool_event.get())
+        self.assertFalse(hasattr(handler, "_tool_event"))
 
         entered = asyncio.Event()
         release = asyncio.Event()
         seen = []
 
         async def observe(context, parameters):
-            proof = handler._tool_event.get()
-            seen.append((context.actor_id, proof[0].user, proof[1], proof[2]))
+            scope = await handler.services.scopes.bind(context)
+            message = await scope.message.read()
+            seen.append((context.actor_id, message.event_ref, message.text))
             if context.actor_id.endswith("user-17"):
                 entered.set()
                 await release.wait()
-                self.assertIs(handler._tool_event.get(), proof)
+                self.assertEqual(await scope.message.read(), message)
             return await invoke(context, parameters)
 
         handler.invoke = observe
@@ -1097,9 +1130,9 @@ class LLMToolTests(unittest.IsolatedAsyncioTestCase):
             {row[0] for row in seen},
             {"test-platform-1:user-17", "test-platform-1:other"},
         )
-        self.assertTrue(all(actor == owner for actor, owner, _, _ in seen))
-        self.assertIsNot(seen[0][2], seen[1][2])
-        self.assertIsNone(handler._tool_event.get())
+        self.assertNotEqual(seen[0][1], seen[1][1])
+        self.assertEqual(seen[0][2], seen[1][2])
+        self.assertFalse(hasattr(handler, "_tool_event"))
 
     async def test_consumed_selection_flight_rejects_query_bypass_and_fences_new_item(
         self,
@@ -1153,16 +1186,18 @@ class LLMToolTests(unittest.IsolatedAsyncioTestCase):
                 try:
                     await asyncio.wait_for(entered.wait(), 3)
                     before = len(self.transport.requests)
+                    denials = []
                     for query in (f"Synthetic Item {item_id}", "Synthetic"):
-                        denied = await self.call(
-                            parameters={
-                                "query": query,
-                                "region": "global",
-                                "quality": "nq",
-                            },
-                            wrapper=confirmation,
+                        denials.append(
+                            self.call(
+                                parameters={
+                                    "query": query,
+                                    "region": "global",
+                                    "quality": "nq",
+                                },
+                                wrapper=confirmation,
+                            )
                         )
-                        self.assertEqual(denied["status"], "error")
                     for text in (
                         "第7个",
                         "第七个",
@@ -1173,18 +1208,32 @@ class LLMToolTests(unittest.IsolatedAsyncioTestCase):
                         "不选",
                         "后者",
                     ):
-                        denied = await self.call(
-                            parameters={
-                                "query": text,
-                                "region": "global",
-                                "quality": "nq",
-                            },
-                            wrapper=self.wrapper(text),
+                        denials.append(
+                            self.call(
+                                parameters={
+                                    "query": text,
+                                    "region": "global",
+                                    "quality": "nq",
+                                },
+                                wrapper=self.wrapper(text),
+                            )
                         )
+                    # All negatives exercise this one live consumed flight.
+                    # Serial Core fences can exhaust the real 10s request cap
+                    # before the synthetic HTTP barrier is released.
+                    values = await asyncio.gather(
+                        *denials, self.call("ff14_market_select", args, confirmation)
+                    )
+                    for denied in values[:-1]:
                         self.assertEqual(denied["status"], "error")
-                    replay = await self.call("ff14_market_select", args, confirmation)
+                        self.assertEqual(denied["error"]["code"], "parameter_error")
+                    replay = values[-1]
                     self.assertEqual(replay["status"], "error")
+                    self.assertEqual(replay["error"]["code"], "parameter_error")
                     self.assertEqual(len(self.transport.requests), before)
+                    self.assertFalse(
+                        selected.done(), "consumed flight must remain live"
+                    )
                     if replace_query:
                         fresh = await self.call(
                             parameters={
@@ -1203,7 +1252,7 @@ class LLMToolTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(result["status"], "error")
                     self.assertNotIn("market", result)
                 else:
-                    self.assertEqual(result["status"], "success")
+                    self.assertEqual(result["status"], "success", result)
                     for field in (
                         "scope",
                         "quality",
@@ -1367,7 +1416,7 @@ class LLMToolTests(unittest.IsolatedAsyncioTestCase):
                     "ff14_market_select", args, self.wrapper("Synthetic Item 44091")
                 )
             finally:
-                reset.append(handler._tool_event.get())
+                reset.append(hasattr(handler, "_tool_event"))
 
         self.transport.callback = block
         flight = asyncio.create_task(call_selection())
@@ -1385,7 +1434,7 @@ class LLMToolTests(unittest.IsolatedAsyncioTestCase):
                 await flight
         finally:
             release.set()
-        self.assertEqual(reset, [None])
+        self.assertEqual(reset, [False])
         self.assertEqual(handler.registry.size, 0)
         self.transport.callback = None
         fresh = await self.call(
@@ -1414,7 +1463,7 @@ class LLMToolTests(unittest.IsolatedAsyncioTestCase):
 
         async def failing_catalog():
             self.assertEqual(handler.registry.size, 1)
-            self.assertIsNotNone(handler._tool_event.get())
+            self.assertFalse(hasattr(handler, "_tool_event"))
             raise RuntimeError("synthetic internal catalog failure")
 
         handler.source.start_bound = lambda *args, **kwargs: SimpleNamespace(
@@ -1429,7 +1478,7 @@ class LLMToolTests(unittest.IsolatedAsyncioTestCase):
                 )
         finally:
             handler.source.start_bound = start_bound
-        self.assertIsNone(handler._tool_event.get())
+        self.assertFalse(hasattr(handler, "_tool_event"))
         self.assertEqual(handler.registry.size, 0)
         retry = await self.call(
             parameters={"query": "Synthetic"}, wrapper=self.wrapper("Synthetic什么价")
@@ -1459,6 +1508,8 @@ class LLMToolTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_unbound_wrong_owner_and_expired_confirmation_cannot_query(self):
+        from yomihime_game_link_sdk.errors import AccessDenied
+
         await self.start()
         core = self.runtime.core_runtime
         handler = (
@@ -1468,22 +1519,38 @@ class LLMToolTests(unittest.IsolatedAsyncioTestCase):
         )
         event = self.wrapper("物品ID 44091").context.event
         ingress = self.runtime._make_ingress(event, origin=InvocationOrigin.LLM_TOOL)
-        unbound = await core.invoke_tool(
-            "ff14/ff14", "ff14_market_query", {"query": "44091"}, ingress=ingress
-        )
-        self.assertEqual(unbound.output.result.facts.facts["status"], "error")
-        with handler._bind_tool_event(
-            event,
-            "物品ID 44091",
-            "test-platform-1:other",
-            "group-42",
-            "test-platform-1",
-        ):
-            wrong = await core.invoke_tool(
+        self.assertFalse(hasattr(handler, "_bind_tool_event"))
+        with self.assertRaises(AccessDenied):
+            await core.invoke_tool(
                 "ff14/ff14", "ff14_market_query", {"query": "44091"}, ingress=ingress
             )
-        self.assertEqual(wrong.output.result.facts.facts["status"], "error")
-        self.assertIsNone(handler._tool_event.get())
+        handle = next(
+            h
+            for h in self.runtime._tool_publisher.handles
+            if h.descriptor.name == "ff14_market_query"
+        )
+        # The missing owner closes its own receipt; a fresh official event is
+        # the positive control for the independent actor-only forgery.
+        with self.assertRaises(AccessDenied):
+            self.runtime._make_ingress(
+                event, origin=InvocationOrigin.LLM_TOOL, tool_handle=handle
+            )
+        event = self.wrapper("物品ID 44091").context.event
+        valid = self.runtime._make_ingress(
+            event, origin=InvocationOrigin.LLM_TOOL, tool_handle=handle
+        )
+        self.assertTrue(
+            self.runtime._message_ingress.current(InvocationOrigin.LLM_TOOL, valid)
+        )
+        with self.assertRaises(AccessDenied):
+            await core.invoke_tool(
+                "ff14/ff14",
+                "ff14_market_query",
+                {"query": "44091"},
+                ingress=__import__("dataclasses").replace(
+                    valid, actor_id="test-platform-1:other"
+                ),
+            )
         self.assertEqual(self.transport.requests, [])
         for text in (
             "Synthetic Item 44091那个。",
@@ -1604,11 +1671,15 @@ class LLMToolTests(unittest.IsolatedAsyncioTestCase):
         original = handler.invoke
 
         async def private(*_):
-            return CapabilityResult(
-                "private",
-                ResultStatus.ERROR,
-                privacy=Privacy.PRIVATE,
-                error=ErrorDetail(ErrorCode.NOT_FOUND, "private internal"),
+            return validate_contract(
+                CapabilityResult(
+                    "private",
+                    ResultStatus.ERROR,
+                    privacy=Privacy.PRIVATE,
+                    error=validate_contract(
+                        ErrorDetail(ErrorCode.NOT_FOUND, "private internal")
+                    ),
+                )
             )
 
         handler.invoke = private
@@ -1806,7 +1877,7 @@ class LLMToolTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_partial_no_data_and_decimal_missing_facts_remain_truthful(self):
         await self.start()
-        from yomihime_sdk.api.services import HttpResponse
+        from yomihime_game_link_sdk.services import HttpResponse
 
         from .test_market_integration import aggregated
 
@@ -1815,8 +1886,10 @@ class LLMToolTests(unittest.IsolatedAsyncioTestCase):
                 return None
             region = request.path.split("/")[-2]
             if region == "Europe":
-                return HttpResponse(503, {}, b"{}")
-            return HttpResponse(200, {}, json.dumps(aggregated(region)).encode())
+                return validate_contract(HttpResponse(503, {}, b"{}"))
+            return validate_contract(
+                HttpResponse(200, {}, json.dumps(aggregated(region)).encode())
+            )
 
         self.transport.callback = partial
         result = await self.call(parameters={"query": "44091", "region": "global"})
@@ -1863,7 +1936,9 @@ class LLMToolTests(unittest.IsolatedAsyncioTestCase):
         # Query a new noncached item and return the official explicit empty marker.
         async def empty(request):
             if "/aggregated/" in request.path:
-                return HttpResponse(200, {}, b'{"results":[],"failedItems":[]}')
+                return validate_contract(
+                    HttpResponse(200, {}, b'{"results":[],"failedItems":[]}')
+                )
             return None
 
         self.transport.callback = empty
@@ -1873,8 +1948,11 @@ class LLMToolTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(no_data["status"], "error")
         self.assertEqual(no_data["error"]["code"], "no_records")
-        self.assertEqual(no_data["market"]["coverage"][0]["state"], "empty")
-        self.assertEqual(no_data["market"]["minimums"], [])
+        self.assertNotIn("market", no_data)
+        self.assertEqual(
+            no_data["supplement"]["market"]["coverage"][0]["state"], "empty"
+        )
+        self.assertEqual(no_data["supplement"]["market"]["minimums"], [])
 
 
 if __name__ == "__main__":

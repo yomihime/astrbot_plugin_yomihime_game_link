@@ -4,20 +4,37 @@ from __future__ import annotations
 
 import asyncio
 import tempfile
+import weakref
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from secrets import token_urlsafe
+from threading import RLock
 from time import monotonic, time
 from types import MappingProxyType
 from typing import Callable
 
-from ...api.administration import AdminAuthorizationDenied, AdminOperation
-from ...api.contexts import InvocationOrigin
-from ...api.display import DisplayLimits
-from ...api.manifests import PrivacyFloor
-from ...api.services import CapabilityHealth, HealthStatus
-from ...api.subscriptions import ConversationKind
+from yomihime_game_link_sdk.contexts import InvocationOrigin
+from yomihime_game_link_sdk.declarations import PrivacyFloor
+from yomihime_game_link_sdk.display import DisplayLimits
+from yomihime_game_link_sdk.errors import (
+    AccessDenied,
+    InvalidInvocation,
+    OperationTimeout,
+    ParameterError,
+    ServiceUnavailable,
+)
+from yomihime_game_link_sdk.services import CapabilityHealth, HealthStatus
+from yomihime_game_link_sdk.subscriptions import ConversationKind
+
+from ...core.contracts.administration import (
+    AdminAuthorizationDenied,
+    AdminOperation,
+    ManagementRecoveryProjection,
+)
+from ...core.contracts.validation_boundary import validate_contract
 from ...core.help_catalog import HelpCatalog
+from ...core.public_errors import public_boundary
 from ...extensions.factory_resolver import (
     ReviewedInventoryFactorySource,
     ReviewedSupportLease,
@@ -75,15 +92,385 @@ _BUNDLE_FAILURE_DIAGNOSTICS = {
 }
 
 
+@dataclass(slots=True)
+class _MessageReceipt:
+    event: weakref.ReferenceType = field(repr=False)
+    facts: tuple | None = field(repr=False)
+    text: str | None = field(repr=False)
+    correlation: str | None = field(repr=False)
+    expires: float
+    closed: bool = False
+    closed_reason: str | None = field(default=None, repr=False)
+
+
+class _MessageReceipts:
+    """Host-private exact-object receipts, bounded including live tombstones."""
+
+    def __init__(self):
+        self._clock = monotonic
+        self._records = {}
+        self._lock = RLock()
+        self._closed = False
+
+    @staticmethod
+    def _close(receipt, reason):
+        if not receipt.closed:
+            receipt.closed_reason = reason
+        receipt.closed = True
+        receipt.text = receipt.facts = receipt.correlation = None
+
+    @staticmethod
+    def _closed_failure(receipt):
+        if receipt.closed_reason == "expired":
+            raise OperationTimeout()
+        if receipt.closed_reason == "unavailable":
+            raise ServiceUnavailable()
+        if receipt.closed_reason == "invalid":
+            raise ParameterError("parameters are invalid")
+
+    def _prune(self):
+        now = self._clock()
+        for key, receipt in tuple(self._records.items()):
+            if receipt.event() is None:
+                self._close(receipt, "collected")
+                del self._records[key]
+            elif receipt.expires <= now:
+                self._close(receipt, "expired")
+
+    @staticmethod
+    @public_boundary("proof")
+    def _text(event):
+        failed = False
+        try:
+            value = event.get_message_str()
+        except Exception:
+            failed = True
+        if failed:
+            raise ServiceUnavailable()
+        if type(value) is not str or len(value) > 16384:
+            raise ParameterError("parameters are invalid")
+        try:
+            valid = len(value.encode("utf-8")) <= 65536
+        except UnicodeError:
+            valid = False
+        if not valid:
+            raise ParameterError("parameters are invalid")
+        return value
+
+    def invalidate_event(self, event, reason):
+        with self._lock:
+            self._prune()
+            receipt = self._records.get(id(event))
+            if receipt is not None and receipt.event() is event:
+                self._close(receipt, reason)
+
+    def invalidate(self, receipt, reason):
+        with self._lock:
+            self._prune()
+            event = receipt.event()
+            if event is not None and self._records.get(id(event)) is receipt:
+                self._close(receipt, reason)
+
+    @public_boundary("proof")
+    def live(self, receipt):
+        with self._lock:
+            self._prune()
+            if not isinstance(receipt, _MessageReceipt):
+                return False
+            event = receipt.event()
+            if event is None or self._records.get(id(event)) is not receipt:
+                return False
+            if receipt.closed:
+                self._closed_failure(receipt)
+                return False
+            return not self._closed
+
+    def check_event(self, event):
+        with self._lock:
+            self._prune()
+            receipt = self._records.get(id(event))
+            if receipt is not None and receipt.event() is event:
+                if not self.live(receipt):
+                    raise AccessDenied("source_revoked")
+
+    @public_boundary("proof")
+    def capture(self, event, facts):
+        with self._lock:
+            self._prune()
+            if self._closed:
+                raise AccessDenied("source_revoked")
+            key = id(event)
+            receipt = self._records.get(key)
+            if receipt is not None and receipt.event() is event:
+                if receipt.closed:
+                    self._closed_failure(receipt)
+                    raise AccessDenied("source_revoked")
+                if receipt.facts != facts:
+                    self._close(receipt, "revoked")
+                    raise AccessDenied("source_revoked")
+                try:
+                    text = self._text(event)
+                except ParameterError:
+                    self._prune()
+                    self._close(receipt, "invalid")
+                    raise
+                except Exception:
+                    self._prune()
+                    self._close(receipt, "unavailable")
+                    raise
+                if receipt.text != text:
+                    self._close(receipt, "revoked")
+                    raise AccessDenied("source_revoked")
+                if not self.live(receipt):
+                    raise AccessDenied("source_revoked")
+                return receipt
+            if len(self._records) >= 128:
+                raise ServiceUnavailable()
+            text = self._text(event)
+
+            def collected(reference):
+                with self._lock:
+                    current = self._records.get(key)
+                    if current is not None and current.event is reference:
+                        self._close(current, "collected")
+                        del self._records[key]
+
+            failed = False
+            try:
+                reference = weakref.ref(event, collected)
+            except TypeError:
+                failed = True
+            if failed:
+                raise ServiceUnavailable()
+            receipt = _MessageReceipt(
+                reference, facts, text, token_urlsafe(32), self._clock() + 300
+            )
+            self._records[key] = receipt
+            return receipt
+
+    @public_boundary("proof")
+    def current(self, receipt, facts, text, correlation):
+        with self._lock:
+            if not self.live(receipt):
+                return False
+            event = receipt.event()
+            try:
+                valid = (
+                    receipt.facts == facts
+                    and receipt.text == text
+                    and receipt.correlation == correlation
+                    and self._text(event) == text
+                    and _AstrBotMessageIngress._read_event_facts(event) == facts
+                )
+            except ParameterError:
+                self._prune()
+                self._close(receipt, "invalid")
+                raise
+            except Exception:
+                self._prune()
+                self._close(receipt, "unavailable")
+                raise ServiceUnavailable()
+            if not valid:
+                self._close(receipt, "revoked")
+            return self.live(receipt) and valid
+
+    def close(self):
+        with self._lock:
+            self._closed = True
+            for receipt in self._records.values():
+                self._close(receipt, "closed")
+            self._records.clear()
+
+
 @dataclass(frozen=True, slots=True)
 class _IngressEvidence:
     seal: object
-    event: object
+    event: object = field(repr=False)
     adapter_id: str
     sender_id: str
     conversation_id: str
     conversation_kind: ConversationKind
     origin: InvocationOrigin = InvocationOrigin.COMMAND
+    receipt: _MessageReceipt | None = field(default=None, repr=False)
+    tool_handle: object | None = field(default=None, repr=False)
+
+
+class _AstrBotMessageIngress:
+    """Private production receiver shared by controlled offline composition.
+
+    Readiness and published tool ownership come only from its trusted owner.
+    """
+
+    def __init__(self, seal, receipts, owner_current):
+        self._evidence_seal, self._message_receipts = seal, receipts
+        self._owner_current = owner_current
+
+    @public_boundary("proof")
+    def make(
+        self, event: object, *, origin=InvocationOrigin.COMMAND, tool_handle=None
+    ) -> HostIngress:
+        receipt = None
+        if origin is InvocationOrigin.LLM_TOOL:
+            from astrbot.core.platform.astr_message_event import AstrMessageEvent
+
+            if not isinstance(event, AstrMessageEvent):
+                raise InvalidInvocation()
+            self._message_receipts.check_event(event)
+            failed = False
+            try:
+                facts = self._read_event_facts(event)
+            except Exception:
+                failed = True
+            if failed:
+                self._message_receipts.invalidate_event(event, "unavailable")
+                raise ServiceUnavailable()
+            receipt = self._message_receipts.capture(event, facts)
+            facts = receipt.facts
+        else:
+            facts = self._read_event_facts(event)
+        adapter, sender, conversation, kind = facts
+        evidence = _IngressEvidence(
+            self._evidence_seal,
+            receipt.event if receipt else event,
+            adapter,
+            sender,
+            conversation,
+            kind,
+            origin,
+            receipt,
+            tool_handle,
+        )
+        return HostIngress(
+            adapter_id=adapter,
+            actor_id=f"{adapter}:{sender}",
+            conversation_id=conversation,
+            delivery_route=adapter,
+            conversation_kind=kind,
+            evidence=evidence,
+            message_text=receipt.text if receipt else None,
+            message_correlation=receipt.correlation if receipt else None,
+        )
+
+    def validate(self, origin: InvocationOrigin, ingress: HostIngress) -> bool:
+        validate_contract(origin)
+        if (
+            origin not in (InvocationOrigin.COMMAND, InvocationOrigin.LLM_TOOL)
+            or not isinstance(ingress, HostIngress)
+            or ingress.grant_reference is not None
+            or not isinstance(ingress.evidence, _IngressEvidence)
+        ):
+            return False
+        evidence = ingress.evidence
+        if evidence.seal is not self._evidence_seal or evidence.origin is not origin:
+            return False
+        if origin is InvocationOrigin.LLM_TOOL:
+            return self.current(origin, ingress)
+        if ingress.message_text is not None or ingress.message_correlation is not None:
+            return False
+        try:
+            facts = self._read_event_facts(evidence.event)
+        except Exception:
+            return False
+        return self._identity_current(ingress, evidence, facts)
+
+    @staticmethod
+    def _identity_current(ingress, evidence, facts):
+        adapter, sender, conversation, kind = facts
+        return (
+            facts
+            == (
+                evidence.adapter_id,
+                evidence.sender_id,
+                evidence.conversation_id,
+                evidence.conversation_kind,
+            )
+            and ingress.adapter_id == adapter
+            and ingress.actor_id == f"{adapter}:{sender}"
+            and ingress.conversation_id == conversation
+            and ingress.delivery_route == adapter
+            and ingress.conversation_kind is kind
+        )
+
+    def _owned(self, receipt, handle):
+        failed = False
+        try:
+            owned = self._owner_current(handle) is True
+        except Exception:
+            failed = True
+        if failed:
+            self._message_receipts.invalidate(receipt, "unavailable")
+            raise ServiceUnavailable()
+        if not owned:
+            self._message_receipts.invalidate(receipt, "revoked")
+        return owned
+
+    @public_boundary("proof")
+    def current(self, origin, ingress):
+        if (
+            origin is not InvocationOrigin.LLM_TOOL
+            or not isinstance(ingress, HostIngress)
+            or ingress.grant_reference is not None
+            or not isinstance(ingress.evidence, _IngressEvidence)
+        ):
+            return False
+        evidence = ingress.evidence
+        receipt = evidence.receipt
+        if (
+            evidence.seal is not self._evidence_seal
+            or evidence.origin is not origin
+            or not isinstance(receipt, _MessageReceipt)
+            or evidence.event is not receipt.event
+        ):
+            return False
+        if not self._message_receipts.live(receipt):
+            return False
+        if not self._owned(receipt, evidence.tool_handle):
+            return False
+        event = receipt.event()
+        from astrbot.core.platform.astr_message_event import AstrMessageEvent
+
+        if not isinstance(event, AstrMessageEvent):
+            self._message_receipts.invalidate(receipt, "revoked")
+            return False
+        failed = False
+        try:
+            facts = self._read_event_facts(event)
+        except Exception:
+            failed = True
+        if failed:
+            self._message_receipts.invalidate(receipt, "unavailable")
+            raise ServiceUnavailable()
+        if not self._identity_current(ingress, evidence, facts):
+            self._message_receipts.invalidate(receipt, "revoked")
+            return False
+        valid = self._message_receipts.current(
+            receipt, facts, ingress.message_text, ingress.message_correlation
+        )
+        if not self._owned(receipt, evidence.tool_handle):
+            return False
+        return self._message_receipts.live(receipt) and valid
+
+    @staticmethod
+    def _read_event_facts(
+        event: object,
+    ) -> tuple[str, str, str, ConversationKind]:
+        adapter = _event_text(event, "get_platform_id")
+        sender = _event_text(event, "get_sender_id")
+        conversation = _event_text(event, "get_session_id")
+        getter = getattr(event, "get_message_type", None)
+        if not callable(getter):
+            raise TypeError("event message type is unavailable")
+        message_type = getter()
+        message_type = getattr(message_type, "value", message_type)
+        if message_type == "GroupMessage":
+            kind = ConversationKind.GROUP
+        elif message_type == "FriendMessage":
+            kind = ConversationKind.DIRECT
+        else:
+            raise ValueError("event message type is unsupported")
+        if ":" in adapter:
+            raise ValueError("platform id is not a valid AstrBot session component")
+        return adapter, sender, conversation, kind
 
 
 class AstrBotRuntime:
@@ -124,6 +511,10 @@ class AstrBotRuntime:
         self._http_transport_factory = http_transport_factory
         self._lock = asyncio.Lock()
         self._evidence_seal = object()
+        self._message_receipts = _MessageReceipts()
+        self._message_ingress = _AstrBotMessageIngress(
+            self._evidence_seal, self._message_receipts, self._tool_owner_current
+        )
         self._core: CoreRuntime | None = None
         self._bridge: AstrBotCommandBridge | None = None
         self._tool_publisher = None
@@ -169,7 +560,7 @@ class AstrBotRuntime:
 
     async def recover_management(
         self, core, revisions, *, authorization, complete_from_current
-    ):
+    ) -> ManagementRecoveryProjection:
         async with self._lock:
             current, source = self.management_entry()
             if current is not core:
@@ -319,8 +710,12 @@ class AstrBotRuntime:
 
     async def public_ff14_page_state(self, *, include_values: bool = False) -> dict:
         """Deprecated locator only; no module defaults, gates or credential state."""
-        return {"schema_version": 1, "state": "retired",
-                "reopen_required": True, "host_path": "/#/extension/plugins"}
+        return {
+            "schema_version": 1,
+            "state": "retired",
+            "reopen_required": True,
+            "host_path": "/#/extension/plugins",
+        }
 
     def public_page_bindings(self):
         if self._assembly is None:
@@ -373,6 +768,12 @@ class AstrBotRuntime:
             else:
                 self._cleanup_isolated_extension_dir()
 
+            self._message_receipts.close()
+            self._message_receipts = _MessageReceipts()
+            self._evidence_seal = object()
+            self._message_ingress = _AstrBotMessageIngress(
+                self._evidence_seal, self._message_receipts, self._tool_owner_current
+            )
             self._trusted_bundle = False
             self._bundle_failure_reason = None
             try:
@@ -463,10 +864,11 @@ class AstrBotRuntime:
                             max_members_per_batch=8,
                         )
                     ),
-                    display_limits=DisplayLimits(2, 4096),
+                    display_limits=validate_contract(DisplayLimits(2, 4096)),
                     message_port=message_port,
                     admin_context_validator=lambda *_args: False,
                     host_ingress_validator=self._validate_ingress,
+                    host_message_current_validator=self._message_current,
                     config_principal_id=PLUGIN_NAME,
                     identity_namespace=PLUGIN_NAME,
                     factory_source=ReviewedInventoryFactorySource(
@@ -647,6 +1049,7 @@ class AstrBotRuntime:
     async def terminate(self) -> None:
         """Stop ingress and close the owned pump/modules/database once."""
         self._generation += 1
+        self._message_receipts.close()
         if self._tool_publisher is not None:
             self._tool_publisher.revoke()
         if self._core is not None and callable(
@@ -669,6 +1072,7 @@ class AstrBotRuntime:
             self._closing = False
 
     async def _close_owned_runtime(self) -> None:
+        self._message_receipts.close()
         pending = []
         self._ready = False
         self._bridge = None
@@ -783,7 +1187,9 @@ class AstrBotRuntime:
 
     async def _source_health(self, module_id: str, source_id: str) -> CapabilityHealth:
         """Report local wiring readiness only; never probe remote endpoints."""
-        unavailable = CapabilityHealth(HealthStatus.UNAVAILABLE, "source_unavailable")
+        unavailable = validate_contract(
+            CapabilityHealth(HealthStatus.UNAVAILABLE, "source_unavailable")
+        )
         if (
             not self._trusted_bundle
             or self._assembly is None
@@ -835,7 +1241,9 @@ class AstrBotRuntime:
         # AVAILABLE means only that an exact bundled declaration is wired to
         # the open, owned transport. HealthResolver may normalize its reason;
         # this is deliberately not a claim about remote endpoint reachability.
-        return CapabilityHealth(HealthStatus.AVAILABLE, "local_transport_ready")
+        return validate_contract(
+            CapabilityHealth(HealthStatus.AVAILABLE, "local_transport_ready")
+        )
 
     def _cleanup_isolated_extension_dir(self) -> None:
         directory = self._isolated_extension_dir
@@ -947,114 +1355,56 @@ class AstrBotRuntime:
         )
         return capability is not None and capability.privacy_floor is PrivacyFloor.OWNER
 
-    async def invoke_tool(self, module_id, tool_name, parameters, event):
+    async def invoke_tool(
+        self, module_id, tool_name, parameters, event, *, tool_handle=None
+    ):
         if not self._ready or self._closing or self._core is None:
             raise PermissionError("Host tool ingress unavailable")
         from astrbot.core.platform.astr_message_event import AstrMessageEvent
 
         if not isinstance(event, AstrMessageEvent):
             raise PermissionError("official Host event required")
-        core = self._core
-        ingress = self._make_ingress(event, origin=InvocationOrigin.LLM_TOOL)
+        if (
+            tool_handle is None
+            or tool_handle.module_id != module_id
+            or tool_handle.descriptor.name != tool_name
+        ):
+            raise PermissionError("Host tool ingress unavailable")
+        ingress = self._make_ingress(
+            event, origin=InvocationOrigin.LLM_TOOL, tool_handle=tool_handle
+        )
         if not self._validate_ingress(InvocationOrigin.LLM_TOOL, ingress):
             raise PermissionError("validated Host event required")
-        module, capability = core._active_module(
-            module_id, origin=InvocationOrigin.LLM_TOOL, target=tool_name
+        outcome = await self._core.invoke_tool(
+            module_id, tool_name, parameters, ingress=ingress
         )
-        handler = module.handlers.capabilities[capability]
-        # This private, task-local proof belongs to the exact installed handler.
-        # It adds no model parameters and grants no alternative Core entry point.
-        binder = getattr(handler, "_bind_tool_event", None)
-        if binder is None:
-            return await core.invoke_tool(
-                module_id, tool_name, parameters, ingress=ingress
-            )
-        if core.registry.snapshot().module(module_id) is not module:
-            raise PermissionError("module changed before Host event binding")
-        with binder(
-            event,
-            event.get_message_str(),
-            ingress.actor_id,
-            ingress.conversation_id,
-            ingress.adapter_id,
-        ):
-            return await core.invoke_tool(
-                module_id, tool_name, parameters, ingress=ingress
-            )
+        if not self._message_current(InvocationOrigin.LLM_TOOL, ingress):
+            raise PermissionError("Host message unavailable")
+        return outcome
+
+    def _tool_owner_current(self, handle):
+        publisher = self._tool_publisher
+        return (
+            self._ready
+            and not self._closing
+            and self._core is not None
+            and publisher is not None
+            and any(item is handle for item in publisher.handles)
+            and publisher._current(handle)
+        )
 
     def _make_ingress(
-        self, event: object, *, origin=InvocationOrigin.COMMAND
-    ) -> HostIngress:
-        adapter, sender, conversation, kind = self._read_event_facts(event)
-        evidence = _IngressEvidence(
-            self._evidence_seal, event, adapter, sender, conversation, kind, origin
-        )
-        return HostIngress(
-            adapter_id=adapter,
-            actor_id=f"{adapter}:{sender}",
-            conversation_id=conversation,
-            delivery_route=adapter,
-            conversation_kind=kind,
-            evidence=evidence,
-        )
+        self, event, *, origin=InvocationOrigin.COMMAND, tool_handle=None
+    ):
+        return self._message_ingress.make(event, origin=origin, tool_handle=tool_handle)
 
-    def _validate_ingress(self, origin: InvocationOrigin, ingress: HostIngress) -> bool:
-        if (
-            origin not in (InvocationOrigin.COMMAND, InvocationOrigin.LLM_TOOL)
-            or not isinstance(ingress, HostIngress)
-            or ingress.grant_reference is not None
-            or not isinstance(ingress.evidence, _IngressEvidence)
-        ):
-            return False
-        evidence = ingress.evidence
-        if evidence.seal is not self._evidence_seal or evidence.origin is not origin:
-            return False
-        if origin is InvocationOrigin.LLM_TOOL:
-            from astrbot.core.platform.astr_message_event import AstrMessageEvent
+    def _validate_ingress(self, origin, ingress):
+        return self._message_ingress.validate(origin, ingress)
 
-            if not isinstance(evidence.event, AstrMessageEvent):
-                return False
-        try:
-            facts = self._read_event_facts(evidence.event)
-        except Exception:
-            return False
-        adapter, sender, conversation, kind = facts
-        return (
-            facts
-            == (
-                evidence.adapter_id,
-                evidence.sender_id,
-                evidence.conversation_id,
-                evidence.conversation_kind,
-            )
-            and ingress.adapter_id == adapter
-            and ingress.actor_id == f"{adapter}:{sender}"
-            and ingress.conversation_id == conversation
-            and ingress.delivery_route == adapter
-            and ingress.conversation_kind is kind
-        )
+    def _message_current(self, origin, ingress):
+        return self._message_ingress.current(origin, ingress)
 
-    @staticmethod
-    def _read_event_facts(
-        event: object,
-    ) -> tuple[str, str, str, ConversationKind]:
-        adapter = _event_text(event, "get_platform_id")
-        sender = _event_text(event, "get_sender_id")
-        conversation = _event_text(event, "get_session_id")
-        getter = getattr(event, "get_message_type", None)
-        if not callable(getter):
-            raise TypeError("event message type is unavailable")
-        message_type = getter()
-        message_type = getattr(message_type, "value", message_type)
-        if message_type == "GroupMessage":
-            kind = ConversationKind.GROUP
-        elif message_type == "FriendMessage":
-            kind = ConversationKind.DIRECT
-        else:
-            raise ValueError("event message type is unsupported")
-        if ":" in adapter:
-            raise ValueError("platform id is not a valid AstrBot session component")
-        return adapter, sender, conversation, kind
+    _read_event_facts = staticmethod(_AstrBotMessageIngress._read_event_facts)
 
 
 def _event_text(event: object, method: str) -> str:

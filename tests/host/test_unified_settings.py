@@ -11,6 +11,7 @@ from ygl_test_subject.adapters.astrbot.web_public import (
     WebPublicRejected,
     invocation_envelope,
 )
+from ygl_test_subject.core.contracts.validation_boundary import validate_contract
 from ygl_test_subject.infrastructure.secret_codec import AESGCMSecretCodec
 from ygl_test_subject.infrastructure.secret_store import SQLiteSecretStore
 
@@ -130,9 +131,11 @@ class UnifiedManagementHostTests(unittest.IsolatedAsyncioTestCase):
                 },
             )
             self.assertEqual(saved.status_code, 200, saved.text)
-        from ygl_test_subject.api.services import ConfigTarget
+        from yomihime_game_link_sdk.services import ConfigTarget
 
-        target = ConfigTarget("astrbot_plugin_yomihime_game_link", "ff14/ff14")
+        target = validate_contract(
+            ConfigTarget("astrbot_plugin_yomihime_game_link", "ff14/ff14")
+        )
         saved_metadata = (await core.config_repository.current(target)).secret_metadata
         before = (await self.call("read", {})).json()["data"]
         response = await self.call("modules", {})
@@ -219,8 +222,9 @@ class UnifiedManagementHostTests(unittest.IsolatedAsyncioTestCase):
     async def test_late_ordinary_and_credential_update_cannot_commit_after_unload(self):
         import asyncio
 
-        from ygl_test_subject.api.administration import AdminOperation
-        from ygl_test_subject.api.services import ConfigTarget
+        from ygl_test_subject.core.contracts.administration import AdminOperation
+
+        from yomihime_game_link_sdk.services import ConfigTarget
 
         await self.recover()
         for endpoint, updates in (
@@ -238,7 +242,9 @@ class UnifiedManagementHostTests(unittest.IsolatedAsyncioTestCase):
         ):
             core = self.runtime.core_runtime
             ops = core.admin_operations
-            target = ConfigTarget("astrbot_plugin_yomihime_game_link", "ff14/ff14")
+            target = validate_contract(
+                ConfigTarget("astrbot_plugin_yomihime_game_link", "ff14/ff14")
+            )
             before = await core.config_repository.current(target)
             entered, release = asyncio.Event(), asyncio.Event()
             original = ops.authorization.authorize
@@ -314,13 +320,13 @@ class NeutralPublicHostTests(unittest.IsolatedAsyncioTestCase):
         from pathlib import Path
 
         from ygl_test_subject.adapters.astrbot.runtime import AstrBotRuntime
-        from ygl_test_subject.api.display import DisplayLimits
         from ygl_test_subject.services.core_runtime import CoreRuntime
 
         from tests.fixtures.settings_module import write_settings_module
         from tests.host.test_ff14_pages import _Context
         from tests.services.test_admin_operations import _Codec, _MessagePort, _Renderer
         from tests.services.test_unified_settings import NeutralModuleSettingsTests
+        from yomihime_game_link_sdk.display import DisplayLimits
 
         self.temp = tempfile.TemporaryDirectory(dir=Path.cwd())
         self.root = Path(self.temp.name)
@@ -352,7 +358,7 @@ class NeutralPublicHostTests(unittest.IsolatedAsyncioTestCase):
             secret_codec=_Codec(),
             http_transport=lambda r: r,
             renderer=_Renderer(),
-            display_limits=DisplayLimits(2, 4096),
+            display_limits=validate_contract(DisplayLimits(2, 4096)),
             message_port=_MessagePort(),
             admin_context_validator=lambda *_: False,
             host_ingress_validator=lambda *_: False,
@@ -372,7 +378,7 @@ class NeutralPublicHostTests(unittest.IsolatedAsyncioTestCase):
         self.runtime._web_validator = self.validator
         self.validator.attach(self.core)
         await self.core.start()
-        from ygl_test_subject.api.administration import AdminOperation
+        from ygl_test_subject.core.contracts.administration import AdminOperation
 
         self.modules = self.core.admin_authorization.register_source(
             "modules",
@@ -481,20 +487,27 @@ class NeutralPublicHostTests(unittest.IsolatedAsyncioTestCase):
             WebPublicRejected,
             project_result,
         )
-        from ygl_test_subject.api.display import DisplayDocument, TextBlock
-        from ygl_test_subject.api.results import (
+
+        from yomihime_game_link_sdk.display import DisplayDocument, TextBlock
+        from yomihime_game_link_sdk.results import (
             CapabilityResult,
             FactDocument,
             ResultStatus,
         )
 
-        nested = CapabilityResult(
-            "neutral",
-            ResultStatus.SUCCESS,
-            DisplayDocument("N", "N", (TextBlock("N"),)),
-            model_facts=FactDocument(
-                {"rows": [{"a": 1, "b": 2, "c": 3} for _ in range(200)]}
-            ),
+        nested = validate_contract(
+            CapabilityResult(
+                "neutral",
+                ResultStatus.SUCCESS,
+                validate_contract(
+                    DisplayDocument("N", "N", (validate_contract(TextBlock("N")),))
+                ),
+                model_facts=validate_contract(
+                    FactDocument(
+                        {"rows": [{"a": 1, "b": 2, "c": 3} for _ in range(200)]}
+                    )
+                ),
+            )
         )
         with self.assertRaises(WebPublicRejected):
             project_result(nested)

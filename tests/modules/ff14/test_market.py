@@ -11,6 +11,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from ygl_test_subject.adapters.astrbot.web_public import project_result
+from ygl_test_subject.core.contracts.validation_boundary import validate_contract
 from ygl_test_subject.infrastructure.http import SourceHttpService
 from ygl_test_subject.modules.ff14.features.market import (
     MarketClient,
@@ -43,9 +44,10 @@ from ygl_test_subject.modules.ff14.query_resolution import (
     ScopeCatalog,
 )
 
-from yomihime_sdk.api.results import ErrorCode, ResultStatus
-from yomihime_sdk.api.services import HttpRequest, HttpResponse, SourceHttpError
-from yomihime_sdk.api.storage import CacheEntry
+from yomihime_game_link_sdk.errors import SourceHttpError
+from yomihime_game_link_sdk.results import ErrorCode, ResultStatus
+from yomihime_game_link_sdk.services import HttpRequest, HttpResponse
+from yomihime_game_link_sdk.storage import CacheEntry
 
 NOW = datetime(2026, 10, 5, tzinfo=UTC)
 MS = int(NOW.timestamp() * 1000)
@@ -136,7 +138,9 @@ class FakeHttp:
             raise value
         if isinstance(value, HttpResponse):
             return value
-        return HttpResponse(200, {}, json.dumps(value, allow_nan=False).encode())
+        return validate_contract(
+            HttpResponse(200, {}, json.dumps(value, allow_nan=False).encode())
+        )
 
 
 class FakeCache:
@@ -148,7 +152,9 @@ class FakeCache:
 
     async def put(self, key, payload, *, ttl_seconds):
         self.puts.append((key, copy.deepcopy(payload), ttl_seconds))
-        entry = CacheEntry(key, payload, self.wall() + timedelta(seconds=ttl_seconds))
+        entry = validate_contract(
+            CacheEntry(key, payload, self.wall() + timedelta(seconds=ttl_seconds))
+        )
         self.values[key] = entry
         return entry
 
@@ -630,7 +636,7 @@ class MarketExecutionTests(unittest.IsolatedAsyncioTestCase):
                 expires = NOW - timedelta(seconds=1)
             if kind == "future":
                 payload["fetched_at_ms"] = MS + 1000
-            cache.values[key] = CacheEntry(key, payload, expires)
+            cache.values[key] = validate_contract(CacheEntry(key, payload, expires))
             await client.execute(query())
             self.assertEqual(len(http.requests), 2)
 
@@ -771,10 +777,14 @@ class MarketExecutionTests(unittest.IsolatedAsyncioTestCase):
                     two_started.set()
                 try:
                     await release.wait()
-                    return HttpResponse(
-                        200,
-                        {},
-                        json.dumps(aggregated(request.path.split("/")[-2])).encode(),
+                    return validate_contract(
+                        HttpResponse(
+                            200,
+                            {},
+                            json.dumps(
+                                aggregated(request.path.split("/")[-2])
+                            ).encode(),
+                        )
                     )
                 except asyncio.CancelledError:
                     cancelled += 1
@@ -844,19 +854,23 @@ class MarketExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(market["effect"], "read_only")
         self.assertEqual(market["invocation_policy"], "command_and_public_web")
         self.assertEqual(market["required_sources"], [UNIVERSALIS_SOURCE])
-        from yomihime_sdk.api.manifests import SourceDeclaration
+        from yomihime_game_link_sdk.declarations import SourceDeclaration
 
         class Transport:
             async def request(inner, request):
                 inner.request_value = request
-                return HttpResponse(200, {}, b"[]")
+                return validate_contract(HttpResponse(200, {}, b"[]"))
 
         transport = Transport()
-        http = SourceHttpService((SourceDeclaration(**source),), transport)
-        await http.fetch(HttpRequest(UNIVERSALIS_SOURCE, WORLDS_PATH))
+        http = SourceHttpService(
+            (validate_contract(SourceDeclaration(**source)),), transport
+        )
+        await http.fetch(
+            validate_contract(HttpRequest(UNIVERSALIS_SOURCE, WORLDS_PATH))
+        )
         self.assertEqual(transport.request_value.url, SOURCE_ROOT + WORLDS_PATH)
         with self.assertRaises(SourceHttpError):
-            await http.fetch(HttpRequest("unknown", WORLDS_PATH))
+            await http.fetch(validate_contract(HttpRequest("unknown", WORLDS_PATH)))
 
     async def test_cache_age_grows_from_source_time_and_retains_original_fetch(self):
         wall = [NOW]
@@ -893,7 +907,9 @@ class MarketExecutionTests(unittest.IsolatedAsyncioTestCase):
                 if calls == 2:
                     two_started.set()
                 await release.wait()
-                return HttpResponse(200, {}, json.dumps(aggregated()).encode())
+                return validate_contract(
+                    HttpResponse(200, {}, json.dumps(aggregated()).encode())
+                )
 
         first_http = Blocking(None)
         second_http = FakeHttp(lambda request: aggregated())

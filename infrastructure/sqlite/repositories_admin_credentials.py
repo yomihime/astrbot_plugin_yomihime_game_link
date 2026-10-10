@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 
-from ...api.administration import (
+from ...core.contracts.administration import (
     AdminAuthorizationDenied,
     AdminAuthorizationGrant,
     AdminOperation,

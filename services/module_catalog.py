@@ -6,15 +6,15 @@ import hashlib
 import json
 from collections.abc import Mapping
 
-from ..api.administration import ModuleLifecycle
-from ..api.contexts import InvocationOrigin
-from ..api.manifests import (
+from yomihime_game_link_sdk.contexts import InvocationOrigin
+from yomihime_game_link_sdk.declarations import CapabilityEffect, PrivacyFloor
+
+from ..core.contracts.administration import ModuleLifecycle
+from ..core.contracts.manifests import (
     EXTENSION_MANIFEST_MAX_BYTES,
     EXTENSION_MANIFEST_MAX_STRING_LENGTH,
     EXTENSION_MODULE_MAX_DECLARATIONS,
     EXTENSION_PACKAGE_MAX_MODULES,
-    CapabilityEffect,
-    PrivacyFloor,
 )
 from ..core.lifecycle import LifecycleState
 from ..core.ports import RunIdentity

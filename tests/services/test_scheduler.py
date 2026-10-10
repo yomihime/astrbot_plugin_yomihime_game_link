@@ -8,43 +8,14 @@ from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
-from ygl_test_subject.api.contexts import InvocationOrigin
-from ygl_test_subject.api.manifests import (
-    CapabilityDescriptor,
-    CapabilityEffect,
-    InvocationPolicy,
-    ModuleCategory,
-    ModuleManifest,
-    PackageManifest,
-    SourceDeclaration,
-)
-from ygl_test_subject.api.services import (
-    CapabilityHealth,
-    Grant,
-    GrantStatus,
-    HealthReport,
-    HealthStatus,
-    ModuleHandlers,
-)
-from ygl_test_subject.api.storage import GrantReference, OwnerScope, OwnershipKind
-from ygl_test_subject.api.subscriptions import (
+from ygl_test_subject.core.admission import AdmissionController
+from ygl_test_subject.core.context_issuer import ContextIssuer
+from ygl_test_subject.core.contracts.services import Grant, GrantStatus
+from ygl_test_subject.core.contracts.subscriptions import (
     CadenceConfiguration,
-    CollectionKey,
-    ConversationKind,
-    ConversationRef,
-    DigestScheduleProfile,
-    DstFoldPolicy,
-    DstGapPolicy,
     DueCollectionJob,
-    EvaluationState,
-    NormalizedInput,
-    Observation,
-    ObservationCompleteness,
     ObservationCursor,
     ObservationEvaluationCommit,
-    ScheduleDescriptor,
-    ScheduleTrigger,
-    SubscriptionDescriptor,
     SubscriptionEvaluationCommit,
     SubscriptionJobAssociation,
     SubscriptionJobChange,
@@ -52,8 +23,7 @@ from ygl_test_subject.api.subscriptions import (
     SubscriptionRecord,
     SubscriptionStatus,
 )
-from ygl_test_subject.core.admission import AdmissionController
-from ygl_test_subject.core.context_issuer import ContextIssuer
+from ygl_test_subject.core.contracts.validation_boundary import validate_contract
 from ygl_test_subject.core.lifecycle import LifecycleController
 from ygl_test_subject.core.ports import (
     CollectionRunRequest,
@@ -83,6 +53,38 @@ from tests.fixtures.b04_runtime import (
     initialize_subscription_gate_fixture,
     synthetic_subscription_gate_bindings,
 )
+from yomihime_game_link_sdk.contexts import InvocationOrigin
+from yomihime_game_link_sdk.declarations import (
+    CapabilityDescriptor,
+    CapabilityEffect,
+    InvocationPolicy,
+    ModuleCategory,
+    ModuleManifest,
+    PackageManifest,
+    SourceDeclaration,
+)
+from yomihime_game_link_sdk.services import (
+    CapabilityHealth,
+    HealthReport,
+    HealthStatus,
+    ModuleHandlers,
+)
+from yomihime_game_link_sdk.storage import GrantReference, OwnerScope, OwnershipKind
+from yomihime_game_link_sdk.subscriptions import (
+    CollectionKey,
+    ConversationKind,
+    ConversationRef,
+    DigestScheduleProfile,
+    DstFoldPolicy,
+    DstGapPolicy,
+    EvaluationState,
+    NormalizedInput,
+    Observation,
+    ObservationCompleteness,
+    ScheduleDescriptor,
+    ScheduleTrigger,
+    SubscriptionDescriptor,
+)
 
 
 class _Collector:
@@ -96,7 +98,7 @@ class _Collector:
         self.fail = fail
 
     def normalize(self, parameters):
-        return NormalizedInput(dict(parameters))
+        return validate_contract(NormalizedInput(dict(parameters)))
 
     async def collect(self, context, parameters, previous):
         self.calls += 1
@@ -104,15 +106,19 @@ class _Collector:
         await self.finish.wait()
         if self.fail:
             raise RuntimeError("collector failed")
-        return Observation(
-            f"obs-{self.calls}",
-            context.key,
-            1,
-            None,
-            datetime(2026, 1, 1, tzinfo=UTC),
-            self.completeness,
-            ("item-x",) if self.completeness is ObservationCompleteness.PARTIAL else (),
-            {"value": 1},
+        return validate_contract(
+            Observation(
+                f"obs-{self.calls}",
+                context.key,
+                1,
+                None,
+                datetime(2026, 1, 1, tzinfo=UTC),
+                self.completeness,
+                ("item-x",)
+                if self.completeness is ObservationCompleteness.PARTIAL
+                else (),
+                {"value": 1},
+            )
         )
 
 
@@ -154,7 +160,15 @@ class _SchedulerModuleInstance:
         return None
 
     async def check_health(self):
-        return HealthReport({"read.data": CapabilityHealth(HealthStatus.AVAILABLE)})
+        return validate_contract(
+            HealthReport(
+                {
+                    "read.data": validate_contract(
+                        CapabilityHealth(HealthStatus.AVAILABLE)
+                    )
+                }
+            )
+        )
 
 
 class _Repo:
@@ -300,21 +314,23 @@ class _Windows:
 
 
 def _schedule(*, scope=OwnershipKind.PUBLIC):
-    return ScheduleDescriptor(
-        collector_id="prices",
-        key_version=1,
-        source_id="market",
-        data_version=1,
-        input_schema={
-            "type": "object",
-            "properties": {"item": {"type": "string"}},
-            "required": ["item"],
-        },
-        shared_scope=scope,
-        trigger=ScheduleTrigger.PERIODIC,
-        minimum_interval_seconds=30,
-        default_interval_seconds=60,
-        interval_config_key="poll_seconds",
+    return validate_contract(
+        ScheduleDescriptor(
+            collector_id="prices",
+            key_version=1,
+            source_id="market",
+            data_version=1,
+            input_schema={
+                "type": "object",
+                "properties": {"item": {"type": "string"}},
+                "required": ["item"],
+            },
+            shared_scope=scope,
+            trigger=ScheduleTrigger.PERIODIC,
+            minimum_interval_seconds=30,
+            default_interval_seconds=60,
+            interval_config_key="poll_seconds",
+        )
     )
 
 
@@ -325,7 +341,9 @@ def _profile(
     gap=DstGapPolicy.SKIP,
     revision=1,
 ):
-    return DigestScheduleProfile(timezone, local_time, 3600, fold, gap, revision)
+    return validate_contract(
+        DigestScheduleProfile(timezone, local_time, 3600, fold, gap, revision)
+    )
 
 
 def _record(
@@ -339,13 +357,15 @@ def _record(
     grant=None,
     type_id="prices_alert",
 ):
-    key = key or CollectionKey(
-        "pkg/pricing",
-        "prices",
-        1,
-        "market",
-        NormalizedInput({"item": "x"}),
-        OwnerScope.public(),
+    key = key or validate_contract(
+        CollectionKey(
+            "pkg/pricing",
+            "prices",
+            1,
+            "market",
+            validate_contract(NormalizedInput({"item": "x"})),
+            OwnerScope.public(),
+        )
     )
     return SubscriptionRecord(
         subscription_id,
@@ -355,7 +375,9 @@ def _record(
         owner,
         grant,
         recipient
-        or ConversationRef("test", ConversationKind.DIRECT, owner, f"route-{owner}"),
+        or validate_contract(
+            ConversationRef("test", ConversationKind.DIRECT, owner, f"route-{owner}")
+        ),
         mode,
         {},
         SubscriptionStatus.ACTIVE,
@@ -365,14 +387,16 @@ def _record(
 
 
 def _authorized_record(*, mode="instant", profile=None):
-    grant = GrantReference("grant-1", 1)
-    key = CollectionKey(
-        "pkg/pricing",
-        "prices",
-        1,
-        "market",
-        NormalizedInput({"item": "x"}),
-        OwnerScope.authorized("alice", grant),
+    grant = validate_contract(GrantReference("grant-1", 1))
+    key = validate_contract(
+        CollectionKey(
+            "pkg/pricing",
+            "prices",
+            1,
+            "market",
+            validate_contract(NormalizedInput({"item": "x"})),
+            OwnerScope.authorized("alice", grant),
+        )
     )
     return _record(key=key, grant=grant, mode=mode, profile=profile)
 
@@ -397,39 +421,55 @@ def _runtime(
 ):
     collector = collector or _Collector()
     schedule = _schedule(scope=scope)
-    module = ModuleManifest(
-        "pricing",
-        "pricing",
-        ModuleCategory.GAME,
-        "test.module:Factory",
-        "0.1.0",
-        (
-            CapabilityDescriptor(
-                "read.data",
-                {"type": "object", "properties": {}, "required": []},
-                InvocationPolicy.NATURAL_LANGUAGE_ALLOWED,
-                CapabilityEffect.READ_ONLY,
+    module = validate_contract(
+        ModuleManifest(
+            "pricing",
+            "pricing",
+            ModuleCategory.GAME,
+            "test.module:Factory",
+            "0.1.0",
+            (
+                validate_contract(
+                    CapabilityDescriptor(
+                        "read.data",
+                        {"type": "object", "properties": {}, "required": []},
+                        InvocationPolicy.NATURAL_LANGUAGE_ALLOWED,
+                        CapabilityEffect.READ_ONLY,
+                    )
+                ),
             ),
-        ),
-        schedules=(schedule,),
-        subscriptions=(
-            SubscriptionDescriptor(
-                "prices_alert",
-                "prices",
-                "matcher",
-                {"type": "object", "properties": {}, "required": []},
-                ("instant", "digest"),
+            schedules=(schedule,),
+            subscriptions=(
+                validate_contract(
+                    SubscriptionDescriptor(
+                        "prices_alert",
+                        "prices",
+                        "matcher",
+                        {"type": "object", "properties": {}, "required": []},
+                        ("instant", "digest"),
+                    )
+                ),
             ),
-        ),
-        sources=(SourceDeclaration("market", "example.test", requests_per_minute=60),),
+            sources=(
+                validate_contract(
+                    SourceDeclaration("market", "example.test", requests_per_minute=60)
+                ),
+            ),
+        )
     )
-    handlers = ModuleHandlers(
-        {"read.data": _Capability()}, {"prices": collector}, {"matcher": _Evaluator()}
+    handlers = validate_contract(
+        ModuleHandlers(
+            {"read.data": _Capability()},
+            {"prices": collector},
+            {"matcher": _Evaluator()},
+        )
     )
     registry = Registry()
     registry.register_package(
-        PackageManifest(
-            "pkg", "0.1.0", "1.1.0", (module,), "Tests", "AGPL-3.0", "offline"
+        validate_contract(
+            PackageManifest(
+                "pkg", "0.1.0", "2.0", (module,), "Tests", "AGPL-3.0", "offline"
+            )
         ),
         {"pricing": handlers},
     )
@@ -514,17 +554,21 @@ def _runtime(
         monotonic_clock=lambda: 1.0,
         random_source=lambda: random_value,
     )
-    key = CollectionKey(
-        "pkg/pricing",
-        "prices",
-        1,
-        "market",
-        NormalizedInput({"item": "x"}),
-        (
-            OwnerScope.public()
-            if scope is OwnershipKind.PUBLIC
-            else OwnerScope.authorized("alice", GrantReference("grant-1", 1))
-        ),
+    key = validate_contract(
+        CollectionKey(
+            "pkg/pricing",
+            "prices",
+            1,
+            "market",
+            validate_contract(NormalizedInput({"item": "x"})),
+            (
+                OwnerScope.public()
+                if scope is OwnershipKind.PUBLIC
+                else OwnerScope.authorized(
+                    "alice", validate_contract(GrantReference("grant-1", 1))
+                )
+            ),
+        )
     )
     return scheduler, collector, repo, registry, key, subs, windows, binder
 
@@ -736,7 +780,7 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_digest_window_page_rejects_grant_with_wrong_owner(self):
         record = _authorized_record(mode="digest", profile=_profile())
-        from ygl_test_subject.api.subscriptions import ActiveDigestSchedule
+        from ygl_test_subject.core.contracts.subscriptions import ActiveDigestSchedule
 
         subscriptions = _SubscriptionStore((record,))
         subscriptions.active_digest = [ActiveDigestSchedule(record)]
@@ -883,15 +927,17 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
             )
 
             started_at = datetime.now(UTC)
-            initial = Observation(
-                "prior-observation",
-                record.collection_key,
-                1,
-                started_at,
-                started_at,
-                ObservationCompleteness.COMPLETE,
-                (),
-                {"value": "preserved"},
+            initial = validate_contract(
+                Observation(
+                    "prior-observation",
+                    record.collection_key,
+                    1,
+                    started_at,
+                    started_at,
+                    ObservationCompleteness.COMPLETE,
+                    (),
+                    {"value": "preserved"},
+                )
             )
             initial_lease = await repository.claim_due(
                 CollectionRunRequest(
@@ -909,7 +955,7 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
                 record.subscription_id,
                 record.revision,
                 None,
-                EvaluationState(1, {"state": "prior"}),
+                validate_contract(EvaluationState(1, {"state": "prior"})),
                 ObservationCursor(
                     initial.observation_id,
                     initial.data_version,
@@ -955,7 +1001,9 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
             current = await repository.current_evaluation(record.subscription_id, key)
             self.assertEqual(current.observation, initial)
             self.assertEqual(current.cursor.observation_id, initial.observation_id)
-            self.assertEqual(current.state, EvaluationState(1, {"state": "prior"}))
+            self.assertEqual(
+                current.state, validate_contract(EvaluationState(1, {"state": "prior"}))
+            )
             async with db.unit_of_work() as unit:
                 stored_failure = unit.execute(
                     "SELECT observation_id FROM b04_observations WHERE observation_id=?",
@@ -1092,7 +1140,7 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
         profile = _profile()
         record = _record(mode="digest", profile=profile)
         subscriptions = _SubscriptionStore((record,))
-        from ygl_test_subject.api.subscriptions import ActiveDigestSchedule
+        from ygl_test_subject.core.contracts.subscriptions import ActiveDigestSchedule
 
         subscriptions.active_digest = [ActiveDigestSchedule(record)]
         windows = _Windows()
@@ -1116,7 +1164,9 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
 
     def test_digest_window_identity_is_shared_by_profile_and_recipient(self):
         profile = _profile()
-        route = ConversationRef("test", ConversationKind.DIRECT, "alice", "route-alice")
+        route = validate_contract(
+            ConversationRef("test", ConversationKind.DIRECT, "alice", "route-alice")
+        )
         first = _record(
             subscription_id="sub-a",
             owner="alice",
@@ -1137,8 +1187,10 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first_window.utc_start, second_window.utc_start)
 
     async def test_due_route_scan_recovers_before_paging_and_uses_returned_route(self):
-        route = ConversationRef("test", ConversationKind.DIRECT, "alice", "route-alice")
-        from ygl_test_subject.api.subscriptions import DigestRouteCandidate
+        route = validate_contract(
+            ConversationRef("test", ConversationKind.DIRECT, "alice", "route-alice")
+        )
+        from ygl_test_subject.core.contracts.subscriptions import DigestRouteCandidate
 
         windows = _Windows()
         windows.routes = (

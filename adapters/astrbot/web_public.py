@@ -16,7 +16,7 @@ from math import isfinite
 from time import monotonic, time
 from urllib.parse import urlsplit
 
-from ...api.display import (
+from yomihime_game_link_sdk.display import (
     DisplayDocument,
     FieldsBlock,
     Link,
@@ -29,7 +29,9 @@ from ...api.display import (
     TextBlock,
     TimeValue,
 )
-from ...api.results import CapabilityResult, ErrorCode, ResultStatus
+from yomihime_game_link_sdk.results import CapabilityResult, ErrorCode, ResultStatus
+
+from ...core.contracts.validation_boundary import validate_contract
 from ...core.ports import PublicWebBinding
 from ...core.public_result import public_fact_strings
 
@@ -296,7 +298,7 @@ def _value(value: object, depth: int = 0):
         if type(value.value) not in (Decimal, int, str):
             raise WebPublicRejected("result_rejected")
         try:
-            NumberValue(value.value, precision=value.precision)
+            validate_contract(NumberValue(value.value, precision=value.precision))
         except (TypeError, ValueError):
             raise WebPublicRejected("result_rejected") from None
         data = {"value": str(value.value), "precision": value.precision}
@@ -348,6 +350,10 @@ def _block(block: object) -> dict:
 
 
 def project_result(result: CapabilityResult) -> dict:
+    try:
+        validate_contract(result)
+    except (TypeError, ValueError):
+        raise WebPublicRejected("result_rejected") from None
     if (
         type(result) is not CapabilityResult
         or result.privacy is not Privacy.PUBLIC

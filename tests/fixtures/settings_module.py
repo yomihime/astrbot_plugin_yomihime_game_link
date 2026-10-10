@@ -3,6 +3,8 @@
 import hashlib
 import json
 
+from yomihime_game_link_sdk import MODULE_ABI_VERSION
+
 
 def write_settings_module(root, package_id="example", route="demo"):
     directory = root / package_id
@@ -12,7 +14,7 @@ def write_settings_module(root, package_id="example", route="demo"):
         "schema_version": 1,
         "package_id": package_id,
         "package_version": "1.0.0",
-        "contract_version": "1.7.0",
+        "contract_version": MODULE_ABI_VERSION,
         "author": "tests",
         "license": "MIT",
         "source": "isolated fixture",
@@ -98,7 +100,7 @@ def write_settings_module(root, package_id="example", route="demo"):
     )
     (directory / "page.js").write_bytes(page)
     (directory / "module.py").write_text(
-        """from yomihime_sdk import (HealthReport, CapabilityHealth, HealthStatus, ModuleHandlers, CapabilityResult,
+        """from yomihime_game_link_sdk import (HealthReport, CapabilityHealth, HealthStatus, ModuleHandlers, CapabilityResult,
     ResultStatus, DisplayDocument, TextBlock, FactDocument, Privacy)
 class Handler:
     async def invoke(self, context, parameters):

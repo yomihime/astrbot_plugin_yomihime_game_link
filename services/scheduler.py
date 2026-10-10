@@ -20,36 +20,46 @@ from typing import Protocol
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
-from ..api.contexts import InvocationOrigin, InvocationView
-from ..api.manifests import SourceDeclaration
-from ..api.services import Grant, GrantStatus, InvocationServiceBinder
-from ..api.storage import GrantReference, JsonObject, OwnerScope, OwnershipKind
-from ..api.subscriptions import (
-    ActiveDigestSchedule,
-    CadenceConfiguration,
+from yomihime_game_link_sdk.contexts import InvocationOrigin, InvocationView
+from yomihime_game_link_sdk.declarations import SourceDeclaration
+from yomihime_game_link_sdk.services import InvocationServiceBinder
+from yomihime_game_link_sdk.storage import (
+    GrantReference,
+    JsonObject,
+    OwnerScope,
+    OwnershipKind,
+)
+from yomihime_game_link_sdk.subscriptions import (
     CollectionKey,
     CollectionView,
     ConversationKind,
     ConversationRef,
-    DigestRouteCandidate,
-    DigestRouteCursor,
     DigestScheduleProfile,
-    DigestWindow,
-    DueCollectionJob,
-    DueJobCursor,
     IntervalLimits,
     NormalizedInput,
     Observation,
     ObservationCompleteness,
-    ObservationEvaluationCommit,
     ScheduleDescriptor,
     ScheduleTrigger,
+)
+
+from ..core.collection_context import require_collection_context
+from ..core.context_issuer import ContextIssuer
+from ..core.contracts.services import Grant, GrantStatus
+from ..core.contracts.subscriptions import (
+    ActiveDigestSchedule,
+    CadenceConfiguration,
+    DigestRouteCandidate,
+    DigestRouteCursor,
+    DigestWindow,
+    DueCollectionJob,
+    DueJobCursor,
+    ObservationEvaluationCommit,
     SubscriptionRecord,
     SubscriptionStatus,
 )
-from ..api.validation import _validate as _validate_schema
-from ..core.collection_context import require_collection_context
-from ..core.context_issuer import ContextIssuer
+from ..core.contracts.validation import _validate as _validate_schema
+from ..core.contracts.validation_boundary import validate_contract
 from ..core.ports import (
     AdmissionPort,
     CollectionRunRequest,
@@ -232,7 +242,7 @@ def _verify_schema(schema: Mapping[str, object], value: object) -> JsonObject:
     if not isinstance(value, Mapping) or any(not isinstance(key, str) for key in value):
         raise CandidateRejected("scheduled parameters must be an object")
     # NormalizedInput performs a detached, recursively immutable JSON copy.
-    return NormalizedInput(value).values
+    return validate_contract(NormalizedInput(value)).values
 
 
 def canonical_collection_key(
@@ -242,6 +252,9 @@ def canonical_collection_key(
     scope: OwnerScope,
 ) -> CollectionKey:
     """Validate declaration/input/scope, then use the registered normalizer."""
+    validate_contract(descriptor)
+    validate_contract(collector_parameters)
+    validate_contract(scope)
     if not module.enabled:
         raise CandidateRejected("module is disabled")
     if descriptor not in module.manifest.schedules:
@@ -261,17 +274,21 @@ def canonical_collection_key(
         raise CandidateRejected("collector parameters could not be normalized") from exc
     if not isinstance(normalized, NormalizedInput):
         raise CandidateRejected("collector returned an invalid normalized input")
-    return CollectionKey(
-        module.module_id,
-        descriptor.collector_id,
-        descriptor.key_version,
-        descriptor.source_id,
-        normalized,
-        scope,
+    return validate_contract(
+        CollectionKey(
+            module.module_id,
+            descriptor.collector_id,
+            descriptor.key_version,
+            descriptor.source_id,
+            normalized,
+            scope,
+        )
     )
 
 
 def _route_equal(left: ConversationRef | None, right: ConversationRef) -> bool:
+    validate_contract(left)
+    validate_contract(right)
     return isinstance(left, ConversationRef) and left == right
 
 
@@ -284,6 +301,7 @@ def _plain_json(value: object) -> object:
 
 
 def _key_token(key: CollectionKey) -> str:
+    validate_contract(key)
     scope = key.scope
     payload = [
         key.module_id,
@@ -304,6 +322,7 @@ def _resolve_local_boundary(
     local_date: date, profile: DigestScheduleProfile
 ) -> datetime | None:
     """Resolve the configured wall-clock boundary under its explicit DST policy."""
+    validate_contract(profile)
     zone = ZoneInfo(profile.timezone_name)
     hour, minute = (int(part) for part in profile.local_time.split(":"))
     wall = datetime.combine(local_date, time(hour, minute))
@@ -421,6 +440,9 @@ class SharedCollectionScheduler:
         | None = None,
         source_minimum_for: Callable[[SourceDeclaration], float] | None = None,
     ) -> None:
+        validate_contract(binder_for)
+        validate_contract(runtime_minimum_for)
+        validate_contract(source_minimum_for)
         self.registry = registry
         self.issuer = issuer
         self.lifecycle = lifecycle
@@ -505,6 +527,7 @@ class SharedCollectionScheduler:
 
     async def cancel_local(self, key: CollectionKey) -> bool:
         """Request local task cancellation; external IO cancellation is not implied."""
+        validate_contract(key)
         key_token = _key_token(key)
         async with self._active_lock:
             task = self._active.get(key_token)
@@ -518,6 +541,7 @@ class SharedCollectionScheduler:
     ) -> tuple[
         RegistrySnapshot, RegisteredModule, ScheduleDescriptor, SourceDeclaration
     ]:
+        validate_contract(key)
         snapshot = self.registry.snapshot()
         try:
             module = snapshot.module(key.module_id)
@@ -559,6 +583,7 @@ class SharedCollectionScheduler:
         return snapshot, module, descriptor, source
 
     async def _principal_for(self, key: CollectionKey) -> _Principal | None:
+        validate_contract(key)
         links = await self.job_links.for_collection(key)
         for link in links:
             record = await self.subscriptions.current(link.subscription_id)
@@ -589,6 +614,7 @@ class SharedCollectionScheduler:
         self, reference: GrantReference, *, owner_id: str, module_id: str
     ) -> bool:
         """Prove the persisted subscription reference against the live Grant."""
+        validate_contract(reference)
         grant = await self.grant_store.current_grant(reference.grant_id)
         if (
             not isinstance(grant, Grant)
@@ -610,14 +636,21 @@ class SharedCollectionScheduler:
         schedule: ScheduleDescriptor,
         source: SourceDeclaration,
     ) -> float:
-        limits = IntervalLimits(
-            requested_seconds=candidate.cadence_seconds,
-            module_minimum_seconds=schedule.minimum_interval_seconds,
-            runtime_minimum_seconds=max(
-                self.quotas.runtime_minimum_seconds,
-                self.runtime_minimum_for(module, schedule),
-                max(60.0 / source.requests_per_minute, self.source_minimum_for(source)),
-            ),
+        validate_contract(schedule)
+        validate_contract(source)
+        limits = validate_contract(
+            IntervalLimits(
+                requested_seconds=candidate.cadence_seconds,
+                module_minimum_seconds=schedule.minimum_interval_seconds,
+                runtime_minimum_seconds=max(
+                    self.quotas.runtime_minimum_seconds,
+                    self.runtime_minimum_for(module, schedule),
+                    max(
+                        60.0 / source.requests_per_minute,
+                        self.source_minimum_for(source),
+                    ),
+                ),
+            )
         )
         available = tuple(
             value
@@ -636,6 +669,8 @@ class SharedCollectionScheduler:
         source: SourceDeclaration,
         completion_at: datetime,
     ) -> datetime:
+        validate_contract(observation)
+        validate_contract(source)
         if observation.completeness is ObservationCompleteness.FAILED:
             base_seconds = self.reschedule.failure_backoff_seconds
             jitter_ratio = self.reschedule.failure_jitter_ratio
@@ -753,8 +788,12 @@ class SharedCollectionScheduler:
                 binder = self.binder_for(module.module_id)
                 bound = await binder.bind(invocation)
                 self.admission.check(scheduled_lease)
-                context = CollectionView(
-                    candidate.key, deadline_monotonic=deadline, invocation=invocation
+                context = validate_contract(
+                    CollectionView(
+                        candidate.key,
+                        deadline_monotonic=deadline,
+                        invocation=invocation,
+                    )
                 )
                 require_collection_context(
                     self.issuer, context, clock=self.monotonic_clock
@@ -786,15 +825,17 @@ class SharedCollectionScheduler:
                         "collector returned an observation for another key"
                     )
                 completed_at = _utc_now(self.now())
-                observation = Observation(
-                    observation.observation_id,
-                    observation.key,
-                    observation.data_version,
-                    observation.source_observed_at,
-                    completed_at,
-                    observation.completeness,
-                    observation.covered_ids,
-                    observation.payload,
+                observation = validate_contract(
+                    Observation(
+                        observation.observation_id,
+                        observation.key,
+                        observation.data_version,
+                        observation.source_observed_at,
+                        completed_at,
+                        observation.completeness,
+                        observation.covered_ids,
+                        observation.payload,
+                    )
                 )
                 await self._require_current_execution(
                     candidate.key, principal, lease, scheduled_lease
@@ -881,15 +922,18 @@ class SharedCollectionScheduler:
         Revocation, cancellation, epoch changes, and stale grants take the
         fail-closed release path in the caller instead.
         """
-        failed = Observation(
-            uuid4().hex,
-            candidate.key,
-            self._data_version(candidate.key),
-            None,
-            _utc_now(self.now()),
-            ObservationCompleteness.FAILED,
-            (),
-            {},
+        validate_contract(source)
+        failed = validate_contract(
+            Observation(
+                uuid4().hex,
+                candidate.key,
+                self._data_version(candidate.key),
+                None,
+                _utc_now(self.now()),
+                ObservationCompleteness.FAILED,
+                (),
+                {},
+            )
         )
         try:
             await self._require_current_execution(
@@ -939,6 +983,7 @@ class SharedCollectionScheduler:
         )
 
     def _data_version(self, key: CollectionKey) -> int:
+        validate_contract(key)
         snapshot = self.registry.snapshot()
         module = snapshot.modules.get(key.module_id)
         if module is None:
@@ -960,6 +1005,7 @@ class SharedCollectionScheduler:
         lease: ExecutionLease,
         scheduled_lease,
     ) -> None:
+        validate_contract(key)
         if scheduled_lease is not None:
             self.admission.check(scheduled_lease)
         if not await self.repository.is_current(lease, now=_utc_now(self.now())):

@@ -4,9 +4,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ..api.contexts import InvocationOrigin, InvocationView
-from ..api.subscriptions import ConversationKind, ConversationRef
+from yomihime_game_link_sdk.contexts import InvocationOrigin, InvocationView
+from yomihime_game_link_sdk.subscriptions import ConversationKind, ConversationRef
+
 from ..core.context_issuer import ContextIssuer
+from ..core.contracts.validation_boundary import validate_contract
 from ..core.ports import AdmissionLease, AdmissionPort
 from .identity import InvocationPrincipalResolver
 
@@ -64,6 +66,7 @@ class OwnerRouteProofAuthority:
     async def capture(self, invocation: InvocationView, lease: AdmissionLease) -> None:
         """Freeze a direct owner binding before the selected handler runs."""
 
+        validate_contract(invocation)
         self._require_capture_view(invocation, lease)
         if invocation.invocation_id in self._proofs:
             raise OwnerRouteProofError("owner proof already exists")
@@ -91,6 +94,7 @@ class OwnerRouteProofAuthority:
     async def require_current(self, invocation: InvocationView) -> str:
         """Return the frozen principal only while identity and route still match."""
 
+        validate_contract(invocation)
         proof = self._proofs.get(getattr(invocation, "invocation_id", ""))
         if proof is None or proof.invocation is not invocation:
             raise OwnerRouteProofError("owner proof is missing")
@@ -105,6 +109,7 @@ class OwnerRouteProofAuthority:
     def release(self, invocation: InvocationView) -> None:
         """Revoke the exact invocation proof and release its retained objects."""
 
+        validate_contract(invocation)
         if not isinstance(invocation, InvocationView):
             return
         proof = self._proofs.get(invocation.invocation_id)
@@ -114,6 +119,7 @@ class OwnerRouteProofAuthority:
     def _require_capture_view(
         self, invocation: InvocationView, lease: AdmissionLease
     ) -> None:
+        validate_contract(invocation)
         try:
             checked = self._issuer.require(invocation)
             if (
@@ -141,6 +147,7 @@ class OwnerRouteProofAuthority:
     def _require_exact_view(
         self, invocation: InvocationView, proof: _OwnerRouteProof
     ) -> None:
+        validate_contract(invocation)
         try:
             checked = self._issuer.require(invocation)
             if (
@@ -165,6 +172,7 @@ class OwnerRouteProofAuthority:
             ) from None
 
     async def _principal(self, invocation: InvocationView) -> str:
+        validate_contract(invocation)
         self._require_active_invocation(invocation)
         try:
             principal_id = await self._principals.principal_id(invocation)
@@ -176,6 +184,7 @@ class OwnerRouteProofAuthority:
         return principal_id
 
     async def _route(self, invocation: InvocationView) -> ConversationRef:
+        validate_contract(invocation)
         self._require_active_invocation(invocation)
         try:
             route = await self._conversations.resolve(invocation)
@@ -192,6 +201,7 @@ class OwnerRouteProofAuthority:
         return route
 
     def _require_active_invocation(self, invocation: InvocationView) -> None:
+        validate_contract(invocation)
         try:
             if self._issuer.require(invocation) is not invocation:
                 raise ValueError

@@ -7,7 +7,8 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from yomihime_sdk.api.services import HttpRequest, SourceHttp, SourceHttpError
+from yomihime_game_link_sdk.errors import SourceHttpError
+from yomihime_game_link_sdk.services import HttpRequest, SourceHttp
 
 from ..models import (
     AcquisitionKind,

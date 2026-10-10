@@ -7,32 +7,16 @@ from datetime import UTC, datetime
 from time import monotonic
 from uuid import uuid4
 
-from ygl_test_subject.api.administration import ModuleLifecycle
-from ygl_test_subject.api.contexts import InvocationOrigin
-from ygl_test_subject.api.manifests import (
-    CapabilityDescriptor,
-    CapabilityEffect,
-    CommandDescriptor,
-    InvocationPolicy,
-    ModuleCategory,
-    ModuleManifest,
-    PackageManifest,
-    ToolDescriptor,
-)
-from ygl_test_subject.api.services import (
-    CapabilityHealth,
-    HealthReport,
-    HealthStatus,
-    ModuleHandlers,
-)
-from ygl_test_subject.api.version import CONTRACT_VERSION
 from ygl_test_subject.core.admission import AdmissionError
 from ygl_test_subject.core.context_issuer import InvalidInvocation
+from ygl_test_subject.core.contracts.administration import ModuleLifecycle
+from ygl_test_subject.core.contracts.validation_boundary import validate_contract
 from ygl_test_subject.core.lifecycle import (
     LifecycleController,
     LifecycleError,
     LifecycleStopTimeout,
     StaleEpochError,
+    _ServiceLifetime,
 )
 from ygl_test_subject.core.registry import Registry, RegistryError
 from ygl_test_subject.core.task_scope import (
@@ -42,6 +26,25 @@ from ygl_test_subject.core.task_scope import (
     TaskScope,
     observe_tasks,
 )
+
+from yomihime_game_link_sdk.contexts import InvocationOrigin
+from yomihime_game_link_sdk.declarations import (
+    CapabilityDescriptor,
+    CapabilityEffect,
+    CommandDescriptor,
+    InvocationPolicy,
+    ModuleCategory,
+    ModuleManifest,
+    PackageManifest,
+    ToolDescriptor,
+)
+from yomihime_game_link_sdk.services import (
+    CapabilityHealth,
+    HealthReport,
+    HealthStatus,
+    ModuleHandlers,
+)
+from yomihime_game_link_sdk.version import MODULE_ABI_VERSION
 
 
 class TaskObserverTests(unittest.IsolatedAsyncioTestCase):
@@ -59,7 +62,7 @@ class TaskObserverTests(unittest.IsolatedAsyncioTestCase):
                 self.check()
 
         observer = Observer()
-        scope = TaskScope("pkg/mod", 1)
+        scope = validate_contract(TaskScope("pkg/mod", 1))
         called = []
 
         async def work():
@@ -107,7 +110,11 @@ class _Instance:
         self.stopped += 1
 
     async def check_health(self) -> HealthReport:
-        return HealthReport({"read": CapabilityHealth(HealthStatus.AVAILABLE)})
+        return validate_contract(
+            HealthReport(
+                {"read": validate_contract(CapabilityHealth(HealthStatus.AVAILABLE))}
+            )
+        )
 
 
 class _InvalidHandlersInstance(_Instance):
@@ -170,39 +177,47 @@ class _FailingCleanupInstance(_Instance):
 
 
 def _registry() -> Registry:
-    capability = CapabilityDescriptor(
-        capability_id="read",
-        input_schema={"type": "object"},
-        invocation_policy=InvocationPolicy.NATURAL_LANGUAGE_ALLOWED,
-        effect=CapabilityEffect.READ_ONLY,
+    capability = validate_contract(
+        CapabilityDescriptor(
+            capability_id="read",
+            input_schema={"type": "object"},
+            invocation_policy=InvocationPolicy.NATURAL_LANGUAGE_ALLOWED,
+            effect=CapabilityEffect.READ_ONLY,
+        )
     )
-    module = ModuleManifest(
-        module_id="mod",
-        route="mod",
-        category=ModuleCategory.GAME,
-        factory_entry="tests:Factory",
-        module_version="1.0.0",
-        capabilities=(capability,),
-        commands=(
-            CommandDescriptor(
-                operation_path="read",
-                capability_id="read",
-                parameter_mapping={},
-                help_text="read",
+    module = validate_contract(
+        ModuleManifest(
+            module_id="mod",
+            route="mod",
+            category=ModuleCategory.GAME,
+            factory_entry="tests:Factory",
+            module_version="1.0.0",
+            capabilities=(capability,),
+            commands=(
+                validate_contract(
+                    CommandDescriptor(
+                        operation_path="read",
+                        capability_id="read",
+                        parameter_mapping={},
+                        help_text="read",
+                    )
+                ),
             ),
-        ),
+        )
     )
-    package = PackageManifest(
-        package_id="pkg",
-        package_version="1.0.0",
-        contract_version=CONTRACT_VERSION,
-        modules=(module,),
-        author="tests",
-        license="AGPL-3.0",
-        source="offline",
+    package = validate_contract(
+        PackageManifest(
+            package_id="pkg",
+            package_version="1.0.0",
+            contract_version=MODULE_ABI_VERSION,
+            modules=(module,),
+            author="tests",
+            license="AGPL-3.0",
+            source="offline",
+        )
     )
     registry = Registry()
-    handlers = ModuleHandlers({"read": _Handler()}, {}, {})
+    handlers = validate_contract(ModuleHandlers({"read": _Handler()}, {}, {}))
     registry.register_package(package, {"mod": handlers})
     return registry
 
@@ -228,14 +243,16 @@ async def _activate(
 
 
 def _candidate_package(package_id, module):
-    return PackageManifest(
-        package_id=package_id,
-        package_version="1.0.0",
-        contract_version=CONTRACT_VERSION,
-        modules=(module,),
-        author="tests",
-        license="AGPL-3.0",
-        source="offline",
+    return validate_contract(
+        PackageManifest(
+            package_id=package_id,
+            package_version="1.0.0",
+            contract_version=MODULE_ABI_VERSION,
+            modules=(module,),
+            author="tests",
+            license="AGPL-3.0",
+            source="offline",
+        )
     )
 
 
@@ -265,15 +282,23 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
         registry = Registry()
         controller = LifecycleController(registry)
         manifest = _registry().snapshot().module("pkg/mod").manifest
-        handlers = ModuleHandlers({"read": _Handler()}, {}, {})
+        handlers = validate_contract(ModuleHandlers({"read": _Handler()}, {}, {}))
         for instance, expected in (
             (_InvalidHandlersInstance(handlers), TypeError),
             (_RaisingHandlersInstance(handlers), RuntimeError),
         ):
             with self.subTest(instance=type(instance).__name__):
                 operation_id = uuid4().hex
+                lifetime = _ServiceLifetime(("pkg", "pkg/mod", operation_id))
                 with self.assertRaises(expected):
-                    controller.adopt_candidate("pkg", manifest, operation_id, instance)
+                    controller.adopt_candidate(
+                        "pkg",
+                        manifest,
+                        operation_id,
+                        instance,
+                        service_lifetime=lifetime,
+                    )
+                lifetime.check()
 
                 self.assertEqual(registry.snapshot().revision, 0)
                 self.assertIs(
@@ -288,6 +313,8 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
                     )
                 )
                 self.assertEqual(instance.stopped, 1)
+                with self.assertRaises(InvalidInvocation):
+                    lifetime.check()
                 self.assertNotIn(
                     ("pkg", "pkg/mod", operation_id), controller._candidates
                 )
@@ -296,7 +323,9 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
         registry = Registry()
         controller = LifecycleController(registry)
         manifest = _registry().snapshot().module("pkg/mod").manifest
-        instance = _Instance(ModuleHandlers({"read": _Handler()}, {}, {}))
+        instance = _Instance(
+            validate_contract(ModuleHandlers({"read": _Handler()}, {}, {}))
+        )
         release_factory = asyncio.Event()
         returned = asyncio.Event()
 
@@ -338,7 +367,7 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
         controller = LifecycleController(registry)
         base = registry.snapshot().module("pkg/mod").manifest
         route_manifest = replace(base, module_id="route_collision", route="mod")
-        route_handlers = ModuleHandlers({"read": _Handler()}, {}, {})
+        route_handlers = validate_contract(ModuleHandlers({"read": _Handler()}, {}, {}))
         route_instance = _Instance(route_handlers)
         route_operation = uuid4().hex
         route_handlers = controller.adopt_candidate(
@@ -360,17 +389,19 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(route_instance.stopped, 1)
         self.assertNotIn("route_pkg/route_collision", registry.snapshot().modules)
 
-        tool = ToolDescriptor(
-            name="shared_tool",
-            capability_id="read",
-            parameter_mapping={},
-            description="A shared test Tool",
+        tool = validate_contract(
+            ToolDescriptor(
+                name="shared_tool",
+                capability_id="read",
+                parameter_mapping={},
+                description="A shared test Tool",
+            )
         )
         tool_manifest = replace(base, tools=(tool,))
         tool_registry = Registry()
         tool_registry.register_package(
             _candidate_package("pkg", tool_manifest),
-            {"mod": ModuleHandlers({"read": _Handler()}, {}, {})},
+            {"mod": validate_contract(ModuleHandlers({"read": _Handler()}, {}, {}))},
         )
         tool_controller = LifecycleController(tool_registry)
         duplicate_tool_manifest = replace(
@@ -379,7 +410,7 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
             route="tool_collision",
             tools=(tool,),
         )
-        tool_handlers = ModuleHandlers({"read": _Handler()}, {}, {})
+        tool_handlers = validate_contract(ModuleHandlers({"read": _Handler()}, {}, {}))
         tool_instance = _Instance(tool_handlers)
         tool_operation = uuid4().hex
         tool_handlers = tool_controller.adopt_candidate(
@@ -424,7 +455,11 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
         package = _candidate_package("sibling_pkg", other_manifest)
         registry.register_package(
             package,
-            {"sibling": ModuleHandlers({"read": _Handler()}, {}, {})},
+            {
+                "sibling": validate_contract(
+                    ModuleHandlers({"read": _Handler()}, {}, {})
+                )
+            },
         )
         sibling_instance = _Instance(
             registry.snapshot().module("sibling_pkg/sibling").handlers
@@ -452,7 +487,9 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
             registry.snapshot().revision,
         )
 
-        replacement = _Instance(ModuleHandlers({"read": _Handler()}, {}, {}))
+        replacement = _Instance(
+            validate_contract(ModuleHandlers({"read": _Handler()}, {}, {}))
+        )
         candidate_operation = uuid4().hex
         controller.adopt_candidate(
             "pkg",
@@ -477,7 +514,9 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
         registry = _registry()
         controller = LifecycleController(registry)
         manifest = registry.snapshot().module("pkg/mod").manifest
-        instance_a = _Instance(ModuleHandlers({"read": _Handler()}, {}, {}))
+        instance_a = _Instance(
+            validate_contract(ModuleHandlers({"read": _Handler()}, {}, {}))
+        )
         operation_a = uuid4().hex
         handlers_a = controller.adopt_candidate(
             "pkg", manifest, operation_a, instance_a
@@ -486,7 +525,9 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
             "pkg", "pkg/mod", operation_a, instance_a, handlers_a
         )
 
-        instance_b = _Instance(ModuleHandlers({"read": _Handler()}, {}, {}))
+        instance_b = _Instance(
+            validate_contract(ModuleHandlers({"read": _Handler()}, {}, {}))
+        )
         operation_b = uuid4().hex
         handlers_b = controller.adopt_candidate(
             "pkg", manifest, operation_b, instance_b
@@ -527,10 +568,14 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
         registry = _registry()
         controller = LifecycleController(registry)
         manifest = registry.snapshot().module("pkg/mod").manifest
-        instance = _Instance(ModuleHandlers({"read": _Handler()}, {}, {}))
+        instance = _Instance(
+            validate_contract(ModuleHandlers({"read": _Handler()}, {}, {}))
+        )
         install_id = uuid4().hex
         handlers = controller.adopt_candidate("pkg", manifest, install_id, instance)
         controller.install_dormant("pkg", "pkg/mod", install_id, instance, handlers)
+        lifetime = controller.service_lifetime("pkg/mod")
+        lifetime.check()
 
         self.assertTrue(
             await controller.rollback_unpublished_candidate(
@@ -545,6 +590,8 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("pkg/mod", controller._instances)
         self.assertNotIn("pkg/mod", controller._states)
         self.assertFalse(registry.snapshot().module("pkg/mod").enabled)
+        with self.assertRaises(InvalidInvocation):
+            lifetime.check()
 
     async def test_rollback_after_commit_conflict_uses_distinct_install_and_run_ids(
         self,
@@ -552,7 +599,9 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
         registry = _registry()
         controller = LifecycleController(registry)
         manifest = registry.snapshot().module("pkg/mod").manifest
-        instance = _Instance(ModuleHandlers({"read": _Handler()}, {}, {}))
+        instance = _Instance(
+            validate_contract(ModuleHandlers({"read": _Handler()}, {}, {}))
+        )
         install_id = uuid4().hex
         handlers = controller.adopt_candidate("pkg", manifest, install_id, instance)
         controller.install_dormant("pkg", "pkg/mod", install_id, instance, handlers)
@@ -593,7 +642,9 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
         registry = _registry()
         controller = LifecycleController(registry)
         manifest = registry.snapshot().module("pkg/mod").manifest
-        instance = _Instance(ModuleHandlers({"read": _Handler()}, {}, {}))
+        instance = _Instance(
+            validate_contract(ModuleHandlers({"read": _Handler()}, {}, {}))
+        )
         install_id = uuid4().hex
         handlers = controller.adopt_candidate("pkg", manifest, install_id, instance)
         controller.install_dormant("pkg", "pkg/mod", install_id, instance, handlers)
@@ -628,7 +679,9 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
         registry = _registry()
         controller = LifecycleController(registry, stop_timeout=0.02)
         manifest = registry.snapshot().module("pkg/mod").manifest
-        instance = _StubbornStopInstance(ModuleHandlers({"read": _Handler()}, {}, {}))
+        instance = _StubbornStopInstance(
+            validate_contract(ModuleHandlers({"read": _Handler()}, {}, {}))
+        )
         install_id = uuid4().hex
         handlers = controller.adopt_candidate("pkg", manifest, install_id, instance)
         controller.install_dormant("pkg", "pkg/mod", install_id, instance, handlers)
@@ -680,7 +733,7 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
                 controller = LifecycleController(registry)
                 manifest = registry.snapshot().module("pkg/mod").manifest
                 instance = _FailingCleanupInstance(
-                    ModuleHandlers({"read": _Handler()}, {}, {}),
+                    validate_contract(ModuleHandlers({"read": _Handler()}, {}, {})),
                     fail_start=failure_stage == "start",
                     fail_health=failure_stage == "health",
                 )
@@ -710,8 +763,14 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaises(AdmissionError):
                     controller.admission.activate(
                         failed.identity,
-                        HealthReport(
-                            {"read": CapabilityHealth(HealthStatus.AVAILABLE)}
+                        validate_contract(
+                            HealthReport(
+                                {
+                                    "read": validate_contract(
+                                        CapabilityHealth(HealthStatus.AVAILABLE)
+                                    )
+                                }
+                            )
                         ),
                     )
 
@@ -741,7 +800,7 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
         controller = LifecycleController(registry)
         manifest = registry.snapshot().module("pkg/mod").manifest
         instance = _FailingCleanupInstance(
-            ModuleHandlers({"read": _Handler()}, {}, {}),
+            validate_contract(ModuleHandlers({"read": _Handler()}, {}, {})),
             stop_failures=1,
         )
         install_id = uuid4().hex
@@ -780,7 +839,8 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
         controller = LifecycleController(registry)
         manifest = registry.snapshot().module("pkg/mod").manifest
         instance = _FailingCleanupInstance(
-            ModuleHandlers({"read": _Handler()}, {}, {}), stop_failures=0
+            validate_contract(ModuleHandlers({"read": _Handler()}, {}, {})),
+            stop_failures=0,
         )
         install_id = uuid4().hex
         handlers = controller.adopt_candidate("pkg", manifest, install_id, instance)
@@ -807,7 +867,15 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(AdmissionError):
             controller.admission.activate(
                 identity,
-                HealthReport({"read": CapabilityHealth(HealthStatus.AVAILABLE)}),
+                validate_contract(
+                    HealthReport(
+                        {
+                            "read": validate_contract(
+                                CapabilityHealth(HealthStatus.AVAILABLE)
+                            )
+                        }
+                    )
+                ),
             )
         with self.assertRaises(LifecycleError):
             await controller.start_candidate("pkg/mod", start_id)
@@ -826,7 +894,9 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
         registry = _registry()
         controller = LifecycleController(registry, stop_timeout=0.02)
         manifest = registry.snapshot().module("pkg/mod").manifest
-        instance = _StubbornStopInstance(ModuleHandlers({"read": _Handler()}, {}, {}))
+        instance = _StubbornStopInstance(
+            validate_contract(ModuleHandlers({"read": _Handler()}, {}, {}))
+        )
         operation_id = uuid4().hex
         controller.adopt_candidate("pkg", manifest, operation_id, instance)
 
@@ -876,18 +946,20 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
 
         unrelated = _registry().snapshot().module("pkg/mod")
         registry.register_package(
-            PackageManifest(
-                package_id="other",
-                package_version="1.0.0",
-                contract_version=CONTRACT_VERSION,
-                modules=(
-                    replace(unrelated.manifest, module_id="other", route="other"),
-                ),
-                author="tests",
-                license="AGPL-3.0",
-                source="offline",
+            validate_contract(
+                PackageManifest(
+                    package_id="other",
+                    package_version="1.0.0",
+                    contract_version=MODULE_ABI_VERSION,
+                    modules=(
+                        replace(unrelated.manifest, module_id="other", route="other"),
+                    ),
+                    author="tests",
+                    license="AGPL-3.0",
+                    source="offline",
+                )
             ),
-            {"other": ModuleHandlers({"read": _Handler()}, {}, {})},
+            {"other": validate_contract(ModuleHandlers({"read": _Handler()}, {}, {}))},
         )
         controller.guard(
             "pkg/mod",
@@ -1007,7 +1079,9 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
     async def test_task_scope_deadline_and_zero_turn_cancel_close_awaitable(
         self,
     ) -> None:
-        deadline_scope = TaskScope("pkg/mod", 1, deadline_monotonic=monotonic() + 0.05)
+        deadline_scope = validate_contract(
+            TaskScope("pkg/mod", 1, deadline_monotonic=monotonic() + 0.05)
+        )
         started = asyncio.Event()
         task = deadline_scope.create_task(_signal_after(started), name="deadline")
         await started.wait()
@@ -1019,7 +1093,7 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ScopeDeadlineExceeded):
             await task
 
-        scope = TaskScope("pkg/mod", 2, cleanup_timeout=0.02)
+        scope = validate_contract(TaskScope("pkg/mod", 2, cleanup_timeout=0.02))
         work = asyncio.sleep(1)
         task = scope.create_task(work, name="never-started")
         scope.cancel()
@@ -1033,11 +1107,13 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         notifications = []
-        scope = TaskScope(
-            "pkg/mod",
-            3,
-            cleanup_timeout=0.03,
-            on_cleanup_timeout=notifications.append,
+        scope = validate_contract(
+            TaskScope(
+                "pkg/mod",
+                3,
+                cleanup_timeout=0.03,
+                on_cleanup_timeout=notifications.append,
+            )
         )
         release = asyncio.Event()
         started = asyncio.Event()

@@ -6,18 +6,23 @@ import json
 import unittest
 
 from ygl_test_subject.core import registry as core_registry
+from ygl_test_subject.core.contracts.validation_boundary import validate_contract
+from ygl_test_subject.extensions import discovery as e_discovery
+from ygl_test_subject.extensions import disk_manifest as e_disk_manifest
+from ygl_test_subject.extensions.disk_manifest import ManifestError, parse_manifest
 from ygl_test_subject.services import module_services as core_module_services
 
-from extensions import discovery as e_discovery
-from extensions import disk_manifest as e_disk_manifest
-from extensions.disk_manifest import ManifestError, parse_manifest
-from yomihime_sdk.api.manifests import (
+from yomihime_game_link_sdk.declarations import (
     CapabilityReference,
     InvocationPolicy,
     ModuleManifest,
     PackageManifest,
 )
-from yomihime_sdk.api.services import ModuleFactory, ModuleHandlers, ModuleServices
+from yomihime_game_link_sdk.services import (
+    ModuleFactory,
+    ModuleHandlers,
+    ModuleServices,
+)
 
 
 def valid_document() -> dict[str, object]:
@@ -25,7 +30,7 @@ def valid_document() -> dict[str, object]:
         "schema_version": 1,
         "package_id": "sample_pkg",
         "package_version": "1.0.0",
-        "contract_version": "1.1.0",
+        "contract_version": "2.0",
         "author": "Example",
         "license": "MIT",
         "source": "https://example.invalid/project",
@@ -92,11 +97,11 @@ class DiskManifestTests(unittest.TestCase):
         self,
     ) -> None:
         document = valid_document()
-        document["contract_version"] = "1.4.0"
+        document["contract_version"] = "2.0"
         module = document["modules"][0]
         capability = module["capabilities"][0]
         capability["invocation_policy"] = "command_and_public_web"
-        capability["output_version"] = "1.4.0"
+        capability["output_version"] = "1.8.0"
         tools = module.pop("tools")
         package = parse_manifest(json.dumps(document).encode())
         self.assertIs(
@@ -122,34 +127,30 @@ class DiskManifestTests(unittest.TestCase):
                 with self.assertRaises(ManifestError):
                     parse_manifest(json.dumps(candidate).encode())
 
-    def test_all_previous_contracts_and_command_only_policy_remain_compatible(
-        self,
-    ) -> None:
-        for version in ("1.0.0", "1.1.0", "1.2.0", "1.3.0"):
+    def test_unsupported_output_versions_are_rejected_under_module_abi(self) -> None:
+        document = valid_document()
+        module = document["modules"][0]
+        module.pop("tools")
+        capability = module["capabilities"][0]
+        capability["invocation_policy"] = "command_only"
+        capability["output_version"] = "1.8.0"
+        package = parse_manifest(json.dumps(document).encode())
+        self.assertEqual(package.contract_version, "2.0")
+        self.assertIs(
+            package.modules[0].capabilities[0].invocation_policy,
+            InvocationPolicy.COMMAND_ONLY,
+        )
+        for version in tuple("1.%d.0" % n for n in range(8)) + ("2.0.0",):
             with self.subTest(version=version):
-                document = valid_document()
-                document["contract_version"] = version
-                module = document["modules"][0]
-                module.pop("tools")
-                capability = module["capabilities"][0]
-                capability["invocation_policy"] = "command_only"
                 capability["output_version"] = version
-                package = parse_manifest(json.dumps(document).encode())
-                self.assertEqual(package.contract_version, version)
-                self.assertIs(
-                    package.modules[0].capabilities[0].invocation_policy,
-                    InvocationPolicy.COMMAND_ONLY,
-                )
+                with self.assertRaises(ManifestError):
+                    parse_manifest(json.dumps(document).encode())
 
     def test_e_core_and_sdk_use_identical_manifest_factory_and_service_types(
         self,
     ) -> None:
-        from ygl_test_subject.api.services import (
-            ModuleFactory as CoreFactoryContract,
-        )
-        from ygl_test_subject.api.services import (
-            ModuleServices as CoreModuleServices,
-        )
+        from yomihime_game_link_sdk.services import ModuleFactory as CoreFactoryContract
+        from yomihime_game_link_sdk.services import ModuleServices as CoreModuleServices
 
         self.assertIs(core_registry.PackageManifest, PackageManifest)
         self.assertIs(core_registry.ModuleManifest, ModuleManifest)
@@ -182,7 +183,10 @@ class DiskManifestTests(unittest.TestCase):
         ]
         package = parse_manifest(json.dumps(document).encode())
         dependency = package.modules[0].capabilities[0].required_capabilities[0]
-        self.assertEqual(dependency, CapabilityReference("other_pkg/status", "lookup"))
+        self.assertEqual(
+            dependency,
+            validate_contract(CapabilityReference("other_pkg/status", "lookup")),
+        )
 
     def test_rejects_duplicate_json_keys_and_unknown_fields(self) -> None:
         raw = json.dumps(valid_document()).replace(

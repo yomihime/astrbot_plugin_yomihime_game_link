@@ -2,7 +2,7 @@
   "schema_version": 1,
   "package_id": "ff14",
   "package_version": "0.3.0",
-  "contract_version": "1.8.0",
+  "contract_version": "2.0",
   "author": "yomihime",
   "license": "AGPL-3.0-only",
   "source": "https://github.com/yomihime/astrbot_plugin_yomihime_game_link",

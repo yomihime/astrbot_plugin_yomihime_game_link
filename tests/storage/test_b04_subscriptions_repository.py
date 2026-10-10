@@ -12,30 +12,17 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
-from ygl_test_subject.api.display import DisplayDocument, Privacy, TextBlock
-from ygl_test_subject.api.storage import GrantReference, OwnerScope
-from ygl_test_subject.api.subscriptions import (
-    CollectionKey,
-    ConversationKind,
-    ConversationRef,
+from ygl_test_subject.core.contracts.subscriptions import (
     DeliveryAttempt,
     DeliveryEvent,
     DeliveryState,
     DigestEnvelope,
     DigestEnvelopeState,
-    DigestMember,
     DigestMemberAssociation,
     DigestMemberDisposition,
     DigestMemberReceipt,
-    DigestScheduleProfile,
     DigestWindow,
     DigestWindowSelector,
-    DstFoldPolicy,
-    DstGapPolicy,
-    EvaluationState,
-    NormalizedInput,
-    Observation,
-    ObservationCompleteness,
     ObservationCursor,
     ObservationEvaluationCommit,
     SubscriptionEvaluationCommit,
@@ -47,6 +34,7 @@ from ygl_test_subject.api.subscriptions import (
     delivery_idempotency_key,
     digest_envelope_idempotency_key,
 )
+from ygl_test_subject.core.contracts.validation_boundary import validate_contract
 from ygl_test_subject.core.ports import (
     CollectionRunRequest,
     RevisionConflict,
@@ -72,6 +60,25 @@ from tests.fixtures.b04_runtime import (
     initialize_subscription_gate_fixture,
     replace_subscription_gate_fixture,
     synthetic_subscription_gate_bindings,
+)
+from yomihime_game_link_sdk.display import (
+    DigestMember,
+    DisplayDocument,
+    Privacy,
+    TextBlock,
+)
+from yomihime_game_link_sdk.storage import GrantReference, OwnerScope
+from yomihime_game_link_sdk.subscriptions import (
+    CollectionKey,
+    ConversationKind,
+    ConversationRef,
+    DigestScheduleProfile,
+    DstFoldPolicy,
+    DstGapPolicy,
+    EvaluationState,
+    NormalizedInput,
+    Observation,
+    ObservationCompleteness,
 )
 
 
@@ -375,7 +382,9 @@ class B04SubscriptionRepositoryTests(unittest.IsolatedAsyncioTestCase):
         ):
             with self.subTest(label=label):
                 event = self._event(record, event_key="boundary-" + label)
-                member = DigestMember(record.subscription_id, 1, event.event_key, 1)
+                member = validate_contract(
+                    DigestMember(record.subscription_id, 1, event.event_key, 1)
+                )
                 window = DigestWindow(
                     "boundary-" + label,
                     "UTC",
@@ -467,19 +476,21 @@ class B04SubscriptionRepositoryTests(unittest.IsolatedAsyncioTestCase):
 
     @staticmethod
     def _key(scope: OwnerScope | None = None) -> CollectionKey:
-        return CollectionKey(
-            "sample/game",
-            "collector",
-            1,
-            "source",
-            NormalizedInput({"b": 2, "a": 1}),
-            scope or OwnerScope.public(),
+        return validate_contract(
+            CollectionKey(
+                "sample/game",
+                "collector",
+                1,
+                "source",
+                validate_contract(NormalizedInput({"b": 2, "a": 1})),
+                scope or OwnerScope.public(),
+            )
         )
 
     @staticmethod
     def _recipient(user: str = "u1") -> ConversationRef:
-        return ConversationRef(
-            "adapter", ConversationKind.DIRECT, user, f"private-{user}"
+        return validate_contract(
+            ConversationRef("adapter", ConversationKind.DIRECT, user, f"private-{user}")
         )
 
     def _record(
@@ -572,15 +583,17 @@ class B04SubscriptionRepositoryTests(unittest.IsolatedAsyncioTestCase):
         completeness: ObservationCompleteness = ObservationCompleteness.COMPLETE,
         covered: tuple[str, ...] = (),
     ) -> Observation:
-        return Observation(
-            identity,
-            key or self._key(),
-            1,
-            self.now,
-            self.now,
-            completeness,
-            covered,
-            {"snapshot": [1, 2]},
+        return validate_contract(
+            Observation(
+                identity,
+                key or self._key(),
+                1,
+                self.now,
+                self.now,
+                completeness,
+                covered,
+                {"snapshot": [1, 2]},
+            )
         )
 
     def _event(
@@ -591,8 +604,13 @@ class B04SubscriptionRepositoryTests(unittest.IsolatedAsyncioTestCase):
         version: int = 1,
         text: str = "private payload",
     ) -> DeliveryEvent:
-        doc = DisplayDocument(
-            "title", "subject", (TextBlock(text),), privacy=Privacy.PRIVATE
+        doc = validate_contract(
+            DisplayDocument(
+                "title",
+                "subject",
+                (validate_contract(TextBlock(text)),),
+                privacy=Privacy.PRIVATE,
+            )
         )
         return DeliveryEvent(
             event_key,
@@ -645,8 +663,8 @@ class B04SubscriptionRepositoryTests(unittest.IsolatedAsyncioTestCase):
         window = self._window(f"window-{suffix}")
         await self.windows.create(window)
         event = self._event(record, event_key=f"event-{suffix}")
-        member = DigestMember(
-            record.subscription_id, record.revision, event.event_key, 1
+        member = validate_contract(
+            DigestMember(record.subscription_id, record.revision, event.event_key, 1)
         )
         association = DigestMemberAssociation(
             window.window_id, record.recipient, member, event
@@ -656,7 +674,7 @@ class B04SubscriptionRepositoryTests(unittest.IsolatedAsyncioTestCase):
             record.subscription_id,
             record.revision,
             None,
-            EvaluationState(1, {}),
+            validate_contract(EvaluationState(1, {})),
             ObservationCursor(
                 observation.observation_id,
                 1,
@@ -683,23 +701,27 @@ class B04SubscriptionRepositoryTests(unittest.IsolatedAsyncioTestCase):
     async def _immutable_digest_fixture(
         self, suffix: str, *, failed_event: bool = False
     ):
-        key = CollectionKey(
-            "sample/game",
-            "collector",
-            1,
-            "source",
-            NormalizedInput({"immutable-history": suffix}),
-            OwnerScope.public(),
+        key = validate_contract(
+            CollectionKey(
+                "sample/game",
+                "collector",
+                1,
+                "source",
+                validate_contract(NormalizedInput({"immutable-history": suffix})),
+                OwnerScope.public(),
+            )
         )
         record = await self._create(self._record(f"sub-immutable-{suffix}", key=key))
         event = self._event(record, event_key=f"event-immutable-{suffix}")
         window = self._window(f"window-immutable-{suffix}")
         await self.windows.create(window)
-        member = DigestMember(
-            record.subscription_id,
-            record.revision,
-            event.event_key,
-            event.event_version,
+        member = validate_contract(
+            DigestMember(
+                record.subscription_id,
+                record.revision,
+                event.event_key,
+                event.event_version,
+            )
         )
         association = DigestMemberAssociation(
             window.window_id, record.recipient, member, event
@@ -709,7 +731,7 @@ class B04SubscriptionRepositoryTests(unittest.IsolatedAsyncioTestCase):
             record.subscription_id,
             record.revision,
             None,
-            EvaluationState(1, {}),
+            validate_contract(EvaluationState(1, {})),
             ObservationCursor(
                 observation.observation_id,
                 1,
@@ -845,7 +867,7 @@ class B04SubscriptionRepositoryTests(unittest.IsolatedAsyncioTestCase):
             record.subscription_id,
             1,
             None,
-            EvaluationState(1, {"seen": "baseline"}),
+            validate_contract(EvaluationState(1, {"seen": "baseline"})),
             ObservationCursor(
                 first.observation_id,
                 first.data_version,
@@ -867,7 +889,7 @@ class B04SubscriptionRepositoryTests(unittest.IsolatedAsyncioTestCase):
             record.subscription_id,
             1,
             1,
-            EvaluationState(2, {"seen": "new"}),
+            validate_contract(EvaluationState(2, {"seen": "new"})),
             ObservationCursor(
                 observation.observation_id,
                 observation.data_version,
@@ -949,12 +971,14 @@ class B04SubscriptionRepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(set(sql_threads)), 1)
 
     async def test_r01_owner_and_active_digest_schedule_scans_page_stably(self) -> None:
-        profile = DigestScheduleProfile(
-            "Europe/Paris",
-            "12:00",
-            3600,
-            DstFoldPolicy.FIRST_OCCURRENCE,
-            DstGapPolicy.SKIP,
+        profile = validate_contract(
+            DigestScheduleProfile(
+                "Europe/Paris",
+                "12:00",
+                3600,
+                DstFoldPolicy.FIRST_OCCURRENCE,
+                DstGapPolicy.SKIP,
+            )
         )
         records = (
             self._record("sub-a", owner="u1"),
@@ -1015,12 +1039,14 @@ class B04SubscriptionRepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(persisted.type_id, "sample/game:item")
 
     async def test_r01_scheduled_digest_window_selector_survives_restart(self) -> None:
-        profile = DigestScheduleProfile(
-            "UTC",
-            "11:00",
-            3600,
-            DstFoldPolicy.FIRST_OCCURRENCE,
-            DstGapPolicy.SKIP,
+        profile = validate_contract(
+            DigestScheduleProfile(
+                "UTC",
+                "11:00",
+                3600,
+                DstFoldPolicy.FIRST_OCCURRENCE,
+                DstGapPolicy.SKIP,
+            )
         )
         recipient = self._recipient()
         window = DigestWindow(
@@ -1274,13 +1300,15 @@ class B04SubscriptionRepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(due[0].due_at, self.now)
         self.assertEqual(due[0].cadence_seconds, 42)
 
-        failed_key = CollectionKey(
-            "sample/game",
-            "collector",
-            1,
-            "alternate-source",
-            NormalizedInput({"b": 2, "a": 1}),
-            OwnerScope.user("u1"),
+        failed_key = validate_contract(
+            CollectionKey(
+                "sample/game",
+                "collector",
+                1,
+                "alternate-source",
+                validate_contract(NormalizedInput({"b": 2, "a": 1})),
+                OwnerScope.user("u1"),
+            )
         )
         failed_record = self._record(
             original.subscription_id,
@@ -1374,8 +1402,12 @@ class B04SubscriptionRepositoryTests(unittest.IsolatedAsyncioTestCase):
         keys = (
             self._key(OwnerScope.user("u1")),
             self._key(OwnerScope.user("u2")),
-            self._key(OwnerScope.authorized("u1", GrantReference("g", 1))),
-            self._key(OwnerScope.authorized("u1", GrantReference("g", 2))),
+            self._key(
+                OwnerScope.authorized("u1", validate_contract(GrantReference("g", 1)))
+            ),
+            self._key(
+                OwnerScope.authorized("u1", validate_contract(GrantReference("g", 2)))
+            ),
         )
         leases = [
             await self.scheduler.claim_due(self._run(key), now=self.now) for key in keys
@@ -1488,7 +1520,7 @@ class B04SubscriptionRepositoryTests(unittest.IsolatedAsyncioTestCase):
         observation = self._observation(
             completeness=ObservationCompleteness.PARTIAL, covered=("id-1",)
         )
-        state = EvaluationState(1, {"seen": "id-1"})
+        state = validate_contract(EvaluationState(1, {"seen": "id-1"}))
         commit = SubscriptionEvaluationCommit(
             record.subscription_id,
             1,
@@ -1555,8 +1587,10 @@ class B04SubscriptionRepositoryTests(unittest.IsolatedAsyncioTestCase):
         lease = await self._lease()
         observation = self._observation()
         event = self._event(record)
-        member = DigestMember(
-            record.subscription_id, 1, event.event_key, event.event_version
+        member = validate_contract(
+            DigestMember(
+                record.subscription_id, 1, event.event_key, event.event_version
+            )
         )
         association = DigestMemberAssociation(
             window.window_id, record.recipient, member, event
@@ -1565,7 +1599,7 @@ class B04SubscriptionRepositoryTests(unittest.IsolatedAsyncioTestCase):
             record.subscription_id,
             1,
             None,
-            EvaluationState(1, {"n": 1}),
+            validate_contract(EvaluationState(1, {"n": 1})),
             ObservationCursor(
                 observation.observation_id, 1, observation.completeness, ()
             ),
@@ -1621,15 +1655,17 @@ class B04SubscriptionRepositoryTests(unittest.IsolatedAsyncioTestCase):
             connection.commit()
         finally:
             connection.close()
-        observation = Observation(
-            "obs-expired-lease",
-            lease.key,
-            1,
-            collected_at,
-            collected_at,
-            ObservationCompleteness.COMPLETE,
-            (),
-            {"snapshot": [1]},
+        observation = validate_contract(
+            Observation(
+                "obs-expired-lease",
+                lease.key,
+                1,
+                collected_at,
+                collected_at,
+                ObservationCompleteness.COMPLETE,
+                (),
+                {"snapshot": [1]},
+            )
         )
         next_due_at = current + timedelta(minutes=10)
         async with self.db.unit_of_work() as unit:
@@ -1716,15 +1752,17 @@ class B04SubscriptionRepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(lease)
         success_due = started_at + timedelta(minutes=7)
         success_observation = self._observation(identity="obs-explicit-success")
-        success_observation = Observation(
-            success_observation.observation_id,
-            success_observation.key,
-            success_observation.data_version,
-            started_at,
-            started_at,
-            success_observation.completeness,
-            success_observation.covered_ids,
-            success_observation.payload,
+        success_observation = validate_contract(
+            Observation(
+                success_observation.observation_id,
+                success_observation.key,
+                success_observation.data_version,
+                started_at,
+                started_at,
+                success_observation.completeness,
+                success_observation.covered_ids,
+                success_observation.payload,
+            )
         )
         success_commit = ObservationEvaluationCommit(success_observation, ())
         with self.assertRaisesRegex(ValueError, "UTC instant"):
@@ -1763,15 +1801,17 @@ class B04SubscriptionRepositoryTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIsNotNone(failed_lease)
         failed_due = failed_started + timedelta(minutes=19)
-        failed = Observation(
-            "obs-explicit-failed",
-            failed_lease.key,
-            2,
-            failed_started + timedelta(seconds=1),
-            failed_started + timedelta(seconds=1),
-            ObservationCompleteness.FAILED,
-            (),
-            {"error": "temporary"},
+        failed = validate_contract(
+            Observation(
+                "obs-explicit-failed",
+                failed_lease.key,
+                2,
+                failed_started + timedelta(seconds=1),
+                failed_started + timedelta(seconds=1),
+                ObservationCompleteness.FAILED,
+                (),
+                {"error": "temporary"},
+            )
         )
         self.assertTrue(
             await reopened_scheduler.commit_observation(
@@ -2225,13 +2265,17 @@ class B04SubscriptionRepositoryTests(unittest.IsolatedAsyncioTestCase):
             ready_record.subscription_id, expected_revision=ready_record.revision
         )
 
-        stale_key = CollectionKey(
-            "sample/game",
-            "collector",
-            1,
-            "source",
-            NormalizedInput({"immutable-history": "unrelated-stale"}),
-            OwnerScope.public(),
+        stale_key = validate_contract(
+            CollectionKey(
+                "sample/game",
+                "collector",
+                1,
+                "source",
+                validate_contract(
+                    NormalizedInput({"immutable-history": "unrelated-stale"})
+                ),
+                OwnerScope.public(),
+            )
         )
         stale_record = await self._create(
             self._record("sub-unrelated-stale", key=stale_key)
@@ -2730,7 +2774,9 @@ class B04SubscriptionRepositoryTests(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         private_key = self._key(
-            OwnerScope.authorized("u1", GrantReference("grant-private", 4))
+            OwnerScope.authorized(
+                "u1", validate_contract(GrantReference("grant-private", 4))
+            )
         )
         record = self._record(key=private_key)
         await self._create(record)
@@ -2755,7 +2801,9 @@ class B04SubscriptionRepositoryTests(unittest.IsolatedAsyncioTestCase):
         window = self._window()
         await self.windows.create(window)
         event = self._event(record)
-        member = DigestMember(record.subscription_id, 1, event.event_key, 1)
+        member = validate_contract(
+            DigestMember(record.subscription_id, 1, event.event_key, 1)
+        )
         assoc = DigestMemberAssociation(
             window.window_id, record.recipient, member, event
         )
@@ -2765,7 +2813,7 @@ class B04SubscriptionRepositoryTests(unittest.IsolatedAsyncioTestCase):
             record.subscription_id,
             1,
             None,
-            EvaluationState(1, {}),
+            validate_contract(EvaluationState(1, {})),
             ObservationCursor("obs-1", 1, ObservationCompleteness.COMPLETE, ()),
             (event,),
             (assoc,),
@@ -2788,7 +2836,9 @@ class B04SubscriptionRepositoryTests(unittest.IsolatedAsyncioTestCase):
             record = self._record(f"sub-{index}", owner=owner)
             await self._create(record)
             event = self._event(record, event_key=f"event-{index}")
-            member = DigestMember(record.subscription_id, 1, event.event_key, 1)
+            member = validate_contract(
+                DigestMember(record.subscription_id, 1, event.event_key, 1)
+            )
             association = DigestMemberAssociation(
                 window.window_id, record.recipient, member, event
             )
@@ -2797,7 +2847,7 @@ class B04SubscriptionRepositoryTests(unittest.IsolatedAsyncioTestCase):
                     record.subscription_id,
                     1,
                     None,
-                    EvaluationState(1, {}),
+                    validate_contract(EvaluationState(1, {})),
                     ObservationCursor(
                         observation.observation_id, 1, observation.completeness, ()
                     ),
@@ -2850,8 +2900,8 @@ class B04SubscriptionRepositoryTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         event = self._event(record)
-        member = DigestMember(
-            record.subscription_id, record.revision, event.event_key, 1
+        member = validate_contract(
+            DigestMember(record.subscription_id, record.revision, event.event_key, 1)
         )
         association = DigestMemberAssociation(
             window.window_id, record.recipient, member, event
@@ -2862,7 +2912,7 @@ class B04SubscriptionRepositoryTests(unittest.IsolatedAsyncioTestCase):
             record.subscription_id,
             record.revision,
             None,
-            EvaluationState(1, {}),
+            validate_contract(EvaluationState(1, {})),
             ObservationCursor(
                 observation.observation_id, 1, observation.completeness, ()
             ),
@@ -2910,29 +2960,37 @@ class B04SubscriptionRepositoryTests(unittest.IsolatedAsyncioTestCase):
             await reopened.current_envelope(window.window_id, record.recipient), failed
         )
         route_variants = (
-            ConversationRef(
-                "other-adapter",
-                record.recipient.kind,
-                record.recipient.conversation_id,
-                record.recipient.delivery_route,
+            validate_contract(
+                ConversationRef(
+                    "other-adapter",
+                    record.recipient.kind,
+                    record.recipient.conversation_id,
+                    record.recipient.delivery_route,
+                )
             ),
-            ConversationRef(
-                record.recipient.adapter_id,
-                ConversationKind.GROUP,
-                record.recipient.conversation_id,
-                record.recipient.delivery_route,
+            validate_contract(
+                ConversationRef(
+                    record.recipient.adapter_id,
+                    ConversationKind.GROUP,
+                    record.recipient.conversation_id,
+                    record.recipient.delivery_route,
+                )
             ),
-            ConversationRef(
-                record.recipient.adapter_id,
-                record.recipient.kind,
-                "other-conversation",
-                record.recipient.delivery_route,
+            validate_contract(
+                ConversationRef(
+                    record.recipient.adapter_id,
+                    record.recipient.kind,
+                    "other-conversation",
+                    record.recipient.delivery_route,
+                )
             ),
-            ConversationRef(
-                record.recipient.adapter_id,
-                record.recipient.kind,
-                record.recipient.conversation_id,
-                "other-route",
+            validate_contract(
+                ConversationRef(
+                    record.recipient.adapter_id,
+                    record.recipient.kind,
+                    record.recipient.conversation_id,
+                    "other-route",
+                )
             ),
         )
         for route in route_variants:
@@ -3434,7 +3492,9 @@ class B04SubscriptionRepositoryTests(unittest.IsolatedAsyncioTestCase):
         window = self._window()
         await self.windows.create(window)
         event = self._event(record)
-        member = DigestMember(record.subscription_id, 1, event.event_key, 1)
+        member = validate_contract(
+            DigestMember(record.subscription_id, 1, event.event_key, 1)
+        )
         assoc = DigestMemberAssociation(
             window.window_id, record.recipient, member, event
         )
@@ -3444,7 +3504,7 @@ class B04SubscriptionRepositoryTests(unittest.IsolatedAsyncioTestCase):
             record.subscription_id,
             1,
             None,
-            EvaluationState(1, {}),
+            validate_contract(EvaluationState(1, {})),
             ObservationCursor(obs.observation_id, 1, obs.completeness, ()),
             (event,),
             (assoc,),
@@ -3533,7 +3593,9 @@ class B04SubscriptionRepositoryTests(unittest.IsolatedAsyncioTestCase):
             record = self._record(f"sub-{index}", owner="u1")
             await self._create(record)
             event = self._event(record, event_key=f"event-{index}")
-            member = DigestMember(record.subscription_id, 1, event.event_key, 1)
+            member = validate_contract(
+                DigestMember(record.subscription_id, 1, event.event_key, 1)
+            )
             association = DigestMemberAssociation(
                 window.window_id, record.recipient, member, event
             )
@@ -3543,7 +3605,7 @@ class B04SubscriptionRepositoryTests(unittest.IsolatedAsyncioTestCase):
                     record.subscription_id,
                     1,
                     None,
-                    EvaluationState(1, {}),
+                    validate_contract(EvaluationState(1, {})),
                     ObservationCursor(
                         observation.observation_id, 1, observation.completeness, ()
                     ),
@@ -3592,7 +3654,9 @@ class B04SubscriptionRepositoryTests(unittest.IsolatedAsyncioTestCase):
         for index, record in enumerate(records, start=1):
             await self._create(record)
             event = self._event(record, event_key=f"recheck-event-{index}")
-            member = DigestMember(record.subscription_id, 1, event.event_key, 1)
+            member = validate_contract(
+                DigestMember(record.subscription_id, 1, event.event_key, 1)
+            )
             association = DigestMemberAssociation(
                 window.window_id, record.recipient, member, event
             )
@@ -3601,7 +3665,7 @@ class B04SubscriptionRepositoryTests(unittest.IsolatedAsyncioTestCase):
                     record.subscription_id,
                     1,
                     None,
-                    EvaluationState(1, {}),
+                    validate_contract(EvaluationState(1, {})),
                     ObservationCursor(
                         observation.observation_id,
                         1,
@@ -3707,7 +3771,9 @@ class B04SubscriptionRepositoryTests(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         private = self._record(
             key=self._key(
-                OwnerScope.authorized("u1", GrantReference("secret-grant", 1))
+                OwnerScope.authorized(
+                    "u1", validate_contract(GrantReference("secret-grant", 1))
+                )
             )
         )
         await self._create(private)

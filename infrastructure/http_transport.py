@@ -9,10 +9,11 @@ from urllib.parse import parse_qsl
 import aiohttp
 from yarl import URL
 
-from yomihime_sdk.api.services import SourceHttpError
+from yomihime_game_link_sdk.declarations import SourceDeclaration
+from yomihime_game_link_sdk.errors import SourceHttpError
+from yomihime_game_link_sdk.services import HttpRequest, HttpResponse
 
-from ..api.manifests import SourceDeclaration
-from ..api.services import HttpRequest, HttpResponse
+from ..core.contracts.validation_boundary import validate_contract
 from .http import (
     CredentialExchangeRequest,
     TransportRequest,
@@ -153,7 +154,9 @@ class AioHttpTransport:
                 for key, value in response.headers.items()
                 if not any(marker in key.lower() for marker in _RESPONSE_SECRET_MARKERS)
             }
-            return HttpResponse(response.status, response_headers, bytes(body_buffer))
+            return validate_contract(
+                HttpResponse(response.status, response_headers, bytes(body_buffer))
+            )
 
     async def close(self) -> None:
         """Close the owned session once; safe to call during repeated shutdown."""
@@ -219,12 +222,14 @@ class AioHttpTransport:
         if not isinstance(request, TransportRequest):
             raise SourceHttpError("request_rejected") from None
         try:
-            declaration = SourceDeclaration(
-                request.source_id,
-                request.host,
-                request.credential_ref,
-                request.timeout_seconds,
-                1,
+            declaration = validate_contract(
+                SourceDeclaration(
+                    request.source_id,
+                    request.host,
+                    request.credential_ref,
+                    request.timeout_seconds,
+                    1,
+                )
             )
             if (
                 isinstance(request.max_response_bytes, bool)
@@ -261,13 +266,15 @@ class AioHttpTransport:
                 raise ValueError
             elif request._credential_proof is not None:
                 raise ValueError
-            checked = HttpRequest(
-                request.source_id,
-                request.path,
-                request.method,
-                request.query,
-                request.body,
-                validation_headers,
+            checked = validate_contract(
+                HttpRequest(
+                    request.source_id,
+                    request.path,
+                    request.method,
+                    request.query,
+                    request.body,
+                    validation_headers,
+                )
             )
             expected_url = f"https://{declaration.host}{checked.path}"
             if request.url != expected_url:
@@ -286,9 +293,11 @@ class AioHttpTransport:
         ):
             raise SourceHttpError("request_rejected") from None
         try:
-            declaration = SourceDeclaration("oauth_token", request.host)
-            checked = HttpRequest(
-                "oauth_token", request.path, "POST", body=request.body
+            declaration = validate_contract(
+                SourceDeclaration("oauth_token", request.host)
+            )
+            checked = validate_contract(
+                HttpRequest("oauth_token", request.path, "POST", body=request.body)
             )
             headers = dict(request.headers)
             if set(headers) != {"Authorization", "Content-Type", "Accept"}:

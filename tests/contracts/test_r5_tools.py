@@ -5,13 +5,13 @@ import unittest
 from dataclasses import replace
 from types import SimpleNamespace
 
+from ygl_test_subject.core.contracts.validation_boundary import validate_contract
 from ygl_test_subject.core.policy import public_web_allowed, tool_allowed
 from ygl_test_subject.extensions.disk_manifest import ManifestError, parse_manifest
 from ygl_test_subject.services.cache import CacheAccessCoordinator, CacheAccessError
 
-from yomihime_sdk.api.contexts import InvocationOrigin as Origin
-from yomihime_sdk.api.display import Privacy
-from yomihime_sdk.api.manifests import (
+from yomihime_game_link_sdk.contexts import InvocationOrigin as Origin
+from yomihime_game_link_sdk.declarations import (
     CapabilityDescriptor,
     CapabilityEffect,
     InvocationPolicy,
@@ -19,26 +19,29 @@ from yomihime_sdk.api.manifests import (
     ModuleManifest,
     PackageManifest,
 )
-from yomihime_sdk.api.results import (
+from yomihime_game_link_sdk.display import Privacy
+from yomihime_game_link_sdk.results import (
     CapabilityResult,
     ErrorCode,
     ErrorDetail,
     FactDocument,
     ResultStatus,
 )
-from yomihime_sdk.api.storage import CacheVisibility
+from yomihime_game_link_sdk.storage import CacheVisibility
 
 SCHEMA = dict(type="object", properties={}, required=[], additionalProperties=False)
 
 
 class R5ContractTests(unittest.IsolatedAsyncioTestCase):
     def cap(self, **kwargs):
-        return CapabilityDescriptor(
-            "price",
-            SCHEMA,
-            InvocationPolicy.COMMAND_AND_PUBLIC_WEB,
-            CapabilityEffect.READ_ONLY,
-            **kwargs,
+        return validate_contract(
+            CapabilityDescriptor(
+                "price",
+                SCHEMA,
+                InvocationPolicy.COMMAND_AND_PUBLIC_WEB,
+                CapabilityEffect.READ_ONLY,
+                **kwargs,
+            )
         )
 
     def test_three_entries_keep_web_optin_public_and_readonly(self):
@@ -67,9 +70,16 @@ class R5ContractTests(unittest.IsolatedAsyncioTestCase):
             invocation_origins=(Origin.COMMAND, Origin.WEB_PUBLIC, Origin.LLM_TOOL)
         )
         with self.assertRaises(ValueError):
-            replace(cap, effect=CapabilityEffect.WRITE)
+            validate_contract(replace(cap, effect=CapabilityEffect.WRITE))
         with self.assertRaises(ValueError):
-            replace(cap, privacy_floor=__import__("yomihime_sdk").PrivacyFloor.PRIVATE)
+            validate_contract(
+                replace(
+                    cap,
+                    privacy_floor=__import__(
+                        "yomihime_game_link_sdk"
+                    ).PrivacyFloor.PRIVATE,
+                )
+            )
 
     def test_old_policy_mappings_and_natural_write_remain_compatible(self):
         expected = {
@@ -97,22 +107,34 @@ class R5ContractTests(unittest.IsolatedAsyncioTestCase):
         cap = self.cap(
             invocation_origins=(Origin.COMMAND, Origin.WEB_PUBLIC, Origin.LLM_TOOL)
         )
-        module = ModuleManifest(
-            "m", "m", ModuleCategory.GAME, "module:Factory", "1.0.0", (cap,)
+        module = validate_contract(
+            ModuleManifest(
+                "m", "m", ModuleCategory.GAME, "module:Factory", "1.0.0", (cap,)
+            )
         )
         for version in ("1.0.0", "1.1.0", "1.2.0", "1.3.0", "1.4.0", "1.5.0"):
             with self.subTest(version=version), self.assertRaises(ValueError):
-                PackageManifest(
-                    "p", "1.0.0", version, (module,), "test", "MIT", "offline"
+                validate_contract(
+                    PackageManifest(
+                        "p", "1.0.0", version, (module,), "test", "MIT", "offline"
+                    )
                 )
             legacy = replace(
                 module, capabilities=(replace(cap, invocation_origins=None),)
             )
+            with self.assertRaises(ValueError):
+                validate_contract(
+                    PackageManifest(
+                        "p", "1.0.0", version, (legacy,), "test", "MIT", "offline"
+                    )
+                )
             self.assertEqual(
-                PackageManifest(
-                    "p", "1.0.0", version, (legacy,), "test", "MIT", "offline"
+                validate_contract(
+                    PackageManifest(
+                        "p", "1.0.0", "2.0", (legacy,), "test", "MIT", "offline"
+                    )
                 ).contract_version,
-                version,
+                "2.0",
             )
 
     def test_disk_new_field_version_and_shape_are_closed(self):
@@ -120,7 +142,7 @@ class R5ContractTests(unittest.IsolatedAsyncioTestCase):
             schema_version=1,
             package_id="p",
             package_version="1.0.0",
-            contract_version="1.6.0",
+            contract_version="2.0",
             author="tests",
             license="MIT",
             source="offline",
@@ -151,38 +173,46 @@ class R5ContractTests(unittest.IsolatedAsyncioTestCase):
         data["contract_version"] = "1.5.0"
         with self.assertRaises(ManifestError):
             parse_manifest(json.dumps(data).encode())
-        data["contract_version"] = "1.6.0"
+        data["contract_version"] = "2.0"
         data["modules"][0]["capabilities"][0]["invocation_origins"] = None
         with self.assertRaises(ManifestError):
             parse_manifest(json.dumps(data).encode())
 
     def test_error_facts_are_versioned_public_closed_envelope(self):
-        error = ErrorDetail(ErrorCode.NO_RECORDS, "no public records")
-        facts = FactDocument(
-            dict(
-                status="error", error=dict(code=error.code.value, message=error.message)
+        error = validate_contract(
+            ErrorDetail(ErrorCode.NO_RECORDS, "no public records")
+        )
+        facts = validate_contract(
+            FactDocument(
+                dict(
+                    status="error",
+                    error=dict(code=error.code.value, message=error.message),
+                )
             )
         )
-        accepted = CapabilityResult(
-            "r", ResultStatus.ERROR, model_facts=facts, error=error
+        accepted = validate_contract(
+            CapabilityResult("r", ResultStatus.ERROR, model_facts=facts, error=error)
         )
         self.assertEqual(accepted.model_facts.facts["status"], "error")
         with self.assertRaises(ValueError):
-            replace(facts, schema_version="1.5.0")
+            validate_contract(replace(facts, schema_version="1.5.0"))
         for changes in (
             dict(schema_version="1.5.0"),
             dict(privacy=Privacy.PRIVATE),
-            dict(model_facts=FactDocument({"private": "internal"})),
+            dict(model_facts=validate_contract(FactDocument({"private": "internal"}))),
             dict(
-                model_facts=FactDocument(
-                    dict(
-                        status="error", error=dict(code="unknown", message="different")
+                model_facts=validate_contract(
+                    FactDocument(
+                        dict(
+                            status="error",
+                            error=dict(code="unknown", message="different"),
+                        )
                     )
                 )
             ),
         ):
             with self.subTest(changes=changes), self.assertRaises(ValueError):
-                replace(accepted, **changes)
+                validate_contract(replace(accepted, **changes))
 
     async def test_tool_public_cache_scope_without_principal_and_explicit_private_denial(
         self,

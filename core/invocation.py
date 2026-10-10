@@ -9,8 +9,14 @@ from decimal import Decimal
 from time import monotonic
 from types import MappingProxyType
 
-from ..api.contexts import InvocationOrigin, InvocationView
-from ..api.display import (
+from yomihime_game_link_sdk.contexts import InvocationOrigin, InvocationView
+from yomihime_game_link_sdk.declarations import (
+    CommandDescriptor,
+    ModuleManifest,
+    PrivacyFloor,
+    ToolDescriptor,
+)
+from yomihime_game_link_sdk.display import (
     CommandsBlock,
     DisplayDocument,
     FieldsBlock,
@@ -29,20 +35,22 @@ from ..api.display import (
     TimeValue,
     UnknownBlock,
 )
-from ..api.manifests import (
-    CommandDescriptor,
-    ModuleManifest,
-    PrivacyFloor,
-    ToolDescriptor,
+from yomihime_game_link_sdk.errors import (
+    AccessDenied,
+    OperationTimeout,
+    ParameterError,
+    ServiceUnavailable,
 )
-from ..api.results import (
+from yomihime_game_link_sdk.results import (
     CapabilityResult,
     ErrorCode,
     ErrorDetail,
     FactDocument,
     ResultStatus,
 )
-from ..api.validation import ParameterError, validate_parameters
+
+from ..core.contracts.validation import validate_parameters
+from ..core.contracts.validation_boundary import validate_contract
 from .context_issuer import ContextIssuer, InvalidInvocation
 from .lifecycle import LifecycleController, LifecycleError
 from .policy import origin_allowed, tool_allowed
@@ -68,12 +76,20 @@ _MESSAGES = {
 def _error(code: ErrorCode, *, privacy: Privacy = Privacy.PUBLIC) -> CapabilityResult:
     """Construct an error without copying input or exception text into output."""
 
-    return CapabilityResult(
-        result_id="gateway-error",
-        status=ResultStatus.ERROR,
-        privacy=privacy,
-        error=ErrorDetail(code, _MESSAGES[code]),
+    validate_contract(code)
+    validate_contract(privacy)
+    return validate_contract(
+        CapabilityResult(
+            result_id="gateway-error",
+            status=ResultStatus.ERROR,
+            privacy=privacy,
+            error=validate_contract(ErrorDetail(code, _MESSAGES[code])),
+        )
     )
+
+
+class _MessageSourceRejected(Exception):
+    """Distinguish a typed message guard rejection from a handler failure."""
 
 
 class _PublicWebFlight:
@@ -84,6 +100,7 @@ class _PublicWebFlight:
     """
 
     def __init__(self, gateway: "Gateway", view: InvocationView, bearer_key: str):
+        validate_contract(view)
         self.gateway, self.view, self.bearer_key = gateway, view, bearer_key
         self.root: asyncio.Task | None = None
         self.tasks: set[asyncio.Task] = set()
@@ -165,6 +182,8 @@ class Gateway:
         handler_timeout: float = 30.0,
         clock: Callable[[], float] = monotonic,
     ) -> None:
+        validate_contract(private_authorizer)
+        validate_contract(public_fact_guard)
         if not isinstance(registry, Registry):
             raise TypeError("registry must be a Registry")
         if not isinstance(issuer, ContextIssuer):
@@ -360,6 +379,7 @@ class Gateway:
         self, view: InvocationView, parameters: object
     ) -> CapabilityResult:
         try:
+            validate_contract(view)
             self._issuer.require(view)
             module = self._registry.snapshot().module(view.module_id)
             capability = next(
@@ -409,6 +429,7 @@ class Gateway:
     ) -> CapabilityResult:
         """Invoke a declared command using a trusted command-origin view."""
 
+        validate_contract(view)
         return await self._invoke(
             view,
             operation_path,
@@ -422,6 +443,7 @@ class Gateway:
     ) -> CapabilityResult:
         """Invoke a declared natural-language Tool."""
 
+        validate_contract(view)
         return await self._invoke(
             view,
             tool_name,
@@ -442,6 +464,8 @@ class Gateway:
         # ContextIssuer is the authority boundary.  It intentionally receives
         # the original object, rather than a reconstructed DTO.
         try:
+            validate_contract(view)
+            validate_contract(expected_origin)
             trusted = self._issuer.require(view)
         except Exception:
             return _error(ErrorCode.MODULE_UNAVAILABLE)
@@ -468,7 +492,15 @@ class Gateway:
         if not self._current_view(snapshot, module, trusted):
             return _error(ErrorCode.MODULE_UNAVAILABLE)
 
-        descriptor = self._find_descriptor(module.manifest, target, tool=tool)
+        try:
+            descriptor = self._find_descriptor(module.manifest, target, tool=tool)
+        except (TypeError, ValueError, AttributeError):
+            # Invalid declarations are rejected before handler admission.
+            # Command errors remain private when the target may be owner-only.
+            return _error(
+                ErrorCode.UNSUPPORTED,
+                privacy=Privacy.PUBLIC if tool else Privacy.PRIVATE,
+            )
         if descriptor is None:
             return _error(ErrorCode.NOT_FOUND)
 
@@ -499,6 +531,7 @@ class Gateway:
             # their fixed authorization failure is safe to report publicly.
             # OWNER errors remain private so a failed identity/route proof can
             # never become a group-visible result.
+            validate_contract(code)
             return _error(code, privacy=Privacy.PRIVATE if owner else Privacy.PUBLIC)
 
         try:
@@ -568,19 +601,61 @@ class Gateway:
             except Exception:
                 return denied(ErrorCode.MODULE_UNAVAILABLE)
 
+        if tool:
+            try:
+                await self._issuer._check_message_source(trusted)
+            except asyncio.CancelledError:
+                raise
+            except (
+                OperationTimeout,
+                ServiceUnavailable,
+                AccessDenied,
+                InvalidInvocation,
+            ):
+                return denied(ErrorCode.MODULE_UNAVAILABLE)
+            except Exception:
+                return denied(ErrorCode.UNKNOWN)
+
         try:
             deadline = self._clock() + self._handler_timeout
             if trusted.deadline is not None:
                 deadline = min(deadline, trusted.deadline)
             scope = lifecycle.scope(trusted.module_id)
+
+            async def invoke_current():
+                # TaskScope schedules this coroutine. Check in the actual task
+                # entry after all admission/authorization awaits, not before
+                # create_task where another source change could interleave.
+                self._require_current(trusted, lease)
+                if tool:
+                    rejected = False
+                    try:
+                        self._issuer._require_message_current(trusted)
+                    except (
+                        OperationTimeout,
+                        ServiceUnavailable,
+                        AccessDenied,
+                        InvalidInvocation,
+                    ):
+                        rejected = True
+                    if rejected:
+                        raise _MessageSourceRejected()
+                return await handler.invoke(trusted, validated)
+
             result = await scope.run(
-                handler.invoke(trusted, validated),
+                invoke_current(),
                 name=f"gateway:{capability_id}",
                 deadline_monotonic=deadline,
             )
         except asyncio.CancelledError:
             raise
-        except (ScopeCancelled, ScopeDeadlineExceeded, ScopeStaleError, LifecycleError):
+        except (
+            _MessageSourceRejected,
+            ScopeCancelled,
+            ScopeDeadlineExceeded,
+            ScopeStaleError,
+            LifecycleError,
+        ):
             return denied(ErrorCode.MODULE_UNAVAILABLE)
         except Exception:
             return denied(ErrorCode.UNKNOWN)
@@ -589,6 +664,8 @@ class Gateway:
         # the release/disable race for handlers that complete late.
         try:
             self._require_current(trusted, lease)
+            if tool:
+                self._issuer._require_message_current(trusted)
             if owner:
                 if self._owner_authority is None:
                     raise ValueError("owner proof authority is unavailable")
@@ -608,6 +685,7 @@ class Gateway:
             return denied(ErrorCode.UNKNOWN)
 
     def _require_current(self, view: InvocationView, lease: object) -> None:
+        validate_contract(view)
         assert self._admission is not None and self._lifecycle is not None
         self._issuer.require(view)
         self._admission.check(lease)  # type: ignore[arg-type]
@@ -615,7 +693,8 @@ class Gateway:
 
     @staticmethod
     def _require_private_grant(grant: object, view: InvocationView) -> None:
-        from ..api.services import Grant, GrantStatus
+        validate_contract(view)
+        from ..core.contracts.services import Grant, GrantStatus
 
         if (
             not isinstance(grant, Grant)
@@ -633,6 +712,7 @@ class Gateway:
     def _find_descriptor(
         manifest: ModuleManifest, target: object, *, tool: bool
     ) -> CommandDescriptor | ToolDescriptor | None:
+        validate_contract(manifest)
         if not isinstance(target, str):
             return None
         descriptors = manifest.tools if tool else manifest.commands
@@ -668,7 +748,9 @@ class Gateway:
     def _valid_result(result: object, *, expected_privacy: Privacy) -> CapabilityResult:
         """Rebuild and re-run result invariants at the handler boundary."""
 
-        if not isinstance(result, CapabilityResult):
+        validate_contract(expected_privacy)
+        validate_contract(result)
+        if type(result) is not CapabilityResult:
             raise TypeError("expected capability result")
         if not isinstance(result.status, ResultStatus):
             raise TypeError("malformed result status")
@@ -683,20 +765,23 @@ class Gateway:
         if not isinstance(result.warnings, tuple):
             raise TypeError("result warnings must be a tuple")
 
-        # CapabilityResult's constructor checks its status matrix and its
-        # document/result privacy match.  Reconstructing it catches mutations
-        # made after construction (for example via object.__setattr__).
-        checked_result = CapabilityResult(
-            result_id=result.result_id,
-            status=result.status,
-            document=Gateway._rebuild_document(result.document),
-            model_facts=Gateway._rebuild_facts(result.model_facts),
-            provenance=result.provenance,
-            timestamps=tuple(Gateway._rebuild_time(item) for item in result.timestamps),
-            privacy=result.privacy,
-            warnings=result.warnings,
-            error=Gateway._rebuild_error(result.error),
-            schema_version=result.schema_version,
+        # Core receiving validation checks the status and privacy matrix on
+        # this deeply rebuilt result, including objects mutated after creation.
+        checked_result = validate_contract(
+            CapabilityResult(
+                result_id=result.result_id,
+                status=result.status,
+                document=Gateway._rebuild_document(result.document),
+                model_facts=Gateway._rebuild_facts(result.model_facts),
+                provenance=result.provenance,
+                timestamps=tuple(
+                    Gateway._rebuild_time(item) for item in result.timestamps
+                ),
+                privacy=result.privacy,
+                warnings=result.warnings,
+                error=Gateway._rebuild_error(result.error),
+                schema_version=result.schema_version,
+            )
         )
         document = checked_result.document
         if document is not None and document.privacy is not expected_privacy:
@@ -710,9 +795,13 @@ class Gateway:
         if depth > 64:
             raise ValueError("nested display value is too deep")
         if isinstance(value, NumberValue):
-            return NumberValue(value.value, value.unit, value.precision)
+            return validate_contract(
+                NumberValue(value.value, value.unit, value.precision)
+            )
         if isinstance(value, MoneyValue):
-            return MoneyValue(value.value, value.currency, value.precision)
+            return validate_contract(
+                MoneyValue(value.value, value.currency, value.precision)
+            )
         if isinstance(value, TimeValue):
             return Gateway._rebuild_time(value)
         if value is None or isinstance(value, (str, int, bool)):
@@ -746,7 +835,7 @@ class Gateway:
     def _rebuild_time(value: object) -> TimeValue:
         if not isinstance(value, TimeValue):
             raise TypeError("expected time value")
-        return TimeValue(value.value, value.timezone_name)
+        return validate_contract(TimeValue(value.value, value.timezone_name))
 
     @staticmethod
     def _rebuild_number(value: object) -> NumberValue | MoneyValue:
@@ -759,7 +848,7 @@ class Gateway:
     def _rebuild_link(value: object) -> Link:
         if not isinstance(value, Link):
             raise TypeError("expected link")
-        return Link(value.label, value.url)
+        return validate_contract(Link(value.label, value.url))
 
     @staticmethod
     def _rebuild_grid_item(value: object) -> GridItem:
@@ -767,29 +856,40 @@ class Gateway:
             raise TypeError("expected grid item")
         if not isinstance(value.visibility, Privacy):
             raise TypeError("grid visibility must be Privacy")
-        return GridItem(
-            value.label,
-            Gateway._rebuild_value(value.value),
-            value.asset_id,
-            value.visibility,
+        return validate_contract(
+            GridItem(
+                value.label,
+                Gateway._rebuild_value(value.value),
+                value.asset_id,
+                value.visibility,
+            )
         )
 
     @staticmethod
     def _rebuild_block(value: object) -> object:
         if isinstance(value, TextBlock):
-            rebuilt = TextBlock(value.text, value.fallback_text, value.required)
+            rebuilt = validate_contract(
+                TextBlock(value.text, value.fallback_text, value.required)
+            )
         elif isinstance(value, FieldsBlock):
-            rebuilt = FieldsBlock(
-                Gateway._rebuild_mapping(value.fields),
-                value.fallback_text,
-                value.required,
+            rebuilt = validate_contract(
+                FieldsBlock(
+                    Gateway._rebuild_mapping(value.fields),
+                    value.fallback_text,
+                    value.required,
+                )
             )
         elif isinstance(value, MetricsBlock):
             metrics = Gateway._rebuild_mapping(value.metrics)
-            rebuilt = MetricsBlock(
-                {key: Gateway._rebuild_number(item) for key, item in metrics.items()},
-                value.fallback_text,
-                value.required,
+            rebuilt = validate_contract(
+                MetricsBlock(
+                    {
+                        key: Gateway._rebuild_number(item)
+                        for key, item in metrics.items()
+                    },
+                    value.fallback_text,
+                    value.required,
+                )
             )
         elif isinstance(value, TableBlock):
             if not isinstance(value.columns, tuple) or not isinstance(
@@ -802,26 +902,30 @@ class Gateway:
                 tuple(Gateway._rebuild_value(item) for item in row)
                 for row in value.rows
             )
-            rebuilt = TableBlock(
-                value.columns, rows, value.fallback_text, value.required
+            rebuilt = validate_contract(
+                TableBlock(value.columns, rows, value.fallback_text, value.required)
             )
         elif isinstance(value, ItemGridBlock):
             if not isinstance(value.items, tuple):
                 raise TypeError("grid items must be a tuple")
-            rebuilt = ItemGridBlock(
-                tuple(Gateway._rebuild_grid_item(item) for item in value.items),
-                value.fallback_text,
-                value.required,
+            rebuilt = validate_contract(
+                ItemGridBlock(
+                    tuple(Gateway._rebuild_grid_item(item) for item in value.items),
+                    value.fallback_text,
+                    value.required,
+                )
             )
         elif isinstance(value, ImageBlock):
             if not isinstance(value.visibility, Privacy):
                 raise TypeError("image visibility must be Privacy")
-            rebuilt = ImageBlock(
-                value.asset_id,
-                value.alt_text,
-                value.visibility,
-                value.fallback_text,
-                value.required,
+            rebuilt = validate_contract(
+                ImageBlock(
+                    value.asset_id,
+                    value.alt_text,
+                    value.visibility,
+                    value.fallback_text,
+                    value.required,
+                )
             )
         elif isinstance(value, SeriesBlock):
             if not isinstance(value.points, tuple):
@@ -832,21 +936,29 @@ class Gateway:
                 (Gateway._rebuild_time(point[0]), Gateway._rebuild_number(point[1]))
                 for point in value.points
             )
-            rebuilt = SeriesBlock(points, value.fallback_text, value.required)
+            rebuilt = validate_contract(
+                SeriesBlock(points, value.fallback_text, value.required)
+            )
         elif isinstance(value, LinksBlock):
             if not isinstance(value.links, tuple):
                 raise TypeError("links must be a tuple")
-            rebuilt = LinksBlock(
-                tuple(Gateway._rebuild_link(link) for link in value.links),
-                value.fallback_text,
-                value.required,
+            rebuilt = validate_contract(
+                LinksBlock(
+                    tuple(Gateway._rebuild_link(link) for link in value.links),
+                    value.fallback_text,
+                    value.required,
+                )
             )
         elif isinstance(value, CommandsBlock):
             if not isinstance(value.commands, tuple):
                 raise TypeError("commands must be a tuple")
-            rebuilt = CommandsBlock(value.commands, value.fallback_text, value.required)
+            rebuilt = validate_contract(
+                CommandsBlock(value.commands, value.fallback_text, value.required)
+            )
         elif isinstance(value, UnknownBlock):
-            rebuilt = UnknownBlock(value.kind, value.required, value.fallback_text)
+            rebuilt = validate_contract(
+                UnknownBlock(value.kind, value.required, value.fallback_text)
+            )
         else:
             raise TypeError("unsupported display block")
         if rebuilt.kind != value.kind:
@@ -869,15 +981,43 @@ class Gateway:
             raise TypeError("document privacy must be Privacy")
         blocks = tuple(Gateway._rebuild_block(item) for item in value.ordered_blocks)
         timestamps = tuple(Gateway._rebuild_time(item) for item in value.timestamps)
-        return DisplayDocument(
-            value.title,
-            value.subject,
-            blocks,
-            value.sources,
-            timestamps,
-            value.privacy,
-            value.schema_version,
+        return validate_contract(
+            DisplayDocument(
+                value.title,
+                value.subject,
+                blocks,
+                value.sources,
+                timestamps,
+                value.privacy,
+                value.schema_version,
+            )
         )
+
+    @staticmethod
+    def _rebuild_fact_value(value: object, depth: int = 0) -> object:
+        """Detach facts' JSON floats without widening typed display rebuilding."""
+        from math import isfinite
+
+        if type(value) is float:
+            if not isfinite(value):
+                raise ValueError("fact number is not finite")
+            return value
+        if depth > 64:
+            raise ValueError("nested fact value is too deep")
+        if isinstance(value, Mapping):
+            if not isinstance(value, MappingProxyType):
+                raise TypeError("fact mappings must be immutable")
+            if not all(isinstance(key, str) for key in value):
+                raise TypeError("fact mapping keys must be text")
+            return {
+                key: Gateway._rebuild_fact_value(child, depth + 1)
+                for key, child in value.items()
+            }
+        if isinstance(value, tuple):
+            return tuple(
+                Gateway._rebuild_fact_value(child, depth + 1) for child in value
+            )
+        return Gateway._rebuild_value(value, depth)
 
     @staticmethod
     def _rebuild_facts(value: object) -> FactDocument | None:
@@ -887,8 +1027,12 @@ class Gateway:
             raise TypeError("expected fact document")
         if not isinstance(value.sources, tuple):
             raise TypeError("fact sources must be a tuple")
-        return FactDocument(
-            Gateway._rebuild_mapping(value.facts), value.sources, value.schema_version
+        return validate_contract(
+            FactDocument(
+                Gateway._rebuild_fact_value(value.facts),
+                value.sources,
+                value.schema_version,
+            )
         )
 
     @staticmethod
@@ -899,10 +1043,11 @@ class Gateway:
             raise TypeError("expected error detail")
         if not isinstance(value.code, ErrorCode) or not isinstance(value.message, str):
             raise TypeError("malformed error detail")
-        return ErrorDetail(value.code, value.message)
+        return validate_contract(ErrorDetail(value.code, value.message))
 
     @staticmethod
     def _current_view(snapshot, module: RegisteredModule, view: InvocationView) -> bool:
+        validate_contract(view)
         return (
             module.module_id == view.module_id
             and module.epoch == view.module_epoch

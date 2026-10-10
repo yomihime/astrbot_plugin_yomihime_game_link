@@ -4,10 +4,12 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from ..api.contexts import InvocationOrigin
-from ..api.display import CommandsBlock, DisplayDocument, TextBlock
-from ..api.manifests import InvocationPolicy, PrivacyFloor
-from ..api.services import CapabilityHealth, HealthStatus
+from yomihime_game_link_sdk.contexts import InvocationOrigin
+from yomihime_game_link_sdk.declarations import InvocationPolicy, PrivacyFloor
+from yomihime_game_link_sdk.display import CommandsBlock, DisplayDocument, TextBlock
+from yomihime_game_link_sdk.services import CapabilityHealth, HealthStatus
+
+from ..core.contracts.validation_boundary import validate_contract
 from .registry import RegisteredModule, RegistryError, RegistrySnapshot
 
 
@@ -24,6 +26,7 @@ class HelpCatalog:
         health_query: Callable[[str, str], tuple[CapabilityHealth, int]] | None = None,
         active_query: Callable[[RegisteredModule], bool] | None = None,
     ) -> None:
+        validate_contract(health_query)
         if health_query is not None and not callable(health_query):
             raise TypeError("health_query must be callable")
         self._health_query = health_query
@@ -56,19 +59,25 @@ class HelpCatalog:
                 f"{module.manifest.route}：" + self._module_summary(module)
                 for module in modules
             )
-            intro = TextBlock(
-                "总帮助：当前活跃模块；使用模块帮助查看能力。\n" + summaries
+            intro = validate_contract(
+                TextBlock("总帮助：当前活跃模块；使用模块帮助查看能力。\n" + summaries)
             )
-            blocks = (intro, CommandsBlock(tuple(commands)))
+            blocks = (intro, validate_contract(CommandsBlock(tuple(commands))))
         else:
             blocks = (
-                TextBlock(
-                    "当前没有已注册模块。使用 /ygl help 查看帮助；接入模块后，"
-                    "这里会显示模块帮助入口。"
+                validate_contract(
+                    TextBlock(
+                        "当前没有已注册模块。使用 /ygl help 查看帮助；接入模块后，"
+                        "这里会显示模块帮助入口。"
+                    )
                 ),
-                CommandsBlock((), fallback_text="暂无可用模块命令。"),
+                validate_contract(
+                    CommandsBlock((), fallback_text="暂无可用模块命令。")
+                ),
             )
-        return DisplayDocument("Yomihime Game Link 帮助", "ygl", blocks)
+        return validate_contract(
+            DisplayDocument("Yomihime Game Link 帮助", "ygl", blocks)
+        )
 
     @staticmethod
     def _module_summary(module: RegisteredModule) -> str:
@@ -95,9 +104,11 @@ class HelpCatalog:
 
         status = "已启用" if module.enabled else "未启用"
         manifest = module.manifest
-        intro = TextBlock(
-            f"模块：{manifest.route}\n状态：{status}\n"
-            "在命令路径后加 help 查看参数与例子；执行时仍校验状态和调用来源。"
+        intro = validate_contract(
+            TextBlock(
+                f"模块：{manifest.route}\n状态：{status}\n"
+                "在命令路径后加 help 查看参数与例子；执行时仍校验状态和调用来源。"
+            )
         )
         commands = tuple(
             self._command_line(
@@ -105,9 +116,11 @@ class HelpCatalog:
             )
         )
         if not commands:
-            command_block = CommandsBlock((), fallback_text="该模块没有声明命令。")
+            command_block = validate_contract(
+                CommandsBlock((), fallback_text="该模块没有声明命令。")
+            )
         else:
-            command_block = CommandsBlock(commands)
+            command_block = validate_contract(CommandsBlock(commands))
         examples = tuple(
             line
             for command in manifest.commands
@@ -116,8 +129,10 @@ class HelpCatalog:
         )[:2]
         blocks = (intro, command_block)
         if examples:
-            blocks += (TextBlock("\n".join(examples)),)
-        return DisplayDocument(f"{manifest.route} 模块帮助", manifest.route, blocks)
+            blocks += (validate_contract(TextBlock("\n".join(examples))),)
+        return validate_contract(
+            DisplayDocument(f"{manifest.route} 模块帮助", manifest.route, blocks)
+        )
 
     def command(
         self, snapshot: RegistrySnapshot, route: str, operation_path: str
@@ -139,10 +154,18 @@ class HelpCatalog:
             None,
         )
         if command is None:
-            return DisplayDocument(
-                "命令帮助",
-                route,
-                (TextBlock(f"未找到命令。请使用 /ygl {route} help 查看能力。"),),
+            return validate_contract(
+                DisplayDocument(
+                    "命令帮助",
+                    route,
+                    (
+                        validate_contract(
+                            TextBlock(
+                                f"未找到命令。请使用 /ygl {route} help 查看能力。"
+                            )
+                        ),
+                    ),
+                )
             )
         line = next(
             line
@@ -151,10 +174,15 @@ class HelpCatalog:
             )
             if line.startswith(f"/ygl {route} {operation_path} help —")
         )
-        return DisplayDocument(
-            f"{route} {operation_path} 帮助",
-            route,
-            (TextBlock(line), TextBlock(command.help_text)),
+        return validate_contract(
+            DisplayDocument(
+                f"{route} {operation_path} 帮助",
+                route,
+                (
+                    validate_contract(TextBlock(line)),
+                    validate_contract(TextBlock(command.help_text)),
+                ),
+            )
         )
 
     @staticmethod
@@ -175,6 +203,7 @@ class HelpCatalog:
         command_only: bool,
         health_query: Callable[[str, str], tuple[CapabilityHealth, int]] | None,
     ) -> list[str]:
+        validate_contract(health_query)
         manifest = module.manifest
         capabilities = {
             capability.capability_id: capability for capability in manifest.capabilities
@@ -245,13 +274,17 @@ class HelpCatalog:
 
     @staticmethod
     def _unknown_route_document(route: str) -> DisplayDocument:
-        return DisplayDocument(
-            "Yomihime Game Link 帮助",
-            "ygl",
-            (
-                TextBlock(
-                    f"未找到模块路由：{route}。请使用 /ygl help 查看已注册模块。"
+        return validate_contract(
+            DisplayDocument(
+                "Yomihime Game Link 帮助",
+                "ygl",
+                (
+                    validate_contract(
+                        TextBlock(
+                            f"未找到模块路由：{route}。请使用 /ygl help 查看已注册模块。"
+                        )
+                    ),
+                    validate_contract(CommandsBlock(("/ygl help",))),
                 ),
-                CommandsBlock(("/ygl help",)),
-            ),
+            )
         )

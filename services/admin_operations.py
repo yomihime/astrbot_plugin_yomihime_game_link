@@ -10,7 +10,16 @@ from functools import wraps
 from math import isfinite
 from types import MappingProxyType
 
-from ..api.administration import (
+from yomihime_game_link_sdk.contexts import InvocationView
+from yomihime_game_link_sdk.declarations import (
+    ConfigUpdateMode,
+    ModuleManifest,
+    PackageManifest,
+)
+from yomihime_game_link_sdk.services import ConfigSnapshot, ConfigTarget
+from yomihime_game_link_sdk.storage import SecretMetadataState
+
+from ..core.contracts.administration import (
     AdminAuthorizationContext,
     AdminAuthorizationDenied,
     AdminAuthorizationGrant,
@@ -23,17 +32,15 @@ from ..api.administration import (
     ModuleHealth,
     ModuleLifecycle,
     ModuleStatus,
+    ModuleUnloadReceipt,
+    OrdinaryRollbackReceipt,
 )
-from ..api.contexts import InvocationView
-from ..api.manifests import ModuleManifest, PackageManifest
-from ..api.services import (
+from ..core.contracts.services import (
     ConfigFieldUpdate,
     ConfigPatch,
-    ConfigPatchMode,
-    ConfigSnapshot,
-    ConfigTarget,
+    ConfigTarget_validate,
 )
-from ..api.storage import SecretMetadataState
+from ..core.contracts.validation_boundary import validate_contract
 from ..core.health import HealthResolver
 from ..core.lifecycle import LifecycleController
 from ..core.ports import RevisionConflict
@@ -120,6 +127,7 @@ class AdminOperationsService(AdminOperations):
         managed_module_owners=(),
         owner_cleanup=None,
     ) -> None:
+        validate_contract(subscription_gate_fields)
         if not isinstance(authorization, AdminAuthorizationService):
             raise TypeError("authorization must be AdminAuthorizationService")
         if not isinstance(extension_runtime, ExtensionRuntime):
@@ -174,7 +182,7 @@ class AdminOperationsService(AdminOperations):
             }
         )
         for target, fields in self._ordinary_config_resources.items():
-            ConfigTarget.validate(target)
+            ConfigTarget_validate(target)
             if (
                 target.principal_id != config_principal_id
                 or not fields
@@ -184,14 +192,16 @@ class AdminOperationsService(AdminOperations):
         self._managed_module_owners = frozenset(managed_module_owners)
         self._owner_cleanup = owner_cleanup
         for owner in self._managed_module_owners:
-            ConfigTarget(config_principal_id, owner)
+            validate_contract(ConfigTarget(config_principal_id, owner))
 
     def module_resources(self, module_id=None):
         owners = self._managed_module_owners if module_id is None else {module_id}
         if not owners or not owners <= self._managed_module_owners:
             raise AdminAuthorizationDenied
         return {
-            ConfigTarget(self.config_principal_id, owner): {"__module_lifecycle__"}
+            validate_contract(ConfigTarget(self.config_principal_id, owner)): {
+                "__module_lifecycle__"
+            }
             for owner in owners
         }
 
@@ -248,7 +258,10 @@ class AdminOperationsService(AdminOperations):
         )
         for policy in policies:
             resources.setdefault(
-                ConfigTarget(self.config_principal_id, policy.module_id), set()
+                validate_contract(
+                    ConfigTarget(self.config_principal_id, policy.module_id)
+                ),
+                set(),
             ).add(policy.name)
         return resources
 
@@ -361,7 +374,9 @@ class AdminOperationsService(AdminOperations):
             "updates",
         }:
             raise ValueError("invalid credential update")
-        target = ConfigTarget(self.config_principal_id, data["module_id"])
+        target = validate_contract(
+            ConfigTarget(self.config_principal_id, data["module_id"])
+        )
         raw = data["updates"]
         if type(raw) is not list or not 1 <= len(raw) <= 2:
             raise ValueError("invalid credential updates")
@@ -397,7 +412,7 @@ class AdminOperationsService(AdminOperations):
         updates = tuple(
             ConfigFieldUpdate(
                 item["field"],
-                ConfigPatchMode(item["mode"]),
+                validate_contract(ConfigUpdateMode(item["mode"])),
                 secret=policies[item["field"]].material(item["value"])
                 if item["mode"] == "replace"
                 else None,
@@ -541,7 +556,9 @@ class AdminOperationsService(AdminOperations):
         return result
 
     @_tracked_admin_request
-    async def ordinary_rollback(self, expected_revisions, *, authorization):
+    async def ordinary_rollback(
+        self, expected_revisions, *, authorization
+    ) -> OrdinaryRollbackReceipt:
         resources = self.ordinary_resources()
         grant = await self.authorization.authorize(
             AdminOperation.ROLLBACK_CONFIG,
@@ -557,7 +574,7 @@ class AdminOperationsService(AdminOperations):
             await self.authorization.validate_generation(
                 grant, operation=AdminOperation.ROLLBACK_CONFIG
             )
-        return {"rolled_back": True}
+        return OrdinaryRollbackReceipt(rolled_back=True)
 
     def _core_configuration(self) -> ConfigurationCoordinator:
         async def validate(grant):
@@ -616,6 +633,7 @@ class AdminOperationsService(AdminOperations):
         invocation: InvocationView | None,
         context: AdminAuthorizationContext | None,
     ) -> AdminAuthorizationGrant:
+        validate_contract(invocation)
         self._require_accepting()
         if context is None:
             raise AdminAuthorizationDenied from None
@@ -626,9 +644,11 @@ class AdminOperationsService(AdminOperations):
     async def _configuration(
         self, selection: _ManifestSelection
     ) -> ConfigurationCoordinator:
-        target = ConfigTarget(
-            self.config_principal_id,
-            f"{selection.package_id}/{selection.manifest.module_id}",
+        target = validate_contract(
+            ConfigTarget(
+                self.config_principal_id,
+                f"{selection.package_id}/{selection.manifest.module_id}",
+            )
         )
 
         async def validate(grant: AdminAuthorizationGrant) -> None:
@@ -647,6 +667,7 @@ class AdminOperationsService(AdminOperations):
             *,
             changed_fields: frozenset[str],
         ) -> tuple[str, ...]:
+            validate_contract(snapshot)
             current = self.registry.snapshot().modules.get(module_id)
             if current is None:
                 return ()
@@ -741,7 +762,7 @@ class AdminOperationsService(AdminOperations):
         allowed_fields: frozenset[str] | None = None,
     ) -> ModuleAdminSnapshot:
         module_id = f"{selection.package_id}/{selection.manifest.module_id}"
-        target = ConfigTarget(self.config_principal_id, module_id)
+        target = validate_contract(ConfigTarget(self.config_principal_id, module_id))
         config = await self._config_repository.current(target)
         sensitive = {
             field.name
@@ -859,6 +880,10 @@ class AdminOperationsService(AdminOperations):
             if package.package_id is None:
                 continue
             for module in manifest.modules:
+                # A legal module without configuration cannot own any secret
+                # receipt. The coordinator deliberately requires declarations.
+                if not module.config_fields:
+                    continue
                 module_id = f"{package.package_id}/{module.module_id}"
                 selection = _ManifestSelection(
                     module,
@@ -886,6 +911,7 @@ class AdminOperationsService(AdminOperations):
         *,
         authorization: AdminAuthorizationContext | None = None,
     ) -> tuple[ModuleAdminSnapshot, ...]:
+        validate_contract(invocation)
         grant = await self.authorization.authorize(
             AdminOperation.LIST_MODULES,
             invocation=invocation,
@@ -960,6 +986,7 @@ class AdminOperationsService(AdminOperations):
         *,
         authorization: AdminAuthorizationContext | None = None,
     ) -> CoreConfigSummary:
+        validate_contract(invocation)
         grant = await self._authorize(
             AdminOperation.MODULE_SNAPSHOT, invocation, authorization
         )
@@ -997,6 +1024,7 @@ class AdminOperationsService(AdminOperations):
         *,
         authorization: AdminAuthorizationContext | None = None,
     ) -> ModuleAdminSnapshot:
+        validate_contract(invocation)
         grant = await self._authorize(
             AdminOperation.MODULE_SNAPSHOT, invocation, authorization
         )
@@ -1032,6 +1060,7 @@ class AdminOperationsService(AdminOperations):
         expected_registry_revision: int,
         authorization: AdminAuthorizationContext | None = None,
     ) -> ModuleStatus:
+        validate_contract(invocation)
         grant = await self.authorization.authorize(
             AdminOperation.SET_ENABLED,
             invocation=invocation,
@@ -1039,7 +1068,7 @@ class AdminOperationsService(AdminOperations):
             resources=self.module_resources(module_id)
             if self._managed_module_owners
             else {
-                ConfigTarget(self.config_principal_id, module_id): {
+                validate_contract(ConfigTarget(self.config_principal_id, module_id)): {
                     "__module_lifecycle__"
                 }
             },
@@ -1063,7 +1092,7 @@ class AdminOperationsService(AdminOperations):
     @_tracked_admin_request
     async def unload_module(
         self, invocation, module_id, *, expected_registry_revision, authorization=None
-    ):
+    ) -> ModuleUnloadReceipt:
         resources = self.module_resources(module_id)
         grant = await self.authorization.authorize(
             AdminOperation.UNLOAD_MODULE,
@@ -1118,13 +1147,13 @@ class AdminOperationsService(AdminOperations):
                     if module_id in snapshot.modules:
                         self.lifecycle.detach_stopped(module_id)
                     self.extension_runtime.detached(module_id)
-            return {
-                "module_id": module_id,
-                "state": "unloaded",
-                "registry_revision": self.registry.snapshot().revision,
-                "data_retained": True,
-                "reopen_required": True,
-            }
+            return ModuleUnloadReceipt(
+                module_id=module_id,
+                state="unloaded",
+                registry_revision=self.registry.snapshot().revision,
+                data_retained=True,
+                reopen_required=True,
+            )
 
     @_tracked_admin_request
     async def update_config(
@@ -1135,12 +1164,13 @@ class AdminOperationsService(AdminOperations):
         *,
         authorization: AdminAuthorizationContext | None = None,
     ) -> ConfigSummary:
+        validate_contract(invocation)
         grant = await self.authorization.authorize(
             AdminOperation.UPDATE_CONFIG,
             invocation=invocation,
             context=authorization,
             resources={
-                ConfigTarget(self.config_principal_id, module_id): {
+                validate_contract(ConfigTarget(self.config_principal_id, module_id)): {
                     update.field for update in patch.updates
                 }
             },
@@ -1149,11 +1179,11 @@ class AdminOperationsService(AdminOperations):
         from .admin_authorization import _grant_resource_fields
 
         allowed_fields = _grant_resource_fields(
-            grant, ConfigTarget(self.config_principal_id, module_id)
+            grant, validate_contract(ConfigTarget(self.config_principal_id, module_id))
         )
         self.require_ordinary_validators(
             {
-                ConfigTarget(self.config_principal_id, module_id): {
+                validate_contract(ConfigTarget(self.config_principal_id, module_id)): {
                     update.field
                     for update in patch.updates
                     if update.mode.value != "keep"
@@ -1188,7 +1218,9 @@ class AdminOperationsService(AdminOperations):
         selection = self._selection(module_id, registry_snapshot)
         coordinator = await self._configuration(selection)
         updated = await coordinator.update_admin(
-            ConfigTarget(self.config_principal_id, module_id), patch, grant
+            validate_contract(ConfigTarget(self.config_principal_id, module_id)),
+            patch,
+            grant,
         )
         snapshot = await self._snapshot(
             selection,

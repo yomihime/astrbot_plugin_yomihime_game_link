@@ -10,15 +10,13 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from ygl_test_subject.api.services import (
+from ygl_test_subject.core.contracts.services import (
     Binding,
     BindingDefaultSnapshot,
     ConversationKey,
-    ConversationKind,
-    ConversationRef,
     Principal,
-    ResolvedIdentity,
 )
+from ygl_test_subject.core.contracts.validation_boundary import validate_contract
 from ygl_test_subject.core.ports import (
     ModuleNotRegistered,
     ModuleRegistrationSnapshot,
@@ -34,6 +32,9 @@ from ygl_test_subject.infrastructure.sqlite.repositories_identity import (
     SQLiteConversationRepository,
     SQLiteIdentityRepository,
 )
+
+from yomihime_game_link_sdk.services import ResolvedIdentity
+from yomihime_game_link_sdk.subscriptions import ConversationKind, ConversationRef
 
 
 class _ModuleLookup:
@@ -62,10 +63,18 @@ class IdentityBindingRepositoryTests(unittest.IsolatedAsyncioTestCase):
         await self.identities.save_principal(Principal("p-1", "qq", "1001"))
         await self.identities.save_principal(Principal("p-2", "qq", "1002"))
         await self.conversations.save(
-            ConversationRef("adapter-a", ConversationKind.GROUP, "chat-a", "route-a")
+            validate_contract(
+                ConversationRef(
+                    "adapter-a", ConversationKind.GROUP, "chat-a", "route-a"
+                )
+            )
         )
         await self.conversations.save(
-            ConversationRef("adapter-a", ConversationKind.DIRECT, "chat-b", "route-b")
+            validate_contract(
+                ConversationRef(
+                    "adapter-a", ConversationKind.DIRECT, "chat-b", "route-b"
+                )
+            )
         )
 
     async def asyncTearDown(self) -> None:
@@ -98,7 +107,7 @@ class IdentityBindingRepositoryTests(unittest.IsolatedAsyncioTestCase):
         return ConversationKey(adapter_id, conversation_id)
 
     async def test_s2_01_identity_dedup_and_default_replacement(self) -> None:
-        identity = ResolvedIdentity("i-1", "steam", "steam-user")
+        identity = validate_contract(ResolvedIdentity("i-1", "steam", "steam-user"))
         saved = await self.identities.save_identity("p-1", identity)
         self.assertEqual(saved.principal_id, "p-1")
         self.assertEqual(await self.identities.save_identity("p-1", saved), saved)
@@ -146,11 +155,15 @@ class IdentityBindingRepositoryTests(unittest.IsolatedAsyncioTestCase):
             connection_threads.append(threading.get_ident())
             return original_connect(database)
 
-        identity = ResolvedIdentity("i-worker", "steam", "worker-user")
+        identity = validate_contract(
+            ResolvedIdentity("i-worker", "steam", "worker-user")
+        )
         with patch.object(SQLiteDatabase, "_connect", track_connect):
             self.assertEqual(
                 await self.identities.save_identity("p-1", identity),
-                ResolvedIdentity("i-worker", "steam", "worker-user", "p-1"),
+                validate_contract(
+                    ResolvedIdentity("i-worker", "steam", "worker-user", "p-1")
+                ),
             )
         self.assertTrue(connection_threads)
         self.assertNotIn(caller_thread, connection_threads)
@@ -160,7 +173,9 @@ class IdentityBindingRepositoryTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(SQLiteDatabase, "_connect", track_connect):
             self.assertEqual(
                 await self.identities.current_identity("i-worker"),
-                ResolvedIdentity("i-worker", "steam", "worker-user", "p-1"),
+                validate_contract(
+                    ResolvedIdentity("i-worker", "steam", "worker-user", "p-1")
+                ),
             )
         self.assertTrue(connection_threads)
         self.assertNotIn(caller_thread, connection_threads)
@@ -168,14 +183,14 @@ class IdentityBindingRepositoryTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_s2_02_scope_and_namespace_isolation(self) -> None:
         await self.identities.save_identity(
-            "p-1", ResolvedIdentity("i-1", "qq", "same")
+            "p-1", validate_contract(ResolvedIdentity("i-1", "qq", "same"))
         )
         with self.assertRaises(UniqueConstraintViolation):
             await self.identities.save_identity(
-                "p-2", ResolvedIdentity("i-2", "qq", "same")
+                "p-2", validate_contract(ResolvedIdentity("i-2", "qq", "same"))
             )
         await self.identities.save_identity(
-            "p-2", ResolvedIdentity("i-2", "discord", "same")
+            "p-2", validate_contract(ResolvedIdentity("i-2", "discord", "same"))
         )
 
         await self.bindings.save(await self._binding("b-1"), expected_revision=0)
@@ -226,8 +241,12 @@ class IdentityBindingRepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(await self.bindings.current("unknown"))
 
     async def test_s2_sol_003_same_conversation_id_is_adapter_scoped(self) -> None:
-        same_a = ConversationRef("adapter-a", ConversationKind.GROUP, "same", "route-a")
-        same_b = ConversationRef("adapter-b", ConversationKind.GROUP, "same", "route-b")
+        same_a = validate_contract(
+            ConversationRef("adapter-a", ConversationKind.GROUP, "same", "route-a")
+        )
+        same_b = validate_contract(
+            ConversationRef("adapter-b", ConversationKind.GROUP, "same", "route-b")
+        )
         await self.conversations.save(same_a)
         await self.conversations.save(same_b)
         self.assertEqual(await self.conversations.current("adapter-a", "same"), same_a)
@@ -399,7 +418,7 @@ class IdentityBindingRepositoryTests(unittest.IsolatedAsyncioTestCase):
             )
         with self.assertRaises(ValueError):
             await self.identities.save_identity(
-                "p-1", ResolvedIdentity("i-x", "", "subject")
+                "p-1", validate_contract(ResolvedIdentity("i-x", "", "subject"))
             )
         binding = await self.bindings.save(
             await self._binding("b-1"), expected_revision=0
@@ -428,7 +447,7 @@ class IdentityBindingRepositoryTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_s2_05_delete_and_reopen_preserve_consistency(self) -> None:
         await self.identities.save_identity(
-            "p-1", ResolvedIdentity("i-1", "steam", "one")
+            "p-1", validate_contract(ResolvedIdentity("i-1", "steam", "one"))
         )
         await self.bindings.save(await self._binding("b-1"), expected_revision=0)
         await self.bindings.replace_default(
@@ -443,7 +462,7 @@ class IdentityBindingRepositoryTests(unittest.IsolatedAsyncioTestCase):
         reopened = SQLiteDatabase(self.path)
         self.assertEqual(
             await SQLiteIdentityRepository(reopened).current_identity("i-1"),
-            ResolvedIdentity("i-1", "steam", "one", "p-1"),
+            validate_contract(ResolvedIdentity("i-1", "steam", "one", "p-1")),
         )
         self.assertIsNone(
             await SQLiteBindingRepository(reopened, _ModuleLookup()).current("b-1")

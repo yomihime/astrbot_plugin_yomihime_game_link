@@ -13,9 +13,11 @@ from collections.abc import Callable
 from math import isfinite
 from time import monotonic
 
-from ..api.contexts import InvocationOrigin, InvocationView
-from ..api.storage import OwnershipKind
-from ..api.subscriptions import CollectionView
+from yomihime_game_link_sdk.contexts import InvocationOrigin, InvocationView
+from yomihime_game_link_sdk.storage import OwnershipKind
+from yomihime_game_link_sdk.subscriptions import CollectionView
+
+from ..core.contracts.validation_boundary import validate_contract
 from .context_issuer import ContextIssuer, InvalidInvocation
 
 
@@ -32,6 +34,7 @@ def require_collection_context(
     but it is never accepted at this authority boundary.
     """
 
+    validate_contract(context)
     if not isinstance(context, CollectionView):
         raise InvalidInvocation("Unrecognized collection context")
     invocation = context.invocation

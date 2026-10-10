@@ -6,8 +6,17 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
-from ygl_test_subject.api.contexts import InvocationOrigin
-from ygl_test_subject.api.manifests import (
+from ygl_test_subject.core.admission import (
+    AdmissionError,
+    CapabilityUnavailable,
+    MutationReentryError,
+)
+from ygl_test_subject.core.contracts.validation_boundary import validate_contract
+from ygl_test_subject.core.lifecycle import LifecycleController
+from ygl_test_subject.core.ports import ExecutionLease, SendApproval
+
+from yomihime_game_link_sdk.contexts import InvocationOrigin
+from yomihime_game_link_sdk.declarations import (
     CapabilityDescriptor,
     CapabilityEffect,
     CommandDescriptor,
@@ -16,27 +25,20 @@ from ygl_test_subject.api.manifests import (
     ModuleManifest,
     PackageManifest,
 )
-from ygl_test_subject.api.services import (
+from yomihime_game_link_sdk.services import (
     CapabilityHealth,
     HealthReport,
     HealthStatus,
     ModuleHandlers,
 )
-from ygl_test_subject.api.storage import OwnerScope, OwnershipKind
-from ygl_test_subject.api.subscriptions import (
+from yomihime_game_link_sdk.storage import OwnerScope, OwnershipKind
+from yomihime_game_link_sdk.subscriptions import (
     CollectionKey,
     NormalizedInput,
     ScheduleDescriptor,
     ScheduleTrigger,
 )
-from ygl_test_subject.api.version import CONTRACT_VERSION
-from ygl_test_subject.core.admission import (
-    AdmissionError,
-    CapabilityUnavailable,
-    MutationReentryError,
-)
-from ygl_test_subject.core.lifecycle import LifecycleController
-from ygl_test_subject.core.ports import ExecutionLease, SendApproval
+from yomihime_game_link_sdk.version import MODULE_ABI_VERSION
 
 
 class _Handler:
@@ -66,57 +68,73 @@ class _Instance:
         return None
 
     async def check_health(self):
-        return HealthReport({"read": CapabilityHealth(HealthStatus.AVAILABLE)})
+        return validate_contract(
+            HealthReport(
+                {"read": validate_contract(CapabilityHealth(HealthStatus.AVAILABLE))}
+            )
+        )
 
 
 def _registry() -> tuple[object, ModuleHandlers]:
-    schedule = ScheduleDescriptor(
-        collector_id="prices",
-        key_version=1,
-        source_id="steam",
-        data_version=1,
-        input_schema={"type": "object", "properties": {}, "required": []},
-        shared_scope=OwnershipKind.PUBLIC,
-        trigger=ScheduleTrigger.ON_DEMAND,
-        minimum_interval_seconds=30,
+    schedule = validate_contract(
+        ScheduleDescriptor(
+            collector_id="prices",
+            key_version=1,
+            source_id="steam",
+            data_version=1,
+            input_schema={"type": "object", "properties": {}, "required": []},
+            shared_scope=OwnershipKind.PUBLIC,
+            trigger=ScheduleTrigger.ON_DEMAND,
+            minimum_interval_seconds=30,
+        )
     )
-    manifest = ModuleManifest(
-        module_id="mod",
-        route="mod",
-        category=ModuleCategory.GAME,
-        factory_entry="tests:Factory",
-        module_version="1.0.0",
-        capabilities=(
-            CapabilityDescriptor(
-                capability_id="read",
-                input_schema={"type": "object"},
-                invocation_policy=InvocationPolicy.NATURAL_LANGUAGE_ALLOWED,
-                effect=CapabilityEffect.READ_ONLY,
+    manifest = validate_contract(
+        ModuleManifest(
+            module_id="mod",
+            route="mod",
+            category=ModuleCategory.GAME,
+            factory_entry="tests:Factory",
+            module_version="1.0.0",
+            capabilities=(
+                validate_contract(
+                    CapabilityDescriptor(
+                        capability_id="read",
+                        input_schema={"type": "object"},
+                        invocation_policy=InvocationPolicy.NATURAL_LANGUAGE_ALLOWED,
+                        effect=CapabilityEffect.READ_ONLY,
+                    )
+                ),
             ),
-        ),
-        commands=(
-            CommandDescriptor(
-                operation_path="read",
-                capability_id="read",
-                parameter_mapping={},
-                help_text="read",
+            commands=(
+                validate_contract(
+                    CommandDescriptor(
+                        operation_path="read",
+                        capability_id="read",
+                        parameter_mapping={},
+                        help_text="read",
+                    )
+                ),
             ),
-        ),
-        schedules=(schedule,),
+            schedules=(schedule,),
+        )
     )
-    package = PackageManifest(
-        package_id="pkg",
-        package_version="1.0.0",
-        contract_version=CONTRACT_VERSION,
-        modules=(manifest,),
-        author="tests",
-        license="AGPL-3.0",
-        source="offline",
+    package = validate_contract(
+        PackageManifest(
+            package_id="pkg",
+            package_version="1.0.0",
+            contract_version=MODULE_ABI_VERSION,
+            modules=(manifest,),
+            author="tests",
+            license="AGPL-3.0",
+            source="offline",
+        )
     )
-    handlers = ModuleHandlers(
-        {"read": _Handler()},
-        {"prices": _Collector()},
-        {},
+    handlers = validate_contract(
+        ModuleHandlers(
+            {"read": _Handler()},
+            {"prices": _Collector()},
+            {},
+        )
     )
     from ygl_test_subject.core.registry import Registry
 
@@ -170,7 +188,7 @@ class _Scheduler:
 
 class AdmissionTests(unittest.IsolatedAsyncioTestCase):
     async def test_lease_is_exact_health_versioned_and_released_with_view(self):
-        current = [CapabilityHealth(HealthStatus.AVAILABLE), 4]
+        current = [validate_contract(CapabilityHealth(HealthStatus.AVAILABLE)), 4]
 
         def health_query(module_id, capability_id, base, revision):
             return tuple(current)
@@ -183,7 +201,7 @@ class AdmissionTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(AdmissionError):
             controller.admission.check(replace(lease))
 
-        current[:] = [CapabilityHealth(HealthStatus.UNAVAILABLE), 5]
+        current[:] = [validate_contract(CapabilityHealth(HealthStatus.UNAVAILABLE)), 5]
         with self.assertRaises(CapabilityUnavailable):
             controller.admission.check(lease)
 
@@ -245,13 +263,15 @@ class AdmissionTests(unittest.IsolatedAsyncioTestCase):
         self,
     ):
         registry, controller, identity = await _activate()
-        key = CollectionKey(
-            "pkg/mod",
-            "prices",
-            1,
-            "steam",
-            NormalizedInput({}),
-            OwnerScope.public(),
+        key = validate_contract(
+            CollectionKey(
+                "pkg/mod",
+                "prices",
+                1,
+                "steam",
+                validate_contract(NormalizedInput({})),
+                OwnerScope.public(),
+            )
         )
         execution = ExecutionLease(
             key=key,
