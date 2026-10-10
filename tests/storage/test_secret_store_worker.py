@@ -8,12 +8,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from ygl_test_subject.api.storage import (
-    OwnerScope,
-    ResourceMetadata,
-    SecretReceiptState,
-    SecretTarget,
-)
+from ygl_test_subject.core.contracts.storage import SecretReceiptState, SecretTarget
+from ygl_test_subject.core.contracts.validation_boundary import validate_contract
 from ygl_test_subject.core.ports import SecretCompensationState, SecretOwner
 from ygl_test_subject.infrastructure.secret_codec import AESGCMSecretCodec
 from ygl_test_subject.infrastructure.secret_store import SQLiteSecretStore
@@ -27,6 +23,8 @@ from ygl_test_subject.services.b04_runtime import (
     B04Repositories,
     SQLiteResourceVisibilityProbe,
 )
+
+from yomihime_game_link_sdk.storage import OwnerScope, ResourceMetadata
 
 
 class _Codec:
@@ -422,14 +420,16 @@ class SQLiteSecretStoreWorkerTests(unittest.IsolatedAsyncioTestCase):
     async def test_bounded_visibility_probe_uses_worker_and_fails_closed(self):
         resources = SQLiteResourceRepository(self.database)
         await resources.register(
-            ResourceMetadata(
-                "asset_privateprobe",
-                "text/plain",
-                OwnerScope.user("alice"),
-                12,
-                None,
-                False,
-                1,
+            validate_contract(
+                ResourceMetadata(
+                    "asset_privateprobe",
+                    "text/plain",
+                    OwnerScope.user("alice"),
+                    12,
+                    None,
+                    False,
+                    1,
+                )
             )
         )
         probe = SQLiteResourceVisibilityProbe(self.database)

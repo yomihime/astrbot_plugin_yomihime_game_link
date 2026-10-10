@@ -4,14 +4,12 @@ import json
 import unittest
 from dataclasses import replace
 
-from ygl_test_subject.api.administration import AdminAuthorizationDenied, AdminOperation
-from ygl_test_subject.api.manifests import ConfigField
-from ygl_test_subject.api.services import (
-    ConfigFieldUpdate,
-    ConfigPatch,
-    ConfigPatchMode,
-    ConfigTarget,
+from ygl_test_subject.core.contracts.administration import (
+    AdminAuthorizationDenied,
+    AdminOperation,
 )
+from ygl_test_subject.core.contracts.services import ConfigFieldUpdate, ConfigPatch
+from ygl_test_subject.core.contracts.validation_boundary import validate_contract
 from ygl_test_subject.core.ports import RevisionConflict
 from ygl_test_subject.modules.ff14.config import (
     CALENDAR_CONFIG_FIELDS,
@@ -38,6 +36,8 @@ from ygl_test_subject.services.core_configuration import (
 )
 
 import tests.services.test_admin_operations as runtime_fixture
+from yomihime_game_link_sdk.declarations import ConfigField, ConfigUpdateMode
+from yomihime_game_link_sdk.services import ConfigTarget
 
 
 class CoreSelectionTests(unittest.TestCase):
@@ -62,7 +62,7 @@ class CoreSelectionTests(unittest.TestCase):
         self.assertTrue(after_write.requires_current_export)
         with self.assertRaises(ValueError):
             plan_configuration_rollback(
-                (ConfigField("token", sensitive=True),),
+                (validate_contract(ConfigField("token", sensitive=True)),),
                 {},
                 {},
                 new_configuration_written=False,
@@ -171,12 +171,16 @@ class CoreSelectionTests(unittest.TestCase):
             with self.assertRaises(TypeError):
                 CoreDefaultsView(object(), legacy_defaults=invalid)
         value = {"items": ["kept"]}
-        field = ConfigField(
-            "settings",
-            value_schema={
-                "type": "object",
-                "properties": {"items": {"type": "array", "items": {"type": "string"}}},
-            },
+        field = validate_contract(
+            ConfigField(
+                "settings",
+                value_schema={
+                    "type": "object",
+                    "properties": {
+                        "items": {"type": "array", "items": {"type": "string"}}
+                    },
+                },
+            )
         )
         selected = select_configuration_value(field, {"settings": value}, {})
         value["items"].append("later")
@@ -213,34 +217,66 @@ class CoreDefaultsRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_core_admin_read_revision_invalid_safe_repair_and_no_auth(self):
         target = core_config_target("host-config")
-        runtime, context = await self._seed_invalid_defaults(target, {"default_region": "private-invalid-value"})
+        runtime, context = await self._seed_invalid_defaults(
+            target, {"default_region": "private-invalid-value"}
+        )
         with self.assertRaises(AdminAuthorizationDenied):
             await runtime.admin_facade.config_snapshot(None, CORE_MODULE_ID)
-        summary = await runtime.admin_facade.config_snapshot(None, CORE_MODULE_ID, authorization=context)
-        self.assertEqual((summary.revision, summary.state, summary.default_region), (2, "invalid", None))
+        summary = await runtime.admin_facade.config_snapshot(
+            None, CORE_MODULE_ID, authorization=context
+        )
+        self.assertEqual(
+            (summary.revision, summary.state, summary.default_region),
+            (2, "invalid", None),
+        )
         self.assertTrue(summary.raw_present)
         self.assertNotIn("private-invalid-value", repr(summary))
-        await runtime.admin_facade.update_config(None, CORE_MODULE_ID,
-            ConfigPatch(summary.revision, (ConfigFieldUpdate("default_region", ConfigPatchMode.REPLACE, value="global"),), CORE_CONFIG_FIELDS),
-            authorization=context)
-        current = await runtime.admin_facade.config_snapshot(None, CORE_MODULE_ID, authorization=context)
-        self.assertEqual((current.revision, current.default_region, current.state), (3, "global", "valid"))
+        await runtime.admin_facade.update_config(
+            None,
+            CORE_MODULE_ID,
+            ConfigPatch(
+                summary.revision,
+                (
+                    ConfigFieldUpdate(
+                        "default_region", ConfigUpdateMode.REPLACE, value="global"
+                    ),
+                ),
+                CORE_CONFIG_FIELDS,
+            ),
+            authorization=context,
+        )
+        current = await runtime.admin_facade.config_snapshot(
+            None, CORE_MODULE_ID, authorization=context
+        )
+        self.assertEqual(
+            (current.revision, current.default_region, current.state),
+            (3, "global", "valid"),
+        )
 
     async def test_core_admin_read_fences_generation_after_repository_read(self):
         from unittest.mock import patch
+
         runtime = self._runtime()
         await self._start_with_candidate(runtime)
         _, context = await self._bootstrap(runtime)
         original = runtime.config_repository.current
+
         async def rotated(target):
             snapshot = await original(target)
-            await runtime.admin_credential_repository.rotate(1, runtime_fixture._digest(runtime_fixture.token_urlsafe(32)))
+            await runtime.admin_credential_repository.rotate(
+                1, runtime_fixture._digest(runtime_fixture.token_urlsafe(32))
+            )
             return snapshot
+
         with patch.object(runtime.config_repository, "current", rotated):
             with self.assertRaises(AdminAuthorizationDenied):
-                await runtime.admin_facade.config_snapshot(None, CORE_MODULE_ID, authorization=context)
+                await runtime.admin_facade.config_snapshot(
+                    None, CORE_MODULE_ID, authorization=context
+                )
 
-    async def test_actual_admin_write_conflicts_with_migration_without_partial_completion(self):
+    async def test_actual_admin_write_conflicts_with_migration_without_partial_completion(
+        self,
+    ):
         from unittest.mock import patch
 
         from ygl_test_subject.infrastructure.sqlite.repositories_config_migration import (
@@ -253,23 +289,49 @@ class CoreDefaultsRuntimeTests(unittest.IsolatedAsyncioTestCase):
         from tests.host.assembly_contract import (
             ordinary_migration_fields,
         )
+
         runtime = self._runtime()
         await self._start_with_candidate(runtime)
         _, context = await self._bootstrap(runtime)
-        repository = SQLiteOrdinaryConfigurationMigrationRepository(runtime.config_repository)
-        migration = OrdinaryConfigurationMigration(repository, ordinary_migration_fields("host-config"), migration_id="ff14-core-defaults-v1")
+        repository = SQLiteOrdinaryConfigurationMigrationRepository(
+            runtime.config_repository
+        )
+        migration = OrdinaryConfigurationMigration(
+            repository,
+            ordinary_migration_fields("host-config"),
+            migration_id="ff14-core-defaults-v1",
+        )
         original = repository.apply
+
         async def admin_concurrent(definition, snapshots, selected, legacy):
-            await runtime.admin_facade.update_config(None, CORE_MODULE_ID,
-                ConfigPatch(snapshots[core_config_target("host-config")].revision,
-                            (ConfigFieldUpdate("default_region", ConfigPatchMode.REPLACE, value="global"),), CORE_CONFIG_FIELDS),
-                authorization=context)
+            await runtime.admin_facade.update_config(
+                None,
+                CORE_MODULE_ID,
+                ConfigPatch(
+                    snapshots[core_config_target("host-config")].revision,
+                    (
+                        ConfigFieldUpdate(
+                            "default_region", ConfigUpdateMode.REPLACE, value="global"
+                        ),
+                    ),
+                    CORE_CONFIG_FIELDS,
+                ),
+                authorization=context,
+            )
             return await original(definition, snapshots, selected, legacy)
+
         with patch.object(repository, "apply", admin_concurrent):
             with self.assertRaises(RevisionConflict):
                 await migration.migrate({})
         self.assertFalse(await migration.complete())
-        self.assertEqual((await runtime.config_repository.current(ConfigTarget("host-config", "ff14/ff14"))).values, {})
+        self.assertEqual(
+            (
+                await runtime.config_repository.current(
+                    validate_contract(ConfigTarget("host-config", "ff14/ff14"))
+                )
+            ).values,
+            {},
+        )
 
     async def test_admin_can_replace_invalid_core_without_bypassing_patch_guards(self):
         target = core_config_target("host-config")
@@ -285,9 +347,9 @@ class CoreDefaultsRuntimeTests(unittest.IsolatedAsyncioTestCase):
             )
 
         for action, error in (
-            (patch(ConfigPatchMode.REPLACE, True), ConfigurationValueError),
-            (patch(ConfigPatchMode.KEEP), ConfigurationValueError),
-            (patch(ConfigPatchMode.REPLACE, "global", revision=1), RevisionConflict),
+            (patch(ConfigUpdateMode.REPLACE, True), ConfigurationValueError),
+            (patch(ConfigUpdateMode.KEEP), ConfigurationValueError),
+            (patch(ConfigUpdateMode.REPLACE, "global", revision=1), RevisionConflict),
         ):
             with self.assertRaises(error):
                 await runtime.admin_facade.update_config(
@@ -297,7 +359,7 @@ class CoreDefaultsRuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(
                 (raw.revision, dict(raw.values)), (2, {"default_region": None})
             )
-        valid = patch(ConfigPatchMode.REPLACE, "global")
+        valid = patch(ConfigUpdateMode.REPLACE, "global")
         with self.assertRaises(AdminAuthorizationDenied):
             await runtime.admin_facade.update_config(None, CORE_MODULE_ID, valid)
         with self.assertRaises(ConfigurationValueError):
@@ -327,7 +389,7 @@ class CoreDefaultsRuntimeTests(unittest.IsolatedAsyncioTestCase):
             await legacy_view.current()
         patch = ConfigPatch(
             2,
-            (ConfigFieldUpdate("default_region", ConfigPatchMode.CLEAR),),
+            (ConfigFieldUpdate("default_region", ConfigUpdateMode.CLEAR),),
             CORE_CONFIG_FIELDS,
         )
         updated = await runtime.admin_facade.update_config(
@@ -349,7 +411,7 @@ class CoreDefaultsRuntimeTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_unrelated_or_keep_patch_cannot_hide_invalid_module_predecessor(self):
-        target = ConfigTarget("host-config", "ff14/ff14")
+        target = validate_contract(ConfigTarget("host-config", "ff14/ff14"))
         runtime, context = await self._seed_invalid_defaults(
             target, {DAYS: 7, TIMEZONE: None}
         )
@@ -369,8 +431,8 @@ class CoreDefaultsRuntimeTests(unittest.IsolatedAsyncioTestCase):
             AdminOperation.UPDATE_CONFIG, invocation=None, context=context
         )
         for update in (
-            ConfigFieldUpdate(DAYS, ConfigPatchMode.REPLACE, value=8),
-            ConfigFieldUpdate(TIMEZONE, ConfigPatchMode.KEEP),
+            ConfigFieldUpdate(DAYS, ConfigUpdateMode.REPLACE, value=8),
+            ConfigFieldUpdate(TIMEZONE, ConfigUpdateMode.KEEP),
         ):
             with self.assertRaises(ConfigurationValueError):
                 await coordinator.update_admin(
@@ -386,7 +448,7 @@ class CoreDefaultsRuntimeTests(unittest.IsolatedAsyncioTestCase):
             target,
             ConfigPatch(
                 2,
-                (ConfigFieldUpdate(TIMEZONE, ConfigPatchMode.REPLACE, value="UTC"),),
+                (ConfigFieldUpdate(TIMEZONE, ConfigUpdateMode.REPLACE, value="UTC"),),
                 CALENDAR_CONFIG_FIELDS,
             ),
             grant,
@@ -403,7 +465,7 @@ class CoreDefaultsRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 revision,
                 (
                     ConfigFieldUpdate(
-                        "default_region", ConfigPatchMode.REPLACE, value=value
+                        "default_region", ConfigUpdateMode.REPLACE, value=value
                     ),
                 ),
                 CORE_CONFIG_FIELDS,
@@ -449,15 +511,15 @@ class CoreDefaultsRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 "unknown/mod",
                 ConfigPatch(
                     1,
-                    (ConfigFieldUpdate("mode", ConfigPatchMode.REPLACE, value="ok"),),
-                    (ConfigField("mode"),),
+                    (ConfigFieldUpdate("mode", ConfigUpdateMode.REPLACE, value="ok"),),
+                    (validate_contract(ConfigField("mode")),),
                 ),
                 authorization=context,
             )
         self.assertEqual(
             (
                 await runtime.config_repository.current(
-                    ConfigTarget("host-config", "admin/mod")
+                    validate_contract(ConfigTarget("host-config", "admin/mod"))
                 )
             ).values,
             {},
@@ -500,7 +562,7 @@ class CoreDefaultsRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 1,
                 (
                     ConfigFieldUpdate(
-                        "default_region", ConfigPatchMode.REPLACE, value="global"
+                        "default_region", ConfigUpdateMode.REPLACE, value="global"
                     ),
                 ),
                 CORE_CONFIG_FIELDS,
@@ -520,7 +582,10 @@ class CoreDefaultsRuntimeTests(unittest.IsolatedAsyncioTestCase):
         for name in ("core_defaults", "default_region"):
             with self.assertRaises(ValueError):
                 runtime.module_services.for_candidate(
-                    "admin/mod", replace(manifest, config_fields=(ConfigField(name),))
+                    "admin/mod",
+                    replace(
+                        manifest, config_fields=(validate_contract(ConfigField(name)),)
+                    ),
                 )
         with self.assertRaises(ValueError):
             runtime.module_services.for_candidate(
@@ -535,7 +600,7 @@ class CoreDefaultsRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             (
                 await runtime.config_repository.current(
-                    ConfigTarget("host-config", "admin/mod")
+                    validate_contract(ConfigTarget("host-config", "admin/mod"))
                 )
             ).values,
             {},
@@ -605,7 +670,7 @@ class CoreDefaultsRuntimeTests(unittest.IsolatedAsyncioTestCase):
         runtime = self._runtime()
         await self._start_with_candidate(runtime)
         _, context = await self._bootstrap(runtime)
-        target = ConfigTarget("host-config", "ff14/ff14")
+        target = validate_contract(ConfigTarget("host-config", "ff14/ff14"))
         coordinator = ConfigurationCoordinator(
             target,
             CALENDAR_CONFIG_FIELDS,
@@ -623,7 +688,7 @@ class CoreDefaultsRuntimeTests(unittest.IsolatedAsyncioTestCase):
         )
         for name in (DAYS, TIMEZONE, DELIVERY_TIME):
             with self.assertRaisesRegex(ValueError, "require a value"):
-                ConfigFieldUpdate(name, ConfigPatchMode.REPLACE, value=None)
+                ConfigFieldUpdate(name, ConfigUpdateMode.REPLACE, value=None)
         invalid = {
             DAYS: [True, False, 0, 31, "7", 7.0],
             TIMEZONE: ["", "Unknown/Bad", "../UTC", "UTC\n"],
@@ -639,7 +704,7 @@ class CoreDefaultsRuntimeTests(unittest.IsolatedAsyncioTestCase):
                                 1,
                                 (
                                     ConfigFieldUpdate(
-                                        name, ConfigPatchMode.REPLACE, value=value
+                                        name, ConfigUpdateMode.REPLACE, value=value
                                     ),
                                 ),
                                 CALENDAR_CONFIG_FIELDS,
@@ -653,7 +718,7 @@ class CoreDefaultsRuntimeTests(unittest.IsolatedAsyncioTestCase):
             ConfigPatch(
                 1,
                 tuple(
-                    ConfigFieldUpdate(name, ConfigPatchMode.REPLACE, value=value)
+                    ConfigFieldUpdate(name, ConfigUpdateMode.REPLACE, value=value)
                     for name, value in valid.items()
                 ),
                 CALENDAR_CONFIG_FIELDS,

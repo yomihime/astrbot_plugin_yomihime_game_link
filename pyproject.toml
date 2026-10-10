@@ -3,8 +3,8 @@ requires = ["setuptools==80.9.0", "wheel==0.45.1"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "yomihime-module-sdk"
-version = "1.8.0"
+name = "yomihime-game-link-sdk"
+version = "0.1.0a6"
 description = "Host-independent public contracts and resources for Yomihime modules"
 readme = "docs/module-sdk.md"
 requires-python = ">=3.11"
@@ -21,21 +21,20 @@ dependencies = []
 
 [tool.setuptools]
 packages = [
-  "yomihime_sdk",
-  "yomihime_sdk.api",
-  "yomihime_sdk._examples.empty_module",
-  "yomihime_sdk._examples.offline_sample",
+  "yomihime_game_link_sdk",
+  "yomihime_game_link_sdk._examples.empty_module",
+  "yomihime_game_link_sdk._examples.offline_sample",
 ]
 
 [tool.setuptools.package-dir]
-yomihime_sdk = "yomihime_sdk"
-"yomihime_sdk._examples.empty_module" = "examples/empty_module"
-"yomihime_sdk._examples.offline_sample" = "examples/offline_sample"
+yomihime_game_link_sdk = "yomihime_game_link_sdk"
+"yomihime_game_link_sdk._examples.empty_module" = "examples/empty_module"
+"yomihime_game_link_sdk._examples.offline_sample" = "examples/offline_sample"
 
 [tool.setuptools.package-data]
-yomihime_sdk = ["py.typed"]
-"yomihime_sdk._examples.empty_module" = ["manifest.json", "module.py", "README.md"]
-"yomihime_sdk._examples.offline_sample" = ["manifest.json", "module.py", "README.md"]
+yomihime_game_link_sdk = ["py.typed"]
+"yomihime_game_link_sdk._examples.empty_module" = ["manifest.json", "module.py", "README.md"]
+"yomihime_game_link_sdk._examples.offline_sample" = ["manifest.json", "module.py", "README.md"]
 
 [tool.ruff]
 target-version = "py312"

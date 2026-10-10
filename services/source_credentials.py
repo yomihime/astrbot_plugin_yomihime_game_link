@@ -10,16 +10,17 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from time import monotonic
 
-from yomihime_sdk.api.manifests import ConfigField, SourceDeclaration
-from yomihime_sdk.api.services import (
+from yomihime_game_link_sdk.declarations import ConfigField, SourceDeclaration
+from yomihime_game_link_sdk.errors import SourceHttpError
+from yomihime_game_link_sdk.services import (
     ConfigSnapshot,
     ConfigTarget,
     HttpRequest,
     HttpResponse,
-    SourceHttpError,
 )
-from yomihime_sdk.api.storage import SecretMetadataState, SecretRef
+from yomihime_game_link_sdk.storage import SecretMetadataState, SecretRef
 
+from ..core.contracts.validation_boundary import validate_contract
 from ..core.ports import ConfigRepository, SecretOwner, SecretStore, validate_module_id
 from ..infrastructure.http import (
     CredentialExchangeRequest,
@@ -48,23 +49,25 @@ class SourceCredentialPolicy:
 
     def __post_init__(self) -> None:
         validate_module_id(self.module_id, "credential policy module_id")
-        resource = SourceDeclaration(
-            self.source_id, self.resource_host, self.credential_ref
+        resource = validate_contract(
+            SourceDeclaration(self.source_id, self.resource_host, self.credential_ref)
         )
-        token = SourceDeclaration("oauth_token", self.token_host)
+        token = validate_contract(SourceDeclaration("oauth_token", self.token_host))
         if resource.credential_ref is None:
             raise ValueError("source credential policy requires a credential alias")
-        HttpRequest(
-            "oauth_token",
-            self.token_path,
-            "POST",
-            body=b"grant_type=client_credentials",
+        validate_contract(
+            HttpRequest(
+                "oauth_token",
+                self.token_path,
+                "POST",
+                body=b"grant_type=client_credentials",
+            )
         )
         paths = tuple(self.allowed_resource_paths)
         if not paths or len(paths) != len(set(paths)):
             raise ValueError("credential policy requires unique resource paths")
         for path in paths:
-            HttpRequest(self.source_id, path, "GET")
+            validate_contract(HttpRequest(self.source_id, path, "GET"))
         object.__setattr__(self, "resource_host", resource.host)
         object.__setattr__(self, "token_host", token.host)
         object.__setattr__(self, "allowed_resource_paths", paths)
@@ -98,6 +101,8 @@ def bind_source_credential_declarations(
     the exact host policy or are rejected.
     """
 
+    validate_contract(declarations)
+    validate_contract(config_fields)
     validate_module_id(module_id, "source credential module_id")
     sources = tuple(declarations)
     fields = tuple(config_fields)
@@ -146,12 +151,14 @@ def bind_source_credential_declarations(
             effective.append(declaration)
             continue
         effective.append(
-            SourceDeclaration(
-                declaration.source_id,
-                declaration.host,
-                policy.credential_ref,
-                declaration.timeout_seconds,
-                declaration.requests_per_minute,
+            validate_contract(
+                SourceDeclaration(
+                    declaration.source_id,
+                    declaration.host,
+                    policy.credential_ref,
+                    declaration.timeout_seconds,
+                    declaration.requests_per_minute,
+                )
             )
         )
     if len(policy_map) != len(bindings):
@@ -216,6 +223,8 @@ class SourceCredentialService:
         config_principal_id: str,
         clock: Callable[[], float] = monotonic,
     ) -> None:
+        validate_contract(declarations)
+        validate_contract(config_fields)
         validate_module_id(module_id, "source credential module_id")
         if type(config_principal_id) is not str or not config_principal_id.strip():
             raise ValueError("source credential principal is required")
@@ -291,6 +300,8 @@ class SourceCredentialService:
         request: HttpRequest,
         deadline: float,
     ) -> CredentialLease:
+        validate_contract(declaration)
+        validate_contract(request)
         self._ensure_active()
         policy = self._checked_binding(module_id, declaration, request)
         state = self._states[declaration.source_id]
@@ -337,6 +348,7 @@ class SourceCredentialService:
         declaration: SourceDeclaration,
         lease: CredentialLease,
     ) -> None:
+        validate_contract(declaration)
         if (
             module_id != self._module_id
             or not isinstance(declaration, SourceDeclaration)
@@ -385,6 +397,8 @@ class SourceCredentialService:
         declaration: SourceDeclaration,
         request: HttpRequest,
     ) -> SourceCredentialPolicy:
+        validate_contract(declaration)
+        validate_contract(request)
         if (
             module_id != self._module_id
             or not isinstance(declaration, SourceDeclaration)
@@ -412,7 +426,9 @@ class SourceCredentialService:
     async def _current_secret_ref(self, credential_ref: str | None) -> SecretRef:
         if credential_ref is None:
             raise SourceHttpError("credentials_unavailable") from None
-        target = ConfigTarget(self._config_principal_id, self._module_id)
+        target = validate_contract(
+            ConfigTarget(self._config_principal_id, self._module_id)
+        )
         try:
             snapshot = await self._config_repository.current(target)
             if not isinstance(snapshot, ConfigSnapshot):
@@ -445,6 +461,7 @@ class SourceCredentialService:
     async def _read_material(
         self, secret_ref: SecretRef, credential_ref: str | None
     ) -> _ClientMaterial:
+        validate_contract(secret_ref)
         if credential_ref is None:
             raise SourceHttpError("credentials_unavailable") from None
         owner = SecretOwner(

@@ -5,8 +5,10 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 
-from ..api.manifests import ConfigField
-from ..api.services import ConfigTarget
+from yomihime_game_link_sdk.declarations import ConfigField
+from yomihime_game_link_sdk.services import ConfigTarget
+
+from ..core.contracts.validation_boundary import validate_contract
 
 MAX_FIELDS = 128
 MAX_BYTES = 262144
@@ -39,7 +41,7 @@ def project_configuration_catalog(
 ):
     fields = []
     for module_id, declared in sorted(declarations.items()):
-        target = ConfigTarget(principal_id, module_id)
+        target = validate_contract(ConfigTarget(principal_id, module_id))
         for field in sorted(declared, key=lambda item: item.name):
             if not isinstance(field, ConfigField):
                 raise ValueError("configuration catalog declaration is invalid")

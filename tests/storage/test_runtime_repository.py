@@ -5,23 +5,17 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from ygl_test_subject.api.administration import (
+from ygl_test_subject.core.contracts.administration import (
     AdminAuthorizationDenied,
     AdminAuthorizationGrant,
     AdminOperation,
 )
-from ygl_test_subject.api.manifests import ConfigField
-from ygl_test_subject.api.services import (
+from ygl_test_subject.core.contracts.services import (
     ConfigFieldUpdate,
-    ConfigPatchMode,
-    ConfigTarget,
     PersistedConfigPatch,
 )
-from ygl_test_subject.api.storage import (
-    SecretReceipt,
-    SecretRef,
-    SecretTarget,
-)
+from ygl_test_subject.core.contracts.storage import SecretReceipt, SecretTarget
+from ygl_test_subject.core.contracts.validation_boundary import validate_contract
 from ygl_test_subject.core.ports import RevisionConflict
 from ygl_test_subject.infrastructure.sqlite.database import SQLiteDatabase
 from ygl_test_subject.infrastructure.sqlite.repositories_admin_credentials import (
@@ -34,6 +28,10 @@ from ygl_test_subject.infrastructure.sqlite.repositories_runtime import (
     RuntimeJournalPhase,
     SQLiteModuleRuntimeRepository,
 )
+
+from yomihime_game_link_sdk.declarations import ConfigField, ConfigUpdateMode
+from yomihime_game_link_sdk.services import ConfigTarget
+from yomihime_game_link_sdk.storage import SecretRef
 
 
 class RuntimeRepositoryTests(unittest.IsolatedAsyncioTestCase):
@@ -225,11 +223,11 @@ class RuntimeRepositoryTests(unittest.IsolatedAsyncioTestCase):
         await self.database.executor.initialize()
         await self.credentials.bootstrap(bytes(range(32)))
         config = SQLiteConfigRepository(self.database)
-        target = ConfigTarget("principal", "sample/module")
+        target = validate_contract(ConfigTarget("principal", "sample/module"))
         patch = PersistedConfigPatch(
             1,
-            (ConfigFieldUpdate("region", ConfigPatchMode.REPLACE, value="cn"),),
-            (ConfigField("region"),),
+            (ConfigFieldUpdate("region", ConfigUpdateMode.REPLACE, value="cn"),),
+            (validate_contract(ConfigField("region")),),
             "config-operation",
             target,
         )
@@ -241,8 +239,8 @@ class RuntimeRepositoryTests(unittest.IsolatedAsyncioTestCase):
 
         stale = PersistedConfigPatch(
             2,
-            (ConfigFieldUpdate("region", ConfigPatchMode.REPLACE, value="jp"),),
-            (ConfigField("region"),),
+            (ConfigFieldUpdate("region", ConfigUpdateMode.REPLACE, value="jp"),),
+            (validate_contract(ConfigField("region")),),
             "stale-config-operation",
             target,
         )
@@ -257,10 +255,16 @@ class RuntimeRepositoryTests(unittest.IsolatedAsyncioTestCase):
         await self.database.executor.initialize()
         await self.credentials.bootstrap(bytes(range(32)))
         config = SQLiteConfigRepository(self.database)
-        target = ConfigTarget("principal", "sample/module")
+        target = validate_contract(ConfigTarget("principal", "sample/module"))
         receipt = SecretReceipt(
-            SecretRef(
-                "secret_unclaimed", "principal", "sample/module", "token", "config-op"
+            validate_contract(
+                SecretRef(
+                    "secret_unclaimed",
+                    "principal",
+                    "sample/module",
+                    "token",
+                    "config-op",
+                )
             ),
             SecretTarget("principal", "sample/module", "token"),
             "config-op",
@@ -269,8 +273,8 @@ class RuntimeRepositoryTests(unittest.IsolatedAsyncioTestCase):
         )
         patch = PersistedConfigPatch(
             1,
-            (ConfigFieldUpdate("token", ConfigPatchMode.REPLACE, receipt=receipt),),
-            (ConfigField("token", sensitive=True),),
+            (ConfigFieldUpdate("token", ConfigUpdateMode.REPLACE, receipt=receipt),),
+            (validate_contract(ConfigField("token", sensitive=True)),),
             "config-op",
             target,
         )

@@ -8,6 +8,8 @@ import unittest
 from collections import deque
 from typing import Any
 
+from ygl_test_subject.core.contracts.validation_boundary import validate_contract
+
 from modules.ff14.features.fflogs import (
     FFLogsCharacterLookup,
     FFLogsOutputPercentiles,
@@ -27,15 +29,15 @@ from modules.ff14.features.fflogs_catalog import (
     resolve_output_metadata,
 )
 from modules.ff14.features.fflogs_models import FFLogsPayloadError, RegionRecord
-from yomihime_sdk.api.display import TextBlock
-from yomihime_sdk.api.results import ErrorCode, ResultStatus
-from yomihime_sdk.api.services import (
-    ConfigSnapshot,
-    HttpRequest,
-    HttpResponse,
-    SourceHttpError,
+from yomihime_game_link_sdk.display import TextBlock
+from yomihime_game_link_sdk.errors import SourceHttpError
+from yomihime_game_link_sdk.results import ErrorCode, ResultStatus
+from yomihime_game_link_sdk.services import ConfigSnapshot, HttpRequest, HttpResponse
+from yomihime_game_link_sdk.storage import (
+    SecretMetadata,
+    SecretMetadataState,
+    SecretRef,
 )
-from yomihime_sdk.api.storage import SecretMetadata, SecretMetadataState, SecretRef
 
 
 class _Scope:
@@ -67,29 +69,41 @@ class _FakeHttp:
         body = (
             response if isinstance(response, bytes) else json.dumps(response).encode()
         )
-        return HttpResponse(200, {"Content-Type": "application/json"}, body)
+        return validate_contract(
+            HttpResponse(200, {"Content-Type": "application/json"}, body)
+        )
 
 
 def _services(http: _FakeHttp, *, configured=True):
     class Config:
         async def current(self):
             aliases = ("credential_fflogs_cn", "credential_fflogs_global")
-            return ConfigSnapshot(
-                1,
-                {},
-                tuple(
-                    SecretMetadata(
-                        alias,
-                        SecretRef(
-                            "secret_synthetic", "test", "ff14/ff14", alias, "synthetic"
-                        ),
-                        1,
-                        SecretMetadataState.ACTIVE,
+            return validate_contract(
+                ConfigSnapshot(
+                    1,
+                    {},
+                    tuple(
+                        validate_contract(
+                            SecretMetadata(
+                                alias,
+                                validate_contract(
+                                    SecretRef(
+                                        "secret_synthetic",
+                                        "test",
+                                        "ff14/ff14",
+                                        alias,
+                                        "synthetic",
+                                    )
+                                ),
+                                1,
+                                SecretMetadataState.ACTIVE,
+                            )
+                        )
+                        for alias in aliases
                     )
-                    for alias in aliases
+                    if configured
+                    else (),
                 )
-                if configured
-                else (),
             )
 
     return type("Services", (), {"scopes": _Scopes(http), "config": Config()})()

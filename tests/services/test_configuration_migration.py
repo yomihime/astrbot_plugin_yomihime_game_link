@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from ygl_test_subject.api.services import ConfigTarget
+from ygl_test_subject.core.contracts.validation_boundary import validate_contract
 from ygl_test_subject.core.ports import RevisionConflict
 from ygl_test_subject.infrastructure.sqlite.database import (
     SQLiteDatabase,
@@ -31,6 +31,7 @@ from ygl_test_subject.services.core_configuration import (
 )
 
 from tests.host.assembly_contract import ordinary_migration_fields
+from yomihime_game_link_sdk.services import ConfigTarget
 
 
 class MigrationTests(unittest.IsolatedAsyncioTestCase):
@@ -46,7 +47,7 @@ class MigrationTests(unittest.IsolatedAsyncioTestCase):
             migration_id="ff14-core-defaults-v1",
         )
         self.core = core_config_target("host")
-        self.ff14 = ConfigTarget("host", "ff14/ff14")
+        self.ff14 = validate_contract(ConfigTarget("host", "ff14/ff14"))
 
     async def asyncTearDown(self):
         await self.db.executor.close()

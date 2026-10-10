@@ -11,46 +11,16 @@ from secrets import token_urlsafe
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from ygl_test_subject.api.administration import AdminOperation
-from ygl_test_subject.api.display import (
-    DisplayDocument,
-    DisplayLimits,
-    DisplayOutput,
-    Privacy,
-    TextBlock,
-)
-from ygl_test_subject.api.manifests import (
-    CapabilityDescriptor,
-    CapabilityEffect,
-    CommandDescriptor,
-    ConfigField,
-    InvocationPolicy,
-    ModuleCategory,
-    ModuleManifest,
-    PrivacyFloor,
-    SourceDeclaration,
-)
-from ygl_test_subject.api.results import CapabilityResult, ResultStatus
-from ygl_test_subject.api.services import (
-    CapabilityHealth,
+from ygl_test_subject.core.admission import AdmissionError
+from ygl_test_subject.core.contracts.administration import AdminOperation
+from ygl_test_subject.core.contracts.services import (
     ConfigFieldUpdate,
-    ConfigPatchMode,
-    ConfigTarget,
     Grant,
     GrantStatus,
-    HealthReport,
-    HealthStatus,
-    ModuleHandlers,
     PersistedConfigPatch,
     Principal,
 )
-from ygl_test_subject.api.storage import GrantReference, OwnerScope
-from ygl_test_subject.api.subscriptions import (
-    CollectionKey,
-    ConversationKind,
-    NormalizedInput,
-)
-from ygl_test_subject.core.admission import AdmissionError
+from ygl_test_subject.core.contracts.validation_boundary import validate_contract
 from ygl_test_subject.core.ports import (
     ExecutionLease,
     MessageReceipt,
@@ -73,6 +43,39 @@ from ygl_test_subject.services.extension_runtime import ExtensionCleanupPending
 from ygl_test_subject.services.source_credentials import SourceCredentialPolicy
 
 from tests.contracts.test_context_issuer import _PublicWebProofs
+from yomihime_game_link_sdk.declarations import (
+    CapabilityDescriptor,
+    CapabilityEffect,
+    CommandDescriptor,
+    ConfigField,
+    ConfigUpdateMode,
+    InvocationPolicy,
+    ModuleCategory,
+    ModuleManifest,
+    PrivacyFloor,
+    SourceDeclaration,
+)
+from yomihime_game_link_sdk.display import (
+    DisplayDocument,
+    DisplayLimits,
+    DisplayOutput,
+    Privacy,
+    TextBlock,
+)
+from yomihime_game_link_sdk.results import CapabilityResult, ResultStatus
+from yomihime_game_link_sdk.services import (
+    CapabilityHealth,
+    ConfigTarget,
+    HealthReport,
+    HealthStatus,
+    ModuleHandlers,
+)
+from yomihime_game_link_sdk.storage import GrantReference, OwnerScope
+from yomihime_game_link_sdk.subscriptions import (
+    CollectionKey,
+    ConversationKind,
+    NormalizedInput,
+)
 
 
 class _Renderer:
@@ -88,7 +91,7 @@ class _Renderer:
                 await self.release.wait()
             except asyncio.CancelledError:
                 await self.release.wait()
-        return DisplayOutput(document.title)
+        return validate_contract(DisplayOutput(document.title))
 
     async def render_batch(self, batch, limits):  # pragma: no cover - protocol path
         del batch, limits
@@ -111,16 +114,20 @@ class _Handler:
     async def invoke(self, context, parameters):
         del parameters
         self.grant = (context.grant_id, context.grant_revision)
-        return CapabilityResult(
-            "private-result",
-            ResultStatus.SUCCESS,
-            document=DisplayDocument(
-                "Private result",
-                "Private result",
-                (TextBlock("authorized"),),
+        return validate_contract(
+            CapabilityResult(
+                "private-result",
+                ResultStatus.SUCCESS,
+                document=validate_contract(
+                    DisplayDocument(
+                        "Private result",
+                        "Private result",
+                        (validate_contract(TextBlock("authorized")),),
+                        privacy=Privacy.PRIVATE,
+                    )
+                ),
                 privacy=Privacy.PRIVATE,
-            ),
-            privacy=Privacy.PRIVATE,
+            )
         )
 
 
@@ -131,7 +138,7 @@ class _Instance:
         self.stopped = False
 
     def handlers(self):
-        return ModuleHandlers({"private": self._handler}, {}, {})
+        return validate_contract(ModuleHandlers({"private": self._handler}, {}, {}))
 
     async def start(self) -> None:
         self.started = True
@@ -140,7 +147,11 @@ class _Instance:
         self.stopped = True
 
     async def check_health(self) -> HealthReport:
-        return HealthReport({"private": CapabilityHealth(HealthStatus.AVAILABLE)})
+        return validate_contract(
+            HealthReport(
+                {"private": validate_contract(CapabilityHealth(HealthStatus.AVAILABLE))}
+            )
+        )
 
 
 class _Factory:
@@ -234,16 +245,18 @@ class CoreRuntimeTests(unittest.IsolatedAsyncioTestCase):
         expected = packages[0].manifest.modules[0]
 
         self.assertTrue(_matches_trusted_bundled_manifest(expected, expected))
-        added_capability = CapabilityDescriptor(
-            "unreviewed.operation",
-            {
-                "type": "object",
-                "properties": {},
-                "required": [],
-                "additionalProperties": False,
-            },
-            InvocationPolicy.COMMAND_ONLY,
-            CapabilityEffect.READ_ONLY,
+        added_capability = validate_contract(
+            CapabilityDescriptor(
+                "unreviewed.operation",
+                {
+                    "type": "object",
+                    "properties": {},
+                    "required": [],
+                    "additionalProperties": False,
+                },
+                InvocationPolicy.COMMAND_ONLY,
+                CapabilityEffect.READ_ONLY,
+            )
         )
 
         def changed_status(**changes):
@@ -318,38 +331,46 @@ class CoreRuntimeTests(unittest.IsolatedAsyncioTestCase):
     def test_trusted_defaults_allow_public_read_only_sources_without_credentials(
         self,
     ) -> None:
-        capability = CapabilityDescriptor(
-            "lookup",
-            {
-                "type": "object",
-                "properties": {"query": {"type": "string"}},
-                "required": ["query"],
-                "additionalProperties": False,
-            },
-            InvocationPolicy.COMMAND_ONLY,
-            CapabilityEffect.READ_ONLY,
-            required_sources=("items",),
+        capability = validate_contract(
+            CapabilityDescriptor(
+                "lookup",
+                {
+                    "type": "object",
+                    "properties": {"query": {"type": "string"}},
+                    "required": ["query"],
+                    "additionalProperties": False,
+                },
+                InvocationPolicy.COMMAND_ONLY,
+                CapabilityEffect.READ_ONLY,
+                required_sources=("items",),
+            )
         )
 
         def manifest(sources: tuple[SourceDeclaration, ...]) -> ModuleManifest:
-            return ModuleManifest(
-                "items",
-                "items",
-                ModuleCategory.GAME,
-                "module:Factory",
-                "1.0.0",
-                (capability,),
-                commands=(
-                    CommandDescriptor(
-                        "lookup", "lookup", {"query": "query"}, "Look up item"
+            return validate_contract(
+                ModuleManifest(
+                    "items",
+                    "items",
+                    ModuleCategory.GAME,
+                    "module:Factory",
+                    "1.0.0",
+                    (capability,),
+                    commands=(
+                        validate_contract(
+                            CommandDescriptor(
+                                "lookup", "lookup", {"query": "query"}, "Look up item"
+                            )
+                        ),
                     ),
-                ),
-                sources=sources,
+                    sources=sources,
+                )
             )
 
         self.assertTrue(
             _is_safe_bundled_default(
-                manifest((SourceDeclaration("items", "example.invalid"),)),
+                manifest(
+                    (validate_contract(SourceDeclaration("items", "example.invalid")),)
+                ),
                 frozenset({"lookup"}),
             )
         )
@@ -360,10 +381,12 @@ class CoreRuntimeTests(unittest.IsolatedAsyncioTestCase):
             _is_safe_bundled_default(
                 manifest(
                     (
-                        SourceDeclaration(
-                            "items",
-                            "example.invalid",
-                            credential_ref="credential_example",
+                        validate_contract(
+                            SourceDeclaration(
+                                "items",
+                                "example.invalid",
+                                credential_ref="credential_example",
+                            )
                         ),
                     )
                 ),
@@ -403,7 +426,7 @@ class CoreRuntimeTests(unittest.IsolatedAsyncioTestCase):
             secret_codec=_TestCodec(),
             http_transport=lambda request: request,
             renderer=renderer or _Renderer(),
-            display_limits=DisplayLimits(2, 4096),
+            display_limits=validate_contract(DisplayLimits(2, 4096)),
             message_port=_MessagePort(),
             admin_context_validator=lambda *_args: True,
             host_ingress_validator=ingress_validator or (lambda *_args: True),
@@ -422,7 +445,7 @@ class CoreRuntimeTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def _public_web_runtime(self, *, detached=False, block_root=False):
-        from ygl_test_subject.services.module_services import InvocationBindingError
+        from yomihime_game_link_sdk.errors import InvalidInvocation
 
         class WebHandler:
             services = None
@@ -456,15 +479,21 @@ class CoreRuntimeTests(unittest.IsolatedAsyncioTestCase):
                                 pass
                         try:
                             bound.tasks.create_task(late(), name="late-after-close")
-                        except InvocationBindingError:
+                        except InvalidInvocation:
                             inner.late_rejected = True
 
                     bound.tasks.create_task(work(), name="web-detached")
                     await inner.entered.wait()
-                return CapabilityResult(
-                    "web-result",
-                    ResultStatus.SUCCESS,
-                    document=DisplayDocument("Public", "Web", (TextBlock("ok"),)),
+                return validate_contract(
+                    CapabilityResult(
+                        "web-result",
+                        ResultStatus.SUCCESS,
+                        document=validate_contract(
+                            DisplayDocument(
+                                "Public", "Web", (validate_contract(TextBlock("ok")),)
+                            )
+                        ),
+                    )
                 )
 
         class WebFactory(_Factory):
@@ -479,7 +508,7 @@ class CoreRuntimeTests(unittest.IsolatedAsyncioTestCase):
             public_web_capabilities=frozenset({("private/mod", "private")}),
         )
         manifest = _private_manifest()
-        manifest["contract_version"] = "1.4.0"
+        manifest["contract_version"] = "2.0"
         manifest["modules"][0]["capabilities"][0].update(
             invocation_policy="command_and_public_web", privacy_floor="public"
         )
@@ -801,7 +830,10 @@ class CoreRuntimeTests(unittest.IsolatedAsyncioTestCase):
             binding = runtime.b04_repositories.lifecycle._subscription_gate_bindings[
                 module_id
             ]
-            self.assertEqual(binding.target, ConfigTarget("host-config", module_id))
+            self.assertEqual(
+                binding.target,
+                validate_contract(ConfigTarget("host-config", module_id)),
+            )
             self.assertEqual(
                 (binding.package_id, binding.module_id), tuple(module_id.split("/", 1))
             )
@@ -819,13 +851,13 @@ class CoreRuntimeTests(unittest.IsolatedAsyncioTestCase):
             runtime.b04_repositories.lifecycle._subscription_gate_bindings[
                 "other/mod"
             ] = binding
-        target = ConfigTarget("host-config", "private/mod")
+        target = validate_contract(ConfigTarget("host-config", "private/mod"))
         await runtime.config_repository.update(
             target,
             PersistedConfigPatch(
                 1,
-                (ConfigFieldUpdate("gate", ConfigPatchMode.REPLACE, value=False),),
-                (ConfigField("gate", default=True),),
+                (ConfigFieldUpdate("gate", ConfigUpdateMode.REPLACE, value=False),),
+                (validate_contract(ConfigField("gate", default=True)),),
                 "pause",
                 target,
             ),
@@ -951,7 +983,11 @@ class CoreRuntimeTests(unittest.IsolatedAsyncioTestCase):
                             modules=(
                                 replace(
                                     first.package.manifest.modules[0],
-                                    config_fields=(ConfigField("gate", default=1),),
+                                    config_fields=(
+                                        validate_contract(
+                                            ConfigField("gate", default=1)
+                                        ),
+                                    ),
                                 ),
                             ),
                         ),
@@ -1046,9 +1082,9 @@ class CoreRuntimeTests(unittest.IsolatedAsyncioTestCase):
                     trusted_subscription_gates=invalid,
                 )
         for declaration in (
-            ConfigField("gate", default=1),
-            ConfigField("gate", default=False),
-            ConfigField("gate", sensitive=True),
+            validate_contract(ConfigField("gate", default=1)),
+            validate_contract(ConfigField("gate", default=False)),
+            validate_contract(ConfigField("gate", sensitive=True)),
         ):
             invalid_manifest = replace(
                 expected["private/mod"], config_fields=(declaration,)
@@ -1106,16 +1142,22 @@ class CoreRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
         class Instance(_Instance):
             def handlers(self):
-                return ModuleHandlers(
-                    {key: self._handler for key in capability_ids}, {}, {}
+                return validate_contract(
+                    ModuleHandlers(
+                        {key: self._handler for key in capability_ids}, {}, {}
+                    )
                 )
 
             async def check_health(self):
-                return HealthReport(
-                    {
-                        key: CapabilityHealth(HealthStatus.AVAILABLE)
-                        for key in capability_ids
-                    }
+                return validate_contract(
+                    HealthReport(
+                        {
+                            key: validate_contract(
+                                CapabilityHealth(HealthStatus.AVAILABLE)
+                            )
+                            for key in capability_ids
+                        }
+                    )
                 )
 
         class Factory(_Factory):
@@ -1409,7 +1451,7 @@ class CoreRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 return None
 
             async def check_health(self) -> HealthReport:
-                return HealthReport({})
+                return validate_contract(HealthReport({}))
 
             async def stop(self) -> None:
                 self.stop_calls += 1
@@ -1484,7 +1526,7 @@ class CoreRuntimeTests(unittest.IsolatedAsyncioTestCase):
             "route-one",
             ConversationKind.DIRECT,
             object(),
-            GrantReference("grant-one", 1),
+            validate_contract(GrantReference("grant-one", 1)),
         )
         outcome = await runtime.invoke_command(
             "private/mod", "read", {}, ingress=ingress
@@ -1609,7 +1651,9 @@ class CoreRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 "private/mod",
                 "read",
                 {},
-                ingress=_ingress(grant_reference=GrantReference("grant-one", 1)),
+                ingress=_ingress(
+                    grant_reference=validate_contract(GrantReference("grant-one", 1))
+                ),
             )
         )
         await asyncio.wait_for(entered.wait(), timeout=1)
@@ -1643,7 +1687,9 @@ class CoreRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 "private/mod",
                 "read",
                 {},
-                ingress=_ingress(grant_reference=GrantReference("grant-one", 1)),
+                ingress=_ingress(
+                    grant_reference=validate_contract(GrantReference("grant-one", 1))
+                ),
             )
         )
         await asyncio.wait_for(entered.wait(), timeout=1)
@@ -1761,13 +1807,15 @@ class CoreRuntimeTests(unittest.IsolatedAsyncioTestCase):
         fixed = datetime(2026, 1, 1, tzinfo=UTC)
         runtime = self._runtime(utc_clock=lambda: fixed)
         await runtime.start()
-        key = CollectionKey(
-            "missing/mod",
-            "collector",
-            1,
-            "source",
-            NormalizedInput({}),
-            OwnerScope.public(),
+        key = validate_contract(
+            CollectionKey(
+                "missing/mod",
+                "collector",
+                1,
+                "source",
+                validate_contract(NormalizedInput({})),
+                OwnerScope.public(),
+            )
         )
         lease = ExecutionLease(
             key,
@@ -1882,7 +1930,9 @@ class CoreRuntimeTests(unittest.IsolatedAsyncioTestCase):
             await runtime.close(timeout=0.02)
         self.assertEqual(caught.exception.component, "host_ingress")
         release.set()
-        with self.assertRaises(RuntimeError):
+        from yomihime_game_link_sdk.errors import InvalidInvocation
+
+        with self.assertRaises(InvalidInvocation):
             await request
         self.assertTrue(await runtime.close(timeout=0.5))
 
@@ -1929,7 +1979,9 @@ class CoreRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 "private/mod",
                 "read",
                 {},
-                ingress=_ingress(grant_reference=GrantReference("grant-one", 1)),
+                ingress=_ingress(
+                    grant_reference=validate_contract(GrantReference("grant-one", 1))
+                ),
             )
         )
         await asyncio.wait_for(entered.wait(), timeout=1)
@@ -2087,7 +2139,7 @@ def _private_manifest(*, factory_entry: str = "factory:create") -> dict[str, obj
         "schema_version": 1,
         "package_id": "private",
         "package_version": "1.0.0",
-        "contract_version": "1.1.0",
+        "contract_version": "2.0",
         "author": "tests",
         "license": "MIT",
         "source": "test source bundle",
@@ -2126,9 +2178,9 @@ def _private_manifest(*, factory_entry: str = "factory:create") -> dict[str, obj
 
 def _packaged_factory_source() -> str:
     return """
-from yomihime_sdk.api.display import DisplayDocument, Privacy, TextBlock
-from yomihime_sdk.api.results import CapabilityResult, ResultStatus
-from yomihime_sdk.api.services import (
+from yomihime_game_link_sdk.display import DisplayDocument, Privacy, TextBlock
+from yomihime_game_link_sdk.results import CapabilityResult, ResultStatus
+from yomihime_game_link_sdk.services import (
     CapabilityHealth, HealthReport, HealthStatus, ModuleHandlers,
 )
 

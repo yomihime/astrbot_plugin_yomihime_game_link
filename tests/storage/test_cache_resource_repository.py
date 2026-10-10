@@ -8,15 +8,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
-from ygl_test_subject.api.services import CacheAccessRequest
-from ygl_test_subject.api.storage import (
-    CacheEntry,
-    CacheLookupStatus,
-    CacheVisibility,
-    GrantReference,
-    OwnerScope,
-    ResourceMetadata,
-)
+from ygl_test_subject.core.contracts.services import CacheAccessRequest
+from ygl_test_subject.core.contracts.validation_boundary import validate_contract
 from ygl_test_subject.core.ports import AuthorizationWindowExpired, RevisionConflict
 from ygl_test_subject.infrastructure.files import LocalSafeFileStore
 from ygl_test_subject.infrastructure.sqlite import repositories_cache_resources
@@ -25,6 +18,15 @@ from ygl_test_subject.infrastructure.sqlite.repositories_cache_resources import 
     SQLiteCacheRepository,
     SQLiteResourceRepository,
     _scope_from_row,
+)
+
+from yomihime_game_link_sdk.storage import (
+    CacheEntry,
+    CacheLookupStatus,
+    CacheVisibility,
+    GrantReference,
+    OwnerScope,
+    ResourceMetadata,
 )
 
 
@@ -60,10 +62,14 @@ class CacheResourceRepositoryTests(unittest.IsolatedAsyncioTestCase):
         user_b = self._request("same", CacheVisibility.USER, OwnerScope.user("b"))
         expiry = datetime.now(UTC) + timedelta(minutes=5)
         await repository.put(
-            public, CacheEntry("same", {"value": 1}, expiry), source_version=4
+            public,
+            validate_contract(CacheEntry("same", {"value": 1}, expiry)),
+            source_version=4,
         )
         await repository.put(
-            user_a, CacheEntry("same", {"value": 2}, expiry), source_version=5
+            user_a,
+            validate_contract(CacheEntry("same", {"value": 2}, expiry)),
+            source_version=5,
         )
         self.assertEqual(
             (await repository.get(public, minimum_source_version=4)).status,
@@ -76,14 +82,16 @@ class CacheResourceRepositoryTests(unittest.IsolatedAsyncioTestCase):
         )
         updated = await repository.put(
             public,
-            CacheEntry("same", {"value": 3}, expiry),
+            validate_contract(CacheEntry("same", {"value": 3}, expiry)),
             expected_revision=1,
             source_version=6,
         )
         self.assertEqual(updated.revision, 2)
         with self.assertRaises(RevisionConflict):
             await repository.put(
-                public, CacheEntry("same", {"value": 4}, expiry), expected_revision=1
+                public,
+                validate_contract(CacheEntry("same", {"value": 4}, expiry)),
+                expected_revision=1,
             )
         await repository.invalidate(public)
         self.assertEqual((await repository.get(public)).status, CacheLookupStatus.MISS)
@@ -95,16 +103,17 @@ class CacheResourceRepositoryTests(unittest.IsolatedAsyncioTestCase):
         first = self._request(
             "account",
             CacheVisibility.AUTHORIZED,
-            OwnerScope.authorized("u1", GrantReference("g1", 1)),
+            OwnerScope.authorized("u1", validate_contract(GrantReference("g1", 1))),
         )
         second = self._request(
             "account",
             CacheVisibility.AUTHORIZED,
-            OwnerScope.authorized("u1", GrantReference("g1", 2)),
+            OwnerScope.authorized("u1", validate_contract(GrantReference("g1", 2))),
         )
         expiry = datetime.now(UTC) + timedelta(minutes=5)
         await repository.put(
-            first, CacheEntry("account", {"token": "metadata"}, expiry)
+            first,
+            validate_contract(CacheEntry("account", {"token": "metadata"}, expiry)),
         )
         self.assertEqual((await repository.get(first)).status, CacheLookupStatus.HIT)
         self.assertEqual(
@@ -117,11 +126,11 @@ class CacheResourceRepositoryTests(unittest.IsolatedAsyncioTestCase):
         stage_a = await files.stage("op-a", content, OwnerScope.user("a"))
         stage_b = await files.stage("op-b", content, OwnerScope.user("b"))
         self.assertNotEqual(stage_a.asset_id, stage_b.asset_id)
-        metadata_a = ResourceMetadata(
-            stage_a.asset_id, "image/png", stage_a.scope, len(content)
+        metadata_a = validate_contract(
+            ResourceMetadata(stage_a.asset_id, "image/png", stage_a.scope, len(content))
         )
-        metadata_b = ResourceMetadata(
-            stage_b.asset_id, "image/png", stage_b.scope, len(content)
+        metadata_b = validate_contract(
+            ResourceMetadata(stage_b.asset_id, "image/png", stage_b.scope, len(content))
         )
         await files.commit(stage_a, metadata_a)
         await files.commit(stage_b, metadata_b)
@@ -136,7 +145,9 @@ class CacheResourceRepositoryTests(unittest.IsolatedAsyncioTestCase):
         files = LocalSafeFileStore(self.root / "assets")
         repository = SQLiteResourceRepository(self.database, files)
         stage = await files.stage("op", b"png", OwnerScope.public())
-        metadata = ResourceMetadata(stage.asset_id, "image/png", stage.scope, 3)
+        metadata = validate_contract(
+            ResourceMetadata(stage.asset_id, "image/png", stage.scope, 3)
+        )
         await files.commit(stage, metadata)
         registered = await repository.register(metadata)
         self.assertEqual(registered.revision, 1)
@@ -146,23 +157,29 @@ class CacheResourceRepositoryTests(unittest.IsolatedAsyncioTestCase):
             await repository.register(metadata, expected_revision=0)
         with self.assertRaises(ValueError):
             await repository.register(
-                ResourceMetadata(stage.asset_id, "unknown", OwnerScope.public(), 3)
+                validate_contract(
+                    ResourceMetadata(stage.asset_id, "unknown", OwnerScope.public(), 3)
+                )
             )
 
         failed_stage = await files.stage(
             "index-failure", b"failed", OwnerScope.public()
         )
-        failed_metadata = ResourceMetadata(
-            failed_stage.asset_id, "image/png", failed_stage.scope, len(b"failed")
+        failed_metadata = validate_contract(
+            ResourceMetadata(
+                failed_stage.asset_id, "image/png", failed_stage.scope, len(b"failed")
+            )
         )
         await files.commit(failed_stage, failed_metadata)
         with self.assertRaises(ValueError):
             await repository.register(
-                ResourceMetadata(
-                    failed_stage.asset_id,
-                    "unknown",
-                    failed_stage.scope,
-                    len(b"failed"),
+                validate_contract(
+                    ResourceMetadata(
+                        failed_stage.asset_id,
+                        "unknown",
+                        failed_stage.scope,
+                        len(b"failed"),
+                    )
                 )
             )
         self.assertTrue(await files.recover_orphans())
@@ -194,8 +211,10 @@ class CacheResourceRepositoryTests(unittest.IsolatedAsyncioTestCase):
         repository = SQLiteResourceRepository(self.database, files)
         user_scope = OwnerScope.user("alice")
         user_stage = await files.stage("user-resource", b"alice", user_scope)
-        user_metadata = ResourceMetadata(
-            user_stage.asset_id, "image/png", user_scope, len(b"alice")
+        user_metadata = validate_contract(
+            ResourceMetadata(
+                user_stage.asset_id, "image/png", user_scope, len(b"alice")
+            )
         )
         await files.commit(user_stage, user_metadata)
         await repository.register(user_metadata)
@@ -205,10 +224,14 @@ class CacheResourceRepositoryTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(FileNotFoundError):
             await repository.read(user_stage.asset_id, OwnerScope.user("bob"))
 
-        grant_one = OwnerScope.authorized("alice", GrantReference("grant", 1))
+        grant_one = OwnerScope.authorized(
+            "alice", validate_contract(GrantReference("grant", 1))
+        )
         authorized_stage = await files.stage("authorized-resource", b"grant", grant_one)
-        authorized_metadata = ResourceMetadata(
-            authorized_stage.asset_id, "image/png", grant_one, len(b"grant")
+        authorized_metadata = validate_contract(
+            ResourceMetadata(
+                authorized_stage.asset_id, "image/png", grant_one, len(b"grant")
+            )
         )
         await files.commit(authorized_stage, authorized_metadata)
         await repository.register(authorized_metadata)
@@ -218,12 +241,16 @@ class CacheResourceRepositoryTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(FileNotFoundError):
             await repository.read(
                 authorized_stage.asset_id,
-                OwnerScope.authorized("alice", GrantReference("grant", 2)),
+                OwnerScope.authorized(
+                    "alice", validate_contract(GrantReference("grant", 2))
+                ),
             )
         with self.assertRaises(FileNotFoundError):
             await repository.read(
                 authorized_stage.asset_id,
-                OwnerScope.authorized("bob", GrantReference("grant", 1)),
+                OwnerScope.authorized(
+                    "bob", validate_contract(GrantReference("grant", 1))
+                ),
             )
 
         reopened = SQLiteResourceRepository(
@@ -259,15 +286,19 @@ class CacheResourceRepositoryTests(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         files = LocalSafeFileStore(self.root / "expired-index-assets")
         repository = SQLiteResourceRepository(self.database, files)
-        scope = OwnerScope.authorized("alice", GrantReference("expired-index", 1))
+        scope = OwnerScope.authorized(
+            "alice", validate_contract(GrantReference("expired-index", 1))
+        )
         payload = b"expired-but-indexed"
         stage = await files.stage("expired-index", payload, scope)
-        metadata = ResourceMetadata(
-            stage.asset_id,
-            "application/octet-stream",
-            scope,
-            len(payload),
-            datetime.now(UTC) - timedelta(seconds=1),
+        metadata = validate_contract(
+            ResourceMetadata(
+                stage.asset_id,
+                "application/octet-stream",
+                scope,
+                len(payload),
+                datetime.now(UTC) - timedelta(seconds=1),
+            )
         )
         await files.commit(stage, metadata)
         registered = await repository.register(metadata)
@@ -283,7 +314,7 @@ class CacheResourceRepositoryTests(unittest.IsolatedAsyncioTestCase):
 
         async def write(value: int):
             return await repository.put(
-                request, CacheEntry("race", {"value": value}, expiry)
+                request, validate_contract(CacheEntry("race", {"value": value}, expiry))
             )
 
         results = await asyncio.gather(write(1), write(2), return_exceptions=True)
@@ -316,8 +347,10 @@ class CacheResourceRepositoryTests(unittest.IsolatedAsyncioTestCase):
             request = self._request(
                 "worker", CacheVisibility.PUBLIC, OwnerScope.public()
             )
-            entry = CacheEntry(
-                "worker", {"value": 1}, datetime.now(UTC) + timedelta(minutes=1)
+            entry = validate_contract(
+                CacheEntry(
+                    "worker", {"value": 1}, datetime.now(UTC) + timedelta(minutes=1)
+                )
             )
             await cache.put(request, entry)
         self.assertTrue(connection_threads)
@@ -339,7 +372,9 @@ class CacheResourceRepositoryTests(unittest.IsolatedAsyncioTestCase):
         request = self._request(
             "queued-private",
             CacheVisibility.AUTHORIZED,
-            OwnerScope.authorized("alice", GrantReference("grant-queue", 1)),
+            OwnerScope.authorized(
+                "alice", validate_contract(GrantReference("grant-queue", 1))
+            ),
         )
         await repository.current_revision(request)
         executor = self.database.executor
@@ -358,7 +393,9 @@ class CacheResourceRepositoryTests(unittest.IsolatedAsyncioTestCase):
         write = asyncio.create_task(
             repository.put(
                 request,
-                CacheEntry("queued-private", {"secret": True}, deadline),
+                validate_contract(
+                    CacheEntry("queued-private", {"secret": True}, deadline)
+                ),
                 authorization_deadline=deadline,
             )
         )
@@ -383,7 +420,9 @@ class CacheResourceRepositoryTests(unittest.IsolatedAsyncioTestCase):
         request = self._request(
             "locked-private",
             CacheVisibility.AUTHORIZED,
-            OwnerScope.authorized("alice", GrantReference("grant-lock", 1)),
+            OwnerScope.authorized(
+                "alice", validate_contract(GrantReference("grant-lock", 1))
+            ),
         )
         await repository.current_revision(request)
         locker = self.database.connect()
@@ -393,7 +432,9 @@ class CacheResourceRepositoryTests(unittest.IsolatedAsyncioTestCase):
             write = asyncio.create_task(
                 repository.put(
                     request,
-                    CacheEntry("locked-private", {"secret": True}, deadline),
+                    validate_contract(
+                        CacheEntry("locked-private", {"secret": True}, deadline)
+                    ),
                     authorization_deadline=deadline,
                 )
             )
@@ -415,17 +456,27 @@ class CacheResourceRepositoryTests(unittest.IsolatedAsyncioTestCase):
         deadline = _SteppedDateTime(2050, 1, 1, tzinfo=UTC)
         before = _SteppedDateTime(2049, 12, 31, tzinfo=UTC)
         after = _SteppedDateTime(2050, 1, 1, 0, 0, 1, tzinfo=UTC)
-        grant_scope = OwnerScope.authorized("alice", GrantReference("grant-step", 1))
+        grant_scope = OwnerScope.authorized(
+            "alice", validate_contract(GrantReference("grant-step", 1))
+        )
         cache_repository = SQLiteCacheRepository(self.database)
         cache_request = self._request(
             "rollback-cache", CacheVisibility.AUTHORIZED, grant_scope
         )
-        old_entry = CacheEntry(
-            "rollback-cache", {"value": "old"}, datetime.now(UTC) + timedelta(minutes=5)
+        old_entry = validate_contract(
+            CacheEntry(
+                "rollback-cache",
+                {"value": "old"},
+                datetime.now(UTC) + timedelta(minutes=5),
+            )
         )
         await cache_repository.put(cache_request, old_entry)
-        updated_entry = CacheEntry(
-            "rollback-cache", {"value": "new"}, datetime.now(UTC) + timedelta(minutes=5)
+        updated_entry = validate_contract(
+            CacheEntry(
+                "rollback-cache",
+                {"value": "new"},
+                datetime.now(UTC) + timedelta(minutes=5),
+            )
         )
         _SteppedDateTime.moments = [before, after]
         with patch.object(repositories_cache_resources, "datetime", _SteppedDateTime):
@@ -453,16 +504,20 @@ class CacheResourceRepositoryTests(unittest.IsolatedAsyncioTestCase):
         files = LocalSafeFileStore(self.root / "assets-deadline")
         resource_repository = SQLiteResourceRepository(self.database, files)
         stage = await files.stage("deadline-base", b"base", grant_scope)
-        original = ResourceMetadata(stage.asset_id, "image/png", grant_scope, 4)
+        original = validate_contract(
+            ResourceMetadata(stage.asset_id, "image/png", grant_scope, 4)
+        )
         await files.commit(stage, original)
         registered = await resource_repository.register(original)
-        replacement = ResourceMetadata(
-            registered.asset_id,
-            "image/png",
-            grant_scope,
-            4,
-            datetime.now(UTC) + timedelta(minutes=10),
-            registered.temporary,
+        replacement = validate_contract(
+            ResourceMetadata(
+                registered.asset_id,
+                "image/png",
+                grant_scope,
+                4,
+                datetime.now(UTC) + timedelta(minutes=10),
+                registered.temporary,
+            )
         )
         _SteppedDateTime.moments = [before, after]
         with patch.object(repositories_cache_resources, "datetime", _SteppedDateTime):

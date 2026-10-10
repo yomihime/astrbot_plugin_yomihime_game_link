@@ -7,8 +7,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import Decimal
 
-from yomihime_sdk.api.services import ToolOutput
-
+from ...core.contracts.services import ToolOutput
 from ...core.policy import tool_allowed
 from ...services.output import OutputStatus
 
@@ -195,7 +194,7 @@ class AstrBotToolPublisher:
                 from astrbot.core.agent.run_context import ContextWrapper
                 from astrbot.core.platform.astr_message_event import AstrMessageEvent
 
-                from yomihime_sdk.api.validation import _validate
+                from ...core.contracts.validation import _validate
 
                 if not publisher._current(handle):
                     raise PermissionError("tool revoked or module changed")
@@ -211,7 +210,11 @@ class AstrBotToolPublisher:
                 _validate(parameters, kwargs, "parameters", 0)
                 event = context.context.event
                 outcome = await publisher.invoke(
-                    handle.module_id, handle.descriptor.name, kwargs, event
+                    handle.module_id,
+                    handle.descriptor.name,
+                    kwargs,
+                    event,
+                    tool_handle=handle,
                 )
                 if not publisher._current(handle):
                     raise PermissionError("tool revoked during execution")

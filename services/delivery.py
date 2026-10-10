@@ -13,8 +13,11 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
-from ..api.contexts import InvocationConversationKind, InvocationSubscriptionScope
-from ..api.display import (
+from yomihime_game_link_sdk.contexts import (
+    InvocationConversationKind,
+    InvocationSubscriptionScope,
+)
+from yomihime_game_link_sdk.display import (
     DisplayAudience,
     DisplayBatch,
     DisplayBatchMember,
@@ -23,11 +26,12 @@ from ..api.display import (
     DisplayRenderer,
     Privacy,
 )
-from ..api.services import Grant, GrantStatus, TrustedPersistedRouteResolver
-from ..api.storage import OwnershipKind
-from ..api.subscriptions import (
-    ConversationKind,
-    ConversationRef,
+from yomihime_game_link_sdk.storage import OwnershipKind
+from yomihime_game_link_sdk.subscriptions import ConversationKind, ConversationRef
+
+from ..core.admission import AdmissionError
+from ..core.contracts.services import Grant, GrantStatus, TrustedPersistedRouteResolver
+from ..core.contracts.subscriptions import (
     DeliveryAttempt,
     DeliveryEvent,
     DeliveryState,
@@ -38,7 +42,7 @@ from ..api.subscriptions import (
     DigestMemberReceipt,
     digest_envelope_idempotency_key,
 )
-from ..core.admission import AdmissionError
+from ..core.contracts.validation_boundary import validate_contract
 from ..core.ports import (
     AdmissionPort,
     ApprovedSendScheduler,
@@ -124,6 +128,8 @@ class DeliveryService:
         retry_at: RetryAt | None = None,
         page_size: int = 100,
     ) -> None:
+        validate_contract(renderer)
+        validate_contract(limits)
         if claim_lease.total_seconds() <= 0 or send_timeout <= 0 or page_size < 1:
             raise ValueError("delivery bounds must be positive")
         self._deliveries = deliveries
@@ -223,6 +229,9 @@ class DeliveryService:
                     else DisplayAudience.PUBLIC
                 ),
             )
+            if type(rendered) is not DisplayOutput:
+                raise TypeError("renderer must return DisplayOutput")
+            validate_contract(rendered)
         except asyncio.CancelledError:
             self._admission.release(lease)
             raise
@@ -494,6 +503,7 @@ class DeliveryService:
         self, window_id: str, recipient: ConversationRef, *, now: datetime | None = None
     ) -> DeliveryResult | None:
         """Claim, prune and render a digest before its exact last-send approval."""
+        validate_contract(recipient)
         current_time = self._utc_now() if now is None else self._as_utc(now)
         window = await self._windows.get(window_id)
         if window is None or window.due_at > current_time:
@@ -574,22 +584,29 @@ class DeliveryService:
             try:
                 while candidates:
                     self._admission.check(lease)
-                    batch = DisplayBatch(
-                        tuple(
-                            DisplayBatchMember(member, event.display_data)
-                            for member, event, _ in candidates
-                        ),
-                        DisplayAudience.PRIVATE
-                        if any(
-                            event.display_data.privacy is Privacy.PRIVATE
-                            for _, event, _ in candidates
+                    batch = validate_contract(
+                        DisplayBatch(
+                            tuple(
+                                validate_contract(
+                                    DisplayBatchMember(member, event.display_data)
+                                )
+                                for member, event, _ in candidates
+                            ),
+                            DisplayAudience.PRIVATE
+                            if any(
+                                event.display_data.privacy is Privacy.PRIVATE
+                                for _, event, _ in candidates
+                            )
+                            else DisplayAudience.PUBLIC,
                         )
-                        else DisplayAudience.PUBLIC,
                     )
                     try:
                         rendered = await self._renderer.render_batch(
                             batch, self._limits
                         )
+                        if type(rendered) is not DisplayOutput:
+                            raise TypeError("renderer must return DisplayOutput")
+                        validate_contract(rendered)
                     except Exception:
                         _LOG.warning("delivery rejected code=display_render_failed")
                         return await self._finish_digest_without_send(
@@ -1010,6 +1027,11 @@ class DeliveryService:
         expected_epoch: int | None = None,
     ) -> _Eligibility:
         try:
+            validate_contract(recipient)
+            validate_contract(privacy)
+        except (TypeError, ValueError):
+            return _Eligibility(False, "privacy_rejected")
+        try:
             record = await self._subscriptions.current(subscription_id)
         except Exception:
             return _Eligibility(False, "subscription_unavailable")
@@ -1175,10 +1197,12 @@ class DeliveryService:
                     adapter_id=event.recipient.adapter_id,
                     conversation_id=event.recipient.conversation_id,
                     delivery_route=event.recipient.delivery_route,
-                    conversation_kind=InvocationConversationKind(
-                        event.recipient.kind.value
+                    conversation_kind=validate_contract(
+                        InvocationConversationKind(event.recipient.kind.value)
                     ),
-                    subscription_scope=InvocationSubscriptionScope(scope.value),
+                    subscription_scope=validate_contract(
+                        InvocationSubscriptionScope(scope.value)
+                    ),
                 )
             )
         first = records[0]
@@ -1727,6 +1751,7 @@ class DeliveryService:
         eligible,
         deadlines_current,
     ) -> DeliveryResult:
+        validate_contract(output)
         message = RenderedMessage(output.text, output.resource_ids)
         attempt = envelope.delivery_attempts[-1]
         try:

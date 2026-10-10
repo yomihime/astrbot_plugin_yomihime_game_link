@@ -7,10 +7,11 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
-from ...api.services import Grant
-from ...api.storage import GrantReference, OwnershipKind
-from ...api.subscriptions import (
-    CollectionKey,
+from yomihime_game_link_sdk.storage import GrantReference, OwnershipKind
+from yomihime_game_link_sdk.subscriptions import CollectionKey
+
+from ...core.contracts.services import Grant
+from ...core.contracts.subscriptions import (
     DeliveryAttempt,
     DeliveryEvent,
     DeliveryState,
@@ -20,6 +21,7 @@ from ...api.subscriptions import (
     SubscriptionRecord,
     SubscriptionStatus,
 )
+from ...core.contracts.validation_boundary import validate_contract
 from ...core.ports import RevisionConflict
 from .database import SQLiteDatabase, SQLiteUnitOfWork
 from .repositories_auth import SQLiteGrantStore
@@ -142,7 +144,9 @@ class SQLiteGrantRevocationRepository:
                         or key.scope.kind is not OwnershipKind.AUTHORIZED
                         or key.scope.user_id != scope.principal_id
                         or key.scope.grant
-                        != GrantReference(scope.grant_id, scope.revision)
+                        != validate_contract(
+                            GrantReference(scope.grant_id, scope.revision)
+                        )
                     ):
                         raise ValueError(
                             "subscription job link does not match its stored record"
@@ -248,7 +252,8 @@ class SQLiteGrantRevocationRepository:
                     key.module_id != scope.module_id
                     or key.scope.kind is not OwnershipKind.AUTHORIZED
                     or key.scope.user_id != scope.principal_id
-                    or key.scope.grant != GrantReference(scope.grant_id, scope.revision)
+                    or key.scope.grant
+                    != validate_contract(GrantReference(scope.grant_id, scope.revision))
                 ):
                     raise ValueError("collection job scope does not match its columns")
                 associations = unit.execute(
@@ -274,7 +279,9 @@ class SQLiteGrantRevocationRepository:
                             record.module_id != scope.module_id
                             or record.owner_id != scope.principal_id
                             or record.grant
-                            != GrantReference(scope.grant_id, scope.revision)
+                            != validate_contract(
+                                GrantReference(scope.grant_id, scope.revision)
+                            )
                         ):
                             raise ValueError(
                                 "active subscription has a mismatched collection grant"
@@ -501,7 +508,7 @@ class SQLiteGrantRevocationRepository:
                     for association in envelope.member_associations
                     if association.event.owner_id == scope.principal_id
                     and association.event.grant
-                    == GrantReference(scope.grant_id, scope.revision)
+                    == validate_contract(GrantReference(scope.grant_id, scope.revision))
                 }
                 if not envelope_grant_members.issubset(members):
                     raise ValueError(
@@ -517,7 +524,9 @@ class SQLiteGrantRevocationRepository:
                 if (
                     any(
                         association.event.grant
-                        == GrantReference(scope.grant_id, scope.revision)
+                        == validate_contract(
+                            GrantReference(scope.grant_id, scope.revision)
+                        )
                         for association in envelope.member_associations
                     )
                     and not envelope_grant_members
@@ -691,7 +700,8 @@ def _validate_subscription_row(
         )
         or record.module_id != scope.module_id
         or record.owner_id != scope.principal_id
-        or record.grant != GrantReference(scope.grant_id, scope.revision)
+        or record.grant
+        != validate_contract(GrantReference(scope.grant_id, scope.revision))
         or record.collection_key.scope.kind is not OwnershipKind.AUTHORIZED
     ):
         raise ValueError("subscription row disagrees with its stored JSON")
@@ -708,7 +718,8 @@ def _validate_event_row(
         or event.subscription_id != row["subscription_id"]
         or event.subscription_revision != int(row["subscription_revision"])
         or event.owner_id != row["owner_id"]
-        or event.grant != GrantReference(scope.grant_id, scope.revision)
+        or event.grant
+        != validate_contract(GrantReference(scope.grant_id, scope.revision))
         or event.state.value != row["state"]
         or attempt_number != int(row["attempt_number"])
         or retry_at != row["retry_at"]
@@ -766,7 +777,8 @@ def _validate_digest_association(
         or member.event_key != row["event_key"]
         or member.event_version != int(row["event_version"])
         or association.event.owner_id != scope.principal_id
-        or association.event.grant != GrantReference(scope.grant_id, scope.revision)
+        or association.event.grant
+        != validate_contract(GrantReference(scope.grant_id, scope.revision))
         or association.event.event_key != row["event_key"]
         or association.event.event_version != int(row["event_version"])
         or association.event.subscription_id != row["subscription_id"]

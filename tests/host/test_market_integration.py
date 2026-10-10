@@ -16,8 +16,8 @@ import httpx
 from fastapi import FastAPI, Request
 from ygl_test_subject.adapters.astrbot.ff14_pages import FF14Pages
 from ygl_test_subject.adapters.astrbot.runtime import PLUGIN_NAME
-from ygl_test_subject.api.administration import AdminAuthorizationDenied
-from ygl_test_subject.api.services import HttpResponse
+from ygl_test_subject.core.contracts.administration import AdminAuthorizationDenied
+from ygl_test_subject.core.contracts.validation_boundary import validate_contract
 from ygl_test_subject.modules.ff14.assembly import query_parameters
 
 from tests.host import test_astrbot_runtime as runtime_fixture
@@ -31,6 +31,7 @@ from tests.modules.ff14.test_market import (
     currently,
     listing,
 )
+from yomihime_game_link_sdk.services import HttpResponse
 
 
 class FixtureTransport(runtime_fixture._IdleTransport):
@@ -49,7 +50,9 @@ class FixtureTransport(runtime_fixture._IdleTransport):
                 return (
                     body
                     if isinstance(body, HttpResponse)
-                    else HttpResponse(200, {}, json.dumps(body).encode())
+                    else validate_contract(
+                        HttpResponse(200, {}, json.dumps(body).encode())
+                    )
                 )
         if request.path == "/api/v2/worlds":
             body = WORLDS
@@ -74,14 +77,16 @@ class FixtureTransport(runtime_fixture._IdleTransport):
                 region = next(dc["region"] for dc in DCS if dc["name"] == region)
                 level = "dc"
             body = aggregated(region, level=level)
+            body["results"][0]["itemId"] = int(request.path.rsplit("/", 1)[-1])
         else:
             body = currently(
                 rows=[listing(100 + i, hq=True, ordinal=i) for i in range(6)]
             )
+            body["itemID"] = int(request.path.rsplit("/", 1)[-1])
             if request.path.split("/")[-2].isdigit():
                 body.pop("regionName")
                 body["worldID"] = int(request.path.split("/")[-2])
-        return HttpResponse(200, {}, json.dumps(body).encode())
+        return validate_contract(HttpResponse(200, {}, json.dumps(body).encode()))
 
 
 class MarketHostIntegrationTests(unittest.IsolatedAsyncioTestCase):
@@ -131,25 +136,39 @@ class MarketHostIntegrationTests(unittest.IsolatedAsyncioTestCase):
         finally:
             self.runtime.finish_public_web(state)
 
-    async def test_module_public_market_validator_is_active_and_malformed_facts_fail_closed(self):
+    async def test_module_public_market_validator_is_active_and_malformed_facts_fail_closed(
+        self,
+    ):
         await self.start()
-        handler=self.runtime.core_runtime.registry.snapshot().module("ff14/ff14").handlers.capabilities["ff14.market.query"]
-        globals_=handler.invoke.__func__.__globals__
-        validator=globals_["validate_public_market_facts"]
-        calls=[]
+        handler = (
+            self.runtime.core_runtime.registry.snapshot()
+            .module("ff14/ff14")
+            .handlers.capabilities["ff14.market.query"]
+        )
+        globals_ = handler.invoke.__func__.__globals__
+        validator = globals_["validate_public_market_facts"]
+        calls = []
+
         def checked(facts):
             calls.append(facts)
             return validator(facts)
-        with patch.dict(globals_, {"validate_public_market_facts":checked}):
-            result=await self.public(dict(query="44091",server="90001",quality="hq",intent="min"))
-            self.assertEqual(result["status"],"success")
+
+        with patch.dict(globals_, {"validate_public_market_facts": checked}):
+            result = await self.public(
+                dict(query="44091", server="90001", quality="hq", intent="min")
+            )
+            self.assertEqual(result["status"], "success")
             self.assertTrue(calls)
             calls.clear()
-            with patch.dict(globals_, {"_query_facts":lambda _: {"private":"fixture"}}):
-                result=await self.public(dict(query="44091",server="90001",quality="hq",intent="min"))
-                self.assertEqual(result["status"],"error")
+            with patch.dict(
+                globals_, {"_query_facts": lambda _: {"private": "fixture"}}
+            ):
+                result = await self.public(
+                    dict(query="44091", server="90001", quality="hq", intent="min")
+                )
+                self.assertEqual(result["status"], "error")
                 self.assertTrue(calls)
-                self.assertNotIn("private",json.dumps(result))
+                self.assertNotIn("private", json.dumps(result))
 
     async def test_registered_handler_real_http_cache_sdk_and_public_projection(self):
         await self.start()
@@ -498,10 +517,9 @@ class MarketHostIntegrationTests(unittest.IsolatedAsyncioTestCase):
     async def test_default_host_admin_false_cannot_upgrade_public_session_or_role(self):
         await self.start()
         core = self.runtime.core_runtime
-        from ygl_test_subject.api.services import (
+        from ygl_test_subject.core.contracts.services import (
             ConfigFieldUpdate,
             ConfigPatch,
-            ConfigPatchMode,
         )
         from ygl_test_subject.services.core_configuration import (
             CORE_CONFIG_FIELDS,
@@ -510,6 +528,7 @@ class MarketHostIntegrationTests(unittest.IsolatedAsyncioTestCase):
         )
 
         from tests.services.test_admin_operations import _digest, token_urlsafe
+        from yomihime_game_link_sdk.declarations import ConfigUpdateMode
 
         target = core_config_target(PLUGIN_NAME)
         await core.admin_credential_repository.bootstrap(_digest(token_urlsafe(32)))
@@ -540,7 +559,7 @@ class MarketHostIntegrationTests(unittest.IsolatedAsyncioTestCase):
                         (
                             ConfigFieldUpdate(
                                 "default_region",
-                                ConfigPatchMode.REPLACE,
+                                ConfigUpdateMode.REPLACE,
                                 value="global",
                             ),
                         ),
@@ -562,6 +581,7 @@ class MarketHostIntegrationTests(unittest.IsolatedAsyncioTestCase):
         from ygl_test_subject.modules.ff14.features.public_projection import (
             validate_public_market_facts as _market_facts,
         )
+
         WebPublicRejected = ValueError
 
         await self.start()

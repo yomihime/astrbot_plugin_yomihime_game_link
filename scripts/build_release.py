@@ -99,8 +99,8 @@ def _copy_sdk_source(repository_root: Path, source_root: Path) -> None:
     docs_target.parent.mkdir(parents=True)
     shutil.copy2(docs_source, docs_target)
     shutil.copytree(
-        repository_root / "yomihime_sdk",
-        source_root / "yomihime_sdk",
+        repository_root / "yomihime_game_link_sdk",
+        source_root / "yomihime_game_link_sdk",
         ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
     )
     for example in SDK_EXAMPLE_DIRS:
@@ -177,7 +177,7 @@ def build_release(
         Path(output_dir) if output_dir is not None else repository_root / "dist"
     )
     zip_name = f"{plugin_name}-{metadata_version}.zip"
-    wheel_name = "yomihime_module_sdk-1.8.0-py3-none-any.whl"
+    wheel_name = "yomihime_game_link_sdk-0.1.0a6-py3-none-any.whl"
 
     with tempfile.TemporaryDirectory(prefix="yomihime-release-build-") as temporary:
         work_root = Path(temporary)

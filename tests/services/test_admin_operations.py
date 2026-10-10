@@ -9,17 +9,14 @@ from pathlib import Path
 from secrets import token_urlsafe
 from unittest.mock import AsyncMock, patch
 
-from ygl_test_subject.api.administration import AdminAuthorizationDenied
-from ygl_test_subject.api.display import DisplayLimits, DisplayOutput
-from ygl_test_subject.api.manifests import ConfigField
-from ygl_test_subject.api.services import (
+from ygl_test_subject.core.contracts.administration import AdminAuthorizationDenied
+from ygl_test_subject.core.contracts.services import (
     ConfigFieldUpdate,
     ConfigPatch,
-    ConfigPatchMode,
-    ConfigTarget,
     SecretMaterial,
 )
-from ygl_test_subject.api.storage import SecretReceiptState, SecretTarget
+from ygl_test_subject.core.contracts.storage import SecretReceiptState, SecretTarget
+from ygl_test_subject.core.contracts.validation_boundary import validate_contract
 from ygl_test_subject.core.ports import MessageReceipt, MessageStatus
 from ygl_test_subject.extensions.discovery import discover_packages
 from ygl_test_subject.infrastructure.sqlite.database import SQLiteDatabase
@@ -30,11 +27,15 @@ from ygl_test_subject.services.core_runtime import (
     TrustedSubscriptionGate,
 )
 
+from yomihime_game_link_sdk.declarations import ConfigField, ConfigUpdateMode
+from yomihime_game_link_sdk.display import DisplayLimits, DisplayOutput
+from yomihime_game_link_sdk.services import ConfigTarget
+
 
 class _Renderer:
     async def render(self, document, *, limits, audience):
         del limits, audience
-        return DisplayOutput(document.title)
+        return validate_contract(DisplayOutput(document.title))
 
     async def render_batch(self, batch, limits):  # pragma: no cover - protocol only
         del batch, limits
@@ -95,7 +96,7 @@ class AdminOperationsRuntimeTests(unittest.IsolatedAsyncioTestCase):
             secret_codec=_Codec(),
             http_transport=lambda request: request,
             renderer=_Renderer(),
-            display_limits=DisplayLimits(2, 4096),
+            display_limits=validate_contract(DisplayLimits(2, 4096)),
             message_port=_MessagePort(),
             admin_context_validator=context_validator or (lambda *_args: True),
             host_ingress_validator=lambda *_args: True,
@@ -124,6 +125,25 @@ class AdminOperationsRuntimeTests(unittest.IsolatedAsyncioTestCase):
         credential = token_urlsafe(32)
         await runtime.admin_credential_repository.bootstrap(_digest(credential))
         return credential, _AdminContext()
+
+    async def test_startup_accepts_configless_disabled_candidate(self) -> None:
+        runtime = self._runtime()
+        package = self.root / "extensions" / "admin"
+        package.mkdir()
+        manifest = _config_manifest()
+        manifest["modules"][0].pop("config_fields", None)
+        (package / "yomihime.manifest.json").write_text(
+            json.dumps(manifest), encoding="utf-8"
+        )
+        (package / "module.py").write_text(
+            "raise AssertionError('disabled candidate source executed')\n",
+            encoding="utf-8",
+        )
+        report = await runtime.start()
+        self.assertEqual(report.config_failures, ())
+        self.assertEqual(report.extension_failures, ())
+        self.assertIsNotNone(runtime.extension_runtime.candidate("admin"))
+        self.assertEqual(runtime.registry.snapshot().modules, {})
 
     async def test_real_admin_gate_policy_rejects_mixed_invalid_patch_before_secret_stage(
         self,
@@ -154,8 +174,8 @@ class AdminOperationsRuntimeTests(unittest.IsolatedAsyncioTestCase):
         _, context = await self._bootstrap(runtime)
         fields = expected.config_fields
         for mode, value in (
-            (ConfigPatchMode.CLEAR, None),
-            (ConfigPatchMode.REPLACE, "true"),
+            (ConfigUpdateMode.CLEAR, None),
+            (ConfigUpdateMode.REPLACE, "true"),
         ):
             for gate_first in (True, False):
                 with (
@@ -192,7 +212,7 @@ class AdminOperationsRuntimeTests(unittest.IsolatedAsyncioTestCase):
                     gate = ConfigFieldUpdate("gate", mode, value=value)
                     secret = ConfigFieldUpdate(
                         "token",
-                        ConfigPatchMode.REPLACE,
+                        ConfigUpdateMode.REPLACE,
                         secret=SecretMaterial(b"synthetic-never-staged"),
                     )
                     updates = (gate, secret) if gate_first else (secret, gate)
@@ -212,10 +232,10 @@ class AdminOperationsRuntimeTests(unittest.IsolatedAsyncioTestCase):
             ConfigPatch(
                 1,
                 (
-                    ConfigFieldUpdate("gate", ConfigPatchMode.REPLACE, value=False),
+                    ConfigFieldUpdate("gate", ConfigUpdateMode.REPLACE, value=False),
                     ConfigFieldUpdate(
                         "token",
-                        ConfigPatchMode.REPLACE,
+                        ConfigUpdateMode.REPLACE,
                         secret=SecretMaterial(b"synthetic-configured"),
                     ),
                 ),
@@ -226,7 +246,7 @@ class AdminOperationsRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(updated.revision, 2)
         self.assertEqual(updated.fields["token"], "configured")
         persisted = await runtime.config_repository.current(
-            ConfigTarget("host-config", "admin/mod")
+            validate_contract(ConfigTarget("host-config", "admin/mod"))
         )
         self.assertIs(persisted.values["gate"], False)
         await runtime.close(timeout=0.5)
@@ -250,15 +270,19 @@ class AdminOperationsRuntimeTests(unittest.IsolatedAsyncioTestCase):
             "admin/mod",
             ConfigPatch(
                 1,
-                (ConfigFieldUpdate("mode", ConfigPatchMode.REPLACE, value="safe"),),
-                (ConfigField("mode", required=True, default="default"),),
+                (ConfigFieldUpdate("mode", ConfigUpdateMode.REPLACE, value="safe"),),
+                (
+                    validate_contract(
+                        ConfigField("mode", required=True, default="default")
+                    ),
+                ),
             ),
             authorization=context,
         )
         self.assertEqual(updated.revision, 2)
         self.assertEqual(dict(updated.fields), {"mode": "configured"})
         persisted = await runtime.config_repository.current(
-            ConfigTarget("host-config", "admin/mod")
+            validate_contract(ConfigTarget("host-config", "admin/mod"))
         )
         self.assertEqual(persisted.values["mode"], "safe")
         self.assertTrue(await runtime.close(timeout=0.5))
@@ -286,10 +310,14 @@ class AdminOperationsRuntimeTests(unittest.IsolatedAsyncioTestCase):
                     1,
                     (
                         ConfigFieldUpdate(
-                            "mode", ConfigPatchMode.REPLACE, value="changed"
+                            "mode", ConfigUpdateMode.REPLACE, value="changed"
                         ),
                     ),
-                    (ConfigField("mode", required=True, default="default"),),
+                    (
+                        validate_contract(
+                            ConfigField("mode", required=True, default="default")
+                        ),
+                    ),
                 ),
                 authorization=context,
             )
@@ -306,7 +334,7 @@ class AdminOperationsRuntimeTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(AdminAuthorizationDenied):
             await update
         current = await runtime.config_repository.current(
-            ConfigTarget("host-config", "admin/mod")
+            validate_contract(ConfigTarget("host-config", "admin/mod"))
         )
         self.assertEqual(current.revision, 2)
         self.assertEqual(current.values["mode"], "changed")
@@ -385,11 +413,11 @@ class AdminOperationsRuntimeTests(unittest.IsolatedAsyncioTestCase):
                         (
                             ConfigFieldUpdate(
                                 "token",
-                                ConfigPatchMode.REPLACE,
+                                ConfigUpdateMode.REPLACE,
                                 secret=SecretMaterial(b"core-close-secret"),
                             ),
                         ),
-                        (ConfigField("token", sensitive=True),),
+                        (validate_contract(ConfigField("token", sensitive=True)),),
                     ),
                     authorization=context,
                 )
@@ -400,7 +428,7 @@ class AdminOperationsRuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(caught.exception.component, "module_quiesce")
             self.assertFalse(runtime.closed)
             committed = await runtime.config_repository.current(
-                ConfigTarget("host-config", "admin/mod")
+                validate_contract(ConfigTarget("host-config", "admin/mod"))
             )
             self.assertEqual(committed.revision, 2)
             self.assertEqual(committed.secret_metadata[0].field, "token")
@@ -466,7 +494,7 @@ def _config_manifest() -> dict[str, object]:
         "schema_version": 1,
         "package_id": "admin",
         "package_version": "1.0.0",
-        "contract_version": "1.1.0",
+        "contract_version": "2.0",
         "author": "tests",
         "license": "MIT",
         "source": "admin operation test package",

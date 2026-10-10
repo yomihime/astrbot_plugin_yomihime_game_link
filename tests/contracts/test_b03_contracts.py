@@ -5,11 +5,12 @@ import copy
 import pickle
 import traceback
 import unittest
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from inspect import signature
 from typing import get_type_hints
 
-from ygl_test_subject.api.administration import (
+from ygl_test_subject.core.contracts.administration import (
     AdminError,
     CapabilitySummary,
     ConfigSummary,
@@ -19,63 +20,32 @@ from ygl_test_subject.api.administration import (
     ModuleLifecycle,
     ModuleStatus,
 )
-from ygl_test_subject.api.manifests import (
-    CapabilityDescriptor,
-    CapabilityEffect,
-    CapabilityReference,
-    ConfigField,
-    InvocationPolicy,
-    ModuleCategory,
-    ModuleManifest,
-    PackageManifest,
-    SourceDeclaration,
-)
-from ygl_test_subject.api.services import (
+from ygl_test_subject.core.contracts.manifests import CapabilityReference_validate
+from ygl_test_subject.core.contracts.services import (
     Binding,
     BindingDefaultSnapshot,
     CacheAccessRequest,
-    CallerCapability,
     ConfigFieldUpdate,
     ConfigPatch,
-    ConfigPatchMode,
-    ConfigSnapshot,
-    ConfigTarget,
     ConversationKey,
-    ConversationKind,
-    ConversationRef,
-    DependencyInvoker,
     Grant,
     GrantStatus,
-    HttpRequest,
     LoginSession,
     LoginSessionStatus,
-    ModuleHandlers,
     PersistedConfigPatch,
     Principal,
     SecretMaterial,
-    SubscriptionOperations,
-    SubscriptionUnavailable,
     validate_cache_access_request,
 )
-from ygl_test_subject.api.storage import (
-    CacheEntry,
-    CacheLookup,
-    CacheLookupStatus,
-    CacheVisibility,
+from ygl_test_subject.core.contracts.storage import (
     ClaimedSecretReceipt,
-    CollectionDescriptor,
-    CollectionIndex,
-    GrantReference,
-    OwnerScope,
-    OwnershipKind,
-    ResourceMetadata,
-    SecretMetadata,
-    SecretMetadataState,
+    CollectionDescriptor_validate,
     SecretReceipt,
     SecretReceiptState,
-    SecretRef,
+    SecretRef_validate,
     SecretTarget,
 )
+from ygl_test_subject.core.contracts.validation_boundary import validate_contract
 from ygl_test_subject.core.ports import (
     AuthorizationRepository,
     BindingRepository,
@@ -104,6 +74,45 @@ from ygl_test_subject.core.ports import (
 )
 from ygl_test_subject.core.registry import Registry
 
+from yomihime_game_link_sdk.declarations import (
+    CapabilityDescriptor,
+    CapabilityEffect,
+    CapabilityReference,
+    ConfigField,
+    ConfigUpdateMode,
+    InvocationPolicy,
+    ModuleCategory,
+    ModuleManifest,
+    PackageManifest,
+    SourceDeclaration,
+)
+from yomihime_game_link_sdk.errors import ServiceUnavailable
+from yomihime_game_link_sdk.services import (
+    CallerCapability,
+    ConfigSnapshot,
+    ConfigTarget,
+    DependencyInvoker,
+    HttpRequest,
+    ModuleHandlers,
+    SubscriptionOperations,
+)
+from yomihime_game_link_sdk.storage import (
+    CacheEntry,
+    CacheLookup,
+    CacheLookupStatus,
+    CacheVisibility,
+    CollectionDescriptor,
+    CollectionIndex,
+    GrantReference,
+    OwnerScope,
+    OwnershipKind,
+    ResourceMetadata,
+    SecretMetadata,
+    SecretMetadataState,
+    SecretRef,
+)
+from yomihime_game_link_sdk.subscriptions import ConversationKind, ConversationRef
+
 
 class B03ContractTests(unittest.TestCase):
     def test_cc_b03_01_imports_annotations_and_immutable_snapshots(self):
@@ -122,20 +131,31 @@ class B03ContractTests(unittest.TestCase):
             PackageManifest,
         ):
             self.assertTrue(get_type_hints(cls), cls.__name__)
-        source = SourceDeclaration("steam", "api.example.test", "credential_steam")
+        source = validate_contract(
+            SourceDeclaration("steam", "api.example.test", "credential_steam")
+        )
         self.assertEqual(source.timeout_seconds, 10.0)
-        collection = CollectionDescriptor(
-            "prices", 1, OwnershipKind.PUBLIC, (CollectionIndex("by_app", "app"),)
+        collection = validate_contract(
+            CollectionDescriptor(
+                "prices",
+                1,
+                OwnershipKind.PUBLIC,
+                (validate_contract(CollectionIndex("by_app", "app")),),
+            )
         )
         with self.assertRaises(AttributeError):
             collection.name = "other"  # type: ignore[misc]
-        dependency = CapabilityReference("package/target", "target.query")
-        capability = CapabilityDescriptor(
-            "source.query",
-            {"type": "object", "properties": {}, "required": []},
-            InvocationPolicy.NATURAL_LANGUAGE_ALLOWED,
-            CapabilityEffect.READ_ONLY,
-            required_capabilities=(dependency,),
+        dependency = validate_contract(
+            CapabilityReference("package/target", "target.query")
+        )
+        capability = validate_contract(
+            CapabilityDescriptor(
+                "source.query",
+                {"type": "object", "properties": {}, "required": []},
+                InvocationPolicy.NATURAL_LANGUAGE_ALLOWED,
+                CapabilityEffect.READ_ONLY,
+                required_capabilities=(dependency,),
+            )
         )
         self.assertEqual(capability.required_capabilities, (dependency,))
 
@@ -146,36 +166,44 @@ class B03ContractTests(unittest.TestCase):
             __hash__ = str.__hash__
 
         with self.assertRaises(ValueError):
-            CapabilityReference("package/target", EvilCapabilityId("wrong"))
+            validate_contract(
+                CapabilityReference("package/target", EvilCapabilityId("wrong"))
+            )
         forged_dependency = object.__new__(CapabilityReference)
         object.__setattr__(forged_dependency, "module_id", "package/target")
         object.__setattr__(
             forged_dependency, "capability_id", EvilCapabilityId("wrong")
         )
         with self.assertRaises(ValueError):
-            CapabilityReference.validate(forged_dependency)
+            CapabilityReference_validate(forged_dependency)
         with self.assertRaises(ValueError):
+            validate_contract(
+                CapabilityDescriptor(
+                    "source.query",
+                    {"type": "object", "properties": {}, "required": []},
+                    InvocationPolicy.NATURAL_LANGUAGE_ALLOWED,
+                    CapabilityEffect.READ_ONLY,
+                    required_capabilities=(forged_dependency,),
+                )
+            )
+        self.assertNotEqual(
+            validate_contract(CapabilityReference("package/target", "wrong")),
+            validate_contract(CapabilityReference("package/target", "right")),
+        )
+        legacy_capability = validate_contract(
             CapabilityDescriptor(
-                "source.query",
+                "legacy.query",
                 {"type": "object", "properties": {}, "required": []},
                 InvocationPolicy.NATURAL_LANGUAGE_ALLOWED,
                 CapabilityEffect.READ_ONLY,
-                required_capabilities=(forged_dependency,),
+                required_capabilities=("local.lookup",),
             )
-        self.assertNotEqual(
-            CapabilityReference("package/target", "wrong"),
-            CapabilityReference("package/target", "right"),
-        )
-        legacy_capability = CapabilityDescriptor(
-            "legacy.query",
-            {"type": "object", "properties": {}, "required": []},
-            InvocationPolicy.NATURAL_LANGUAGE_ALLOWED,
-            CapabilityEffect.READ_ONLY,
-            required_capabilities=("local.lookup",),
         )
         self.assertEqual(legacy_capability.required_capabilities, ("local.lookup",))
         self.assertEqual(
-            CallerCapability("package/source", "source.query", 3, 4).module_id,
+            validate_contract(
+                CallerCapability("package/source", "source.query", 3, 4)
+            ).module_id,
             "package/source",
         )
         self.assertTrue(get_type_hints(DependencyInvoker.invoke))
@@ -186,7 +214,9 @@ class B03ContractTests(unittest.TestCase):
         public = OwnerScope.public()
         self.assertEqual(public.kind, OwnershipKind.PUBLIC)
         with self.assertRaises(AttributeError):
-            ResourceMetadata("asset", "image/png", public, 1).scope.user_id = "u"  # type: ignore[misc]
+            validate_contract(
+                ResourceMetadata("asset", "image/png", public, 1)
+            ).scope.user_id = "u"  # type: ignore[misc]
         with self.assertRaises(ValueError):
             Grant(
                 "grant",
@@ -258,49 +288,51 @@ class B03ContractTests(unittest.TestCase):
     def test_cc_b03_03_expected_revisions_are_explicit(self):
         patch = ConfigPatch(
             3,
-            (ConfigFieldUpdate("region", ConfigPatchMode.REPLACE, "cn"),),
+            (ConfigFieldUpdate("region", ConfigUpdateMode.REPLACE, "cn"),),
         )
         self.assertEqual(patch.expected_revision, 3)
         with self.assertRaises(ValueError):
-            ConfigPatch(1, (ConfigFieldUpdate("region", ConfigPatchMode.REPLACE),))
+            ConfigPatch(1, (ConfigFieldUpdate("region", ConfigUpdateMode.REPLACE),))
         with self.assertRaises(ValueError):
-            ConfigPatch(1, (ConfigFieldUpdate("region", ConfigPatchMode.KEEP, "cn"),))
+            ConfigPatch(1, (ConfigFieldUpdate("region", ConfigUpdateMode.KEEP, "cn"),))
         secret_patch = ConfigPatch(
             3,
             (
                 ConfigFieldUpdate(
                     "api_key",
-                    ConfigPatchMode.REPLACE,
+                    ConfigUpdateMode.REPLACE,
                     secret=SecretMaterial(b"opaque-input"),
                 ),
             ),
-            (ConfigField("api_key", sensitive=True),),
+            (validate_contract(ConfigField("api_key", sensitive=True)),),
         )
         self.assertIsNotNone(secret_patch.updates[0].secret)
         with self.assertRaises(ValueError):
             ConfigPatch(
                 3,
-                (ConfigFieldUpdate("api_key", ConfigPatchMode.REPLACE, "RAW_LEAK"),),
-                (ConfigField("api_key", sensitive=True),),
+                (ConfigFieldUpdate("api_key", ConfigUpdateMode.REPLACE, "RAW_LEAK"),),
+                (validate_contract(ConfigField("api_key", sensitive=True)),),
             )
         with self.assertRaises(ValueError):
             ConfigPatch(
                 3,
-                (ConfigFieldUpdate("unknown", ConfigPatchMode.REPLACE, "value"),),
-                (ConfigField("region"),),
+                (ConfigFieldUpdate("unknown", ConfigUpdateMode.REPLACE, "value"),),
+                (validate_contract(ConfigField("region")),),
             )
         for field in ("accesskey", "passwd", "pwd", "session_id", "signingkey"):
             with self.subTest(field=field), self.assertRaises(ValueError):
-                ConfigFieldUpdate(field, ConfigPatchMode.REPLACE, "RAW_LEAK")
+                ConfigFieldUpdate(field, ConfigUpdateMode.REPLACE, "RAW_LEAK")
         with self.assertRaises(ValueError):
             ConfigPatch(
                 3,
-                (ConfigFieldUpdate("pin", ConfigPatchMode.REPLACE, "RAW_LEAK"),),
+                (ConfigFieldUpdate("pin", ConfigUpdateMode.REPLACE, "RAW_LEAK"),),
             )
 
-        target = ConfigTarget("user", "steam")
+        target = validate_contract(ConfigTarget("user", "steam"))
         receipt = SecretReceipt(
-            SecretRef("secret_pin", "user", "steam", "pin", "op-config"),
+            validate_contract(
+                SecretRef("secret_pin", "user", "steam", "pin", "op-config")
+            ),
             SecretTarget("user", "steam", "pin"),
             "op-config",
             3,
@@ -311,10 +343,10 @@ class B03ContractTests(unittest.TestCase):
             3,
             (
                 ConfigFieldUpdate(
-                    "pin", ConfigPatchMode.REPLACE, secret=SecretMaterial(b"opaque")
+                    "pin", ConfigUpdateMode.REPLACE, secret=SecretMaterial(b"opaque")
                 ),
             ),
-            (ConfigField("pin", sensitive=True),),
+            (validate_contract(ConfigField("pin", sensitive=True)),),
             "op-config",
         )
         persisted = staged.to_persisted(target, {"pin": receipt})
@@ -338,9 +370,13 @@ class B03ContractTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             PersistedConfigPatch.validate_for(forged_target, persisted)
         with self.assertRaises(ValueError):
-            PersistedConfigPatch.validate_for(ConfigTarget("other", "steam"), persisted)
+            PersistedConfigPatch.validate_for(
+                validate_contract(ConfigTarget("other", "steam")), persisted
+            )
         with self.assertRaises(ValueError):
-            PersistedConfigPatch.validate_for(ConfigTarget("user", "other"), persisted)
+            PersistedConfigPatch.validate_for(
+                validate_contract(ConfigTarget("user", "other")), persisted
+            )
         with self.assertRaises(ValueError):
             staged.to_persisted(target, {})
         with self.assertRaises(ValueError):
@@ -356,7 +392,9 @@ class B03ContractTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             staged.to_persisted(target, DuplicateReceiptMapping())
         wrong_target_receipt = SecretReceipt(
-            SecretRef("secret_other", "user-b", "steam", "pin", "op-config"),
+            validate_contract(
+                SecretRef("secret_other", "user-b", "steam", "pin", "op-config")
+            ),
             SecretTarget("user-b", "steam", "pin"),
             "op-config",
             3,
@@ -366,28 +404,42 @@ class B03ContractTests(unittest.TestCase):
             staged.to_persisted(target, {"pin": wrong_target_receipt})
         for bad_receipt in (
             SecretReceipt(
-                SecretRef("secret_wrong_module", "user", "other", "pin", "op-config"),
+                validate_contract(
+                    SecretRef(
+                        "secret_wrong_module", "user", "other", "pin", "op-config"
+                    )
+                ),
                 SecretTarget("user", "other", "pin"),
                 "op-config",
                 3,
                 9,
             ),
             SecretReceipt(
-                SecretRef("secret_wrong_revision", "user", "steam", "pin", "op-config"),
+                validate_contract(
+                    SecretRef(
+                        "secret_wrong_revision", "user", "steam", "pin", "op-config"
+                    )
+                ),
                 SecretTarget("user", "steam", "pin"),
                 "op-config",
                 4,
                 10,
             ),
             SecretReceipt(
-                SecretRef("secret_wrong_operation", "user", "steam", "pin", "other-op"),
+                validate_contract(
+                    SecretRef(
+                        "secret_wrong_operation", "user", "steam", "pin", "other-op"
+                    )
+                ),
                 SecretTarget("user", "steam", "pin"),
                 "other-op",
                 3,
                 11,
             ),
             SecretReceipt(
-                SecretRef("secret_active", "user", "steam", "pin", "op-config"),
+                validate_contract(
+                    SecretRef("secret_active", "user", "steam", "pin", "op-config")
+                ),
                 SecretTarget("user", "steam", "pin"),
                 "op-config",
                 3,
@@ -397,42 +449,62 @@ class B03ContractTests(unittest.TestCase):
         ):
             with self.assertRaises(ValueError):
                 staged.to_persisted(target, {"pin": bad_receipt})
-        snapshot = ConfigSnapshot(
-            4,
-            {"region": "cn"},
-            (SecretMetadata("pin", ref, 4, SecretMetadataState.ACTIVE),),
+        snapshot = validate_contract(
+            ConfigSnapshot(
+                4,
+                {"region": "cn"},
+                (
+                    validate_contract(
+                        SecretMetadata("pin", ref, 4, SecretMetadataState.ACTIVE)
+                    ),
+                ),
+            )
         )
         self.assertEqual(snapshot.secret_metadata[0].revision, 4)
         with self.assertRaises(ValueError):
-            ConfigSnapshot(4, {"PIN": "RAW_LEAK"})
+            validate_contract(ConfigSnapshot(4, {"PIN": "RAW_LEAK"}))
 
     def test_cc_b03_04_rejects_urls_paths_headers_and_sensitive_values(self):
         with self.assertRaises(ValueError):
-            SourceDeclaration("steam", "https://api.example.test")
+            validate_contract(SourceDeclaration("steam", "https://api.example.test"))
         with self.assertRaises(ValueError):
-            SourceDeclaration("steam", "api/../private")
+            validate_contract(SourceDeclaration("steam", "api/../private"))
         with self.assertRaises(ValueError):
-            ConfigFieldUpdate("access_token", ConfigPatchMode.REPLACE, "secret")
+            ConfigFieldUpdate("access_token", ConfigUpdateMode.REPLACE, "secret")
         for field in ("api_key", "API-KEY", "cookie_value", "AUTHORIZATION"):
             with self.subTest(field=field), self.assertRaises(ValueError):
-                ConfigFieldUpdate(field, ConfigPatchMode.REPLACE, "RAW_LEAK")
+                ConfigFieldUpdate(field, ConfigUpdateMode.REPLACE, "RAW_LEAK")
         with self.assertRaises(ValueError):
-            CollectionDescriptor("../private", 1, OwnershipKind.PUBLIC)
+            validate_contract(
+                CollectionDescriptor("../private", 1, OwnershipKind.PUBLIC)
+            )
         requests = (
-            lambda: HttpRequest("steam", "/path", headers={" Authorization": "x"}),
-            lambda: HttpRequest(
-                "steam", "/path", headers={"X-Trace": "x\r\nAuthorization: x"}
+            lambda: validate_contract(
+                HttpRequest("steam", "/path", headers={" Authorization": "x"})
             ),
-            lambda: HttpRequest("steam", "/%2e%2e/private"),
-            lambda: HttpRequest("steam", "/%252e%252e/private"),
-            lambda: HttpRequest("steam", "//authority/private"),
-            lambda: HttpRequest("steam", "/path", headers={"Cookie": "x"}),
-            lambda: HttpRequest("steam", "/．．/private"),
-            lambda: HttpRequest("steam", "/／evil.example/private"),
-            lambda: HttpRequest("steam", "/ok\x7f"),
-            lambda: HttpRequest("steam", "/path", headers={"Proxy-Authorization": "x"}),
-            lambda: HttpRequest("steam", "/path", headers={"Authentication": "x"}),
-            lambda: HttpRequest("steam", "/path", headers={"X-Authorization": "x"}),
+            lambda: validate_contract(
+                HttpRequest(
+                    "steam", "/path", headers={"X-Trace": "x\r\nAuthorization: x"}
+                )
+            ),
+            lambda: validate_contract(HttpRequest("steam", "/%2e%2e/private")),
+            lambda: validate_contract(HttpRequest("steam", "/%252e%252e/private")),
+            lambda: validate_contract(HttpRequest("steam", "//authority/private")),
+            lambda: validate_contract(
+                HttpRequest("steam", "/path", headers={"Cookie": "x"})
+            ),
+            lambda: validate_contract(HttpRequest("steam", "/．．/private")),
+            lambda: validate_contract(HttpRequest("steam", "/／evil.example/private")),
+            lambda: validate_contract(HttpRequest("steam", "/ok\x7f")),
+            lambda: validate_contract(
+                HttpRequest("steam", "/path", headers={"Proxy-Authorization": "x"})
+            ),
+            lambda: validate_contract(
+                HttpRequest("steam", "/path", headers={"Authentication": "x"})
+            ),
+            lambda: validate_contract(
+                HttpRequest("steam", "/path", headers={"X-Authorization": "x"})
+            ),
         )
         for build_request in requests:
             with self.subTest(request=build_request), self.assertRaises(ValueError):
@@ -443,7 +515,9 @@ class B03ContractTests(unittest.TestCase):
                 raise RuntimeError("RAW_LEAK_FROM_HEADERS")
 
         with self.assertRaises(ValueError) as header_error:
-            HttpRequest("steam", "/path", headers=ExplodingHeaders())
+            request = HttpRequest("steam", "/path")
+            object.__setattr__(request, "headers", ExplodingHeaders())
+            validate_contract(request)
         self.assertEqual(
             str(header_error.exception),
             "HTTP credentials are managed by the declared source",
@@ -457,8 +531,8 @@ class B03ContractTests(unittest.TestCase):
     def test_cc_b03_05_expiry_generation_and_uow_lifecycle_are_typed(self):
         expiry = datetime.now(UTC) + timedelta(minutes=5)
         principal = Principal("user-1", "qq", "10001")
-        conversation = ConversationRef(
-            "qq", ConversationKind.DIRECT, "chat-1", "route-1"
+        conversation = validate_contract(
+            ConversationRef("qq", ConversationKind.DIRECT, "chat-1", "route-1")
         )
         binding = Binding(
             "binding-1",
@@ -619,16 +693,16 @@ class B03ContractTests(unittest.TestCase):
         self.assertNotIn("bytes", str(repository_hints))
 
     def test_cc_b03_06_subscription_placeholder_has_stable_semantics(self):
-        error = SubscriptionUnavailable()
-        self.assertEqual(error.code, "subscription_unavailable")
-        self.assertEqual(str(error), error.message)
+        error = ServiceUnavailable()
+        self.assertEqual(error.code, "service_unavailable")
+        self.assertEqual(str(error), "service is unavailable")
         self.assertEqual(
-            str(signature(SubscriptionOperations.create)),
-            "(self, invocation: 'InvocationView', subscription: 'SubscriptionView') -> 'SubscriptionView'",
+            str(signature(SubscriptionOperations.create_request)),
+            "(self, invocation: 'InvocationView', request: 'SubscriptionRequest') -> 'SubscriptionView'",
         )
         self.assertEqual(
-            str(signature(SubscriptionOperations.revise)),
-            "(self, invocation: 'InvocationView', subscription: 'SubscriptionView') -> 'SubscriptionView'",
+            str(signature(SubscriptionOperations.revise_request)),
+            "(self, invocation: 'InvocationView', request: 'SubscriptionRequest') -> 'SubscriptionView'",
         )
         self.assertEqual(
             str(signature(SubscriptionOperations.list_current)),
@@ -665,11 +739,13 @@ class B03ContractTests(unittest.TestCase):
         self.assertTrue(get_type_hints(ModuleRegistrationLookup.require_registered))
 
     def test_cc_b03_05_registry_global_module_id_flows_through_contract(self):
-        declared_collection = CollectionDescriptor(
-            "items",
-            1,
-            OwnershipKind.USER,
-            (CollectionIndex("by_name", "name"),),
+        declared_collection = validate_contract(
+            CollectionDescriptor(
+                "items",
+                1,
+                OwnershipKind.USER,
+                (validate_contract(CollectionIndex("by_name", "name")),),
+            )
         )
 
         class EvilSchemaVersion(int):
@@ -679,24 +755,32 @@ class B03ContractTests(unittest.TestCase):
             __hash__ = int.__hash__
 
         with self.assertRaises(ValueError):
-            CollectionDescriptor("items", EvilSchemaVersion(999), OwnershipKind.USER)
-        module = ModuleManifest(
-            "module-a",
-            "route_a",
-            ModuleCategory.GAME,
-            "demo.factory:create",
-            "1.0.0",
-            (),
-            collections=(declared_collection,),
+            validate_contract(
+                CollectionDescriptor(
+                    "items", EvilSchemaVersion(999), OwnershipKind.USER
+                )
+            )
+        module = validate_contract(
+            ModuleManifest(
+                "module-a",
+                "route_a",
+                ModuleCategory.GAME,
+                "demo.factory:create",
+                "1.0.0",
+                (),
+                collections=(declared_collection,),
+            )
         )
-        package = PackageManifest(
-            "package",
-            "1.0.0",
-            "1.1.0",
-            (module,),
-            "author",
-            "MIT",
-            "https://example.test/package",
+        package = validate_contract(
+            PackageManifest(
+                "package",
+                "1.0.0",
+                "2.0",
+                (module,),
+                "author",
+                "MIT",
+                "https://example.test/package",
+            )
         )
 
         class RegistryBackedLookup:
@@ -714,7 +798,7 @@ class B03ContractTests(unittest.TestCase):
         registry = Registry()
         snapshot = registry.register_package(
             package,
-            {"module-a": ModuleHandlers({}, {}, {})},
+            {"module-a": validate_contract(ModuleHandlers({}, {}, {}))},
         )
         registered = snapshot.module("package/module-a")
         registration = asyncio.run(
@@ -725,11 +809,11 @@ class B03ContractTests(unittest.TestCase):
         self.assertEqual(registration.collections, (declared_collection,))
         self.assertIn(declared_collection, registration.collections)
         self.assertNotIn(
-            CollectionDescriptor("items", 2, OwnershipKind.USER),
+            validate_contract(CollectionDescriptor("items", 2, OwnershipKind.USER)),
             registration.collections,
         )
         self.assertNotIn(
-            CollectionDescriptor("other", 1, OwnershipKind.USER),
+            validate_contract(CollectionDescriptor("other", 1, OwnershipKind.USER)),
             registration.collections,
         )
         forged_descriptor = object.__new__(CollectionDescriptor)
@@ -746,7 +830,9 @@ class B03ContractTests(unittest.TestCase):
                 registration.epoch,
                 (forged_descriptor,),
             )
-        forged_extra = CollectionDescriptor("forged", 1, OwnershipKind.USER)
+        forged_extra = validate_contract(
+            CollectionDescriptor("forged", 1, OwnershipKind.USER)
+        )
         forged_snapshot = ModuleRegistrationSnapshot(
             module_id,
             True,
@@ -760,7 +846,7 @@ class B03ContractTests(unittest.TestCase):
         def consume_collection(snapshot, descriptor, revision, epoch):
             if snapshot.registry_revision != revision or snapshot.epoch != epoch:
                 raise ValueError("module registration snapshot is stale")
-            descriptor = CollectionDescriptor.validate(descriptor)
+            descriptor = CollectionDescriptor_validate(descriptor)
             if descriptor not in snapshot.collections:
                 raise ValueError("collection is not declared by the registered module")
             return descriptor
@@ -792,23 +878,27 @@ class B03ContractTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             consume_collection(
                 refreshed,
-                CollectionDescriptor("items", 2, OwnershipKind.USER),
+                validate_contract(CollectionDescriptor("items", 2, OwnershipKind.USER)),
                 refreshed.registry_revision,
                 refreshed.epoch,
             )
         with self.assertRaises(ValueError):
             consume_collection(
                 refreshed,
-                CollectionDescriptor(
-                    "items",
-                    1,
-                    OwnershipKind.USER,
-                    (CollectionIndex("by_other", "name"),),
+                validate_contract(
+                    CollectionDescriptor(
+                        "items",
+                        1,
+                        OwnershipKind.USER,
+                        (validate_contract(CollectionIndex("by_other", "name")),),
+                    )
                 ),
                 refreshed.registry_revision,
                 refreshed.epoch,
             )
-        self.assertEqual(ConfigTarget("principal", module_id).module_id, module_id)
+        self.assertEqual(
+            validate_contract(ConfigTarget("principal", module_id)).module_id, module_id
+        )
         binding = Binding(
             "binding",
             1,
@@ -830,8 +920,8 @@ class B03ContractTests(unittest.TestCase):
             module_id,
         )
         self.assertEqual(
-            SecretRef(
-                "secret_issued", "principal", module_id, "credential", "op"
+            validate_contract(
+                SecretRef("secret_issued", "principal", module_id, "credential", "op")
             ).module_id,
             module_id,
         )
@@ -884,7 +974,7 @@ class B03ContractTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             ModuleRegistrationSnapshot(evil, True, 1, 1)
         with self.assertRaises(ValueError):
-            ConfigTarget("principal", evil)
+            validate_contract(ConfigTarget("principal", evil))
         with self.assertRaises(ValueError):
             Binding(
                 "binding",
@@ -901,7 +991,9 @@ class B03ContractTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             SecretTarget("principal", evil, "credential")
         with self.assertRaises(ValueError):
-            SecretRef("secret_issued", "principal", evil, "credential", "op")
+            validate_contract(
+                SecretRef("secret_issued", "principal", evil, "credential", "op")
+            )
         with self.assertRaises(ValueError):
             SecretOwner("principal", evil, "credential", "op")
 
@@ -920,7 +1012,7 @@ class B03ContractTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     ModuleRegistrationSnapshot(invalid, True, 1, 1)
                 with self.assertRaises(ValueError):
-                    ConfigTarget("principal", invalid)
+                    validate_contract(ConfigTarget("principal", invalid))
                 with self.assertRaises(ValueError):
                     Binding(
                         "binding",
@@ -939,7 +1031,11 @@ class B03ContractTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     SecretOwner("principal", invalid, "credential", "op")
                 with self.assertRaises(ValueError):
-                    SecretRef("secret_issued", "principal", invalid, "credential", "op")
+                    validate_contract(
+                        SecretRef(
+                            "secret_issued", "principal", invalid, "credential", "op"
+                        )
+                    )
                 with self.assertRaises(ValueError):
                     ModuleStatus(
                         invalid,
@@ -964,7 +1060,9 @@ class B03ContractTests(unittest.TestCase):
         ):
             self.assertTrue(get_type_hints(getattr(SecretStore, method)), method)
         owner = SecretOwner("user", "steam", "credential", "op-1")
-        secret_ref = SecretRef("secret_new", "user", "steam", "credential", "op-1")
+        secret_ref = validate_contract(
+            SecretRef("secret_new", "user", "steam", "credential", "op-1")
+        )
         receipt = SecretReceipt(
             secret_ref,
             SecretTarget("user", "steam", "credential"),
@@ -1008,7 +1106,7 @@ class B03ContractTests(unittest.TestCase):
                 operation_id="op-1",
                 owner=owner,
             )
-        self.assertEqual(SecretRef.validate(secret_ref), secret_ref)
+        self.assertEqual(SecretRef_validate(secret_ref), secret_ref)
         self.assertEqual(SecretReceipt.validate(receipt), receipt)
         self.assertEqual(copy.copy(receipt), receipt)
         self.assertEqual(copy.deepcopy(receipt), receipt)
@@ -1027,12 +1125,14 @@ class B03ContractTests(unittest.TestCase):
                     raise ValueError("stage requires opaque bytes")
                 token = f"secret_issued_{len(self.issued) + 1}"
                 staged_receipt = SecretReceipt(
-                    SecretRef(
-                        token,
-                        target.principal_id,
-                        target.module_id,
-                        target.field,
-                        operation_id,
+                    validate_contract(
+                        SecretRef(
+                            token,
+                            target.principal_id,
+                            target.module_id,
+                            target.field,
+                            operation_id,
+                        )
                     ),
                     target,
                     operation_id,
@@ -1089,20 +1189,20 @@ class B03ContractTests(unittest.TestCase):
                 self.calls += 1
                 self.target = target
                 self.patch = patch
-                return ConfigSnapshot(2, {}, target=target)
+                return validate_contract(ConfigSnapshot(2, {}, target=target))
 
-        config_target = ConfigTarget("user", "steam")
+        config_target = validate_contract(ConfigTarget("user", "steam"))
         secret_target = SecretTarget("user", "steam", "credential")
         persisted_template = ConfigPatch(
             1,
             (
                 ConfigFieldUpdate(
                     "credential",
-                    ConfigPatchMode.REPLACE,
+                    ConfigUpdateMode.REPLACE,
                     secret=SecretMaterial(b"opaque"),
                 ),
             ),
-            (ConfigField("credential", sensitive=True),),
+            (validate_contract(ConfigField("credential", sensitive=True)),),
             "op-1",
         )
 
@@ -1123,7 +1223,11 @@ class B03ContractTests(unittest.TestCase):
             config_target,
             {
                 "credential": SecretReceipt(
-                    SecretRef("secret_unissued", "user", "steam", "credential", "op-1"),
+                    validate_contract(
+                        SecretRef(
+                            "secret_unissued", "user", "steam", "credential", "op-1"
+                        )
+                    ),
                     secret_target,
                     "op-1",
                     1,
@@ -1156,7 +1260,9 @@ class B03ContractTests(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             asyncio.run(
-                validate_then_cas(ConfigTarget("user", "other"), persisted_patch)
+                validate_then_cas(
+                    validate_contract(ConfigTarget("user", "other")), persisted_patch
+                )
             )
         self.assertEqual(repository.calls, 1)
         with self.assertRaises(ValueError):
@@ -1165,12 +1271,14 @@ class B03ContractTests(unittest.TestCase):
             )
         self.assertEqual(repository.calls, 1)
         wrong_target = SecretReceipt(
-            SecretRef(
-                issued_receipt.secret_ref.token,
-                "other-user",
-                "steam",
-                "credential",
-                "op-1",
+            validate_contract(
+                SecretRef(
+                    issued_receipt.secret_ref.token,
+                    "other-user",
+                    "steam",
+                    "credential",
+                    "op-1",
+                )
             ),
             SecretTarget("other-user", "steam", "credential"),
             "op-1",
@@ -1196,14 +1304,16 @@ class B03ContractTests(unittest.TestCase):
             )
         self.assertTrue(get_type_hints(SecretReceiptLedger.claim_for_config))
         scope = OwnerScope.user("user-1")
-        request = CacheLookup(CacheLookupStatus.MISS)
+        request = validate_contract(CacheLookup(CacheLookupStatus.MISS))
         self.assertEqual(request.status, CacheLookupStatus.MISS)
-        entry = CacheEntry(
-            "key", {"value": 1}, datetime.now(UTC) + timedelta(seconds=30)
+        entry = validate_contract(
+            CacheEntry("key", {"value": 1}, datetime.now(UTC) + timedelta(seconds=30))
         )
-        hit = CacheLookup(CacheLookupStatus.HIT, entry)
+        hit = validate_contract(CacheLookup(CacheLookupStatus.HIT, entry))
         self.assertEqual(hit.entry, entry)
-        metadata = ResourceMetadata("asset-1", "image/png", scope, 10, temporary=True)
+        metadata = validate_contract(
+            ResourceMetadata("asset-1", "image/png", scope, 10, temporary=True)
+        )
         self.assertEqual(metadata.scope.user_id, "user-1")
         self.assertEqual(CacheVisibility.USER.value, "user")
         forged = object.__new__(OwnerScope)
@@ -1227,7 +1337,9 @@ class B03ContractTests(unittest.TestCase):
                     "key", CacheVisibility.AUTHORIZED, forged_nested_scope
                 )
             )
-        metadata = ResourceMetadata("asset-2", "image/png", scope, 4, revision=2)
+        metadata = validate_contract(
+            ResourceMetadata("asset-2", "image/png", scope, 4, revision=2)
+        )
         stage = FileStage("op-file", "asset-2", scope, 4, metadata)
         self.assertEqual(stage.scope, scope)
         replacement = OwnerScope.user("other-user")
@@ -1236,32 +1348,41 @@ class B03ContractTests(unittest.TestCase):
         self.assertEqual(entry.revision, 1)
         self.assertEqual(metadata.revision, 2)
 
-    def test_cc_b03_01_old_b02_manifests_remain_compatible(self):
-        capability = CapabilityDescriptor(
-            "lookup",
-            {"type": "object"},
-            InvocationPolicy.COMMAND_ONLY,
-            CapabilityEffect.READ_ONLY,
-            output_version="1.0.0",
+    def test_cc_b03_01_unsupported_output_is_rejected_under_module_abi(self):
+        capability = validate_contract(
+            CapabilityDescriptor(
+                "lookup",
+                {"type": "object"},
+                InvocationPolicy.COMMAND_ONLY,
+                CapabilityEffect.READ_ONLY,
+                output_version="1.8.0",
+            )
         )
-        module = ModuleManifest(
-            "demo",
-            "demo",
-            ModuleCategory.GAME,
-            "demo:factory",
-            "1.0.0",
-            (capability,),
+        module = validate_contract(
+            ModuleManifest(
+                "demo",
+                "demo",
+                ModuleCategory.GAME,
+                "demo:factory",
+                "1.0.0",
+                (capability,),
+            )
         )
-        package = PackageManifest(
-            "demo",
-            "1.0.0",
-            "1.0.0",
-            (module,),
-            "author",
-            "license",
-            "source",
+        package = validate_contract(
+            PackageManifest(
+                "demo",
+                "1.0.0",
+                "2.0",
+                (module,),
+                "author",
+                "license",
+                "source",
+            )
         )
-        self.assertEqual(package.contract_version, "1.0.0")
+        self.assertEqual(package.contract_version, "2.0")
+        for version in tuple("1.%d.0" % n for n in range(8)) + ("2.0.0",):
+            with self.subTest(version=version), self.assertRaises(ValueError):
+                validate_contract(replace(capability, output_version=version))
 
 
 if __name__ == "__main__":

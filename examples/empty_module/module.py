@@ -1,6 +1,6 @@
 """No-op factory ABI example; importing this module has no side effects."""
 
-from yomihime_sdk import HealthReport, ModuleHandlers, ModuleServices
+from yomihime_game_link_sdk.services import HealthReport, ModuleHandlers, ModuleServices
 
 
 class Factory:

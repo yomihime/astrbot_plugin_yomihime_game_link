@@ -20,15 +20,18 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Protocol
 
-from ..api.contexts import InvocationOrigin, InvocationView
-from ..api.services import (
+from yomihime_game_link_sdk.contexts import InvocationOrigin, InvocationView
+from yomihime_game_link_sdk.storage import GrantReference, SecretRef
+
+from ..core.context_issuer import ContextIssuer, InvalidInvocation
+from ..core.contracts.services import (
     Grant,
     GrantStatus,
     LoginSession,
     LoginSessionStatus,
 )
-from ..api.storage import GrantReference, SecretRef
-from ..core.context_issuer import ContextIssuer, InvalidInvocation
+from ..core.contracts.storage import GrantReference_validate
+from ..core.contracts.validation_boundary import validate_contract
 from ..core.ports import (
     AdmissionLease,
     AdmissionPort,
@@ -108,7 +111,7 @@ class AuthorizationStatus:
 
     def __post_init__(self) -> None:
         if self.grant is not None:
-            object.__setattr__(self, "grant", GrantReference.validate(self.grant))
+            object.__setattr__(self, "grant", GrantReference_validate(self.grant))
         if self.grant_status is not None and not isinstance(
             self.grant_status, GrantStatus
         ):
@@ -300,6 +303,7 @@ class AuthorizationService:
         *,
         allow_derived_command: bool = False,
     ) -> tuple[InvocationView, str, str]:
+        validate_contract(invocation)
         try:
             checked = self._issuer.require_adapter(invocation)
         except (InvalidInvocation, TypeError, ValueError):
@@ -357,6 +361,7 @@ class AuthorizationService:
         return checked, principal_id, checked.module_id
 
     def _check_live(self, invocation: InvocationView) -> None:
+        validate_contract(invocation)
         try:
             self._issuer.require(invocation)
             if self._admission is not None:
@@ -380,6 +385,7 @@ class AuthorizationService:
     async def begin_login(self, invocation: InvocationView) -> str:
         """Start a new login generation and return only its opaque session id."""
 
+        validate_contract(invocation)
         checked, principal_id, module_id = await self._scope(invocation)
         async with self._mutation(f"authorization-login:{module_id}"):
             self._check_live(checked)
@@ -388,6 +394,7 @@ class AuthorizationService:
     async def _begin_login_locked(
         self, checked: InvocationView, principal_id: str, module_id: str
     ) -> str:
+        validate_contract(checked)
         key = (principal_id, module_id)
         expected = self._generations.get(key, 0)
         for _ in range(self._max_generation_retries):
@@ -426,6 +433,7 @@ class AuthorizationService:
     async def reopen(self, invocation: InvocationView) -> str:
         """Start a fresh generation; the old callback remains unusable."""
 
+        validate_contract(invocation)
         return await self.begin_login(invocation)
 
     reopen_login = reopen
@@ -451,6 +459,7 @@ class AuthorizationService:
     async def _current_grant(
         self, principal_id: str, module_id: str, grant_ref: GrantReference
     ) -> Grant:
+        validate_contract(grant_ref)
         try:
             grant = await self._grants.current_grant(grant_ref.grant_id)
         except Exception:
@@ -490,6 +499,7 @@ class AuthorizationService:
     async def status_details(self, invocation: InvocationView) -> AuthorizationStatus:
         """Read current redacted login/grant status for a command invocation."""
 
+        validate_contract(invocation)
         _, principal_id, module_id = await self._scope(invocation)
         try:
             grants = await self._grants.list_for(principal_id, module_id)
@@ -529,7 +539,7 @@ class AuthorizationService:
             )
         current = usable[0]
         return AuthorizationStatus(
-            GrantReference(current.grant_id, current.revision),
+            validate_contract(GrantReference(current.grant_id, current.revision)),
             GrantStatus.ACTIVE,
             True,
             login_status,
@@ -539,6 +549,7 @@ class AuthorizationService:
     async def status(self, invocation: InvocationView) -> GrantReference | None:
         """Return a current usable grant reference, never its secret."""
 
+        validate_contract(invocation)
         snapshot = await self.status_details(invocation)
         return snapshot.grant if snapshot.grant_status is GrantStatus.ACTIVE else None
 
@@ -550,6 +561,7 @@ class AuthorizationService:
         and that its secret reference is available.
         """
 
+        validate_contract(invocation)
         checked, principal_id, module_id = await self._scope(invocation)
         return await self._require_current_grant_for_scope(
             checked, principal_id, module_id
@@ -566,6 +578,7 @@ class AuthorizationService:
         the root-only ``_scope`` default.
         """
 
+        validate_contract(invocation)
         checked, principal_id, module_id = await self._scope(
             invocation, allow_derived_command=True
         )
@@ -578,10 +591,13 @@ class AuthorizationService:
     async def _require_current_grant_for_scope(
         self, checked: InvocationView, principal_id: str, module_id: str
     ) -> Grant:
+        validate_contract(checked)
         if checked.grant_id is None or checked.grant_revision is None:
             raise AuthorizationPermissionError()
         try:
-            reference = GrantReference(checked.grant_id, checked.grant_revision)
+            reference = validate_contract(
+                GrantReference(checked.grant_id, checked.grant_revision)
+            )
         except (TypeError, ValueError):
             raise AuthorizationPermissionError() from None
         grant = await self._current_grant(principal_id, module_id, reference)
@@ -612,6 +628,7 @@ class AuthorizationService:
         module_id: str,
         reference: GrantReference,
     ) -> bool:
+        validate_contract(reference)
         return (
             grant.grant_id == reference.grant_id
             and grant.revision == reference.revision
@@ -626,6 +643,8 @@ class AuthorizationService:
     ) -> tuple[InvocationView, AdmissionLease, AdmissionLease]:
         """Fence an exact same-module child in a COMMAND invocation chain."""
 
+        validate_contract(parent)
+        validate_contract(child)
         try:
             checked_parent = self._issuer.require_adapter(parent)
             checked_child = self._issuer.require_adapter(child)
@@ -671,6 +690,8 @@ class AuthorizationService:
         its root-only default. Only DependencyInvoker receives this method.
         """
 
+        validate_contract(parent)
+        validate_contract(child)
         self._check_dependency_views(parent, child)
         checked, principal_id, module_id = await self._scope(
             parent, allow_derived_command=True
@@ -684,7 +705,9 @@ class AuthorizationService:
         ):
             raise AuthorizationPermissionError()
         try:
-            reference = GrantReference(checked.grant_id, checked.grant_revision)
+            reference = validate_contract(
+                GrantReference(checked.grant_id, checked.grant_revision)
+            )
         except (TypeError, ValueError):
             raise AuthorizationPermissionError() from None
 
@@ -711,6 +734,7 @@ class AuthorizationService:
     ) -> None:
         """Require the exact active scheduler lease attached by this issuer."""
 
+        validate_contract(invocation)
         try:
             checked = self._issuer.require(invocation)
             if (
@@ -730,6 +754,8 @@ class AuthorizationService:
     def _scheduled_grant_is_current(
         self, grant: Grant, invocation: InvocationView, reference: GrantReference
     ) -> bool:
+        validate_contract(invocation)
+        validate_contract(reference)
         return (
             grant.grant_id == reference.grant_id
             and grant.revision == reference.revision
@@ -750,6 +776,7 @@ class AuthorizationService:
         actor/module/grant tuple. Tool and nested views never enter this path.
         """
 
+        validate_contract(invocation)
         if not isinstance(lease, ScheduledLease):
             raise AuthorizationPermissionError()
         self._check_scheduled_live(invocation, lease)
@@ -760,7 +787,9 @@ class AuthorizationService:
         ):
             raise AuthorizationPermissionError()
         try:
-            reference = GrantReference(invocation.grant_id, invocation.grant_revision)
+            reference = validate_contract(
+                GrantReference(invocation.grant_id, invocation.grant_revision)
+            )
         except (TypeError, ValueError):
             raise AuthorizationPermissionError() from None
 
@@ -819,6 +848,7 @@ class AuthorizationService:
         *,
         generation: int | None = None,
     ) -> GrantReference:
+        validate_contract(invocation)
         checked, _, module_id = await self._scope(invocation)
         async with self._mutation(f"authorization-complete:{module_id}"):
             self._check_live(checked)
@@ -836,6 +866,7 @@ class AuthorizationService:
     ) -> GrantReference:
         """Commit a verified exchange only for the current login generation."""
 
+        validate_contract(invocation)
         checked, principal_id, module_id = await self._scope(invocation)
         try:
             session_id = _bounded_text(session_id, "session_id")
@@ -985,12 +1016,14 @@ class AuthorizationService:
                 checked.adapter_id or "",
                 checked.conversation_id or "",
             )
-        return GrantReference(persisted.grant_id, persisted.revision)
+        return validate_contract(GrantReference(persisted.grant_id, persisted.revision))
 
     complete = complete_login
     confirm = complete_login
 
     async def revoke(self, invocation: InvocationView, grant: GrantReference) -> None:
+        validate_contract(invocation)
+        validate_contract(grant)
         checked, _, module_id = await self._scope(invocation)
         async with self._mutation(f"authorization-revoke:{module_id}"):
             self._check_live(checked)
@@ -1001,9 +1034,11 @@ class AuthorizationService:
     ) -> None:
         """CAS-revoke a user-owned grant and invalidate private data."""
 
+        validate_contract(invocation)
+        validate_contract(grant)
         _, principal_id, module_id = await self._scope(invocation)
         try:
-            grant = GrantReference.validate(grant)
+            grant = GrantReference_validate(grant)
         except (TypeError, ValueError):
             raise AuthorizationPermissionError() from None
         current = await self._current_grant(principal_id, module_id, grant)

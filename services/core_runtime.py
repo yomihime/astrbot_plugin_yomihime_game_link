@@ -6,7 +6,7 @@ import asyncio
 import inspect
 import re
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from math import isfinite
 from pathlib import Path
@@ -14,30 +14,44 @@ from time import monotonic
 from types import MappingProxyType
 from typing import Protocol
 
-from ..api.administration import AdminAuthorizationDenied, AdminOperation
-from ..api.contexts import InvocationOrigin, InvocationView
-from ..api.display import DisplayLimits, DisplayRenderer, Privacy
-from ..api.manifests import (
+from yomihime_game_link_sdk.contexts import (
+    InvocationOrigin,
+    InvocationView,
+    MessageContext,
+)
+from yomihime_game_link_sdk.declarations import (
     CapabilityEffect,
     CommandDescriptor,
     ModuleManifest,
     PrivacyFloor,
     ToolDescriptor,
 )
-from ..api.results import CapabilityResult
-from ..api.services import CapabilityHealth, ConfigTarget
-from ..api.storage import GrantReference
-from ..api.subscriptions import CadenceConfiguration, ConversationKind, ConversationRef
+from yomihime_game_link_sdk.display import DisplayLimits, DisplayRenderer, Privacy
+from yomihime_game_link_sdk.errors import AccessDenied, InvalidInvocation
+from yomihime_game_link_sdk.results import CapabilityResult
+from yomihime_game_link_sdk.services import CapabilityHealth, ConfigTarget
+from yomihime_game_link_sdk.storage import GrantReference
+from yomihime_game_link_sdk.subscriptions import ConversationKind, ConversationRef
+
 from ..core.context_issuer import ContextIssuer
+from ..core.contracts.administration import (
+    AdminAuthorizationDenied,
+    AdminOperation,
+    ManagementRecoveryProjection,
+)
+from ..core.contracts.subscriptions import CadenceConfiguration
+from ..core.contracts.validation_boundary import validate_contract
 from ..core.health import HealthResolver
 from ..core.invocation import Gateway
 from ..core.lifecycle import LifecycleController
 from ..core.policy import tool_allowed
 from ..core.ports import (
+    AdmissionLease,
     PublicWebProofValidator,
     SubscriptionGateBinding,
     SubscriptionGateState,
 )
+from ..core.public_errors import public_boundary
 from ..core.registry import RegisteredModule, Registry
 from ..extensions.discovery import DiscoveredPackage
 from ..extensions.loader import ExtensionCandidate
@@ -133,13 +147,17 @@ class HostIngress:
     conversation_kind: ConversationKind
     evidence: object
     grant_reference: GrantReference | None = None
+    message_text: str | None = field(default=None, repr=False)
+    message_correlation: str | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
-        ConversationRef(
-            self.adapter_id,
-            self.conversation_kind,
-            self.conversation_id,
-            self.delivery_route,
+        validate_contract(
+            ConversationRef(
+                self.adapter_id,
+                self.conversation_kind,
+                self.conversation_id,
+                self.delivery_route,
+            )
         )
         if type(self.actor_id) is not str or not self.actor_id.strip():
             raise ValueError("host actor identity is required")
@@ -149,6 +167,143 @@ class HostIngress:
             self.grant_reference, GrantReference
         ):
             raise TypeError("grant_reference must be a GrantReference")
+
+
+@dataclass(frozen=True, slots=True)
+class _ValidatedHostIngress:
+    authority: object
+    ingress: HostIngress
+    origin: InvocationOrigin
+    facts: tuple = field(repr=False)
+
+
+class _HostIngressAuthority:
+    """Trusted composition's shared receiver, also used by CoreRuntime.
+
+    No SDK service can validate/register ingress. The owned acceptance object
+    binds one exact ingress to its receiving authority; message DTOs grant
+    nothing, and every use still checks the live synchronous source predicate.
+    """
+
+    def __init__(self, validator, message_current_validator, require_accepting):
+        self.__validator = validator
+        self.__current = message_current_validator
+        self.__accepting = require_accepting
+        self.__seal = object()
+
+    @staticmethod
+    def _facts(ingress):
+        if type(ingress) is not HostIngress:
+            raise InvalidInvocation()
+        # Re-run the receiving contract even for objects mutated after init.
+        HostIngress.__post_init__(ingress)
+        validate_contract(ingress.grant_reference)
+        return (
+            ingress.adapter_id,
+            ingress.actor_id,
+            ingress.conversation_id,
+            ingress.delivery_route,
+            ingress.conversation_kind,
+            ingress.message_text,
+            ingress.message_correlation,
+        )
+
+    @public_boundary("proof")
+    def _source_current(self, origin, ingress):
+        self.__accepting()
+        self._facts(ingress)
+        predicate = self.__current
+        if not callable(predicate) or inspect.iscoroutinefunction(predicate):
+            raise InvalidInvocation()
+        # Bound validators must belong to the same trusted composition. A
+        # different Host cannot certify the receipt accepted by this receiver.
+        owner = getattr(self.__validator, "__self__", None)
+        if owner is not getattr(predicate, "__self__", None):
+            raise InvalidInvocation()
+        current = predicate(origin, ingress)
+        if inspect.isawaitable(current):
+            if inspect.iscoroutine(current):
+                current.close()
+            raise InvalidInvocation()
+        if current is not True:
+            raise AccessDenied("source_revoked")
+        return True
+
+    @public_boundary("proof")
+    async def validate(self, origin, ingress):
+        validate_contract(origin)
+        self.__accepting()
+        facts = self._facts(ingress)
+        if origin is InvocationOrigin.LLM_TOOL:
+            if ingress.grant_reference is not None:
+                raise InvalidInvocation()
+            validate_contract(
+                MessageContext(ingress.message_text, ingress.message_correlation)
+            )
+        elif (
+            ingress.message_text is not None or ingress.message_correlation is not None
+        ):
+            raise InvalidInvocation()
+        accepted = self.__validator(origin, ingress)
+        if inspect.isawaitable(accepted):
+            accepted = await accepted
+        if accepted is not True:
+            raise AccessDenied()
+        self.__accepting()
+        if self._facts(ingress) != facts:
+            raise InvalidInvocation()
+        if origin is InvocationOrigin.LLM_TOOL:
+            self._source_current(origin, ingress)
+        return _ValidatedHostIngress(self.__seal, ingress, origin, facts)
+
+    @public_boundary("proof")
+    def attach_message(self, issuer, view, accepted):
+        self.__accepting()
+        if (
+            type(accepted) is not _ValidatedHostIngress
+            or accepted.authority is not self.__seal
+            or accepted.origin is not InvocationOrigin.LLM_TOOL
+        ):
+            raise InvalidInvocation()
+        ingress = accepted.ingress
+        if self._facts(ingress) != accepted.facts:
+            raise InvalidInvocation()
+        issuer.require(view)
+        lease = issuer.lease_for(view)
+        if (
+            view.origin is not InvocationOrigin.LLM_TOOL
+            or view.parent_id is not None
+            or view.actor_id != ingress.actor_id
+            or view.conversation_id != ingress.conversation_id
+            or view.adapter_id != ingress.adapter_id
+            or not isinstance(lease, AdmissionLease)
+            or lease.invocation_id != view.invocation_id
+            or lease.module_id != view.module_id
+            or lease.module_epoch != view.module_epoch
+            or lease.capability_id != view.capability_id
+        ):
+            raise InvalidInvocation()
+        self._source_current(accepted.origin, ingress)
+
+        async def source_check():
+            self.__accepting()
+            if self._facts(ingress) != accepted.facts:
+                raise InvalidInvocation()
+            result = self.__validator(accepted.origin, ingress)
+            return await result if inspect.isawaitable(result) else result
+
+        def source_current():
+            if self._facts(ingress) != accepted.facts:
+                raise InvalidInvocation()
+            return self._source_current(accepted.origin, ingress)
+
+        issuer._attach_message(
+            view,
+            text=ingress.message_text,
+            correlation=ingress.message_correlation,
+            source_check=source_check,
+            source_current=source_current,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -223,6 +378,7 @@ class _CoreConversationResolver:
         self._conversations = conversations
 
     async def resolve(self, invocation: InvocationView) -> ConversationRef | None:
+        validate_contract(invocation)
         self._issuer.require(invocation)
         if invocation.adapter_id is None or invocation.conversation_id is None:
             return None
@@ -245,6 +401,7 @@ class _CorePersistedRouteResolver:
     async def resolve_current(
         self, owner_id: str, persisted_recipient: ConversationRef
     ) -> ConversationRef | None:
+        validate_contract(persisted_recipient)
         del owner_id
         current = await self._conversations.current(
             persisted_recipient.adapter_id, persisted_recipient.conversation_id
@@ -254,6 +411,7 @@ class _CorePersistedRouteResolver:
     async def resolve_private(
         self, owner_id: str, persisted_recipient: ConversationRef
     ) -> ConversationRef | None:
+        validate_contract(persisted_recipient)
         current = await self.resolve_current(owner_id, persisted_recipient)
         if current is None or current.kind is not ConversationKind.DIRECT:
             return None
@@ -277,6 +435,8 @@ class CoreRuntime:
         message_port,
         admin_context_validator: ContextValidator,
         host_ingress_validator: HostIngressValidator,
+        host_message_current_validator: Callable[[InvocationOrigin, HostIngress], bool]
+        | None = None,
         config_principal_id: str,
         identity_namespace: str,
         trusted_bundled_defaults: Mapping[str, tuple[str, ...]] | None = None,
@@ -310,6 +470,10 @@ class CoreRuntime:
         managed_module_owners=(),
         owner_cleanup=None,
     ) -> None:
+        validate_contract(renderer)
+        validate_contract(display_limits)
+        validate_contract(trusted_bundled_manifests)
+        validate_contract(source_health)
         if not isinstance(database, SQLiteDatabase):
             database = SQLiteDatabase(database)
         if type(config_principal_id) is not str or not config_principal_id.strip():
@@ -323,7 +487,9 @@ class CoreRuntime:
         )
         gate_fields = MappingProxyType(
             {
-                ConfigTarget(config_principal_id, module_id): (gate.field,)
+                validate_contract(ConfigTarget(config_principal_id, module_id)): (
+                    gate.field,
+                )
                 for module_id, gate in subscription_gates.items()
             }
         )
@@ -389,7 +555,7 @@ class CoreRuntime:
         execution_gate_bindings = MappingProxyType(
             {
                 module_id: SubscriptionGateBinding(
-                    ConfigTarget(config_principal_id, module_id),
+                    validate_contract(ConfigTarget(config_principal_id, module_id)),
                     gate.field,
                     *module_id.split("/", 1),
                 )
@@ -418,7 +584,7 @@ class CoreRuntime:
 
         async def load_config(module_id: str):
             return await self.config_repository.current(
-                ConfigTarget(config_principal_id, module_id)
+                validate_contract(ConfigTarget(config_principal_id, module_id))
             )
 
         self.health_resolver = HealthResolver(
@@ -575,7 +741,7 @@ class CoreRuntime:
         )
 
         async def validate_set_enabled(grant) -> None:
-            from ..api.administration import AdminOperation
+            from ..core.contracts.administration import AdminOperation
 
             await self.admin_authorization.validate_generation(
                 grant, operation=AdminOperation.SET_ENABLED
@@ -637,6 +803,11 @@ class CoreRuntime:
             self.repositories.conversations, self.lifecycle.admission
         )
         self._host_ingress_validator = host_ingress_validator
+        self._host_ingress_authority = _HostIngressAuthority(
+            host_ingress_validator,
+            host_message_current_validator,
+            self._require_accepting_ingress,
+        )
         self._utc_clock = utc_clock
         self._monotonic_clock = monotonic_clock
         self._handler_timeout = float(handler_timeout)
@@ -764,7 +935,7 @@ class CoreRuntime:
 
     async def recover_management(
         self, expected_revisions, *, authorization, complete_from_current=False
-    ):
+    ) -> ManagementRecoveryProjection:
         if not self.configuration_blocked or self._starting:
             raise AdminAuthorizationDenied
         resources = self.admin_operations.ordinary_resources()
@@ -1071,18 +1242,8 @@ class CoreRuntime:
 
     async def _host_ingress(
         self, origin: InvocationOrigin, ingress: HostIngress
-    ) -> None:
-        self._require_accepting_ingress()
-        if not isinstance(ingress, HostIngress):
-            raise PermissionError("trusted host ingress is required")
-        if origin is InvocationOrigin.LLM_TOOL and ingress.grant_reference is not None:
-            raise PermissionError("Tool ingress cannot carry a private grant")
-        accepted = self._host_ingress_validator(origin, ingress)
-        if inspect.isawaitable(accepted):
-            accepted = await accepted
-        if accepted is not True:
-            raise PermissionError("host ingress evidence was rejected")
-        self._require_accepting_ingress()
+    ) -> _ValidatedHostIngress:
+        return await self._host_ingress_authority.validate(origin, ingress)
 
     def _require_accepting_ingress(self) -> None:
         if not self._started or not self._accepting or self._closing or self._closed:
@@ -1091,6 +1252,7 @@ class CoreRuntime:
     def _active_module(
         self, module_id: str, *, origin: InvocationOrigin, target: str
     ) -> tuple[RegisteredModule, str]:
+        validate_contract(origin)
         module = self.registry.snapshot().module(module_id)
         if not module.enabled:
             raise PermissionError("module is disabled")
@@ -1182,13 +1344,14 @@ class CoreRuntime:
         *,
         ingress: HostIngress,
     ) -> CoreInvocationOutcome:
+        validate_contract(origin)
         task = asyncio.current_task()
         if task is None:
             raise RuntimeError("host ingress requires an asyncio task")
         self._host_flights.add(task)
         try:
             self._require_accepting_ingress()
-            await self._host_ingress(origin, ingress)
+            accepted_ingress = await self._host_ingress(origin, ingress)
             module, capability_id = self._active_module(
                 module_id, origin=origin, target=target
             )
@@ -1204,11 +1367,13 @@ class CoreRuntime:
             ):
                 raise PermissionError("Tool ingress cannot carry a private grant")
             await self.trusted_route_publisher.publish(
-                ConversationRef(
-                    ingress.adapter_id,
-                    ingress.conversation_kind,
-                    ingress.conversation_id,
-                    ingress.delivery_route,
+                validate_contract(
+                    ConversationRef(
+                        ingress.adapter_id,
+                        ingress.conversation_kind,
+                        ingress.conversation_id,
+                        ingress.delivery_route,
+                    )
                 )
             )
             self._require_accepting_ingress()
@@ -1248,11 +1413,20 @@ class CoreRuntime:
             )
             try:
                 self.lifecycle.admission.admit(view, capability_id)
+                if origin is InvocationOrigin.LLM_TOOL:
+                    self._host_ingress_authority.attach_message(
+                        self.issuer, view, accepted_ingress
+                    )
                 if origin is InvocationOrigin.COMMAND:
                     result = await self.gateway.invoke_command(view, target, parameters)
                 else:
                     result = await self.gateway.invoke_tool(view, target, parameters)
+                if origin is InvocationOrigin.LLM_TOOL:
+                    self.issuer._require_message_current(view)
                 routed = await self.output.route(view, result)
+                if origin is InvocationOrigin.LLM_TOOL:
+                    self._require_accepting_ingress()
+                    self.issuer._require_message_current(view)
                 exposed_result = result
                 if (
                     isinstance(result, CapabilityResult)
@@ -1471,6 +1645,7 @@ def _normalize_bundled_manifests(
     requested: Mapping[str, ModuleManifest] | None,
 ) -> Mapping[str, ModuleManifest]:
     """Copy exact expected declarations supplied by trusted host composition."""
+    validate_contract(requested)
     if requested is None:
         return MappingProxyType({})
     if not isinstance(requested, Mapping):
@@ -1495,6 +1670,7 @@ def _normalize_bundled_manifests(
 
 
 def _is_subscription_gate_field(manifest: ModuleManifest, field: str) -> bool:
+    validate_contract(manifest)
     declarations = tuple(item for item in manifest.config_fields if item.name == field)
     return (
         len(declarations) == 1
@@ -1507,6 +1683,7 @@ def _normalize_subscription_gates(
     requested: Mapping[str, TrustedSubscriptionGate] | None,
     manifests: Mapping[str, ModuleManifest],
 ) -> Mapping[str, TrustedSubscriptionGate]:
+    validate_contract(manifests)
     if requested is None:
         return MappingProxyType({})
     if not isinstance(requested, Mapping):
@@ -1531,6 +1708,7 @@ def _matches_trusted_bundled_manifest(
     candidate: object, expected: ModuleManifest
 ) -> bool:
     """Match the complete host-reviewed declaration and reject disk aliases."""
+    validate_contract(expected)
     try:
         return (
             isinstance(candidate, ModuleManifest)

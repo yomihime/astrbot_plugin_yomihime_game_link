@@ -4,6 +4,7 @@ import unittest
 from dataclasses import replace
 from datetime import timedelta
 
+from ygl_test_subject.core.contracts.validation_boundary import validate_contract
 from ygl_test_subject.modules.ff14.features.market_handler import _execution_facts
 from ygl_test_subject.modules.ff14.features.market_models import (
     Listing,
@@ -14,8 +15,8 @@ from ygl_test_subject.modules.ff14.features.market_models import (
 )
 from ygl_test_subject.modules.ff14.features.market_sources import Provenance
 
-from yomihime_sdk.api.display import DisplayDocument, TextBlock
-from yomihime_sdk.api.results import CapabilityResult, ErrorCode, ResultStatus
+from yomihime_game_link_sdk.display import DisplayDocument, TextBlock
+from yomihime_game_link_sdk.results import CapabilityResult, ErrorCode, ResultStatus
 
 from .test_market import NOW, REGION_IDS, catalog, query
 
@@ -51,10 +52,18 @@ class MarketFactsTests(unittest.TestCase):
             (),
             tuple((r.quality, "China", r) for r in quotes),
             False,
-            CapabilityResult(
-                "fixture",
-                ResultStatus.PARTIAL_SUCCESS if partial else ResultStatus.SUCCESS,
-                DisplayDocument("Fixture", "fixture", (TextBlock("fixture"),)),
+            validate_contract(
+                CapabilityResult(
+                    "fixture",
+                    ResultStatus.PARTIAL_SUCCESS if partial else ResultStatus.SUCCESS,
+                    validate_contract(
+                        DisplayDocument(
+                            "Fixture",
+                            "fixture",
+                            (validate_contract(TextBlock("fixture")),),
+                        )
+                    ),
+                )
             ),
             NOW,
             catalog() if snapshot else None,
@@ -208,6 +217,234 @@ class MarketFactsTests(unittest.TestCase):
         self.assertIsNone(row["minimum"])
         self.assertIsNone(row["minimum_time"]["source_time"])
         self.assertEqual(row["missing"], ["minimum"])
+
+    def test_error_projection_selects_fields_and_preserves_missing_and_json_numbers(
+        self,
+    ):
+        from decimal import Decimal
+
+        from ygl_test_subject.modules.ff14.features.market_handler import (
+            _error_execution_facts,
+            _tool_facts,
+        )
+
+        from yomihime_game_link_sdk.results import ErrorDetail
+
+        original = self.execution()
+        quote = Quote(
+            "nq",
+            average_sale_price=Decimal("11.25"),
+            daily_sale_velocity=Decimal("2.5"),
+        )
+        data = ScopeData(quotes=(quote,), incomplete=True)
+        outcome = replace(original.outcomes[0], data=data)
+        error = CapabilityResult(
+            "error-fixture",
+            ResultStatus.ERROR,
+            error=ErrorDetail(
+                ErrorCode.NO_RECORDS, "来源暂无可用市场记录，请等待新指令。"
+            ),
+            warnings=("PRIVATE_WARNING_CANARY",),
+        )
+        execution = replace(
+            original,
+            query=replace(original.query, original_query="PRIVATE_MESSAGE_CANARY"),
+            outcomes=(outcome,),
+            minimums=(),
+            result=error,
+        )
+        facts = _error_execution_facts(execution)
+        result = validate_contract(
+            replace(
+                error, model_facts=_tool_facts(error, {"supplement": {"market": facts}})
+            )
+        )
+        body = result.model_facts.facts
+        self.assertEqual(set(body), {"status", "error", "supplement"})
+        row = body["supplement"]["market"]["coverage"][0]["quotes"][0]
+        self.assertIsNone(row["minimum"])
+        self.assertIsNone(row["recent_purchase"])
+        self.assertEqual(row["average_sale_price"], 11.25)
+        self.assertEqual(row["daily_sale_velocity"], 2.5)
+        self.assertEqual(tuple(row["missing"]), ("minimum", "recent_purchase"))
+        self.assertTrue(body["supplement"]["market"]["coverage"][0]["cached"])
+        self.assertEqual(body["supplement"]["market"]["minimums"], ())
+        self.assertNotIn("warnings", body["supplement"]["market"])
+        self.assertNotIn("original_query", body["supplement"]["market"])
+        self.assertIn("等待用户明确新指令", facts["answer_guidance"])
+        rendered = repr(body)
+        for canary in ("PRIVATE_WARNING_CANARY", "PRIVATE_MESSAGE_CANARY"):
+            self.assertNotIn(canary, rendered)
+        # Direct module constructor selects fields; actual Core receiver
+        # acceptance of its JSON representation is checked above, without proof claims.
+        self.assertEqual(result.error, error.error)
+
+    def test_error_failure_and_empty_diagnostics_do_not_claim_success(self):
+        from ygl_test_subject.modules.ff14.features.market_handler import (
+            _error_execution_facts,
+            _tool_facts,
+        )
+
+        from yomihime_game_link_sdk.results import ErrorDetail
+
+        original = self.execution()
+        failed = ScopeOutcome(
+            "China",
+            "China",
+            code=ErrorCode.UPSTREAM_ERROR,
+            stage="http",
+            reason="upstream_error",
+            status_code=503,
+        )
+        empty = ScopeOutcome("Japan", "Japan", ScopeData(quotes=(Quote("nq"),)))
+        error = CapabilityResult(
+            "error-fixture",
+            ResultStatus.ERROR,
+            error=ErrorDetail(ErrorCode.UPSTREAM_ERROR, "来源未完成。"),
+        )
+        facts = _error_execution_facts(
+            replace(original, outcomes=(failed, empty), minimums=(), result=error)
+        )
+        rows = facts["coverage"]
+        self.assertEqual([row["state"] for row in rows], ["failed", "empty"])
+        self.assertEqual(rows[0]["status_code"], 503)
+        self.assertEqual(rows[0]["reason"], "upstream_error")
+        self.assertIsNone(rows[1]["quotes"][0]["minimum"])
+        self.assertFalse(
+            any(key in facts for key in ("partial", "coverage_complete", "warnings"))
+        )
+        self.assertEqual(facts["minimums"], [])
+        self.assertEqual(facts["listings"], [])
+        validate_contract(
+            replace(
+                error, model_facts=_tool_facts(error, {"supplement": {"market": facts}})
+            )
+        )
+
+    def test_error_constructor_integral_zero_and_finite_decimal_numbers(self):
+        from decimal import Decimal
+
+        from ygl_test_subject.modules.ff14.features.market_handler import (
+            _error_execution_facts,
+            _tool_facts,
+        )
+
+        from yomihime_game_link_sdk.results import ErrorDetail
+
+        original = self.execution()
+        error = CapabilityResult(
+            "error-numeric-fixture",
+            ResultStatus.ERROR,
+            error=ErrorDetail(ErrorCode.NO_RECORDS, "来源暂无可用市场记录。"),
+        )
+        fields = (
+            "minimum",
+            "recent_purchase",
+            "average_sale_price",
+            "daily_sale_velocity",
+        )
+        for value, expected, value_type in (
+            (Decimal("7"), 7, int),
+            (Decimal("0"), 0, int),
+            (Decimal("0.0"), 0, int),
+            (Decimal("-0"), 0, int),
+            (Decimal("11.25"), 11.25, float),
+            (None, None, type(None)),
+        ):
+            for field in fields:
+                with self.subTest(value=value, field=field):
+                    quote = Quote("nq", **{field: value})
+                    outcome = replace(
+                        original.outcomes[0], data=ScopeData(quotes=(quote,))
+                    )
+                    execution = replace(
+                        original, outcomes=(outcome,), minimums=(), result=error
+                    )
+                    facts = _error_execution_facts(execution)
+                    result = validate_contract(
+                        replace(
+                            error,
+                            model_facts=_tool_facts(
+                                error, {"supplement": {"market": facts}}
+                            ),
+                        )
+                    )
+                    row = result.model_facts.facts["supplement"]["market"]["coverage"][
+                        0
+                    ]["quotes"][0]
+                    self.assertEqual(row[field], expected)
+                    self.assertIs(type(row[field]), value_type)
+                    self.assertEqual(result.status, ResultStatus.ERROR)
+                    self.assertEqual(result.error, error.error)
+                    self.assertEqual(
+                        result.model_facts.facts["supplement"]["market"]["minimums"], ()
+                    )
+                    self.assertEqual(
+                        result.model_facts.facts["supplement"]["market"]["listings"], ()
+                    )
+
+    def test_error_constructor_rejects_nonfinite_overflow_and_nonzero_underflow(self):
+        from decimal import Decimal
+
+        from ygl_test_subject.modules.ff14.features.market_handler import (
+            _error_execution_facts,
+            _tool_facts,
+        )
+
+        from yomihime_game_link_sdk.results import ErrorDetail
+
+        original = self.execution()
+        error = CapabilityResult(
+            "error-numeric-fixture",
+            ResultStatus.ERROR,
+            error=ErrorDetail(ErrorCode.NO_RECORDS, "来源暂无可用市场记录。"),
+        )
+        fields = (
+            "minimum",
+            "recent_purchase",
+            "average_sale_price",
+            "daily_sale_velocity",
+        )
+        # A nonintegral Decimal above binary64 range reaches the float branch;
+        # integral prices keep the existing exact integer pipeline.
+        for value in (
+            Decimal("NaN"),
+            Decimal("sNaN"),
+            Decimal("Infinity"),
+            Decimal("-Infinity"),
+            Decimal("1" + "0" * 400 + ".5"),
+            Decimal("1e-999"),
+            Decimal("-1e-999"),
+        ):
+            for field in fields:
+                with self.subTest(value=value, field=field):
+
+                    def execution(number):
+                        quote = Quote("nq", **{field: number})
+                        outcome = replace(
+                            original.outcomes[0], data=ScopeData(quotes=(quote,))
+                        )
+                        return replace(
+                            original, outcomes=(outcome,), minimums=(), result=error
+                        )
+
+                    # Same constructor and field accepts genuine zero first.
+                    positive = _error_execution_facts(execution(Decimal("0")))
+                    validate_contract(
+                        replace(
+                            error,
+                            model_facts=_tool_facts(
+                                error, {"supplement": {"market": positive}}
+                            ),
+                        )
+                    )
+                    self.assertEqual(positive["coverage"][0]["quotes"][0][field], 0)
+                    with self.assertRaisesRegex(
+                        ValueError, "^invalid public price$"
+                    ) as rejected:
+                        _error_execution_facts(execution(value))
+                    self.assertIsNone(rejected.exception.__cause__)
+                    self.assertIsNone(rejected.exception.__context__)
 
 
 if __name__ == "__main__":

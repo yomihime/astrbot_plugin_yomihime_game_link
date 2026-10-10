@@ -6,15 +6,16 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
-from ...api.services import (
+from yomihime_game_link_sdk.services import ResolvedIdentity
+from yomihime_game_link_sdk.subscriptions import ConversationKind, ConversationRef
+
+from ...core.contracts.services import (
     Binding,
     BindingDefaultSnapshot,
     ConversationKey,
-    ConversationKind,
-    ConversationRef,
     Principal,
-    ResolvedIdentity,
 )
+from ...core.contracts.validation_boundary import validate_contract
 from ...core.ports import (
     ModuleRegistrationLookup,
     RevisionConflict,
@@ -131,13 +132,14 @@ class SQLiteIdentityRepository(_SQLiteRepository):
             ).fetchone()
             if row is None:
                 return None
-            return ResolvedIdentity(row[0], row[1], row[2], row[3])
+            return validate_contract(ResolvedIdentity(row[0], row[1], row[2], row[3]))
 
         return await self.database.executor.run_read(_run)
 
     async def save_identity(
         self, principal_id: str, identity: ResolvedIdentity
     ) -> ResolvedIdentity:
+        validate_contract(identity)
         if not isinstance(identity, ResolvedIdentity):
             raise TypeError("identity must be a ResolvedIdentity")
         if identity.principal_id not in (None, principal_id):
@@ -154,8 +156,13 @@ class SQLiteIdentityRepository(_SQLiteRepository):
                 "FROM identities WHERE identity_id = ?",
                 (identity.identity_id,),
             ).fetchone()
-            persisted = ResolvedIdentity(
-                identity.identity_id, identity.provider, identity.subject, principal_id
+            persisted = validate_contract(
+                ResolvedIdentity(
+                    identity.identity_id,
+                    identity.provider,
+                    identity.subject,
+                    principal_id,
+                )
             )
             if existing is not None:
                 if tuple(existing) != tuple(
@@ -202,11 +209,16 @@ class SQLiteConversationRepository(_SQLiteRepository):
             ).fetchone()
             if row is None:
                 return None
-            return ConversationRef(row[0], ConversationKind(row[1]), row[2], row[3])
+            return validate_contract(
+                ConversationRef(
+                    row[0], validate_contract(ConversationKind(row[1])), row[2], row[3]
+                )
+            )
 
         return await self.database.executor.run_read(_run)
 
     async def save(self, conversation: ConversationRef) -> ConversationRef:
+        validate_contract(conversation)
         if not isinstance(conversation, ConversationRef):
             raise TypeError("conversation must be a ConversationRef")
 

@@ -9,10 +9,9 @@ from pathlib import Path
 from secrets import token_urlsafe
 from zoneinfo import ZoneInfo
 
-from ygl_test_subject.api.administration import AdminAuthorizationDenied
-from ygl_test_subject.api.display import DisplayLimits
-from ygl_test_subject.api.services import CapabilityHealth, HealthStatus, HttpResponse
-from ygl_test_subject.api.subscriptions import ConversationKind, DeliveryState
+from ygl_test_subject.core.contracts.administration import AdminAuthorizationDenied
+from ygl_test_subject.core.contracts.subscriptions import DeliveryState
+from ygl_test_subject.core.contracts.validation_boundary import validate_contract
 from ygl_test_subject.core.ports import MessageStatus
 from ygl_test_subject.extensions.discovery import discover_packages
 from ygl_test_subject.infrastructure.http import TransportRequest
@@ -31,6 +30,9 @@ from tests.modules.ff14.test_integration import (
     _AdminContext,
     _Renderer,
 )
+from yomihime_game_link_sdk.display import DisplayLimits
+from yomihime_game_link_sdk.services import CapabilityHealth, HealthStatus, HttpResponse
+from yomihime_game_link_sdk.subscriptions import ConversationKind
 
 ROOT = Path(__file__).resolve().parents[2]
 MODULE_SOURCE = ROOT / "modules" / "ff14"
@@ -62,17 +64,21 @@ class _CalendarTransport:
         self.requests.append(request)
         if request.source_id == "ff14_calendar_primary":
             if self.primary_unavailable:
-                return HttpResponse(503, {"content-type": "text/plain"}, b"offline")
-            return HttpResponse(
-                200, {"content-type": "text/calendar"}, self.calendar_ics
+                return validate_contract(
+                    HttpResponse(503, {"content-type": "text/plain"}, b"offline")
+                )
+            return validate_contract(
+                HttpResponse(200, {"content-type": "text/calendar"}, self.calendar_ics)
             )
         if request.source_id == "ff14_calendar_fallback":
             if self.fallback_unavailable:
-                return HttpResponse(503, {"content-type": "text/plain"}, b"offline")
-            return HttpResponse(
-                200, {"content-type": "text/calendar"}, self.calendar_ics
+                return validate_contract(
+                    HttpResponse(503, {"content-type": "text/plain"}, b"offline")
+                )
+            return validate_contract(
+                HttpResponse(200, {"content-type": "text/calendar"}, self.calendar_ics)
             )
-        return HttpResponse(404, {}, b"")
+        return validate_contract(HttpResponse(404, {}, b""))
 
     async def request_credential_exchange(self, request) -> HttpResponse:
         del request
@@ -126,7 +132,7 @@ class FF14CalendarRuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
             secret_codec=None,
             http_transport=self.transport,
             renderer=_Renderer(),
-            display_limits=DisplayLimits(16, 16_384),
+            display_limits=validate_contract(DisplayLimits(16, 16_384)),
             message_port=self.message_port,
             admin_context_validator=validate_admin,
             host_ingress_validator=validate_ingress,
@@ -198,7 +204,7 @@ class FF14CalendarRuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
     @staticmethod
     async def _source_health(_module_id: str, _source_id: str):
-        return CapabilityHealth(HealthStatus.AVAILABLE)
+        return validate_contract(CapabilityHealth(HealthStatus.AVAILABLE))
 
     def _ingress(
         self,

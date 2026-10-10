@@ -9,15 +9,17 @@ from __future__ import annotations
 
 import inspect
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime
 from decimal import Decimal
+from functools import wraps
 from typing import Any, Protocol
 
-from ..api.display import (
+from yomihime_game_link_sdk.display import (
     CommandsBlock,
     DisplayAudience,
     DisplayBatch,
+    DisplayBatchMember,
     DisplayDocument,
     DisplayLimits,
     DisplayOutput,
@@ -36,7 +38,9 @@ from ..api.display import (
     TimeValue,
     UnknownBlock,
 )
-from ..api.version import CONTRACT_VERSION
+
+from ..core.contracts.validation_boundary import validate_contract
+from ..core.contracts.version import CONTRACT_VERSION
 
 _TRUNCATION_NOTICE = "[内容已截断]"
 _TRUNCATION_FALLBACK = "[截断]"
@@ -98,6 +102,19 @@ class RenderingFailure(RuntimeError):
         super().__init__(self.code)
 
 
+def _safe_render(function):
+    @wraps(function)
+    async def render(*args, **kwargs):
+        try:
+            return await function(*args, **kwargs)
+        except Exception:
+            failed = True
+        if failed:
+            raise RenderingFailure()
+
+    return render
+
+
 class GenericDisplayRenderer:
     """Render only generic display DTOs into bounded plain text and asset refs."""
 
@@ -114,6 +131,7 @@ class GenericDisplayRenderer:
         self._asset_reader = asset_reader
         self._image_backend = image_backend
 
+    @_safe_render
     async def render(
         self,
         document: DisplayDocument,
@@ -121,6 +139,17 @@ class GenericDisplayRenderer:
         limits: DisplayLimits,
         audience: DisplayAudience = DisplayAudience.PUBLIC,
     ) -> DisplayOutput:
+        if (
+            type(document) is DisplayDocument
+            and type(document.schema_version) is str
+            and document.schema_version != CONTRACT_VERSION
+        ):
+            validate_contract(limits)
+            self._validate_call(limits, audience)
+            return validate_contract(DisplayOutput("不支持的显示版本"))
+        validate_contract(document)
+        validate_contract(limits)
+        validate_contract(audience)
         if not isinstance(document, DisplayDocument):
             raise TypeError("document must be a DisplayDocument")
         audience = self._validate_call(limits, audience)
@@ -131,9 +160,33 @@ class GenericDisplayRenderer:
         )
         return self._output(lines, resources, limits.max_pages)
 
+    @_safe_render
     async def render_batch(
         self, batch: DisplayBatch, limits: DisplayLimits
     ) -> DisplayOutput:
+        if type(batch) is DisplayBatch:
+            sanitized = []
+            for item in batch.members:
+                if type(item) is not DisplayBatchMember:
+                    raise TypeError("batch member must be canonical")
+                document = item.document
+                if (
+                    type(document) is DisplayDocument
+                    and type(document.schema_version) is str
+                    and document.schema_version != CONTRACT_VERSION
+                ):
+                    item = replace(
+                        item,
+                        document=DisplayDocument(
+                            "不支持的显示版本",
+                            "display",
+                            (TextBlock("不支持的显示版本"),),
+                        ),
+                    )
+                sanitized.append(item)
+            batch = replace(batch, members=tuple(sanitized))
+        validate_contract(batch)
+        validate_contract(limits)
         if not isinstance(batch, DisplayBatch):
             raise TypeError("batch must be a DisplayBatch")
         audience = self._validate_call(limits, batch.audience)
@@ -171,11 +224,13 @@ class GenericDisplayRenderer:
     def _validate_call(
         self, limits: DisplayLimits, audience: DisplayAudience
     ) -> DisplayAudience:
+        validate_contract(limits)
+        validate_contract(audience)
         if not isinstance(limits, DisplayLimits):
             raise TypeError("limits must be DisplayLimits")
         if isinstance(audience, str):
             try:
-                audience = DisplayAudience(audience)
+                audience = validate_contract(DisplayAudience(audience))
             except ValueError:
                 raise ValueError("audience must be a DisplayAudience") from None
         if not isinstance(audience, DisplayAudience):
@@ -189,6 +244,9 @@ class GenericDisplayRenderer:
         limits: DisplayLimits,
         max_asset_reads: int,
     ) -> tuple[list[str], list[tuple[int, str]], int]:
+        validate_contract(document)
+        validate_contract(audience)
+        validate_contract(limits)
         lines = [document.title, document.subject]
         resources: list[tuple[int, str]] = []
         if document.schema_version != CONTRACT_VERSION:
@@ -248,6 +306,10 @@ class GenericDisplayRenderer:
         document_privacy: Privacy,
         limits: DisplayLimits,
     ) -> tuple[str | None, str | None]:
+        validate_contract(block)
+        validate_contract(audience)
+        validate_contract(document_privacy)
+        validate_contract(limits)
         if not self._visible(block.visibility, document_privacy, audience):
             if block.required:
                 return self._fallback(block.fallback_text, block.alt_text), None
@@ -268,6 +330,10 @@ class GenericDisplayRenderer:
         limits: DisplayLimits,
         remaining_asset_reads: int,
     ) -> tuple[list[str], list[tuple[int, str]], int]:
+        validate_contract(block)
+        validate_contract(audience)
+        validate_contract(document_privacy)
+        validate_contract(limits)
         lines = []
         resources: list[tuple[int, str]] = []
         reads = 0
@@ -316,6 +382,8 @@ class GenericDisplayRenderer:
     async def _check_asset(
         self, asset_id: str, audience: DisplayAudience, limits: DisplayLimits
     ) -> None:
+        validate_contract(audience)
+        validate_contract(limits)
         if self._asset_reader is None or self._image_backend is None:
             raise RenderingFailure()
         max_bytes = min(limits.max_image_bytes, self._bounds.max_asset_read_bytes)
@@ -335,6 +403,9 @@ class GenericDisplayRenderer:
     def _visible(
         self, visibility: Privacy, document_privacy: Privacy, audience: DisplayAudience
     ) -> bool:
+        validate_contract(visibility)
+        validate_contract(document_privacy)
+        validate_contract(audience)
         if visibility is Privacy.PRIVATE:
             return audience is DisplayAudience.PRIVATE
         return audience is DisplayAudience.PRIVATE or document_privacy is Privacy.PUBLIC
@@ -422,6 +493,7 @@ class GenericDisplayRenderer:
         return lines
 
     def _render_grid_item(self, item: GridItem) -> str:
+        validate_contract(item)
         return f"{item.label}: {self._format_value(item.value)}"
 
     def _format_value(self, value: Any) -> str:
@@ -475,6 +547,7 @@ class GenericDisplayRenderer:
         return f"{rendered} {suffix}".rstrip() if suffix else rendered
 
     def _format_time(self, value: TimeValue) -> str:
+        validate_contract(value)
         moment: datetime | date = value.value
         rendered = moment.isoformat()
         if value.timezone_name:
@@ -530,7 +603,7 @@ class GenericDisplayRenderer:
                 if line_index in kept_indexes
             )
         )
-        return DisplayOutput(text, unique_resources)
+        return validate_contract(DisplayOutput(text, unique_resources))
 
     def _clip(self, value: str, max_chars: int) -> str:
         if len(value) <= max_chars:

@@ -42,7 +42,7 @@ def extract_installed_sdk_examples(
 
     extracted: list[ExtractedSdkExample] = []
     for package_id in _EXAMPLES:
-        package = resources.files(f"yomihime_sdk._examples.{package_id}")
+        package = resources.files(f"yomihime_game_link_sdk._examples.{package_id}")
         destination = root / package_id
         destination.mkdir()
         for filename in _RESOURCE_FILES:

@@ -8,8 +8,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from api.manifests import EXTENSION_MANIFEST_ABI
-from extensions.discovery import (
+from ygl_test_subject.core.contracts.manifests import EXTENSION_MANIFEST_ABI
+from ygl_test_subject.extensions.discovery import (
     EXTENSION_ROOT_MAX_ENTRIES,
     EXTENSION_ROOT_MAX_PACKAGES,
     DiscoveryRootError,
@@ -27,7 +27,7 @@ def empty_package(package_id: str) -> dict[str, object]:
         "schema_version": 1,
         "package_id": package_id,
         "package_version": "1.0.0",
-        "contract_version": "1.1.0",
+        "contract_version": "2.0",
         "modules": [],
         "author": "Example",
         "license": "MIT",

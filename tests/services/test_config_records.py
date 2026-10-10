@@ -8,33 +8,19 @@ from pathlib import Path
 from secrets import token_urlsafe
 from unittest.mock import AsyncMock, patch
 
-from ygl_test_subject.api.administration import AdminAuthorizationDenied, AdminOperation
-from ygl_test_subject.api.manifests import (
-    ConfigField,
-    ModuleCategory,
-    ModuleManifest,
-    PackageManifest,
-)
-from ygl_test_subject.api.services import (
-    CapabilityHealth,
-    ConfigFieldUpdate,
-    ConfigPatch,
-    ConfigPatchMode,
-    ConfigTarget,
-    HealthStatus,
-    ModuleHandlers,
-    SecretMaterial,
-)
-from ygl_test_subject.api.storage import (
-    CollectionDescriptor,
-    CollectionIndex,
-    OwnerScope,
-    OwnershipKind,
-    SecretTarget,
-)
-from ygl_test_subject.api.version import CONTRACT_VERSION
 from ygl_test_subject.core.admission import AdmissionController
 from ygl_test_subject.core.context_issuer import ContextIssuer
+from ygl_test_subject.core.contracts.administration import (
+    AdminAuthorizationDenied,
+    AdminOperation,
+)
+from ygl_test_subject.core.contracts.services import (
+    ConfigFieldUpdate,
+    ConfigPatch,
+    SecretMaterial,
+)
+from ygl_test_subject.core.contracts.storage import SecretTarget
+from ygl_test_subject.core.contracts.validation_boundary import validate_contract
 from ygl_test_subject.core.ports import (
     ModuleNotRegistered,
     ModuleRegistrationSnapshot,
@@ -65,6 +51,27 @@ from ygl_test_subject.services.configuration import (
     ConfigurationUpdateFailed,
 )
 from ygl_test_subject.services.records import ModuleRecordsService
+
+from yomihime_game_link_sdk.declarations import (
+    ConfigField,
+    ConfigUpdateMode,
+    ModuleCategory,
+    ModuleManifest,
+    PackageManifest,
+)
+from yomihime_game_link_sdk.services import (
+    CapabilityHealth,
+    ConfigTarget,
+    HealthStatus,
+    ModuleHandlers,
+)
+from yomihime_game_link_sdk.storage import (
+    CollectionDescriptor,
+    CollectionIndex,
+    OwnerScope,
+    OwnershipKind,
+)
+from yomihime_game_link_sdk.version import MODULE_ABI_VERSION
 
 
 class _Codec:
@@ -210,25 +217,29 @@ class _PublishUnrelatedAfterCollection:
         collection = await self.delegate.collection(*args, **kwargs)
         if self.publish_next:
             self.publish_next = False
-            unrelated = ModuleManifest(
-                "other",
-                "other",
-                ModuleCategory.GAME,
-                "tests.fixtures.minimal_module:factory",
-                "1.0.0",
-                (),
+            unrelated = validate_contract(
+                ModuleManifest(
+                    "other",
+                    "other",
+                    ModuleCategory.GAME,
+                    "tests.fixtures.minimal_module:factory",
+                    "1.0.0",
+                    (),
+                )
             )
             self.registry.register_package(
-                PackageManifest(
-                    "other-package",
-                    "1.0.0",
-                    CONTRACT_VERSION,
-                    (unrelated,),
-                    "author",
-                    "MIT",
-                    "source",
+                validate_contract(
+                    PackageManifest(
+                        "other-package",
+                        "1.0.0",
+                        MODULE_ABI_VERSION,
+                        (unrelated,),
+                        "author",
+                        "MIT",
+                        "source",
+                    )
                 ),
-                {"other": ModuleHandlers({}, {}, {})},
+                {"other": validate_contract(ModuleHandlers({}, {}, {}))},
             )
         return collection
 
@@ -249,7 +260,7 @@ class ConfigRecordsServiceTests(unittest.IsolatedAsyncioTestCase):
             current_run=lambda _module_id: None,
             is_active=lambda _identity: False,
             health_query=lambda _module_id, _capability_id: (
-                CapabilityHealth(HealthStatus.UNKNOWN),
+                validate_contract(CapabilityHealth(HealthStatus.UNKNOWN)),
                 0,
             ),
         )
@@ -299,20 +310,20 @@ class ConfigRecordsServiceTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_mixed_invalid_gate_and_secret_patch_rejects_before_all_staging(self):
-        target = ConfigTarget("principal-a", "module-a")
+        target = validate_contract(ConfigTarget("principal-a", "module-a"))
         fields = (
-            ConfigField("gate", default=True),
-            ConfigField("token", sensitive=True),
+            validate_contract(ConfigField("gate", default=True)),
+            validate_contract(ConfigField("token", sensitive=True)),
         )
         grant = await self.admin_auth.authorize(
             AdminOperation.UPDATE_CONFIG, invocation=None, context=self.admin_context
         )
         for mode, value in (
-            (ConfigPatchMode.CLEAR, None),
-            (ConfigPatchMode.REPLACE, 0),
-            (ConfigPatchMode.REPLACE, 1),
-            (ConfigPatchMode.REPLACE, "true"),
-            (ConfigPatchMode.REPLACE, {}),
+            (ConfigUpdateMode.CLEAR, None),
+            (ConfigUpdateMode.REPLACE, 0),
+            (ConfigUpdateMode.REPLACE, 1),
+            (ConfigUpdateMode.REPLACE, "true"),
+            (ConfigUpdateMode.REPLACE, {}),
         ):
             for gate_first in (True, False):
                 with (
@@ -348,7 +359,7 @@ class ConfigRecordsServiceTests(unittest.IsolatedAsyncioTestCase):
                     gate = ConfigFieldUpdate("gate", mode, value=value)
                     secret = ConfigFieldUpdate(
                         "token",
-                        ConfigPatchMode.REPLACE,
+                        ConfigUpdateMode.REPLACE,
                         secret=SecretMaterial(b"synthetic-never-staged"),
                     )
                     updates = (gate, secret) if gate_first else (secret, gate)
@@ -367,8 +378,8 @@ class ConfigRecordsServiceTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_gate_keeps_existing_bool_and_allows_strict_bool_update(self):
-        target = ConfigTarget("principal-a", "module-a")
-        fields = (ConfigField("gate", default=True),)
+        target = validate_contract(ConfigTarget("principal-a", "module-a"))
+        fields = (validate_contract(ConfigField("gate", default=True)),)
         coordinator = self._coordinator(
             target, fields, subscription_gate_fields=("gate",)
         )
@@ -379,14 +390,14 @@ class ConfigRecordsServiceTests(unittest.IsolatedAsyncioTestCase):
             target,
             ConfigPatch(
                 1,
-                (ConfigFieldUpdate("gate", ConfigPatchMode.REPLACE, value=False),),
+                (ConfigFieldUpdate("gate", ConfigUpdateMode.REPLACE, value=False),),
                 fields,
             ),
             grant,
         )
         kept = await coordinator.update_admin(
             target,
-            ConfigPatch(2, (ConfigFieldUpdate("gate", ConfigPatchMode.KEEP),), fields),
+            ConfigPatch(2, (ConfigFieldUpdate("gate", ConfigUpdateMode.KEEP),), fields),
             grant,
         )
         self.assertIs(replaced.values["gate"], False)
@@ -412,11 +423,11 @@ class ConfigRecordsServiceTests(unittest.IsolatedAsyncioTestCase):
         return await coordinator.update_admin(snapshot.target, patch, grant)
 
     async def _change_credential_during_stage(self, *, revoke: bool) -> None:
-        target = ConfigTarget("principal-a", "module-a")
+        target = validate_contract(ConfigTarget("principal-a", "module-a"))
         blocking_store = _BlockingStageStore(self.secret_store)
         coordinator = self._coordinator(
             target,
-            (ConfigField("token", sensitive=True),),
+            (validate_contract(ConfigField("token", sensitive=True)),),
             self.config_repository,
             blocking_store,
         )
@@ -429,10 +440,10 @@ class ConfigRecordsServiceTests(unittest.IsolatedAsyncioTestCase):
             1,
             (
                 ConfigFieldUpdate(
-                    "token", ConfigPatchMode.REPLACE, secret=SecretMaterial(b"raw")
+                    "token", ConfigUpdateMode.REPLACE, secret=SecretMaterial(b"raw")
                 ),
             ),
-            (ConfigField("token", sensitive=True),),
+            (validate_contract(ConfigField("token", sensitive=True)),),
             "stage-race",
         )
         update = asyncio.create_task(coordinator.update_admin(target, patch, grant))
@@ -466,11 +477,11 @@ class ConfigRecordsServiceTests(unittest.IsolatedAsyncioTestCase):
         await self._change_credential_during_stage(revoke=True)
 
     async def test_committed_claim_is_finalized_on_reopen_after_cancellation(self):
-        target = ConfigTarget("principal-a", "module-a")
+        target = validate_contract(ConfigTarget("principal-a", "module-a"))
         pausing_repository = _CommitThenPauseRepository(self.config_repository)
         coordinator = self._coordinator(
             target,
-            (ConfigField("token", sensitive=True),),
+            (validate_contract(ConfigField("token", sensitive=True)),),
             pausing_repository,
             self.secret_store,
         )
@@ -478,10 +489,10 @@ class ConfigRecordsServiceTests(unittest.IsolatedAsyncioTestCase):
             1,
             (
                 ConfigFieldUpdate(
-                    "token", ConfigPatchMode.REPLACE, secret=SecretMaterial(b"kept")
+                    "token", ConfigUpdateMode.REPLACE, secret=SecretMaterial(b"kept")
                 ),
             ),
-            (ConfigField("token", sensitive=True),),
+            (validate_contract(ConfigField("token", sensitive=True)),),
             "cancel-after-config-commit",
         )
         update = asyncio.create_task(self._admin_update(coordinator, patch))
@@ -500,7 +511,7 @@ class ConfigRecordsServiceTests(unittest.IsolatedAsyncioTestCase):
 
         reopened = self._coordinator(
             target,
-            (ConfigField("token", sensitive=True),),
+            (validate_contract(ConfigField("token", sensitive=True)),),
             SQLiteConfigRepository(self.database),
             self.secret_store,
         )
@@ -524,8 +535,11 @@ class ConfigRecordsServiceTests(unittest.IsolatedAsyncioTestCase):
     async def test_cancellation_after_plain_update_and_secret_clear_publishes_health(
         self,
     ):
-        target = ConfigTarget("principal-a", "module-a")
-        fields = (ConfigField("region"), ConfigField("token", sensitive=True))
+        target = validate_contract(ConfigTarget("principal-a", "module-a"))
+        fields = (
+            validate_contract(ConfigField("region")),
+            validate_contract(ConfigField("token", sensitive=True)),
+        )
         seed = self._coordinator(
             target, fields, self.config_repository, self.secret_store
         )
@@ -534,9 +548,9 @@ class ConfigRecordsServiceTests(unittest.IsolatedAsyncioTestCase):
             ConfigPatch(
                 1,
                 (
-                    ConfigFieldUpdate("region", ConfigPatchMode.REPLACE, value="us"),
+                    ConfigFieldUpdate("region", ConfigUpdateMode.REPLACE, value="us"),
                     ConfigFieldUpdate(
-                        "token", ConfigPatchMode.REPLACE, secret=SecretMaterial(b"old")
+                        "token", ConfigUpdateMode.REPLACE, secret=SecretMaterial(b"old")
                     ),
                 ),
                 fields,
@@ -562,7 +576,7 @@ class ConfigRecordsServiceTests(unittest.IsolatedAsyncioTestCase):
         plain = await cancel_after_commit(
             ConfigPatch(
                 2,
-                (ConfigFieldUpdate("region", ConfigPatchMode.REPLACE, value="eu"),),
+                (ConfigFieldUpdate("region", ConfigUpdateMode.REPLACE, value="eu"),),
                 fields,
                 "cancel-plain",
             )
@@ -575,7 +589,7 @@ class ConfigRecordsServiceTests(unittest.IsolatedAsyncioTestCase):
         clearing = await cancel_after_commit(
             ConfigPatch(
                 3,
-                (ConfigFieldUpdate("token", ConfigPatchMode.CLEAR),),
+                (ConfigFieldUpdate("token", ConfigUpdateMode.CLEAR),),
                 fields,
                 "cancel-clear",
             )
@@ -590,8 +604,11 @@ class ConfigRecordsServiceTests(unittest.IsolatedAsyncioTestCase):
     async def test_reopen_finalizes_referenced_claim_but_cleans_unreferenced_pending(
         self,
     ):
-        target = ConfigTarget("principal-a", "module-a")
-        fields = (ConfigField("region"), ConfigField("token", sensitive=True))
+        target = validate_contract(ConfigTarget("principal-a", "module-a"))
+        fields = (
+            validate_contract(ConfigField("region")),
+            validate_contract(ConfigField("token", sensitive=True)),
+        )
         coordinator = self._coordinator(
             target,
             fields,
@@ -606,7 +623,7 @@ class ConfigRecordsServiceTests(unittest.IsolatedAsyncioTestCase):
                     (
                         ConfigFieldUpdate(
                             "token",
-                            ConfigPatchMode.REPLACE,
+                            ConfigUpdateMode.REPLACE,
                             secret=SecretMaterial(b"referenced"),
                         ),
                     ),
@@ -624,7 +641,7 @@ class ConfigRecordsServiceTests(unittest.IsolatedAsyncioTestCase):
             plain,
             ConfigPatch(
                 2,
-                (ConfigFieldUpdate("region", ConfigPatchMode.REPLACE, value="eu"),),
+                (ConfigFieldUpdate("region", ConfigUpdateMode.REPLACE, value="eu"),),
                 fields,
                 "unrelated-region-update",
             ),
@@ -671,8 +688,8 @@ class ConfigRecordsServiceTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_old_secret_cleanup_uses_the_predecessor_inside_shared_gate(self):
-        target = ConfigTarget("principal-a", "module-a")
-        fields = (ConfigField("token", sensitive=True),)
+        target = validate_contract(ConfigTarget("principal-a", "module-a"))
+        fields = (validate_contract(ConfigField("token", sensitive=True)),)
         initial = self._coordinator(
             target, fields, self.config_repository, self.secret_store
         )
@@ -682,7 +699,7 @@ class ConfigRecordsServiceTests(unittest.IsolatedAsyncioTestCase):
                 1,
                 (
                     ConfigFieldUpdate(
-                        "token", ConfigPatchMode.REPLACE, secret=SecretMaterial(b"A")
+                        "token", ConfigUpdateMode.REPLACE, secret=SecretMaterial(b"A")
                     ),
                 ),
                 fields,
@@ -706,7 +723,7 @@ class ConfigRecordsServiceTests(unittest.IsolatedAsyncioTestCase):
             3,
             (
                 ConfigFieldUpdate(
-                    "token", ConfigPatchMode.REPLACE, secret=SecretMaterial(b"C")
+                    "token", ConfigUpdateMode.REPLACE, secret=SecretMaterial(b"C")
                 ),
             ),
             fields,
@@ -724,7 +741,7 @@ class ConfigRecordsServiceTests(unittest.IsolatedAsyncioTestCase):
                 2,
                 (
                     ConfigFieldUpdate(
-                        "token", ConfigPatchMode.REPLACE, secret=SecretMaterial(b"B")
+                        "token", ConfigUpdateMode.REPLACE, secret=SecretMaterial(b"B")
                     ),
                 ),
                 fields,
@@ -774,16 +791,21 @@ class ConfigRecordsServiceTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_unregistered_manifest_config_can_update_without_factory(self):
-        target = ConfigTarget("principal-a", "not-registered/module-a")
+        target = validate_contract(
+            ConfigTarget("principal-a", "not-registered/module-a")
+        )
         coordinator = self._coordinator(
-            target, (ConfigField("region"),), self.config_repository, self.secret_store
+            target,
+            (validate_contract(ConfigField("region")),),
+            self.config_repository,
+            self.secret_store,
         )
         updated = await self._admin_update(
             coordinator,
             ConfigPatch(
                 1,
-                (ConfigFieldUpdate("region", ConfigPatchMode.REPLACE, value="eu"),),
-                (ConfigField("region"),),
+                (ConfigFieldUpdate("region", ConfigUpdateMode.REPLACE, value="eu"),),
+                (validate_contract(ConfigField("region")),),
             ),
         )
         self.assertEqual(updated.values["region"], "eu")
@@ -792,15 +814,15 @@ class ConfigRecordsServiceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_legacy_coordinator_writes_are_rejected(self):
         coordinator = ConfigurationCoordinator(
-            ConfigTarget("principal-a", "module-a"),
-            (ConfigField("region"),),
+            validate_contract(ConfigTarget("principal-a", "module-a")),
+            (validate_contract(ConfigField("region")),),
             self.config_repository,
             self.secret_store,
         )
         patch = ConfigPatch(
             1,
-            (ConfigFieldUpdate("region", ConfigPatchMode.REPLACE, value="eu"),),
-            (ConfigField("region"),),
+            (ConfigFieldUpdate("region", ConfigUpdateMode.REPLACE, value="eu"),),
+            (validate_contract(ConfigField("region")),),
         )
         with self.assertRaises(AdminAuthorizationDenied):
             await coordinator.update(patch)
@@ -809,15 +831,15 @@ class ConfigRecordsServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await coordinator.current()).values, {})
 
     async def test_admin_update_requires_wiring_and_exact_target(self):
-        target = ConfigTarget("principal-a", "module-a")
+        target = validate_contract(ConfigTarget("principal-a", "module-a"))
         patch = ConfigPatch(
             1,
-            (ConfigFieldUpdate("region", ConfigPatchMode.REPLACE, value="eu"),),
-            (ConfigField("region"),),
+            (ConfigFieldUpdate("region", ConfigUpdateMode.REPLACE, value="eu"),),
+            (validate_contract(ConfigField("region")),),
         )
         unwired = ConfigurationCoordinator(
             target,
-            (ConfigField("region"),),
+            (validate_contract(ConfigField("region")),),
             self.config_repository,
             self.secret_store,
         )
@@ -830,18 +852,26 @@ class ConfigRecordsServiceTests(unittest.IsolatedAsyncioTestCase):
             await unwired.update_admin(target, patch, grant)
 
         wired = self._coordinator(
-            target, (ConfigField("region"),), self.config_repository, self.secret_store
+            target,
+            (validate_contract(ConfigField("region")),),
+            self.config_repository,
+            self.secret_store,
         )
         with self.assertRaises(AdminAuthorizationDenied):
             await wired.update_admin(
-                ConfigTarget("principal-a", "other/module-a"), patch, grant
+                validate_contract(ConfigTarget("principal-a", "other/module-a")),
+                patch,
+                grant,
             )
         self.assertEqual((await wired.current()).values, {})
 
     async def test_sensitive_replace_is_staged_claimed_and_finalized(self) -> None:
         service = self._coordinator(
-            ConfigTarget("principal-a", "package/module-a"),
-            (ConfigField("region"), ConfigField("token", sensitive=True)),
+            validate_contract(ConfigTarget("principal-a", "package/module-a")),
+            (
+                validate_contract(ConfigField("region")),
+                validate_contract(ConfigField("token", sensitive=True)),
+            ),
             self.config_repository,
             self.secret_store,
         )
@@ -849,8 +879,8 @@ class ConfigRecordsServiceTests(unittest.IsolatedAsyncioTestCase):
             service,
             ConfigPatch(
                 1,
-                (ConfigFieldUpdate("region", ConfigPatchMode.REPLACE, value="cn"),),
-                (ConfigField("region"),),
+                (ConfigFieldUpdate("region", ConfigUpdateMode.REPLACE, value="cn"),),
+                (validate_contract(ConfigField("region")),),
             ),
         )
         updated = await self._admin_update(
@@ -859,10 +889,10 @@ class ConfigRecordsServiceTests(unittest.IsolatedAsyncioTestCase):
                 2,
                 (
                     ConfigFieldUpdate(
-                        "token", ConfigPatchMode.REPLACE, secret=SecretMaterial(b"raw")
+                        "token", ConfigUpdateMode.REPLACE, secret=SecretMaterial(b"raw")
                     ),
                 ),
-                (ConfigField("token", sensitive=True),),
+                (validate_contract(ConfigField("token", sensitive=True)),),
                 "replace-token",
             ),
         )
@@ -872,8 +902,11 @@ class ConfigRecordsServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             await service.current(),
             await ConfigurationService(
-                ConfigTarget("principal-a", "package/module-a"),
-                (ConfigField("region"), ConfigField("token", sensitive=True)),
+                validate_contract(ConfigTarget("principal-a", "package/module-a")),
+                (
+                    validate_contract(ConfigField("region")),
+                    validate_contract(ConfigField("token", sensitive=True)),
+                ),
                 SQLiteConfigRepository(self.database),
                 self.secret_store,
             ).current(),
@@ -883,8 +916,8 @@ class ConfigRecordsServiceTests(unittest.IsolatedAsyncioTestCase):
         """Check the supported public surface, not a same-process sandbox."""
 
         coordinator = self._coordinator(
-            ConfigTarget("principal-a", "module-a"),
-            (ConfigField("token", sensitive=True),),
+            validate_contract(ConfigTarget("principal-a", "module-a")),
+            (validate_contract(ConfigField("token", sensitive=True)),),
             self.config_repository,
             self.secret_store,
         )
@@ -901,8 +934,8 @@ class ConfigRecordsServiceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_sensitive_cas_failure_cleans_staged_payload(self) -> None:
         service = self._coordinator(
-            ConfigTarget("principal-a", "module-a"),
-            (ConfigField("token", sensitive=True),),
+            validate_contract(ConfigTarget("principal-a", "module-a")),
+            (validate_contract(ConfigField("token", sensitive=True)),),
             self.config_repository,
             self.secret_store,
         )
@@ -914,11 +947,11 @@ class ConfigRecordsServiceTests(unittest.IsolatedAsyncioTestCase):
                     (
                         ConfigFieldUpdate(
                             "token",
-                            ConfigPatchMode.REPLACE,
+                            ConfigUpdateMode.REPLACE,
                             secret=SecretMaterial(b"raw"),
                         ),
                     ),
-                    (ConfigField("token", sensitive=True),),
+                    (validate_contract(ConfigField("token", sensitive=True)),),
                     "cas-failure",
                 ),
             )
@@ -926,8 +959,8 @@ class ConfigRecordsServiceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_cas_compensation_delete_failure_is_recovery_and_orphan(self) -> None:
         service = self._coordinator(
-            ConfigTarget("principal-a", "module-a"),
-            (ConfigField("token", sensitive=True),),
+            validate_contract(ConfigTarget("principal-a", "module-a")),
+            (validate_contract(ConfigField("token", sensitive=True)),),
             self.config_repository,
             _DeleteFailureStore(self.secret_store),
         )
@@ -939,11 +972,11 @@ class ConfigRecordsServiceTests(unittest.IsolatedAsyncioTestCase):
                     (
                         ConfigFieldUpdate(
                             "token",
-                            ConfigPatchMode.REPLACE,
+                            ConfigUpdateMode.REPLACE,
                             secret=SecretMaterial(b"raw"),
                         ),
                     ),
-                    (ConfigField("token", sensitive=True),),
+                    (validate_contract(ConfigField("token", sensitive=True)),),
                     "cas-delete-failure",
                 ),
             )
@@ -959,8 +992,8 @@ class ConfigRecordsServiceTests(unittest.IsolatedAsyncioTestCase):
             self.database, Path(self.temp.name) / "no-key-secrets"
         )
         service = self._coordinator(
-            ConfigTarget("principal-a", "module-a"),
-            (ConfigField("token", sensitive=True),),
+            validate_contract(ConfigTarget("principal-a", "module-a")),
+            (validate_contract(ConfigField("token", sensitive=True)),),
             self.config_repository,
             store,
         )
@@ -972,11 +1005,11 @@ class ConfigRecordsServiceTests(unittest.IsolatedAsyncioTestCase):
                     (
                         ConfigFieldUpdate(
                             "token",
-                            ConfigPatchMode.REPLACE,
+                            ConfigUpdateMode.REPLACE,
                             secret=SecretMaterial(b"raw"),
                         ),
                     ),
-                    (ConfigField("token", sensitive=True),),
+                    (validate_contract(ConfigField("token", sensitive=True)),),
                     "no-key",
                 ),
             )
@@ -984,8 +1017,8 @@ class ConfigRecordsServiceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_stage_ack_failure_reconciles_pending_receipt(self) -> None:
         service = self._coordinator(
-            ConfigTarget("principal-a", "module-a"),
-            (ConfigField("token", sensitive=True),),
+            validate_contract(ConfigTarget("principal-a", "module-a")),
+            (validate_contract(ConfigField("token", sensitive=True)),),
             self.config_repository,
             _StageAfterCommitFailureStore(self.secret_store),
         )
@@ -997,11 +1030,11 @@ class ConfigRecordsServiceTests(unittest.IsolatedAsyncioTestCase):
                     (
                         ConfigFieldUpdate(
                             "token",
-                            ConfigPatchMode.REPLACE,
+                            ConfigUpdateMode.REPLACE,
                             secret=SecretMaterial(b"raw"),
                         ),
                     ),
-                    (ConfigField("token", sensitive=True),),
+                    (validate_contract(ConfigField("token", sensitive=True)),),
                     "stage-ack-failure",
                 ),
             )
@@ -1016,8 +1049,8 @@ class ConfigRecordsServiceTests(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         service = self._coordinator(
-            ConfigTarget("principal-a", "module-a"),
-            (ConfigField("token", sensitive=True),),
+            validate_contract(ConfigTarget("principal-a", "module-a")),
+            (validate_contract(ConfigField("token", sensitive=True)),),
             self.config_repository,
             _ClaimFailureStore(self.secret_store),
         )
@@ -1029,11 +1062,11 @@ class ConfigRecordsServiceTests(unittest.IsolatedAsyncioTestCase):
                     (
                         ConfigFieldUpdate(
                             "token",
-                            ConfigPatchMode.REPLACE,
+                            ConfigUpdateMode.REPLACE,
                             secret=SecretMaterial(b"raw"),
                         ),
                     ),
-                    (ConfigField("token", sensitive=True),),
+                    (validate_contract(ConfigField("token", sensitive=True)),),
                     "claim-failure",
                 ),
             )
@@ -1049,8 +1082,8 @@ class ConfigRecordsServiceTests(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         service = self._coordinator(
-            ConfigTarget("principal-a", "module-a"),
-            (ConfigField("token", sensitive=True),),
+            validate_contract(ConfigTarget("principal-a", "module-a")),
+            (validate_contract(ConfigField("token", sensitive=True)),),
             self.config_repository,
             _FinalizeAfterCommitFailureStore(self.secret_store),
         )
@@ -1062,18 +1095,18 @@ class ConfigRecordsServiceTests(unittest.IsolatedAsyncioTestCase):
                     (
                         ConfigFieldUpdate(
                             "token",
-                            ConfigPatchMode.REPLACE,
+                            ConfigUpdateMode.REPLACE,
                             secret=SecretMaterial(b"raw"),
                         ),
                     ),
-                    (ConfigField("token", sensitive=True),),
+                    (validate_contract(ConfigField("token", sensitive=True)),),
                     "finalize-failure",
                 ),
             )
         self.assertTrue(context.exception.transitions)
         reopened = self._coordinator(
-            ConfigTarget("principal-a", "module-a"),
-            (ConfigField("token", sensitive=True),),
+            validate_contract(ConfigTarget("principal-a", "module-a")),
+            (validate_contract(ConfigField("token", sensitive=True)),),
             SQLiteConfigRepository(self.database),
             self.secret_store,
         )
@@ -1100,8 +1133,8 @@ class ConfigRecordsServiceTests(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         service = self._coordinator(
-            ConfigTarget("principal-a", "module-a"),
-            (ConfigField("token", sensitive=True),),
+            validate_contract(ConfigTarget("principal-a", "module-a")),
+            (validate_contract(ConfigField("token", sensitive=True)),),
             _CommitAfterWriteFailureRepository(self.config_repository),
             self.secret_store,
         )
@@ -1113,11 +1146,11 @@ class ConfigRecordsServiceTests(unittest.IsolatedAsyncioTestCase):
                     (
                         ConfigFieldUpdate(
                             "token",
-                            ConfigPatchMode.REPLACE,
+                            ConfigUpdateMode.REPLACE,
                             secret=SecretMaterial(b"raw"),
                         ),
                     ),
-                    (ConfigField("token", sensitive=True),),
+                    (validate_contract(ConfigField("token", sensitive=True)),),
                     "metadata-ack-failure",
                 ),
             )
@@ -1126,8 +1159,8 @@ class ConfigRecordsServiceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_clear_commits_tombstone_before_secret_cleanup(self) -> None:
         service = self._coordinator(
-            ConfigTarget("principal-a", "module-a"),
-            (ConfigField("token", sensitive=True),),
+            validate_contract(ConfigTarget("principal-a", "module-a")),
+            (validate_contract(ConfigField("token", sensitive=True)),),
             self.config_repository,
             self.secret_store,
         )
@@ -1137,10 +1170,10 @@ class ConfigRecordsServiceTests(unittest.IsolatedAsyncioTestCase):
                 1,
                 (
                     ConfigFieldUpdate(
-                        "token", ConfigPatchMode.REPLACE, secret=SecretMaterial(b"raw")
+                        "token", ConfigUpdateMode.REPLACE, secret=SecretMaterial(b"raw")
                     ),
                 ),
-                (ConfigField("token", sensitive=True),),
+                (validate_contract(ConfigField("token", sensitive=True)),),
                 "seed",
             ),
         )
@@ -1148,8 +1181,8 @@ class ConfigRecordsServiceTests(unittest.IsolatedAsyncioTestCase):
             service,
             ConfigPatch(
                 2,
-                (ConfigFieldUpdate("token", ConfigPatchMode.CLEAR),),
-                (ConfigField("token", sensitive=True),),
+                (ConfigFieldUpdate("token", ConfigUpdateMode.CLEAR),),
+                (validate_contract(ConfigField("token", sensitive=True)),),
             ),
         )
         self.assertEqual(cleared.revision, 3)
@@ -1158,8 +1191,8 @@ class ConfigRecordsServiceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_old_secret_delete_failure_is_recovery_state(self) -> None:
         service = self._coordinator(
-            ConfigTarget("principal-a", "module-a"),
-            (ConfigField("token", sensitive=True),),
+            validate_contract(ConfigTarget("principal-a", "module-a")),
+            (validate_contract(ConfigField("token", sensitive=True)),),
             self.config_repository,
             self.secret_store,
         )
@@ -1169,16 +1202,16 @@ class ConfigRecordsServiceTests(unittest.IsolatedAsyncioTestCase):
                 1,
                 (
                     ConfigFieldUpdate(
-                        "token", ConfigPatchMode.REPLACE, secret=SecretMaterial(b"old")
+                        "token", ConfigUpdateMode.REPLACE, secret=SecretMaterial(b"old")
                     ),
                 ),
-                (ConfigField("token", sensitive=True),),
+                (validate_contract(ConfigField("token", sensitive=True)),),
                 "old",
             ),
         )
         failing = self._coordinator(
-            ConfigTarget("principal-a", "module-a"),
-            (ConfigField("token", sensitive=True),),
+            validate_contract(ConfigTarget("principal-a", "module-a")),
+            (validate_contract(ConfigField("token", sensitive=True)),),
             SQLiteConfigRepository(self.database),
             _DeleteFailureStore(self.secret_store),
         )
@@ -1190,11 +1223,11 @@ class ConfigRecordsServiceTests(unittest.IsolatedAsyncioTestCase):
                     (
                         ConfigFieldUpdate(
                             "token",
-                            ConfigPatchMode.REPLACE,
+                            ConfigUpdateMode.REPLACE,
                             secret=SecretMaterial(b"new"),
                         ),
                     ),
-                    (ConfigField("token", sensitive=True),),
+                    (validate_contract(ConfigField("token", sensitive=True)),),
                     "new",
                 ),
             )
@@ -1205,8 +1238,8 @@ class ConfigRecordsServiceTests(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         seed = self._coordinator(
-            ConfigTarget("principal-a", "module-a"),
-            (ConfigField("token", sensitive=True),),
+            validate_contract(ConfigTarget("principal-a", "module-a")),
+            (validate_contract(ConfigField("token", sensitive=True)),),
             self.config_repository,
             self.secret_store,
         )
@@ -1216,16 +1249,16 @@ class ConfigRecordsServiceTests(unittest.IsolatedAsyncioTestCase):
                 1,
                 (
                     ConfigFieldUpdate(
-                        "token", ConfigPatchMode.REPLACE, secret=SecretMaterial(b"old")
+                        "token", ConfigUpdateMode.REPLACE, secret=SecretMaterial(b"old")
                     ),
                 ),
-                (ConfigField("token", sensitive=True),),
+                (validate_contract(ConfigField("token", sensitive=True)),),
                 "clear-seed",
             ),
         )
         failing = self._coordinator(
-            ConfigTarget("principal-a", "module-a"),
-            (ConfigField("token", sensitive=True),),
+            validate_contract(ConfigTarget("principal-a", "module-a")),
+            (validate_contract(ConfigField("token", sensitive=True)),),
             SQLiteConfigRepository(self.database),
             _DeleteFailureStore(self.secret_store),
         )
@@ -1234,8 +1267,8 @@ class ConfigRecordsServiceTests(unittest.IsolatedAsyncioTestCase):
                 failing,
                 ConfigPatch(
                     2,
-                    (ConfigFieldUpdate("token", ConfigPatchMode.CLEAR),),
-                    (ConfigField("token", sensitive=True),),
+                    (ConfigFieldUpdate("token", ConfigUpdateMode.CLEAR),),
+                    (validate_contract(ConfigField("token", sensitive=True)),),
                 ),
             )
         snapshot = await failing.current()
@@ -1245,30 +1278,39 @@ class ConfigRecordsServiceTests(unittest.IsolatedAsyncioTestCase):
     async def test_records_use_current_registry_declarations_and_fixed_scope(
         self,
     ) -> None:
-        descriptor = CollectionDescriptor(
-            "items", 1, OwnershipKind.USER, (CollectionIndex("by-name", "name"),)
+        descriptor = validate_contract(
+            CollectionDescriptor(
+                "items",
+                1,
+                OwnershipKind.USER,
+                (validate_contract(CollectionIndex("by-name", "name")),),
+            )
         )
-        manifest = ModuleManifest(
-            "module-a",
-            "module-a",
-            ModuleCategory.GAME,
-            "tests.fixtures.minimal_module:factory",
-            "1.0.0",
-            (),
-            collections=(descriptor,),
+        manifest = validate_contract(
+            ModuleManifest(
+                "module-a",
+                "module-a",
+                ModuleCategory.GAME,
+                "tests.fixtures.minimal_module:factory",
+                "1.0.0",
+                (),
+                collections=(descriptor,),
+            )
         )
         registry = Registry()
         registry.register_package(
-            PackageManifest(
-                "package",
-                "1.0.0",
-                "1.1.0",
-                (manifest,),
-                "author",
-                "MIT",
-                "source",
+            validate_contract(
+                PackageManifest(
+                    "package",
+                    "1.0.0",
+                    "2.0",
+                    (manifest,),
+                    "author",
+                    "MIT",
+                    "source",
+                )
             ),
-            {"module-a": ModuleHandlers({}, {}, {})},
+            {"module-a": validate_contract(ModuleHandlers({}, {}, {}))},
         )
         snapshot = registry.set_enabled("package/module-a", True)
         registered = snapshot.module("package/module-a")
@@ -1287,25 +1329,29 @@ class ConfigRecordsServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("owner", dir(records))
         collection = await records.collection("items")
 
-        unrelated = ModuleManifest(
-            "other",
-            "other",
-            ModuleCategory.GAME,
-            "tests.fixtures.minimal_module:factory",
-            "1.0.0",
-            (),
+        unrelated = validate_contract(
+            ModuleManifest(
+                "other",
+                "other",
+                ModuleCategory.GAME,
+                "tests.fixtures.minimal_module:factory",
+                "1.0.0",
+                (),
+            )
         )
         registry.register_package(
-            PackageManifest(
-                "other-package",
-                "1.0.0",
-                CONTRACT_VERSION,
-                (unrelated,),
-                "author",
-                "MIT",
-                "source",
+            validate_contract(
+                PackageManifest(
+                    "other-package",
+                    "1.0.0",
+                    MODULE_ABI_VERSION,
+                    (unrelated,),
+                    "author",
+                    "MIT",
+                    "source",
+                )
             ),
-            {"other": ModuleHandlers({}, {}, {})},
+            {"other": validate_contract(ModuleHandlers({}, {}, {}))},
         )
         await collection.create("one", {"name": "first"})
         self.assertEqual((await collection.get("one")).value["name"], "first")
@@ -1316,30 +1362,39 @@ class ConfigRecordsServiceTests(unittest.IsolatedAsyncioTestCase):
             await collection.get("one")
 
     async def test_records_ignore_unrelated_publish_during_collection_reissue(self):
-        descriptor = CollectionDescriptor(
-            "items", 1, OwnershipKind.USER, (CollectionIndex("by-name", "name"),)
+        descriptor = validate_contract(
+            CollectionDescriptor(
+                "items",
+                1,
+                OwnershipKind.USER,
+                (validate_contract(CollectionIndex("by-name", "name")),),
+            )
         )
-        manifest = ModuleManifest(
-            "module-a",
-            "module-a",
-            ModuleCategory.GAME,
-            "tests.fixtures.minimal_module:factory",
-            "1.0.0",
-            (),
-            collections=(descriptor,),
+        manifest = validate_contract(
+            ModuleManifest(
+                "module-a",
+                "module-a",
+                ModuleCategory.GAME,
+                "tests.fixtures.minimal_module:factory",
+                "1.0.0",
+                (),
+                collections=(descriptor,),
+            )
         )
         registry = Registry()
         registry.register_package(
-            PackageManifest(
-                "package",
-                "1.0.0",
-                CONTRACT_VERSION,
-                (manifest,),
-                "author",
-                "MIT",
-                "source",
+            validate_contract(
+                PackageManifest(
+                    "package",
+                    "1.0.0",
+                    MODULE_ABI_VERSION,
+                    (manifest,),
+                    "author",
+                    "MIT",
+                    "source",
+                )
             ),
-            {"module-a": ModuleHandlers({}, {}, {})},
+            {"module-a": validate_contract(ModuleHandlers({}, {}, {}))},
         )
         registered = registry.set_enabled("package/module-a", True).module(
             "package/module-a"

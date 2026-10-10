@@ -14,14 +14,16 @@ from enum import StrEnum
 from pathlib import Path
 from time import time
 
-from ..api.administration import (
+from yomihime_game_link_sdk.contexts import InvocationView
+from yomihime_game_link_sdk.services import ConfigSnapshot
+
+from ..core.contracts.administration import (
     AdminAuthorizationContext,
     AdminAuthorizationDenied,
     AdminAuthorizationGrant,
     AdminOperation,
 )
-from ..api.contexts import InvocationView
-from ..api.services import ConfigSnapshot
+from ..core.contracts.validation_boundary import validate_contract
 from ..core.ports import AdmissionPort
 from ..infrastructure.sqlite.repositories_admin_credentials import (
     AdminCredentialState,
@@ -165,6 +167,7 @@ class AdminAuthorizationService:
         context: AdminAuthorizationContext | None,
         resources=None,
     ) -> AdminAuthorizationGrant:
+        validate_contract(invocation)
         if not isinstance(operation, AdminOperation) or not _context_is_structural(
             context
         ):
@@ -211,6 +214,7 @@ class AdminAuthorizationService:
         context: AdminAuthorizationContext | None,
     ) -> AdminAuthorizationGrant:
         """Recheck a prior grant immediately before a Core read/write effect."""
+        validate_contract(invocation)
         effect = self._owned(grant)
         if grant.operation is not operation or effect.context is not context:
             raise AdminAuthorizationDenied from None
@@ -273,6 +277,7 @@ class AdminAuthorizationService:
         invocation: InvocationView | None,
         context: AdminAuthorizationContext | None,
     ) -> AdminCredentialState:
+        validate_contract(invocation)
         validator = self.context_validator
         if validator is None or not _context_is_structural(context):
             raise AdminAuthorizationDenied from None
@@ -324,6 +329,7 @@ class AdminAuthorizationService:
         invocation: InvocationView | None,
         context: AdminAuthorizationContext | None,
     ) -> AdminCredentialState:
+        validate_contract(invocation)
         admission = self.admission
         if admission is None:
             raise AdminAuthorizationDenied from None
@@ -344,6 +350,7 @@ class AdminAuthorizationService:
         invocation: InvocationView | None,
         context: AdminAuthorizationContext | None,
     ) -> AdminCredentialState:
+        validate_contract(invocation)
         admission = self.admission
         if admission is None:
             raise AdminAuthorizationDenied from None
@@ -477,11 +484,13 @@ def _project_snapshot_fields(snapshot, fields):
     """
     if fields is None:
         return snapshot
-    return ConfigSnapshot(
-        snapshot.revision,
-        {name: value for name, value in snapshot.values.items() if name in fields},
-        tuple(item for item in snapshot.secret_metadata if item.field in fields),
-        snapshot.target,
+    return validate_contract(
+        ConfigSnapshot(
+            snapshot.revision,
+            {name: value for name, value in snapshot.values.items() if name in fields},
+            tuple(item for item in snapshot.secret_metadata if item.field in fields),
+            snapshot.target,
+        )
     )
 
 

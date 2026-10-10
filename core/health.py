@@ -12,22 +12,36 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
-from ..api.administration import ModuleLifecycle
-from ..api.manifests import CapabilityReference, ModuleManifest
-from ..api.services import CapabilityHealth, ConfigSnapshot, HealthStatus
-from ..api.storage import SecretMetadataState
+from yomihime_game_link_sdk.declarations import CapabilityReference, ModuleManifest
+from yomihime_game_link_sdk.services import (
+    CapabilityHealth,
+    ConfigSnapshot,
+    HealthStatus,
+)
+from yomihime_game_link_sdk.storage import SecretMetadataState
+
+from ..core.contracts.administration import ModuleLifecycle
+from ..core.contracts.validation_boundary import validate_contract
 from .lifecycle import LifecycleController
 from .ports import AdmissionPort, RunIdentity
 
 ConfigSnapshotLoader = Callable[[str], Awaitable[ConfigSnapshot]]
 SourceHealthProvider = Callable[[str, str], Awaitable[CapabilityHealth]]
 
-_UNKNOWN_CONFIG = CapabilityHealth(HealthStatus.UNKNOWN, "configuration_unknown")
-_MISSING_CONFIG = CapabilityHealth(HealthStatus.UNAVAILABLE, "configuration_missing")
-_UNKNOWN_SOURCE = CapabilityHealth(HealthStatus.UNKNOWN, "source_unknown")
-_UNKNOWN_DEPENDENCY = CapabilityHealth(HealthStatus.UNKNOWN, "dependency_unknown")
-_UNAVAILABLE_DEPENDENCY = CapabilityHealth(
-    HealthStatus.UNAVAILABLE, "dependency_unavailable"
+_UNKNOWN_CONFIG = validate_contract(
+    CapabilityHealth(HealthStatus.UNKNOWN, "configuration_unknown")
+)
+_MISSING_CONFIG = validate_contract(
+    CapabilityHealth(HealthStatus.UNAVAILABLE, "configuration_missing")
+)
+_UNKNOWN_SOURCE = validate_contract(
+    CapabilityHealth(HealthStatus.UNKNOWN, "source_unknown")
+)
+_UNKNOWN_DEPENDENCY = validate_contract(
+    CapabilityHealth(HealthStatus.UNKNOWN, "dependency_unknown")
+)
+_UNAVAILABLE_DEPENDENCY = validate_contract(
+    CapabilityHealth(HealthStatus.UNAVAILABLE, "dependency_unavailable")
 )
 
 
@@ -87,6 +101,7 @@ class HealthResolver:
     async def prepare(self, module_id: str, manifest: ModuleManifest) -> None:
         """Prepare readiness for the exact STARTING run before gate opening."""
 
+        validate_contract(manifest)
         lifecycle, admission = self._runtime()
         if not isinstance(manifest, ModuleManifest):
             raise TypeError("manifest must be a ModuleManifest")
@@ -183,6 +198,7 @@ class HealthResolver:
     ) -> tuple[str, ...]:
         """Publish a metadata-only configuration snapshot while holding mutation."""
 
+        validate_contract(snapshot)
         self._runtime()
         manifest = self._registered_manifest(module_id)
         if not isinstance(snapshot, ConfigSnapshot):
@@ -286,6 +302,7 @@ class HealthResolver:
     ) -> tuple[CapabilityHealth, int]:
         """Synchronous in-memory projection consumed by Admission/Lifecycle."""
 
+        validate_contract(lifecycle_health)
         lifecycle, _ = self._runtime()
         if not isinstance(lifecycle_health, CapabilityHealth):
             raise TypeError("lifecycle health must be CapabilityHealth")
@@ -323,16 +340,21 @@ class HealthResolver:
         state = lifecycle.state(module_id)
         report = state.health_report
         if report is None:
-            return CapabilityHealth(HealthStatus.UNKNOWN, "health_not_prepared"), 0
+            return validate_contract(
+                CapabilityHealth(HealthStatus.UNKNOWN, "health_not_prepared")
+            ), 0
         health = report.capabilities.get(capability_id)
         revision = (state.health_revisions or {}).get(capability_id)
         if health is None or revision is None:
-            return CapabilityHealth(HealthStatus.UNKNOWN, "health_not_declared"), 0
+            return validate_contract(
+                CapabilityHealth(HealthStatus.UNKNOWN, "health_not_declared")
+            ), 0
         return self.query(module_id, capability_id, health, revision)
 
     async def _load_config(
         self, module_id: str, manifest: ModuleManifest
     ) -> ConfigSnapshot | None:
+        validate_contract(manifest)
         if not manifest.config_fields:
             return None
         try:
@@ -362,14 +384,18 @@ class HealthResolver:
         if not isinstance(value, CapabilityHealth):
             return _UNKNOWN_SOURCE
         if value.status is HealthStatus.AVAILABLE:
-            return CapabilityHealth(HealthStatus.AVAILABLE)
+            return validate_contract(CapabilityHealth(HealthStatus.AVAILABLE))
         if value.status is HealthStatus.UNAVAILABLE:
-            return CapabilityHealth(HealthStatus.UNAVAILABLE, "source_unavailable")
+            return validate_contract(
+                CapabilityHealth(HealthStatus.UNAVAILABLE, "source_unavailable")
+            )
         return _UNKNOWN_SOURCE
 
     def _readiness(
         self, module_id: str, manifest: ModuleManifest, snapshot: ConfigSnapshot
     ) -> _ConfigReadiness:
+        validate_contract(manifest)
+        validate_contract(snapshot)
         declarations = {field.name: field for field in manifest.config_fields}
         fields: dict[str, CapabilityHealth] = {}
         target = snapshot.target
@@ -384,7 +410,7 @@ class HealthResolver:
         for name, declaration in declarations.items():
             if not declaration.sensitive:
                 fields[name] = (
-                    CapabilityHealth(HealthStatus.AVAILABLE)
+                    validate_contract(CapabilityHealth(HealthStatus.AVAILABLE))
                     if name in snapshot.values
                     else _MISSING_CONFIG
                 )
@@ -404,7 +430,9 @@ class HealthResolver:
             else:
                 # This records configured metadata only; it does not claim
                 # the secret can be decrypted or the provider accepts it.
-                fields[name] = CapabilityHealth(HealthStatus.AVAILABLE)
+                fields[name] = validate_contract(
+                    CapabilityHealth(HealthStatus.AVAILABLE)
+                )
         return _ConfigReadiness(snapshot.revision, fields)
 
     def _effective(
@@ -415,6 +443,7 @@ class HealthResolver:
         *,
         override: tuple[CapabilityHealth, int] | None,
     ) -> CapabilityHealth:
+        validate_contract(override)
         key = (module_id, capability_id)
         if key in stack:
             return _UNAVAILABLE_DEPENDENCY
@@ -435,9 +464,13 @@ class HealthResolver:
             return _UNAVAILABLE_DEPENDENCY
         state = lifecycle.state(module_id)
         if not registered.enabled or state.lifecycle is not ModuleLifecycle.ACTIVE:
-            return CapabilityHealth(HealthStatus.UNAVAILABLE, "module_unavailable")
+            return validate_contract(
+                CapabilityHealth(HealthStatus.UNAVAILABLE, "module_unavailable")
+            )
         if state.identity is None or state.identity.module_epoch != registered.epoch:
-            return CapabilityHealth(HealthStatus.UNAVAILABLE, "module_unavailable")
+            return validate_contract(
+                CapabilityHealth(HealthStatus.UNAVAILABLE, "module_unavailable")
+            )
         if module_id == key[0] and override is not None:
             base = override[0]
         else:
@@ -446,7 +479,9 @@ class HealthResolver:
                 report.capabilities.get(capability_id) if report is not None else None
             )
         if not isinstance(base, CapabilityHealth):
-            return CapabilityHealth(HealthStatus.UNKNOWN, "health_unknown")
+            return validate_contract(
+                CapabilityHealth(HealthStatus.UNKNOWN, "health_unknown")
+            )
         if base.status is not HealthStatus.AVAILABLE:
             return base
 
@@ -494,7 +529,7 @@ class HealthResolver:
                 return _UNAVAILABLE_DEPENDENCY
             if dependency.status is HealthStatus.UNKNOWN:
                 return _UNKNOWN_DEPENDENCY
-        return CapabilityHealth(HealthStatus.AVAILABLE)
+        return validate_contract(CapabilityHealth(HealthStatus.AVAILABLE))
 
     def _prime_health(
         self,

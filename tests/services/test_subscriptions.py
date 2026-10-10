@@ -11,51 +11,14 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
-from ygl_test_subject.api.contexts import InvocationOrigin
-from ygl_test_subject.api.display import DisplayDocument, Privacy, TextBlock
-from ygl_test_subject.api.manifests import (
-    CapabilityDescriptor,
-    CapabilityEffect,
-    CommandDescriptor,
-    InvocationPolicy,
-    ModuleCategory,
-    ModuleManifest,
-    PackageManifest,
-    PrivacyFloor,
-)
-from ygl_test_subject.api.services import (
-    CapabilityHealth,
-    Grant,
-    GrantStatus,
-    HealthReport,
-    HealthStatus,
-    ModuleHandlers,
-    Principal,
-    SubscriptionUnavailable,
-)
-from ygl_test_subject.api.storage import GrantReference, OwnerScope, OwnershipKind
-from ygl_test_subject.api.subscriptions import (
-    CollectionKey,
-    ConversationKind,
-    ConversationRef,
-    DigestScheduleProfile,
-    DigestWindow,
-    DstFoldPolicy,
-    DstGapPolicy,
-    EvaluationDecision,
-    NormalizedInput,
-    Observation,
-    ObservationCompleteness,
-    ScheduleDescriptor,
-    ScheduleTrigger,
-    SubscriptionDescriptor,
-    SubscriptionRecord,
-    SubscriptionRequest,
-    SubscriptionStatus,
-    SubscriptionView,
-)
-from ygl_test_subject.api.version import CONTRACT_VERSION
 from ygl_test_subject.core.context_issuer import ContextIssuer, InvalidInvocation
+from ygl_test_subject.core.contracts.services import Grant, GrantStatus, Principal
+from ygl_test_subject.core.contracts.subscriptions import (
+    DigestWindow,
+    SubscriptionRecord,
+    SubscriptionStatus,
+)
+from ygl_test_subject.core.contracts.validation_boundary import validate_contract
 from ygl_test_subject.core.lifecycle import LifecycleController
 from ygl_test_subject.core.ports import CollectionRunRequest, RevisionConflict
 from ygl_test_subject.core.registry import Registry
@@ -88,11 +51,48 @@ from tests.fixtures.b04_runtime import (
     replace_subscription_gate_fixture,
     synthetic_subscription_gate_bindings,
 )
+from yomihime_game_link_sdk.contexts import InvocationOrigin
+from yomihime_game_link_sdk.declarations import (
+    CapabilityDescriptor,
+    CapabilityEffect,
+    CommandDescriptor,
+    InvocationPolicy,
+    ModuleCategory,
+    ModuleManifest,
+    PackageManifest,
+    PrivacyFloor,
+)
+from yomihime_game_link_sdk.display import DisplayDocument, Privacy, TextBlock
+from yomihime_game_link_sdk.services import (
+    CapabilityHealth,
+    HealthReport,
+    HealthStatus,
+    ModuleHandlers,
+)
+from yomihime_game_link_sdk.storage import GrantReference, OwnerScope, OwnershipKind
+from yomihime_game_link_sdk.subscriptions import (
+    CollectionKey,
+    ConversationKind,
+    ConversationRef,
+    DigestScheduleProfile,
+    DstFoldPolicy,
+    DstGapPolicy,
+    EvaluationDecision,
+    NormalizedInput,
+    Observation,
+    ObservationCompleteness,
+    ScheduleDescriptor,
+    ScheduleTrigger,
+    SubscriptionDescriptor,
+    SubscriptionRequest,
+    SubscriptionView,
+)
+from yomihime_game_link_sdk.version import MODULE_ABI_VERSION
 
 
 class _Collector:
     def normalize(self, parameters):
-        return NormalizedInput(parameters)
+        return validate_contract(NormalizedInput(parameters))
 
     async def collect(self, context, parameters, previous):  # pragma: no cover
         raise AssertionError("M must not recollect")
@@ -117,7 +117,11 @@ class _SubscriptionModuleInstance:
         return None
 
     async def check_health(self):
-        return HealthReport({"query": CapabilityHealth(HealthStatus.AVAILABLE)})
+        return validate_contract(
+            HealthReport(
+                {"query": validate_contract(CapabilityHealth(HealthStatus.AVAILABLE))}
+            )
+        )
 
 
 class _ThresholdEvaluator:
@@ -136,21 +140,25 @@ class _ThresholdEvaluator:
         )
         version = max(previous, observation.data_version)
         document = (
-            DisplayDocument(
-                "Update",
-                "A threshold was reached",
-                (TextBlock("score changed"),),
-                privacy=self.privacy,
+            validate_contract(
+                DisplayDocument(
+                    "Update",
+                    "A threshold was reached",
+                    (validate_contract(TextBlock("score changed")),),
+                    privacy=self.privacy,
+                )
             )
             if triggered
             else None
         )
-        return EvaluationDecision(
-            {"last_version": version},
-            triggered,
-            "shared-threshold" if triggered else None,
-            observation.data_version if triggered else None,
-            document,
+        return validate_contract(
+            EvaluationDecision(
+                {"last_version": version},
+                triggered,
+                "shared-threshold" if triggered else None,
+                observation.data_version if triggered else None,
+                document,
+            )
         )
 
 
@@ -170,11 +178,13 @@ class _Resolver:
                 if invocation.conversation_id.startswith("group-")
                 else ConversationKind.DIRECT
             )
-            resolved = ConversationRef(
-                invocation.adapter_id,
-                kind,
-                invocation.conversation_id,
-                f"route-{invocation.conversation_id}",
+            resolved = validate_contract(
+                ConversationRef(
+                    invocation.adapter_id,
+                    kind,
+                    invocation.conversation_id,
+                    f"route-{invocation.conversation_id}",
+                )
             )
         if self.after_resolve is not None:
             await self.after_resolve(invocation, resolved)
@@ -224,35 +234,39 @@ class _GrantRepository:
 
 
 def _schedule(collector_id: str, scope: OwnershipKind) -> ScheduleDescriptor:
-    return ScheduleDescriptor(
-        collector_id,
-        1,
-        "source",
-        1,
-        {
-            "type": "object",
-            "properties": {"region": {"type": "string"}},
-            "required": ["region"],
-        },
-        scope,
-        ScheduleTrigger.PERIODIC,
-        30,
-        60,
-        f"{collector_id}_cadence",
+    return validate_contract(
+        ScheduleDescriptor(
+            collector_id,
+            1,
+            "source",
+            1,
+            {
+                "type": "object",
+                "properties": {"region": {"type": "string"}},
+                "required": ["region"],
+            },
+            scope,
+            ScheduleTrigger.PERIODIC,
+            30,
+            60,
+            f"{collector_id}_cadence",
+        )
     )
 
 
 def _subscription(type_id: str, collector_id: str) -> SubscriptionDescriptor:
-    return SubscriptionDescriptor(
-        type_id,
-        collector_id,
-        f"{type_id}_matcher",
-        {
-            "type": "object",
-            "properties": {"threshold": {"type": "number", "minimum": 0}},
-            "required": ["threshold"],
-        },
-        ("instant", "digest"),
+    return validate_contract(
+        SubscriptionDescriptor(
+            type_id,
+            collector_id,
+            f"{type_id}_matcher",
+            {
+                "type": "object",
+                "properties": {"threshold": {"type": "number", "minimum": 0}},
+                "required": ["threshold"],
+            },
+            ("instant", "digest"),
+        )
     )
 
 
@@ -292,57 +306,69 @@ class B04SubscriptionServiceTests(unittest.IsolatedAsyncioTestCase):
         self.public_evaluator = _ThresholdEvaluator(privacy=Privacy.PUBLIC)
         self.private_evaluator = _ThresholdEvaluator(privacy=Privacy.PRIVATE)
         self.registry = Registry()
-        manifest = ModuleManifest(
-            "game",
-            "game",
-            ModuleCategory.GAME,
-            "test.module:Factory",
-            "0.1.0",
-            (
-                CapabilityDescriptor(
-                    "query",
-                    {"type": "object", "additionalProperties": False},
-                    InvocationPolicy.COMMAND_ONLY,
-                    CapabilityEffect.READ_ONLY,
+        manifest = validate_contract(
+            ModuleManifest(
+                "game",
+                "game",
+                ModuleCategory.GAME,
+                "test.module:Factory",
+                "0.1.0",
+                (
+                    validate_contract(
+                        CapabilityDescriptor(
+                            "query",
+                            {"type": "object", "additionalProperties": False},
+                            InvocationPolicy.COMMAND_ONLY,
+                            CapabilityEffect.READ_ONLY,
+                        )
+                    ),
                 ),
-            ),
-            commands=(
-                CommandDescriptor("subscribe", "query", {}, "Manage subscriptions"),
-            ),
-            schedules=(
-                _schedule("public-data", OwnershipKind.PUBLIC),
-                _schedule("authorized-data", OwnershipKind.AUTHORIZED),
-                _schedule("user-data", OwnershipKind.USER),
-            ),
-            subscriptions=(
-                _subscription("public-alert", "public-data"),
-                _subscription("private-alert", "authorized-data"),
-                _subscription("user-alert", "user-data"),
-            ),
+                commands=(
+                    validate_contract(
+                        CommandDescriptor(
+                            "subscribe", "query", {}, "Manage subscriptions"
+                        )
+                    ),
+                ),
+                schedules=(
+                    _schedule("public-data", OwnershipKind.PUBLIC),
+                    _schedule("authorized-data", OwnershipKind.AUTHORIZED),
+                    _schedule("user-data", OwnershipKind.USER),
+                ),
+                subscriptions=(
+                    _subscription("public-alert", "public-data"),
+                    _subscription("private-alert", "authorized-data"),
+                    _subscription("user-alert", "user-data"),
+                ),
+            )
         )
         self.registry.register_package(
-            PackageManifest(
-                "sample",
-                "0.1.0",
-                CONTRACT_VERSION,
-                (manifest,),
-                "Tests",
-                "AGPL-3.0",
-                "local",
+            validate_contract(
+                PackageManifest(
+                    "sample",
+                    "0.1.0",
+                    MODULE_ABI_VERSION,
+                    (manifest,),
+                    "Tests",
+                    "AGPL-3.0",
+                    "local",
+                )
             ),
             {
-                "game": ModuleHandlers(
-                    capabilities={"query": _Handler()},
-                    collectors={
-                        "public-data": _Collector(),
-                        "authorized-data": _Collector(),
-                        "user-data": _Collector(),
-                    },
-                    evaluators={
-                        "public-alert_matcher": self.public_evaluator,
-                        "private-alert_matcher": self.private_evaluator,
-                        "user-alert_matcher": self.private_evaluator,
-                    },
+                "game": validate_contract(
+                    ModuleHandlers(
+                        capabilities={"query": _Handler()},
+                        collectors={
+                            "public-data": _Collector(),
+                            "authorized-data": _Collector(),
+                            "user-data": _Collector(),
+                        },
+                        evaluators={
+                            "public-alert_matcher": self.public_evaluator,
+                            "private-alert_matcher": self.private_evaluator,
+                            "user-alert_matcher": self.private_evaluator,
+                        },
+                    )
                 ),
             },
         )
@@ -491,7 +517,7 @@ class B04SubscriptionServiceTests(unittest.IsolatedAsyncioTestCase):
             created = await grants.revoke_grant(
                 created, expected_revision=created.revision
             )
-        return GrantReference(created.grant_id, created.revision)
+        return validate_contract(GrantReference(created.grant_id, created.revision))
 
     @staticmethod
     def request(
@@ -504,14 +530,16 @@ class B04SubscriptionServiceTests(unittest.IsolatedAsyncioTestCase):
         subscription_id: str | None = None,
         expected_revision: int | None = None,
     ) -> SubscriptionRequest:
-        return SubscriptionRequest(
-            type_id,
-            {"region": region},
-            {"threshold": threshold},
-            mode,
-            digest_schedule,
-            subscription_id,
-            expected_revision,
+        return validate_contract(
+            SubscriptionRequest(
+                type_id,
+                {"region": region},
+                {"threshold": threshold},
+                mode,
+                digest_schedule,
+                subscription_id,
+                expected_revision,
+            )
         )
 
     async def create(
@@ -551,14 +579,16 @@ class B04SubscriptionServiceTests(unittest.IsolatedAsyncioTestCase):
                 ),
             ),
         )
-        owner_package = PackageManifest(
-            "sample",
-            "0.1.0",
-            CONTRACT_VERSION,
-            (owner_module,),
-            "Tests",
-            "AGPL-3.0",
-            "local",
+        owner_package = validate_contract(
+            PackageManifest(
+                "sample",
+                "0.1.0",
+                MODULE_ABI_VERSION,
+                (owner_module,),
+                "Tests",
+                "AGPL-3.0",
+                "local",
+            )
         )
         owner_handlers = self.module.handlers
         owner_registry.register_package(owner_package, {"game": owner_handlers})
@@ -631,15 +661,17 @@ class B04SubscriptionServiceTests(unittest.IsolatedAsyncioTestCase):
         covered=(),
     ):
         record = await self.record_for(view)
-        return Observation(
-            identity,
-            record.collection_key,
-            version,
-            self.now,
-            self.now,
-            completeness,
-            covered,
-            {"score": score},
+        return validate_contract(
+            Observation(
+                identity,
+                record.collection_key,
+                version,
+                self.now,
+                self.now,
+                completeness,
+                covered,
+                {"score": score},
+            )
         )
 
     async def evaluate(self, observation):
@@ -701,8 +733,10 @@ class B04SubscriptionServiceTests(unittest.IsolatedAsyncioTestCase):
 
         def evaluator(subscription, observation, previous_state):
             previous_inputs.append(previous_state)
-            return EvaluationDecision(
-                {"baseline": observation.data_version}, False, None, None, None
+            return validate_contract(
+                EvaluationDecision(
+                    {"baseline": observation.data_version}, False, None, None, None
+                )
             )
 
         for version, old_null in ((2, False), (3, True)):
@@ -789,7 +823,8 @@ class B04SubscriptionServiceTests(unittest.IsolatedAsyncioTestCase):
         shared = await self.create(type_id="public-alert")
         personal = await self.create(type_id="user-alert")
         authorized = await self.create(
-            type_id="private-alert", grant=GrantReference("owner-grant", 1)
+            type_id="private-alert",
+            grant=validate_contract(GrantReference("owner-grant", 1)),
         )
         service, view, _, _ = await self._owner_service()
 
@@ -836,21 +871,25 @@ class B04SubscriptionServiceTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_owner_cannot_cancel_foreign_or_cross_module_rows(self):
-        route = ConversationRef(
-            "adapter", ConversationKind.DIRECT, "direct-u1", "route-direct-u1"
+        route = validate_contract(
+            ConversationRef(
+                "adapter", ConversationKind.DIRECT, "direct-u1", "route-direct-u1"
+            )
         )
         rows = (
             SubscriptionRecord(
                 "foreign-owner",
                 1,
                 "sample/game",
-                CollectionKey(
-                    "sample/game",
-                    "public-data",
-                    1,
-                    "source",
-                    NormalizedInput({"region": "US"}),
-                    OwnerScope.public(),
+                validate_contract(
+                    CollectionKey(
+                        "sample/game",
+                        "public-data",
+                        1,
+                        "source",
+                        validate_contract(NormalizedInput({"region": "US"})),
+                        OwnerScope.public(),
+                    )
                 ),
                 "u2",
                 None,
@@ -863,13 +902,15 @@ class B04SubscriptionServiceTests(unittest.IsolatedAsyncioTestCase):
                 "cross-module",
                 1,
                 "other/game",
-                CollectionKey(
-                    "other/game",
-                    "public-data",
-                    1,
-                    "source",
-                    NormalizedInput({"region": "US"}),
-                    OwnerScope.public(),
+                validate_contract(
+                    CollectionKey(
+                        "other/game",
+                        "public-data",
+                        1,
+                        "source",
+                        validate_contract(NormalizedInput({"region": "US"})),
+                        OwnerScope.public(),
+                    )
                 ),
                 "u1",
                 None,
@@ -960,7 +1001,7 @@ class B04SubscriptionServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.store.current(saved.subscription_id)).revision, 1)
 
     async def test_m05_authorized_subscription_requires_current_exact_grant(self):
-        grant = GrantReference("grant-1", 2)
+        grant = validate_contract(GrantReference("grant-1", 2))
         with self.assertRaises(SubscriptionOperationError):
             await self.service.create_request(
                 self.invocation(grant=grant), self.request("private-alert")
@@ -1028,7 +1069,9 @@ class B04SubscriptionServiceTests(unittest.IsolatedAsyncioTestCase):
         revoked = await grants.revoke_grant(
             current_grant, expected_revision=current_grant.revision
         )
-        revoked_ref = GrantReference(revoked.grant_id, revoked.revision)
+        revoked_ref = validate_contract(
+            GrantReference(revoked.grant_id, revoked.revision)
+        )
         with self.assertRaises(SubscriptionOperationError):
             await service.revise_request(
                 self.invocation(grant=revoked_ref),
@@ -1097,13 +1140,15 @@ class B04SubscriptionServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.store.list_for_owner("u1", limit=10), ())
         self.assertEqual(
             await self.jobs.for_collection(
-                CollectionKey(
-                    "sample/game",
-                    "authorized-data",
-                    1,
-                    "source",
-                    NormalizedInput({"region": "US"}),
-                    OwnerScope.authorized("u1", create_ref),
+                validate_contract(
+                    CollectionKey(
+                        "sample/game",
+                        "authorized-data",
+                        1,
+                        "source",
+                        validate_contract(NormalizedInput({"region": "US"})),
+                        OwnerScope.authorized("u1", create_ref),
+                    )
                 )
             ),
             (),
@@ -1199,12 +1244,14 @@ class B04SubscriptionServiceTests(unittest.IsolatedAsyncioTestCase):
                 self.invocation(), self.request(mode="digest")
             )
         with self.assertRaises(ValueError):
-            DigestScheduleProfile(
-                "Not/AZone",
-                "08:00",
-                3600,
-                DstFoldPolicy.FIRST_OCCURRENCE,
-                DstGapPolicy.SKIP,
+            validate_contract(
+                DigestScheduleProfile(
+                    "Not/AZone",
+                    "08:00",
+                    3600,
+                    DstFoldPolicy.FIRST_OCCURRENCE,
+                    DstGapPolicy.SKIP,
+                )
             )
         self.assertEqual(await self.store.list_for_owner("u1", limit=10), ())
 
@@ -1419,12 +1466,14 @@ class B04SubscriptionServiceTests(unittest.IsolatedAsyncioTestCase):
 
     @staticmethod
     def profile(timezone="UTC", local_time="13:00"):
-        return DigestScheduleProfile(
-            timezone,
-            local_time,
-            7200,
-            DstFoldPolicy.FIRST_OCCURRENCE,
-            DstGapPolicy.SKIP,
+        return validate_contract(
+            DigestScheduleProfile(
+                timezone,
+                local_time,
+                7200,
+                DstFoldPolicy.FIRST_OCCURRENCE,
+                DstGapPolicy.SKIP,
+            )
         )
 
     async def test_m14_digest_members_reuse_persisted_window_and_documents(self):
@@ -1467,7 +1516,7 @@ class B04SubscriptionServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(r1.recipient, r2.recipient)
 
     async def test_m16_group_authorized_instant_and_digest_fail_without_writes(self):
-        grant = GrantReference("grant-group", 1)
+        grant = validate_contract(GrantReference("grant-group", 1))
         self.grants.values[grant.grant_id] = self.grant_details(grant)
         invocation = self.invocation("u1", "group-one", grant=grant)
         before = await self.store.list_for_owner("u1", limit=10)
@@ -1482,14 +1531,16 @@ class B04SubscriptionServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.store.list_for_owner("u1", limit=10), before)
 
     async def test_authorized_revise_rejects_same_id_direct_route_change(self):
-        grant = GrantReference("grant-revise-route", 1)
+        grant = validate_contract(GrantReference("grant-revise-route", 1))
         saved = await self.create(
             type_id="private-alert", grant=grant, conversation="direct-u1"
         )
         before = await self.record_for(saved)
         invocation = self.invocation("u1", "direct-u1", grant=grant)
-        self.resolver.overrides[invocation.invocation_id] = ConversationRef(
-            "adapter", ConversationKind.DIRECT, "direct-u1", "route-migrated"
+        self.resolver.overrides[invocation.invocation_id] = validate_contract(
+            ConversationRef(
+                "adapter", ConversationKind.DIRECT, "direct-u1", "route-migrated"
+            )
         )
         with self.assertRaises(PrivateRecipientRequired):
             await self.service.revise_request(
@@ -1506,14 +1557,16 @@ class B04SubscriptionServiceTests(unittest.IsolatedAsyncioTestCase):
     async def test_authorized_cancel_rejects_group_route_with_same_conversation_id(
         self,
     ):
-        grant = GrantReference("grant-cancel-group", 1)
+        grant = validate_contract(GrantReference("grant-cancel-group", 1))
         saved = await self.create(
             type_id="private-alert", grant=grant, conversation="direct-u1"
         )
         before = await self.record_for(saved)
         invocation = self.invocation("u1", "direct-u1", grant=grant)
-        self.resolver.overrides[invocation.invocation_id] = ConversationRef(
-            "adapter", ConversationKind.GROUP, "direct-u1", "route-group"
+        self.resolver.overrides[invocation.invocation_id] = validate_contract(
+            ConversationRef(
+                "adapter", ConversationKind.GROUP, "direct-u1", "route-group"
+            )
         )
         with self.assertRaises(PrivateRecipientRequired):
             await self.service.cancel(
@@ -1531,20 +1584,24 @@ class B04SubscriptionServiceTests(unittest.IsolatedAsyncioTestCase):
         )
         registry = Registry()
         registry.register_package(
-            PackageManifest(
-                "sample",
-                "0.1.0",
-                CONTRACT_VERSION,
-                (manifest,),
-                "Tests",
-                "AGPL-3.0",
-                "local",
+            validate_contract(
+                PackageManifest(
+                    "sample",
+                    "0.1.0",
+                    MODULE_ABI_VERSION,
+                    (manifest,),
+                    "Tests",
+                    "AGPL-3.0",
+                    "local",
+                )
             ),
             {
-                "game": ModuleHandlers(
-                    capabilities={"query": _Handler()},
-                    collectors={"public-data": _Collector()},
-                    evaluators={"public-alert_matcher": self.public_evaluator},
+                "game": validate_contract(
+                    ModuleHandlers(
+                        capabilities={"query": _Handler()},
+                        collectors={"public-data": _Collector()},
+                        evaluators={"public-alert_matcher": self.public_evaluator},
+                    )
                 )
             },
         )
@@ -1612,15 +1669,17 @@ class B04SubscriptionServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.store.list_for_owner("u1", limit=10), ())
 
     async def test_m17_missing_or_forged_conversation_route_fails_closed(self):
-        grant = GrantReference("grant-route", 1)
+        grant = validate_contract(GrantReference("grant-route", 1))
         self.grants.values[grant.grant_id] = self.grant_details(grant)
         invocation = self.invocation(grant=grant)
         self.resolver.overrides[invocation.invocation_id] = None
         with self.assertRaises(PrivateRecipientRequired):
             await self.service.create_request(invocation, self.request("private-alert"))
         forged = self.invocation("u1", "direct-forged", grant=grant)
-        self.resolver.overrides[forged.invocation_id] = ConversationRef(
-            "adapter", ConversationKind.DIRECT, "other-direct", "route-forged"
+        self.resolver.overrides[forged.invocation_id] = validate_contract(
+            ConversationRef(
+                "adapter", ConversationKind.DIRECT, "other-direct", "route-forged"
+            )
         )
         with self.assertRaises(PrivateRecipientRequired):
             await self.service.create_request(forged, self.request("private-alert"))
@@ -1681,7 +1740,7 @@ class B04SubscriptionServiceTests(unittest.IsolatedAsyncioTestCase):
             (created.subscription_id,),
         )
 
-        grant = GrantReference("grant-external-u1", 1)
+        grant = validate_contract(GrantReference("grant-external-u1", 1))
         self.grants.values[grant.grant_id] = self.grant_details(
             grant, principal_id="principal-u1"
         )
@@ -1702,7 +1761,9 @@ class B04SubscriptionServiceTests(unittest.IsolatedAsyncioTestCase):
         created = await self.create()
 
         async def async_evaluate(subscription, observation, previous_state):
-            return EvaluationDecision({"last_version": observation.data_version}, False)
+            return validate_contract(
+                EvaluationDecision({"last_version": observation.data_version}, False)
+            )
 
         self.public_evaluator.evaluate = async_evaluate
         observation = await self.observation_for(created)
@@ -1727,6 +1788,56 @@ class B04SubscriptionServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(snapshot.state)
         self.assertIsNone(snapshot.cursor)
 
+    async def test_malformed_evaluator_result_rejects_before_any_persistent_commit(
+        self,
+    ):
+        created = await self.create()
+        observation = await self.observation_for(created)
+        request = CollectionRunRequest(
+            observation.key,
+            self.eval_now,
+            30,
+            1,
+            self.module.epoch,
+            self.snapshot.revision,
+        )
+        lease = await self.scheduler.claim_due(request, now=self.eval_now)
+        self.assertIsNotNone(lease)
+        good = EvaluationDecision({}, False)
+        bad_values = (
+            replace(good, triggered=1),
+            replace(good, state=object()),
+            EvaluationDecision(
+                {},
+                True,
+                "event",
+                True,
+                DisplayDocument("title", "subject", (TextBlock("text"),)),
+            ),
+            EvaluationDecision(
+                {},
+                True,
+                "event",
+                1,
+                DisplayDocument(
+                    "title", "subject", (TextBlock("text", required="yes"),)
+                ),
+            ),
+        )
+        try:
+            for decision in bad_values:
+                self.public_evaluator.evaluate = lambda *args, value=decision: value
+                with self.subTest(decision=decision):
+                    with self.assertRaises(SubscriptionOperationError):
+                        await self.service.prepare_evaluations(lease, observation)
+                    snapshot = await self.scheduler.current_evaluation(
+                        created.subscription_id, observation.key
+                    )
+                    self.assertIsNone(snapshot.state)
+                    self.assertIsNone(snapshot.cursor)
+        finally:
+            await self.scheduler.release(lease)
+
     async def test_digest_trigger_without_persisted_window_does_not_advance_state(self):
         profile = self.profile()
         created = await self.create("u1", mode="digest", digest_schedule=profile)
@@ -1739,11 +1850,9 @@ class B04SubscriptionServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(snapshot.cursor)
 
     async def test_legacy_b03_create_and_revise_are_fail_closed(self):
-        view = SubscriptionView("sub", 1, "u1", None, "direct-u1", {})
-        with self.assertRaises(SubscriptionUnavailable):
-            await self.service.create(self.invocation(), view)
-        with self.assertRaises(SubscriptionUnavailable):
-            await self.service.revise(self.invocation(), view)
+        validate_contract(SubscriptionView("sub", 1, "u1", None, "direct-u1", {}))
+        self.assertFalse(hasattr(self.service, "create"))
+        self.assertFalse(hasattr(self.service, "revise"))
         self.assertEqual(await self.store.list_for_owner("u1", limit=10), ())
 
 

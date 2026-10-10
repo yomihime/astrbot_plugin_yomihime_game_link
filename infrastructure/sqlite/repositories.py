@@ -11,7 +11,9 @@ from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 
-from ...api.services import ConfigTarget
+from yomihime_game_link_sdk.services import ConfigTarget
+
+from ...core.contracts.validation_boundary import validate_contract
 from ...core.ports import ModuleRegistrationLookup
 from ..files import SafeFileStore
 from ..secret_store import SQLiteSecretStore
@@ -57,6 +59,7 @@ class SQLiteRepositories:
         subscription_gate_fields: Mapping[ConfigTarget, tuple[str, ...]] | None = None,
         config_clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
+        validate_contract(subscription_gate_fields)
         if not callable(getattr(registration_lookup, "require_registered", None)):
             raise TypeError("registration lookup is not usable")
         if not all(

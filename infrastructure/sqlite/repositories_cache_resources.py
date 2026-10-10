@@ -10,16 +10,18 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from ...api.services import CacheAccessRequest, validate_cache_access_request
-from ...api.storage import (
+from yomihime_game_link_sdk.storage import (
     CacheEntry,
     CacheLookup,
     CacheLookupStatus,
     OwnerScope,
     OwnershipKind,
     ResourceMetadata,
-    freeze_json,
 )
+
+from ...core.contracts.services import CacheAccessRequest, validate_cache_access_request
+from ...core.contracts.storage import OwnerScope_validate, freeze_json
+from ...core.contracts.validation_boundary import validate_contract
 from ...core.ports import (
     AuthorizationWindowExpired,
     RevisionConflict,
@@ -82,7 +84,8 @@ def _load_json(value: object) -> Mapping[str, Any]:
 
 
 def _scope_parts(scope: OwnerScope) -> tuple[str, str | None, str | None, int | None]:
-    scope = OwnerScope.validate(scope)
+    validate_contract(scope)
+    scope = OwnerScope_validate(scope)
     if scope.kind is OwnershipKind.PUBLIC:
         return "public", None, None, None
     if scope.kind is OwnershipKind.USER:
@@ -111,12 +114,13 @@ def _scope_from_row(row: sqlite3.Row) -> OwnerScope:
                 raise ValueError("user resource row carries invalid grant data")
             return OwnerScope.user(user_id)
         if kind == "authorized":
-            from ...api.storage import GrantReference
+            from yomihime_game_link_sdk.storage import GrantReference
 
             if user_id is None or grant_id is None or grant_revision is None:
                 raise ValueError("authorized resource row is incomplete")
             return OwnerScope.authorized(
-                user_id, GrantReference(grant_id, int(grant_revision))
+                user_id,
+                validate_contract(GrantReference(grant_id, int(grant_revision))),
             )
     except (IndexError, KeyError, TypeError, ValueError):
         raise ValueError("stored owner scope is invalid") from None
@@ -158,11 +162,13 @@ class SQLiteCacheRepository:
 
     @staticmethod
     def _entry(row: sqlite3.Row) -> CacheEntry:
-        return CacheEntry(
-            row["cache_key"],
-            _load_json(row["payload_json"]),
-            _datetime(row["expires_at"]),
-            int(row["revision"]),
+        return validate_contract(
+            CacheEntry(
+                row["cache_key"],
+                _load_json(row["payload_json"]),
+                _datetime(row["expires_at"]),
+                int(row["revision"]),
+            )
         )
 
     @staticmethod
@@ -210,16 +216,18 @@ class SQLiteCacheRepository:
 
         grant_mismatch, row = await self.database.executor.run_read(_read)
         if grant_mismatch:
-            return CacheLookup(CacheLookupStatus.REJECTED)
+            return validate_contract(CacheLookup(CacheLookupStatus.REJECTED))
         if row is None or row[0]:
-            return CacheLookup(CacheLookupStatus.MISS)
+            return validate_contract(CacheLookup(CacheLookupStatus.MISS))
         expires_at = _datetime(row[1])
         if expires_at is None or expires_at <= datetime.now(UTC):
-            return CacheLookup(CacheLookupStatus.EXPIRED)
+            return validate_contract(CacheLookup(CacheLookupStatus.EXPIRED))
         if minimum_source_version is not None and row[2] < minimum_source_version:
-            return CacheLookup(CacheLookupStatus.REJECTED)
-        entry = CacheEntry(row[3], _load_json(row[4]), expires_at, row[5])
-        return CacheLookup(CacheLookupStatus.HIT, entry)
+            return validate_contract(CacheLookup(CacheLookupStatus.REJECTED))
+        entry = validate_contract(
+            CacheEntry(row[3], _load_json(row[4]), expires_at, row[5])
+        )
+        return validate_contract(CacheLookup(CacheLookupStatus.HIT, entry))
 
     async def put(
         self,
@@ -230,6 +238,7 @@ class SQLiteCacheRepository:
         source_version: int = 0,
         authorization_deadline: datetime | None = None,
     ) -> CacheEntry:
+        validate_contract(entry)
         request = self._request(request)
         if not isinstance(entry, CacheEntry):
             raise TypeError("entry must be a CacheEntry")
@@ -296,7 +305,9 @@ class SQLiteCacheRepository:
         revision = await self.database.executor.run_transaction(
             _write, begin_mode="IMMEDIATE"
         )
-        return CacheEntry(entry.key, entry.payload, entry.expires_at, revision)
+        return validate_contract(
+            CacheEntry(entry.key, entry.payload, entry.expires_at, revision)
+        )
 
     async def invalidate(
         self,
@@ -337,16 +348,19 @@ _MEDIA_TYPE = re.compile(r"^[a-z][a-z0-9!#$&^_.+-]*/[a-z0-9][a-z0-9!#$&^_.+-]*$"
 
 
 def _validate_metadata(metadata: ResourceMetadata) -> ResourceMetadata:
+    validate_contract(metadata)
     if not isinstance(metadata, ResourceMetadata):
         raise TypeError("metadata must be ResourceMetadata")
-    metadata = ResourceMetadata(
-        metadata.asset_id,
-        metadata.media_type,
-        metadata.scope,
-        metadata.size_bytes,
-        metadata.expires_at,
-        metadata.temporary,
-        metadata.revision,
+    metadata = validate_contract(
+        ResourceMetadata(
+            metadata.asset_id,
+            metadata.media_type,
+            metadata.scope,
+            metadata.size_bytes,
+            metadata.expires_at,
+            metadata.temporary,
+            metadata.revision,
+        )
     )
     if not _MEDIA_TYPE.fullmatch(metadata.media_type.lower()):
         raise ValueError("unsupported media type")
@@ -387,6 +401,7 @@ class SQLiteResourceRepository:
 
     @staticmethod
     def _params(asset_id: str, scope: OwnerScope) -> tuple[Any, ...]:
+        validate_contract(scope)
         if (
             not isinstance(asset_id, str)
             or not asset_id.strip()
@@ -399,17 +414,20 @@ class SQLiteResourceRepository:
 
     @staticmethod
     def _metadata(row: sqlite3.Row) -> ResourceMetadata:
-        return ResourceMetadata(
-            row["asset_id"],
-            row["media_type"],
-            _scope_from_row(row),
-            int(row["size_bytes"]),
-            _datetime(row["expires_at"]),
-            bool(row["temporary"]),
-            int(row["revision"]),
+        return validate_contract(
+            ResourceMetadata(
+                row["asset_id"],
+                row["media_type"],
+                _scope_from_row(row),
+                int(row["size_bytes"]),
+                _datetime(row["expires_at"]),
+                bool(row["temporary"]),
+                int(row["revision"]),
+            )
         )
 
     async def current_revision(self, asset_id: str, scope: OwnerScope) -> int | None:
+        validate_contract(scope)
         params = self._params(asset_id, scope)
 
         def _read(unit: SQLiteUnitOfWork) -> int | None:
@@ -429,6 +447,7 @@ class SQLiteResourceRepository:
         expected_revision: int | None = None,
         authorization_deadline: datetime | None = None,
     ) -> ResourceMetadata:
+        validate_contract(metadata)
         metadata = _validate_metadata(metadata)
         authorization_deadline = _authorization_deadline(authorization_deadline)
         if expected_revision is not None and (
@@ -494,20 +513,23 @@ class SQLiteResourceRepository:
         confirm = getattr(self.file_store, "confirm", None)
         if confirm is not None:
             await confirm(metadata)
-        return ResourceMetadata(
-            metadata.asset_id,
-            metadata.media_type,
-            metadata.scope,
-            metadata.size_bytes,
-            metadata.expires_at,
-            metadata.temporary,
-            revision,
+        return validate_contract(
+            ResourceMetadata(
+                metadata.asset_id,
+                metadata.media_type,
+                metadata.scope,
+                metadata.size_bytes,
+                metadata.expires_at,
+                metadata.temporary,
+                revision,
+            )
         )
 
     async def registration_state(
         self, asset_id: str, scope: OwnerScope
     ) -> ResourceMetadata | None:
         """Return the exact index row without filtering resource expiry."""
+        validate_contract(scope)
         params = self._params(asset_id, scope)
 
         def _read(unit: SQLiteUnitOfWork) -> ResourceMetadata | None:
@@ -519,13 +541,14 @@ class SQLiteResourceRepository:
             return None if row is None else self._metadata(row)
 
         metadata = await self.database.executor.run_read(_read)
-        if metadata is not None and metadata.scope != OwnerScope.validate(scope):
+        if metadata is not None and metadata.scope != OwnerScope_validate(scope):
             raise ValueError("stored owner scope does not match lookup")
         return metadata
 
     async def metadata(
         self, asset_id: str, scope: OwnerScope
     ) -> ResourceMetadata | None:
+        validate_contract(scope)
         params = self._params(asset_id, scope)
 
         def _read(unit: SQLiteUnitOfWork) -> ResourceMetadata | None:
@@ -539,13 +562,14 @@ class SQLiteResourceRepository:
         metadata = await self.database.executor.run_read(_read)
         if metadata is None:
             return None
-        if metadata.scope != OwnerScope.validate(scope):
+        if metadata.scope != OwnerScope_validate(scope):
             raise ValueError("stored owner scope does not match lookup")
         if metadata.expires_at is not None and metadata.expires_at <= datetime.now(UTC):
             return None
         return metadata
 
     async def read(self, asset_id: str, scope: OwnerScope) -> bytes:
+        validate_contract(scope)
         metadata = await self.metadata(asset_id, scope)
         if metadata is None:
             raise FileNotFoundError("resource is unavailable")
@@ -561,6 +585,7 @@ class SQLiteResourceRepository:
         *,
         authorization_deadline: datetime | None = None,
     ) -> None:
+        validate_contract(scope)
         params = self._params(asset_id, scope)
         authorization_deadline = _authorization_deadline(authorization_deadline)
 

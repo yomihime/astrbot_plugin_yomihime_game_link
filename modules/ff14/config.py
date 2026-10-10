@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from yomihime_sdk.api.manifests import ConfigField
+from yomihime_game_link_sdk.declarations import ConfigField
 
 REGION = "ff14_default_region"
 DAYS = "ff14_calendar_default_days"

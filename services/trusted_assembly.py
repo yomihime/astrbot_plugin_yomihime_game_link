@@ -8,8 +8,10 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 
-from ..api.manifests import InvocationPolicy, SourceDeclaration
-from ..api.services import ConfigTarget
+from yomihime_game_link_sdk.declarations import InvocationPolicy, SourceDeclaration
+from yomihime_game_link_sdk.services import ConfigTarget
+
+from ..core.contracts.validation_boundary import validate_contract
 from ..extensions.disk_manifest import parse_manifest
 from .configuration_migration import OrdinaryMigrationField
 from .core_configuration import CORE_CONFIG_FIELDS, core_config_target
@@ -67,7 +69,7 @@ class ReviewedAssembly:
         }
         if not names <= declared:
             raise ValueError("reviewed ordinary policy mismatches declaration")
-        return {ConfigTarget(principal_id, self.module_id): names}
+        return {validate_contract(ConfigTarget(principal_id, self.module_id)): names}
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,7 +80,6 @@ class LegacyAssemblySupport:
 
     def ordinary_snapshot(self, _values, _defaults):
         return None
-
 
 
 def _object(pairs):
@@ -196,7 +197,7 @@ def assemble_reviewed(inventory, *, principal_id, support, selected=False):
     for source_id, host in hosts.items():
         _string(source_id)
         _string(host)
-        SourceDeclaration(source_id, host)
+        validate_contract(SourceDeclaration(source_id, host))
         # A missing/mismatched ordinary source is local capability degradation.
     credentials = descriptor["credentials"]
     if type(credentials) is not list or len(credentials) > 32:
@@ -301,7 +302,10 @@ def assemble_reviewed(inventory, *, principal_id, support, selected=False):
             target, validator = core_config_target(principal_id), None
         elif item["target"] == owner:
             candidates = fields
-            target, validator = ConfigTarget(principal_id, owner), validators.get(name)
+            target, validator = (
+                validate_contract(ConfigTarget(principal_id, owner)),
+                validators.get(name),
+            )
         else:
             raise ValueError("migration target mismatch")
         field = candidates.get(name)
@@ -350,7 +354,7 @@ def assemble_reviewed(inventory, *, principal_id, support, selected=False):
                 raise ValueError("unknown page source")
     # Callback code and its stable semantic validator identities belong to the
     # reviewed module. Freeze declarative metadata supplied to pure projection.
-    from ..api.storage import freeze_json
+    from ..core.contracts.storage import freeze_json
 
     return ReviewedAssembly(
         owner,

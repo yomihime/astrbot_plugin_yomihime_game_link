@@ -7,7 +7,7 @@ From the AstrBot checkout parent, run::
 First build and install the local SDK wheel using the offline instructions in
 ``docs/module-sdk.md``, then make that isolated SDK site available on
 ``PYTHONPATH``. The source checkout intentionally does not contain the wheel's
-``yomihime_sdk._examples`` resource packages.
+``yomihime_game_link_sdk._examples`` resource packages.
 
 This is an offline integration example. Its reversible secret codec is for
 demonstration only, its HTTP transport rejects every network attempt, and its
@@ -28,17 +28,18 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-import yomihime_sdk
-
-from ..api.administration import AdminOperation
-from ..api.contexts import InvocationOrigin
-from ..api.display import (
+import yomihime_game_link_sdk
+from yomihime_game_link_sdk.contexts import InvocationOrigin
+from yomihime_game_link_sdk.display import (
     DisplayAudience,
     DisplayLimits,
     DisplayOutput,
     Privacy,
 )
-from ..api.subscriptions import ConversationKind
+from yomihime_game_link_sdk.subscriptions import ConversationKind
+
+from ..core.contracts.administration import AdminOperation
+from ..core.contracts.validation_boundary import validate_contract
 from ..core.ports import MessageReceipt, MessageStatus
 from ..infrastructure.sqlite.database import SQLiteDatabase
 from ..services.b05_runtime import extract_installed_sdk_examples
@@ -154,14 +155,16 @@ class _PlainTextRenderer:
             for block in document.ordered_blocks
             if isinstance(text := getattr(block, "text", None), str)
         )
-        return DisplayOutput("\n".join(lines))
+        return validate_contract(DisplayOutput("\n".join(lines)))
 
     async def render_batch(self, batch, limits):
         rendered = [
             await self.render(member.document, limits=limits, audience=batch.audience)
             for member in batch.members
         ]
-        return DisplayOutput("\n\n".join(item.text for item in rendered))
+        return validate_contract(
+            DisplayOutput("\n\n".join(item.text for item in rendered))
+        )
 
 
 class _RecordingMessagePort:
@@ -247,7 +250,7 @@ async def _run() -> None:
 
         examples = extract_installed_sdk_examples(extension_root)
         sample = next(item for item in examples if item.package_id == "offline_sample")
-        print(f"SDK origin: {Path(yomihime_sdk.__file__).resolve()}")
+        print(f"SDK origin: {Path(yomihime_game_link_sdk.__file__).resolve()}")
         print(f"SDK resource: {sample.package_id} extracted into the temporary E root")
 
         credential_bytes = secrets.token_bytes(32)
@@ -268,7 +271,7 @@ async def _run() -> None:
             secret_codec=_DemoOnlySecretCodec(),
             http_transport=http_transport,
             renderer=_PlainTextRenderer(),
-            display_limits=DisplayLimits(2, 4096),
+            display_limits=validate_contract(DisplayLimits(2, 4096)),
             message_port=message_port,
             admin_context_validator=local_host.validate_admin_context,
             host_ingress_validator=local_host.validate_host_ingress,

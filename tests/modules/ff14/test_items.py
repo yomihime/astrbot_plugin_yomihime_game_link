@@ -6,8 +6,7 @@ from collections import deque
 from pathlib import Path
 from typing import Any
 
-from ygl_test_subject.api.results import ErrorCode, ResultStatus
-from ygl_test_subject.api.services import HttpRequest, HttpResponse
+from ygl_test_subject.core.contracts.validation_boundary import validate_contract
 from ygl_test_subject.modules.ff14.features.item_sources import (
     GARLAND_SOURCE,
     XIVAPI_SOURCE,
@@ -18,7 +17,9 @@ from ygl_test_subject.modules.ff14.features.item_sources import (
 from ygl_test_subject.modules.ff14.features.items import ItemLookup
 from ygl_test_subject.modules.ff14.models import AcquisitionKind
 
-from yomihime_sdk.api.services import SourceHttpError
+from yomihime_game_link_sdk.errors import SourceHttpError
+from yomihime_game_link_sdk.results import ErrorCode, ResultStatus
+from yomihime_game_link_sdk.services import HttpRequest, HttpResponse
 
 ROOT = Path(__file__).resolve().parents[3]
 FIXTURE = ROOT / "tests" / "fixtures" / "ff14" / "items.json"
@@ -53,7 +54,9 @@ class _FakeHttp:
         body = (
             response if isinstance(response, bytes) else json.dumps(response).encode()
         )
-        return HttpResponse(200, {"Content-Type": "application/json"}, body)
+        return validate_contract(
+            HttpResponse(200, {"Content-Type": "application/json"}, body)
+        )
 
 
 class ItemLookupTests(unittest.IsolatedAsyncioTestCase):

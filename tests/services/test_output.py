@@ -9,58 +9,23 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from ygl_test_subject.api.contexts import (
-    InvocationConversationKind,
-    InvocationOrigin,
-    InvocationSubscriptionScope,
-)
-from ygl_test_subject.api.display import (
-    DisplayDocument,
-    DisplayLimits,
-    DisplayOutput,
-    Privacy,
-    TextBlock,
-)
-from ygl_test_subject.api.manifests import (
-    CommandDescriptor,
-    InvocationPolicy,
-    ModuleCategory,
-    ModuleManifest,
-    PackageManifest,
-    PrivacyFloor,
-)
-from ygl_test_subject.api.results import (
-    CapabilityResult,
-    ErrorCode,
-    ErrorDetail,
-    FactDocument,
-    ResultStatus,
-)
-from ygl_test_subject.api.services import (
-    CapabilityHealth,
+from ygl_test_subject.core.context_issuer import ContextIssuer
+from ygl_test_subject.core.contracts.services import (
     CommandOutput,
     Grant,
     GrantStatus,
-    HealthReport,
-    HealthStatus,
-    ModuleHandlers,
     Principal,
     SubscriptionOutput,
     ToolOutput,
 )
-from ygl_test_subject.api.storage import OwnerScope
-from ygl_test_subject.api.subscriptions import (
-    CollectionKey,
-    ConversationKind,
-    ConversationRef,
+from ygl_test_subject.core.contracts.subscriptions import (
     DeliveryEvent,
     DeliveryState,
-    NormalizedInput,
     SubscriptionRecord,
     SubscriptionStatus,
     delivery_idempotency_key,
 )
-from ygl_test_subject.core.context_issuer import ContextIssuer
+from ygl_test_subject.core.contracts.validation_boundary import validate_contract
 from ygl_test_subject.core.lifecycle import LifecycleController
 from ygl_test_subject.core.ports import (
     MessageReceipt,
@@ -89,6 +54,46 @@ from ygl_test_subject.services.owner_authority import OwnerRouteProofAuthority
 
 from tests.fixtures.b04_runtime import _run_async_from_sync
 from tests.fixtures.minimal_module import build_package
+from yomihime_game_link_sdk.contexts import (
+    InvocationConversationKind,
+    InvocationOrigin,
+    InvocationSubscriptionScope,
+)
+from yomihime_game_link_sdk.declarations import (
+    CommandDescriptor,
+    InvocationPolicy,
+    ModuleCategory,
+    ModuleManifest,
+    PackageManifest,
+    PrivacyFloor,
+)
+from yomihime_game_link_sdk.display import (
+    DisplayDocument,
+    DisplayLimits,
+    DisplayOutput,
+    Privacy,
+    TextBlock,
+)
+from yomihime_game_link_sdk.results import (
+    CapabilityResult,
+    ErrorCode,
+    ErrorDetail,
+    FactDocument,
+    ResultStatus,
+)
+from yomihime_game_link_sdk.services import (
+    CapabilityHealth,
+    HealthReport,
+    HealthStatus,
+    ModuleHandlers,
+)
+from yomihime_game_link_sdk.storage import OwnerScope
+from yomihime_game_link_sdk.subscriptions import (
+    CollectionKey,
+    ConversationKind,
+    ConversationRef,
+    NormalizedInput,
+)
 
 
 class _OutputModuleInstance:
@@ -105,11 +110,17 @@ class _OutputModuleInstance:
         return None
 
     async def check_health(self) -> HealthReport:
-        return HealthReport(
-            {
-                "lookup": CapabilityHealth(HealthStatus.AVAILABLE),
-                "status": CapabilityHealth(HealthStatus.AVAILABLE),
-            }
+        return validate_contract(
+            HealthReport(
+                {
+                    "lookup": validate_contract(
+                        CapabilityHealth(HealthStatus.AVAILABLE)
+                    ),
+                    "status": validate_contract(
+                        CapabilityHealth(HealthStatus.AVAILABLE)
+                    ),
+                }
+            )
         )
 
 
@@ -122,7 +133,7 @@ class _Renderer:
         self.calls.append((document, limits, audience))
         if self.fail:
             raise ValueError("decoder and path details must not escape")
-        return DisplayOutput("rendered result", ("img:one",))
+        return validate_contract(DisplayOutput("rendered result", ("img:one",)))
 
     async def render_batch(self, batch, limits):  # pragma: no cover - protocol only
         raise AssertionError("root result routing does not batch render")
@@ -296,11 +307,13 @@ class OutputServiceTests(unittest.IsolatedAsyncioTestCase):
             admission=self.admission,
         )
         self.send_scheduler = LifecycleApprovedSendScheduler(self.lifecycle)
-        self.route = ConversationRef(
-            "offline-adapter",
-            ConversationKind.DIRECT,
-            "offline-conversation",
-            "direct:actor",
+        self.route = validate_contract(
+            ConversationRef(
+                "offline-adapter",
+                ConversationKind.DIRECT,
+                "offline-conversation",
+                "direct:actor",
+            )
         )
         self.renderer = _Renderer()
         self.message_port = _MessagePort()
@@ -316,7 +329,9 @@ class OutputServiceTests(unittest.IsolatedAsyncioTestCase):
             "send_scheduler": self.send_scheduler,
             "registry": self.registry,
             "renderer": self.renderer,
-            "limits": DisplayLimits(max_pages=2, max_image_bytes=1024),
+            "limits": validate_contract(
+                DisplayLimits(max_pages=2, max_image_bytes=1024)
+            ),
             "conversations": self.conversations,
             "message_port": self.message_port,
             "deliveries": self.deliveries,
@@ -340,23 +355,31 @@ class OutputServiceTests(unittest.IsolatedAsyncioTestCase):
             invocation_policy=InvocationPolicy.COMMAND_ONLY,
             privacy_floor=PrivacyFloor.OWNER,
         )
-        owner_module = ModuleManifest(
-            original.module_id,
-            original.route,
-            ModuleCategory.GAME,
-            original.factory_entry,
-            original.module_version,
-            (owner_lookup, original.capabilities[1]),
-            commands=(CommandDescriptor("read", "lookup", {"item": "item"}, "Read"),),
+        owner_module = validate_contract(
+            ModuleManifest(
+                original.module_id,
+                original.route,
+                ModuleCategory.GAME,
+                original.factory_entry,
+                original.module_version,
+                (owner_lookup, original.capabilities[1]),
+                commands=(
+                    validate_contract(
+                        CommandDescriptor("read", "lookup", {"item": "item"}, "Read")
+                    ),
+                ),
+            )
         )
-        owner_package = PackageManifest(
-            package.package_id,
-            package.package_version,
-            package.contract_version,
-            (owner_module,),
-            package.author,
-            package.license,
-            package.source,
+        owner_package = validate_contract(
+            PackageManifest(
+                package.package_id,
+                package.package_version,
+                package.contract_version,
+                (owner_module,),
+                package.author,
+                package.license,
+                package.source,
+            )
         )
         registry = Registry()
         registry.register_package(owner_package, {"demo": handlers})
@@ -477,15 +500,26 @@ class OutputServiceTests(unittest.IsolatedAsyncioTestCase):
 
     @staticmethod
     def _result(*, privacy=Privacy.PUBLIC, facts=True):
-        document = DisplayDocument(
-            "lookup", "offline item", (TextBlock("visible result"),), privacy=privacy
+        document = validate_contract(
+            DisplayDocument(
+                "lookup",
+                "offline item",
+                (validate_contract(TextBlock("visible result")),),
+                privacy=privacy,
+            )
         )
-        return CapabilityResult(
-            "offline-result",
-            ResultStatus.SUCCESS,
-            document=document,
-            model_facts=(FactDocument({"value": "public"}) if facts else None),
-            privacy=privacy,
+        return validate_contract(
+            CapabilityResult(
+                "offline-result",
+                ResultStatus.SUCCESS,
+                document=document,
+                model_facts=(
+                    validate_contract(FactDocument({"value": "public"}))
+                    if facts
+                    else None
+                ),
+                privacy=privacy,
+            )
         )
 
     async def test_auth_errors_use_fixed_chinese_recovery_without_raw_details(self):
@@ -493,10 +527,14 @@ class OutputServiceTests(unittest.IsolatedAsyncioTestCase):
             (ErrorCode.AUTH_REQUIRED, "此来源需要授权。"),
             (ErrorCode.AUTH_EXPIRED, "此来源授权已失效。"),
         ):
-            result = CapabilityResult(
-                "auth-error",
-                ResultStatus.ERROR,
-                error=ErrorDetail(code, "private upstream payload must never render"),
+            result = validate_contract(
+                CapabilityResult(
+                    "auth-error",
+                    ResultStatus.ERROR,
+                    error=validate_contract(
+                        ErrorDetail(code, "private upstream payload must never render")
+                    ),
+                )
             )
             rendered = await self.output._render(result)
             self.assertTrue(rendered.text.startswith(expected))
@@ -568,7 +606,7 @@ class OutputServiceTests(unittest.IsolatedAsyncioTestCase):
     async def test_o05_standalone_tool_output_cannot_skip_source_privacy_check(self):
         view = self._view(InvocationOrigin.LLM_TOOL)
         output = await self.output.route(
-            view, ToolOutput(FactDocument({"value": "public"}))
+            view, ToolOutput(validate_contract(FactDocument({"value": "public"})))
         )
         self.assertEqual(output.error_code, "tool_provenance_required")
 
@@ -588,9 +626,11 @@ class OutputServiceTests(unittest.IsolatedAsyncioTestCase):
             connection.close()
         source = replace(
             self._result(),
-            model_facts=FactDocument(
-                {"nested": [{"resource_ref": f"see {private_id} in this text"}]},
-                sources=(f"source mentions {private_id}",),
+            model_facts=validate_contract(
+                FactDocument(
+                    {"nested": [{"resource_ref": f"see {private_id} in this text"}]},
+                    sources=(f"source mentions {private_id}",),
+                )
             ),
         )
         view = self._view(InvocationOrigin.LLM_TOOL)
@@ -614,13 +654,15 @@ class OutputServiceTests(unittest.IsolatedAsyncioTestCase):
             "subscription-one",
             1,
             "sample/demo",
-            CollectionKey(
-                "sample/demo",
-                "collector",
-                1,
-                "source",
-                NormalizedInput({"x": 1}),
-                OwnerScope.public(),
+            validate_contract(
+                CollectionKey(
+                    "sample/demo",
+                    "collector",
+                    1,
+                    "source",
+                    validate_contract(NormalizedInput({"x": 1})),
+                    OwnerScope.public(),
+                )
             ),
             "principal-offline",
             None,
@@ -707,10 +749,18 @@ class OutputServiceTests(unittest.IsolatedAsyncioTestCase):
         conflict = await self.output.route(
             view,
             CommandOutput(
-                CapabilityResult(
-                    "different",
-                    ResultStatus.SUCCESS,
-                    document=DisplayDocument("other", "subject", (TextBlock("other"),)),
+                validate_contract(
+                    CapabilityResult(
+                        "different",
+                        ResultStatus.SUCCESS,
+                        document=validate_contract(
+                            DisplayDocument(
+                                "other",
+                                "subject",
+                                (validate_contract(TextBlock("other")),),
+                            )
+                        ),
+                    )
                 )
             ),
         )
@@ -777,6 +827,23 @@ class OutputServiceTests(unittest.IsolatedAsyncioTestCase):
         unknown = await unknown_service.route(third_view, CommandOutput(self._result()))
         self.assertEqual(unknown.status, OutputStatus.UNKNOWN)
         self.assertEqual(unknown.receipt, unknown_port.receipt)
+
+    async def test_malformed_renderer_output_never_reaches_message_port(self):
+        for malformed in (
+            DisplayOutput("", ()),
+            DisplayOutput("text", ("../private",)),
+            DisplayOutput("text", ("asset", "asset")),
+        ):
+
+            class BadRenderer(_Renderer):
+                async def render(self, *args, **kwargs):
+                    return malformed
+
+            service = self._service(renderer=BadRenderer())
+            result = await service.route(self._view(), CommandOutput(self._result()))
+            self.assertEqual(result.status, OutputStatus.FAILED)
+            self.assertEqual(result.error_code, "display_render_failed")
+            self.assertEqual(self.message_port.calls, [])
 
     async def test_o09_timeout_and_send_exception_require_recovery_without_resend(self):
         view = self._view()
@@ -1102,11 +1169,13 @@ class OutputServiceTests(unittest.IsolatedAsyncioTestCase):
             registry=second_registry,
             renderer=_Renderer(),
             conversations=_Conversations(
-                ConversationRef(
-                    "offline-adapter",
-                    ConversationKind.GROUP,
-                    "another-conversation",
-                    "group:1",
+                validate_contract(
+                    ConversationRef(
+                        "offline-adapter",
+                        ConversationKind.GROUP,
+                        "another-conversation",
+                        "group:1",
+                    )
                 )
             ),
             message_port=port,

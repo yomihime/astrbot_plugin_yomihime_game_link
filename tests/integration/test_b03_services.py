@@ -9,42 +9,17 @@ from pathlib import Path
 from secrets import token_urlsafe
 from uuid import uuid4
 
-from ygl_test_subject.api.administration import AdminOperation
-from ygl_test_subject.api.contexts import InvocationOrigin
-from ygl_test_subject.api.display import DisplayDocument, Privacy, TextBlock
-from ygl_test_subject.api.manifests import (
-    CapabilityReference,
-    InvocationPolicy,
-    ModuleCategory,
-    ModuleManifest,
-    PackageManifest,
-)
-from ygl_test_subject.api.results import CapabilityResult, ResultStatus
-from ygl_test_subject.api.services import (
+from ygl_test_subject.core.context_issuer import ContextIssuer
+from ygl_test_subject.core.contracts.administration import AdminOperation
+from ygl_test_subject.core.contracts.services import (
     CacheAccessRequest,
     ConfigFieldUpdate,
     ConfigPatch,
-    ConfigPatchMode,
-    ConfigTarget,
-    ConversationKind,
-    ConversationRef,
     Grant,
     GrantStatus,
-    HttpRequest,
     LoginSessionStatus,
-    ModuleHandlers,
-    ResolvedIdentity,
-    SubscriptionUnavailable,
 )
-from ygl_test_subject.api.storage import (
-    CacheVisibility,
-    GrantReference,
-    OwnerScope,
-    SecretRef,
-)
-from ygl_test_subject.api.subscriptions import CollectionKey, NormalizedInput
-from ygl_test_subject.api.version import CONTRACT_VERSION
-from ygl_test_subject.core.context_issuer import ContextIssuer
+from ygl_test_subject.core.contracts.validation_boundary import validate_contract
 from ygl_test_subject.core.invocation import Gateway
 from ygl_test_subject.core.ports import CollectionRunRequest, SecretOwner
 from ygl_test_subject.core.registry import Registry
@@ -69,7 +44,6 @@ from ygl_test_subject.services.authorization import (
 from ygl_test_subject.services.configuration import ConfigurationCoordinator
 from ygl_test_subject.services.dependency_calls import DependencyInvoker
 from ygl_test_subject.services.module_services import (
-    InvocationBindingError,
     ModuleServicesFactory,
     UnavailableSubscriptionOperations,
 )
@@ -81,6 +55,41 @@ from tests.fixtures.b04_runtime import (
     replace_subscription_gate_fixture,
     synthetic_subscription_gate_bindings,
 )
+from yomihime_game_link_sdk.contexts import InvocationOrigin
+from yomihime_game_link_sdk.declarations import (
+    CapabilityReference,
+    ConfigUpdateMode,
+    InvocationPolicy,
+    ModuleCategory,
+    ModuleManifest,
+    PackageManifest,
+)
+from yomihime_game_link_sdk.display import DisplayDocument, Privacy, TextBlock
+from yomihime_game_link_sdk.errors import (
+    AccessDenied,
+    ParameterError,
+    ServiceUnavailable,
+)
+from yomihime_game_link_sdk.results import CapabilityResult, ResultStatus
+from yomihime_game_link_sdk.services import (
+    ConfigTarget,
+    HttpRequest,
+    ModuleHandlers,
+    ResolvedIdentity,
+)
+from yomihime_game_link_sdk.storage import (
+    CacheVisibility,
+    GrantReference,
+    OwnerScope,
+    SecretRef,
+)
+from yomihime_game_link_sdk.subscriptions import (
+    CollectionKey,
+    ConversationKind,
+    ConversationRef,
+    NormalizedInput,
+)
+from yomihime_game_link_sdk.version import MODULE_ABI_VERSION
 
 
 class B03ServiceAssemblyTests(unittest.IsolatedAsyncioTestCase):
@@ -98,8 +107,8 @@ class B03ServiceAssemblyTests(unittest.IsolatedAsyncioTestCase):
         alpha = _manifest(
             "alpha",
             (
-                CapabilityReference("sample/beta", "read"),
-                CapabilityReference("sample/alpha", "private.read"),
+                validate_contract(CapabilityReference("sample/beta", "read")),
+                validate_contract(CapabilityReference("sample/alpha", "private.read")),
             ),
         )
         beta = _manifest("beta")
@@ -120,16 +129,26 @@ class B03ServiceAssemblyTests(unittest.IsolatedAsyncioTestCase):
         )
         handler = _Handler()
         registry.register_package(
-            PackageManifest(
-                "sample", "1.0.0", CONTRACT_VERSION, modules, "tests", "MIT", "offline"
+            validate_contract(
+                PackageManifest(
+                    "sample",
+                    "1.0.0",
+                    MODULE_ABI_VERSION,
+                    modules,
+                    "tests",
+                    "MIT",
+                    "offline",
+                )
             ),
             {
-                "alpha": ModuleHandlers(
-                    {"read": handler, "private.read": _Handler("private.read")},
-                    {"account-collector": _Collector()},
-                    {},
+                "alpha": validate_contract(
+                    ModuleHandlers(
+                        {"read": handler, "private.read": _Handler("private.read")},
+                        {"account-collector": _Collector()},
+                        {},
+                    )
                 ),
-                "beta": ModuleHandlers({"read": handler}, {}, {}),
+                "beta": validate_contract(ModuleHandlers({"read": handler}, {}, {})),
             },
         )
         runtime = await build_runtime(
@@ -151,25 +170,31 @@ class B03ServiceAssemblyTests(unittest.IsolatedAsyncioTestCase):
             bound = await runtime.services.for_module(module.module_id).scopes.bind(
                 view
             )
-            response = await bound.http.fetch(HttpRequest("catalog", "/items"))
+            response = await bound.http.fetch(
+                validate_contract(HttpRequest("catalog", "/items"))
+            )
             self.assertEqual(response.status_code, 200)
             result = await bound.dependencies.invoke(
-                view, CapabilityReference("sample/beta", "read"), {}
+                view, validate_contract(CapabilityReference("sample/beta", "read")), {}
             )
             self.assertEqual(result.status, ResultStatus.SUCCESS)
             denied = await bound.dependencies.invoke(
-                view, CapabilityReference("sample/alpha", "private.read"), {}
+                view,
+                validate_contract(CapabilityReference("sample/alpha", "private.read")),
+                {},
             )
             self.assertEqual(denied.status, ResultStatus.ERROR)
             self.assertIsNone(handler.calls[-1][0].actor_id)
-            with self.assertRaises(InvocationBindingError):
+            with self.assertRaises(AccessDenied):
                 await runtime.services.for_module(module.module_id).scopes.bind(
                     replace(view)
                 )
             issuer.release(view)
             self.assertIn(proof, proofs.revoked)
             with self.assertRaises(SourceHttpError):
-                await bound.http.fetch(HttpRequest("catalog", "/items"))
+                await bound.http.fetch(
+                    validate_contract(HttpRequest("catalog", "/items"))
+                )
             self.assertEqual(len(runtime.transport.requests), 1)
         finally:
             await runtime.services.close_credentials()
@@ -241,12 +266,14 @@ class B03ServiceAssemblyTests(unittest.IsolatedAsyncioTestCase):
             "sample/alpha",
             f"account-{actor}",
             ("read", "private.read"),
-            SecretRef(
-                f"secret_{grant_id}",
-                actor,
-                "sample/alpha",
-                "credential",
-                "test_exchange",
+            validate_contract(
+                SecretRef(
+                    f"secret_{grant_id}",
+                    actor,
+                    "sample/alpha",
+                    "credential",
+                    "test_exchange",
+                )
             ),
             GrantStatus.ACTIVE,
         )
@@ -381,11 +408,15 @@ class B03ServiceAssemblyTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(FileNotFoundError):
             await bob.resources.read(alice_asset)
 
-        response = await alice.http.fetch(HttpRequest("catalog", "/items"))
+        response = await alice.http.fetch(
+            validate_contract(HttpRequest("catalog", "/items"))
+        )
         self.assertEqual(response.status_code, 200)
         self.assertEqual(len(self.runtime.transport.requests), 1)
         with self.assertRaises(SourceHttpError) as http_error:
-            await alice.http.fetch(HttpRequest("undeclared", "/items"))
+            await alice.http.fetch(
+                validate_contract(HttpRequest("undeclared", "/items"))
+            )
         self.assertEqual(http_error.exception.code, "source_not_declared")
         self.assertEqual(len(self.runtime.transport.requests), 1)
 
@@ -435,7 +466,7 @@ class B03ServiceAssemblyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await bob_account_records.get("same")).value["owner"], "bob")
         with self.assertRaises(FileNotFoundError):
             await bob.resources.read(alice_asset)
-        with self.assertRaises(InvocationBindingError):
+        with self.assertRaises(AccessDenied):
             await beta_services.scopes.bind(alice_view)
 
         # Dependency authority is bound to the issuer-carried caller capability.
@@ -443,7 +474,7 @@ class B03ServiceAssemblyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(alice.dependencies.caller_capability.module_id, "sample/alpha")
         result = await alice.dependencies.invoke(
             alice_view,
-            CapabilityReference("sample/beta", "read"),
+            validate_contract(CapabilityReference("sample/beta", "read")),
             {},
         )
         self.assertEqual(result.status, ResultStatus.SUCCESS, result.error)
@@ -451,10 +482,10 @@ class B03ServiceAssemblyTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(issued_key, self.runtime.services._caller_issuer._issued)
         self.runtime.issuer.release(alice_view)
         self.assertNotIn(issued_key, self.runtime.services._caller_issuer._issued)
-        with self.assertRaises(InvocationBindingError):
+        with self.assertRaises(AccessDenied):
             await alice.dependencies.invoke(
                 alice_view,
-                CapabilityReference("sample/beta", "read"),
+                validate_contract(CapabilityReference("sample/beta", "read")),
                 {},
             )
 
@@ -523,25 +554,29 @@ class B03ServiceAssemblyTests(unittest.IsolatedAsyncioTestCase):
         # A publication in an unrelated package advances the registry's
         # global revision. It must not invalidate the exact root/child lease
         # chain for this still-current module invocation.
-        unrelated = ModuleManifest(
-            "noise",
-            "noise",
-            ModuleCategory.PLATFORM,
-            "tests.module:Factory",
-            "1.0.0",
-            (),
+        unrelated = validate_contract(
+            ModuleManifest(
+                "noise",
+                "noise",
+                ModuleCategory.PLATFORM,
+                "tests.module:Factory",
+                "1.0.0",
+                (),
+            )
         )
         self.runtime.registry.register_package(
-            PackageManifest(
-                "unrelated",
-                "1.0.0",
-                CONTRACT_VERSION,
-                (unrelated,),
-                "Tests",
-                "MIT",
-                "unrelated registry revision regression",
+            validate_contract(
+                PackageManifest(
+                    "unrelated",
+                    "1.0.0",
+                    MODULE_ABI_VERSION,
+                    (unrelated,),
+                    "Tests",
+                    "MIT",
+                    "unrelated registry revision regression",
+                )
             ),
-            {"noise": ModuleHandlers({}, {}, {})},
+            {"noise": validate_contract(ModuleHandlers({}, {}, {}))},
         )
         self.assertGreater(self.runtime.registry.snapshot().revision, root_revision)
         private_handler = (
@@ -553,7 +588,7 @@ class B03ServiceAssemblyTests(unittest.IsolatedAsyncioTestCase):
         try:
             result = await services.dependencies.invoke(
                 root,
-                CapabilityReference("sample/alpha", "private.read"),
+                validate_contract(CapabilityReference("sample/alpha", "private.read")),
                 {},
             )
             self.assertEqual(result.status, ResultStatus.SUCCESS)
@@ -581,20 +616,29 @@ class B03ServiceAssemblyTests(unittest.IsolatedAsyncioTestCase):
                 await profiles.get("cross-module-public")
             ).value["owner"]
 
-            with self.assertRaises(InvocationBindingError):
+            with self.assertRaises(AccessDenied):
                 await bound.records.collection("account_records")
             authorized_cache = CacheAccessRequest(
                 "private-entry",
                 CacheVisibility.AUTHORIZED,
                 OwnerScope.authorized(
-                    "alice", GrantReference(grant.grant_id, grant.revision)
+                    "alice",
+                    validate_contract(GrantReference(grant.grant_id, grant.revision)),
                 ),
             )
-            with self.assertRaises(PermissionError):
+            with self.assertRaises(ParameterError):
                 await bound.cache.lookup(authorized_cache)
+            with self.assertRaises(AccessDenied):
+                from yomihime_game_link_sdk.storage import CacheQuery
+
+                await bound.cache.lookup(
+                    CacheQuery("private-entry", CacheVisibility.AUTHORIZED)
+                )
 
             private = await bound.dependencies.invoke(
-                child, CapabilityReference("sample/alpha", "private.read"), {}
+                child,
+                validate_contract(CapabilityReference("sample/alpha", "private.read")),
+                {},
             )
             observations["private_dependency"] = private.error.code.value
             return await original_invoke(child, parameters)
@@ -602,7 +646,7 @@ class B03ServiceAssemblyTests(unittest.IsolatedAsyncioTestCase):
         handler.invoke = bind_public_child
         try:
             result = await root_services.dependencies.invoke(
-                root, CapabilityReference("sample/beta", "read"), {}
+                root, validate_contract(CapabilityReference("sample/beta", "read")), {}
             )
         finally:
             handler.invoke = original_invoke
@@ -637,9 +681,9 @@ class B03ServiceAssemblyTests(unittest.IsolatedAsyncioTestCase):
             await account_records.create("child-private-authorized", {"owner": "alice"})
             authorized_record = await account_records.get("child-private-authorized")
             observations["authorized_record_owner"] = authorized_record.value["owner"]
-            with self.assertRaises(InvocationBindingError):
+            with self.assertRaises(AccessDenied):
                 await module_services.accounts.begin_login(child)
-            with self.assertRaises(InvocationBindingError):
+            with self.assertRaises(AccessDenied):
                 await module_services.subscriptions.list_current(child)
             observations["management_denied"] = True
             return await original_invoke(child, parameters)
@@ -648,7 +692,7 @@ class B03ServiceAssemblyTests(unittest.IsolatedAsyncioTestCase):
         try:
             result = await root_services.dependencies.invoke(
                 root,
-                CapabilityReference("sample/alpha", "private.read"),
+                validate_contract(CapabilityReference("sample/alpha", "private.read")),
                 {},
             )
         finally:
@@ -666,15 +710,18 @@ class B03ServiceAssemblyTests(unittest.IsolatedAsyncioTestCase):
         snapshot = self.runtime.registry.snapshot()
         module = snapshot.module("sample/alpha")
         now = datetime.now(UTC)
-        key = CollectionKey(
-            "sample/alpha",
-            "account-collector",
-            1,
-            "catalog",
-            NormalizedInput({}),
-            OwnerScope.authorized(
-                grant.principal_id, GrantReference(grant.grant_id, grant.revision)
-            ),
+        key = validate_contract(
+            CollectionKey(
+                "sample/alpha",
+                "account-collector",
+                1,
+                "catalog",
+                validate_contract(NormalizedInput({})),
+                OwnerScope.authorized(
+                    grant.principal_id,
+                    validate_contract(GrantReference(grant.grant_id, grant.revision)),
+                ),
+            )
         )
         request = CollectionRunRequest(
             key,
@@ -743,10 +790,10 @@ class B03ServiceAssemblyTests(unittest.IsolatedAsyncioTestCase):
         async def assert_record_access_denied(view):
             try:
                 bound = await service.bind(view)
-            except InvocationBindingError:
+            except AccessDenied:
                 pass
             else:
-                with self.assertRaises(InvocationBindingError):
+                with self.assertRaises(AccessDenied):
                     await bound.records.collection("account_records")
             finally:
                 self.runtime.issuer.release(view)
@@ -761,7 +808,7 @@ class B03ServiceAssemblyTests(unittest.IsolatedAsyncioTestCase):
         released = self._view(grant=active)
         bound = await service.bind(released)
         self.runtime.issuer.release(released)
-        with self.assertRaises(InvocationBindingError):
+        with self.assertRaises(AccessDenied):
             await bound.records.collection("account_records")
         self.assertEqual(await self._authorized_record_count(), 0)
 
@@ -771,13 +818,15 @@ class B03ServiceAssemblyTests(unittest.IsolatedAsyncioTestCase):
         root = self._view(grant=grant, capability_id="read")
         caller = factory._caller_issuer.issue(root, "read")
         authorization = factory._new_authorization()
-        invoker = DependencyInvoker(
-            self.runtime.registry,
-            self.runtime.issuer,
-            self.runtime.lifecycle,
-            factory._caller_issuer,
-            caller,
-            private_authorizer=authorization.require_dependency_grant,
+        invoker = validate_contract(
+            DependencyInvoker(
+                self.runtime.registry,
+                self.runtime.issuer,
+                self.runtime.lifecycle,
+                factory._caller_issuer,
+                caller,
+                private_authorizer=authorization.require_dependency_grant,
+            )
         )
         private_handler = (
             self.runtime.registry.snapshot()
@@ -797,9 +846,9 @@ class B03ServiceAssemblyTests(unittest.IsolatedAsyncioTestCase):
             await self.runtime.repositories.authorization.revoke_grant(
                 current, expected_revision=current.revision
             )
-            with self.assertRaises(InvocationBindingError):
+            with self.assertRaises(AccessDenied):
                 await profiles.get("before-revoke")
-            with self.assertRaises(InvocationBindingError):
+            with self.assertRaises(AccessDenied):
                 await child_services.records.collection("account_records")
             observations["service_denied_after_revoke"] = True
             return await original_invoke(child, parameters)
@@ -807,7 +856,9 @@ class B03ServiceAssemblyTests(unittest.IsolatedAsyncioTestCase):
         private_handler.invoke = use_then_revoke
         try:
             result = await invoker.invoke(
-                root, CapabilityReference("sample/alpha", "private.read"), {}
+                root,
+                validate_contract(CapabilityReference("sample/alpha", "private.read")),
+                {},
             )
         finally:
             private_handler.invoke = original_invoke
@@ -826,22 +877,26 @@ class B03ServiceAssemblyTests(unittest.IsolatedAsyncioTestCase):
         original_invoke = handler.invoke
 
         async def returns_private_result(invocation, parameters):
-            return CapabilityResult(
-                "unexpected-private",
-                ResultStatus.SUCCESS,
-                document=DisplayDocument(
-                    "private",
-                    "subject",
-                    (TextBlock("sensitive"),),
+            return validate_contract(
+                CapabilityResult(
+                    "unexpected-private",
+                    ResultStatus.SUCCESS,
+                    document=validate_contract(
+                        DisplayDocument(
+                            "private",
+                            "subject",
+                            (validate_contract(TextBlock("sensitive")),),
+                            privacy=Privacy.PRIVATE,
+                        )
+                    ),
                     privacy=Privacy.PRIVATE,
-                ),
-                privacy=Privacy.PRIVATE,
+                )
             )
 
         handler.invoke = returns_private_result
         try:
             result = await module_services.dependencies.invoke(
-                root, CapabilityReference("sample/beta", "read"), {}
+                root, validate_contract(CapabilityReference("sample/beta", "read")), {}
             )
         finally:
             handler.invoke = original_invoke
@@ -895,13 +950,15 @@ class B03ServiceAssemblyTests(unittest.IsolatedAsyncioTestCase):
         root = self._view(grant=grant, capability_id="read")
         caller = factory._caller_issuer.issue(root, "read")
         authorization = factory._new_authorization()
-        invoker = DependencyInvoker(
-            self.runtime.registry,
-            self.runtime.issuer,
-            self.runtime.lifecycle,
-            factory._caller_issuer,
-            caller,
-            private_authorizer=authorization.require_dependency_grant,
+        invoker = validate_contract(
+            DependencyInvoker(
+                self.runtime.registry,
+                self.runtime.issuer,
+                self.runtime.lifecycle,
+                factory._caller_issuer,
+                caller,
+                private_authorizer=authorization.require_dependency_grant,
+            )
         )
         private_handler = (
             self.runtime.registry.snapshot()
@@ -922,7 +979,9 @@ class B03ServiceAssemblyTests(unittest.IsolatedAsyncioTestCase):
         private_handler.invoke = revoke_then_invoke
         try:
             result = await invoker.invoke(
-                root, CapabilityReference("sample/alpha", "private.read"), {}
+                root,
+                validate_contract(CapabilityReference("sample/alpha", "private.read")),
+                {},
             )
         finally:
             self.runtime.issuer.release(root)
@@ -957,7 +1016,7 @@ class B03ServiceAssemblyTests(unittest.IsolatedAsyncioTestCase):
         services = await factory.for_module("sample/alpha").scopes.bind(tool)
         result = await services.dependencies.invoke(
             tool,
-            CapabilityReference("sample/alpha", "private.read"),
+            validate_contract(CapabilityReference("sample/alpha", "private.read")),
             {},
         )
         self.assertEqual(result.status, ResultStatus.ERROR)
@@ -973,21 +1032,25 @@ class B03ServiceAssemblyTests(unittest.IsolatedAsyncioTestCase):
             if self._table_exists(table)
         }
         subscription_api = module_services.subscriptions
+        for method in (
+            subscription_api.create_request(issued, None),
+            subscription_api.revise_request(issued, None),
+        ):
+            with self.assertRaises(ParameterError):
+                await method
         methods = (
-            subscription_api.create(issued, None),
-            subscription_api.revise(issued, None),
             subscription_api.list_current(issued),
             subscription_api.cancel(issued, "sub-1", expected_revision=1),
         )
         for method in methods:
-            with self.assertRaises(SubscriptionUnavailable) as caught:
+            with self.assertRaises(ServiceUnavailable) as caught:
                 await method
-            self.assertEqual(caught.exception.code, "subscription_unavailable")
+            self.assertEqual(caught.exception.code, "service_unavailable")
 
         tool = self._view(origin=InvocationOrigin.LLM_TOOL)
         tool_methods = (
-            subscription_api.create(tool, None),
-            subscription_api.revise(tool, None),
+            subscription_api.create_request(tool, None),
+            subscription_api.revise_request(tool, None),
             subscription_api.list_current(tool),
             subscription_api.cancel(tool, "sub-1", expected_revision=1),
         )
@@ -998,16 +1061,16 @@ class B03ServiceAssemblyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(after, before)
 
         tool_view = self._view(origin=InvocationOrigin.LLM_TOOL)
-        with self.assertRaises(InvocationBindingError):
+        with self.assertRaises(AccessDenied):
             await module_services.accounts.bindings(tool_view)
-        with self.assertRaises(InvocationBindingError):
+        with self.assertRaises(AccessDenied):
             await module_services.scopes.bind(self._view(capability_id=None))
-        with self.assertRaises(InvocationBindingError):
+        with self.assertRaises(AccessDenied):
             await module_services.scopes.bind(self._view(capability_id="undeclared"))
 
         grant = await self._grant()
         mismatched_actor = self._view(actor="bob", grant=grant)
-        with self.assertRaises(InvocationBindingError):
+        with self.assertRaises(AccessDenied):
             await module_services.scopes.bind(mismatched_actor)
 
         # A structurally identical view from a different issuer is not authority.
@@ -1022,12 +1085,12 @@ class B03ServiceAssemblyTests(unittest.IsolatedAsyncioTestCase):
             adapter_id=issued.adapter_id,
             capability_id=issued.capability_id,
         )
-        with self.assertRaises(InvocationBindingError):
+        with self.assertRaises(AccessDenied):
             await module_services.scopes.bind(forged)
 
         stale_revision = self._view()
         await self.runtime.lifecycle.stop("sample/beta")
-        with self.assertRaises(InvocationBindingError):
+        with self.assertRaises(AccessDenied):
             await module_services.scopes.bind(stale_revision)
 
     async def test_i03_grant_revoke_disable_and_release_reject_late_calls(self):
@@ -1038,25 +1101,27 @@ class B03ServiceAssemblyTests(unittest.IsolatedAsyncioTestCase):
         await bound.cache.put("authorized", {"value": 1}, ttl_seconds=120)
         authorized_asset = await self._asset_id(
             b"grant-private",
-            OwnerScope.authorized("alice", GrantReference(grant.grant_id, 1)),
+            OwnerScope.authorized(
+                "alice", validate_contract(GrantReference(grant.grant_id, 1))
+            ),
         )
         await bound.resources.register(authorized_asset, "text/plain", b"grant-private")
         async with self.runtime.lifecycle.admission.mutation("test-revoke-grant"):
             await self.runtime.repositories.authorization.revoke_grant(
                 grant, expected_revision=1
             )
-        with self.assertRaises(InvocationBindingError):
+        with self.assertRaises(AccessDenied):
             await bound.cache.get("authorized")
-        with self.assertRaises(InvocationBindingError):
+        with self.assertRaises(AccessDenied):
             await bound.resources.read(authorized_asset)
 
         active = self._view()
         active_handles = await service.scopes.bind(active)
         profiles = await active_handles.records.collection("profiles")
         await self.runtime.lifecycle.stop("sample/alpha")
-        with self.assertRaises(InvocationBindingError):
+        with self.assertRaises(AccessDenied):
             await active_handles.records.collection("profiles")
-        with self.assertRaises(InvocationBindingError):
+        with self.assertRaises(AccessDenied):
             await profiles.get("late")
 
         # A fresh epoch can start, but a released invocation stays unusable.
@@ -1064,7 +1129,7 @@ class B03ServiceAssemblyTests(unittest.IsolatedAsyncioTestCase):
         released = self._view()
         released_handles = await service.scopes.bind(released)
         self.runtime.issuer.release(released)
-        with self.assertRaises(InvocationBindingError):
+        with self.assertRaises(AccessDenied):
             await released_handles.resources.read(
                 await self._asset_id(b"shared-content", OwnerScope.user("alice"))
             )
@@ -1075,7 +1140,7 @@ class B03ServiceAssemblyTests(unittest.IsolatedAsyncioTestCase):
         beta_handles = await beta_service.scopes.bind(beta_view)
         beta_profiles = await beta_handles.records.collection("profiles")
         await self.runtime.lifecycle.stop("sample/beta")
-        with self.assertRaises(InvocationBindingError):
+        with self.assertRaises(AccessDenied):
             await beta_profiles.get("late")
 
     async def test_i03_inflight_dependency_result_is_rejected_after_revoke(self):
@@ -1088,7 +1153,7 @@ class B03ServiceAssemblyTests(unittest.IsolatedAsyncioTestCase):
         call = asyncio.create_task(
             bound.dependencies.invoke(
                 invocation,
-                CapabilityReference("sample/beta", "read"),
+                validate_contract(CapabilityReference("sample/beta", "read")),
                 {},
             )
         )
@@ -1098,7 +1163,7 @@ class B03ServiceAssemblyTests(unittest.IsolatedAsyncioTestCase):
                 grant, expected_revision=grant.revision
             )
         self.runtime.handler.release.set()
-        with self.assertRaises(InvocationBindingError):
+        with self.assertRaises(AccessDenied):
             await call
 
     async def test_i05_sqlite_restart_persists_state_and_expires_pending_sessions(self):
@@ -1106,7 +1171,10 @@ class B03ServiceAssemblyTests(unittest.IsolatedAsyncioTestCase):
         repo = self.runtime.repositories
         async with self.runtime.lifecycle.admission.mutation("test-identity-bootstrap"):
             identity = await repo.identities.save_identity(
-                "alice", ResolvedIdentity("identity-alice", "steam", "subject-alice")
+                "alice",
+                validate_contract(
+                    ResolvedIdentity("identity-alice", "steam", "subject-alice")
+                ),
             )
         from ygl_test_subject.services.identity import TrustedRoutePublisher
 
@@ -1114,8 +1182,10 @@ class B03ServiceAssemblyTests(unittest.IsolatedAsyncioTestCase):
             repo.conversations, self.runtime.lifecycle.admission
         )
         route = await publisher.publish(
-            ConversationRef(
-                "test-adapter", ConversationKind.DIRECT, "direct-room", "route"
+            validate_contract(
+                ConversationRef(
+                    "test-adapter", ConversationKind.DIRECT, "direct-room", "route"
+                )
             )
         )
         self.assertEqual(route.conversation_id, "direct-room")
@@ -1124,7 +1194,7 @@ class B03ServiceAssemblyTests(unittest.IsolatedAsyncioTestCase):
         saved_binding = await account.bind(command, identity)
         grant = await self._grant()
 
-        config_target = ConfigTarget("host-config", "sample/alpha")
+        config_target = validate_contract(ConfigTarget("host-config", "sample/alpha"))
         fields = (
             self.runtime.registry.snapshot()
             .module("sample/alpha")
@@ -1167,7 +1237,7 @@ class B03ServiceAssemblyTests(unittest.IsolatedAsyncioTestCase):
             config_target,
             ConfigPatch(
                 current.revision,
-                (ConfigFieldUpdate("region", ConfigPatchMode.REPLACE, "eu-west"),),
+                (ConfigFieldUpdate("region", ConfigUpdateMode.REPLACE, "eu-west"),),
                 declared_fields=fields,
             ),
             admin_grant,
@@ -1244,7 +1314,7 @@ class B03ServiceAssemblyTests(unittest.IsolatedAsyncioTestCase):
             ).status,
             LoginSessionStatus.EXPIRED,
         )
-        with self.assertRaises(InvocationBindingError):
+        with self.assertRaises(AccessDenied):
             await reopened_services.for_module("sample/alpha").scopes.bind(
                 old_epoch_view
             )

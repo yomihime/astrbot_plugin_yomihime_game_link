@@ -6,13 +6,17 @@ import asyncio
 from contextlib import suppress
 from time import time
 
-from ...api.administration import AdminAuthorizationDenied, AdminOperation
-from ...api.services import (
-    ConfigFieldUpdate,
-    ConfigPatch,
-    ConfigPatchMode,
-    ConfigTarget,
+from yomihime_game_link_sdk.declarations import ConfigUpdateMode
+from yomihime_game_link_sdk.services import ConfigTarget
+
+from ...core.contracts.administration import (
+    AdminAuthorizationDenied,
+    AdminOperation,
+    ModuleUnloadReceipt,
+    OrdinaryRollbackReceipt,
 )
+from ...core.contracts.services import ConfigFieldUpdate, ConfigPatch
+from ...core.contracts.validation_boundary import validate_contract
 from ...core.ports import RevisionConflict
 from ...infrastructure.secret_store import SecretStoreUnavailable
 from .runtime import PLUGIN_NAME
@@ -209,12 +213,22 @@ class AdminPages:
             if set(data) != keys:
                 raise ValueError("invalid module operation")
             if endpoint == "module-unload":
-                return await ops.unload_module(
+                receipt = await ops.unload_module(
                     None,
                     data["module_id"],
                     expected_registry_revision=data["expected_registry_revision"],
                     authorization=context,
                 )
+                if type(receipt) is not ModuleUnloadReceipt:
+                    raise TypeError("invalid unload receipt")
+                receipt.__post_init__()
+                return {
+                    "module_id": receipt.module_id,
+                    "state": receipt.state,
+                    "registry_revision": receipt.registry_revision,
+                    "data_retained": receipt.data_retained,
+                    "reopen_required": receipt.reopen_required,
+                }
             return asdict(
                 await ops.set_enabled(
                     None,
@@ -254,7 +268,9 @@ class AdminPages:
             ):
                 raise ValueError("invalid update")
             resources = ops.ordinary_resources()
-            target = ConfigTarget(ops.config_principal_id, data["module_id"])
+            target = validate_contract(
+                ConfigTarget(ops.config_principal_id, data["module_id"])
+            )
             if target not in resources:
                 raise ValueError("invalid target")
             declarations = ops.ordinary_declarations(target)
@@ -272,7 +288,7 @@ class AdminPages:
                 updates.append(
                     ConfigFieldUpdate(
                         update["field"],
-                        ConfigPatchMode(update["mode"]),
+                        validate_contract(ConfigUpdateMode(update["mode"])),
                         value=update.get("value"),
                     )
                 )
@@ -291,11 +307,17 @@ class AdminPages:
         if set(data) != keys or type(data["expected_revisions"]) is not dict:
             raise ValueError("invalid recovery parameters")
         revisions = {
-            ConfigTarget(ops.config_principal_id, module_id): revision
+            validate_contract(
+                ConfigTarget(ops.config_principal_id, module_id)
+            ): revision
             for module_id, revision in data["expected_revisions"].items()
         }
         if endpoint == "rollback":
-            return await ops.ordinary_rollback(revisions, authorization=context)
+            receipt = await ops.ordinary_rollback(revisions, authorization=context)
+            if type(receipt) is not OrdinaryRollbackReceipt:
+                raise TypeError("invalid rollback receipt")
+            receipt.__post_init__()
+            return {"rolled_back": receipt.rolled_back}
         if type(data["complete_from_current"]) is not bool:
             raise ValueError("explicit recovery intent is required")
         return await self.runtime.recover_management(

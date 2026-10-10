@@ -15,8 +15,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Mapping
 
-from yomihime_sdk.api.manifests import EXTENSION_MANIFEST_ABI
-
+from ..core.contracts.manifests import EXTENSION_MANIFEST_ABI
 from .disk_manifest import ManifestError, parse_manifest
 
 MAX_SOURCE_FILES = 256

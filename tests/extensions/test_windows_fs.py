@@ -20,23 +20,23 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from api.manifests import EXTENSION_MANIFEST_ABI
-from extensions import discovery, windows_fs
-from extensions import windows_maintenance as maintenance
-from extensions.discovery import (
+from ygl_test_subject.core.contracts.manifests import EXTENSION_MANIFEST_ABI
+from ygl_test_subject.extensions import discovery, windows_fs
+from ygl_test_subject.extensions import windows_maintenance as maintenance
+from ygl_test_subject.extensions.discovery import (
     EXTENSION_ROOT_MAX_ENTRIES,
     EXTENSION_ROOT_MAX_PACKAGES,
     DiscoveryRootError,
     discover_packages,
 )
-from extensions.factory_resolver import FilesystemFactorySource
-from extensions.loader import CandidateState, ExtensionCandidate
-from extensions.source_snapshot import (
+from ygl_test_subject.extensions.factory_resolver import FilesystemFactorySource
+from ygl_test_subject.extensions.loader import CandidateState, ExtensionCandidate
+from ygl_test_subject.extensions.source_snapshot import (
     SourceSnapshotError,
     SourceSnapshotLimits,
     capture_source_bundle,
 )
-from extensions.windows_fs import (
+from ygl_test_subject.extensions.windows_fs import (
     WindowsScanError,
     _assert_x64_layout,
     _ByHandleFileInformation,
@@ -53,7 +53,7 @@ def _document(package_id: str = "sample_pkg") -> dict[str, object]:
         "schema_version": 1,
         "package_id": package_id,
         "package_version": "1.0.0",
-        "contract_version": "1.1.0",
+        "contract_version": "2.0",
         "modules": [],
         "author": "Example",
         "license": "MIT",
@@ -332,7 +332,8 @@ class WindowsAbiTests(unittest.TestCase):
 
     def test_unsupported_matrix_fails_before_root_access(self) -> None:
         with patch(
-            "extensions.windows_fs._native_windows_version", return_value=(10, 0, 0)
+            "ygl_test_subject.extensions.windows_fs._native_windows_version",
+            return_value=(10, 0, 0),
         ):
             with self.assertRaises(WindowsScanError) as raised:
                 scan_windows_root(
@@ -366,7 +367,7 @@ class WindowsAbiTests(unittest.TestCase):
         info.dwFileAttributes = windows_fs.FILE_ATTRIBUTE_DIRECTORY
         native = object()
         handle = _Handle(native, 1)  # type: ignore[arg-type]
-        with patch("extensions.windows_fs._get_info", return_value=info):
+        with patch.object(windows_fs, "_get_info", return_value=info):
             with self.assertRaises(WindowsScanError) as raised:
                 windows_fs._verify_opened(
                     native,
@@ -383,7 +384,7 @@ class WindowsAbiTests(unittest.TestCase):
         entry = windows_fs._DirectoryEntry(
             "linked.py", 77, windows_fs.FILE_ATTRIBUTE_REPARSE_POINT
         )
-        with patch("extensions.windows_fs._enumerate", return_value=[entry]):
+        with patch.object(windows_fs, "_enumerate", return_value=[entry]):
             with self.assertRaises(WindowsScanError) as raised:
                 windows_fs._windows_inventory(
                     native,

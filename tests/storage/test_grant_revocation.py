@@ -7,30 +7,19 @@ import unittest
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from ygl_test_subject.api.display import DisplayDocument, Privacy, TextBlock
-from ygl_test_subject.api.services import (
-    ConversationKind,
-    ConversationRef,
-    Grant,
-    GrantStatus,
-)
-from ygl_test_subject.api.storage import GrantReference
-from ygl_test_subject.api.subscriptions import (
+from ygl_test_subject.core.contracts.services import Grant, GrantStatus
+from ygl_test_subject.core.contracts.subscriptions import (
     DeliveryAttempt,
     DeliveryEvent,
     DeliveryState,
     DigestEnvelope,
     DigestEnvelopeState,
-    DigestMember,
     DigestMemberAssociation,
-    DigestScheduleProfile,
     DigestWindow,
-    DstFoldPolicy,
-    DstGapPolicy,
-    SubscriptionRequest,
     delivery_idempotency_key,
     digest_envelope_idempotency_key,
 )
+from ygl_test_subject.core.contracts.validation_boundary import validate_contract
 from ygl_test_subject.core.ports import SecretOwner
 from ygl_test_subject.infrastructure.sqlite.repositories_subscriptions import (
     _dump,
@@ -39,6 +28,21 @@ from ygl_test_subject.infrastructure.sqlite.repositories_subscriptions import (
 )
 
 from tests.fixtures.b04_runtime import DeterministicClock, build_runtime
+from yomihime_game_link_sdk.display import (
+    DigestMember,
+    DisplayDocument,
+    Privacy,
+    TextBlock,
+)
+from yomihime_game_link_sdk.storage import GrantReference
+from yomihime_game_link_sdk.subscriptions import (
+    ConversationKind,
+    ConversationRef,
+    DigestScheduleProfile,
+    DstFoldPolicy,
+    DstGapPolicy,
+    SubscriptionRequest,
+)
 
 
 class SQLiteGrantRevocationTests(unittest.IsolatedAsyncioTestCase):
@@ -84,8 +88,10 @@ class SQLiteGrantRevocationTests(unittest.IsolatedAsyncioTestCase):
         grant: Grant | None = None,
         mode: str = "instant",
     ):
-        recipient = ConversationRef(
-            "test-adapter", ConversationKind.DIRECT, route, f"private-route-{route}"
+        recipient = validate_contract(
+            ConversationRef(
+                "test-adapter", ConversationKind.DIRECT, route, f"private-route-{route}"
+            )
         )
         await self.runtime.host_repositories.conversations.save(recipient)
         invocation = self.runtime.invocation(actor, route, grant=grant)
@@ -95,22 +101,26 @@ class SQLiteGrantRevocationTests(unittest.IsolatedAsyncioTestCase):
         else:
             type_id = "private-alert"
             schedule = (
-                DigestScheduleProfile(
-                    "UTC",
-                    "12:00",
-                    3600,
-                    DstFoldPolicy.FIRST_OCCURRENCE,
-                    DstGapPolicy.SKIP,
+                validate_contract(
+                    DigestScheduleProfile(
+                        "UTC",
+                        "12:00",
+                        3600,
+                        DstFoldPolicy.FIRST_OCCURRENCE,
+                        DstGapPolicy.SKIP,
+                    )
                 )
                 if mode == "digest"
                 else None
             )
-        request = SubscriptionRequest(
-            type_id,
-            {"region": "global"},
-            {"minimum": 0},
-            mode,
-            schedule,
+        request = validate_contract(
+            SubscriptionRequest(
+                type_id,
+                {"region": "global"},
+                {"minimum": 0},
+                mode,
+                schedule,
+            )
         )
         services = self.runtime.module_factory.for_module("sample/feed")
         return await services.subscriptions.create_request(invocation, request)
@@ -151,11 +161,15 @@ class SQLiteGrantRevocationTests(unittest.IsolatedAsyncioTestCase):
             record.owner_id,
             record.grant,
             record.recipient,
-            DisplayDocument(
-                "Private result",
-                "Revocation fixture",
-                (TextBlock(event_key),),
-                privacy=Privacy.PRIVATE if record.grant is not None else Privacy.PUBLIC,
+            validate_contract(
+                DisplayDocument(
+                    "Private result",
+                    "Revocation fixture",
+                    (validate_contract(TextBlock(event_key)),),
+                    privacy=Privacy.PRIVATE
+                    if record.grant is not None
+                    else Privacy.PUBLIC,
+                )
             ),
             key,
             state,
@@ -205,11 +219,13 @@ class SQLiteGrantRevocationTests(unittest.IsolatedAsyncioTestCase):
             DigestEnvelopeState.SENT: DeliveryState.SENT,
         }.get(state, DeliveryState.PENDING)
         event = await self._event(record, event_key, state=event_state)
-        member = DigestMember(
-            record.subscription_id,
-            record.revision,
-            event.event_key,
-            event.event_version,
+        member = validate_contract(
+            DigestMember(
+                record.subscription_id,
+                record.revision,
+                event.event_key,
+                event.event_version,
+            )
         )
         association = DigestMemberAssociation(
             window_id, record.recipient, member, event
@@ -290,17 +306,20 @@ class SQLiteGrantRevocationTests(unittest.IsolatedAsyncioTestCase):
 
     async def _revoke_through_module(self, grant: Grant) -> None:
         await self.runtime.host_repositories.conversations.save(
-            ConversationRef(
-                "test-adapter",
-                ConversationKind.DIRECT,
-                "command-alice",
-                "private-route-command-alice",
+            validate_contract(
+                ConversationRef(
+                    "test-adapter",
+                    ConversationKind.DIRECT,
+                    "command-alice",
+                    "private-route-command-alice",
+                )
             )
         )
         invocation = self.runtime.invocation("alice", "command-alice")
         accounts = self.runtime.module_factory.for_module("sample/feed").accounts
         await accounts.revoke(
-            invocation, GrantReference(grant.grant_id, grant.revision)
+            invocation,
+            validate_contract(GrantReference(grant.grant_id, grant.revision)),
         )
 
     async def test_revoke_is_exact_and_preserves_immutable_private_history(
@@ -505,11 +524,13 @@ class SQLiteGrantRevocationTests(unittest.IsolatedAsyncioTestCase):
             DigestMemberAssociation(
                 window.window_id,
                 target.recipient,
-                DigestMember(
-                    record.subscription_id,
-                    record.revision,
-                    event.event_key,
-                    event.event_version,
+                validate_contract(
+                    DigestMember(
+                        record.subscription_id,
+                        record.revision,
+                        event.event_key,
+                        event.event_version,
+                    )
                 ),
                 event,
             )
@@ -649,11 +670,13 @@ class SQLiteGrantRevocationTests(unittest.IsolatedAsyncioTestCase):
             DigestMemberAssociation(
                 window.window_id,
                 target.recipient,
-                DigestMember(
-                    record.subscription_id,
-                    record.revision,
-                    event.event_key,
-                    event.event_version,
+                validate_contract(
+                    DigestMember(
+                        record.subscription_id,
+                        record.revision,
+                        event.event_key,
+                        event.event_version,
+                    )
                 ),
                 event,
             )

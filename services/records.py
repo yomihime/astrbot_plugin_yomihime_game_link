@@ -5,8 +5,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import cast
 
-from ..api.services import ModuleRecords
-from ..api.storage import (
+from yomihime_game_link_sdk.services import ModuleRecords
+from yomihime_game_link_sdk.storage import (
     CollectionDescriptor,
     DeclaredIndexQuery,
     OwnerScope,
@@ -14,6 +14,9 @@ from ..api.storage import (
     RecordPage,
     VersionedRecord,
 )
+
+from ..core.contracts.storage import OwnerScope_validate
+from ..core.contracts.validation_boundary import validate_contract
 from ..core.ports import (
     ModuleNotRegistered,
     ModuleRegistrationLookup,
@@ -54,8 +57,9 @@ class _ModuleRecordsCoordinator:
         owner: OwnerScope,
         registration_lookup: ModuleRegistrationLookup | None = None,
     ) -> None:
+        validate_contract(owner)
         module_id = _module_id(module_id)
-        owner = OwnerScope.validate(owner)
+        owner = OwnerScope_validate(owner)
         if not callable(getattr(repository, "collection", None)):
             raise TypeError("record repository is not usable")
         if registration_lookup is None:
@@ -103,6 +107,8 @@ class _ModuleRecordsCoordinator:
         *args: object,
         **kwargs: object,
     ) -> object:
+        validate_contract(descriptor)
+        validate_contract(owner)
         snapshot = await self._registered()
         self._assert_collection(snapshot, descriptor, module_epoch)
         collection = await self.repository.collection(self.module_id, descriptor, owner)
@@ -122,6 +128,7 @@ class _ModuleRecordsCoordinator:
         descriptor: CollectionDescriptor,
         module_epoch: int,
     ) -> None:
+        validate_contract(descriptor)
         if (
             snapshot.module_id != self.module_id
             or not snapshot.enabled
@@ -178,6 +185,8 @@ class _BoundRecordCollection(RecordCollection):
         owner: OwnerScope,
         module_epoch: int,
     ) -> None:
+        validate_contract(descriptor)
+        validate_contract(owner)
         object.__setattr__(self, "_BoundRecordCollection__coordinator", coordinator)
         object.__setattr__(self, "_BoundRecordCollection__descriptor", descriptor)
         object.__setattr__(self, "_BoundRecordCollection__owner", owner)
@@ -204,6 +213,16 @@ class _BoundRecordCollection(RecordCollection):
         return cast(VersionedRecord, result)
 
     async def query(self, query: DeclaredIndexQuery) -> RecordPage:
+        validate_contract(query)
+        from ..core.public_errors import parameters
+
+        def declared_query():
+            if query.index_name not in {
+                index.name for index in self.__descriptor.indexes
+            }:
+                raise ValueError("record index is not declared")
+
+        parameters(declared_query)
         result = await self._operate("query", query)
         return cast(RecordPage, result)
 
@@ -239,6 +258,7 @@ class ModuleRecordsService(ModuleRecords):
         owner: OwnerScope | None = None,
         registration_lookup: ModuleRegistrationLookup | None = None,
     ) -> None:
+        validate_contract(owner)
         if isinstance(coordinator_or_module_id, _ModuleRecordsCoordinator):
             if any(
                 value is not None for value in (repository, owner, registration_lookup)

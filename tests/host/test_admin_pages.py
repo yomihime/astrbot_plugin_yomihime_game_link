@@ -14,7 +14,7 @@ from fastapi import FastAPI, Request
 from ygl_test_subject.adapters.astrbot.admin_pages import AdminPages
 from ygl_test_subject.adapters.astrbot.runtime import PLUGIN_NAME, AstrBotRuntime
 from ygl_test_subject.adapters.astrbot.web_admin import verified_dashboard_request
-from ygl_test_subject.api.administration import AdminAuthorizationDenied
+from ygl_test_subject.core.contracts.administration import AdminAuthorizationDenied
 
 from tests.host.astrbot_contract import host_contracts
 from tests.host.test_astrbot_runtime import _IdleTransport, _MessageChain, _Plain

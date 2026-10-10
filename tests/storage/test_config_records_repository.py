@@ -8,35 +8,16 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
-from ygl_test_subject.api.administration import (
+from ygl_test_subject.core.contracts.administration import (
     AdminAuthorizationDenied,
     AdminOperation,
 )
-from ygl_test_subject.api.manifests import (
-    ConfigField,
-    ModuleCategory,
-    ModuleManifest,
-    PackageManifest,
-)
-from ygl_test_subject.api.services import (
+from ygl_test_subject.core.contracts.services import (
     ConfigFieldUpdate,
-    ConfigPatchMode,
-    ConfigTarget,
-    ModuleHandlers,
     PersistedConfigPatch,
 )
-from ygl_test_subject.api.storage import (
-    CollectionDescriptor,
-    CollectionIndex,
-    DeclaredIndexQuery,
-    GrantReference,
-    OwnerScope,
-    OwnershipKind,
-    QueryOperator,
-    SecretReceipt,
-    SecretRef,
-    SecretTarget,
-)
+from ygl_test_subject.core.contracts.storage import SecretReceipt, SecretTarget
+from ygl_test_subject.core.contracts.validation_boundary import validate_contract
 from ygl_test_subject.core.ports import (
     ModuleNotRegistered,
     ModuleRegistrationSnapshot,
@@ -53,13 +34,32 @@ from ygl_test_subject.infrastructure.sqlite.repositories_config import (
     SQLiteRecordRepository,
 )
 
+from yomihime_game_link_sdk.declarations import (
+    ConfigField,
+    ConfigUpdateMode,
+    ModuleCategory,
+    ModuleManifest,
+    PackageManifest,
+)
+from yomihime_game_link_sdk.services import ConfigTarget, ModuleHandlers
+from yomihime_game_link_sdk.storage import (
+    CollectionDescriptor,
+    CollectionIndex,
+    DeclaredIndexQuery,
+    GrantReference,
+    OwnerScope,
+    OwnershipKind,
+    QueryOperator,
+    SecretRef,
+)
+
 
 class SubscriptionGateStorageTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.database = SQLiteDatabase(Path(self.temp.name) / "gates.sqlite3")
         self.database.initialize()
-        self.target = ConfigTarget("system", "ff14/ff14")
+        self.target = validate_contract(ConfigTarget("system", "ff14/ff14"))
         self.now = datetime(2026, 10, 2, 12, tzinfo=UTC)
         self.policy = {self.target: ("subscription_enabled",)}
         self.repository = self._repository()
@@ -103,7 +103,7 @@ class SubscriptionGateStorageTests(unittest.IsolatedAsyncioTestCase):
         return PersistedConfigPatch(
             revision,
             (ConfigFieldUpdate("subscription_enabled", mode, value=value),),
-            (ConfigField("subscription_enabled"),),
+            (validate_contract(ConfigField("subscription_enabled")),),
             "gate-operation",
             self.target,
         )
@@ -118,7 +118,7 @@ class SubscriptionGateStorageTests(unittest.IsolatedAsyncioTestCase):
             "'ff14/ff14','logs_secret','original-operation','active',7)"
         )
         secret_metadata = (await self.repository.current(self.target)).secret_metadata
-        second = ConfigTarget("system", "other/module")
+        second = validate_contract(ConfigTarget("system", "other/module"))
         policy = {
             self.target: ("subscription_enabled", "another_gate"),
             second: ("gate",),
@@ -196,7 +196,7 @@ class SubscriptionGateStorageTests(unittest.IsolatedAsyncioTestCase):
     async def test_atomic_failure_rolls_back_all_targets_and_markers(self):
         self._entry("subscription_enabled", "true")
         original = self._sql("SELECT * FROM config_entries")
-        second = ConfigTarget("system", "other/module")
+        second = validate_contract(ConfigTarget("system", "other/module"))
         repository = self._repository(
             {self.target: ("subscription_enabled", "new_gate"), second: ("gate",)}
         )
@@ -299,28 +299,28 @@ class SubscriptionGateStorageTests(unittest.IsolatedAsyncioTestCase):
         original = self._gate_row()
         self.now += timedelta(hours=1)
         same = await self.repository.update(
-            self.target, self._patch(1, ConfigPatchMode.REPLACE, True)
+            self.target, self._patch(1, ConfigUpdateMode.REPLACE, True)
         )
         self.assertEqual(same.revision, 2)
         self.assertEqual(self._gate_row(), original)
         kept = await self.repository.update(
-            self.target, self._patch(2, ConfigPatchMode.KEEP)
+            self.target, self._patch(2, ConfigUpdateMode.KEEP)
         )
         self.assertEqual(kept.revision, 3)
         self.assertEqual(self._gate_row(), original)
         paused = await self.repository.update(
-            self.target, self._patch(3, ConfigPatchMode.REPLACE, False)
+            self.target, self._patch(3, ConfigUpdateMode.REPLACE, False)
         )
         self.assertEqual(paused.revision, 4)
         self.assertEqual(self._gate_row(), [("false", 4, self.now.isoformat())])
         self.now += timedelta(hours=1)
         await self.repository.update(
-            self.target, self._patch(4, ConfigPatchMode.REPLACE, True)
+            self.target, self._patch(4, ConfigUpdateMode.REPLACE, True)
         )
         self.assertEqual(self._gate_row(), [("true", 5, self.now.isoformat())])
         with self.assertRaises(RevisionConflict):
             await self.repository.update(
-                self.target, self._patch(4, ConfigPatchMode.REPLACE, False)
+                self.target, self._patch(4, ConfigUpdateMode.REPLACE, False)
             )
         self.assertEqual(self._gate_row(), [("true", 5, self.now.isoformat())])
 
@@ -330,16 +330,16 @@ class SubscriptionGateStorageTests(unittest.IsolatedAsyncioTestCase):
         for value in (0, 1, "true", (), {}):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 await self.repository.update(
-                    self.target, self._patch(1, ConfigPatchMode.REPLACE, value)
+                    self.target, self._patch(1, ConfigUpdateMode.REPLACE, value)
                 )
         with self.assertRaises(ValueError):
             await self.repository.update(
-                self.target, self._patch(1, ConfigPatchMode.CLEAR)
+                self.target, self._patch(1, ConfigUpdateMode.CLEAR)
             )
         sensitive_keep = PersistedConfigPatch(
             1,
-            (ConfigFieldUpdate("subscription_enabled", ConfigPatchMode.KEEP),),
-            (ConfigField("subscription_enabled", sensitive=True),),
+            (ConfigFieldUpdate("subscription_enabled", ConfigUpdateMode.KEEP),),
+            (validate_contract(ConfigField("subscription_enabled", sensitive=True)),),
             "gate-operation",
             self.target,
         )
@@ -350,7 +350,7 @@ class SubscriptionGateStorageTests(unittest.IsolatedAsyncioTestCase):
         )  # A bad transition clock rolls back overall CAS too.
         with self.assertRaises(ValueError):
             await self.repository.update(
-                self.target, self._patch(1, ConfigPatchMode.REPLACE, False)
+                self.target, self._patch(1, ConfigUpdateMode.REPLACE, False)
             )
         self.assertEqual(self._sql("SELECT revision FROM config_state"), [(1,)])
         self.assertEqual(self._gate_row(), before)
@@ -393,8 +393,8 @@ class ConfigRecordsRepositoryTests(unittest.IsolatedAsyncioTestCase):
     ) -> PersistedConfigPatch:
         return PersistedConfigPatch(
             expected,
-            (ConfigFieldUpdate(field, ConfigPatchMode.REPLACE, value=value),),
-            (ConfigField(field),),
+            (ConfigFieldUpdate(field, ConfigUpdateMode.REPLACE, value=value),),
+            (validate_contract(ConfigField(field)),),
             "operation-1",
             target,
         )
@@ -405,26 +405,32 @@ class ConfigRecordsRepositoryTests(unittest.IsolatedAsyncioTestCase):
     ) -> tuple[
         SQLiteRecordRepository, Registry, RegistryBackedLookup, RegisteredModule
     ]:
-        module = ModuleManifest(
-            "module-a",
-            "module_a",
-            ModuleCategory.GAME,
-            "tests.fixtures.minimal_module:factory",
-            "1.0.0",
-            (),
-            collections=(descriptor,),
+        module = validate_contract(
+            ModuleManifest(
+                "module-a",
+                "module_a",
+                ModuleCategory.GAME,
+                "tests.fixtures.minimal_module:factory",
+                "1.0.0",
+                (),
+                collections=(descriptor,),
+            )
         )
-        package = PackageManifest(
-            "package",
-            "1.0.0",
-            "1.1.0",
-            (module,),
-            "author",
-            "MIT",
-            "source",
+        package = validate_contract(
+            PackageManifest(
+                "package",
+                "1.0.0",
+                "2.0",
+                (module,),
+                "author",
+                "MIT",
+                "source",
+            )
         )
         registry = Registry()
-        registry.register_package(package, {"module-a": ModuleHandlers({}, {}, {})})
+        registry.register_package(
+            package, {"module-a": validate_contract(ModuleHandlers({}, {}, {}))}
+        )
         snapshot = registry.set_enabled("package/module-a", True)
         registered = snapshot.module("package/module-a")
         lookup = RegistryBackedLookup(registry)
@@ -436,16 +442,16 @@ class ConfigRecordsRepositoryTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_config_scope_cas_restart_and_sensitive_metadata(self) -> None:
-        target = ConfigTarget("user-a", "module-a")
+        target = validate_contract(ConfigTarget("user-a", "module-a"))
         first = await self.config.current(target)
         self.assertEqual(first.revision, 1)
         updated = await self.config.update(target, self._ordinary_patch(target, 1))
         self.assertEqual(updated.revision, 2)
         self.assertEqual(updated.values["region"], "cn")
 
-        secret_target = ConfigTarget("user-a", "module-secret")
-        ref = SecretRef(
-            "secret_opaque", "user-a", "module-secret", "token", "op-secret"
+        secret_target = validate_contract(ConfigTarget("user-a", "module-secret"))
+        ref = validate_contract(
+            SecretRef("secret_opaque", "user-a", "module-secret", "token", "op-secret")
         )
         receipt = SecretReceipt(
             ref,
@@ -456,8 +462,8 @@ class ConfigRecordsRepositoryTests(unittest.IsolatedAsyncioTestCase):
         )
         sensitive = PersistedConfigPatch(
             1,
-            (ConfigFieldUpdate("token", ConfigPatchMode.REPLACE, receipt=receipt),),
-            (ConfigField("token", sensitive=True),),
+            (ConfigFieldUpdate("token", ConfigUpdateMode.REPLACE, receipt=receipt),),
+            (validate_contract(ConfigField("token", sensitive=True)),),
             "op-secret",
             secret_target,
         )
@@ -485,7 +491,7 @@ class ConfigRecordsRepositoryTests(unittest.IsolatedAsyncioTestCase):
         from tests.fixtures.admin_authorization import native_grant
 
         grant = await native_grant(credentials, AdminOperation.UPDATE_CONFIG)
-        target = ConfigTarget("user-authorized", "module-a")
+        target = validate_contract(ConfigTarget("user-authorized", "module-a"))
         first = await self.config.update_authorized(
             target, self._ordinary_patch(target, 1), grant
         )
@@ -502,12 +508,14 @@ class ConfigRecordsRepositoryTests(unittest.IsolatedAsyncioTestCase):
         await self.database.executor.initialize()
         credentials = SQLiteAdminCredentialRepository(self.database)
         await credentials.bootstrap(b"c" * 32)
-        target = ConfigTarget("user-secret", "module-a")
+        target = validate_contract(ConfigTarget("user-secret", "module-a"))
         from tests.fixtures.admin_authorization import native_grant
 
         grant = await native_grant(credentials, AdminOperation.UPDATE_CONFIG)
         receipt = SecretReceipt(
-            SecretRef("secret_unclaimed", "user-secret", "module-a", "token", "op"),
+            validate_contract(
+                SecretRef("secret_unclaimed", "user-secret", "module-a", "token", "op")
+            ),
             SecretTarget("user-secret", "module-a", "token"),
             "op",
             1,
@@ -515,8 +523,8 @@ class ConfigRecordsRepositoryTests(unittest.IsolatedAsyncioTestCase):
         )
         patch = PersistedConfigPatch(
             1,
-            (ConfigFieldUpdate("token", ConfigPatchMode.REPLACE, receipt=receipt),),
-            (ConfigField("token", sensitive=True),),
+            (ConfigFieldUpdate("token", ConfigUpdateMode.REPLACE, receipt=receipt),),
+            (validate_contract(ConfigField("token", sensitive=True)),),
             "op",
             target,
         )
@@ -531,8 +539,8 @@ class ConfigRecordsRepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(current.secret_metadata, ())
 
     async def test_config_owner_isolation_expected_revision_and_rollback(self) -> None:
-        target_a = ConfigTarget("user-a", "module-a")
-        target_b = ConfigTarget("user-b", "module-a")
+        target_a = validate_contract(ConfigTarget("user-a", "module-a"))
+        target_b = validate_contract(ConfigTarget("user-b", "module-a"))
         await self.config.update(target_a, self._ordinary_patch(target_a, 1))
         self.assertEqual((await self.config.current(target_b)).revision, 1)
         with self.assertRaises(RevisionConflict):
@@ -551,16 +559,22 @@ class ConfigRecordsRepositoryTests(unittest.IsolatedAsyncioTestCase):
         except RuntimeError:
             pass
         self.assertEqual(
-            (await self.config.current(ConfigTarget("rollback", "module"))).revision,
+            (
+                await self.config.current(
+                    validate_contract(ConfigTarget("rollback", "module"))
+                )
+            ).revision,
             1,
         )
 
     async def test_records_unique_owner_cas_and_declared_index_paging(self) -> None:
-        descriptor = CollectionDescriptor(
-            "scores",
-            1,
-            OwnershipKind.USER,
-            (CollectionIndex("by-name", "name"),),
+        descriptor = validate_contract(
+            CollectionDescriptor(
+                "scores",
+                1,
+                OwnershipKind.USER,
+                (validate_contract(CollectionIndex("by-name", "name")),),
+            )
         )
         records, _, _, _ = self._records(self.database, descriptor)
         first = await records.collection(
@@ -583,34 +597,46 @@ class ConfigRecordsRepositoryTests(unittest.IsolatedAsyncioTestCase):
         for index in range(2, 5):
             await first.create(f"{index}", {"name": f"alice-{index}"})
         page = await first.query(
-            DeclaredIndexQuery("by-name", QueryOperator.PREFIX, "alice", limit=2)
+            validate_contract(
+                DeclaredIndexQuery("by-name", QueryOperator.PREFIX, "alice", limit=2)
+            )
         )
         self.assertEqual(len(page.records), 2)
         self.assertIsNotNone(page.next_cursor)
         next_page = await first.query(
-            DeclaredIndexQuery(
-                "by-name",
-                QueryOperator.PREFIX,
-                "alice",
-                limit=2,
-                cursor=page.next_cursor,
+            validate_contract(
+                DeclaredIndexQuery(
+                    "by-name",
+                    QueryOperator.PREFIX,
+                    "alice",
+                    limit=2,
+                    cursor=page.next_cursor,
+                )
             )
         )
         self.assertGreaterEqual(len(next_page.records), 1)
         with self.assertRaises(ValueError):
             await first.query(
-                DeclaredIndexQuery("not-declared", QueryOperator.EQUALS, "alice")
+                validate_contract(
+                    DeclaredIndexQuery("not-declared", QueryOperator.EQUALS, "alice")
+                )
             )
         with self.assertRaises(ValueError):
             await first.query(
-                DeclaredIndexQuery(
-                    "by-name", QueryOperator.EQUALS, "alice", cursor="bad"
+                validate_contract(
+                    DeclaredIndexQuery(
+                        "by-name", QueryOperator.EQUALS, "alice", cursor="bad"
+                    )
                 )
             )
 
     async def test_record_scope_and_declaration_are_bound(self) -> None:
-        descriptor = CollectionDescriptor("items", 1, OwnershipKind.AUTHORIZED, ())
-        scope = OwnerScope.authorized("user-a", GrantReference("grant-a", 1))
+        descriptor = validate_contract(
+            CollectionDescriptor("items", 1, OwnershipKind.AUTHORIZED, ())
+        )
+        scope = OwnerScope.authorized(
+            "user-a", validate_contract(GrantReference("grant-a", 1))
+        )
         declared, registry, lookup, registered = self._records(
             self.database, descriptor
         )
@@ -618,22 +644,28 @@ class ConfigRecordsRepositoryTests(unittest.IsolatedAsyncioTestCase):
         other_scope = await declared.collection(
             "package/module-a",
             descriptor,
-            OwnerScope.authorized("user-b", GrantReference("grant-a", 1)),
+            OwnerScope.authorized(
+                "user-b", validate_contract(GrantReference("grant-a", 1))
+            ),
         )
         with self.assertRaises(ValueError):
             await declared.collection(
                 "package/module-a",
-                CollectionDescriptor("items", 2, OwnershipKind.AUTHORIZED, ()),
+                validate_contract(
+                    CollectionDescriptor("items", 2, OwnershipKind.AUTHORIZED, ())
+                ),
                 scope,
             )
         with self.assertRaises(ValueError):
             await declared.collection(
                 "package/module-a",
-                CollectionDescriptor(
-                    "items",
-                    1,
-                    OwnershipKind.AUTHORIZED,
-                    (CollectionIndex("by-value", "value"),),
+                validate_contract(
+                    CollectionDescriptor(
+                        "items",
+                        1,
+                        OwnershipKind.AUTHORIZED,
+                        (validate_contract(CollectionIndex("by-value", "value")),),
+                    )
                 ),
                 scope,
             )
@@ -652,17 +684,25 @@ class ConfigRecordsRepositoryTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):
             await declared.collection(
                 "package/module-a",
-                CollectionDescriptor("other", 1, OwnershipKind.AUTHORIZED),
+                validate_contract(
+                    CollectionDescriptor("other", 1, OwnershipKind.AUTHORIZED)
+                ),
                 scope,
             )
-        mismatched_manifest = ModuleManifest(
-            "module-a",
-            "module_a",
-            ModuleCategory.GAME,
-            "tests.fixtures.minimal_module:factory",
-            "1.0.0",
-            (),
-            collections=(CollectionDescriptor("items", 2, OwnershipKind.AUTHORIZED),),
+        mismatched_manifest = validate_contract(
+            ModuleManifest(
+                "module-a",
+                "module_a",
+                ModuleCategory.GAME,
+                "tests.fixtures.minimal_module:factory",
+                "1.0.0",
+                (),
+                collections=(
+                    validate_contract(
+                        CollectionDescriptor("items", 2, OwnershipKind.AUTHORIZED)
+                    ),
+                ),
+            )
         )
         mismatched = SQLiteRecordRepository(
             self.database,
@@ -678,19 +718,25 @@ class ConfigRecordsRepositoryTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):
             await mismatched.collection(
                 "package/module-a",
-                CollectionDescriptor("items", 2, OwnershipKind.AUTHORIZED),
+                validate_contract(
+                    CollectionDescriptor("items", 2, OwnershipKind.AUTHORIZED)
+                ),
                 scope,
             )
         fresh_path = Path(self.temp.name) / "undeclared.sqlite3"
-        fake_extra = CollectionDescriptor("fake-extra", 1, OwnershipKind.AUTHORIZED)
-        fake_manifest = ModuleManifest(
-            "module-a",
-            "module_a",
-            ModuleCategory.GAME,
-            "tests.fixtures.minimal_module:factory",
-            "1.0.0",
-            (),
-            collections=(descriptor, fake_extra),
+        fake_extra = validate_contract(
+            CollectionDescriptor("fake-extra", 1, OwnershipKind.AUTHORIZED)
+        )
+        fake_manifest = validate_contract(
+            ModuleManifest(
+                "module-a",
+                "module_a",
+                ModuleCategory.GAME,
+                "tests.fixtures.minimal_module:factory",
+                "1.0.0",
+                (),
+                collections=(descriptor, fake_extra),
+            )
         )
         fake_extra_repository = SQLiteRecordRepository(
             SQLiteDatabase(fresh_path),
@@ -713,8 +759,8 @@ class ConfigRecordsRepositoryTests(unittest.IsolatedAsyncioTestCase):
                 return True
 
         forged_path = Path(self.temp.name) / "forged-descriptor.sqlite3"
-        forged_descriptor = CollectionDescriptor(
-            ForgedName("fake"), 1, OwnershipKind.AUTHORIZED
+        forged_descriptor = validate_contract(
+            CollectionDescriptor(ForgedName("fake"), 1, OwnershipKind.AUTHORIZED)
         )
         forged_repository = SQLiteRecordRepository(
             SQLiteDatabase(forged_path), registered, lookup
@@ -730,25 +776,29 @@ class ConfigRecordsRepositoryTests(unittest.IsolatedAsyncioTestCase):
                 ("package/module-a", "fake"),
             ).fetchone()
             self.assertIsNone(row)
-        other_module = ModuleManifest(
-            "other",
-            "other",
-            ModuleCategory.GAME,
-            "tests.fixtures.minimal_module:factory",
-            "1.0.0",
-            (),
+        other_module = validate_contract(
+            ModuleManifest(
+                "other",
+                "other",
+                ModuleCategory.GAME,
+                "tests.fixtures.minimal_module:factory",
+                "1.0.0",
+                (),
+            )
         )
         registry.register_package(
-            PackageManifest(
-                "other-package",
-                "1.0.0",
-                "1.1.0",
-                (other_module,),
-                "author",
-                "MIT",
-                "source",
+            validate_contract(
+                PackageManifest(
+                    "other-package",
+                    "1.0.0",
+                    "2.0",
+                    (other_module,),
+                    "author",
+                    "MIT",
+                    "source",
+                )
             ),
-            {"other": ModuleHandlers({}, {}, {})},
+            {"other": validate_contract(ModuleHandlers({}, {}, {}))},
         )
         self.assertEqual((await collection.get("key")).value["ok"], True)
         fresh = await declared.collection("package/module-a", descriptor, scope)

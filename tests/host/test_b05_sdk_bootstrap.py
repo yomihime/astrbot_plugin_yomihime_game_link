@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import os
 import shutil
@@ -29,6 +30,7 @@ from scripts.build_dashboard_zip import (
     validate_source_path,
     validate_wheel,
 )
+from scripts.build_release import build_sdk_wheel
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -84,19 +86,21 @@ for name, module in {
 }.items():
     sys.modules[name] = module
 
-if mode in {"same", "partial", "unsupported", "mixed"}:
+if mode in {"same", "partial", "unsupported", "mixed", "abi"}:
     sys.path.insert(0, str(plugin_root))
-    import yomihime_sdk
+    import yomihime_game_link_sdk
     sys.path.pop(0)
     if mode == "partial":
-        del sys.modules["yomihime_sdk.api.results"]
+        del sys.modules["yomihime_game_link_sdk.results"]
     elif mode == "unsupported":
-        yomihime_sdk.__version__ = "9.9.9"
+        yomihime_game_link_sdk.__version__ = "9.9.9"
+    elif mode == "abi":
+        sys.modules["yomihime_game_link_sdk.version"].MODULE_ABI_VERSION = "9.0"
     elif mode == "mixed":
         other = Path(sys.argv[3]).resolve()
-        name = "yomihime_sdk.api.results"
+        name = "yomihime_game_link_sdk.results"
         spec = importlib.util.spec_from_file_location(
-            name, other / "yomihime_sdk/api/results.py"
+            name, other / "yomihime_game_link_sdk/results.py"
         )
         mixed_module = importlib.util.module_from_spec(spec)
         sys.modules[name] = mixed_module
@@ -104,8 +108,11 @@ if mode in {"same", "partial", "unsupported", "mixed"}:
 elif mode == "different":
     other = Path(sys.argv[3]).resolve()
     sys.path.insert(0, str(other))
-    import yomihime_sdk
+    import yomihime_game_link_sdk
     sys.path.pop(0)
+
+if mode == "retired":
+    sys.modules["yomihime_sdk.api.contexts"] = types.ModuleType("yomihime_sdk.api.contexts")
 
 before = list(sys.path)
 spec = importlib.util.spec_from_file_location("ygl_bootstrap_subject", plugin_root / "main.py")
@@ -114,7 +121,7 @@ sys.modules[spec.name] = module
 try:
     spec.loader.exec_module(module)
 except module.SDKBootstrapError:
-    assert mode in {"different", "partial", "unsupported", "mixed", "root-escape"}, mode
+    assert mode in {"different", "partial", "unsupported", "mixed", "root-escape", "abi", "retired", "hash"}, mode
 else:
     assert mode in {"cold", "same", "root-check", "entry-text", "entry-none", "lifecycle"}, mode
     if mode == "root-check":
@@ -124,9 +131,9 @@ else:
             pass
         else:
             raise AssertionError("out-of-root SDK package was accepted")
-    assert module.bootstrap_sdk(plugin_root) is sys.modules["yomihime_sdk"]
-    sdk_root = Path(sys.modules["yomihime_sdk"].__file__).resolve().parent
-    assert sdk_root == plugin_root / "yomihime_sdk"
+    assert module.bootstrap_sdk(plugin_root) is sys.modules["yomihime_game_link_sdk"]
+    sdk_root = Path(sys.modules["yomihime_game_link_sdk"].__file__).resolve().parent
+    assert sdk_root == plugin_root / "yomihime_game_link_sdk"
     if mode == "lifecycle":
         class Pages:
             def register(self): lifecycle_events.append("register")
@@ -186,30 +193,13 @@ class SDKBootstrapTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.temp = tempfile.TemporaryDirectory(prefix="ygl-h-sdk-")
         cls.temp_root = Path(cls.temp.name).resolve()
-        cls.wheel_dir = cls.temp_root / "wheel"
-        cls.wheel_dir.mkdir()
-        env = os.environ.copy()
-        env["SOURCE_DATE_EPOCH"] = "315532800"
-        subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "pip",
-                "wheel",
-                "--no-index",
-                "--no-deps",
-                "--no-build-isolation",
-                "--wheel-dir",
-                str(cls.wheel_dir),
-                str(ROOT),
-            ],
-            cwd=ROOT,
-            env=env,
-            check=True,
-            capture_output=True,
-            text=True,
+        wheel_input = os.environ.get("YGL_TEST_SDK_WHEEL")
+        cls.wheel = (
+            Path(wheel_input).resolve(strict=True)
+            if wheel_input
+            else build_sdk_wheel(cls.temp_root / "build", ROOT)
         )
-        cls.wheel = next(cls.wheel_dir.glob("*.whl"))
+        validate_wheel(cls.wheel)
 
     @classmethod
     def tearDownClass(cls) -> None:
@@ -233,6 +223,39 @@ class SDKBootstrapTests(unittest.TestCase):
         if result.returncode:
             raise AssertionError(result.stderr)
 
+    def test_s2a_current_message_projection_matches_actual_wheel(self) -> None:
+        tree = ast.parse((ROOT / "main.py").read_text(encoding="utf-8"))
+        manifest = next(
+            ast.literal_eval(node.value)
+            for node in tree.body
+            if isinstance(node, ast.Assign)
+            and any(
+                isinstance(target, ast.Name) and target.id == "SDK_PACKAGE_MANIFEST"
+                for target in node.targets
+            )
+        )
+        package = validate_wheel(self.wheel)
+        self.assertEqual(len(manifest), 17)
+        self.assertEqual(
+            set(package), {"yomihime_game_link_sdk/" + name for name in manifest}
+        )
+        for relative, expected in manifest.items():
+            with self.subTest(member=relative):
+                payload = package["yomihime_game_link_sdk/" + relative]
+                self.assertEqual(hashlib.sha256(payload).hexdigest(), expected)
+                source = (
+                    ROOT / "examples" / relative.removeprefix("_examples/")
+                    if relative.startswith("_examples/")
+                    else ROOT / "yomihime_game_link_sdk" / relative
+                )
+                self.assertEqual(payload, source.read_bytes())
+        self.assertIn(
+            b"class MessageContext", package["yomihime_game_link_sdk/contexts.py"]
+        )
+        self.assertIn(
+            b"class MessageAccess", package["yomihime_game_link_sdk/services.py"]
+        )
+
     def test_page_registration_and_cleanup_surround_runtime_lifecycle(self) -> None:
         self._run_bootstrap(self._plugin("page-lifecycle"), "lifecycle")
 
@@ -250,7 +273,7 @@ class SDKBootstrapTests(unittest.TestCase):
     def test_different_partial_mixed_and_unsupported_preloads_fail_closed(self) -> None:
         target = self._plugin("target-plugin")
         foreign = self._plugin("foreign-plugin")
-        changed = foreign / "yomihime_sdk/api/results.py"
+        changed = foreign / "yomihime_game_link_sdk/results.py"
         changed.write_text(
             changed.read_text(encoding="utf-8") + "\n# same version, different build\n",
             encoding="utf-8",
@@ -259,17 +282,27 @@ class SDKBootstrapTests(unittest.TestCase):
         self._run_bootstrap(self._plugin("partial-plugin"), "partial")
         self._run_bootstrap(self._plugin("unsupported-plugin"), "unsupported")
         self._run_bootstrap(self._plugin("mixed-plugin"), "mixed", foreign)
+        self._run_bootstrap(self._plugin("abi-plugin"), "abi")
+        self._run_bootstrap(self._plugin("retired-plugin"), "retired")
+        tampered = self._plugin("hash-plugin")
+        changed = tampered / "yomihime_game_link_sdk" / "services.py"
+        changed.write_bytes(changed.read_bytes() + b"\n# altered content\n")
+        self._run_bootstrap(tampered, "hash")
 
     def test_sdk_package_root_cannot_escape_the_plugin_root(self) -> None:
         target = self._plugin("sdk-root-target")
         foreign = self._plugin("sdk-root-foreign")
-        sdk_tree = target / "yomihime_sdk"
+        sdk_tree = target / "yomihime_game_link_sdk"
         shutil.rmtree(sdk_tree)
         try:
-            os.symlink(foreign / "yomihime_sdk", sdk_tree, target_is_directory=True)
+            os.symlink(
+                foreign / "yomihime_game_link_sdk", sdk_tree, target_is_directory=True
+            )
         except OSError:
-            shutil.copytree(foreign / "yomihime_sdk", sdk_tree)
-            self._run_bootstrap(target, "root-check", foreign / "yomihime_sdk")
+            shutil.copytree(foreign / "yomihime_game_link_sdk", sdk_tree)
+            self._run_bootstrap(
+                target, "root-check", foreign / "yomihime_game_link_sdk"
+            )
         else:
             self._run_bootstrap(target, "root-escape")
 
@@ -342,10 +375,10 @@ class SDKBootstrapTests(unittest.TestCase):
                 replacement, "w", compression=zipfile.ZIP_DEFLATED
             ) as output,
         ):
-            authenticated = source.read("yomihime_sdk/py.typed")
+            authenticated = source.read("yomihime_game_link_sdk/py.typed")
             for name in source.namelist():
                 data = source.read(name)
-                if name == "yomihime_sdk/py.typed":
+                if name == "yomihime_game_link_sdk/py.typed":
                     data = b"replaced after digest snapshot\n"
                 output.writestr(name, data)
 
@@ -360,9 +393,10 @@ class SDKBootstrapTests(unittest.TestCase):
             zip_builder, "_read_snapshot", side_effect=read_then_replace
         ):
             package = zip_builder.validate_wheel(original_path)
-        self.assertEqual(package["yomihime_sdk/py.typed"], authenticated)
+        self.assertEqual(package["yomihime_game_link_sdk/py.typed"], authenticated)
         self.assertNotEqual(
-            package["yomihime_sdk/py.typed"], b"replaced after digest snapshot\n"
+            package["yomihime_game_link_sdk/py.typed"],
+            b"replaced after digest snapshot\n",
         )
 
     def test_zip_uses_the_runtime_bytes_captured_by_its_validated_snapshot(
@@ -536,7 +570,9 @@ class SDKBootstrapTests(unittest.TestCase):
                     self.assertIn(attrs[attribute], ("./styles.css", "./app.js"))
         self.assertFalse("".join(locator.inline_script).strip())
         script = (ROOT / "modules/ff14/pages/compat/app.js").read_text(encoding="utf-8")
-        self.assertEqual((ROOT / "pages/ff14/app.js").read_text(encoding="utf-8"), script)
+        self.assertEqual(
+            (ROOT / "pages/ff14/app.js").read_text(encoding="utf-8"), script
+        )
         # The retired locator is static guidance, not a second business entry point.
         self.assertFalse(
             [

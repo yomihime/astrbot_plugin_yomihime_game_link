@@ -5,9 +5,16 @@ from time import monotonic
 from unittest import IsolatedAsyncioTestCase
 from uuid import uuid4
 
-from ygl_test_subject.api.contexts import InvocationOrigin
-from ygl_test_subject.api.display import DisplayDocument, Privacy, TextBlock
-from ygl_test_subject.api.manifests import (
+from ygl_test_subject.core.context_issuer import ContextIssuer
+from ygl_test_subject.core.contracts.validation_boundary import validate_contract
+from ygl_test_subject.core.lifecycle import LifecycleController
+from ygl_test_subject.core.ports import CallerCapabilityIssuer
+from ygl_test_subject.core.registry import Registry
+from ygl_test_subject.services.dependency_calls import DependencyInvoker
+
+from tests.contracts.test_context_issuer import _PublicWebProofs
+from yomihime_game_link_sdk.contexts import InvocationOrigin
+from yomihime_game_link_sdk.declarations import (
     CapabilityDescriptor,
     CapabilityEffect,
     CapabilityReference,
@@ -17,22 +24,16 @@ from ygl_test_subject.api.manifests import (
     PackageManifest,
     PrivacyFloor,
 )
-from ygl_test_subject.api.results import CapabilityResult, ErrorCode, ResultStatus
-from ygl_test_subject.api.services import (
+from yomihime_game_link_sdk.display import DisplayDocument, Privacy, TextBlock
+from yomihime_game_link_sdk.results import CapabilityResult, ErrorCode, ResultStatus
+from yomihime_game_link_sdk.services import (
     CallerCapability,
     CapabilityHealth,
     HealthReport,
     HealthStatus,
     ModuleHandlers,
 )
-from ygl_test_subject.api.version import CONTRACT_VERSION
-from ygl_test_subject.core.context_issuer import ContextIssuer
-from ygl_test_subject.core.lifecycle import LifecycleController
-from ygl_test_subject.core.ports import CallerCapabilityIssuer
-from ygl_test_subject.core.registry import Registry
-from ygl_test_subject.services.dependency_calls import DependencyInvoker
-
-from tests.contracts.test_context_issuer import _PublicWebProofs
+from yomihime_game_link_sdk.version import MODULE_ABI_VERSION
 
 
 class PublicWebDependencyTests(IsolatedAsyncioTestCase):
@@ -61,7 +62,11 @@ class PublicWebDependencyTests(IsolatedAsyncioTestCase):
         source = _capability(
             "source.query",
             policy=InvocationPolicy.COMMAND_AND_PUBLIC_WEB,
-            required=(CapabilityReference("dependency-tests/target", "target.query"),),
+            required=(
+                validate_contract(
+                    CapabilityReference("dependency-tests/target", "target.query")
+                ),
+            ),
         )
         old, handler, _ = await fixture._ready(
             (source,), _capability("target.query", policy=target_policy), target_handler
@@ -89,7 +94,9 @@ class PublicWebDependencyTests(IsolatedAsyncioTestCase):
         invoker, handler = await self._ready_web()
         result = await invoker.invoke(
             self.parent,
-            CapabilityReference("dependency-tests/target", "target.query"),
+            validate_contract(
+                CapabilityReference("dependency-tests/target", "target.query")
+            ),
             {},
         )
         self.assertEqual(result.status, ResultStatus.SUCCESS)
@@ -108,7 +115,9 @@ class PublicWebDependencyTests(IsolatedAsyncioTestCase):
             )
             result = await invoker.invoke(
                 self.parent,
-                CapabilityReference("dependency-tests/target", "target.query"),
+                validate_contract(
+                    CapabilityReference("dependency-tests/target", "target.query")
+                ),
                 {},
             )
             self.assertEqual(result.status, ResultStatus.ERROR)
@@ -122,7 +131,9 @@ class PublicWebDependencyTests(IsolatedAsyncioTestCase):
         pending = asyncio.create_task(
             invoker.invoke(
                 self.parent,
-                CapabilityReference("dependency-tests/target", "target.query"),
+                validate_contract(
+                    CapabilityReference("dependency-tests/target", "target.query")
+                ),
                 {},
             )
         )
@@ -135,12 +146,19 @@ class PublicWebDependencyTests(IsolatedAsyncioTestCase):
 
 
 def _result(label: str = "ok") -> CapabilityResult:
-    return CapabilityResult(
-        f"result-{label}",
-        ResultStatus.SUCCESS,
-        document=DisplayDocument(
-            label, "subject", (TextBlock(label),), privacy=Privacy.PUBLIC
-        ),
+    return validate_contract(
+        CapabilityResult(
+            f"result-{label}",
+            ResultStatus.SUCCESS,
+            document=validate_contract(
+                DisplayDocument(
+                    label,
+                    "subject",
+                    (validate_contract(TextBlock(label)),),
+                    privacy=Privacy.PUBLIC,
+                )
+            ),
+        )
     )
 
 
@@ -152,36 +170,42 @@ def _capability(
     effect: CapabilityEffect = CapabilityEffect.READ_ONLY,
     privacy: PrivacyFloor = PrivacyFloor.PUBLIC,
 ) -> CapabilityDescriptor:
-    return CapabilityDescriptor(
-        capability_id,
-        {"type": "object", "properties": {}, "required": []},
-        policy,
-        effect,
-        privacy_floor=privacy,
-        required_capabilities=required,
+    return validate_contract(
+        CapabilityDescriptor(
+            capability_id,
+            {"type": "object", "properties": {}, "required": []},
+            policy,
+            effect,
+            privacy_floor=privacy,
+            required_capabilities=required,
+        )
     )
 
 
 def _module(module_id: str, capabilities: tuple[CapabilityDescriptor, ...]):
-    return ModuleManifest(
-        module_id,
-        module_id,
-        ModuleCategory.PLATFORM,
-        "tests.module:Factory",
-        "1.0.0",
-        capabilities,
+    return validate_contract(
+        ModuleManifest(
+            module_id,
+            module_id,
+            ModuleCategory.PLATFORM,
+            "tests.module:Factory",
+            "1.0.0",
+            capabilities,
+        )
     )
 
 
 def _package(*modules: ModuleManifest) -> PackageManifest:
-    return PackageManifest(
-        "dependency-tests",
-        "1.0.0",
-        CONTRACT_VERSION,
-        modules,
-        "Tests",
-        "MIT",
-        "offline",
+    return validate_contract(
+        PackageManifest(
+            "dependency-tests",
+            "1.0.0",
+            MODULE_ABI_VERSION,
+            modules,
+            "Tests",
+            "MIT",
+            "offline",
+        )
     )
 
 
@@ -216,11 +240,15 @@ class _Instance:
         return None
 
     async def check_health(self):
-        return HealthReport(
-            {
-                capability_id: CapabilityHealth(HealthStatus.AVAILABLE)
-                for capability_id in self._capability_ids
-            }
+        return validate_contract(
+            HealthReport(
+                {
+                    capability_id: validate_contract(
+                        CapabilityHealth(HealthStatus.AVAILABLE)
+                    )
+                    for capability_id in self._capability_ids
+                }
+            )
         )
 
 
@@ -229,11 +257,13 @@ class _CallerIssuer:
         self._issued = {}
 
     def issue(self, invocation, capability_id):
-        caller = CallerCapability(
-            invocation.module_id,
-            capability_id,
-            invocation.registry_revision,
-            invocation.module_epoch,
+        caller = validate_contract(
+            CallerCapability(
+                invocation.module_id,
+                capability_id,
+                invocation.registry_revision,
+                invocation.module_epoch,
+            )
         )
         self._issued[(invocation.invocation_id, capability_id)] = caller
         return caller
@@ -352,11 +382,15 @@ class DependencyInvokerTests(IsolatedAsyncioTestCase):
         self.registry.register_package(
             _package(source, target),
             {
-                "source": ModuleHandlers(
-                    {cap.capability_id: source_handler for cap in source_caps}, {}, {}
+                "source": validate_contract(
+                    ModuleHandlers(
+                        {cap.capability_id: source_handler for cap in source_caps},
+                        {},
+                        {},
+                    )
                 ),
-                "target": ModuleHandlers(
-                    {target_cap.capability_id: target_handler}, {}, {}
+                "target": validate_contract(
+                    ModuleHandlers({target_cap.capability_id: target_handler}, {}, {})
                 ),
             },
         )
@@ -374,13 +408,15 @@ class DependencyInvokerTests(IsolatedAsyncioTestCase):
         return invocation, target_handler, caller
 
     def _invoker(self, caller):
-        return DependencyInvoker(
-            self.registry,
-            self.issuer,
-            self.lifecycle,
-            self.caller_issuer,
-            caller,
-            clock=self.clock,
+        return validate_contract(
+            DependencyInvoker(
+                self.registry,
+                self.issuer,
+                self.lifecycle,
+                self.caller_issuer,
+                caller,
+                clock=self.clock,
+            )
         )
 
     async def test_declared_cross_module_call_drops_module_scoped_grant(self):
@@ -389,7 +425,11 @@ class DependencyInvokerTests(IsolatedAsyncioTestCase):
                 _capability(
                     "source.query",
                     required=(
-                        CapabilityReference("dependency-tests/target", "target.query"),
+                        validate_contract(
+                            CapabilityReference(
+                                "dependency-tests/target", "target.query"
+                            )
+                        ),
                     ),
                 ),
             ),
@@ -400,7 +440,9 @@ class DependencyInvokerTests(IsolatedAsyncioTestCase):
         )
         result = await self._invoker(caller).invoke(
             invocation,
-            CapabilityReference("dependency-tests/target", "target.query"),
+            validate_contract(
+                CapabilityReference("dependency-tests/target", "target.query")
+            ),
             {},
         )
         self.assertEqual(result.status, ResultStatus.SUCCESS)
@@ -414,8 +456,12 @@ class DependencyInvokerTests(IsolatedAsyncioTestCase):
         self.assertEqual(child.registry_revision, invocation.registry_revision)
 
     async def test_child_capability_identity_binds_nested_dependencies(self):
-        target_ref = CapabilityReference("dependency-tests/target", "target.query")
-        nested_ref = CapabilityReference("dependency-tests/nested", "nested.query")
+        target_ref = validate_contract(
+            CapabilityReference("dependency-tests/target", "target.query")
+        )
+        nested_ref = validate_contract(
+            CapabilityReference("dependency-tests/nested", "nested.query")
+        )
         source_capability = _capability("source.query", required=(target_ref,))
         target_capability = _capability("target.query", required=(nested_ref,))
         nested_handler = _Handler(_result("nested"))
@@ -452,11 +498,17 @@ class DependencyInvokerTests(IsolatedAsyncioTestCase):
         self.registry.register_package(
             _package(source, target, nested),
             {
-                "source": ModuleHandlers(
-                    {"source.query": _Handler(_result("source"))}, {}, {}
+                "source": validate_contract(
+                    ModuleHandlers(
+                        {"source.query": _Handler(_result("source"))}, {}, {}
+                    )
                 ),
-                "target": ModuleHandlers({"target.query": target_handler}, {}, {}),
-                "nested": ModuleHandlers({"nested.query": nested_handler}, {}, {}),
+                "target": validate_contract(
+                    ModuleHandlers({"target.query": target_handler}, {}, {})
+                ),
+                "nested": validate_contract(
+                    ModuleHandlers({"nested.query": nested_handler}, {}, {})
+                ),
             },
         )
         await self._activate_modules(("source", "target", "nested"))
@@ -479,7 +531,11 @@ class DependencyInvokerTests(IsolatedAsyncioTestCase):
     async def test_qualified_reference_selects_the_declared_same_named_target(self):
         source_cap = _capability(
             "source.query",
-            required=(CapabilityReference("dependency-tests/other", "target.query"),),
+            required=(
+                validate_contract(
+                    CapabilityReference("dependency-tests/other", "target.query")
+                ),
+            ),
         )
         source = _module("source", (source_cap,))
         first_handler = _Handler(_result("first-target"))
@@ -489,11 +545,17 @@ class DependencyInvokerTests(IsolatedAsyncioTestCase):
         self.registry.register_package(
             _package(source, first, other),
             {
-                "source": ModuleHandlers(
-                    {"source.query": _Handler(_result("source"))}, {}, {}
+                "source": validate_contract(
+                    ModuleHandlers(
+                        {"source.query": _Handler(_result("source"))}, {}, {}
+                    )
                 ),
-                "first": ModuleHandlers({"target.query": first_handler}, {}, {}),
-                "other": ModuleHandlers({"target.query": other_handler}, {}, {}),
+                "first": validate_contract(
+                    ModuleHandlers({"target.query": first_handler}, {}, {})
+                ),
+                "other": validate_contract(
+                    ModuleHandlers({"target.query": other_handler}, {}, {})
+                ),
             },
         )
         await self._activate_modules(("source", "first", "other"))
@@ -501,7 +563,9 @@ class DependencyInvokerTests(IsolatedAsyncioTestCase):
         caller = self.caller_issuer.issue(invocation, "source.query")
         result = await self._invoker(caller).invoke(
             invocation,
-            CapabilityReference("dependency-tests/other", "target.query"),
+            validate_contract(
+                CapabilityReference("dependency-tests/other", "target.query")
+            ),
             {},
         )
         self.assertEqual(result.document.title, "other-target")
@@ -514,7 +578,11 @@ class DependencyInvokerTests(IsolatedAsyncioTestCase):
                 _capability(
                     "source.query",
                     required=(
-                        CapabilityReference("dependency-tests/target", "target.query"),
+                        validate_contract(
+                            CapabilityReference(
+                                "dependency-tests/target", "target.query"
+                            )
+                        ),
                     ),
                 ),
             ),
@@ -527,24 +595,34 @@ class DependencyInvokerTests(IsolatedAsyncioTestCase):
         tool_caller = self.caller_issuer.issue(tool_invocation, "source.query")
         result = await self._invoker(tool_caller).invoke(
             tool_invocation,
-            CapabilityReference("dependency-tests/target", "target.query"),
+            validate_contract(
+                CapabilityReference("dependency-tests/target", "target.query")
+            ),
             {},
         )
         self.assertEqual(result.error.code, ErrorCode.MODULE_UNAVAILABLE)
         self.assertEqual(handler.contexts, [])
         result = await self._invoker(_caller).invoke(
-            invocation, CapabilityReference("dependency-tests/target", "missing"), {}
+            invocation,
+            validate_contract(
+                CapabilityReference("dependency-tests/target", "missing")
+            ),
+            {},
         )
         self.assertEqual(result.error.code, ErrorCode.UNSUPPORTED)
         result = await self._invoker(_caller).invoke(
             invocation,
-            CapabilityReference("dependency-tests/target", "target.query"),
+            validate_contract(
+                CapabilityReference("dependency-tests/target", "target.query")
+            ),
             {"unexpected": True},
         )
         self.assertEqual(result.error.code, ErrorCode.PARAMETER_ERROR)
 
     async def test_owner_floor_is_never_invocable_as_a_dependency(self):
-        target_ref = CapabilityReference("dependency-tests/target", "target.query")
+        target_ref = validate_contract(
+            CapabilityReference("dependency-tests/target", "target.query")
+        )
         invocation, handler, caller = await self._ready(
             (_capability("source.query", required=(target_ref,)),),
             _capability(
@@ -560,7 +638,9 @@ class DependencyInvokerTests(IsolatedAsyncioTestCase):
         self.assertEqual(handler.contexts, [])
 
     async def test_bound_caller_selects_only_its_declared_dependencies(self):
-        target_ref = CapabilityReference("dependency-tests/target", "target.query")
+        target_ref = validate_contract(
+            CapabilityReference("dependency-tests/target", "target.query")
+        )
         invocation, handler, caller = await self._ready(
             (
                 _capability("source.query", required=(target_ref,)),
@@ -573,11 +653,13 @@ class DependencyInvokerTests(IsolatedAsyncioTestCase):
         self.assertEqual(result.error.code, ErrorCode.UNSUPPORTED)
         self.assertEqual(handler.contexts, [])
 
-        forged = CallerCapability(
-            invocation.module_id,
-            "source.query",
-            invocation.registry_revision,
-            invocation.module_epoch,
+        forged = validate_contract(
+            CallerCapability(
+                invocation.module_id,
+                "source.query",
+                invocation.registry_revision,
+                invocation.module_epoch,
+            )
         )
         result = await self._invoker(forged).invoke(invocation, target_ref, {})
         self.assertEqual(result.error.code, ErrorCode.MODULE_UNAVAILABLE)
@@ -594,7 +676,11 @@ class DependencyInvokerTests(IsolatedAsyncioTestCase):
                 _capability(
                     "source.query",
                     required=(
-                        CapabilityReference("dependency-tests/target", "target.query"),
+                        validate_contract(
+                            CapabilityReference(
+                                "dependency-tests/target", "target.query"
+                            )
+                        ),
                     ),
                 ),
             ),
@@ -605,7 +691,9 @@ class DependencyInvokerTests(IsolatedAsyncioTestCase):
         pending = asyncio.create_task(
             invoker.invoke(
                 invocation,
-                CapabilityReference("dependency-tests/target", "target.query"),
+                validate_contract(
+                    CapabilityReference("dependency-tests/target", "target.query")
+                ),
                 {},
             )
         )
@@ -624,7 +712,11 @@ class DependencyInvokerTests(IsolatedAsyncioTestCase):
                 _capability(
                     "source.query",
                     required=(
-                        CapabilityReference("dependency-tests/target", "target.query"),
+                        validate_contract(
+                            CapabilityReference(
+                                "dependency-tests/target", "target.query"
+                            )
+                        ),
                     ),
                 ),
             ),
@@ -635,7 +727,9 @@ class DependencyInvokerTests(IsolatedAsyncioTestCase):
         pending = asyncio.create_task(
             invoker.invoke(
                 invocation,
-                CapabilityReference("dependency-tests/target", "target.query"),
+                validate_contract(
+                    CapabilityReference("dependency-tests/target", "target.query")
+                ),
                 {},
             )
         )
@@ -657,7 +751,9 @@ class DependencyInvokerTests(IsolatedAsyncioTestCase):
             (
                 await self._invoker(fresh_caller).invoke(
                     fresh,
-                    CapabilityReference("dependency-tests/target", "target.query"),
+                    validate_contract(
+                        CapabilityReference("dependency-tests/target", "target.query")
+                    ),
                     {},
                 )
             ).status,
@@ -665,7 +761,9 @@ class DependencyInvokerTests(IsolatedAsyncioTestCase):
         )
 
     async def test_deadline_exhausted_before_task_creation(self):
-        target_ref = CapabilityReference("dependency-tests/target", "target.query")
+        target_ref = validate_contract(
+            CapabilityReference("dependency-tests/target", "target.query")
+        )
         started = asyncio.Event()
         invocation, handler, caller = await self._ready(
             (_capability("source.query", required=(target_ref,)),),
@@ -683,7 +781,9 @@ class DependencyInvokerTests(IsolatedAsyncioTestCase):
         self.assertEqual(self.lifecycle.scope(target_ref.module_id).tasks, ())
 
     async def test_deadline_expires_after_task_creation_and_cleans_up(self):
-        target_ref = CapabilityReference("dependency-tests/target", "target.query")
+        target_ref = validate_contract(
+            CapabilityReference("dependency-tests/target", "target.query")
+        )
         started = asyncio.Event()
         invocation, handler, caller = await self._ready(
             (_capability("source.query", required=(target_ref,)),),
@@ -714,17 +814,21 @@ class DependencyInvokerTests(IsolatedAsyncioTestCase):
         class _Nested:
             async def invoke(self, context, parameters):
                 nested_caller = self_outer.caller_issuer.issue(context, "second.call")
-                nested = DependencyInvoker(
-                    self_outer.registry,
-                    self_outer.issuer,
-                    self_outer.lifecycle,
-                    self_outer.caller_issuer,
-                    nested_caller,
-                    max_depth=holder["max_depth"],
+                nested = validate_contract(
+                    DependencyInvoker(
+                        self_outer.registry,
+                        self_outer.issuer,
+                        self_outer.lifecycle,
+                        self_outer.caller_issuer,
+                        nested_caller,
+                        max_depth=holder["max_depth"],
+                    )
                 )
                 return await nested.invoke(
                     context,
-                    CapabilityReference("dependency-tests/first", "first.call"),
+                    validate_contract(
+                        CapabilityReference("dependency-tests/first", "first.call")
+                    ),
                     parameters,
                 )
 
@@ -736,7 +840,11 @@ class DependencyInvokerTests(IsolatedAsyncioTestCase):
                 _capability(
                     "first.call",
                     required=(
-                        CapabilityReference("dependency-tests/second", "second.call"),
+                        validate_contract(
+                            CapabilityReference(
+                                "dependency-tests/second", "second.call"
+                            )
+                        ),
                     ),
                 ),
             ),
@@ -747,7 +855,9 @@ class DependencyInvokerTests(IsolatedAsyncioTestCase):
                 _capability(
                     "second.call",
                     required=(
-                        CapabilityReference("dependency-tests/first", "first.call"),
+                        validate_contract(
+                            CapabilityReference("dependency-tests/first", "first.call")
+                        ),
                     ),
                 ),
             ),
@@ -755,8 +865,12 @@ class DependencyInvokerTests(IsolatedAsyncioTestCase):
         self.registry.register_package(
             _package(first, second),
             {
-                "first": ModuleHandlers({"first.call": first_handler}, {}, {}),
-                "second": ModuleHandlers({"second.call": _Nested()}, {}, {}),
+                "first": validate_contract(
+                    ModuleHandlers({"first.call": first_handler}, {}, {})
+                ),
+                "second": validate_contract(
+                    ModuleHandlers({"second.call": _Nested()}, {}, {})
+                ),
             },
         )
         await self._activate_modules(("first", "second"))
@@ -766,24 +880,30 @@ class DependencyInvokerTests(IsolatedAsyncioTestCase):
         holder["max_depth"] = 8
         result = await invoker.invoke(
             root,
-            CapabilityReference("dependency-tests/second", "second.call"),
+            validate_contract(
+                CapabilityReference("dependency-tests/second", "second.call")
+            ),
             {},
         )
         self.assertEqual(result.status, ResultStatus.ERROR)
         self.assertEqual(result.error.code, ErrorCode.UNSUPPORTED)
 
-        depth_limited = DependencyInvoker(
-            self.registry,
-            self.issuer,
-            self.lifecycle,
-            self.caller_issuer,
-            root_caller,
-            max_depth=1,
+        depth_limited = validate_contract(
+            DependencyInvoker(
+                self.registry,
+                self.issuer,
+                self.lifecycle,
+                self.caller_issuer,
+                root_caller,
+                max_depth=1,
+            )
         )
         holder["max_depth"] = 1
         result = await depth_limited.invoke(
             root,
-            CapabilityReference("dependency-tests/second", "second.call"),
+            validate_contract(
+                CapabilityReference("dependency-tests/second", "second.call")
+            ),
             {},
         )
         self.assertEqual(result.status, ResultStatus.ERROR)
@@ -801,13 +921,15 @@ class DependencyInvokerTests(IsolatedAsyncioTestCase):
         self.registry.register_package(
             _package(source),
             {
-                "source": ModuleHandlers(
-                    {
-                        "source.query": _Handler(_result("source")),
-                        "local.lookup": handler,
-                    },
-                    {},
-                    {},
+                "source": validate_contract(
+                    ModuleHandlers(
+                        {
+                            "source.query": _Handler(_result("source")),
+                            "local.lookup": handler,
+                        },
+                        {},
+                        {},
+                    )
                 )
             },
         )
