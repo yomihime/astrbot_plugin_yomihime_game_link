@@ -8,40 +8,30 @@ from enum import Enum, StrEnum
 from math import isfinite
 from typing import AsyncContextManager, Awaitable, Callable, Mapping, Protocol
 
-from ..api.administration import (
-    AdminAuthorizationContext,
-    AdminAuthorizationGrant,
-    AdminOperation,
-)
-from ..api.contexts import (
+from yomihime_game_link_sdk.contexts import (
     InvocationConversationKind,
     InvocationSubscriptionScope,
     InvocationView,
 )
-from ..api.display import _asset
-from ..api.manifests import SourceDeclaration
-from ..api.results import CapabilityResult
-from ..api.services import (
-    Binding,
-    BindingDefaultSnapshot,
-    CacheAccessRequest,
+from yomihime_game_link_sdk.declarations import SourceDeclaration
+from yomihime_game_link_sdk.display import DigestMember
+from yomihime_game_link_sdk.errors import (
+    RevisionConflict as RevisionConflict,
+)
+from yomihime_game_link_sdk.errors import (
+    UniqueConstraintViolation as UniqueConstraintViolation,
+)
+from yomihime_game_link_sdk.results import CapabilityResult
+from yomihime_game_link_sdk.services import (
     CallerCapability,
     ConfigSnapshot,
     ConfigTarget,
-    ConversationKey,
-    ConversationKind,
-    ConversationRef,
-    Grant,
     HealthReport,
-    LoginSession,
-    PersistedConfigPatch,
-    Principal,
     ResolvedIdentity,
 )
-from ..api.storage import (
+from yomihime_game_link_sdk.storage import (
     CacheEntry,
     CacheLookup,
-    ClaimedSecretReceipt,
     CollectionDescriptor,
     DeclaredIndexQuery,
     GrantReference,
@@ -50,23 +40,51 @@ from ..api.storage import (
     RecordPage,
     ResourceMetadata,
     SecretMetadata,
-    SecretReceipt,
     SecretRef,
-    SecretTarget,
     VersionedRecord,
+)
+from yomihime_game_link_sdk.storage import JsonValue as JsonValue
+from yomihime_game_link_sdk.subscriptions import (
+    CollectionKey,
+    ConversationKind,
+    ConversationRef,
+    Observation,
+)
+
+from ..core.contracts.administration import (
+    AdminAuthorizationContext,
+    AdminAuthorizationGrant,
+    AdminOperation,
+)
+from ..core.contracts.display import _asset
+from ..core.contracts.services import (
+    Binding,
+    BindingDefaultSnapshot,
+    CacheAccessRequest,
+    ConfigTarget_validate,
+    ConversationKey,
+    Grant,
+    LoginSession,
+    PersistedConfigPatch,
+    Principal,
+)
+from ..core.contracts.storage import (
+    ClaimedSecretReceipt,
+    CollectionDescriptor_validate,
+    OwnerScope_validate,
+    SecretReceipt,
+    SecretRef_validate,
+    SecretTarget,
     validate_module_id,
 )
-from ..api.storage import JsonValue as JsonValue
-from ..api.subscriptions import (
+from ..core.contracts.subscriptions import (
     ActiveDigestSchedule,
-    CollectionKey,
     DeliveryAttempt,
     DeliveryEvent,
     DeliveryEventCursor,
     DeliveryState,
     DigestEnvelope,
     DigestEnvelopeClaim,
-    DigestMember,
     DigestMemberReceipt,
     DigestRouteCandidate,
     DigestRouteCursor,
@@ -74,13 +92,13 @@ from ..api.subscriptions import (
     DigestWindowSelector,
     DueCollectionJob,
     DueJobCursor,
-    Observation,
     ObservationEvaluationCommit,
     SubscriptionEvaluationSnapshot,
     SubscriptionJobAssociation,
     SubscriptionJobChange,
     SubscriptionRecord,
 )
+from ..core.contracts.validation_boundary import validate_contract
 
 
 def _bounded_identifier(value: str, field: str) -> None:
@@ -824,7 +842,7 @@ class ModuleRegistrationSnapshot:
                 raise ValueError(f"{field} must be a non-negative integer")
         try:
             collections = tuple(
-                CollectionDescriptor.validate(item) for item in self.collections
+                CollectionDescriptor_validate(item) for item in self.collections
             )
         except (AttributeError, TypeError, ValueError):
             raise ValueError("module collection declarations are invalid") from None
@@ -1003,7 +1021,7 @@ class SubscriptionGateBinding:
     module_id: str
 
     def __post_init__(self) -> None:
-        ConfigTarget.validate(self.target)
+        ConfigTarget_validate(self.target)
         for name in ("field", "package_id", "module_id"):
             _bounded_identifier(getattr(self, name), name)
         if self.target.module_id != f"{self.package_id}/{self.module_id}":
@@ -1511,42 +1529,6 @@ class ResultOutlet(Protocol):
     ) -> None: ...
 
 
-class RevisionConflict(RuntimeError):
-    """Stable optimistic-concurrency failure with no record or secret values."""
-
-    code = "revision_conflict"
-
-    def __init__(self, resource: str, expected_revision: int, actual_revision: int):
-        if (
-            not isinstance(resource, str)
-            or not resource
-            or any(marker in resource for marker in ("/", "\\", "\n"))
-        ):
-            raise ValueError("resource must be a bounded identifier")
-        if not isinstance(expected_revision, int) or not isinstance(
-            actual_revision, int
-        ):
-            raise TypeError("revision values must be integers")
-        self.resource = resource
-        self.expected_revision = expected_revision
-        self.actual_revision = actual_revision
-        super().__init__("expected revision does not match current revision")
-
-
-class UniqueConstraintViolation(RuntimeError):
-    code = "unique_constraint"
-
-    def __init__(self, resource: str):
-        if (
-            not isinstance(resource, str)
-            or not resource
-            or any(marker in resource for marker in ("/", "\\", "\n"))
-        ):
-            raise ValueError("resource must be a bounded identifier")
-        self.resource = resource
-        super().__init__("unique constraint rejected")
-
-
 class AuthorizationWindowExpired(PermissionError):
     """A private write reached its SQLite decision point after Grant expiry."""
 
@@ -1828,17 +1810,19 @@ class FileStage:
                 or any(character in value for character in ("/", "\\", "\n"))
             ):
                 raise ValueError("file stage identifiers must be bounded")
-        scope = OwnerScope.validate(self.scope)
+        scope = OwnerScope_validate(self.scope)
         if self.metadata is not None:
             try:
-                metadata = ResourceMetadata(
-                    self.metadata.asset_id,
-                    self.metadata.media_type,
-                    self.metadata.scope,
-                    self.metadata.size_bytes,
-                    self.metadata.expires_at,
-                    self.metadata.temporary,
-                    self.metadata.revision,
+                metadata = validate_contract(
+                    ResourceMetadata(
+                        self.metadata.asset_id,
+                        self.metadata.media_type,
+                        self.metadata.scope,
+                        self.metadata.size_bytes,
+                        self.metadata.expires_at,
+                        self.metadata.temporary,
+                        self.metadata.revision,
+                    )
                 )
             except (AttributeError, TypeError, ValueError):
                 raise ValueError("file stage metadata invariants are invalid") from None
@@ -1896,7 +1880,8 @@ class SecretOwner:
 
 def validate_secret_ref(secret_ref: SecretRef) -> SecretRef:
     """Rebuild reference syntax; issuance is checked by SecretReceiptLedger."""
-    return SecretRef.validate(secret_ref)
+    validate_contract(secret_ref)
+    return SecretRef_validate(secret_ref)
 
 
 class SecretStore(Protocol):

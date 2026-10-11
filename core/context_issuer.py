@@ -5,23 +5,46 @@ instance is accepted. This is a cooperative runtime boundary, not a sandbox
 against hostile Python code in the same process.
 """
 
+import hashlib
+import hmac
+import inspect
+import json
 from collections.abc import Callable
-from dataclasses import replace
+from dataclasses import dataclass, replace
+from secrets import token_bytes
 from time import monotonic
 from uuid import uuid4
 
-from ..api.contexts import (
+from yomihime_game_link_sdk.contexts import (
     InvocationConversationKind,
     InvocationOrigin,
     InvocationSubscriptionScope,
     InvocationView,
+    MessageContext,
 )
+from yomihime_game_link_sdk.errors import (
+    AccessDenied,
+    InvalidInvocation,
+    ServiceUnavailable,
+)
+
+from ..core.contracts.validation_boundary import validate_contract
 from .policy import public_web_allowed
 from .ports import PublicWebBinding, PublicWebProofValidator
+from .public_errors import public_boundary
 
 
-class InvalidInvocation(PermissionError):
-    """A view was forged, expired, released, or belongs to another issuer."""
+class _InvocationExpired(InvalidInvocation):
+    def __init__(self, diagnostic=None):
+        super().__init__(diagnostic)
+        self.code = "invocation_expired"
+
+
+@dataclass(frozen=True, slots=True)
+class _OwnedMessage:
+    snapshot: MessageContext
+    source_check: Callable
+    source_current: Callable
 
 
 class ContextIssuer:
@@ -61,6 +84,8 @@ class ContextIssuer:
         self._web_deployment = deployment
         self._web_proofs: dict[str, tuple[object, PublicWebBinding]] = {}
         self._issued: dict[str, InvocationView] = {}
+        self._messages: dict[str, _OwnedMessage] = {}
+        self._message_scope_key = token_bytes(32)
         self._children: dict[str, set[str]] = {}
         self._leases: dict[str, object] = {}
         self._release_observers: set[Callable[[InvocationView], None]] = set()
@@ -85,6 +110,9 @@ class ContextIssuer:
         subscription_revision: int | None = None,
         capability_id: str | None = None,
     ) -> InvocationView:
+        validate_contract(origin)
+        validate_contract(conversation_kind)
+        validate_contract(subscription_scope)
         if origin is InvocationOrigin.WEB_PUBLIC:
             raise InvalidInvocation(
                 "Public web invocations require an owned host proof"
@@ -146,29 +174,105 @@ class ContextIssuer:
             raise InvalidInvocation(
                 "Only subscription invocations may carry a subscription scope"
             )
-        view = InvocationView(
-            invocation_id=uuid4().hex,
-            origin=origin,
-            actor_id=actor_id,
-            conversation_id=conversation_id,
-            module_id=module_id,
-            module_epoch=module_epoch,
-            registry_revision=registry_revision,
-            deadline=deadline,
-            parent_id=None,
-            grant_id=grant_id,
-            grant_revision=grant_revision,
-            subscription_id=subscription_id,
-            subscription_revision=subscription_revision,
-            adapter_id=adapter_id,
-            capability_id=capability_id,
-            delivery_route=delivery_route,
-            conversation_kind=conversation_kind,
-            subscription_scope=subscription_scope,
+        view = validate_contract(
+            InvocationView(
+                invocation_id=uuid4().hex,
+                origin=origin,
+                actor_id=actor_id,
+                conversation_id=conversation_id,
+                module_id=module_id,
+                module_epoch=module_epoch,
+                registry_revision=registry_revision,
+                deadline=deadline,
+                parent_id=None,
+                grant_id=grant_id,
+                grant_revision=grant_revision,
+                subscription_id=subscription_id,
+                subscription_revision=subscription_revision,
+                adapter_id=adapter_id,
+                capability_id=capability_id,
+                delivery_route=delivery_route,
+                conversation_kind=conversation_kind,
+                subscription_scope=subscription_scope,
+            )
         )
         self._check_deadline(view)
         self._issued[view.invocation_id] = view
         return view
+
+    @public_boundary("proof")
+    def _attach_message(
+        self,
+        view: InvocationView,
+        *,
+        text: str,
+        correlation: str,
+        source_check: Callable,
+        source_current: Callable,
+    ) -> None:
+        """Core composition only: attach a verified source to an exact root."""
+        self.require(view)
+        if view.origin is not InvocationOrigin.LLM_TOOL or view.parent_id is not None:
+            raise InvalidInvocation()
+        if self.lease_for(view) is None or view.invocation_id in self._messages:
+            raise InvalidInvocation()
+        if type(correlation) is not str or not correlation or len(correlation) > 256:
+            raise InvalidInvocation()
+        if not callable(source_check) or not callable(source_current):
+            raise InvalidInvocation()
+        scope = json.dumps(
+            (
+                view.module_id,
+                view.module_epoch,
+                view.adapter_id,
+                view.actor_id,
+                view.conversation_id,
+                correlation,
+            ),
+            ensure_ascii=True,
+            separators=(",", ":"),
+        ).encode("ascii")
+        event_ref = hmac.new(self._message_scope_key, scope, hashlib.sha256).hexdigest()
+        snapshot = validate_contract(MessageContext(text, event_ref))
+        owned = _OwnedMessage(snapshot, source_check, source_current)
+        self._messages[view.invocation_id] = owned
+        try:
+            self._require_message_current(view)
+        except BaseException:
+            self._messages.pop(view.invocation_id, None)
+            raise
+
+    @public_boundary("proof")
+    def _message_for(self, view: InvocationView) -> _OwnedMessage:
+        self.require(view)
+        if view.origin is not InvocationOrigin.LLM_TOOL or view.parent_id is not None:
+            raise ServiceUnavailable()
+        message = self._messages.get(view.invocation_id)
+        if message is None:
+            raise InvalidInvocation()
+        return message
+
+    @public_boundary("proof")
+    async def _check_message_source(self, view: InvocationView) -> None:
+        message = self._message_for(view)
+        accepted = message.source_check()
+        if inspect.isawaitable(accepted):
+            accepted = await accepted
+        if accepted is not True:
+            raise AccessDenied("source_revoked")
+
+    @public_boundary("proof")
+    def _require_message_current(self, view: InvocationView) -> MessageContext:
+        """Final synchronous predicate; callers must not await before using it."""
+        message = self._message_for(view)
+        accepted = message.source_current()
+        if inspect.isawaitable(accepted):
+            if inspect.iscoroutine(accepted):
+                accepted.close()
+            raise InvalidInvocation()
+        if accepted is not True:
+            raise AccessDenied("source_revoked")
+        return message.snapshot
 
     def issue_public_web(
         self,
@@ -200,17 +304,19 @@ class ContextIssuer:
                 or validator.is_current(proof, binding) is not True
             ):
                 raise InvalidInvocation("Public web proof was rejected")
-            view = InvocationView(
-                invocation_id=uuid4().hex,
-                origin=InvocationOrigin.WEB_PUBLIC,
-                actor_id=None,
-                conversation_id=None,
-                module_id=module_id,
-                module_epoch=module_epoch,
-                registry_revision=registry_revision,
-                deadline=min(deadline, binding.deadline_monotonic),
-                capability_id=capability_id,
-                public_session_id=binding.bearer_key,
+            view = validate_contract(
+                InvocationView(
+                    invocation_id=uuid4().hex,
+                    origin=InvocationOrigin.WEB_PUBLIC,
+                    actor_id=None,
+                    conversation_id=None,
+                    module_id=module_id,
+                    module_epoch=module_epoch,
+                    registry_revision=registry_revision,
+                    deadline=min(deadline, binding.deadline_monotonic),
+                    capability_id=capability_id,
+                    public_session_id=binding.bearer_key,
+                )
             )
             self._check_deadline(view)
         except BaseException:
@@ -221,6 +327,10 @@ class ContextIssuer:
         return view
 
     def public_web_binding(self, view: InvocationView) -> PublicWebBinding:
+        try:
+            validate_contract(view)
+        except (TypeError, ValueError, AttributeError):
+            raise InvalidInvocation() from None
         self.require(view)
         current = view
         while current.parent_id is not None:
@@ -235,6 +345,10 @@ class ContextIssuer:
 
     def require(self, view: InvocationView) -> InvocationView:
         """Validate identity and the entire still-active parent chain."""
+        try:
+            validate_contract(view)
+        except (TypeError, ValueError, AttributeError):
+            raise InvalidInvocation() from None
         if not isinstance(view, InvocationView):
             raise InvalidInvocation("Unrecognized invocation")
         current = view
@@ -266,6 +380,10 @@ class ContextIssuer:
         B02 callers that do not use adapter-scoped identity may continue to
         call :meth:`require`.
         """
+        try:
+            validate_contract(view)
+        except (TypeError, ValueError, AttributeError):
+            raise InvalidInvocation() from None
         checked = self.require(view)
         if checked.adapter_id is None:
             raise InvalidInvocation("Identity-bound invocations require an adapter")
@@ -290,6 +408,10 @@ class ContextIssuer:
         scoped. Other origins may not carry a Grant across modules. Actor,
         origin, and subscription provenance are never caller-selectable here.
         """
+        try:
+            validate_contract(parent)
+        except (TypeError, ValueError, AttributeError):
+            raise InvalidInvocation() from None
         self.require(parent)
         if parent.origin is InvocationOrigin.WEB_PUBLIC and (
             capability_id is None
@@ -335,6 +457,10 @@ class ContextIssuer:
         This sidecar does not alter the SDK DTO. Callers must pass the original
         view and lease objects; equality of copied DTO fields grants nothing.
         """
+        try:
+            validate_contract(view)
+        except (TypeError, ValueError, AttributeError):
+            raise InvalidInvocation() from None
         self.require(view)
         if lease is None:
             raise TypeError("an admission lease is required")
@@ -345,11 +471,19 @@ class ContextIssuer:
 
     def lease_for(self, view: InvocationView) -> object | None:
         """Return the exact attached lease for an active original view."""
+        try:
+            validate_contract(view)
+        except (TypeError, ValueError, AttributeError):
+            raise InvalidInvocation() from None
         self.require(view)
         return self._leases.get(view.invocation_id)
 
     def detach_lease(self, view: InvocationView, lease: object) -> None:
         """Remove one exact lease sidecar while keeping its invocation active."""
+        try:
+            validate_contract(view)
+        except (TypeError, ValueError, AttributeError):
+            raise InvalidInvocation() from None
         self.require(view)
         if self._leases.get(view.invocation_id) is not lease:
             raise InvalidInvocation("Cannot detach a different admission lease")
@@ -363,6 +497,10 @@ class ContextIssuer:
         idempotent. It never detaches a different sidecar or accepts a copied
         view while the original is still issued.
         """
+        try:
+            validate_contract(view)
+        except (TypeError, ValueError, AttributeError):
+            raise InvalidInvocation() from None
         if not isinstance(view, InvocationView):
             raise InvalidInvocation("Unrecognized invocation")
         current = self._leases.get(view.invocation_id)
@@ -385,6 +523,7 @@ class ContextIssuer:
         Observers are synchronous cleanup hooks. They should remove authority
         sidecars keyed by invocation ID and must not retain the supplied view.
         """
+        validate_contract(observer)
         if not callable(observer):
             raise TypeError("release observer must be callable")
         self._release_observers.add(observer)
@@ -396,6 +535,10 @@ class ContextIssuer:
 
     def release(self, view: InvocationView) -> None:
         """Release a completed request and its descendants, including expired ones."""
+        try:
+            validate_contract(view)
+        except (TypeError, ValueError, AttributeError):
+            raise InvalidInvocation() from None
         if not isinstance(view, InvocationView):
             raise InvalidInvocation("Unrecognized invocation")
         if self._issued.get(view.invocation_id) is not view:
@@ -420,6 +563,7 @@ class ContextIssuer:
         for key in removed:
             released = self._issued.pop(key, None)
             self._leases.pop(key, None)
+            self._messages.pop(key, None)
             proof = self._web_proofs.pop(key, None)
             if proof is not None and self._web_validator is not None:
                 try:
@@ -439,5 +583,9 @@ class ContextIssuer:
                     continue
 
     def _check_deadline(self, view: InvocationView) -> None:
+        try:
+            validate_contract(view)
+        except (TypeError, ValueError, AttributeError):
+            raise InvalidInvocation() from None
         if view.deadline is not None and view.deadline <= self._clock():
-            raise InvalidInvocation("Invocation deadline has expired")
+            raise _InvocationExpired("Invocation deadline has expired")

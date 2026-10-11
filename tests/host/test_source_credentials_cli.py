@@ -24,14 +24,13 @@ from unittest.mock import AsyncMock, patch
 
 from ygl_test_subject.adapters.astrbot.bundled import install_bundled_ff14
 from ygl_test_subject.adapters.astrbot.runtime import PLUGIN_NAME
-from ygl_test_subject.api.administration import AdminOperation
-from ygl_test_subject.api.services import (
+from ygl_test_subject.core.contracts.administration import AdminOperation
+from ygl_test_subject.core.contracts.services import (
     ConfigFieldUpdate,
     ConfigPatch,
-    ConfigPatchMode,
-    ConfigTarget,
     SecretMaterial,
 )
+from ygl_test_subject.core.contracts.validation_boundary import validate_contract
 from ygl_test_subject.core.ports import RevisionConflict, SecretOwner
 from ygl_test_subject.infrastructure.sqlite.repositories_admin_credentials import (
     AdminCredentialStatus,
@@ -41,6 +40,8 @@ from ygl_test_subject.scripts import configure_source_credentials as cli
 from ygl_test_subject.services.admin_authorization import _digest
 
 from tests.host.assembly_contract import selected_assembly
+from yomihime_game_link_sdk.declarations import ConfigUpdateMode
+from yomihime_game_link_sdk.services import ConfigTarget
 
 ROOT = Path(__file__).resolve().parents[2]
 _ADMIN = token_urlsafe(32)
@@ -148,7 +149,7 @@ class SourceCredentialCliTests(unittest.IsolatedAsyncioTestCase):
         try:
             await core.database.executor.initialize()
             snapshot = await core.config_repository.current(
-                ConfigTarget(PLUGIN_NAME, cli.MODULE_ID)
+                validate_contract(ConfigTarget(PLUGIN_NAME, cli.MODULE_ID))
             )
             metadata = next(
                 item for item in snapshot.secret_metadata if item.field == alias
@@ -847,7 +848,7 @@ class SourceCredentialCliTests(unittest.IsolatedAsyncioTestCase):
                     if item.module_id == "ff14"
                 )
                 alias = "credential_fflogs_cn"
-                clear = ConfigFieldUpdate(alias, ConfigPatchMode.CLEAR)
+                clear = ConfigFieldUpdate(alias, ConfigUpdateMode.CLEAR)
                 cleared = await core.admin_facade.update_config(
                     None,
                     cli.MODULE_ID,
@@ -867,7 +868,7 @@ class SourceCredentialCliTests(unittest.IsolatedAsyncioTestCase):
                             (
                                 ConfigFieldUpdate(
                                     alias,
-                                    ConfigPatchMode.REPLACE,
+                                    ConfigUpdateMode.REPLACE,
                                     secret=SecretMaterial(b"stale replacement"),
                                 ),
                             ),
@@ -941,22 +942,22 @@ class SourceCredentialCliTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("set", completed.stdout)
         self.assertNotIn("client_secret", completed.stdout)
 
-    def test_both_official_clis_keep_exact_sdk_path_version_revision_pins(self):
+    def test_both_official_clis_keep_exact_sdk_path_release_and_abi_pins(self):
         code = r"""
 import importlib, sys
 from pathlib import Path
 root, module, mismatch = sys.argv[1:]
 sys.path.insert(0, root)
-import yomihime_sdk as sdk
-from yomihime_sdk.api import version
+import yomihime_game_link_sdk as sdk
+from yomihime_game_link_sdk import version
 if mismatch == 'version':
-    sdk.__version__ = version.CONTRACT_VERSION = '1.6.0'
-elif mismatch == 'revision':
-    version.CONTRACT_REVISION = 'R5-LLM-TOOLS'
+    sdk.__version__ = '0.1.0a4'
+elif mismatch == 'abi':
+    version.MODULE_ABI_VERSION = '1.7.0'
 elif mismatch == 'path':
     sdk.__file__ = str(Path(root).parent / 'foreign-sdk' / '__init__.py')
-elif mismatch == 'compatibility':
-    version.COMPATIBLE_CONTRACT_VERSIONS = version.COMPATIBLE_CONTRACT_VERSIONS[:-1]
+elif mismatch == 'future':
+    sdk.__version__ = '0.1.0a7'
 else:
     raise AssertionError('unknown probe')
 try:
@@ -979,9 +980,7 @@ else:
                 )
                 self.assertEqual(help_result.returncode, 0, help_result.stderr)
                 self.assertIn("usage:", help_result.stdout)
-            mismatches = ["version", "revision", "path"]
-            if cli_name == "admin_credentials":
-                mismatches.append("compatibility")
+            mismatches = ["version", "abi", "path", "future"]
             for mismatch in mismatches:
                 with self.subTest(cli=cli_name, mismatch=mismatch):
                     result = subprocess.run(

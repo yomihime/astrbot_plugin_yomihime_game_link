@@ -19,10 +19,12 @@ from types import MappingProxyType
 from typing import Protocol
 from urllib.parse import quote_plus, urlencode
 
-from yomihime_sdk.api.services import SourceHttpError
+from yomihime_game_link_sdk.declarations import SourceDeclaration
+from yomihime_game_link_sdk.errors import SourceHttpError
+from yomihime_game_link_sdk.services import HttpRequest, HttpResponse, SourceHttp
 
-from ..api.manifests import SourceDeclaration
-from ..api.services import HttpRequest, HttpResponse, SourceHttp
+from ..core.contracts.validation_boundary import validate_contract
+from ..core.public_errors import public_boundary
 
 
 class HttpTransport(Protocol):
@@ -247,7 +249,7 @@ def _create_credential_exchange_request(
     """Build the only supported internal Basic-auth request shape."""
 
     try:
-        declaration = SourceDeclaration("oauth_token", host)
+        declaration = validate_contract(SourceDeclaration("oauth_token", host))
         if (
             type(module_id) is not str
             or not module_id.strip()
@@ -291,7 +293,7 @@ def _create_credential_exchange_request(
         basic = base64.b64encode(
             f"{encoded_id}:{encoded_secret}".encode("utf-8")
         ).decode("ascii")
-        HttpRequest("oauth_token", path, "POST", body=body)
+        validate_contract(HttpRequest("oauth_token", path, "POST", body=body))
         headers = {
             "Authorization": f"Basic {basic}",
             "Content-Type": "application/x-www-form-urlencoded",
@@ -381,6 +383,7 @@ class SourceHttpService(SourceHttp):
         module_id: str | None = None,
         credential_service: SourceCredentialAuthorizer | None = None,
     ) -> None:
+        validate_contract(declarations)
         if isinstance(declarations, Mapping):
             if any(type(key) is not str for key in declarations):
                 raise TypeError("HTTP declaration keys must be built-in strings")
@@ -452,6 +455,7 @@ class SourceHttpService(SourceHttp):
         if callable(close):
             await close()
 
+    @public_boundary("service")
     async def fetch(self, request: HttpRequest) -> HttpResponse:
         """Fetch one request after enforcing the declared source policy."""
 
@@ -526,6 +530,8 @@ class SourceHttpService(SourceHttp):
         request: HttpRequest,
         deadline: float,
     ) -> CredentialLease | None:
+        validate_contract(declaration)
+        validate_contract(request)
         if declaration.credential_ref is None:
             return None
         service = self._credential_service
@@ -549,6 +555,7 @@ class SourceHttpService(SourceHttp):
         lease: CredentialLease,
         deadline: float,
     ) -> None:
+        validate_contract(declaration)
         service = self._credential_service
         module_id = self._module_id
         if service is None or module_id is None:
@@ -571,6 +578,8 @@ class SourceHttpService(SourceHttp):
         lease: CredentialLease | None,
         deadline: float,
     ) -> HttpResponse:
+        validate_contract(declaration)
+        validate_contract(checked)
         headers = dict(checked.headers)
         proof = None
         if lease is not None:
@@ -666,21 +675,25 @@ class SourceHttpService(SourceHttp):
             raise SourceHttpError("timeout") from None
 
     def _validate_request(self, request: HttpRequest) -> HttpRequest:
-        if not isinstance(request, HttpRequest):
+        if type(request) is not HttpRequest:
             raise SourceHttpError("request_rejected") from None
         try:
-            return HttpRequest(
-                request.source_id,
-                request.path,
-                request.method,
-                request.query,
-                request.body,
-                request.headers,
+            validate_contract(request)
+            return validate_contract(
+                HttpRequest(
+                    request.source_id,
+                    request.path,
+                    request.method,
+                    request.query,
+                    request.body,
+                    request.headers,
+                )
             )
         except Exception:
             raise SourceHttpError("request_rejected") from None
 
     def _validate_limits(self, request: HttpRequest) -> None:
+        validate_contract(request)
         if len(request.path) > self._max_path_length:
             raise SourceHttpError("request_too_large") from None
         if len(request.query) > self._max_query_items or any(
@@ -693,13 +706,16 @@ class SourceHttpService(SourceHttp):
             raise SourceHttpError("request_too_large") from None
 
     def _validate_response(self, response: object) -> HttpResponse:
-        if not isinstance(response, HttpResponse):
+        if type(response) is not HttpResponse:
             raise SourceHttpError("invalid_response") from None
         try:
-            checked = HttpResponse(
-                response.status_code,
-                response.headers,
-                response.body,
+            validate_contract(response)
+            checked = validate_contract(
+                HttpResponse(
+                    response.status_code,
+                    response.headers,
+                    response.body,
+                )
             )
         except Exception:
             raise SourceHttpError("invalid_response") from None

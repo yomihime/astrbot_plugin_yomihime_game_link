@@ -8,27 +8,23 @@ import re
 from html.parser import HTMLParser
 from urllib.parse import quote
 
-from yomihime_sdk.api.contexts import InvocationView
-from yomihime_sdk.api.display import (
+from yomihime_game_link_sdk.contexts import InvocationView
+from yomihime_game_link_sdk.display import (
     DisplayDocument,
     Link,
     LinksBlock,
     Privacy,
     TextBlock,
 )
-from yomihime_sdk.api.results import (
+from yomihime_game_link_sdk.errors import SourceHttpError
+from yomihime_game_link_sdk.results import (
     CapabilityResult,
     ErrorCode,
     ErrorDetail,
     ResultStatus,
 )
-from yomihime_sdk.api.services import (
-    ConfigSnapshot,
-    HttpRequest,
-    ModuleServices,
-    SourceHttpError,
-)
-from yomihime_sdk.api.storage import JsonObject, SecretMetadataState
+from yomihime_game_link_sdk.services import ConfigSnapshot, HttpRequest, ModuleServices
+from yomihime_game_link_sdk.storage import JsonObject, SecretMetadataState
 
 from .fflogs_catalog import (
     FFLOGS_CN_SOURCE,

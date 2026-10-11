@@ -6,8 +6,10 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from types import MappingProxyType
 
-from ..api.manifests import ModuleManifest, PackageManifest
-from ..api.services import ModuleHandlers
+from yomihime_game_link_sdk.declarations import ModuleManifest, PackageManifest
+from yomihime_game_link_sdk.services import ModuleHandlers
+
+from ..core.contracts.validation_boundary import validate_contract
 
 
 class RegistryError(ValueError):
@@ -164,6 +166,8 @@ class Registry:
     ) -> RegistrySnapshot:
         """Validate and atomically register one complete package."""
 
+        validate_contract(manifest)
+        validate_contract(handlers_by_module)
         if not isinstance(manifest, PackageManifest):
             raise RegistryError("manifest must be a PackageManifest")
         if not isinstance(handlers_by_module, Mapping):
@@ -311,6 +315,7 @@ class Registry:
         self, module_id: str, handlers: ModuleHandlers
     ) -> RegistrySnapshot:
         """Publish the handlers owned by an installed Lifecycle instance."""
+        validate_contract(handlers)
         if self._lifecycle_owner is None:
             raise RegistryError("Registry has no Lifecycle projection owner")
         module_id = _query_key(module_id, "module_id")
@@ -382,6 +387,8 @@ class Registry:
 
     @staticmethod
     def _validate_handlers(module: ModuleManifest, handlers: ModuleHandlers) -> None:
+        validate_contract(module)
+        validate_contract(handlers)
         if not isinstance(handlers, ModuleHandlers):
             raise RegistryError("module handlers have an invalid type")
         expected = {capability.capability_id for capability in module.capabilities}

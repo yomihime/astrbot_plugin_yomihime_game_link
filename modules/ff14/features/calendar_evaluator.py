@@ -13,7 +13,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from dateutil.tz import datetime_exists, resolve_imaginary
 
-from yomihime_sdk.api.display import (
+from yomihime_game_link_sdk.display import (
     DisplayDocument,
     Link,
     LinksBlock,
@@ -22,8 +22,8 @@ from yomihime_sdk.api.display import (
     TextBlock,
     TimeValue,
 )
-from yomihime_sdk.api.storage import OwnershipKind
-from yomihime_sdk.api.subscriptions import (
+from yomihime_game_link_sdk.storage import OwnershipKind
+from yomihime_game_link_sdk.subscriptions import (
     EvaluationDecision,
     EvaluationState,
     Observation,

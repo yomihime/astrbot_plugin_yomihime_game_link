@@ -11,14 +11,12 @@ from time import monotonic
 from typing import Callable, TypeVar
 from uuid import uuid4
 
-from ..api.contexts import InvocationView
-from ..api.services import ResourceAccess, ResourceReference
-from ..api.storage import (
-    CacheVisibility,
-    OwnerScope,
-    ResourceMetadata,
-)
+from yomihime_game_link_sdk.contexts import InvocationView
+from yomihime_game_link_sdk.services import ResourceAccess, ResourceReference
+from yomihime_game_link_sdk.storage import CacheVisibility, OwnerScope, ResourceMetadata
+
 from ..core.context_issuer import ContextIssuer, InvalidInvocation
+from ..core.contracts.validation_boundary import validate_contract
 from ..core.ports import (
     AdmissionLease,
     AdmissionPort,
@@ -88,6 +86,7 @@ class _ResourceAccessCoordinator:
         clock: Callable[[], float] = monotonic,
         resource_ttl_seconds: float | None = None,
     ) -> None:
+        validate_contract(invocation)
         if not isinstance(invocation, InvocationView):
             raise TypeError("resource service requires an invocation")
         if not all(
@@ -255,6 +254,7 @@ class _ResourceAccessCoordinator:
         Cancellation, a closed/full SQLite executor, an unavailable status port,
         and any mismatched row all leave the pending marker as the recovery owner.
         """
+        validate_contract(metadata)
         task = asyncio.current_task()
         if isinstance(failure, asyncio.CancelledError) or (
             task is not None and task.cancelling()
@@ -336,6 +336,7 @@ class _ResourceAccessCoordinator:
         return principal_id
 
     async def _scope(self, visibility: CacheVisibility | None = None) -> OwnerScope:
+        validate_contract(visibility)
         invocation = self.__invocation
         if visibility is None:
             visibility = self._default_visibility()
@@ -352,11 +353,13 @@ class _ResourceAccessCoordinator:
             raise ResourceAccessError(
                 "authorised scope requires a grant", code="scope_denied"
             )
-        from ..api.storage import GrantReference
+        from yomihime_game_link_sdk.storage import GrantReference
 
         return OwnerScope.authorized(
             principal_id,
-            GrantReference(invocation.grant_id, invocation.grant_revision),
+            validate_contract(
+                GrantReference(invocation.grant_id, invocation.grant_revision)
+            ),
         )
 
     async def register(
@@ -369,6 +372,7 @@ class _ResourceAccessCoordinator:
         ttl_seconds: float | None = None,
         expires_at: datetime | None = None,
     ) -> ResourceReference:
+        validate_contract(visibility)
         await self._admit()
         asset_id = _asset_id(asset_id)
         if not isinstance(content, bytes):
@@ -419,8 +423,8 @@ class _ResourceAccessCoordinator:
             await self._assert_grant_current()
             if stage.asset_id != asset_id:
                 raise ValueError("asset id does not match content")
-            metadata = ResourceMetadata(
-                asset_id, media_type, scope, len(content), expires_at
+            metadata = validate_contract(
+                ResourceMetadata(asset_id, media_type, scope, len(content), expires_at)
             )
             async with self._write_mutation("resource-register"):
                 try:
@@ -449,13 +453,16 @@ class _ResourceAccessCoordinator:
             if not committed:
                 await self._discard_uncommitted_stage(stage)
             raise
-        return ResourceReference(
-            registered.asset_id, registered.media_type, registered.scope
+        return validate_contract(
+            ResourceReference(
+                registered.asset_id, registered.media_type, registered.scope
+            )
         )
 
     async def read(
         self, asset_id: str, *, visibility: CacheVisibility | None = None
     ) -> bytes:
+        validate_contract(visibility)
         await self._admit()
         asset_id = _asset_id(asset_id)
         scopes = await self._read_scopes(visibility)
@@ -476,6 +483,7 @@ class _ResourceAccessCoordinator:
     async def metadata(
         self, asset_id: str, *, visibility: CacheVisibility | None = None
     ) -> ResourceMetadata | None:
+        validate_contract(visibility)
         await self._admit()
         asset_id = _asset_id(asset_id)
         for scope in await self._read_scopes(visibility):
@@ -489,6 +497,7 @@ class _ResourceAccessCoordinator:
     async def delete(
         self, asset_id: str, *, visibility: CacheVisibility | None = None
     ) -> None:
+        validate_contract(visibility)
         await self._admit()
         delete = getattr(self.__repository, "delete", None)
         if not callable(delete):
@@ -525,6 +534,7 @@ class _ResourceAccessCoordinator:
         while metadata and (for authorized scopes) the current Grant remain
         the authorization facts.
         """
+        validate_contract(visibility)
         if visibility is not None:
             return (await self._scope(visibility),)
         default = await self._scope()
@@ -553,6 +563,7 @@ class ResourceAccessService(ResourceAccess):
         file_store: SafeFileStore | None = None,
         **kwargs: object,
     ) -> None:
+        validate_contract(coordinator_or_invocation)
         if isinstance(coordinator_or_invocation, _ResourceAccessCoordinator):
             if repository is not None or file_store is not None or kwargs:
                 raise TypeError("coordinator facade does not accept storage arguments")
@@ -575,6 +586,7 @@ class ResourceAccessService(ResourceAccess):
         ttl_seconds: float | None = None,
         expires_at: datetime | None = None,
     ) -> ResourceReference:
+        validate_contract(visibility)
         return await self.__coordinator.register(
             asset_id,
             media_type,
@@ -587,16 +599,19 @@ class ResourceAccessService(ResourceAccess):
     async def read(
         self, asset_id: str, *, visibility: CacheVisibility | None = None
     ) -> bytes:
+        validate_contract(visibility)
         return await self.__coordinator.read(asset_id, visibility=visibility)
 
     async def metadata(
         self, asset_id: str, *, visibility: CacheVisibility | None = None
     ) -> ResourceMetadata | None:
+        validate_contract(visibility)
         return await self.__coordinator.metadata(asset_id, visibility=visibility)
 
     async def delete(
         self, asset_id: str, *, visibility: CacheVisibility | None = None
     ) -> None:
+        validate_contract(visibility)
         return await self.__coordinator.delete(asset_id, visibility=visibility)
 
 

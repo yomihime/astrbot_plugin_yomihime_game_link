@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
-from ...api.administration import AdminOperation
+from ...core.contracts.administration import AdminOperation
 from ...core.ports import RevisionConflict
 from ...services.configuration import validate_configuration_value
 from .repositories_admin_credentials import assert_generation_current

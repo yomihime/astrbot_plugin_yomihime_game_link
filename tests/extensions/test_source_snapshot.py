@@ -9,13 +9,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from api.manifests import EXTENSION_MANIFEST_ABI
-from extensions.discovery import (
+from ygl_test_subject.core.contracts.manifests import EXTENSION_MANIFEST_ABI
+from ygl_test_subject.extensions.discovery import (
     DiscoveryRootError,
     _require_handle_relative_support,
     discover_packages,
 )
-from extensions.source_snapshot import (
+from ygl_test_subject.extensions.source_snapshot import (
     MAX_PACKAGE_SOURCE_BYTES,
     SourceBundle,
     SourceSnapshotError,
@@ -30,7 +30,7 @@ def _manifest(package_id: str) -> dict[str, object]:
         "schema_version": 1,
         "package_id": package_id,
         "package_version": "1.0.0",
-        "contract_version": "1.1.0",
+        "contract_version": "2.0",
         "modules": [],
         "author": "Example",
         "license": "MIT",
@@ -76,7 +76,7 @@ class SourceSnapshotLimitTests(unittest.TestCase):
             bundle.files["other.py"] = b"x"  # type: ignore[index]
 
     def test_untrusted_or_forged_provenance_is_rejected(self) -> None:
-        from extensions.source_snapshot import PackageProvenance
+        from ygl_test_subject.extensions.source_snapshot import PackageProvenance
 
         forged = PackageProvenance(
             platform="posix",

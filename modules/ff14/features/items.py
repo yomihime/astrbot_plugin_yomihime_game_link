@@ -2,22 +2,23 @@
 
 from __future__ import annotations
 
-from yomihime_sdk.api.contexts import InvocationView
-from yomihime_sdk.api.display import (
+from yomihime_game_link_sdk.contexts import InvocationView
+from yomihime_game_link_sdk.display import (
     DisplayDocument,
     Link,
     LinksBlock,
     Privacy,
     TextBlock,
 )
-from yomihime_sdk.api.results import (
+from yomihime_game_link_sdk.errors import SourceHttpError
+from yomihime_game_link_sdk.results import (
     CapabilityResult,
     ErrorCode,
     ErrorDetail,
     ResultStatus,
 )
-from yomihime_sdk.api.services import ModuleServices, SourceHttpError
-from yomihime_sdk.api.storage import JsonObject
+from yomihime_game_link_sdk.services import ModuleServices
+from yomihime_game_link_sdk.storage import JsonObject
 
 from ..models import ItemCandidate, ItemRecord
 from .item_resolution import (

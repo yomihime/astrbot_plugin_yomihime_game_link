@@ -6,14 +6,16 @@ from dataclasses import FrozenInstanceError, replace
 from time import monotonic
 from typing import get_type_hints
 
-from ygl_test_subject.api.contexts import (
+from ygl_test_subject.core.context_issuer import ContextIssuer, InvalidInvocation
+from ygl_test_subject.core.contracts.validation_boundary import validate_contract
+from ygl_test_subject.core.ports import PublicWebBinding
+
+from yomihime_game_link_sdk.contexts import (
     InvocationConversationKind,
     InvocationOrigin,
     InvocationSubscriptionScope,
     InvocationView,
 )
-from ygl_test_subject.core.context_issuer import ContextIssuer, InvalidInvocation
-from ygl_test_subject.core.ports import PublicWebBinding
 
 
 class _PublicWebProofs:
@@ -172,8 +174,8 @@ class PublicWebIssuerTests(unittest.TestCase):
             registry_revision=1,
         )
         self.assertIsNone(scheduler.public_session_id)
-        with self.assertRaises(ValueError):
-            replace(scheduler, public_session_id="forged")
+        with self.assertRaises(InvalidInvocation):
+            self.issuer.require(replace(scheduler, public_session_id="forged"))
 
 
 class ContextIssuerTests(unittest.TestCase):
@@ -634,19 +636,21 @@ class ContextIssuerTests(unittest.TestCase):
 
 class InvocationViewContractTests(unittest.TestCase):
     def test_valid_context_and_optional_references(self) -> None:
-        view = InvocationView(
-            "request.1",
-            InvocationOrigin.SCHEDULER,
-            None,
-            "conversation.1",
-            "yomihime/catalog",
-            2,
-            3,
-            12.5,
-            grant_id="grant.1",
-            grant_revision=4,
-            subscription_id="sub.1",
-            subscription_revision=5,
+        view = validate_contract(
+            InvocationView(
+                "request.1",
+                InvocationOrigin.SCHEDULER,
+                None,
+                "conversation.1",
+                "yomihime/catalog",
+                2,
+                3,
+                12.5,
+                grant_id="grant.1",
+                grant_revision=4,
+                subscription_id="sub.1",
+                subscription_revision=5,
+            )
         )
         self.assertEqual(12.5, view.deadline)
         with self.assertRaises(FrozenInstanceError):
@@ -665,16 +669,16 @@ class InvocationViewContractTests(unittest.TestCase):
         for deadline in (0, -1.0, math.inf, math.nan, True):
             with self.subTest(deadline=deadline):
                 with self.assertRaises((TypeError, ValueError)):
-                    InvocationView(*base, deadline=deadline)
+                    validate_contract(InvocationView(*base, deadline=deadline))
         with self.assertRaises(TypeError):
-            InvocationView(*base, module_epoch=True)
+            validate_contract(InvocationView(*base, module_epoch=True))
         with self.assertRaises(ValueError):
-            InvocationView(*base, grant_id="grant.1")
+            validate_contract(InvocationView(*base, grant_id="grant.1"))
         with self.assertRaises(ValueError):
-            InvocationView(*base, subscription_revision=1)
+            validate_contract(InvocationView(*base, subscription_revision=1))
         with self.assertRaises(ValueError):
-            InvocationView("bad\x00id", *base[1:])
+            validate_contract(InvocationView("bad\x00id", *base[1:]))
         for module_id in ("pkg./module", "pkg/module.", "pkg-/module"):
             with self.subTest(module_id=module_id):
                 with self.assertRaises(ValueError):
-                    InvocationView(*base[:4], module_id, *base[5:])
+                    validate_contract(InvocationView(*base[:4], module_id, *base[5:]))

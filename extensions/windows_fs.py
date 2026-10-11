@@ -1003,8 +1003,7 @@ def capture_python_sources(
     Every object is opened by its enumerated FileID.  Names are used only as
     parent-child edge proofs, never as import paths or file-open paths.
     """
-    from yomihime_sdk.api.manifests import EXTENSION_MANIFEST_ABI
-
+    from ..core.contracts.manifests import EXTENSION_MANIFEST_ABI
     from .source_snapshot import (
         SourceSnapshotError,
         SourceSnapshotLimits,

@@ -5,22 +5,22 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Mapping
-from contextlib import contextmanager
-from contextvars import ContextVar
 from dataclasses import replace
 from decimal import Decimal
+from math import isfinite
 from time import monotonic
 
-from yomihime_sdk.api.contexts import InvocationOrigin, InvocationView
-from yomihime_sdk.api.display import DisplayDocument, Privacy, TextBlock
-from yomihime_sdk.api.results import (
+from yomihime_game_link_sdk.contexts import InvocationOrigin, InvocationView
+from yomihime_game_link_sdk.display import DisplayDocument, Privacy, TextBlock
+from yomihime_game_link_sdk.errors import ServiceUnavailable, SourceHttpError
+from yomihime_game_link_sdk.results import (
     CapabilityResult,
     ErrorCode,
     ErrorDetail,
     FactDocument,
     ResultStatus,
 )
-from yomihime_sdk.api.services import ModuleServices, SourceHttpError
+from yomihime_game_link_sdk.services import ModuleServices
 
 from ..query_resolution import (
     CandidateBatch,
@@ -231,6 +231,95 @@ def _execution_facts(execution: MarketExecution) -> dict:
     return facts
 
 
+def _error_execution_facts(execution: MarketExecution) -> dict:
+    """Select public error diagnostics; never copy success facts or source bodies."""
+    query, observed = execution.query, execution.observed_at
+    coverage = []
+    for outcome in execution.outcomes[:4]:
+        data, provenance = outcome.data, outcome.provenance
+        quotes = (
+            [
+                dict(
+                    quality=quote.quality,
+                    minimum=_error_number(quote.minimum),
+                    recent_purchase=_error_number(quote.recent_purchase),
+                    average_sale_price=_error_number(quote.average_sale_price),
+                    daily_sale_velocity=_error_number(quote.daily_sale_velocity),
+                    missing=[
+                        name
+                        for name in (
+                            "minimum",
+                            "recent_purchase",
+                            "average_sale_price",
+                            "daily_sale_velocity",
+                        )
+                        if getattr(quote, name) is None
+                    ],
+                )
+                for quote in data.quotes[:2]
+                if data
+            ]
+            if data
+            else []
+        )
+        coverage.append(
+            dict(
+                region=outcome.region,
+                target=outcome.target,
+                state="failed"
+                if outcome.failed
+                else "available"
+                if data and data.has_data
+                else "empty",
+                stage=outcome.stage if outcome.failed else None,
+                reason=outcome.reason if outcome.failed else None,
+                status_code=outcome.status_code if outcome.failed else None,
+                cached=provenance.cached if provenance else None,
+                fetched_at=provenance.fetched_at.isoformat() if provenance else None,
+                fetched_age_seconds=(observed - provenance.fetched_at).total_seconds()
+                if provenance
+                else None,
+                source=provenance.url if provenance else None,
+                incomplete=data.incomplete if data else None,
+                truncated=data.truncated if data else None,
+                quotes=quotes,
+            )
+        )
+    facts = _query_facts(query)
+    facts.update(
+        item_id=query.item_id,
+        item_name=query.item_name,
+        currency="Gil",
+        price_unit="per_item",
+        observed_at=observed.isoformat(),
+        truncated=execution.truncated,
+        coverage=coverage,
+        minimums=[],
+        listings=[],
+        answer_guidance="本次没有可用市场结果；保留失败或暂无记录的区别，不能据此判断无挂牌或不可交易。请等待用户明确新指令，不自行更换范围或参数。",
+    )
+    return facts
+
+
+def _error_number(value):
+    # Error supplements use JSON numbers; success facts retain their Decimal path.
+    if isinstance(value, Decimal):
+        if not value.is_finite():
+            raise ValueError("invalid public price")
+        if value == value.to_integral_value():
+            value = int(value)
+        else:
+            number = float(value)
+            if number == 0 and value != 0:
+                raise ValueError("invalid public price")
+            value = number
+    if value is None or type(value) is int:
+        return value
+    if type(value) is float and isfinite(value):
+        return value
+    raise ValueError("invalid public price")
+
+
 def _fact_values(value):
     if type(value) is float:
         return Decimal(str(value))
@@ -242,6 +331,14 @@ def _fact_values(value):
 
 
 def _tool_facts(result: CapabilityResult, facts: dict | None = None) -> FactDocument:
+    if result.status is ResultStatus.ERROR:
+        return FactDocument(
+            dict(
+                status="error",
+                error=dict(code=result.error.code.value, message=result.error.message),
+                **(facts or {}),
+            )
+        )
     return FactDocument(
         _fact_values(
             dict(
@@ -323,17 +420,6 @@ class MarketQueryHandler:
         self.registry = CandidateRegistry(clock=clock)
         # Only start_bound is used: each query gets freshly authorized ports.
         self.source = MarketSourceClient(None, clock=clock)
-        self._tool_event = ContextVar("ff14_trusted_tool_event", default=None)
-
-    @contextmanager
-    def _bind_tool_event(self, event, text, actor_id, conversation_id, adapter_id):
-        """Internal runtime binding, absent from SDK/model parameters."""
-        owner = TrustedOwner(actor_id, conversation_id, f"llm_tool:{adapter_id}")
-        token = self._tool_event.set((owner, event, text))
-        try:
-            yield
-        finally:
-            self._tool_event.reset(token)
 
     async def invoke(
         self, context: InvocationView, parameters: Mapping
@@ -348,14 +434,18 @@ class MarketQueryHandler:
             )
 
         try:
+            scope = await self.services.scopes.bind(context)
+            message = None
+
+            async def guard():
+                if context.origin is InvocationOrigin.LLM_TOOL:
+                    current = await scope.message.read()
+                    if message is not None and current != message:
+                        raise PermissionError("message context changed")
+
+            if context.origin is InvocationOrigin.LLM_TOOL:
+                message = await scope.message.read()
             owner = _owner(context)
-            evidence = self._tool_event.get()
-            if context.origin is InvocationOrigin.LLM_TOOL and (
-                evidence is None or evidence[0] != owner or type(evidence[2]) is not str
-            ):
-                raise QueryResolutionError(
-                    "缺少本次真实用户消息绑定。", ErrorCode.UNSUPPORTED
-                )
             if context.capability_id == "ff14.market.select":
                 parameters = {"selection": parameters}
             if isinstance(parameters, Mapping) and set(parameters) == {"input"}:
@@ -395,20 +485,22 @@ class MarketQueryHandler:
             if not selecting:
                 if context.origin is InvocationOrigin.LLM_TOOL:
                     # Validate before any registry mutation, including retries.
-                    validate_tool_query(parameters.get("query"), evidence[2])
+                    validate_tool_query(parameters.get("query"), message.text)
                     retry = self.registry.tool_query(
-                        owner, evidence[1], evidence[2], parameters.get("query", "")
+                        owner,
+                        message.event_ref,
+                        message.text,
+                        parameters.get("query", ""),
                     )
                     if retry is not None:
                         return self._candidates(context, retry)
                 ticket = self.registry.begin(
                     owner,
-                    source_event=evidence[1]
+                    source_ref=message.event_ref
                     if context.origin is InvocationOrigin.LLM_TOOL
                     else None,
                 )  # Before bind/config/catalog await.
             async with asyncio.timeout(max(0, deadline - self.clock())):
-                scope = await self.services.scopes.bind(context)
                 session = self.source.start_bound(
                     scope.http, scope.cache, deadline=deadline
                 )
@@ -434,15 +526,17 @@ class MarketQueryHandler:
                         choice["item_id"],
                         retain=True,
                         **(
-                            {"event": evidence[1], "text": evidence[2]}
+                            {"event_ref": message.event_ref, "text": message.text}
                             if context.origin is InvocationOrigin.LLM_TOOL
                             else {}
                         ),
                     )
                     ticket = QueryTicket(owner, choice["generation"])
                     catalog = await session.catalog()
+                    await guard()
                 else:
                     catalog = await session.catalog()
+                    await guard()
                     coordinator = QueryCoordinator(
                         MarketQueryResolver(catalog.catalog), self.registry
                     )
@@ -474,8 +568,10 @@ class MarketQueryHandler:
                             entry=entry,
                             ticket=ticket,
                             retain_until_result=True,
+                            guard=guard,
                         )
                     )
+                    await guard()
                     if isinstance(resolved, CandidateBatch):
                         self.registry._current(ticket)
                         return self._candidates(
@@ -485,6 +581,7 @@ class MarketQueryHandler:
                         )
                     query = resolved
                 execution = await MarketClient(session, catalog).execute(query)
+                await guard()
                 self.registry.finish(
                     ticket, query
                 )  # Fence late market results before publishing.
@@ -496,6 +593,20 @@ class MarketQueryHandler:
                             result.error.code,
                             result.error.message
                             + " 请等待用户明确新指令，不要自行换参数或改 query 绕过确认。",
+                        ),
+                    )
+                if result.status is ResultStatus.ERROR:
+                    if context.origin is not InvocationOrigin.LLM_TOOL:
+                        return result
+                    return replace(
+                        result,
+                        model_facts=_tool_facts(
+                            result,
+                            {
+                                "supplement": {
+                                    "market": _error_execution_facts(execution)
+                                }
+                            },
                         ),
                     )
                 facts = _execution_facts(execution)
@@ -521,9 +632,10 @@ class MarketQueryHandler:
                         for row in facts["coverage"]
                     ]
                     return replace(
-                        result, model_facts=FactDocument(
+                        result,
+                        model_facts=FactDocument(
                             validate_public_market_facts({"market": public})
-                        )
+                        ),
                     )
                 return replace(
                     result, model_facts=_tool_facts(result, {"market": facts})
@@ -537,6 +649,7 @@ class MarketQueryHandler:
             MarketDeadlineError,
             SourceHttpError,
             PermissionError,
+            ServiceUnavailable,
         ) as exc:
             outcome = _diagnostic(exc, "", "")
             return failure(outcome.code, "市场查询来源未完成，请稍后重试。")
@@ -594,7 +707,9 @@ class MarketQueryHandler:
                     name_confirmation="回复唯一完整名称或“完整名称那个”；暂不支持序号",
                 )
                 if context.origin is InvocationOrigin.LLM_TOOL
-                else validate_public_market_facts({"market": facts, "selection": selection})
+                else validate_public_market_facts(
+                    {"market": facts, "selection": selection}
+                )
             ),
         )
 

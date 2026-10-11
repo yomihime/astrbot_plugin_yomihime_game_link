@@ -14,7 +14,7 @@ from types import ModuleType
 from typing import Any
 from uuid import uuid4
 
-from yomihime_sdk.api.services import ModuleFactory
+from yomihime_game_link_sdk.services import ModuleFactory
 
 from .loader import ExtensionCandidate
 from .source_snapshot import (

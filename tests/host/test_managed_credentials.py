@@ -8,10 +8,14 @@ import time
 import unittest
 from unittest.mock import patch
 
-from ygl_test_subject.api.administration import AdminAuthorizationDenied, AdminOperation
-from ygl_test_subject.api.services import ConfigTarget
+from ygl_test_subject.core.contracts.administration import (
+    AdminAuthorizationDenied,
+    AdminOperation,
+)
+from ygl_test_subject.core.contracts.validation_boundary import validate_contract
 
 from tests.host import test_admin_pages as admin_fixture
+from yomihime_game_link_sdk.services import ConfigTarget
 
 
 class ManagedCredentialPagesTests(unittest.IsolatedAsyncioTestCase):
@@ -49,7 +53,9 @@ class ManagedCredentialPagesTests(unittest.IsolatedAsyncioTestCase):
     async def test_exact_separate_issuer_no_rollback_recover_or_ordinary_write(self):
         source = self.runtime._credential_admin_source
         self.assertIsNot(source, self.runtime._admin_source)
-        target = ConfigTarget("astrbot_plugin_yomihime_game_link", "ff14/ff14")
+        target = validate_contract(
+            ConfigTarget("astrbot_plugin_yomihime_game_link", "ff14/ff14")
+        )
         for operation in (
             AdminOperation.ROLLBACK_CONFIG,
             AdminOperation.RECOVER_CONFIG,
@@ -88,7 +94,9 @@ class ManagedCredentialPagesTests(unittest.IsolatedAsyncioTestCase):
         from dataclasses import replace
 
         source = self.runtime._credential_admin_source
-        target = ConfigTarget("astrbot_plugin_yomihime_game_link", "ff14/ff14")
+        target = validate_contract(
+            ConfigTarget("astrbot_plugin_yomihime_game_link", "ff14/ff14")
+        )
         resources = {target: {"credential_fflogs_cn"}}
         alive = [True]
         context = source.issue(
@@ -108,7 +116,7 @@ class ManagedCredentialPagesTests(unittest.IsolatedAsyncioTestCase):
                 context,
                 AdminOperation.READ_CONFIG,
                 {
-                    ConfigTarget(target.principal_id, "other/mod"): {
+                    validate_contract(ConfigTarget(target.principal_id, "other/mod")): {
                         "credential_fflogs_cn"
                     }
                 },
@@ -238,11 +246,12 @@ class ManagedCredentialPagesTests(unittest.IsolatedAsyncioTestCase):
     async def test_unmanaged_default_and_sensitive_sdk_schema_cannot_grant(self):
         import inspect
 
-        from ygl_test_subject.api.manifests import ConfigField
         from ygl_test_subject.services.admin_operations import AdminOperationsService
         from ygl_test_subject.services.managed_source_credentials import (
             ManagedSourceCredentialPolicy,
         )
+
+        from yomihime_game_link_sdk.declarations import ConfigField
 
         self.assertEqual(
             inspect.signature(AdminOperationsService)
@@ -251,10 +260,12 @@ class ManagedCredentialPagesTests(unittest.IsolatedAsyncioTestCase):
             (),
         )
         with self.assertRaises(ValueError):
-            ConfigField(
-                "credential_other",
-                sensitive=True,
-                value_schema={"type": "object", "properties": {}},
+            validate_contract(
+                ConfigField(
+                    "credential_other",
+                    sensitive=True,
+                    value_schema={"type": "object", "properties": {}},
+                )
             )
         policy = ManagedSourceCredentialPolicy(
             "other/mod", "credential_other", "other", "Other"
@@ -325,7 +336,9 @@ class ManagedCredentialPagesTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(status["ff14/ff14"]["fields"][alias], "configured")
                 self.assertNotIn("synthetic-client", json.dumps(status))
                 snapshot = await core.config_repository.current(
-                    ConfigTarget("astrbot_plugin_yomihime_game_link", "ff14/ff14")
+                    validate_contract(
+                        ConfigTarget("astrbot_plugin_yomihime_game_link", "ff14/ff14")
+                    )
                 )
                 self.assertNotIn(alias, snapshot.values)
                 for secret in (self.runtime._data_dir / "secrets").rglob("*"):

@@ -8,16 +8,14 @@ from datetime import timedelta
 from pathlib import Path
 from unittest.mock import patch
 
-from ygl_test_subject.api.services import Grant, GrantStatus
-from ygl_test_subject.api.storage import GrantReference, OwnershipKind
-from ygl_test_subject.api.subscriptions import (
-    SubscriptionRequest,
-    SubscriptionStatus,
-)
+from ygl_test_subject.core.contracts.services import Grant, GrantStatus
+from ygl_test_subject.core.contracts.subscriptions import SubscriptionStatus
+from ygl_test_subject.core.contracts.validation_boundary import validate_contract
 from ygl_test_subject.core.ports import SecretOwner
-from ygl_test_subject.services.subscriptions import SubscriptionOperationError
 
 from tests.fixtures.b04_runtime import DeterministicClock, build_runtime
+from yomihime_game_link_sdk.storage import GrantReference, OwnershipKind
+from yomihime_game_link_sdk.subscriptions import SubscriptionRequest
 
 
 class GrantRevocationRuntimeConcurrencyTests(unittest.IsolatedAsyncioTestCase):
@@ -34,14 +32,19 @@ class GrantRevocationRuntimeConcurrencyTests(unittest.IsolatedAsyncioTestCase):
         self.temp.cleanup()
 
     async def _conversation(self, actor: str) -> None:
-        from ygl_test_subject.api.services import ConversationKind, ConversationRef
+        from yomihime_game_link_sdk.subscriptions import (
+            ConversationKind,
+            ConversationRef,
+        )
 
         await self.runtime.host_repositories.conversations.save(
-            ConversationRef(
-                "test-adapter",
-                ConversationKind.DIRECT,
-                actor,
-                f"private-route-{actor}",
+            validate_contract(
+                ConversationRef(
+                    "test-adapter",
+                    ConversationKind.DIRECT,
+                    actor,
+                    f"private-route-{actor}",
+                )
             )
         )
 
@@ -74,11 +77,13 @@ class GrantRevocationRuntimeConcurrencyTests(unittest.IsolatedAsyncioTestCase):
 
     @staticmethod
     def _private_request() -> SubscriptionRequest:
-        return SubscriptionRequest(
-            "private-alert",
-            {"region": "global"},
-            {"minimum": 0},
-            "instant",
+        return validate_contract(
+            SubscriptionRequest(
+                "private-alert",
+                {"region": "global"},
+                {"minimum": 0},
+                "instant",
+            )
         )
 
     async def _create_private(self, actor: str, grant: Grant):
@@ -109,25 +114,32 @@ class GrantRevocationRuntimeConcurrencyTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def _create_public(self, actor: str):
-        from ygl_test_subject.api.services import ConversationKind, ConversationRef
+        from yomihime_game_link_sdk.subscriptions import (
+            ConversationKind,
+            ConversationRef,
+        )
 
         await self.runtime.host_repositories.conversations.save(
-            ConversationRef(
-                "test-adapter",
-                ConversationKind.DIRECT,
-                actor,
-                f"private-route-{actor}",
+            validate_contract(
+                ConversationRef(
+                    "test-adapter",
+                    ConversationKind.DIRECT,
+                    actor,
+                    f"private-route-{actor}",
+                )
             )
         )
         invocation = self.runtime.invocation(actor, actor)
         try:
             return await self.subscriptions.create_request(
                 invocation,
-                SubscriptionRequest(
-                    "feed-alert",
-                    {"region": "global"},
-                    {"minimum": 0},
-                    "instant",
+                validate_contract(
+                    SubscriptionRequest(
+                        "feed-alert",
+                        {"region": "global"},
+                        {"minimum": 0},
+                        "instant",
+                    )
                 ),
             )
         finally:
@@ -137,7 +149,7 @@ class GrantRevocationRuntimeConcurrencyTests(unittest.IsolatedAsyncioTestCase):
         """A creator that read ACTIVE first must recheck after revoke wins the gate."""
 
         grant = await self._grant("alice", "grant-revoke-wins")
-        reference = GrantReference(grant.grant_id, grant.revision)
+        reference = validate_contract(GrantReference(grant.grant_id, grant.revision))
         await self._conversation("alice")
         old_invocation = self.runtime.invocation("alice", "alice", grant=grant)
         revoke_invocation = self.runtime.invocation("alice", "alice")
@@ -212,7 +224,9 @@ class GrantRevocationRuntimeConcurrencyTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIs(revoked.status, GrantStatus.REVOKED)
                 self.assertEqual(revoked.revision, reference.revision + 1)
 
-                with self.assertRaises(SubscriptionOperationError):
+                from yomihime_game_link_sdk.errors import AccessDenied
+
+                with self.assertRaises(AccessDenied):
                     await asyncio.wait_for(create_task, timeout=5)
                 self.assertTrue(creator_acquired_gate.is_set())
                 self.assertEqual(
@@ -232,8 +246,12 @@ class GrantRevocationRuntimeConcurrencyTests(unittest.IsolatedAsyncioTestCase):
 
         alice_grant = await self._grant("alice", "grant-create-wins")
         bob_grant = await self._grant("bob", "grant-other-owner")
-        alice_reference = GrantReference(alice_grant.grant_id, alice_grant.revision)
-        bob_reference = GrantReference(bob_grant.grant_id, bob_grant.revision)
+        alice_reference = validate_contract(
+            GrantReference(alice_grant.grant_id, alice_grant.revision)
+        )
+        bob_reference = validate_contract(
+            GrantReference(bob_grant.grant_id, bob_grant.revision)
+        )
         alice_public = await self._create_public("alice")
         bob_public = await self._create_public("bob")
         bob_private = await self._create_private("bob", bob_grant)

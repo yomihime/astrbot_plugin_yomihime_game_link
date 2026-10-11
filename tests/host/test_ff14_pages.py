@@ -16,7 +16,13 @@ from ygl_test_subject.adapters.astrbot.web_public import (
     WebPublicRejected,
     project_result,
 )
-from ygl_test_subject.api.display import (
+from ygl_test_subject.core.contracts.validation_boundary import validate_contract
+from ygl_test_subject.core.ports import PublicWebBinding
+from ygl_test_subject.modules.ff14.assembly import query_parameters
+
+from tests.host.assembly_contract import selected_assembly
+from tests.host.astrbot_contract import host_contracts as _host_contracts
+from yomihime_game_link_sdk.display import (
     DisplayDocument,
     FieldsBlock,
     ImageBlock,
@@ -26,17 +32,12 @@ from ygl_test_subject.api.display import (
     TableBlock,
     TextBlock,
 )
-from ygl_test_subject.api.results import (
+from yomihime_game_link_sdk.results import (
     CapabilityResult,
     ErrorCode,
     ErrorDetail,
     ResultStatus,
 )
-from ygl_test_subject.core.ports import PublicWebBinding
-from ygl_test_subject.modules.ff14.assembly import query_parameters
-
-from tests.host.assembly_contract import selected_assembly
-from tests.host.astrbot_contract import host_contracts as _host_contracts
 
 
 def _token(**claims):
@@ -107,10 +108,16 @@ class _QueryCore:
         if self.hook:
             await self.hook()
         self.validator.revoke(proof)
-        return CapabilityResult(
-            "synthetic",
-            self.status,
-            DisplayDocument("Synthetic", "public", (TextBlock("plain"),)),
+        return validate_contract(
+            CapabilityResult(
+                "synthetic",
+                self.status,
+                validate_contract(
+                    DisplayDocument(
+                        "Synthetic", "public", (validate_contract(TextBlock("plain")),)
+                    )
+                ),
+            )
         )
 
 
@@ -145,7 +152,11 @@ class PublicWebPagesTests(unittest.IsolatedAsyncioTestCase):
             patch.dict(sys.modules, {"astrbot.api.web": web}),
             web.bind_request_context(request),
         ):
-            handler = next(handler for route, handler in pages._registrations if route == f"/{PLUGIN_NAME}/queries/{endpoint}")
+            handler = next(
+                handler
+                for route, handler in pages._registrations
+                if route == f"/{PLUGIN_NAME}/queries/{endpoint}"
+            )
             return await handler()
 
     async def test_three_exact_queries_and_unconfigured_web_leave_chat_runtime_ready(
@@ -437,67 +448,135 @@ class PublicWebPagesTests(unittest.IsolatedAsyncioTestCase):
         pages.close()
 
     def test_pure_projection_statuses_blocks_privacy_resource_and_byte_bounds(self):
-        document = DisplayDocument(
-            "public",
-            "plain",
-            (
-                TextBlock("text"),
-                FieldsBlock({"count": 1}),
-                TableBlock(("value",), (("plain",),)),
-                LinksBlock((Link("source", "https://source.test/public"),)),
-            ),
+        document = validate_contract(
+            DisplayDocument(
+                "public",
+                "plain",
+                (
+                    validate_contract(TextBlock("text")),
+                    validate_contract(FieldsBlock({"count": 1})),
+                    validate_contract(TableBlock(("value",), (("plain",),))),
+                    validate_contract(
+                        LinksBlock(
+                            (
+                                validate_contract(
+                                    Link("source", "https://source.test/public")
+                                ),
+                            )
+                        )
+                    ),
+                ),
+            )
         )
         for status in (
             ResultStatus.SUCCESS,
             ResultStatus.PARTIAL_SUCCESS,
             ResultStatus.NEEDS_SELECTION,
         ):
-            result = CapabilityResult("synthetic", status, document)
+            result = validate_contract(CapabilityResult("synthetic", status, document))
             data = project_result(result)
             self.assertEqual(data["status"], status.value)
             self.assertEqual(
                 [block["kind"] for block in data["document"]["blocks"]],
                 ["text", "fields", "table", "links"],
             )
-        error = CapabilityResult(
-            "error",
-            ResultStatus.ERROR,
-            error=ErrorDetail(ErrorCode.AUTH_REQUIRED, "private detail"),
+        error = validate_contract(
+            CapabilityResult(
+                "error",
+                ResultStatus.ERROR,
+                error=validate_contract(
+                    ErrorDetail(ErrorCode.AUTH_REQUIRED, "private detail")
+                ),
+            )
         )
         data = project_result(error)
         self.assertEqual(data["error"]["code"], "auth_required")
         self.assertNotIn("private detail", json.dumps(data))
-        private = DisplayDocument(
-            "private", "private", (TextBlock("private"),), privacy=Privacy.PRIVATE
+        private = validate_contract(
+            DisplayDocument(
+                "private",
+                "private",
+                (validate_contract(TextBlock("private")),),
+                privacy=Privacy.PRIVATE,
+            )
         )
         rejected = [
-            CapabilityResult(
-                "private", ResultStatus.SUCCESS, private, privacy=Privacy.PRIVATE
+            validate_contract(
+                CapabilityResult(
+                    "private", ResultStatus.SUCCESS, private, privacy=Privacy.PRIVATE
+                )
             ),
             object(),
-            CapabilityResult(
-                "resource",
-                ResultStatus.SUCCESS,
-                DisplayDocument("r", "r", (ImageBlock("a" * 64, "plain"),)),
+            validate_contract(
+                CapabilityResult(
+                    "resource",
+                    ResultStatus.SUCCESS,
+                    validate_contract(
+                        DisplayDocument(
+                            "r",
+                            "r",
+                            (validate_contract(ImageBlock("a" * 64, "plain")),),
+                        )
+                    ),
+                )
             ),
-            CapabilityResult(
-                "huge",
-                ResultStatus.SUCCESS,
-                DisplayDocument("large", "plain", (TextBlock("x" * (256 * 1024)),)),
+            validate_contract(
+                CapabilityResult(
+                    "huge",
+                    ResultStatus.SUCCESS,
+                    validate_contract(
+                        DisplayDocument(
+                            "large",
+                            "plain",
+                            (validate_contract(TextBlock("x" * (256 * 1024))),),
+                        )
+                    ),
+                )
             ),
-            CapabilityResult(
-                "path",
-                ResultStatus.SUCCESS,
-                DisplayDocument("r", "r", (FieldsBlock({"path": "private"}),)),
+            validate_contract(
+                CapabilityResult(
+                    "path",
+                    ResultStatus.SUCCESS,
+                    validate_contract(
+                        DisplayDocument(
+                            "r",
+                            "r",
+                            (validate_contract(FieldsBlock({"path": "private"})),),
+                        )
+                    ),
+                )
             ),
         ]
         for result in rejected:
             with self.assertRaises(WebPublicRejected):
                 project_result(result)
-        bad = CapabilityResult("mutated", ResultStatus.SUCCESS, document)
+        bad = validate_contract(
+            CapabilityResult("mutated", ResultStatus.SUCCESS, document)
+        )
         object.__setattr__(bad.document, "title", object())
         with self.assertRaises(WebPublicRejected):
             project_result(bad)
+
+    async def test_malformed_result_structure_uses_page_result_rejected_502(self):
+        web, runtime, core, pages = self._fixture()
+        original = core.invoke_public_web
+
+        async def malformed(*args, **kwargs):
+            result = await original(*args, **kwargs)
+            object.__setattr__(result.document, "title", object())
+            return result
+
+        core.invoke_public_web = malformed
+        try:
+            response = await self._call(web, pages, _request(web))
+            self.assertEqual(response.status_code, 502)
+            payload = json.loads(response.body)
+            self.assertEqual(payload["code"], "result_rejected")
+            self.assertEqual(payload["data"], {})
+            self.assertEqual(len(core.calls), 1)
+            self.assertEqual(pages._query_states, {})
+        finally:
+            pages.close()
 
     def test_owned_proof_binding_anonymous_key_core_isolation_and_limits(self):
         web, runtime, core, pages = self._fixture()
@@ -718,7 +797,9 @@ class FF14PagesTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(runtime.calls, [])
         pages.close()
 
-    async def test_close_fences_compat_locators_without_calling_old_business_state(self):
+    async def test_close_fences_compat_locators_without_calling_old_business_state(
+        self,
+    ):
         runtime = _PublicRuntime()
         pages = FF14Pages(_Context(), runtime)
         pages.register()

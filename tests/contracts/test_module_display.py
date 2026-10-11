@@ -4,21 +4,22 @@ import json
 import unittest
 from dataclasses import replace
 
-from ygl_test_subject.api.administration import ModuleLifecycle
+from ygl_test_subject.core.contracts import manifests as core_manifests
+from ygl_test_subject.core.contracts.administration import ModuleLifecycle
+from ygl_test_subject.core.contracts.validation_boundary import validate_contract
 from ygl_test_subject.core.lifecycle import LifecycleState
 from ygl_test_subject.core.registry import Registry
+from ygl_test_subject.extensions.disk_manifest import ManifestError, parse_manifest
 from ygl_test_subject.services.module_catalog import project_module_catalog
 
-from extensions.disk_manifest import ManifestError, parse_manifest
 from tests.core.test_registry import _handlers, _module, _package
 from tests.extensions.test_disk_manifest import valid_document
-from yomihime_sdk import api
-from yomihime_sdk.api import manifests
+from yomihime_game_link_sdk import declarations as manifests
 
 
 class ModuleDisplayTests(unittest.TestCase):
     def display(self, *args, **kwargs):
-        return manifests.ModuleDisplay(*args, **kwargs)
+        return validate_contract(manifests.ModuleDisplay(*args, **kwargs))
 
     def test_names_are_bounded_plain_text_and_mapping_is_frozen(self):
         names = {"zh": "最终幻想 XIV", "en-US": "FINAL FANTASY XIV"}
@@ -55,10 +56,10 @@ class ModuleDisplayTests(unittest.TestCase):
                 with self.assertRaises((TypeError, ValueError)):
                     self.display("Name", names)
 
-    def test_display_requires_new_package_contract_old_set_remains_compatible(self):
+    def test_display_requires_module_abi_and_old_abi_is_rejected(self):
         module = replace(_module("catalog", "catalog"), display=self.display("Name"))
         package = _package("sample", module)
-        self.assertEqual(package.contract_version, "1.8.0")
+        self.assertEqual(package.contract_version, "2.0")
         for version in (
             "1.0.0",
             "1.1.0",
@@ -71,19 +72,21 @@ class ModuleDisplayTests(unittest.TestCase):
         ):
             with self.subTest(version=version):
                 with self.assertRaises(ValueError):
-                    replace(package, contract_version=version)
-                legacy = replace(
-                    package,
-                    contract_version=version,
-                    modules=(replace(module, display=None),),
-                )
-                self.assertIsNone(legacy.modules[0].display)
+                    validate_contract(replace(package, contract_version=version))
+                with self.assertRaises(ValueError):
+                    validate_contract(
+                        replace(
+                            package,
+                            contract_version=version,
+                            modules=(replace(module, display=None),),
+                        )
+                    )
         with self.assertRaises((TypeError, ValueError)):
-            replace(module, display={"default_name": "Name"})
+            validate_contract(replace(module, display={"default_name": "Name"}))
 
     def test_disk_closed_display_shape_and_legacy_field_rejection(self):
         document = valid_document()
-        document["contract_version"] = "1.8.0"
+        document["contract_version"] = "2.0"
         document["modules"][0]["display"] = {
             "default_name": "Name",
             "localized_names": {"en": "Name"},
@@ -116,9 +119,8 @@ class ModuleDisplayTests(unittest.TestCase):
                 parse_manifest(json.dumps(document).encode())
             legacy = json.loads(json.dumps(document))
             del legacy["modules"][0]["display"]
-            self.assertIsNone(
-                parse_manifest(json.dumps(legacy).encode()).modules[0].display
-            )
+            with self.assertRaises(ManifestError):
+                parse_manifest(json.dumps(legacy).encode())
 
     def test_catalog_projects_trusted_names_without_business_execution_or_identity_change(
         self,
@@ -157,10 +159,9 @@ class ModuleDisplayTests(unittest.TestCase):
         self.assertEqual((item["module_id"], item["route"]), (owner, "catalog"))
         self.assertEqual(snapshot.routes["catalog"], owner)
 
-    def test_facade_and_legacy_shim_share_display_identity(self):
-        from ygl_test_subject.api.manifests import ModuleDisplay
-
-        import yomihime_sdk as sdk
+    def test_facade_and_core_share_display_identity(self):
+        import yomihime_game_link_sdk as sdk
+        from yomihime_game_link_sdk.declarations import ModuleDisplay
 
         self.assertIs(sdk.ModuleDisplay, ModuleDisplay)
-        self.assertIs(api.manifests.ModuleDisplay, ModuleDisplay)
+        self.assertIs(core_manifests.ModuleDisplay, ModuleDisplay)

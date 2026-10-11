@@ -8,7 +8,6 @@ from pathlib import Path
 
 from tests.fixtures.b05_runtime import (
     EXPECTED_WHEEL_SHA256,
-    REPOSITORY_ROOT,
     build_and_install_pinned_sdk,
     run_installed_artifact_static_scan,
 )
@@ -16,15 +15,13 @@ from tests.fixtures.b05_runtime import (
 
 class B05InstalledArtifactDiscoveryTests(unittest.TestCase):
     def test_pinned_installed_examples_are_discovered_inertly(self) -> None:
-        with tempfile.TemporaryDirectory(
-            prefix="b05-r-offline-", dir=REPOSITORY_ROOT
-        ) as temporary:
+        with tempfile.TemporaryDirectory(prefix="b05-r-offline-") as temporary:
             work = Path(temporary)
             installed = build_and_install_pinned_sdk(work)
             self.assertEqual(installed.sha256, EXPECTED_WHEEL_SHA256)
 
-            # Keep the root on the workspace NTFS volume so the qualified E
-            # Windows scanner exercises a disposable local root.
+            # The acceptance driver supplies an owned TMP on the qualified
+            # Windows filesystem for this disposable scanner root.
             extension_root = work / "extension-root"
             extension_root.mkdir()
             summary = run_installed_artifact_static_scan(installed, extension_root)
@@ -52,9 +49,9 @@ class B05InstalledArtifactDiscoveryTests(unittest.TestCase):
                 [
                     {
                         "module_id": "status",
-                        "capabilities": 10,
-                        "commands": 10,
-                        "tools": 2,
+                        "capabilities": 14,
+                        "commands": 14,
+                        "tools": 3,
                         "config_fields": 3,
                         "schedules": 2,
                         "subscriptions": 2,

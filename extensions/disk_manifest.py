@@ -7,14 +7,8 @@ import math
 from collections.abc import Mapping
 from typing import Any
 
-from yomihime_sdk.api.contexts import InvocationOrigin
-from yomihime_sdk.api.manifests import (
-    EXTENSION_DESCRIPTOR_FIELDS,
-    EXTENSION_MANIFEST_ABI,
-    EXTENSION_MANIFEST_MAX_BYTES,
-    EXTENSION_MANIFEST_MAX_STRING_LENGTH,
-    EXTENSION_MANIFEST_SCHEMA_VERSION,
-    EXTENSION_PACKAGE_FIELDS,
+from yomihime_game_link_sdk.contexts import InvocationOrigin
+from yomihime_game_link_sdk.declarations import (
     CapabilityDescriptor,
     CapabilityEffect,
     CapabilityReference,
@@ -31,16 +25,28 @@ from yomihime_sdk.api.manifests import (
     SourceDeclaration,
     ToolDescriptor,
 )
-from yomihime_sdk.api.storage import (
+from yomihime_game_link_sdk.storage import (
     CollectionDescriptor,
     CollectionIndex,
     OwnershipKind,
 )
-from yomihime_sdk.api.subscriptions import (
+from yomihime_game_link_sdk.subscriptions import (
     ScheduleDescriptor,
     ScheduleTrigger,
     SubscriptionDescriptor,
 )
+from yomihime_game_link_sdk.version import MODULE_ABI_VERSION
+
+from ..core.contracts.manifests import (
+    EXTENSION_DESCRIPTOR_FIELDS,
+    EXTENSION_MANIFEST_ABI,
+    EXTENSION_MANIFEST_MAX_BYTES,
+    EXTENSION_MANIFEST_MAX_STRING_LENGTH,
+    EXTENSION_MANIFEST_SCHEMA_VERSION,
+    EXTENSION_PACKAGE_FIELDS,
+)
+from ..core.contracts.validation_boundary import validate_contract
+from ..core.contracts.version import CONTRACT_VERSION
 
 
 class ManifestError(ValueError):
@@ -150,7 +156,9 @@ def _map_reference(value: object) -> str | CapabilityReference:
     if type(value) is str:
         return value
     obj = _keys(value, "capability_reference", {"module_id", "capability_id"})
-    return CapabilityReference(obj["module_id"], obj["capability_id"])
+    return validate_contract(
+        CapabilityReference(obj["module_id"], obj["capability_id"])
+    )
 
 
 def _map_capability(value: object) -> CapabilityDescriptor:
@@ -159,28 +167,30 @@ def _map_capability(value: object) -> CapabilityDescriptor:
         "capability",
         {"capability_id", "input_schema", "invocation_policy", "effect"},
     )
-    return CapabilityDescriptor(
-        capability_id=obj["capability_id"],
-        input_schema=_schema(obj["input_schema"], "input_schema"),
-        invocation_policy=_enum(
-            InvocationPolicy, obj["invocation_policy"], "invocation_policy"
-        ),
-        effect=_enum(CapabilityEffect, obj["effect"], "effect"),
-        output_version=obj.get("output_version", "1.1.0"),
-        privacy_floor=_enum(
-            PrivacyFloor, obj.get("privacy_floor", "public"), "privacy_floor"
-        ),
-        required_config=tuple(_list(obj, "required_config")),
-        required_sources=tuple(_list(obj, "required_sources")),
-        required_capabilities=tuple(
-            _map_reference(item) for item in _list(obj, "required_capabilities")
-        ),
-        invocation_origins=tuple(
-            _enum(InvocationOrigin, item, "invocation_origins")
-            for item in _list(obj, "invocation_origins")
+    return validate_contract(
+        CapabilityDescriptor(
+            capability_id=obj["capability_id"],
+            input_schema=_schema(obj["input_schema"], "input_schema"),
+            invocation_policy=_enum(
+                InvocationPolicy, obj["invocation_policy"], "invocation_policy"
+            ),
+            effect=_enum(CapabilityEffect, obj["effect"], "effect"),
+            output_version=obj.get("output_version", CONTRACT_VERSION),
+            privacy_floor=_enum(
+                PrivacyFloor, obj.get("privacy_floor", "public"), "privacy_floor"
+            ),
+            required_config=tuple(_list(obj, "required_config")),
+            required_sources=tuple(_list(obj, "required_sources")),
+            required_capabilities=tuple(
+                _map_reference(item) for item in _list(obj, "required_capabilities")
+            ),
+            invocation_origins=tuple(
+                _enum(InvocationOrigin, item, "invocation_origins")
+                for item in _list(obj, "invocation_origins")
+            )
+            if "invocation_origins" in obj
+            else None,
         )
-        if "invocation_origins" in obj
-        else None,
     )
 
 
@@ -199,10 +209,10 @@ def _map_module(value: object, contract_version: str) -> ModuleManifest:
     )
     display = None
     if "display" in obj:
-        if contract_version != "1.8.0":
-            raise ManifestError("display requires contract 1.8.0")
+        if contract_version != MODULE_ABI_VERSION:
+            raise ManifestError("display requires module ABI 2.0")
         raw_display = _keys(obj["display"], "module_display", {"default_name"})
-        display = ModuleDisplay(**raw_display)
+        display = validate_contract(ModuleDisplay(**raw_display))
     commands = []
     for raw in _list(obj, "commands"):
         item = _keys(
@@ -210,13 +220,13 @@ def _map_module(value: object, contract_version: str) -> ModuleManifest:
             "command",
             {"operation_path", "capability_id", "parameter_mapping", "help_text"},
         )
-        commands.append(CommandDescriptor(**item))
+        commands.append(validate_contract(CommandDescriptor(**item)))
     tools = []
     for raw in _list(obj, "tools"):
         item = _keys(
             raw, "tool", {"name", "capability_id", "parameter_mapping", "description"}
         )
-        tools.append(ToolDescriptor(**item))
+        tools.append(validate_contract(ToolDescriptor(**item)))
     schedules = []
     for raw in _list(obj, "schedules"):
         item = _keys(
@@ -238,7 +248,7 @@ def _map_module(value: object, contract_version: str) -> ModuleManifest:
             OwnershipKind, item["shared_scope"], "shared_scope"
         )
         item["trigger"] = _enum(ScheduleTrigger, item["trigger"], "schedule trigger")
-        schedules.append(ScheduleDescriptor(**item))
+        schedules.append(validate_contract(ScheduleDescriptor(**item)))
     subscriptions = []
     for raw in _list(obj, "subscriptions"):
         item = _keys(
@@ -256,32 +266,36 @@ def _map_module(value: object, contract_version: str) -> ModuleManifest:
         item["notification_modes"] = tuple(
             _shape(item["notification_modes"], "array", "notification_modes")
         )
-        subscriptions.append(SubscriptionDescriptor(**item))
+        subscriptions.append(validate_contract(SubscriptionDescriptor(**item)))
     config_fields = []
     for raw in _list(obj, "config_fields"):
         item = _keys(raw, "config_field", {"name"})
         if "value_schema" in item:
             item["value_schema"] = _schema(item["value_schema"], "value_schema")
-        config_fields.append(ConfigField(**item))
+        config_fields.append(validate_contract(ConfigField(**item)))
     sources = []
     for raw in _list(obj, "sources"):
         item = _keys(raw, "source", {"source_id", "host"})
-        sources.append(SourceDeclaration(credential_ref=None, **item))
+        sources.append(
+            validate_contract(SourceDeclaration(credential_ref=None, **item))
+        )
     collections = []
     for raw in _list(obj, "collections"):
         item = _keys(raw, "collection", {"name", "schema_version", "owner_kind"})
         indexes = []
         for raw_index in _list(item, "indexes"):
             indexes.append(
-                CollectionIndex(
-                    **_keys(raw_index, "collection_index", {"name", "field"})
+                validate_contract(
+                    CollectionIndex(
+                        **_keys(raw_index, "collection_index", {"name", "field"})
+                    )
                 )
             )
         item["indexes"] = tuple(indexes)
         item["owner_kind"] = _enum(
             OwnershipKind, item["owner_kind"], "collection owner_kind"
         )
-        collections.append(CollectionDescriptor(**item))
+        collections.append(validate_contract(CollectionDescriptor(**item)))
     for key in ("capabilities",):
         if len(_list(obj, key)) > EXTENSION_MANIFEST_ABI.max_declarations_per_module:
             raise ManifestError("module declaration budget exceeded")
@@ -302,36 +316,42 @@ def _map_module(value: object, contract_version: str) -> ModuleManifest:
     )
     if counts > EXTENSION_MANIFEST_ABI.max_declarations_per_module:
         raise ManifestError("module declaration budget exceeded")
-    return ModuleManifest(
-        module_id=obj["module_id"],
-        route=obj["route"],
-        category=_enum(ModuleCategory, obj["category"], "module category"),
-        factory_entry=obj["factory_entry"],
-        module_version=obj["module_version"],
-        capabilities=tuple(
-            _map_capability(item) for item in _list(obj, "capabilities")
-        ),
-        commands=tuple(commands),
-        tools=tuple(tools),
-        schedules=tuple(schedules),
-        subscriptions=tuple(subscriptions),
-        config_fields=tuple(config_fields),
-        sources=tuple(sources),
-        collections=tuple(collections),
-        pages=tuple(
-            PageDescriptor(
-                **{
-                    **_keys(item, "page", {"route_id", "title", "entry"}),
-                    "styles": tuple(_list(item, "styles")),
-                }
-            )
-            for item in _list(obj, "pages")
-        ),
-        resources=tuple(
-            PageResource(**_keys(item, "page_resource", {"path", "sha256"}))
-            for item in _list(obj, "resources")
-        ),
-        display=display,
+    return validate_contract(
+        ModuleManifest(
+            module_id=obj["module_id"],
+            route=obj["route"],
+            category=_enum(ModuleCategory, obj["category"], "module category"),
+            factory_entry=obj["factory_entry"],
+            module_version=obj["module_version"],
+            capabilities=tuple(
+                _map_capability(item) for item in _list(obj, "capabilities")
+            ),
+            commands=tuple(commands),
+            tools=tuple(tools),
+            schedules=tuple(schedules),
+            subscriptions=tuple(subscriptions),
+            config_fields=tuple(config_fields),
+            sources=tuple(sources),
+            collections=tuple(collections),
+            pages=tuple(
+                validate_contract(
+                    PageDescriptor(
+                        **{
+                            **_keys(item, "page", {"route_id", "title", "entry"}),
+                            "styles": tuple(_list(item, "styles")),
+                        }
+                    )
+                )
+                for item in _list(obj, "pages")
+            ),
+            resources=tuple(
+                validate_contract(
+                    PageResource(**_keys(item, "page_resource", {"path", "sha256"}))
+                )
+                for item in _list(obj, "resources")
+            ),
+            display=display,
+        )
     )
 
 
@@ -374,20 +394,22 @@ def parse_manifest(data: bytes | bytearray | memoryview) -> PackageManifest:
     if len(modules_raw) > EXTENSION_MANIFEST_ABI.max_modules:
         raise ManifestError("package module budget exceeded")
     try:
-        return PackageManifest(
-            package_id=_shape(root["package_id"], "string", "package_id"),
-            package_version=_shape(
-                root["package_version"], "string", "package_version"
-            ),
-            contract_version=_shape(
-                root["contract_version"], "string", "contract_version"
-            ),
-            modules=tuple(
-                _map_module(item, root["contract_version"]) for item in modules_raw
-            ),
-            author=_shape(root["author"], "string", "author"),
-            license=_shape(root["license"], "string", "license"),
-            source=_shape(root["source"], "string", "source"),
+        return validate_contract(
+            PackageManifest(
+                package_id=_shape(root["package_id"], "string", "package_id"),
+                package_version=_shape(
+                    root["package_version"], "string", "package_version"
+                ),
+                contract_version=_shape(
+                    root["contract_version"], "string", "contract_version"
+                ),
+                modules=tuple(
+                    _map_module(item, root["contract_version"]) for item in modules_raw
+                ),
+                author=_shape(root["author"], "string", "author"),
+                license=_shape(root["license"], "string", "license"),
+                source=_shape(root["source"], "string", "source"),
+            )
         )
     except ManifestError:
         raise

@@ -5,8 +5,10 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 
-from ..api.manifests import ConfigField
-from ..api.services import SecretMaterial
+from yomihime_game_link_sdk.declarations import ConfigField
+
+from ..core.contracts.services import SecretMaterial
+from ..core.contracts.validation_boundary import validate_contract
 from ..core.ports import validate_module_id
 from .source_credentials import _client_field
 
@@ -20,8 +22,13 @@ class ManagedSourceCredentialPolicy:
 
     def __post_init__(self):
         validate_module_id(self.module_id, "managed credential owner")
-        ConfigField(
-            self.name, sensitive=True, group=self.group, description=self.description
+        validate_contract(
+            ConfigField(
+                self.name,
+                sensitive=True,
+                group=self.group,
+                description=self.description,
+            )
         )
         if not self.group or not self.description or len(self.description) > 4096:
             raise ValueError("managed credential form is invalid")

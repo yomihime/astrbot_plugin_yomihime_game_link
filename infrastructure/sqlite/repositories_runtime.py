@@ -10,12 +10,12 @@ from enum import StrEnum
 from pathlib import Path
 from uuid import uuid4
 
-from ...api.administration import (
+from ...core.contracts.administration import (
     AdminAuthorizationDenied,
     AdminAuthorizationGrant,
     AdminOperation,
 )
-from ...api.storage import validate_module_id
+from ...core.contracts.storage import validate_module_id
 from ...core.ports import RevisionConflict
 from .database import SQLiteDatabase, SQLiteUnitOfWork
 from .repositories_admin_credentials import assert_generation_current

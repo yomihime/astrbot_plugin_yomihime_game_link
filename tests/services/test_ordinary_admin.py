@@ -8,15 +8,12 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
-from ygl_test_subject.api.administration import AdminAuthorizationDenied, AdminOperation
-from ygl_test_subject.api.display import DisplayLimits
-from ygl_test_subject.api.manifests import ConfigField
-from ygl_test_subject.api.services import (
-    ConfigFieldUpdate,
-    ConfigPatch,
-    ConfigPatchMode,
-    ConfigTarget,
+from ygl_test_subject.core.contracts.administration import (
+    AdminAuthorizationDenied,
+    AdminOperation,
 )
+from ygl_test_subject.core.contracts.services import ConfigFieldUpdate, ConfigPatch
+from ygl_test_subject.core.contracts.validation_boundary import validate_contract
 from ygl_test_subject.core.ports import RevisionConflict
 from ygl_test_subject.modules.ff14.config import (
     CALENDAR_CONFIG_FIELDS,
@@ -33,6 +30,9 @@ from ygl_test_subject.services.core_configuration import (
 from ygl_test_subject.services.core_runtime import CoreRuntime
 
 from tests.services.test_admin_operations import _Codec, _MessagePort, _Renderer
+from yomihime_game_link_sdk.declarations import ConfigField, ConfigUpdateMode
+from yomihime_game_link_sdk.display import DisplayLimits
+from yomihime_game_link_sdk.services import ConfigTarget
 
 
 class OrdinaryAdminTests(unittest.IsolatedAsyncioTestCase):
@@ -46,7 +46,7 @@ class OrdinaryAdminTests(unittest.IsolatedAsyncioTestCase):
             ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
         )
         self.coretarget = core_config_target("fixture")
-        self.ff14target = ConfigTarget("fixture", "ff14/ff14")
+        self.ff14target = validate_contract(ConfigTarget("fixture", "ff14/ff14"))
         self.fields = (
             OrdinaryMigrationField(self.coretarget, DEFAULT_REGION, "legacy_region"),
             *(
@@ -68,13 +68,16 @@ class OrdinaryAdminTests(unittest.IsolatedAsyncioTestCase):
             secret_codec=_Codec(),
             http_transport=lambda request: request,
             renderer=_Renderer(),
-            display_limits=DisplayLimits(2, 4096),
+            display_limits=validate_contract(DisplayLimits(2, 4096)),
             message_port=_MessagePort(),
             admin_context_validator=lambda *_: False,
             host_ingress_validator=lambda *_: False,
             config_principal_id="fixture",
             identity_namespace="fixture",
-            ordinary_config_resources={self.coretarget: {DEFAULT_REGION.name}, self.ff14target: {field.name for field in CALENDAR_CONFIG_FIELDS}},
+            ordinary_config_resources={
+                self.coretarget: {DEFAULT_REGION.name},
+                self.ff14target: {field.name for field in CALENDAR_CONFIG_FIELDS},
+            },
             ordinary_migration_fields=self.fields,
             ordinary_migration_source=lambda: self.raw,
             module_config_validators={"ff14/ff14": CALENDAR_VALUE_VALIDATORS},
@@ -132,7 +135,7 @@ class OrdinaryAdminTests(unittest.IsolatedAsyncioTestCase):
                 ConfigPatch(
                     revision or snapshot.revision,
                     tuple(
-                        ConfigFieldUpdate(key, ConfigPatchMode.REPLACE, value=value)
+                        ConfigFieldUpdate(key, ConfigUpdateMode.REPLACE, value=value)
                         for key, value in values.items()
                     ),
                     declarations,
@@ -262,11 +265,15 @@ class OrdinaryAdminTests(unittest.IsolatedAsyncioTestCase):
         await self.core.recover_management(revisions, authorization=context)
         migration = self.core.ordinary_config_migration.repository
         await self.core.config_repository.current(
-            ConfigTarget("unrelated", "other/mod")
+            validate_contract(ConfigTarget("unrelated", "other/mod"))
         )
         await self.core.database.executor.run_transaction(
             lambda u: migration._write(
-                u, ConfigTarget("unrelated", "other/mod"), "note", "keep", 1
+                u,
+                validate_contract(ConfigTarget("unrelated", "other/mod")),
+                "note",
+                "keep",
+                1,
             )
         )
         revisions = {
@@ -281,7 +288,7 @@ class OrdinaryAdminTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             (
                 await self.core.config_repository.current(
-                    ConfigTarget("unrelated", "other/mod")
+                    validate_contract(ConfigTarget("unrelated", "other/mod"))
                 )
             ).values["note"],
             "keep",
@@ -314,10 +321,10 @@ class OrdinaryAdminTests(unittest.IsolatedAsyncioTestCase):
                     1,
                     (
                         ConfigFieldUpdate(
-                            "unrelated", ConfigPatchMode.REPLACE, value=True
+                            "unrelated", ConfigUpdateMode.REPLACE, value=True
                         ),
                     ),
-                    (ConfigField("unrelated"),),
+                    (validate_contract(ConfigField("unrelated")),),
                 ),
                 authorization=context,
             )

@@ -8,20 +8,15 @@ import unittest
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from ygl_test_subject.api.contexts import InvocationOrigin
-from ygl_test_subject.api.services import (
+from ygl_test_subject.core.context_issuer import ContextIssuer
+from ygl_test_subject.core.contracts.services import (
     Grant,
     GrantStatus,
     LoginSession,
     LoginSessionStatus,
 )
-from ygl_test_subject.api.storage import (
-    ClaimedSecretReceipt,
-    GrantReference,
-    SecretRef,
-    SecretTarget,
-)
-from ygl_test_subject.core.context_issuer import ContextIssuer
+from ygl_test_subject.core.contracts.storage import ClaimedSecretReceipt, SecretTarget
+from ygl_test_subject.core.contracts.validation_boundary import validate_contract
 from ygl_test_subject.core.ports import RevisionConflict, SecretOwner
 from ygl_test_subject.infrastructure.secret_store import (
     SecretStoreUnavailable,
@@ -35,6 +30,9 @@ from ygl_test_subject.services.authorization import (
     AuthorizationConflict,
     AuthorizationService,
 )
+
+from yomihime_game_link_sdk.contexts import InvocationOrigin
+from yomihime_game_link_sdk.storage import GrantReference, SecretRef
 
 
 class _Codec:
@@ -146,19 +144,21 @@ class AuthSecretRepositoryTests(unittest.IsolatedAsyncioTestCase):
             "package/module",
             "account-qualified",
             ("private.read",),
-            SecretRef(
-                "secret_qualified",
-                "user-a",
-                "package/module",
-                "credential",
-                "operation-qualified",
+            validate_contract(
+                SecretRef(
+                    "secret_qualified",
+                    "user-a",
+                    "package/module",
+                    "credential",
+                    "operation-qualified",
+                )
             ),
             GrantStatus.ACTIVE,
         )
         await repo.create_grant(grant, expected_revision=0)
         self.assertEqual(
             await service.status(invocation),
-            GrantReference("grant-qualified", 1),
+            validate_contract(GrantReference("grant-qualified", 1)),
         )
 
         self.assertEqual(await service.restart(), 1)
@@ -252,8 +252,8 @@ class AuthSecretRepositoryTests(unittest.IsolatedAsyncioTestCase):
             operation_id="op-1",
             expected_config_revision=3,
         )
-        wrong_ref = SecretRef(
-            receipt.secret_ref.token, "user-b", "steam", "token", "op-1"
+        wrong_ref = validate_contract(
+            SecretRef(receipt.secret_ref.token, "user-b", "steam", "token", "op-1")
         )
         wrong_owner = SecretOwner("user-b", "steam", "token", "op-1")
         with self.assertRaises(ValueError):
@@ -553,7 +553,9 @@ class AuthSecretRepositoryTests(unittest.IsolatedAsyncioTestCase):
         repo = SQLiteAuthRepository(self.db, expire_on_open=False)
         original = self._grant()
         await repo.create_grant(original, expected_revision=0)
-        old_reference = GrantReference(original.grant_id, original.revision)
+        old_reference = validate_contract(
+            GrantReference(original.grant_id, original.revision)
+        )
         revoked = await repo.revoke_grant(
             self._grant(revision=2, status=GrantStatus.REVOKED),
             expected_revision=1,

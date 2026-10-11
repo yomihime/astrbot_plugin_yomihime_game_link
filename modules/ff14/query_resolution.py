@@ -12,11 +12,11 @@ import secrets
 import shlex
 import time
 from collections import OrderedDict
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
 
-from yomihime_sdk.api.results import ErrorCode
-from yomihime_sdk.api.services import ModuleServices
+from yomihime_game_link_sdk.results import ErrorCode
+from yomihime_game_link_sdk.services import ModuleServices
 
 from .features.item_resolution import (
     ItemSearch,
@@ -479,9 +479,9 @@ class _Pending:
     generation: str
     expires: float
     batch: CandidateBatch | None = None
-    source_event: object | None = None
+    source_ref: str | None = None
     consumed_batch: CandidateBatch | None = None
-    confirmation_event: object | None = None
+    confirmation_ref: str | None = None
 
 
 def _confirmation_text(value: str) -> str:
@@ -575,7 +575,7 @@ class CandidateRegistry:
         return len(self._pending)
 
     def begin(
-        self, owner: TrustedOwner | None, *, source_event: object | None = None
+        self, owner: TrustedOwner | None, *, source_ref: str | None = None
     ) -> QueryTicket:
         if not isinstance(owner, TrustedOwner):
             raise QueryResolutionError(
@@ -587,12 +587,12 @@ class CandidateRegistry:
             self._pending.popitem(last=False)
         ticket = QueryTicket(owner, secrets.token_urlsafe(18))
         self._pending[owner] = _Pending(
-            ticket.generation, self._clock() + self._ttl, source_event=source_event
+            ticket.generation, self._clock() + self._ttl, source_ref=source_ref
         )
         return ticket
 
     def tool_query(
-        self, owner: TrustedOwner, event: object, text: str, query: str
+        self, owner: TrustedOwner, event_ref: str, text: str, query: str
     ) -> CandidateBatch | None:
         """Keep candidate continuations out of the new-query invalidation path."""
         self._prune()
@@ -610,7 +610,7 @@ class CandidateRegistry:
         original = _confirmation_text(batch.query.query)
         if (
             pending.batch is not None
-            and event is pending.source_event
+            and event_ref == pending.source_ref
             and name == original
         ):
             return batch  # Retry keeps the complete frozen context and ticket.
@@ -619,8 +619,8 @@ class CandidateRegistry:
         )
         candidate_ids = tuple(str(item.item_id) for item in batch.candidates)
         if (
-            event is pending.source_event
-            or event is pending.confirmation_event
+            event_ref == pending.source_ref
+            or event_ref == pending.confirmation_ref
             or _continuation_message(text, query)
             or name in candidate_names
             or name in candidate_ids
@@ -663,14 +663,14 @@ class CandidateRegistry:
         generation: str,
         item_id: int,
         *,
-        event: object,
+        event_ref: str,
         text: str,
         retain: bool = False,
     ) -> MarketQuery:
         """Derive the choice from a new trusted event before checking model ID."""
         if (
             not isinstance(owner, TrustedOwner)
-            or event is None
+            or type(event_ref) is not str or not event_ref
             or type(text) is not str
         ):
             raise QueryResolutionError("缺少可信用户消息绑定。", ErrorCode.UNSUPPORTED)
@@ -681,7 +681,7 @@ class CandidateRegistry:
             or pending.batch is None
             or pending.generation != generation
             or pending.batch.batch_id != batch_id
-            or event is pending.source_event
+            or event_ref == pending.source_ref
         ):
             raise QueryResolutionError(
                 "候选确认无效或已过期，请重新查询或回复当前候选的完整名称。"
@@ -719,7 +719,7 @@ class CandidateRegistry:
         selected = self.choose(owner, batch_id, generation, confirmed, retain=retain)
         if retain:
             pending.consumed_batch = batch
-            pending.confirmation_event = event
+            pending.confirmation_ref = event_ref
         return selected
 
     def _current(self, ticket: QueryTicket) -> _Pending:
@@ -814,7 +814,7 @@ class CandidateRegistry:
             pending.batch = (
                 None  # Consume selection immediately, retain late-result fence.
             )
-            pending.source_event = None
+            pending.source_ref = None
         else:
             del self._pending[owner]
         return query
@@ -845,6 +845,7 @@ class QueryCoordinator:
         entry: str = "structured",
         ticket: QueryTicket | None = None,
         retain_until_result: bool = False,
+        guard: Callable[[], Awaitable[None]] | None = None,
     ) -> MarketQuery | CandidateBatch:
         if ticket is None:
             ticket = self.start(owner)
@@ -860,10 +861,14 @@ class QueryCoordinator:
         else:
             raise QueryResolutionError("未知查询入口。")
         defaults = await QueryDefaults.capture(services)
+        if guard is not None:
+            await guard()
         query = self.resolver.parse(parameters, defaults)
         if query.item_id is not None:
             return self.registry.finish(ticket, query, retain=retain_until_result)
         candidates, truncated = await search_item_candidates(source, query.query)
+        if guard is not None:
+            await guard()
         if not candidates and not truncated:
             self.registry.finish(ticket, query)
             raise QueryResolutionError("没有找到匹配的物品。", ErrorCode.NOT_FOUND)

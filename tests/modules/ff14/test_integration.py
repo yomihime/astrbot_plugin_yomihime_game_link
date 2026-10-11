@@ -12,18 +12,7 @@ from ygl_test_subject.adapters.astrbot.command_bridge import (
     AstrBotCommandBridge,
     CommandInvocation,
 )
-from ygl_test_subject.api.display import (
-    DisplayLimits,
-    DisplayOutput,
-    LinksBlock,
-    TextBlock,
-)
-from ygl_test_subject.api.services import (
-    CapabilityHealth,
-    HealthStatus,
-    HttpResponse,
-)
-from ygl_test_subject.api.subscriptions import ConversationKind
+from ygl_test_subject.core.contracts.validation_boundary import validate_contract
 from ygl_test_subject.core.ports import MessageReceipt, MessageStatus
 from ygl_test_subject.extensions.discovery import discover_packages
 from ygl_test_subject.infrastructure.http import TransportRequest
@@ -35,6 +24,15 @@ from ygl_test_subject.services.core_runtime import (
     TrustedSubscriptionGate,
 )
 from ygl_test_subject.services.source_credentials import SourceCredentialPolicy
+
+from yomihime_game_link_sdk.display import (
+    DisplayLimits,
+    DisplayOutput,
+    LinksBlock,
+    TextBlock,
+)
+from yomihime_game_link_sdk.services import CapabilityHealth, HealthStatus, HttpResponse
+from yomihime_game_link_sdk.subscriptions import ConversationKind
 
 ROOT = Path(__file__).resolve().parents[3]
 MODULE_SOURCE = ROOT / "modules" / "ff14"
@@ -54,7 +52,7 @@ class _Renderer:
                 lines.append(block.text)
             elif isinstance(block, LinksBlock):
                 lines.extend(f"{link.label}: {link.url}" for link in block.links)
-        return DisplayOutput("\n".join(lines))
+        return validate_contract(DisplayOutput("\n".join(lines)))
 
     async def render_batch(self, batch, limits):
         del batch, limits
@@ -88,13 +86,17 @@ class _FixtureTransport:
         ):
             payload = self.fixture["garland"]["linked_item_detail"]
         elif request.source_id == "ff14_calendar_primary":
-            return HttpResponse(200, {"Content-Type": "text/calendar"}, CALENDAR_ICS)
+            return validate_contract(
+                HttpResponse(200, {"Content-Type": "text/calendar"}, CALENDAR_ICS)
+            )
         else:
-            return HttpResponse(404, {}, b"")
-        return HttpResponse(
-            200,
-            {"Content-Type": "application/json"},
-            json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            return validate_contract(HttpResponse(404, {}, b""))
+        return validate_contract(
+            HttpResponse(
+                200,
+                {"Content-Type": "application/json"},
+                json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            )
         )
 
     async def request_credential_exchange(self, request):
@@ -131,7 +133,7 @@ class FF14InstalledModuleTests(unittest.IsolatedAsyncioTestCase):
             package = discovered[0].manifest
             self.assertIsNotNone(package)
             self.assertEqual(package.package_id, "ff14")
-            self.assertEqual(package.contract_version, "1.8.0")
+            self.assertEqual(package.contract_version, "2.0")
             module_manifest = package.modules[0]
             self.assertEqual(module_manifest.module_id, "ff14")
             self.assertEqual(module_manifest.factory_entry, "module:Factory")
@@ -271,8 +273,10 @@ class FF14InstalledModuleTests(unittest.IsolatedAsyncioTestCase):
 
             async def source_health(module_id: str, source_id: str):
                 if module_id == GLOBAL_MODULE_ID and source_id == "xivapi_items":
-                    return CapabilityHealth(HealthStatus.AVAILABLE)
-                return CapabilityHealth(HealthStatus.UNAVAILABLE, "source_unavailable")
+                    return validate_contract(CapabilityHealth(HealthStatus.AVAILABLE))
+                return validate_contract(
+                    CapabilityHealth(HealthStatus.UNAVAILABLE, "source_unavailable")
+                )
 
             runtime = CoreRuntime(
                 database=SQLiteDatabase(root / "core.sqlite3"),
@@ -282,7 +286,7 @@ class FF14InstalledModuleTests(unittest.IsolatedAsyncioTestCase):
                 secret_codec=None,
                 http_transport=transport,
                 renderer=_Renderer(),
-                display_limits=DisplayLimits(16, 16_384),
+                display_limits=validate_contract(DisplayLimits(16, 16_384)),
                 message_port=message_port,
                 admin_context_validator=lambda *_args: True,
                 host_ingress_validator=lambda *_args: True,

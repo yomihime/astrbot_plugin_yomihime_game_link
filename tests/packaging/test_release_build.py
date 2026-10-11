@@ -64,7 +64,7 @@ def _render_record(payloads: dict[str, bytes], record_name: str) -> bytes:
 def _write_posix_wheel(path: Path) -> tuple[dict[str, bytes], str]:
     record_name = "yomihime_module_sdk-1.5.0.dist-info/RECORD"
     payloads = {
-        "yomihime_sdk/__init__.py": b"SDK_VALUE = 1\n",
+        "yomihime_game_link_sdk/__init__.py": b"SDK_VALUE = 1\n",
         "yomihime_module_sdk-1.5.0.dist-info/METADATA": (
             b"Metadata-Version: 2.4\nName: yomihime-module-sdk\nVersion: 1.5.0\n"
         ),
@@ -72,7 +72,7 @@ def _write_posix_wheel(path: Path) -> tuple[dict[str, bytes], str]:
             b"Wheel-Version: 1.0\nGenerator: fixture\n"
             b"Root-Is-Purelib: true\nTag: py3-none-any\n"
         ),
-        "yomihime_module_sdk-1.5.0.dist-info/top_level.txt": b"yomihime_sdk\n",
+        "yomihime_module_sdk-1.5.0.dist-info/top_level.txt": b"yomihime_game_link_sdk\n",
         "yomihime_module_sdk-1.5.0.dist-info/licenses/LICENSE": b"MIT\n",
     }
     with ZipFile(path, "w", compression=ZIP_DEFLATED) as archive:
@@ -369,7 +369,7 @@ class ReleaseBuildTests(unittest.TestCase):
     def test_reused_sdk_wheel_still_requires_the_independent_pin(self) -> None:
         with tempfile.TemporaryDirectory(prefix="yomihime-release-wheel-") as work:
             root = Path(work)
-            wheel = root / "yomihime_module_sdk-1.8.0-py3-none-any.whl"
+            wheel = root / "yomihime_game_link_sdk-0.1.0a6-py3-none-any.whl"
             wheel.write_bytes(b"not the reviewed wheel")
             output = root / "artifacts"
 

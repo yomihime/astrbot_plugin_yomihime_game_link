@@ -21,32 +21,18 @@ from pathlib import Path
 # Pin the SDK import to this installed package before importing Core-facing APIs,
 # while keeping this small maintenance CLI independent of AstrBot main.py.
 _PLUGIN_ROOT = Path(__file__).resolve().parents[1]
-_SDK_VERSION = "1.8.0"
-_SDK_CONTRACT_REVISION = "MODULE-DISPLAY-01"
-_SDK_COMPATIBLE_CONTRACT_VERSIONS = (
-    "1.0.0",
-    "1.1.0",
-    "1.2.0",
-    "1.3.0",
-    "1.4.0",
-    "1.5.0",
-    "1.6.0",
-    "1.7.0",
-    "1.8.0",
-)
+_SDK_VERSION = "0.1.0a6"
+_SDK_MODULE_ABI_VERSION = "2.0"
 if str(_PLUGIN_ROOT) not in sys.path:
     sys.path.insert(0, str(_PLUGIN_ROOT))
 try:
-    _sdk = importlib.import_module("yomihime_sdk")
-    _sdk_version = importlib.import_module("yomihime_sdk.api.version")
+    _sdk = importlib.import_module("yomihime_game_link_sdk")
+    _sdk_version = importlib.import_module("yomihime_game_link_sdk.version")
     _sdk_root = Path(_sdk.__file__).resolve().parent
     if (
-        _sdk_root != (_PLUGIN_ROOT / "yomihime_sdk").resolve()
+        _sdk_root != (_PLUGIN_ROOT / "yomihime_game_link_sdk").resolve()
         or _sdk.__version__ != _SDK_VERSION
-        or _sdk_version.CONTRACT_VERSION != _SDK_VERSION
-        or _sdk_version.CONTRACT_REVISION != _SDK_CONTRACT_REVISION
-        or tuple(_sdk_version.COMPATIBLE_CONTRACT_VERSIONS)
-        != _SDK_COMPATIBLE_CONTRACT_VERSIONS
+        or _sdk_version.MODULE_ABI_VERSION != _SDK_MODULE_ABI_VERSION
     ):
         raise RuntimeError("unsupported plugin-local SDK")
 except Exception:

@@ -19,8 +19,9 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Callable, Mapping
 
-from ...api.display import (
+from yomihime_game_link_sdk.display import (
     CommandsBlock,
+    DigestMember,
     DisplayDocument,
     FieldsBlock,
     GridItem,
@@ -38,12 +39,22 @@ from ...api.display import (
     TimeValue,
     UnknownBlock,
 )
-from ...api.storage import GrantReference, OwnerScope, OwnershipKind
-from ...api.subscriptions import (
-    ActiveDigestSchedule,
+from yomihime_game_link_sdk.storage import GrantReference, OwnerScope, OwnershipKind
+from yomihime_game_link_sdk.subscriptions import (
     CollectionKey,
     ConversationKind,
     ConversationRef,
+    DigestScheduleProfile,
+    DstFoldPolicy,
+    DstGapPolicy,
+    EvaluationState,
+    NormalizedInput,
+    Observation,
+    ObservationCompleteness,
+)
+
+from ...core.contracts.subscriptions import (
+    ActiveDigestSchedule,
     DeliveryAttempt,
     DeliveryEvent,
     DeliveryEventCursor,
@@ -51,23 +62,15 @@ from ...api.subscriptions import (
     DigestEnvelope,
     DigestEnvelopeClaim,
     DigestEnvelopeState,
-    DigestMember,
     DigestMemberAssociation,
     DigestMemberDisposition,
     DigestMemberReceipt,
     DigestRouteCandidate,
     DigestRouteCursor,
-    DigestScheduleProfile,
     DigestWindow,
     DigestWindowSelector,
-    DstFoldPolicy,
-    DstGapPolicy,
     DueCollectionJob,
     DueJobCursor,
-    EvaluationState,
-    NormalizedInput,
-    Observation,
-    ObservationCompleteness,
     ObservationCursor,
     ObservationEvaluationCommit,
     SubscriptionEvaluationCommit,
@@ -79,7 +82,8 @@ from ...api.subscriptions import (
     SubscriptionStatus,
     digest_envelope_idempotency_key,
 )
-from ...api.version import CONTRACT_VERSION
+from ...core.contracts.validation_boundary import validate_contract
+from ...core.contracts.version import CONTRACT_VERSION
 from ...core.ports import (
     CollectionRunRequest,
     EvaluationCheckpoint,
@@ -234,8 +238,13 @@ def _decode(value: Any) -> Any:
                         "schema_version",
                     }:
                         raise ValueError("invalid stored 1.7 display shape")
-                    stored_fields = {**stored_fields, "schema_version": CONTRACT_VERSION}
-            return cls(**{key: _decode(item) for key, item in stored_fields.items()})
+                    stored_fields = {
+                        **stored_fields,
+                        "schema_version": CONTRACT_VERSION,
+                    }
+            return validate_contract(
+                cls(**{key: _decode(item) for key, item in stored_fields.items()})
+            )
         return {key: _decode(item) for key, item in value.items()}
     return value
 
@@ -258,10 +267,12 @@ def _load(value: str) -> Any:
 
 
 def _key_json(key: CollectionKey) -> str:
+    validate_contract(key)
     return _dump(key)
 
 
 def _job_key(key: CollectionKey) -> str:
+    validate_contract(key)
     return hashlib.sha256(_key_json(key).encode("utf-8")).hexdigest()
 
 
@@ -395,6 +406,7 @@ def _put_job(
     key: CollectionKey,
     initial_run: CollectionRunRequest | None = None,
 ) -> str:
+    validate_contract(key)
     if initial_run is not None:
         if not isinstance(initial_run, CollectionRunRequest):
             raise TypeError("initial_run must be a CollectionRunRequest")
@@ -800,6 +812,8 @@ class SQLiteSubscriptionJobRepository(_Repository):
     async def for_collection(
         self, key: CollectionKey
     ) -> tuple[SubscriptionJobAssociation, ...]:
+        validate_contract(key)
+
         def _run(unit: SQLiteUnitOfWork) -> Any:
             rows = unit.execute(
                 "SELECT sj.subscription_id,sj.subscription_revision,sj.cadence_seconds,sj.config_revision,sj.association_revision,j.key_json FROM b04_subscription_jobs sj JOIN b04_subscriptions s USING(subscription_id) JOIN b04_collection_jobs j USING(job_key) WHERE sj.job_key=? ORDER BY sj.subscription_id",
@@ -1277,12 +1291,15 @@ class SQLiteSchedulerRepository(_Repository):
     async def current_evaluation(
         self, subscription_id: str, collection_key: CollectionKey
     ) -> SubscriptionEvaluationSnapshot | None:
+        validate_contract(collection_key)
         checkpoint = await self.current_checkpoint(subscription_id, collection_key)
         return None if checkpoint is None else checkpoint.snapshot
 
     async def current_checkpoint(
         self, subscription_id: str, collection_key: CollectionKey
     ) -> EvaluationCheckpoint | None:
+        validate_contract(collection_key)
+
         def _run(unit: SQLiteUnitOfWork) -> Any:
             row = unit.execute(
                 "SELECT record_json FROM b04_subscriptions WHERE subscription_id=?",
@@ -1323,6 +1340,7 @@ class SQLiteSchedulerRepository(_Repository):
         *,
         next_due_at: datetime | None = None,
     ) -> bool:
+        validate_contract(observation)
         return await self.commit_observation_with_evaluations(
             lease,
             ObservationEvaluationCommit(observation, ()),
@@ -1725,6 +1743,7 @@ class SQLiteDigestWindowRepository(_Repository):
     async def current_envelope(
         self, window_id: str, recipient: ConversationRef
     ) -> DigestEnvelope | None:
+        validate_contract(recipient)
         if not isinstance(recipient, ConversationRef):
             raise TypeError("recipient must be a ConversationRef")
 
@@ -1740,6 +1759,8 @@ class SQLiteDigestWindowRepository(_Repository):
     async def add_members(
         self, window_id: str, members: tuple[DigestMember, ...]
     ) -> DigestWindow:
+        validate_contract(members)
+
         def _run(unit: SQLiteUnitOfWork) -> Any:
             row = unit.execute(
                 "SELECT window_json FROM b04_digest_windows WHERE window_id=?",
@@ -1884,6 +1905,8 @@ class SQLiteDigestWindowRepository(_Repository):
         recipient: ConversationRef,
         window_id: str,
     ) -> DigestMemberDisposition:
+        validate_contract(member)
+        validate_contract(recipient)
         row = unit.execute(
             "SELECT revision,status,record_json FROM b04_subscriptions WHERE subscription_id=?",
             (member.subscription_id,),

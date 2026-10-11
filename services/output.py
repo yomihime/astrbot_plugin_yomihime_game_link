@@ -14,31 +14,42 @@ from enum import Enum, StrEnum
 from typing import Any, Protocol, TypeAlias
 from uuid import uuid4
 
-from ..api.contexts import (
+from yomihime_game_link_sdk.contexts import (
     InvocationOrigin,
     InvocationSubscriptionScope,
     InvocationView,
 )
-from ..api.display import DisplayAudience, DisplayLimits, DisplayRenderer, Privacy
-from ..api.manifests import CapabilityDescriptor, PrivacyFloor
-from ..api.results import CapabilityResult, ErrorCode, FactDocument, ResultStatus
-from ..api.services import (
+from yomihime_game_link_sdk.declarations import CapabilityDescriptor, PrivacyFloor
+from yomihime_game_link_sdk.display import (
+    DisplayAudience,
+    DisplayLimits,
+    DisplayRenderer,
+    Privacy,
+)
+from yomihime_game_link_sdk.results import (
+    CapabilityResult,
+    ErrorCode,
+    FactDocument,
+    ResultStatus,
+)
+from yomihime_game_link_sdk.storage import OwnershipKind
+from yomihime_game_link_sdk.subscriptions import ConversationKind, ConversationRef
+
+from ..core.admission import AdmissionError
+from ..core.context_issuer import ContextIssuer
+from ..core.contracts.services import (
     CommandOutput,
     GrantStatus,
     SubscriptionOutput,
     ToolOutput,
     TrustedConversationResolver,
 )
-from ..api.storage import OwnershipKind
-from ..api.subscriptions import (
-    ConversationKind,
-    ConversationRef,
+from ..core.contracts.subscriptions import (
     DeliveryEvent,
     DeliveryState,
     SubscriptionStatus,
 )
-from ..core.admission import AdmissionError
-from ..core.context_issuer import ContextIssuer
+from ..core.contracts.validation_boundary import validate_contract
 from ..core.policy import supports_public_read_only, tool_allowed
 from ..core.ports import (
     AdmissionLease,
@@ -188,6 +199,8 @@ class OutputService:
         send_timeout: float,
         now: Callable[[], datetime] | None = None,
     ) -> None:
+        validate_contract(renderer)
+        validate_contract(limits)
         self._issuer = issuer
         self._admission = admission
         self._send_scheduler = send_scheduler
@@ -221,6 +234,7 @@ class OutputService:
     async def progress(self, invocation: InvocationView) -> None:
         """Validate a progress boundary without creating a user-visible send."""
 
+        validate_contract(invocation)
         self._issuer.require(invocation)
 
     async def route(
@@ -228,6 +242,7 @@ class OutputService:
     ) -> OutputResult:
         """Validate the exact issued view, then route by its trusted origin."""
 
+        validate_contract(invocation)
         try:
             trusted = self._issuer.require(invocation)
             self._require_current_module(trusted)
@@ -271,6 +286,7 @@ class OutputService:
     def _require_current_module(
         self, invocation: InvocationView
     ) -> CapabilityDescriptor | None:
+        validate_contract(invocation)
         snapshot = self._registry.snapshot()
         module = snapshot.module(invocation.module_id)
         if not module.enabled or module.epoch != invocation.module_epoch:
@@ -290,6 +306,7 @@ class OutputService:
         return capability
 
     def _root_lease(self, invocation: InvocationView) -> AdmissionLease:
+        validate_contract(invocation)
         lease = self._issuer.lease_for(invocation)
         if not isinstance(lease, AdmissionLease):
             raise AdmissionError("root output has no exact AdmissionLease")
@@ -313,6 +330,7 @@ class OutputService:
     async def _command(
         self, invocation: InvocationView, request: CommandOutput
     ) -> OutputResult:
+        validate_contract(invocation)
         async with self._serialized_invocation(invocation.invocation_id):
             result = request.result
             try:
@@ -554,6 +572,8 @@ class OutputService:
         result: CapabilityResult,
         expected_target: MessageTarget,
     ) -> datetime | None:
+        validate_contract(invocation)
+        validate_contract(result)
         try:
             self._issuer.require(invocation)
             capability = self._require_current_module(invocation)
@@ -591,6 +611,7 @@ class OutputService:
         fingerprint: str,
     ) -> None:
         """Resolve an interrupted begin_sending by reading the exact owner row."""
+        validate_contract(invocation)
         now = self._utc_now()
         try:
             current = await self._root_outputs.claim(
@@ -658,6 +679,9 @@ class OutputService:
         capability: CapabilityDescriptor,
         result: CapabilityResult,
     ) -> datetime | None:
+        validate_contract(invocation)
+        validate_contract(capability)
+        validate_contract(result)
         if not isinstance(result, CapabilityResult):
             raise _OutputFailure("invalid_result")
         owner_floor = capability.privacy_floor is PrivacyFloor.OWNER
@@ -709,6 +733,8 @@ class OutputService:
     async def _target(
         self, invocation: InvocationView, privacy: Privacy
     ) -> MessageTarget:
+        validate_contract(invocation)
+        validate_contract(privacy)
         if invocation.adapter_id is None or invocation.conversation_id is None:
             raise _OutputFailure("route_unavailable")
         try:
@@ -734,6 +760,7 @@ class OutputService:
         )
 
     async def _render(self, result: CapabilityResult) -> RenderedMessage:
+        validate_contract(result)
         if result.status is ResultStatus.ERROR:
             # Use stable core error text, never module or exception strings.
             message = _ERROR_MESSAGES.get(result.error.code, "request failed")
@@ -749,17 +776,20 @@ class OutputService:
             output = await self._renderer.render(
                 result.document, limits=self._limits, audience=audience
             )
+            validate_contract(output)
         except Exception:
             raise _OutputFailure("display_render_failed") from None
-        from ..api.display import DisplayOutput
+        from yomihime_game_link_sdk.display import DisplayOutput
 
-        if not isinstance(output, DisplayOutput):
+        if type(output) is not DisplayOutput:
             raise _OutputFailure("display_render_failed")
         return RenderedMessage(output.text, output.resource_ids)
 
     async def _tool_result(
         self, invocation: InvocationView, source: CapabilityResult
     ) -> OutputResult:
+        validate_contract(invocation)
+        validate_contract(source)
         try:
             self._issuer.require(invocation)
             request = await self._project_public_tool(invocation, source)
@@ -846,6 +876,8 @@ class OutputService:
     async def _project_public_tool(
         self, invocation: InvocationView, source: CapabilityResult
     ) -> ToolOutput | None:
+        validate_contract(invocation)
+        validate_contract(source)
         try:
             self._issuer.require(invocation)
             capability = self._require_current_module(invocation)
@@ -896,6 +928,7 @@ class OutputService:
     async def _subscription(
         self, invocation: InvocationView, request: SubscriptionOutput
     ) -> OutputResult:
+        validate_contract(invocation)
         event = request.event
         try:
             record = await self._subscription_record(invocation, event)
@@ -982,6 +1015,7 @@ class OutputService:
     async def _subscription_record(
         self, invocation: InvocationView, event: DeliveryEvent
     ):
+        validate_contract(invocation)
         if (
             invocation.parent_id is not None
             or invocation.origin is not InvocationOrigin.SUBSCRIPTION
@@ -1063,6 +1097,7 @@ class OutputService:
     async def _claim(
         self, invocation: InvocationView, output_identity: str, fingerprint: str
     ) -> RootOutputClaim:
+        validate_contract(invocation)
         now = self._utc_now()
         owner_token = uuid4().hex
         try:
@@ -1119,6 +1154,7 @@ class OutputService:
         payload: object,
         code: str,
     ) -> OutputResult:
+        validate_contract(invocation)
         try:
             claim = await self._claim(
                 invocation, output_identity, _fingerprint(payload)
@@ -1281,6 +1317,7 @@ async def _require_public_fact_resources(
     registered IDs and scopes.
     """
 
+    validate_contract(facts)
     from ..core.public_result import public_fact_strings
 
     try:

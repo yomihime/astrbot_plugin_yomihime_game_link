@@ -11,56 +11,15 @@ from time import monotonic
 from types import MappingProxyType
 from typing import Callable
 
-from ygl_test_subject.api.contexts import InvocationOrigin, InvocationView
-from ygl_test_subject.api.display import (
-    DisplayDocument,
-    DisplayLimits,
-    Privacy,
-    TextBlock,
-)
-from ygl_test_subject.api.manifests import (
-    CapabilityDescriptor,
-    CapabilityEffect,
-    CommandDescriptor,
-    ConfigField,
-    InvocationPolicy,
-    ModuleCategory,
-    ModuleManifest,
-    PackageManifest,
-    SourceDeclaration,
-    ToolDescriptor,
-)
-from ygl_test_subject.api.results import CapabilityResult, ResultStatus
-from ygl_test_subject.api.services import (
-    CapabilityHealth,
-    ConfigFieldUpdate,
-    ConfigPatchMode,
-    ConfigTarget,
-    ConversationKind,
-    ConversationRef,
-    Grant,
-    HealthReport,
-    HealthStatus,
-    ModuleHandlers,
-    PersistedConfigPatch,
-)
-from ygl_test_subject.api.storage import OwnershipKind
-from ygl_test_subject.api.subscriptions import (
-    CadenceConfiguration,
-    CollectionView,
-    EvaluationDecision,
-    EvaluationState,
-    NormalizedInput,
-    Observation,
-    ObservationCompleteness,
-    ScheduleDescriptor,
-    ScheduleTrigger,
-    SubscriptionDescriptor,
-    SubscriptionView,
-)
-from ygl_test_subject.api.version import CONTRACT_VERSION
 from ygl_test_subject.core.admission import AdmissionController
 from ygl_test_subject.core.context_issuer import ContextIssuer
+from ygl_test_subject.core.contracts.services import (
+    ConfigFieldUpdate,
+    Grant,
+    PersistedConfigPatch,
+)
+from ygl_test_subject.core.contracts.subscriptions import CadenceConfiguration
+from ygl_test_subject.core.contracts.validation_boundary import validate_contract
 from ygl_test_subject.core.lifecycle import LifecycleController
 from ygl_test_subject.core.ports import (
     MessagePort,
@@ -108,6 +67,51 @@ from ygl_test_subject.services.scheduler import (
 )
 from ygl_test_subject.services.subscriptions import SubscriptionOperationsService
 
+from yomihime_game_link_sdk.contexts import InvocationOrigin, InvocationView
+from yomihime_game_link_sdk.declarations import (
+    CapabilityDescriptor,
+    CapabilityEffect,
+    CommandDescriptor,
+    ConfigField,
+    ConfigUpdateMode,
+    InvocationPolicy,
+    ModuleCategory,
+    ModuleManifest,
+    PackageManifest,
+    SourceDeclaration,
+    ToolDescriptor,
+)
+from yomihime_game_link_sdk.display import (
+    DisplayDocument,
+    DisplayLimits,
+    Privacy,
+    TextBlock,
+)
+from yomihime_game_link_sdk.results import CapabilityResult, ResultStatus
+from yomihime_game_link_sdk.services import (
+    CapabilityHealth,
+    ConfigTarget,
+    HealthReport,
+    HealthStatus,
+    ModuleHandlers,
+)
+from yomihime_game_link_sdk.storage import OwnershipKind
+from yomihime_game_link_sdk.subscriptions import (
+    CollectionView,
+    ConversationKind,
+    ConversationRef,
+    EvaluationDecision,
+    EvaluationState,
+    NormalizedInput,
+    Observation,
+    ObservationCompleteness,
+    ScheduleDescriptor,
+    ScheduleTrigger,
+    SubscriptionDescriptor,
+    SubscriptionView,
+)
+from yomihime_game_link_sdk.version import MODULE_ABI_VERSION
+
 
 class DeterministicClock:
     """Mutable, explicit UTC test clock; no wall-clock sleeps are used."""
@@ -127,7 +131,7 @@ def synthetic_subscription_gate_bindings(module_ids):
     return MappingProxyType(
         {
             module_id: SubscriptionGateBinding(
-                ConfigTarget("b04-fixture", module_id),
+                validate_contract(ConfigTarget("b04-fixture", module_id)),
                 "subscriptions_enabled",
                 *module_id.split("/", 1),
             )
@@ -177,8 +181,8 @@ async def replace_subscription_gate_fixture(database, bindings, module_id, value
         binding.target,
         PersistedConfigPatch(
             snapshot.revision,
-            (ConfigFieldUpdate(binding.field, ConfigPatchMode.REPLACE, value=value),),
-            (ConfigField(binding.field, default=True),),
+            (ConfigFieldUpdate(binding.field, ConfigUpdateMode.REPLACE, value=value),),
+            (validate_contract(ConfigField(binding.field, default=True)),),
             "b04-gate-test-change",
             binding.target,
         ),
@@ -267,9 +271,11 @@ class OfflineHttpTransport(HttpTransport):
 
     async def request(self, request: TransportRequest):
         self.requests.append(request)
-        from ygl_test_subject.api.services import HttpResponse
+        from yomihime_game_link_sdk.services import HttpResponse
 
-        return HttpResponse(200, {"content-type": "text/plain"}, b"test")
+        return validate_contract(
+            HttpResponse(200, {"content-type": "text/plain"}, b"test")
+        )
 
 
 class RecordingMessagePort(MessagePort):
@@ -374,7 +380,7 @@ class _FakeCollector:
         self.release = asyncio.Event()
 
     def normalize(self, parameters):
-        return NormalizedInput(parameters)
+        return validate_contract(NormalizedInput(parameters))
 
     async def collect(self, context: CollectionView, parameters, previous):
         self.calls += 1
@@ -383,15 +389,17 @@ class _FakeCollector:
             self.started.set()
             await self.release.wait()
         completeness = self.next_completeness
-        return Observation(
-            f"observation-{self.calls}",
-            context.key,
-            self.calls,
-            self.clock(),
-            self.clock(),
-            completeness,
-            ("item-a",) if completeness is ObservationCompleteness.PARTIAL else (),
-            {"value": 10, "source": "test-source"},
+        return validate_contract(
+            Observation(
+                f"observation-{self.calls}",
+                context.key,
+                self.calls,
+                self.clock(),
+                self.clock(),
+                completeness,
+                ("item-a",) if completeness is ObservationCompleteness.PARTIAL else (),
+                {"value": 10, "source": "test-source"},
+            )
         )
 
 
@@ -406,36 +414,48 @@ class _FakeMatcher:
     ):
         threshold = subscription.filters.get("minimum", 0)
         triggered = observation.payload.get("value", 0) >= threshold
-        return EvaluationDecision(
-            {"last": observation.observation_id},
-            triggered,
-            f"event-{observation.observation_id}-{subscription.subscription_id}"
-            if triggered
-            else None,
-            observation.data_version if triggered else None,
-            DisplayDocument(
-                "Test feed",
-                "Fixture result",
-                (
-                    TextBlock(
-                        f"{subscription.subscription_id}:{observation.payload.get('value')}"
-                    ),
-                ),
-                privacy=Privacy.PUBLIC
-                if observation.key.scope.kind is OwnershipKind.PUBLIC
-                else Privacy.PRIVATE,
+        return validate_contract(
+            EvaluationDecision(
+                {"last": observation.observation_id},
+                triggered,
+                f"event-{observation.observation_id}-{subscription.subscription_id}"
+                if triggered
+                else None,
+                observation.data_version if triggered else None,
+                validate_contract(
+                    DisplayDocument(
+                        "Test feed",
+                        "Fixture result",
+                        (
+                            validate_contract(
+                                TextBlock(
+                                    f"{subscription.subscription_id}:{observation.payload.get('value')}"
+                                )
+                            ),
+                        ),
+                        privacy=Privacy.PUBLIC
+                        if observation.key.scope.kind is OwnershipKind.PUBLIC
+                        else Privacy.PRIVATE,
+                    )
+                )
+                if triggered
+                else None,
             )
-            if triggered
-            else None,
         )
 
 
 class _Handler:
     async def invoke(self, context, parameters):
-        return CapabilityResult(
-            "test",
-            ResultStatus.SUCCESS,
-            document=DisplayDocument("Test", "Fixture", (TextBlock("ok"),)),
+        return validate_contract(
+            CapabilityResult(
+                "test",
+                ResultStatus.SUCCESS,
+                document=validate_contract(
+                    DisplayDocument(
+                        "Test", "Fixture", (validate_contract(TextBlock("ok")),)
+                    )
+                ),
+            )
         )
 
 
@@ -455,11 +475,15 @@ class _FixtureModule:
         return None
 
     async def check_health(self) -> HealthReport:
-        return HealthReport(
-            {
-                "read": CapabilityHealth(HealthStatus.AVAILABLE),
-                "manage": CapabilityHealth(HealthStatus.AVAILABLE),
-            }
+        return validate_contract(
+            HealthReport(
+                {
+                    "read": validate_contract(CapabilityHealth(HealthStatus.AVAILABLE)),
+                    "manage": validate_contract(
+                        CapabilityHealth(HealthStatus.AVAILABLE)
+                    ),
+                }
+            )
         )
 
 
@@ -550,150 +574,188 @@ def build_runtime(
     root = Path(root)
     root.mkdir(parents=True, exist_ok=True)
     clock = clock or DeterministicClock()
-    schedule = ScheduleDescriptor(
-        "catalog",
-        1,
-        "feed",
-        1,
-        {
-            "type": "object",
-            "properties": {"region": {"type": "string"}},
-            "required": ["region"],
-            "additionalProperties": False,
-        },
-        OwnershipKind.PUBLIC,
-        ScheduleTrigger.PERIODIC,
-        60.0,
-        60.0,
-        "cadence",
+    schedule = validate_contract(
+        ScheduleDescriptor(
+            "catalog",
+            1,
+            "feed",
+            1,
+            {
+                "type": "object",
+                "properties": {"region": {"type": "string"}},
+                "required": ["region"],
+                "additionalProperties": False,
+            },
+            OwnershipKind.PUBLIC,
+            ScheduleTrigger.PERIODIC,
+            60.0,
+            60.0,
+            "cadence",
+        )
     )
-    subscription = SubscriptionDescriptor(
-        "feed-alert",
-        "catalog",
-        "feed-matcher",
-        {
-            "type": "object",
-            "properties": {"minimum": {"type": "integer", "minimum": 0}},
-            "required": ["minimum"],
-            "additionalProperties": False,
-        },
-        ("instant", "digest"),
+    subscription = validate_contract(
+        SubscriptionDescriptor(
+            "feed-alert",
+            "catalog",
+            "feed-matcher",
+            {
+                "type": "object",
+                "properties": {"minimum": {"type": "integer", "minimum": 0}},
+                "required": ["minimum"],
+                "additionalProperties": False,
+            },
+            ("instant", "digest"),
+        )
     )
-    private_schedule = ScheduleDescriptor(
-        "private-catalog",
-        1,
-        "feed",
-        1,
-        {
-            "type": "object",
-            "properties": {"region": {"type": "string"}},
-            "required": ["region"],
-            "additionalProperties": False,
-        },
-        OwnershipKind.AUTHORIZED,
-        ScheduleTrigger.PERIODIC,
-        60.0,
-        60.0,
-        "cadence",
+    private_schedule = validate_contract(
+        ScheduleDescriptor(
+            "private-catalog",
+            1,
+            "feed",
+            1,
+            {
+                "type": "object",
+                "properties": {"region": {"type": "string"}},
+                "required": ["region"],
+                "additionalProperties": False,
+            },
+            OwnershipKind.AUTHORIZED,
+            ScheduleTrigger.PERIODIC,
+            60.0,
+            60.0,
+            "cadence",
+        )
     )
-    private_subscription = SubscriptionDescriptor(
-        "private-alert",
-        "private-catalog",
-        "feed-matcher",
-        {
-            "type": "object",
-            "properties": {"minimum": {"type": "integer", "minimum": 0}},
-            "required": ["minimum"],
-            "additionalProperties": False,
-        },
-        ("instant", "digest"),
+    private_subscription = validate_contract(
+        SubscriptionDescriptor(
+            "private-alert",
+            "private-catalog",
+            "feed-matcher",
+            {
+                "type": "object",
+                "properties": {"minimum": {"type": "integer", "minimum": 0}},
+                "required": ["minimum"],
+                "additionalProperties": False,
+            },
+            ("instant", "digest"),
+        )
     )
-    user_schedule = ScheduleDescriptor(
-        "user-catalog",
-        1,
-        "feed",
-        1,
-        {
-            "type": "object",
-            "properties": {"region": {"type": "string"}},
-            "required": ["region"],
-            "additionalProperties": False,
-        },
-        OwnershipKind.USER,
-        ScheduleTrigger.PERIODIC,
-        60.0,
-        60.0,
-        "cadence",
+    user_schedule = validate_contract(
+        ScheduleDescriptor(
+            "user-catalog",
+            1,
+            "feed",
+            1,
+            {
+                "type": "object",
+                "properties": {"region": {"type": "string"}},
+                "required": ["region"],
+                "additionalProperties": False,
+            },
+            OwnershipKind.USER,
+            ScheduleTrigger.PERIODIC,
+            60.0,
+            60.0,
+            "cadence",
+        )
     )
-    user_subscription = SubscriptionDescriptor(
-        "user-alert",
-        "user-catalog",
-        "feed-matcher",
-        {
-            "type": "object",
-            "properties": {"minimum": {"type": "integer", "minimum": 0}},
-            "required": ["minimum"],
-            "additionalProperties": False,
-        },
-        ("instant", "digest"),
+    user_subscription = validate_contract(
+        SubscriptionDescriptor(
+            "user-alert",
+            "user-catalog",
+            "feed-matcher",
+            {
+                "type": "object",
+                "properties": {"minimum": {"type": "integer", "minimum": 0}},
+                "required": ["minimum"],
+                "additionalProperties": False,
+            },
+            ("instant", "digest"),
+        )
     )
-    capability = CapabilityDescriptor(
-        "read",
-        {
-            "type": "object",
-            "properties": {},
-            "required": [],
-            "additionalProperties": False,
-        },
-        InvocationPolicy.NATURAL_LANGUAGE_ALLOWED,
-        CapabilityEffect.READ_ONLY,
+    capability = validate_contract(
+        CapabilityDescriptor(
+            "read",
+            {
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": False,
+            },
+            InvocationPolicy.NATURAL_LANGUAGE_ALLOWED,
+            CapabilityEffect.READ_ONLY,
+        )
     )
-    manage_capability = CapabilityDescriptor(
-        "manage",
-        {
-            "type": "object",
-            "properties": {},
-            "required": [],
-            "additionalProperties": False,
-        },
-        InvocationPolicy.COMMAND_ONLY,
-        CapabilityEffect.READ_ONLY,
+    manage_capability = validate_contract(
+        CapabilityDescriptor(
+            "manage",
+            {
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": False,
+            },
+            InvocationPolicy.COMMAND_ONLY,
+            CapabilityEffect.READ_ONLY,
+        )
     )
-    tool = ToolDescriptor("feed_read", "read", {}, "Test public feed")
-    manifest = ModuleManifest(
-        "feed",
-        "feed",
-        ModuleCategory.GAME,
-        "tests.fixtures.b04_runtime:build_runtime",
-        "1.0.0",
-        (capability, manage_capability),
-        commands=(
-            CommandDescriptor(
-                "manage_subscriptions", "manage", {}, "Manage subscriptions"
+    tool = validate_contract(
+        ToolDescriptor("feed_read", "read", {}, "Test public feed")
+    )
+    manifest = validate_contract(
+        ModuleManifest(
+            "feed",
+            "feed",
+            ModuleCategory.GAME,
+            "tests.fixtures.b04_runtime:build_runtime",
+            "1.0.0",
+            (capability, manage_capability),
+            commands=(
+                validate_contract(
+                    CommandDescriptor(
+                        "manage_subscriptions", "manage", {}, "Manage subscriptions"
+                    )
+                ),
             ),
-        ),
-        tools=(tool,),
-        schedules=(schedule, private_schedule, user_schedule),
-        subscriptions=(subscription, private_subscription, user_subscription),
-        sources=(SourceDeclaration("feed", "example.test", requests_per_minute=60),),
-        config_fields=(ConfigField("subscriptions_enabled", default=True),),
+            tools=(tool,),
+            schedules=(schedule, private_schedule, user_schedule),
+            subscriptions=(subscription, private_subscription, user_subscription),
+            sources=(
+                validate_contract(
+                    SourceDeclaration("feed", "example.test", requests_per_minute=60)
+                ),
+            ),
+            config_fields=(
+                validate_contract(ConfigField("subscriptions_enabled", default=True)),
+            ),
+        )
     )
-    package = PackageManifest(
-        "sample", "1.0.0", CONTRACT_VERSION, (manifest,), "tests", "MIT", "fixture"
+    package = validate_contract(
+        PackageManifest(
+            "sample",
+            "1.0.0",
+            MODULE_ABI_VERSION,
+            (manifest,),
+            "tests",
+            "MIT",
+            "fixture",
+        )
     )
     registry = Registry()
     collector = _FakeCollector(clock)
     registry.register_package(
         package,
         {
-            "feed": ModuleHandlers(
-                {"read": _Handler(), "manage": _Handler()},
-                {
-                    "catalog": collector,
-                    "private-catalog": collector,
-                    "user-catalog": collector,
-                },
-                {"feed-matcher": _FakeMatcher()},
+            "feed": validate_contract(
+                ModuleHandlers(
+                    {"read": _Handler(), "manage": _Handler()},
+                    {
+                        "catalog": collector,
+                        "private-catalog": collector,
+                        "user-catalog": collector,
+                    },
+                    {"feed-matcher": _FakeMatcher()},
+                )
             )
         },
     )
@@ -858,7 +920,7 @@ def build_runtime(
         routes=routes,
         renderer=renderer,
         message_port=message_port,
-        limits=DisplayLimits(4, 1024 * 1024),
+        limits=validate_contract(DisplayLimits(4, 1024 * 1024)),
         now=clock,
         send_timeout=send_timeout,
         retry_at=retry_at,
@@ -873,7 +935,7 @@ def build_runtime(
         send_scheduler=send_scheduler,
         registry=registry,
         renderer=renderer,
-        limits=DisplayLimits(4, 1024 * 1024),
+        limits=validate_contract(DisplayLimits(4, 1024 * 1024)),
         conversations=resolver,
         message_port=message_port,
         deliveries=b04.deliveries,

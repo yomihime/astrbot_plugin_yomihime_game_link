@@ -12,17 +12,27 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from time import monotonic
 
-from ..api.contexts import InvocationOrigin, InvocationView
-from ..api.display import Privacy
-from ..api.manifests import (
+from yomihime_game_link_sdk.contexts import InvocationOrigin, InvocationView
+from yomihime_game_link_sdk.declarations import (
     CapabilityDescriptor,
     CapabilityReference,
     PrivacyFloor,
 )
-from ..api.results import CapabilityResult, ErrorCode, ErrorDetail, ResultStatus
-from ..api.services import CallerCapability, Grant, GrantStatus, JsonObject
-from ..api.validation import ParameterError, validate_parameters
+from yomihime_game_link_sdk.display import Privacy
+from yomihime_game_link_sdk.errors import ParameterError
+from yomihime_game_link_sdk.results import (
+    CapabilityResult,
+    ErrorCode,
+    ErrorDetail,
+    ResultStatus,
+)
+from yomihime_game_link_sdk.services import CallerCapability
+
 from ..core.context_issuer import ContextIssuer, InvalidInvocation
+from ..core.contracts.manifests import CapabilityReference_validate
+from ..core.contracts.services import Grant, GrantStatus, JsonObject
+from ..core.contracts.validation import validate_parameters
+from ..core.contracts.validation_boundary import validate_contract
 from ..core.lifecycle import LifecycleController, LifecycleError
 from ..core.policy import supports_public_read_only, tool_allowed
 from ..core.ports import CallerCapabilityIssuer
@@ -44,10 +54,13 @@ _ACTIVE_CHAINS: dict[str, tuple[tuple[str, str], ...]] = {}
 
 
 def _error(code: ErrorCode) -> CapabilityResult:
-    return CapabilityResult(
-        result_id="dependency-error",
-        status=ResultStatus.ERROR,
-        error=ErrorDetail(code, _ERROR_MESSAGES[code]),
+    validate_contract(code)
+    return validate_contract(
+        CapabilityResult(
+            result_id="dependency-error",
+            status=ResultStatus.ERROR,
+            error=validate_contract(ErrorDetail(code, _ERROR_MESSAGES[code])),
+        )
     )
 
 
@@ -84,6 +97,8 @@ class DependencyInvoker:
         clock=monotonic,
         utc_clock: Callable[[], datetime] | None = None,
     ) -> None:
+        validate_contract(caller_capability)
+        validate_contract(private_authorizer)
         if not isinstance(registry, Registry):
             raise TypeError("registry must be a Registry")
         if not isinstance(issuer, ContextIssuer):
@@ -131,6 +146,9 @@ class DependencyInvoker:
         by the target declaration.
         """
 
+        validate_contract(invocation)
+        validate_contract(capability)
+        validate_contract(parameters)
         child: InvocationView | None = None
         child_lease: object | None = None
         private_grant: Grant | None = None
@@ -374,6 +392,7 @@ class DependencyInvoker:
     def _current_source(
         self, invocation: InvocationView
     ) -> tuple[RegistrySnapshot, RegisteredModule]:
+        validate_contract(invocation)
         snapshot = self._registry.snapshot()
         source = snapshot.module(invocation.module_id)
         if not source.enabled or source.epoch != invocation.module_epoch:
@@ -384,6 +403,7 @@ class DependencyInvoker:
     def _caller_descriptor(
         module: RegisteredModule, caller: CallerCapability
     ) -> CapabilityDescriptor | None:
+        validate_contract(caller)
         return next(
             (
                 descriptor
@@ -397,10 +417,12 @@ class DependencyInvoker:
     def _target_reference(
         parent: InvocationView, capability: str | CapabilityReference
     ) -> CapabilityReference:
+        validate_contract(parent)
+        validate_contract(capability)
         if isinstance(capability, CapabilityReference):
-            return CapabilityReference.validate(capability)
+            return CapabilityReference_validate(capability)
         if type(capability) is str and capability.strip():
-            return CapabilityReference(parent.module_id, capability)
+            return validate_contract(CapabilityReference(parent.module_id, capability))
         raise TypeError("capability must be a string or CapabilityReference")
 
     @staticmethod
@@ -409,6 +431,8 @@ class DependencyInvoker:
         target: CapabilityReference,
         caller_module_id: str,
     ) -> bool:
+        validate_contract(caller)
+        validate_contract(target)
         for requirement in caller.required_capabilities:
             if isinstance(requirement, CapabilityReference):
                 if requirement == target:
@@ -425,6 +449,7 @@ class DependencyInvoker:
     def _resolve_target(
         snapshot: RegistrySnapshot, target: CapabilityReference
     ) -> tuple[RegisteredModule | None, CapabilityDescriptor | None]:
+        validate_contract(target)
         module = snapshot.modules.get(target.module_id)
         if module is None:
             return None, None
@@ -440,6 +465,8 @@ class DependencyInvoker:
 
     @staticmethod
     def _check_policy(parent: InvocationView, target: CapabilityDescriptor) -> None:
+        validate_contract(parent)
+        validate_contract(target)
         if parent.origin is InvocationOrigin.WEB_PUBLIC and (
             not supports_public_read_only(target)
             or InvocationOrigin.WEB_PUBLIC not in target.effective_origins
@@ -456,6 +483,7 @@ class DependencyInvoker:
             raise DependencyCallError("private dependency requires the parent grant")
 
     def _require_private_grant(self, grant: object, view: InvocationView) -> None:
+        validate_contract(view)
         if (
             not isinstance(grant, Grant)
             or grant.status is not GrantStatus.ACTIVE
@@ -468,6 +496,7 @@ class DependencyInvoker:
             raise ValueError("private authorization is not current")
 
     def _effective_deadline(self, parent: InvocationView) -> float | None:
+        validate_contract(parent)
         if parent.deadline is None:
             return None
         if parent.deadline <= self._clock():
@@ -475,6 +504,7 @@ class DependencyInvoker:
         return parent.deadline
 
     def _remaining_deadline(self, invocation: InvocationView) -> float | None:
+        validate_contract(invocation)
         if invocation.deadline is None:
             return None
         return invocation.deadline - self._clock()
@@ -496,6 +526,7 @@ class DependencyInvoker:
             close()
 
     def _release_child(self, child: InvocationView | None) -> None:
+        validate_contract(child)
         if child is None:
             return
         try:

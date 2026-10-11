@@ -14,27 +14,29 @@ import secrets
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from typing import Any, Protocol
 
-from ..api.administration import (
+from yomihime_game_link_sdk.declarations import ConfigField, ConfigUpdateMode
+from yomihime_game_link_sdk.services import ConfigSnapshot, ConfigTarget
+from yomihime_game_link_sdk.storage import SecretMetadataState
+
+from ..core.contracts.administration import (
     AdminAuthorizationDenied,
     AdminAuthorizationGrant,
     AdminOperation,
 )
-from ..api.manifests import ConfigField
-from ..api.services import (
+from ..core.contracts.manifests import ConfigField_validate_value
+from ..core.contracts.services import (
     ConfigPatch,
-    ConfigPatchMode,
-    ConfigSnapshot,
-    ConfigTarget,
+    ConfigTarget_validate,
     PersistedConfigPatch,
     validate_config_patch,
 )
-from ..api.storage import (
+from ..core.contracts.storage import (
     ClaimedSecretReceipt,
-    SecretMetadataState,
     SecretReceipt,
     SecretReceiptState,
     SecretTarget,
 )
+from ..core.contracts.validation_boundary import validate_contract
 from ..core.ports import (
     AdmissionPort,
     ConfigRepository,
@@ -77,8 +79,9 @@ class ConfigurationValueError(ValueError):
 def validate_configuration_value(
     field: ConfigField, value: object, validator: ConfigValueValidator | None = None
 ) -> None:
+    validate_contract(field)
     try:
-        field.validate_value(value)
+        ConfigField_validate_value(field, value)
         if validator is not None:
             validator(value)
     except (ValueError, TypeError, OSError):
@@ -97,6 +100,7 @@ class ConfigurationRecoveryRequired(RuntimeError):
         snapshot: ConfigSnapshot | None = None,
         transitions: tuple[object, ...] = (),
     ) -> None:
+        validate_contract(snapshot)
         super().__init__(message)
         self.snapshot = snapshot
         self.transitions = tuple(transitions)
@@ -124,6 +128,7 @@ def _bounded_operation_id(value: str | None) -> str:
 
 
 def _fields(value: Iterable[ConfigField]) -> tuple[ConfigField, ...]:
+    validate_contract(value)
     fields = tuple(value)
     if not fields or any(not isinstance(item, ConfigField) for item in fields):
         raise ValueError("configuration requires declared fields")
@@ -133,7 +138,8 @@ def _fields(value: Iterable[ConfigField]) -> tuple[ConfigField, ...]:
 
 
 def _repository_target(target: ConfigTarget) -> ConfigTarget:
-    return ConfigTarget.validate(target)
+    validate_contract(target)
+    return ConfigTarget_validate(target)
 
 
 class _ConfigurationCoordinator:
@@ -171,7 +177,9 @@ class _ConfigurationCoordinator:
         subscription_gate_fields: tuple[str, ...] = (),
         value_validators: Mapping[str, ConfigValueValidator] | None = None,
     ) -> None:
-        target = ConfigTarget.validate(target)
+        validate_contract(target)
+        validate_contract(fields)
+        target = ConfigTarget_validate(target)
         fields = _fields(fields)
         declarations = {field.name: field for field in fields}
         validators = dict(value_validators or {})
@@ -260,7 +268,7 @@ class _ConfigurationCoordinator:
             raise ValueError("configuration repository returned an invalid snapshot")
         if (
             snapshot.target is not None
-            and ConfigTarget.validate(snapshot.target) != self.__target
+            and ConfigTarget_validate(snapshot.target) != self.__target
         ):
             raise ValueError("configuration snapshot target does not match service")
         self._validate_snapshot_fields(snapshot)
@@ -290,7 +298,8 @@ class _ConfigurationCoordinator:
     ) -> ConfigSnapshot:
         """Apply an admin patch through the shared mutation and config CAS."""
 
-        target = ConfigTarget.validate(target)
+        validate_contract(target)
+        target = ConfigTarget_validate(target)
         if target != self.__target:
             raise AdminAuthorizationDenied from None
         if (
@@ -527,7 +536,7 @@ class _ConfigurationCoordinator:
                     changed_fields = frozenset(
                         update.field
                         for update in patch.updates
-                        if update.mode is not ConfigPatchMode.KEEP
+                        if update.mode is not ConfigUpdateMode.KEEP
                     )
                     try:
                         publisher(
@@ -716,21 +725,21 @@ class _ConfigurationCoordinator:
             if declaration is None:
                 raise ValueError("config field is not declared by this module")
             if update.field in self.__subscription_gate_fields:
-                if update.mode is ConfigPatchMode.CLEAR or (
-                    update.mode is ConfigPatchMode.REPLACE
+                if update.mode is ConfigUpdateMode.CLEAR or (
+                    update.mode is ConfigUpdateMode.REPLACE
                     and type(update.value) is not bool
                 ):
                     raise ValueError(
                         "subscription gate requires KEEP or strict bool REPLACE"
                     )
-            if declaration.sensitive and update.mode is ConfigPatchMode.REPLACE:
+            if declaration.sensitive and update.mode is ConfigUpdateMode.REPLACE:
                 if update.secret is None:
                     raise ValueError(
                         "sensitive config replacement requires SecretMaterial"
                     )
             if not declaration.sensitive and update.secret is not None:
                 raise ValueError("ordinary config field cannot receive a secret")
-            if not declaration.sensitive and update.mode is ConfigPatchMode.REPLACE:
+            if not declaration.sensitive and update.mode is ConfigUpdateMode.REPLACE:
                 validate_configuration_value(
                     declaration, update.value, self.__value_validators.get(update.field)
                 )
@@ -746,19 +755,20 @@ class _ConfigurationCoordinator:
     async def _old_refs(
         self, target: ConfigTarget, patch: ConfigPatch
     ) -> tuple[tuple[Any, Any], ...]:
+        validate_contract(target)
         before = await self.__repository.current(target)
         if not isinstance(before, ConfigSnapshot):
             raise ValueError("configuration repository returned an invalid snapshot")
         if before.revision != patch.expected_revision:
             raise RevisionConflict("config", patch.expected_revision, before.revision)
-        if before.target is not None and ConfigTarget.validate(before.target) != target:
+        if before.target is not None and ConfigTarget_validate(before.target) != target:
             raise ValueError("configuration snapshot target does not match service")
         declarations = {field.name: field for field in self.__fields}
         repaired_fields = frozenset(
             update.field
             for update in patch.updates
             if not declarations[update.field].sensitive
-            and update.mode in {ConfigPatchMode.REPLACE, ConfigPatchMode.CLEAR}
+            and update.mode in {ConfigUpdateMode.REPLACE, ConfigUpdateMode.CLEAR}
         )
         # A canonical, authorized patch may repair the ordinary values it
         # replaces/removes. Everything retained, including KEEP, stays strict.
@@ -766,7 +776,7 @@ class _ConfigurationCoordinator:
         old = {item.field: item for item in before.secret_metadata}
         result: list[tuple[Any, Any]] = []
         for update in patch.updates:
-            if update.mode is ConfigPatchMode.KEEP:
+            if update.mode is ConfigUpdateMode.KEEP:
                 continue
             metadata = old.get(update.field)
             if metadata is not None and metadata.secret_ref is not None:
@@ -783,7 +793,7 @@ class _ConfigurationCoordinator:
         for update in patch.updates:
             if (
                 declarations[update.field].sensitive
-                and update.mode is ConfigPatchMode.REPLACE
+                and update.mode is ConfigUpdateMode.REPLACE
             ):
                 target = SecretTarget(
                     self.__target.principal_id, self.__target.module_id, update.field
@@ -817,6 +827,7 @@ class _ConfigurationCoordinator:
     def _validate_snapshot_fields(
         self, snapshot: ConfigSnapshot, *, repaired_fields: frozenset[str] = frozenset()
     ) -> None:
+        validate_contract(snapshot)
         declared = {field.name: field for field in self.__fields}
         if any(field not in declared for field in snapshot.values):
             raise ValueError("configuration snapshot contains an undeclared field")
@@ -1011,6 +1022,8 @@ class ConfigurationService:
         secret_store: SecretStore | None = None,
         ledger: SecretReceiptLedger | None = None,
     ) -> None:
+        validate_contract(coordinator_or_target)
+        validate_contract(fields)
         if isinstance(coordinator_or_target, _ConfigurationCoordinator):
             if any(
                 value is not None

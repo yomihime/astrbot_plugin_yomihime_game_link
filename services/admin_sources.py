@@ -10,8 +10,8 @@ from time import time
 from types import MappingProxyType
 from uuid import uuid4
 
-from ..api.administration import AdminAuthorizationDenied, AdminOperation
-from ..api.services import ConfigTarget
+from ..core.contracts.administration import AdminAuthorizationDenied, AdminOperation
+from ..core.contracts.services import ConfigTarget_validate
 
 
 @dataclass(frozen=True, slots=True, eq=False)
@@ -47,7 +47,7 @@ class TrustedAdminSource:
             raise ValueError("authority identifier is required")
         policy = {}
         for target, fields in resources.items():
-            ConfigTarget.validate(target)
+            ConfigTarget_validate(target)
             fields = frozenset(fields)
             if not fields or any(type(f) is not str or not f for f in fields):
                 raise ValueError("authority requires exact fields")

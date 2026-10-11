@@ -5,9 +5,15 @@ import unittest
 from dataclasses import replace
 from uuid import uuid4
 
-from ygl_test_subject.api.contexts import InvocationOrigin
-from ygl_test_subject.api.display import DisplayDocument, TextBlock
-from ygl_test_subject.api.manifests import (
+from ygl_test_subject.core.context_issuer import ContextIssuer
+from ygl_test_subject.core.contracts.validation_boundary import validate_contract
+from ygl_test_subject.core.health import HealthResolver
+from ygl_test_subject.core.invocation import Gateway
+from ygl_test_subject.core.lifecycle import LifecycleController
+from ygl_test_subject.core.registry import Registry
+
+from yomihime_game_link_sdk.contexts import InvocationOrigin
+from yomihime_game_link_sdk.declarations import (
     CapabilityDescriptor,
     CapabilityEffect,
     CapabilityReference,
@@ -19,8 +25,9 @@ from ygl_test_subject.api.manifests import (
     PackageManifest,
     SourceDeclaration,
 )
-from ygl_test_subject.api.results import CapabilityResult, ResultStatus
-from ygl_test_subject.api.services import (
+from yomihime_game_link_sdk.display import DisplayDocument, TextBlock
+from yomihime_game_link_sdk.results import CapabilityResult, ResultStatus
+from yomihime_game_link_sdk.services import (
     CapabilityHealth,
     ConfigSnapshot,
     ConfigTarget,
@@ -28,12 +35,7 @@ from ygl_test_subject.api.services import (
     HealthStatus,
     ModuleHandlers,
 )
-from ygl_test_subject.api.version import CONTRACT_VERSION
-from ygl_test_subject.core.context_issuer import ContextIssuer
-from ygl_test_subject.core.health import HealthResolver
-from ygl_test_subject.core.invocation import Gateway
-from ygl_test_subject.core.lifecycle import LifecycleController
-from ygl_test_subject.core.registry import Registry
+from yomihime_game_link_sdk.version import MODULE_ABI_VERSION
 
 
 class _Handler:
@@ -43,12 +45,18 @@ class _Handler:
 
     async def invoke(self, context, parameters):
         self.calls.append((context, parameters))
-        return CapabilityResult(
-            f"health-{self.capability_id}",
-            ResultStatus.SUCCESS,
-            document=DisplayDocument(
-                "Health fixture", "health", (TextBlock(self.capability_id),)
-            ),
+        return validate_contract(
+            CapabilityResult(
+                f"health-{self.capability_id}",
+                ResultStatus.SUCCESS,
+                document=validate_contract(
+                    DisplayDocument(
+                        "Health fixture",
+                        "health",
+                        (validate_contract(TextBlock(self.capability_id)),),
+                    )
+                ),
+            )
         )
 
 
@@ -69,11 +77,13 @@ class _Instance:
         return None
 
     async def check_health(self) -> HealthReport:
-        return HealthReport(
-            {
-                item: CapabilityHealth(HealthStatus.AVAILABLE)
-                for item in self._capability_ids
-            }
+        return validate_contract(
+            HealthReport(
+                {
+                    item: validate_contract(CapabilityHealth(HealthStatus.AVAILABLE))
+                    for item in self._capability_ids
+                }
+            )
         )
 
 
@@ -84,14 +94,16 @@ def _descriptor(
     required_config: tuple[str, ...] = (),
     required_sources: tuple[str, ...] = (),
 ) -> CapabilityDescriptor:
-    return CapabilityDescriptor(
-        capability_id,
-        {"type": "object", "properties": {}, "required": []},
-        InvocationPolicy.NATURAL_LANGUAGE_ALLOWED,
-        CapabilityEffect.READ_ONLY,
-        required_capabilities=required_capabilities,
-        required_config=required_config,
-        required_sources=required_sources,
+    return validate_contract(
+        CapabilityDescriptor(
+            capability_id,
+            {"type": "object", "properties": {}, "required": []},
+            InvocationPolicy.NATURAL_LANGUAGE_ALLOWED,
+            CapabilityEffect.READ_ONLY,
+            required_capabilities=required_capabilities,
+            required_config=required_config,
+            required_sources=required_sources,
+        )
     )
 
 
@@ -115,24 +127,28 @@ class HealthResolverTests(unittest.IsolatedAsyncioTestCase):
         self.handlers: dict[tuple[str, str], _Handler] = {}
 
     async def _config_snapshot(self, module_id: str) -> ConfigSnapshot:
-        return ConfigSnapshot(
-            1,
-            {"enabled": False, "limit": 0},
-            target=ConfigTarget("health-test", module_id),
+        return validate_contract(
+            ConfigSnapshot(
+                1,
+                {"enabled": False, "limit": 0},
+                target=validate_contract(ConfigTarget("health-test", module_id)),
+            )
         )
 
     async def _register_and_activate(
         self,
         modules: tuple[ModuleManifest, ...],
     ) -> None:
-        package = PackageManifest(
-            "health",
-            "1.0.0",
-            CONTRACT_VERSION,
-            modules,
-            "Core health tests",
-            "MIT",
-            "offline health fixture",
+        package = validate_contract(
+            PackageManifest(
+                "health",
+                "1.0.0",
+                MODULE_ABI_VERSION,
+                modules,
+                "Core health tests",
+                "MIT",
+                "offline health fixture",
+            )
         )
         package_handlers: dict[str, ModuleHandlers] = {}
         for manifest in modules:
@@ -141,10 +157,12 @@ class HealthResolverTests(unittest.IsolatedAsyncioTestCase):
                 handler = _Handler(capability.capability_id)
                 self.handlers[(manifest.module_id, capability.capability_id)] = handler
                 capabilities[capability.capability_id] = handler
-            package_handlers[manifest.module_id] = ModuleHandlers(
-                capabilities=capabilities,
-                collectors={},
-                evaluators={},
+            package_handlers[manifest.module_id] = validate_contract(
+                ModuleHandlers(
+                    capabilities=capabilities,
+                    collectors={},
+                    evaluators={},
+                )
             )
         self.registry.register_package(package, package_handlers)
 
@@ -195,36 +213,48 @@ class HealthResolverTests(unittest.IsolatedAsyncioTestCase):
     def _manifest(self) -> tuple[ModuleManifest, ModuleManifest]:
         query = _descriptor(
             "query",
-            required_capabilities=(CapabilityReference("health/beta", "read"),),
+            required_capabilities=(
+                validate_contract(CapabilityReference("health/beta", "read")),
+            ),
         )
         status = _descriptor("status")
         configured = _descriptor("configured", required_config=("enabled", "limit"))
         source_backed = _descriptor("source_backed", required_sources=("catalog",))
         limit_only = _descriptor("limit_only", required_config=("limit",))
-        alpha = ModuleManifest(
-            "alpha",
-            "alpha",
-            ModuleCategory.GAME,
-            "tests.core.test_health:factory",
-            "1.0.0",
-            (query, status, configured, source_backed, limit_only),
-            commands=(
-                CommandDescriptor("query", "query", {}, "dependent query"),
-                CommandDescriptor("status", "status", {}, "independent status"),
-            ),
-            config_fields=(
-                ConfigField("enabled", default=True),
-                ConfigField("limit", default=1),
-            ),
-            sources=(SourceDeclaration("catalog", "offline.test"),),
+        alpha = validate_contract(
+            ModuleManifest(
+                "alpha",
+                "alpha",
+                ModuleCategory.GAME,
+                "tests.core.test_health:factory",
+                "1.0.0",
+                (query, status, configured, source_backed, limit_only),
+                commands=(
+                    validate_contract(
+                        CommandDescriptor("query", "query", {}, "dependent query")
+                    ),
+                    validate_contract(
+                        CommandDescriptor("status", "status", {}, "independent status")
+                    ),
+                ),
+                config_fields=(
+                    validate_contract(ConfigField("enabled", default=True)),
+                    validate_contract(ConfigField("limit", default=1)),
+                ),
+                sources=(
+                    validate_contract(SourceDeclaration("catalog", "offline.test")),
+                ),
+            )
         )
-        beta = ModuleManifest(
-            "beta",
-            "beta",
-            ModuleCategory.GAME,
-            "tests.core.test_health:factory",
-            "1.0.0",
-            (_descriptor("read"),),
+        beta = validate_contract(
+            ModuleManifest(
+                "beta",
+                "beta",
+                ModuleCategory.GAME,
+                "tests.core.test_health:factory",
+                "1.0.0",
+                (_descriptor("read"),),
+            )
         )
         return alpha, beta
 
@@ -287,10 +317,12 @@ class HealthResolverTests(unittest.IsolatedAsyncioTestCase):
         configured_before = self.health.current("health/alpha", "configured")
         limit_before = self.health.current("health/alpha", "limit_only")
         status_before = self.health.current("health/alpha", "status")
-        newer = ConfigSnapshot(
-            2,
-            {"enabled": True, "limit": 0},
-            target=ConfigTarget("health-test", "health/alpha"),
+        newer = validate_contract(
+            ConfigSnapshot(
+                2,
+                {"enabled": True, "limit": 0},
+                target=validate_contract(ConfigTarget("health-test", "health/alpha")),
+            )
         )
         async with self.lifecycle.admission.mutation("test-config-publish"):
             self.health.publish_config(
@@ -304,10 +336,12 @@ class HealthResolverTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(limit_after[1], limit_before[1])
         self.assertEqual(status_after[1], status_before[1])
 
-        stale = ConfigSnapshot(
-            1,
-            {"limit": 0},
-            target=ConfigTarget("health-test", "health/alpha"),
+        stale = validate_contract(
+            ConfigSnapshot(
+                1,
+                {"limit": 0},
+                target=validate_contract(ConfigTarget("health-test", "health/alpha")),
+            )
         )
         async with self.lifecycle.admission.mutation("test-stale-config-publish"):
             with self.assertRaises(ValueError):
@@ -329,15 +363,17 @@ class HealthResolverTests(unittest.IsolatedAsyncioTestCase):
             nonlocal calls
             calls += 1
             if calls == 1:
-                return CapabilityHealth(HealthStatus.AVAILABLE)
+                return validate_contract(CapabilityHealth(HealthStatus.AVAILABLE))
             if calls == 2:
                 first_started.set()
                 await release_first.wait()
-                return CapabilityHealth(HealthStatus.UNAVAILABLE, "old_probe")
+                return validate_contract(
+                    CapabilityHealth(HealthStatus.UNAVAILABLE, "old_probe")
+                )
             if calls == 3:
                 second_started.set()
                 await release_second.wait()
-                return CapabilityHealth(HealthStatus.AVAILABLE)
+                return validate_contract(CapabilityHealth(HealthStatus.AVAILABLE))
             raise AssertionError("unexpected source probe")
 
         self._new_runtime(self._config_snapshot, source_provider)
@@ -372,12 +408,14 @@ class HealthResolverTests(unittest.IsolatedAsyncioTestCase):
             nonlocal calls
             calls += 1
             if calls == 1:
-                return CapabilityHealth(HealthStatus.AVAILABLE)
+                return validate_contract(CapabilityHealth(HealthStatus.AVAILABLE))
             if calls == 2:
                 refresh_started.set()
                 await release_refresh.wait()
-                return CapabilityHealth(HealthStatus.UNAVAILABLE, "old_run_probe")
-            return CapabilityHealth(HealthStatus.AVAILABLE)
+                return validate_contract(
+                    CapabilityHealth(HealthStatus.UNAVAILABLE, "old_run_probe")
+                )
+            return validate_contract(CapabilityHealth(HealthStatus.AVAILABLE))
 
         self._new_runtime(self._config_snapshot, source_provider)
         alpha, beta = self._manifest()
@@ -400,7 +438,9 @@ class HealthResolverTests(unittest.IsolatedAsyncioTestCase):
         alpha, beta = self._manifest()
         cycle_read = _descriptor(
             "read",
-            required_capabilities=(CapabilityReference("health/alpha", "query"),),
+            required_capabilities=(
+                validate_contract(CapabilityReference("health/alpha", "query")),
+            ),
         )
         beta = replace(beta, capabilities=(cycle_read,))
         await self._register_and_activate((alpha, beta))
@@ -422,38 +462,52 @@ class HealthResolverTests(unittest.IsolatedAsyncioTestCase):
             if calls == 1:
                 first_started.set()
                 await release_first.wait()
-                return ConfigSnapshot(
-                    1,
-                    {"limit": 0},
-                    target=ConfigTarget("health-test", module_id),
+                return validate_contract(
+                    ConfigSnapshot(
+                        1,
+                        {"limit": 0},
+                        target=validate_contract(
+                            ConfigTarget("health-test", module_id)
+                        ),
+                    )
                 )
-            return ConfigSnapshot(
-                2,
-                {"enabled": False},
-                target=ConfigTarget("health-test", module_id),
+            return validate_contract(
+                ConfigSnapshot(
+                    2,
+                    {"enabled": False},
+                    target=validate_contract(ConfigTarget("health-test", module_id)),
+                )
             )
 
         self._new_runtime(config_provider)
         configured = _descriptor("configured", required_config=("enabled",))
-        manifest = ModuleManifest(
-            "alpha",
-            "alpha",
-            ModuleCategory.GAME,
-            "tests.core.test_health:factory",
-            "1.0.0",
-            (configured,),
-            config_fields=(ConfigField("enabled", default=True),),
+        manifest = validate_contract(
+            ModuleManifest(
+                "alpha",
+                "alpha",
+                ModuleCategory.GAME,
+                "tests.core.test_health:factory",
+                "1.0.0",
+                (configured,),
+                config_fields=(
+                    validate_contract(ConfigField("enabled", default=True)),
+                ),
+            )
         )
-        package = PackageManifest(
-            "health",
-            "1.0.0",
-            CONTRACT_VERSION,
-            (manifest,),
-            "Core health tests",
-            "MIT",
-            "offline health fixture",
+        package = validate_contract(
+            PackageManifest(
+                "health",
+                "1.0.0",
+                MODULE_ABI_VERSION,
+                (manifest,),
+                "Core health tests",
+                "MIT",
+                "offline health fixture",
+            )
         )
-        handlers = ModuleHandlers({"configured": _Handler("configured")}, {}, {})
+        handlers = validate_contract(
+            ModuleHandlers({"configured": _Handler("configured")}, {}, {})
+        )
         self.registry.register_package(package, {"alpha": handlers})
 
         async def install_and_start():

@@ -17,16 +17,20 @@ from datetime import UTC, datetime, timedelta
 from time import monotonic
 from typing import Callable, TypeVar
 
-from ..api.contexts import InvocationOrigin, InvocationView
-from ..api.services import CacheAccess, CacheAccessRequest, JsonObject
-from ..api.storage import (
+from yomihime_game_link_sdk.contexts import InvocationOrigin, InvocationView
+from yomihime_game_link_sdk.services import CacheAccess
+from yomihime_game_link_sdk.storage import (
     CacheEntry,
     CacheLookup,
     CacheLookupStatus,
+    CacheQuery,
     CacheVisibility,
     OwnerScope,
 )
+
 from ..core.context_issuer import ContextIssuer, InvalidInvocation
+from ..core.contracts.services import CacheAccessRequest, JsonObject
+from ..core.contracts.validation_boundary import validate_contract
 from ..core.ports import (
     AdmissionLease,
     AdmissionPort,
@@ -35,6 +39,7 @@ from ..core.ports import (
     RevisionConflict,
     ScheduledLease,
 )
+from ..core.public_errors import parameters, public_boundary
 from .identity import (
     InvocationPrincipalResolver,
     PrincipalResolutionDenied,
@@ -91,6 +96,7 @@ class _CacheAccessCoordinator:
         principal_resolver: InvocationPrincipalResolver | None = None,
         clock: Callable[[], float] = monotonic,
     ) -> None:
+        validate_contract(invocation)
         if not isinstance(invocation, InvocationView):
             raise TypeError("cache service requires an invocation")
         if not callable(getattr(repository, "get", None)) or not callable(
@@ -196,7 +202,7 @@ class _CacheAccessCoordinator:
             if not isinstance(lease, (AdmissionLease, ScheduledLease)):
                 raise InvalidInvocation("invocation has no admission lease")
             admission.check(lease)
-        except CacheAccessError:
+        except (CacheAccessError, InvalidInvocation):
             raise
         except Exception as exc:
             raise CacheAccessError(
@@ -259,6 +265,7 @@ class _CacheAccessCoordinator:
         return principal_id
 
     async def _scope(self, visibility: CacheVisibility) -> OwnerScope:
+        validate_contract(visibility)
         invocation = self.__invocation
         if not isinstance(visibility, CacheVisibility):
             raise TypeError("cache visibility is invalid")
@@ -275,11 +282,13 @@ class _CacheAccessCoordinator:
             raise CacheAccessError(
                 "authorised scope requires a grant", code="scope_denied"
             )
-        from ..api.storage import GrantReference
+        from yomihime_game_link_sdk.storage import GrantReference
 
         return OwnerScope.authorized(
             principal_id,
-            GrantReference(invocation.grant_id, invocation.grant_revision),
+            validate_contract(
+                GrantReference(invocation.grant_id, invocation.grant_revision)
+            ),
         )
 
     async def lookup(self, request: CacheAccessRequest) -> CacheLookup:
@@ -293,13 +302,14 @@ class _CacheAccessCoordinator:
                 "cache scope is outside invocation", code="scope_denied"
             )
         result = await self._await_boundary(lambda: self.__repository.get(request))
-        if not isinstance(result, CacheLookup):
+        if type(result) is not CacheLookup:
             raise ValueError("cache repository returned an invalid lookup")
+        validate_contract(result)
         if result.status is CacheLookupStatus.HIT:
             if result.entry is None or result.entry.key != request.key:
                 raise ValueError("cache repository returned an invalid entry")
             if result.entry.expires_at <= datetime.now(UTC):
-                return CacheLookup(CacheLookupStatus.EXPIRED)
+                return validate_contract(CacheLookup(CacheLookupStatus.EXPIRED))
         return result
 
     async def get(self, key: str) -> CacheEntry | None:
@@ -320,6 +330,8 @@ class _CacheAccessCoordinator:
         expected_revision: int | None = None,
         visibility: CacheVisibility | None = None,
     ) -> CacheEntry:
+        validate_contract(payload)
+        validate_contract(visibility)
         await self._admit()
         key = _bounded_key(key)
         if (
@@ -333,8 +345,10 @@ class _CacheAccessCoordinator:
             visibility = self._default_visibility()
         scope = await self._scope(visibility)
         request = CacheAccessRequest(key, visibility, scope)
-        entry = CacheEntry(
-            key, payload, datetime.now(UTC) + timedelta(seconds=float(ttl_seconds))
+        entry = validate_contract(
+            CacheEntry(
+                key, payload, datetime.now(UTC) + timedelta(seconds=float(ttl_seconds))
+            )
         )
         if expected_revision is None:
             expected_revision = await self._await_boundary(
@@ -409,6 +423,7 @@ class CacheAccessService(CacheAccess):
         repository: CacheRepository | None = None,
         **kwargs: object,
     ) -> None:
+        validate_contract(coordinator_or_invocation)
         if isinstance(coordinator_or_invocation, _CacheAccessCoordinator):
             if repository is not None or kwargs:
                 raise TypeError("coordinator facade does not accept storage arguments")
@@ -421,12 +436,30 @@ class CacheAccessService(CacheAccess):
             )
         object.__setattr__(self, "_CacheAccessService__coordinator", coordinator)
 
+    @public_boundary()
     async def get(self, key: str) -> CacheEntry | None:
+        parameters(_bounded_key, key)
         return await self.__coordinator.get(key)
 
-    async def lookup(self, request: CacheAccessRequest) -> CacheLookup:
-        return await self.__coordinator.lookup(request)
+    @public_boundary()
+    async def lookup(self, request: CacheQuery) -> CacheLookup:
+        await self.__coordinator._admit()
 
+        def check_query():
+            if type(request) is not CacheQuery:
+                raise TypeError("cache query must be canonical")
+            validate_contract(request)
+            _bounded_key(request.key)
+
+        parameters(check_query)
+        visibility = request.visibility
+        if visibility is None:
+            visibility = self.__coordinator._default_visibility()
+        scope = await self.__coordinator._scope(visibility)
+        private_request = CacheAccessRequest(request.key, visibility, scope)
+        return await self.__coordinator.lookup(private_request)
+
+    @public_boundary()
     async def put(
         self,
         key: str,
@@ -436,6 +469,30 @@ class CacheAccessService(CacheAccess):
         expected_revision: int | None = None,
         visibility: CacheVisibility | None = None,
     ) -> CacheEntry:
+        await self.__coordinator._admit()
+
+        def check_input():
+            validate_contract(CacheQuery(key, visibility))
+            _bounded_key(key)
+            if (
+                type(ttl_seconds) not in (int, float)
+                or not math.isfinite(float(ttl_seconds))
+                or ttl_seconds <= 0
+            ):
+                raise ValueError("cache ttl is invalid")
+            if expected_revision is not None and (
+                type(expected_revision) is not int or expected_revision < 0
+            ):
+                raise ValueError("cache revision is invalid")
+            validate_contract(
+                CacheEntry(
+                    key,
+                    payload,
+                    datetime.now(UTC) + timedelta(seconds=float(ttl_seconds)),
+                )
+            )
+
+        parameters(check_input)
         return await self.__coordinator.put(
             key,
             payload,
@@ -454,11 +511,73 @@ class CacheAccessService(CacheAccess):
 
 
 CacheAccessCoordinator = _CacheAccessCoordinator
-CacheService = CacheAccessService
 
 __all__ = [
     "CacheAccessCoordinator",
     "CacheAccessError",
     "CacheAccessService",
-    "CacheService",
 ]
+
+
+class ModuleCacheRepository:
+    """Core-private logical-key adapter bound to one registered module.
+
+    Legacy unnamespaced rows remain untouched. They have no module provenance
+    and are never admitted as a module-scoped cache hit.
+    """
+
+    def __init__(self, repository, module_id):
+        import hashlib
+
+        self._repository = repository
+        self._module_bytes = module_id.encode("utf-8")
+        self._digest = hashlib.sha256
+
+    def _key(self, key):
+        framed = (
+            len(self._module_bytes).to_bytes(4, "big")
+            + self._module_bytes
+            + key.encode("utf-8")
+        )
+        return "module." + self._digest(framed).hexdigest()
+
+    def _request(self, request):
+        return CacheAccessRequest(
+            self._key(request.key), request.visibility, request.scope
+        )
+
+    @staticmethod
+    def _entry(entry, key):
+        if type(entry) is not CacheEntry:
+            raise ValueError("cache repository returned an invalid entry")
+        validate_contract(entry)
+        return validate_contract(
+            CacheEntry(key, entry.payload, entry.expires_at, entry.revision)
+        )
+
+    async def get(self, request, **kwargs):
+        result = await self._repository.get(self._request(request), **kwargs)
+        if type(result) is not CacheLookup:
+            raise ValueError("cache repository returned an invalid lookup")
+        validate_contract(result)
+        if result.entry is not None:
+            if result.entry.key != self._key(request.key):
+                raise ValueError("cache repository returned a foreign entry")
+            return validate_contract(
+                CacheLookup(result.status, self._entry(result.entry, request.key))
+            )
+        return result
+
+    async def current_revision(self, request):
+        return await self._repository.current_revision(self._request(request))
+
+    async def put(self, request, entry, **kwargs):
+        stored = await self._repository.put(
+            self._request(request), self._entry(entry, self._key(request.key)), **kwargs
+        )
+        if type(stored) is not CacheEntry or stored.key != self._key(request.key):
+            raise ValueError("cache repository returned an invalid entry")
+        return self._entry(stored, request.key)
+
+    async def invalidate(self, request, **kwargs):
+        return await self._repository.invalidate(self._request(request), **kwargs)

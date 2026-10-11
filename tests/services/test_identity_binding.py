@@ -8,16 +8,9 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 
-from ygl_test_subject.api.contexts import InvocationOrigin
-from ygl_test_subject.api.services import (
-    BindingView,
-    ConversationKey,
-    ConversationKind,
-    ConversationRef,
-    Principal,
-    ResolvedIdentity,
-)
 from ygl_test_subject.core.context_issuer import ContextIssuer
+from ygl_test_subject.core.contracts.services import ConversationKey, Principal
+from ygl_test_subject.core.contracts.validation_boundary import validate_contract
 from ygl_test_subject.core.ports import (
     ModuleNotRegistered,
     ModuleRegistrationSnapshot,
@@ -37,6 +30,10 @@ from ygl_test_subject.services.bindings import (
     ModuleBindingUnavailable,
 )
 from ygl_test_subject.services.identity import IdentityResolverService
+
+from yomihime_game_link_sdk.contexts import InvocationOrigin
+from yomihime_game_link_sdk.services import BindingView, ResolvedIdentity
+from yomihime_game_link_sdk.subscriptions import ConversationKind, ConversationRef
 
 MODULE = "package/module"
 
@@ -89,15 +86,19 @@ class IdentityBindingServiceTests(unittest.IsolatedAsyncioTestCase):
         await self.identities.save_principal(Principal("p-2", "qq", "u-2"))
         for adapter in ("adapter-a", "adapter-b"):
             await self.conversations.save(
-                ConversationRef(adapter, ConversationKind.GROUP, "same-chat", adapter)
+                validate_contract(
+                    ConversationRef(
+                        adapter, ConversationKind.GROUP, "same-chat", adapter
+                    )
+                )
             )
         for identity in (
-            ResolvedIdentity("i-1", "steam", "same-name"),
-            ResolvedIdentity("i-2", "steam", "second-name"),
+            validate_contract(ResolvedIdentity("i-1", "steam", "same-name")),
+            validate_contract(ResolvedIdentity("i-2", "steam", "second-name")),
         ):
             await self.identities.save_identity("p-1", identity)
         await self.identities.save_identity(
-            "p-2", ResolvedIdentity("i-3", "steam-alt", "same-name")
+            "p-2", validate_contract(ResolvedIdentity("i-3", "steam-alt", "same-name"))
         )
         self.issuer = ContextIssuer()
         self.resolver = IdentityResolverService(
@@ -140,7 +141,7 @@ class IdentityBindingServiceTests(unittest.IsolatedAsyncioTestCase):
     async def test_a1_01_bind_default_replace_list_unbind_and_reopen(self) -> None:
         invocation = self._invocation()
         first = await self.accounts.bind(
-            invocation, ResolvedIdentity("i-1", "steam", "same-name")
+            invocation, validate_contract(ResolvedIdentity("i-1", "steam", "same-name"))
         )
         self.assertTrue(first.is_default)
         self.assertEqual(
@@ -148,7 +149,8 @@ class IdentityBindingServiceTests(unittest.IsolatedAsyncioTestCase):
         )
 
         second = await self.accounts.bind(
-            invocation, ResolvedIdentity("i-2", "steam", "second-name")
+            invocation,
+            validate_contract(ResolvedIdentity("i-2", "steam", "second-name")),
         )
         self.assertTrue(second.is_default)
         values = await self.accounts.bindings(invocation)
@@ -174,7 +176,7 @@ class IdentityBindingServiceTests(unittest.IsolatedAsyncioTestCase):
     async def test_a1_02_adapter_actor_and_origin_are_isolated(self) -> None:
         invocation = self._invocation()
         first = await self.accounts.bind(
-            invocation, ResolvedIdentity("i-1", "steam", "same-name")
+            invocation, validate_contract(ResolvedIdentity("i-1", "steam", "same-name"))
         )
         other_adapter = self._invocation(adapter="adapter-b")
         self.assertIsNone(await self.resolver.default_identity(other_adapter))
@@ -193,7 +195,8 @@ class IdentityBindingServiceTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(IdentityBindingPermissionError):
             await self.resolver.default_identity(forged)
         await self.accounts.bind(
-            other_adapter, ResolvedIdentity("i-1", "steam", "same-name")
+            other_adapter,
+            validate_contract(ResolvedIdentity("i-1", "steam", "same-name")),
         )
         self.assertEqual(
             (await self.resolver.default_identity(other_adapter)).identity_id, "i-1"
@@ -203,10 +206,12 @@ class IdentityBindingServiceTests(unittest.IsolatedAsyncioTestCase):
         first_invocation = self._invocation(actor="u-1")
         second_invocation = self._invocation(actor="u-2")
         first = await self.accounts.bind(
-            first_invocation, ResolvedIdentity("i-1", "steam", "same-name")
+            first_invocation,
+            validate_contract(ResolvedIdentity("i-1", "steam", "same-name")),
         )
         second = await self.accounts.bind(
-            second_invocation, ResolvedIdentity("i-3", "steam-alt", "same-name")
+            second_invocation,
+            validate_contract(ResolvedIdentity("i-3", "steam-alt", "same-name")),
         )
         self.assertEqual(
             (await self.resolver.default_identity(first_invocation)).identity_id,
@@ -236,10 +241,10 @@ class IdentityBindingServiceTests(unittest.IsolatedAsyncioTestCase):
     async def test_a1_03_default_cas_conflict_has_no_partial_binding(self) -> None:
         invocation = self._invocation()
         await self.accounts.bind(
-            invocation, ResolvedIdentity("i-1", "steam", "same-name")
+            invocation, validate_contract(ResolvedIdentity("i-1", "steam", "same-name"))
         )
         await self.identities.save_identity(
-            "p-1", ResolvedIdentity("i-4", "steam", "fourth-name")
+            "p-1", validate_contract(ResolvedIdentity("i-4", "steam", "fourth-name"))
         )
         key = ConversationKey("adapter-a", "same-chat")
         current = await self.bindings.current_default_snapshot("p-1", MODULE, key)
@@ -265,15 +270,15 @@ class IdentityBindingServiceTests(unittest.IsolatedAsyncioTestCase):
         invocation = self._invocation()
         with self.assertRaises(IdentityBindingNotFound):
             await self.accounts.bind(
-                invocation, ResolvedIdentity("missing", "steam", "x")
+                invocation, validate_contract(ResolvedIdentity("missing", "steam", "x"))
             )
         with self.assertRaises(ModuleBindingUnavailable):
             await self.accounts.bind(
                 self._invocation(module="unknown/module"),
-                ResolvedIdentity("i-1", "steam", "same-name"),
+                validate_contract(ResolvedIdentity("i-1", "steam", "same-name")),
             )
         await self.accounts.bind(
-            invocation, ResolvedIdentity("i-1", "steam", "same-name")
+            invocation, validate_contract(ResolvedIdentity("i-1", "steam", "same-name"))
         )
         connection = self.database.connect()
         try:
@@ -285,20 +290,21 @@ class IdentityBindingServiceTests(unittest.IsolatedAsyncioTestCase):
             connection.close()
         with self.assertRaises(IdentityBindingError):
             await self.accounts.bind(
-                invocation, ResolvedIdentity("i-2", "steam", "second-name")
+                invocation,
+                validate_contract(ResolvedIdentity("i-2", "steam", "second-name")),
             )
         self.assertEqual(len(await self.accounts.bindings(invocation)), 1)
 
     async def test_a1_05_concurrent_default_change_has_one_winner(self) -> None:
         invocation = self._invocation()
         await self.accounts.bind(
-            invocation, ResolvedIdentity("i-1", "steam", "same-name")
+            invocation, validate_contract(ResolvedIdentity("i-1", "steam", "same-name"))
         )
         await self.identities.save_identity(
-            "p-1", ResolvedIdentity("i-4", "steam", "fourth-name")
+            "p-1", validate_contract(ResolvedIdentity("i-4", "steam", "fourth-name"))
         )
         await self.identities.save_identity(
-            "p-1", ResolvedIdentity("i-5", "steam", "fifth-name")
+            "p-1", validate_contract(ResolvedIdentity("i-5", "steam", "fifth-name"))
         )
         barrier = _SnapshotBarrier()
         service_a = AccountOperationsService(
@@ -328,8 +334,14 @@ class IdentityBindingServiceTests(unittest.IsolatedAsyncioTestCase):
             identity_namespace="qq",
         )
         results = await asyncio.gather(
-            service_a.bind(invocation, ResolvedIdentity("i-4", "steam", "fourth-name")),
-            service_b.bind(invocation, ResolvedIdentity("i-5", "steam", "fifth-name")),
+            service_a.bind(
+                invocation,
+                validate_contract(ResolvedIdentity("i-4", "steam", "fourth-name")),
+            ),
+            service_b.bind(
+                invocation,
+                validate_contract(ResolvedIdentity("i-5", "steam", "fifth-name")),
+            ),
             return_exceptions=True,
         )
         self.assertEqual(sum(isinstance(item, BindingView) for item in results), 1)

@@ -5,28 +5,27 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
+from ygl_test_subject.core.contracts.validation_boundary import validate_contract
+from ygl_test_subject.extensions.disk_manifest import parse_manifest
+
 from examples.offline_sample.module import Factory, SourceFactory
-from extensions.disk_manifest import parse_manifest
-from yomihime_sdk import (
+from yomihime_game_link_sdk.contexts import InvocationOrigin, InvocationView
+from yomihime_game_link_sdk.declarations import CapabilityReference
+from yomihime_game_link_sdk.display import DisplayDocument, Privacy
+from yomihime_game_link_sdk.results import CapabilityResult, FactDocument, ResultStatus
+from yomihime_game_link_sdk.services import (
     BindingView,
-    CapabilityReference,
-    CapabilityResult,
+    ConfigSnapshot,
+    HealthStatus,
+    ModuleServices,
+    ResolvedIdentity,
+)
+from yomihime_game_link_sdk.storage import GrantReference, OwnerScope, OwnershipKind
+from yomihime_game_link_sdk.subscriptions import (
     CollectionKey,
     CollectionView,
-    DisplayDocument,
-    FactDocument,
-    GrantReference,
-    HealthStatus,
-    InvocationOrigin,
-    InvocationView,
-    ModuleServices,
     NormalizedInput,
     ObservationCompleteness,
-    OwnerScope,
-    OwnershipKind,
-    Privacy,
-    ResolvedIdentity,
-    ResultStatus,
     SubscriptionRequest,
     SubscriptionView,
 )
@@ -35,29 +34,40 @@ ROOT = Path(__file__).resolve().parents[2]
 MANIFEST_PATH = ROOT / "examples" / "offline_sample" / "manifest.json"
 
 
+class _Config:
+    async def current(self):
+        return ConfigSnapshot(1, {"region": "cn"})
+
+
 class _Accounts:
     def __init__(self) -> None:
         self.bind_calls: list[tuple[InvocationView, ResolvedIdentity]] = []
         self.list_calls: list[InvocationView] = []
         self.unbind_calls: list[tuple[InvocationView, str, int]] = []
         self.status_calls: list[InvocationView] = []
-        self.binding = BindingView(
-            "binding-secret-734",
-            918273,
-            ResolvedIdentity(
-                "provider-secret-381:subject-secret-982",
-                "provider-secret-381",
-                "subject-secret-982",
-            ),
-            True,
+        self.binding = validate_contract(
+            BindingView(
+                "binding-secret-734",
+                918273,
+                validate_contract(
+                    ResolvedIdentity(
+                        "provider-secret-381:subject-secret-982",
+                        "provider-secret-381",
+                        "subject-secret-982",
+                    )
+                ),
+                True,
+            )
         )
-        self.status_value = GrantReference("grant-alice", 1)
+        self.status_value = validate_contract(GrantReference("grant-alice", 1))
 
     async def bind(
         self, invocation: InvocationView, identity: ResolvedIdentity
     ) -> BindingView:
         self.bind_calls.append((invocation, identity))
-        self.binding = BindingView("binding-secret-734", 918273, identity, True)
+        self.binding = validate_contract(
+            BindingView("binding-secret-734", 918273, identity, True)
+        )
         return self.binding
 
     async def bindings(self, invocation: InvocationView) -> tuple[BindingView, ...]:
@@ -79,26 +89,30 @@ class _Subscriptions:
         self.create_calls: list[tuple[InvocationView, SubscriptionRequest]] = []
         self.list_calls: list[InvocationView] = []
         self.cancel_calls: list[tuple[InvocationView, str, int]] = []
-        self.current = SubscriptionView(
-            "subscription-secret-281",
-            654321,
-            "owner-secret-681",
-            None,
-            "actor-secret-957",
-            {"minimum": 87531, "region": "region-secret-531"},
+        self.current = validate_contract(
+            SubscriptionView(
+                "subscription-secret-281",
+                654321,
+                "owner-secret-681",
+                None,
+                "actor-secret-957",
+                {"minimum": 87531, "region": "region-secret-531"},
+            )
         )
 
     async def create_request(
         self, invocation: InvocationView, request: SubscriptionRequest
     ) -> SubscriptionView:
         self.create_calls.append((invocation, request))
-        self.current = SubscriptionView(
-            "subscription-secret-281",
-            654321,
-            "owner-secret-681",
-            None,
-            "actor-secret-957",
-            request.filters,
+        self.current = validate_contract(
+            SubscriptionView(
+                "subscription-secret-281",
+                654321,
+                "owner-secret-681",
+                None,
+                "actor-secret-957",
+                request.filters,
+            )
         )
         return self.current
 
@@ -124,11 +138,15 @@ class _Dependencies:
 
     async def invoke(self, invocation, capability, parameters):
         self.calls.append((invocation, capability, parameters))
-        return CapabilityResult(
-            "stub-source-result",
-            ResultStatus.SUCCESS,
-            document=DisplayDocument("Stub source", "A dependency was called.", ()),
-            model_facts=FactDocument({"source": "stub"}),
+        return validate_contract(
+            CapabilityResult(
+                "stub-source-result",
+                ResultStatus.SUCCESS,
+                document=validate_contract(
+                    DisplayDocument("Stub source", "A dependency was called.", ())
+                ),
+                model_facts=validate_contract(FactDocument({"source": "stub"})),
+            )
         )
 
 
@@ -147,12 +165,14 @@ def _services() -> tuple[ModuleServices, _Accounts, _Subscriptions, _Scopes]:
     subscriptions = _Subscriptions()
     scopes = _Scopes()
     return (
-        ModuleServices(
-            config=object(),
-            identities=object(),
-            accounts=accounts,
-            subscriptions=subscriptions,
-            scopes=scopes,
+        validate_contract(
+            ModuleServices(
+                config=_Config(),
+                identities=object(),
+                accounts=accounts,
+                subscriptions=subscriptions,
+                scopes=scopes,
+            )
         ),
         accounts,
         subscriptions,
@@ -163,16 +183,18 @@ def _services() -> tuple[ModuleServices, _Accounts, _Subscriptions, _Scopes]:
 def _command_view(
     capability_id: str, *, module_id: str = "offline_sample/status"
 ) -> InvocationView:
-    return InvocationView(
-        invocation_id=f"sample-{capability_id}",
-        origin=InvocationOrigin.COMMAND,
-        actor_id="alice",
-        conversation_id="alice",
-        module_id=module_id,
-        module_epoch=1,
-        registry_revision=1,
-        adapter_id="sample-adapter",
-        capability_id=capability_id,
+    return validate_contract(
+        InvocationView(
+            invocation_id=f"sample-{capability_id}",
+            origin=InvocationOrigin.COMMAND,
+            actor_id="alice",
+            conversation_id="alice",
+            module_id=module_id,
+            module_epoch=1,
+            registry_revision=1,
+            adapter_id="sample-adapter",
+            capability_id=capability_id,
+        )
     )
 
 
@@ -188,7 +210,7 @@ class OfflineSampleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(set(self.modules), {"status", "source"})
         status = self.modules["status"]
         source = self.modules["source"]
-        self.assertEqual(self.package.contract_version, "1.1.0")
+        self.assertEqual(self.package.contract_version, "2.0")
         gate = next(
             field
             for field in status.config_fields
@@ -206,7 +228,7 @@ class OfflineSampleTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("sample_status", {item.name for item in status.tools})
         self.assertEqual(
             capabilities["from_source"].required_capabilities,
-            (CapabilityReference("offline_sample/source", "read"),),
+            (validate_contract(CapabilityReference("offline_sample/source", "read")),),
         )
         self.assertEqual(
             capabilities["status"].required_capabilities,
@@ -264,6 +286,46 @@ class OfflineSampleTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual({item.capability_id for item in source.capabilities}, {"read"})
 
+    def test_fixed_public_error_example_uses_neutral_json_without_registration(self):
+        from typing import get_type_hints
+
+        from ygl_test_subject.core.invocation import Gateway
+
+        from examples.offline_sample.module import public_error_example
+        from yomihime_game_link_sdk.results import ErrorCode
+
+        self.assertEqual(
+            get_type_hints(public_error_example), {"return": CapabilityResult}
+        )
+        original = public_error_example()
+        # This is descriptive SDK construction plus structural Core validation,
+        # not an issued/bound invocation or a native Host startup claim.
+        result = Gateway._valid_result(original, expected_privacy=Privacy.PUBLIC)
+        self.assertIs(type(result), CapabilityResult)
+        self.assertIs(result.status, ResultStatus.ERROR)
+        self.assertIs(result.error.code, ErrorCode.NO_RECORDS)
+        self.assertIsNone(result.document)
+        facts = result.model_facts.facts
+        self.assertEqual(set(facts), {"status", "error", "supplement"})
+        self.assertEqual(facts["status"], "error")
+        self.assertEqual(
+            facts["error"],
+            {"code": result.error.code.value, "message": result.error.message},
+        )
+        self.assertIsNone(facts["supplement"]["archive"]["available"])
+        self.assertIs(type(facts["supplement"]["archive"]["confidence"]), float)
+        self.assertEqual(facts["supplement"]["archive"]["confidence"], 0.25)
+        self.assertEqual(
+            facts["supplement"]["recovery_hint"], "Choose another public source."
+        )
+        self.assertNotIn("market", facts)
+        self.assertEqual(result.provenance, ())
+        self.assertEqual(result.warnings, ())
+        self.assertNotIn(
+            "public_error_example",
+            {c.capability_id for m in self.package.modules for c in m.capabilities},
+        )
+
     async def test_factories_handlers_and_health_match_the_static_contract(
         self,
     ) -> None:
@@ -317,7 +379,7 @@ class OfflineSampleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(scopes.bind_calls), 1)
         self.assertEqual(
             scopes.dependencies.calls[0][1],
-            CapabilityReference("offline_sample/source", "read"),
+            validate_contract(CapabilityReference("offline_sample/source", "read")),
         )
 
     async def test_account_handlers_delegate_exactly_through_injected_operations(
@@ -346,10 +408,12 @@ class OfflineSampleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(accounts.bind_calls[0][0], view)
         self.assertEqual(
             accounts.bind_calls[0][1],
-            ResolvedIdentity(
-                "provider-secret-381:subject-secret-982",
-                "provider-secret-381",
-                "subject-secret-982",
+            validate_contract(
+                ResolvedIdentity(
+                    "provider-secret-381:subject-secret-982",
+                    "provider-secret-381",
+                    "subject-secret-982",
+                )
             ),
         )
 
@@ -560,20 +624,22 @@ class OfflineSampleTests(unittest.IsolatedAsyncioTestCase):
         instance = await Factory().create(services)
         handlers = instance.handlers()
         region = "global"
-        public_parameters = NormalizedInput({"region": region})
-        public_key = CollectionKey(
-            "offline_sample/status",
-            "public_catalog",
-            1,
-            "offline",
-            public_parameters,
-            OwnerScope(OwnershipKind.PUBLIC),
+        public_parameters = validate_contract(NormalizedInput({"region": region}))
+        public_key = validate_contract(
+            CollectionKey(
+                "offline_sample/status",
+                "public_catalog",
+                1,
+                "offline",
+                public_parameters,
+                validate_contract(OwnerScope(OwnershipKind.PUBLIC)),
+            )
         )
         public_observation = await handlers.collectors["public_catalog"].collect(
-            CollectionView(public_key), public_parameters, None
+            validate_contract(CollectionView(public_key)), public_parameters, None
         )
-        public_subscription = SubscriptionView(
-            "sub-public", 1, "alice", None, "alice", {"minimum": 5}
+        public_subscription = validate_contract(
+            SubscriptionView("sub-public", 1, "alice", None, "alice", {"minimum": 5})
         )
         public_decision = handlers.evaluators["sample_matcher"].evaluate(
             public_subscription, public_observation, None
@@ -585,21 +651,23 @@ class OfflineSampleTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(public_decision.triggered)
         self.assertIs(public_decision.display_data.privacy, Privacy.PUBLIC)
 
-        grant = GrantReference("grant-alice", 2)
-        private_parameters = NormalizedInput({"region": region})
-        private_key = CollectionKey(
-            "offline_sample/status",
-            "private_catalog",
-            1,
-            "offline",
-            private_parameters,
-            OwnerScope(OwnershipKind.AUTHORIZED, "alice", grant),
+        grant = validate_contract(GrantReference("grant-alice", 2))
+        private_parameters = validate_contract(NormalizedInput({"region": region}))
+        private_key = validate_contract(
+            CollectionKey(
+                "offline_sample/status",
+                "private_catalog",
+                1,
+                "offline",
+                private_parameters,
+                validate_contract(OwnerScope(OwnershipKind.AUTHORIZED, "alice", grant)),
+            )
         )
         private_observation = await handlers.collectors["private_catalog"].collect(
-            CollectionView(private_key), private_parameters, None
+            validate_contract(CollectionView(private_key)), private_parameters, None
         )
-        private_subscription = SubscriptionView(
-            "sub-private", 1, "alice", grant, "alice", {"minimum": 5}
+        private_subscription = validate_contract(
+            SubscriptionView("sub-private", 1, "alice", grant, "alice", {"minimum": 5})
         )
         private_decision = handlers.evaluators["sample_matcher"].evaluate(
             private_subscription, private_observation, None

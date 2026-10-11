@@ -8,13 +8,14 @@ import stat
 from pathlib import Path
 from types import MappingProxyType
 
-from yomihime_sdk.api.manifests import (
+from yomihime_game_link_sdk.declarations import PackageManifest
+
+from ..core.contracts.manifests import (
     EXTENSION_MANIFEST_FILENAME,
     EXTENSION_MANIFEST_MAX_BYTES,
-    PackageManifest,
     validate_page_resource_path,
 )
-
+from ..core.contracts.validation_boundary import validate_contract
 from .disk_manifest import parse_manifest
 from .source_snapshot import (
     MAX_PACKAGE_SOURCE_BYTES,
@@ -54,6 +55,7 @@ def _identity(info):
 
 def read_page_resources(root: Path, manifest: PackageManifest) -> dict[str, bytes]:
     """Read only closed declarations; declarations alone do not grant trust."""
+    validate_contract(manifest)
     declarations = {}
     names = set()
     for module in manifest.modules:
@@ -109,6 +111,7 @@ def _read_file(path: Path, root: Path, max_bytes: int) -> bytes:
 
 def capture_page_resources(provenance: PackageProvenance, manifest: PackageManifest):
     """Bind declarations to the same sealed manifest before reading assets."""
+    validate_contract(manifest)
     limits = SourceSnapshotLimits(max_runtime_bytes=MAX_PACKAGE_SOURCE_BYTES)
     capture_source_bundle(provenance, limits)
     root = Path(provenance.root_locator) / provenance.package_name

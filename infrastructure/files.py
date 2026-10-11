@@ -6,7 +6,10 @@ import hashlib
 import os
 from pathlib import Path
 
-from ..api.storage import OwnerScope, ResourceMetadata
+from yomihime_game_link_sdk.storage import OwnerScope, ResourceMetadata
+
+from ..core.contracts.storage import OwnerScope_validate
+from ..core.contracts.validation_boundary import validate_contract
 from ..core.ports import FileStage
 
 
@@ -22,7 +25,8 @@ def _bounded(value: str, field: str) -> str:
 
 
 def _scope_token(scope: OwnerScope) -> str:
-    scope = OwnerScope.validate(scope)
+    validate_contract(scope)
+    scope = OwnerScope_validate(scope)
     grant = (
         "" if scope.grant is None else f":{scope.grant.grant_id}:{scope.grant.revision}"
     )
@@ -49,8 +53,9 @@ class LocalSafeFileStore:
         return asset_id
 
     def _final(self, asset_id: str, scope: OwnerScope) -> Path:
+        validate_contract(scope)
         asset_id = self._asset(asset_id)
-        scope = OwnerScope.validate(scope)
+        scope = OwnerScope_validate(scope)
         return self.root / scope.kind.value / _scope_token(scope) / asset_id
 
     def _temp(self, operation_id: str, asset_id: str) -> Path:
@@ -60,18 +65,21 @@ class LocalSafeFileStore:
         return self._staging / f"{digest}_{asset_id}.tmp"
 
     def _pending(self, asset_id: str, scope: OwnerScope) -> Path:
+        validate_contract(scope)
         return self._final(asset_id, scope).with_suffix(".pending")
 
     def _orphan(self, asset_id: str, scope: OwnerScope) -> Path:
+        validate_contract(scope)
         return self._final(asset_id, scope).with_suffix(".orphan")
 
     async def stage(
         self, operation_id: str, content: bytes, scope: OwnerScope
     ) -> FileStage:
+        validate_contract(scope)
         _bounded(operation_id, "operation_id")
         if not isinstance(content, bytes):
             raise TypeError("resource content must be bytes")
-        scope = OwnerScope.validate(scope)
+        scope = OwnerScope_validate(scope)
         digest = hashlib.sha256(
             f"{_scope_token(scope)}\0".encode() + content
         ).hexdigest()
@@ -98,16 +106,19 @@ class LocalSafeFileStore:
     async def commit(
         self, stage: FileStage, metadata: ResourceMetadata
     ) -> ResourceMetadata:
+        validate_contract(metadata)
         if not isinstance(stage, FileStage):
             raise TypeError("stage must be FileStage")
-        metadata = ResourceMetadata(
-            metadata.asset_id,
-            metadata.media_type,
-            metadata.scope,
-            metadata.size_bytes,
-            metadata.expires_at,
-            metadata.temporary,
-            metadata.revision,
+        metadata = validate_contract(
+            ResourceMetadata(
+                metadata.asset_id,
+                metadata.media_type,
+                metadata.scope,
+                metadata.size_bytes,
+                metadata.expires_at,
+                metadata.temporary,
+                metadata.revision,
+            )
         )
         if metadata.asset_id != stage.asset_id or metadata.scope != stage.scope:
             raise ValueError("file stage metadata does not match")
@@ -134,14 +145,17 @@ class LocalSafeFileStore:
 
     async def confirm(self, metadata: ResourceMetadata) -> None:
         """Clear the commit marker after the corresponding index commit."""
-        metadata = ResourceMetadata(
-            metadata.asset_id,
-            metadata.media_type,
-            metadata.scope,
-            metadata.size_bytes,
-            metadata.expires_at,
-            metadata.temporary,
-            metadata.revision,
+        validate_contract(metadata)
+        metadata = validate_contract(
+            ResourceMetadata(
+                metadata.asset_id,
+                metadata.media_type,
+                metadata.scope,
+                metadata.size_bytes,
+                metadata.expires_at,
+                metadata.temporary,
+                metadata.revision,
+            )
         )
         marker = self._pending(metadata.asset_id, metadata.scope)
         try:
@@ -150,6 +164,7 @@ class LocalSafeFileStore:
             return
 
     async def read(self, asset_id: str, scope: OwnerScope) -> bytes:
+        validate_contract(scope)
         path = self._final(asset_id, scope)
         try:
             return path.read_bytes()

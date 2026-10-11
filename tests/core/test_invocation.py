@@ -9,14 +9,16 @@ from unittest import IsolatedAsyncioTestCase
 from unittest.mock import patch
 from uuid import uuid4
 
-from ygl_test_subject.api.contexts import InvocationOrigin
-from ygl_test_subject.api.display import (
-    DisplayDocument,
-    FieldsBlock,
-    Privacy,
-    TextBlock,
-)
-from ygl_test_subject.api.manifests import (
+from ygl_test_subject.core.context_issuer import ContextIssuer
+from ygl_test_subject.core.contracts.validation_boundary import validate_contract
+from ygl_test_subject.core.health import HealthResolver
+from ygl_test_subject.core.invocation import Gateway
+from ygl_test_subject.core.lifecycle import LifecycleController
+from ygl_test_subject.core.registry import Registry
+
+from tests.contracts.test_context_issuer import _PublicWebProofs
+from yomihime_game_link_sdk.contexts import InvocationOrigin
+from yomihime_game_link_sdk.declarations import (
     CapabilityDescriptor,
     CapabilityEffect,
     CommandDescriptor,
@@ -27,27 +29,26 @@ from ygl_test_subject.api.manifests import (
     PrivacyFloor,
     ToolDescriptor,
 )
-from ygl_test_subject.api.results import (
+from yomihime_game_link_sdk.display import (
+    DisplayDocument,
+    FieldsBlock,
+    Privacy,
+    TextBlock,
+)
+from yomihime_game_link_sdk.results import (
     CapabilityResult,
     ErrorCode,
     ErrorDetail,
     FactDocument,
     ResultStatus,
 )
-from ygl_test_subject.api.services import (
+from yomihime_game_link_sdk.services import (
     CapabilityHealth,
     HealthReport,
     HealthStatus,
     ModuleHandlers,
 )
-from ygl_test_subject.api.version import CONTRACT_VERSION
-from ygl_test_subject.core.context_issuer import ContextIssuer
-from ygl_test_subject.core.health import HealthResolver
-from ygl_test_subject.core.invocation import Gateway
-from ygl_test_subject.core.lifecycle import LifecycleController
-from ygl_test_subject.core.registry import Registry
-
-from tests.contracts.test_context_issuer import _PublicWebProofs
+from yomihime_game_link_sdk.version import MODULE_ABI_VERSION
 
 
 class PublicWebGatewayTests(IsolatedAsyncioTestCase):
@@ -463,9 +464,15 @@ class PublicWebGatewayTests(IsolatedAsyncioTestCase):
 
 
 def _result(*, privacy: Privacy = Privacy.PUBLIC) -> CapabilityResult:
-    document = DisplayDocument("Result", "subject", (TextBlock("ok"),), privacy=privacy)
-    return CapabilityResult(
-        "result", ResultStatus.SUCCESS, document=document, privacy=privacy
+    document = validate_contract(
+        DisplayDocument(
+            "Result", "subject", (validate_contract(TextBlock("ok")),), privacy=privacy
+        )
+    )
+    return validate_contract(
+        CapabilityResult(
+            "result", ResultStatus.SUCCESS, document=document, privacy=privacy
+        )
     )
 
 
@@ -502,11 +509,15 @@ class _Instance:
         return None
 
     async def check_health(self):
-        return HealthReport(
-            {
-                capability_id: CapabilityHealth(HealthStatus.AVAILABLE)
-                for capability_id in self._capability_ids
-            }
+        return validate_contract(
+            HealthReport(
+                {
+                    capability_id: validate_contract(
+                        CapabilityHealth(HealthStatus.AVAILABLE)
+                    )
+                    for capability_id in self._capability_ids
+                }
+            )
         )
 
 
@@ -536,25 +547,29 @@ def _capability(
     privacy: PrivacyFloor = PrivacyFloor.PUBLIC,
     required_config: tuple[str, ...] = (),
 ) -> CapabilityDescriptor:
-    return CapabilityDescriptor(
-        capability_id,
-        {
-            "type": "object",
-            "properties": {"record_id": {"type": "string", "minLength": 1}},
-            "required": ["record_id"],
-        },
-        policy,
-        effect,
-        privacy_floor=privacy,
-        required_config=required_config,
+    return validate_contract(
+        CapabilityDescriptor(
+            capability_id,
+            {
+                "type": "object",
+                "properties": {"record_id": {"type": "string", "minLength": 1}},
+                "required": ["record_id"],
+            },
+            policy,
+            effect,
+            privacy_floor=privacy,
+            required_config=required_config,
+        )
     )
 
 
 def _package(capability: CapabilityDescriptor, *, command=True, tool=True):
     commands = (
         (
-            CommandDescriptor(
-                "查询", capability.capability_id, {"id": "record_id"}, "query"
+            validate_contract(
+                CommandDescriptor(
+                    "查询", capability.capability_id, {"id": "record_id"}, "query"
+                )
             ),
         )
         if command
@@ -562,31 +577,40 @@ def _package(capability: CapabilityDescriptor, *, command=True, tool=True):
     )
     tools = (
         (
-            ToolDescriptor(
-                "record_query", capability.capability_id, {"id": "record_id"}, "query"
+            validate_contract(
+                ToolDescriptor(
+                    "record_query",
+                    capability.capability_id,
+                    {"id": "record_id"},
+                    "query",
+                )
             ),
         )
         if tool
         else ()
     )
-    module = ModuleManifest(
-        "records",
-        "records",
-        ModuleCategory.GAME,
-        "tests.module:Factory",
-        "1.0.0",
-        (capability,),
-        commands,
-        tools,
+    module = validate_contract(
+        ModuleManifest(
+            "records",
+            "records",
+            ModuleCategory.GAME,
+            "tests.module:Factory",
+            "1.0.0",
+            (capability,),
+            commands,
+            tools,
+        )
     )
-    package = PackageManifest(
-        "testpkg",
-        "1.0.0",
-        CONTRACT_VERSION,
-        (module,),
-        "Tests",
-        "MIT",
-        "offline",
+    package = validate_contract(
+        PackageManifest(
+            "testpkg",
+            "1.0.0",
+            MODULE_ABI_VERSION,
+            (module,),
+            "Tests",
+            "MIT",
+            "offline",
+        )
     )
     return package
 
@@ -608,9 +632,13 @@ class GatewayTests(IsolatedAsyncioTestCase):
         self.health.bind_runtime(self.lifecycle, self.lifecycle.admission)
 
     async def _empty_config(self, module_id):
-        from ygl_test_subject.api.services import ConfigSnapshot, ConfigTarget
+        from yomihime_game_link_sdk.services import ConfigSnapshot, ConfigTarget
 
-        return ConfigSnapshot(1, {}, target=ConfigTarget("test-host", module_id))
+        return validate_contract(
+            ConfigSnapshot(
+                1, {}, target=validate_contract(ConfigTarget("test-host", module_id))
+            )
+        )
 
     def _gateway(self):
         return Gateway(
@@ -629,7 +657,11 @@ class GatewayTests(IsolatedAsyncioTestCase):
         handler = handler or _Handler()
         self.registry.register_package(
             _package(capability, command=command, tool=tool),
-            {"records": ModuleHandlers({capability.capability_id: handler}, {}, {})},
+            {
+                "records": validate_contract(
+                    ModuleHandlers({capability.capability_id: handler}, {}, {})
+                )
+            },
         )
         module = self.registry.snapshot().module("testpkg/records")
         instance = _Instance(
@@ -685,8 +717,42 @@ class GatewayTests(IsolatedAsyncioTestCase):
             registry_revision=view.registry_revision,
             actor_id="actor",
             conversation_id="conversation",
+            adapter_id="offline",
             capability_id="record.query",
         )
+        # The normal trusted test Host receipt goes through the production
+        # receiver before attaching the issuer-owned message association.
+        from ygl_test_subject.services.core_runtime import (
+            HostIngress,
+            _HostIngressAuthority,
+        )
+
+        from yomihime_game_link_sdk.subscriptions import ConversationKind
+
+        class Host:
+            def validate(self, origin, ingress):
+                return (
+                    ingress is trusted_ingress and origin is InvocationOrigin.LLM_TOOL
+                )
+
+            def current(self, origin, ingress):
+                return self.validate(origin, ingress)
+
+        host = Host()
+        trusted_ingress = HostIngress(
+            "offline",
+            "actor",
+            "conversation",
+            "offline-route",
+            ConversationKind.DIRECT,
+            object(),
+            message_text="query",
+            message_correlation="test-source",
+        )
+        authority = _HostIngressAuthority(host.validate, host.current, lambda: None)
+        accepted = await authority.validate(InvocationOrigin.LLM_TOOL, trusted_ingress)
+        self.lifecycle.admission.admit(tool_view, "record.query")
+        authority.attach_message(self.issuer, tool_view, accepted)
         result = await gateway.invoke_tool(tool_view, "record_query", {"id": "two"})
         self.assertEqual(result.status, ResultStatus.SUCCESS)
         self.assertEqual(handler.calls[-1][1], {"record_id": "two"})
@@ -860,7 +926,7 @@ class GatewayTests(IsolatedAsyncioTestCase):
         self.assertEqual(result.error.code, ErrorCode.UNKNOWN)
 
         malformed_facts = _result()
-        facts = FactDocument({"safe": "value"})
+        facts = validate_contract(FactDocument({"safe": "value"}))
         object.__setattr__(facts, "facts", object())
         object.__setattr__(malformed_facts, "model_facts", facts)
         handler, view = await self._ready(handler=_Handler(malformed_facts))
@@ -895,15 +961,17 @@ class GatewayTests(IsolatedAsyncioTestCase):
 
     async def test_iv08_returned_result_is_deeply_detached(self):
         facts_backing = {"safe": "before"}
-        facts = FactDocument({"safe": "initial"})
+        facts = validate_contract(FactDocument({"safe": "initial"}))
         object.__setattr__(facts, "facts", MappingProxyType(facts_backing))
         nested_backing = {"inner": "before"}
         fields_backing = {"payload": MappingProxyType(nested_backing)}
-        fields = FieldsBlock({"payload": {"inner": "initial"}})
+        fields = validate_contract(FieldsBlock({"payload": {"inner": "initial"}}))
         object.__setattr__(fields, "fields", MappingProxyType(fields_backing))
-        document = DisplayDocument("Result", "subject", (fields,))
-        payload = CapabilityResult(
-            "result", ResultStatus.SUCCESS, document=document, model_facts=facts
+        document = validate_contract(DisplayDocument("Result", "subject", (fields,)))
+        payload = validate_contract(
+            CapabilityResult(
+                "result", ResultStatus.SUCCESS, document=document, model_facts=facts
+            )
         )
         handler, view = await self._ready(handler=_Handler(payload))
         out = await self._gateway().invoke_command(view, "查询", {"id": "x"})
@@ -932,10 +1000,14 @@ class GatewayTests(IsolatedAsyncioTestCase):
         self.assertEqual(handler.calls[0][1], {"record_id": "x"})
 
     async def test_iv09_error_result_is_rebuilt(self):
-        payload = CapabilityResult(
-            "error-result",
-            ResultStatus.ERROR,
-            error=ErrorDetail(ErrorCode.UPSTREAM_ERROR, "upstream unavailable"),
+        payload = validate_contract(
+            CapabilityResult(
+                "error-result",
+                ResultStatus.ERROR,
+                error=validate_contract(
+                    ErrorDetail(ErrorCode.UPSTREAM_ERROR, "upstream unavailable")
+                ),
+            )
         )
         handler, view = await self._ready(handler=_Handler(payload))
         out = await self._gateway().invoke_command(view, "查询", {"id": "x"})

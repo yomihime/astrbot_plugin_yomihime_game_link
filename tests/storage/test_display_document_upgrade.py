@@ -12,15 +12,13 @@ from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
 
-from ygl_test_subject.api.display import (
-    DisplayAudience,
-    DisplayDocument,
-    DisplayLimits,
+from ygl_test_subject.core.contracts.services import Grant, GrantStatus
+from ygl_test_subject.core.contracts.subscriptions import (
+    DeliveryEventCursor,
+    DeliveryState,
 )
-from ygl_test_subject.api.services import Grant, GrantStatus
-from ygl_test_subject.api.storage import OwnerScope
-from ygl_test_subject.api.subscriptions import DeliveryEventCursor, DeliveryState
-from ygl_test_subject.api.version import CONTRACT_VERSION
+from ygl_test_subject.core.contracts.validation_boundary import validate_contract
+from ygl_test_subject.core.contracts.version import CONTRACT_VERSION
 from ygl_test_subject.infrastructure.sqlite.database import SQLiteDatabase
 from ygl_test_subject.infrastructure.sqlite.repositories_subscriptions import (
     SQLiteDeliveryRepository,
@@ -36,16 +34,15 @@ from ygl_test_subject.presentation.rendering import (
 )
 
 from tests.services import test_delivery as delivery_fixture
+from yomihime_game_link_sdk.display import (
+    DisplayAudience,
+    DisplayDocument,
+    DisplayLimits,
+)
+from yomihime_game_link_sdk.storage import OwnerScope
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "display17"
 GOLDENS = json.loads((FIXTURES / "events.json").read_text(encoding="utf-8"))
-WORK = (
-    Path(__file__).resolve().parents[2]
-    / ".architecture-refactor"
-    / "management-home-settings-ux"
-    / "pr2-revisions"
-    / "tests"
-)
 
 
 class AssetReader:
@@ -77,12 +74,11 @@ class DisplayDocumentUpgradeTests(unittest.IsolatedAsyncioTestCase):
     _disable = delivery_fixture.DeliveryTests._disable
 
     def setUp(self):
-        WORK.mkdir(parents=True, exist_ok=True)
         temporary = tempfile.TemporaryDirectory
         with patch.object(
             delivery_fixture.tempfile,
             "TemporaryDirectory",
-            side_effect=lambda: temporary(dir=WORK),
+            side_effect=lambda: temporary(),
         ):
             delivery_fixture.DeliveryTests.setUp(self)
 
@@ -311,7 +307,9 @@ class DisplayDocumentUpgradeTests(unittest.IsolatedAsyncioTestCase):
         private = _load(GOLDENS["private-pending"]).display_data
         with self.assertRaises(RenderingFailure):
             await renderer().render(
-                private, limits=DisplayLimits(1, 32), audience=DisplayAudience.PUBLIC
+                private,
+                limits=validate_contract(DisplayLimits(1, 32)),
+                audience=DisplayAudience.PUBLIC,
             )
 
         class Reader:
@@ -325,11 +323,11 @@ class DisplayDocumentUpgradeTests(unittest.IsolatedAsyncioTestCase):
         reader = Reader()
         with self.assertRaises(RenderingFailure):
             await renderer(asset_reader=reader).render(
-                public, limits=DisplayLimits(1, 32)
+                public, limits=validate_contract(DisplayLimits(1, 32))
             )
         rendered = await renderer(asset_reader=reader).render(
             replace(public, ordered_blocks=(public.ordered_blocks[5],)),
-            limits=DisplayLimits(1, 32),
+            limits=validate_contract(DisplayLimits(1, 32)),
         )
         self.assertEqual(rendered.resource_ids, ())
         self.assertTrue(
@@ -340,7 +338,9 @@ class DisplayDocumentUpgradeTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertLessEqual(len(reader.calls), 2)
         bounded = GenericDisplayRenderer(RenderingBounds(80, 4, 1, 1, 32, 32, 1, 2, 1))
-        output = await bounded.render(public, limits=DisplayLimits(1, 32))
+        output = await bounded.render(
+            public, limits=validate_contract(DisplayLimits(1, 32))
+        )
         self.assertLessEqual(len(output.text), 80)
         self.assertEqual(output.resource_ids, ())
 
@@ -376,4 +376,4 @@ class DisplayDocumentUpgradeTests(unittest.IsolatedAsyncioTestCase):
             original["fields"]["display_data"]["fields"]["schema_version"], "1.7.0"
         )
         with self.assertRaises(ValueError):
-            DisplayDocument("t", "s", (), schema_version="1.7.0")
+            validate_contract(DisplayDocument("t", "s", (), schema_version="1.7.0"))

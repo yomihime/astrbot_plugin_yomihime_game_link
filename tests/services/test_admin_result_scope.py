@@ -7,17 +7,18 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from ygl_test_subject.api.administration import AdminAuthorizationDenied, AdminOperation
-from ygl_test_subject.api.manifests import ConfigField
-from ygl_test_subject.api.services import (
-    ConfigFieldUpdate,
-    ConfigPatch,
-    ConfigPatchMode,
-    ConfigTarget,
-    PersistedConfigPatch,
-)
 from ygl_test_subject.core.admission import AdmissionController
 from ygl_test_subject.core.context_issuer import ContextIssuer
+from ygl_test_subject.core.contracts.administration import (
+    AdminAuthorizationDenied,
+    AdminOperation,
+)
+from ygl_test_subject.core.contracts.services import (
+    ConfigFieldUpdate,
+    ConfigPatch,
+    PersistedConfigPatch,
+)
+from ygl_test_subject.core.contracts.validation_boundary import validate_contract
 from ygl_test_subject.core.registry import Registry
 from ygl_test_subject.infrastructure.secret_store import SQLiteSecretStore
 from ygl_test_subject.infrastructure.sqlite.database import SQLiteDatabase
@@ -36,6 +37,8 @@ from ygl_test_subject.services.configuration import (
 from tests.fixtures.admin_authorization import native_grant
 from tests.services import test_ordinary_admin as ordinary_fixture
 from tests.services.test_config_records import _Codec
+from yomihime_game_link_sdk.declarations import ConfigField, ConfigUpdateMode
+from yomihime_game_link_sdk.services import ConfigTarget
 
 
 class AdminResultScopeTests(unittest.IsolatedAsyncioTestCase):
@@ -47,8 +50,8 @@ class AdminResultScopeTests(unittest.IsolatedAsyncioTestCase):
         self.repo = SQLiteConfigRepository(self.db)
         self.credentials = SQLiteAdminCredentialRepository(self.db)
         self.auth = AdminAuthorizationService(self.credentials)
-        self.target = ConfigTarget("fixture", "allowed/module")
-        self.other = ConfigTarget("fixture", "other/module")
+        self.target = validate_contract(ConfigTarget("fixture", "allowed/module"))
+        self.other = validate_contract(ConfigTarget("fixture", "other/module"))
         self.resources = {self.target: {"public"}}
         self.source = self.auth.register_source(
             "synthetic-source",
@@ -56,9 +59,9 @@ class AdminResultScopeTests(unittest.IsolatedAsyncioTestCase):
             operations={AdminOperation.READ_CONFIG, AdminOperation.UPDATE_CONFIG},
         )
         self.fields = (
-            ConfigField("public"),
-            ConfigField("unrelated"),
-            ConfigField("logs_secret", sensitive=True),
+            validate_contract(ConfigField("public")),
+            validate_contract(ConfigField("unrelated")),
+            validate_contract(ConfigField("logs_secret", sensitive=True)),
         )
 
         def seed(unit):
@@ -139,7 +142,7 @@ class AdminResultScopeTests(unittest.IsolatedAsyncioTestCase):
     def patch(self):
         return ConfigPatch(
             1,
-            (ConfigFieldUpdate("public", ConfigPatchMode.REPLACE, value="new"),),
+            (ConfigFieldUpdate("public", ConfigUpdateMode.REPLACE, value="new"),),
             self.fields,
         )
 
@@ -184,7 +187,7 @@ class AdminResultScopeTests(unittest.IsolatedAsyncioTestCase):
         # A direct repository write must have the same limited return boundary.
         persisted = PersistedConfigPatch(
             2,
-            (ConfigFieldUpdate("public", ConfigPatchMode.REPLACE, value="newer"),),
+            (ConfigFieldUpdate("public", ConfigUpdateMode.REPLACE, value="newer"),),
             self.fields,
             "scope-direct",
             self.target,
@@ -247,7 +250,7 @@ class AdminResultScopeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(native.secret_metadata), 1)
 
     async def test_outside_patch_or_read_grant_denied_before_secret_staging(self):
-        from ygl_test_subject.api.services import SecretMaterial
+        from ygl_test_subject.core.contracts.services import SecretMaterial
 
         write = await self.grant(AdminOperation.UPDATE_CONFIG)
         outside = ConfigPatch(
@@ -255,7 +258,7 @@ class AdminResultScopeTests(unittest.IsolatedAsyncioTestCase):
             (
                 ConfigFieldUpdate(
                     "logs_secret",
-                    ConfigPatchMode.REPLACE,
+                    ConfigUpdateMode.REPLACE,
                     secret=SecretMaterial(b"synthetic-forbidden"),
                 ),
             ),
@@ -287,7 +290,7 @@ class AdminResultScopeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(raised.exception.transitions, ())
 
     async def test_finalize_failure_returns_only_allowed_secret_metadata(self):
-        from ygl_test_subject.api.services import SecretMaterial
+        from ygl_test_subject.core.contracts.services import SecretMaterial
 
         from tests.services.test_config_records import _FinalizeFailureStore
 
@@ -329,7 +332,7 @@ class AdminResultScopeTests(unittest.IsolatedAsyncioTestCase):
             (
                 ConfigFieldUpdate(
                     "logs_secret",
-                    ConfigPatchMode.REPLACE,
+                    ConfigUpdateMode.REPLACE,
                     secret=SecretMaterial(b"synthetic-new-secret"),
                 ),
             ),

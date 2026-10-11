@@ -13,12 +13,8 @@ from datetime import UTC, datetime
 from typing import TypeVar
 from urllib.parse import urlencode
 
-from yomihime_sdk.api.services import (
-    CacheAccess,
-    HttpRequest,
-    SourceHttp,
-    SourceHttpError,
-)
+from yomihime_game_link_sdk.errors import SourceHttpError
+from yomihime_game_link_sdk.services import CacheAccess, HttpRequest, SourceHttp
 
 from ..query_resolution import SUPPORTED_REGIONS, CatalogEntry, ScopeCatalog
 

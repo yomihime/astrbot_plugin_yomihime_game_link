@@ -5,9 +5,10 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Mapping
 
-from ygl_test_subject.api.contexts import InvocationView
-from ygl_test_subject.api.display import DisplayDocument, FieldsBlock, TextBlock
-from ygl_test_subject.api.manifests import (
+from ygl_test_subject.core.contracts.validation_boundary import validate_contract
+
+from yomihime_game_link_sdk.contexts import InvocationView
+from yomihime_game_link_sdk.declarations import (
     CapabilityDescriptor,
     CapabilityEffect,
     CommandDescriptor,
@@ -17,9 +18,10 @@ from ygl_test_subject.api.manifests import (
     PackageManifest,
     ToolDescriptor,
 )
-from ygl_test_subject.api.results import CapabilityResult, FactDocument, ResultStatus
-from ygl_test_subject.api.services import ModuleHandlers
-from ygl_test_subject.api.version import CONTRACT_VERSION
+from yomihime_game_link_sdk.display import DisplayDocument, FieldsBlock, TextBlock
+from yomihime_game_link_sdk.results import CapabilityResult, FactDocument, ResultStatus
+from yomihime_game_link_sdk.services import ModuleHandlers
+from yomihime_game_link_sdk.version import MODULE_ABI_VERSION
 
 OFFLINE_DATA = {
     "demo": {"label": "离线样例 demo", "value": "固定测试数据"},
@@ -56,11 +58,13 @@ class OfflineCapabilityHandler:
             record = OFFLINE_DATA.get(item)
             if record is None:
                 facts = {"item": item, "found": False}
-                document = DisplayDocument(
-                    "离线样例查询",
-                    "demo",
-                    (TextBlock(f"未找到离线样例：{item}"),),
-                    sources=("offline test fixture",),
+                document = validate_contract(
+                    DisplayDocument(
+                        "离线样例查询",
+                        "demo",
+                        (validate_contract(TextBlock(f"未找到离线样例：{item}")),),
+                        sources=("offline test fixture",),
+                    )
                 )
             else:
                 facts = {
@@ -69,30 +73,38 @@ class OfflineCapabilityHandler:
                     "label": record["label"],
                     "value": record["value"],
                 }
-                document = DisplayDocument(
-                    "离线样例查询",
-                    "demo",
-                    (
-                        TextBlock("这是固定的离线测试数据。"),
-                        FieldsBlock(record),
-                    ),
-                    sources=("offline test fixture",),
+                document = validate_contract(
+                    DisplayDocument(
+                        "离线样例查询",
+                        "demo",
+                        (
+                            validate_contract(TextBlock("这是固定的离线测试数据。")),
+                            validate_contract(FieldsBlock(record)),
+                        ),
+                        sources=("offline test fixture",),
+                    )
                 )
         elif self.capability_id == "status":
             facts = {"status": "ready"}
-            document = DisplayDocument(
-                "离线样例状态",
-                "demo",
-                (TextBlock("离线样例模块已就绪。"),),
-                sources=("offline test fixture",),
+            document = validate_contract(
+                DisplayDocument(
+                    "离线样例状态",
+                    "demo",
+                    (validate_contract(TextBlock("离线样例模块已就绪。")),),
+                    sources=("offline test fixture",),
+                )
             )
         else:  # pragma: no cover - registration only supplies the two IDs above.
             raise AssertionError("unknown offline test capability")
-        return CapabilityResult(
-            f"offline-{self.capability_id}",
-            ResultStatus.SUCCESS,
-            document=document,
-            model_facts=FactDocument(facts, sources=("offline test fixture",)),
+        return validate_contract(
+            CapabilityResult(
+                f"offline-{self.capability_id}",
+                ResultStatus.SUCCESS,
+                document=document,
+                model_facts=validate_contract(
+                    FactDocument(facts, sources=("offline test fixture",))
+                ),
+            )
         )
 
 
@@ -103,59 +115,79 @@ def build_package(
 ) -> tuple[PackageManifest, ModuleHandlers]:
     """Build the fixed sample package and its actual capability handlers."""
 
-    lookup = CapabilityDescriptor(
-        "lookup",
-        {
-            "type": "object",
-            "properties": {"item": {"type": "string", "minLength": 1}},
-            "required": ["item"],
-            "additionalProperties": False,
-        },
-        InvocationPolicy.NATURAL_LANGUAGE_ALLOWED,
-        CapabilityEffect.READ_ONLY,
+    lookup = validate_contract(
+        CapabilityDescriptor(
+            "lookup",
+            {
+                "type": "object",
+                "properties": {"item": {"type": "string", "minLength": 1}},
+                "required": ["item"],
+                "additionalProperties": False,
+            },
+            InvocationPolicy.NATURAL_LANGUAGE_ALLOWED,
+            CapabilityEffect.READ_ONLY,
+        )
     )
-    status = CapabilityDescriptor(
-        "status",
-        {
-            "type": "object",
-            "properties": {},
-            "required": [],
-            "additionalProperties": False,
-        },
-        InvocationPolicy.COMMAND_ONLY,
-        CapabilityEffect.READ_ONLY,
+    status = validate_contract(
+        CapabilityDescriptor(
+            "status",
+            {
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": False,
+            },
+            InvocationPolicy.COMMAND_ONLY,
+            CapabilityEffect.READ_ONLY,
+        )
     )
-    module = ModuleManifest(
-        "demo",
-        "demo",
-        ModuleCategory.GAME,
-        "tests.fixtures.minimal_module:build_package",
-        "1.0.0",
-        (lookup, status),
-        commands=(
-            CommandDescriptor("查询", "lookup", {"item": "item"}, "查询固定离线样例"),
-            CommandDescriptor("状态", "status", {}, "查看离线样例状态"),
-        ),
-        tools=(
-            ToolDescriptor("lookup", "lookup", {"item": "item"}, "查询固定离线样例"),
-        ),
+    module = validate_contract(
+        ModuleManifest(
+            "demo",
+            "demo",
+            ModuleCategory.GAME,
+            "tests.fixtures.minimal_module:build_package",
+            "1.0.0",
+            (lookup, status),
+            commands=(
+                validate_contract(
+                    CommandDescriptor(
+                        "查询", "lookup", {"item": "item"}, "查询固定离线样例"
+                    )
+                ),
+                validate_contract(
+                    CommandDescriptor("状态", "status", {}, "查看离线样例状态")
+                ),
+            ),
+            tools=(
+                validate_contract(
+                    ToolDescriptor(
+                        "lookup", "lookup", {"item": "item"}, "查询固定离线样例"
+                    )
+                ),
+            ),
+        )
     )
-    package = PackageManifest(
-        "sample",
-        "1.0.0",
-        CONTRACT_VERSION,
-        (module,),
-        "Core-B02 offline tests",
-        "MIT",
-        "offline test fixture",
+    package = validate_contract(
+        PackageManifest(
+            "sample",
+            "1.0.0",
+            MODULE_ABI_VERSION,
+            (module,),
+            "Core-B02 offline tests",
+            "MIT",
+            "offline test fixture",
+        )
     )
-    handlers = ModuleHandlers(
-        capabilities={
-            "lookup": lookup_handler or OfflineCapabilityHandler("lookup"),
-            "status": status_handler or OfflineCapabilityHandler("status"),
-        },
-        collectors={},
-        evaluators={},
+    handlers = validate_contract(
+        ModuleHandlers(
+            capabilities={
+                "lookup": lookup_handler or OfflineCapabilityHandler("lookup"),
+                "status": status_handler or OfflineCapabilityHandler("status"),
+            },
+            collectors={},
+            evaluators={},
+        )
     )
     return package, handlers
 

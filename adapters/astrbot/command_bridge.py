@@ -9,9 +9,10 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Protocol
 
-from yomihime_sdk.api.manifests import CapabilityDescriptor, CommandDescriptor
-from yomihime_sdk.api.validation import validate_parameters
+from yomihime_game_link_sdk.declarations import CapabilityDescriptor, CommandDescriptor
 
+from ...core.contracts.validation import validate_parameters
+from ...core.contracts.validation_boundary import validate_contract
 from ...core.help_catalog import HelpCatalog
 from ...core.registry import (
     RegisteredModule,
@@ -163,6 +164,7 @@ class AstrBotCommandBridge:
 
     @staticmethod
     def _parameter_hint(module: RegisteredModule, command: CommandDescriptor) -> str:
+        validate_contract(command)
         return f"参数无效。请使用 /ygl {module.manifest.route} {command.operation_path} help 查看参数帮助。"
 
     def _render(self, document) -> CommandHelp:
@@ -290,6 +292,8 @@ class AstrBotCommandBridge:
         capability: CapabilityDescriptor,
         values: list[str],
     ) -> dict[str, object] | None:
+        validate_contract(command)
+        validate_contract(capability)
         mapping = tuple(command.parameter_mapping.items())
         schema = capability.input_schema
         properties = schema["properties"]

@@ -11,8 +11,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Mapping
 
-from yomihime_sdk.api.manifests import validate_page_resource_path
-
+from ...core.contracts.manifests import validate_page_resource_path
 from ...extensions.discovery import DiscoveredPackage, discover_packages
 from ...extensions.page_resources import capture_page_resources
 from ...extensions.source_snapshot import (

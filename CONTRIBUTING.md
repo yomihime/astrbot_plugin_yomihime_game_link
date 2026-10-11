@@ -10,8 +10,8 @@ CI 使用 Python 3.13.9，并固定以下构建与检查工具：
 - wheel 0.45.1
 - Ruff 0.12.0
 - 运行依赖按 `requirements.txt` 的范围或固定版本安装（含 tzdata）；新旧依赖端点的实测不代表区间每个版本均已验证
-- 离线 Host 合同测试依赖单独放在 `requirements-test.txt`：PyJWT 2.10.1、FastAPI 0.135.2、Starlette 0.52.1、HTTPX 0.28.1；它们不加入插件运行依赖。其余传递依赖由 pip 解析，此文件不是完整依赖锁定文件
-- Node.js 24 仅用于 FF14 页面状态/DOM 合成测试，无 npm 依赖，不是插件运行依赖
+- 离线 Host 合同测试依赖单独放在 `requirements-test.txt`：PyJWT 2.10.1、FastAPI 0.135.2、Starlette 0.52.1、HTTPX 0.28.1、Quart 0.20.0、jsonschema 4.23.0；它们不加入插件运行依赖。其余传递依赖由 pip 解析，此文件不是完整依赖锁定文件
+- Node.js 24 用于前端类型检查、构建及页面状态/DOM 合成测试；前端依赖由 `pages/frontend/package.json` 和锁文件声明，使用 `npm ci --prefix pages/frontend` 安装，不是插件运行依赖
 
 主测试与发布构建使用 Python 3.13.9。固定 AstrBot v4.28.2 的 Python 要求为 `>=3.12`，SDK 的要求为 `>=3.11`；Host 合同测试因此要求 Python 3.12 或以上，并不提高 SDK 的最低版本。可另建 Python 3.12.14 虚拟环境验证 FF14/Host 合同；发布构建仍使用 3.13.9。
 
@@ -56,7 +56,7 @@ python scripts/build_release.py
 脚本要求 Python 3.13 和固定版本的 setuptools、wheel。它从临时 SDK 源码副本构建并验证固定的 SDK wheel，然后生成：
 
 - `dist/astrbot_plugin_yomihime_game_link-v0.1.2.zip`：上传到 AstrBot WebUI 的插件包；
-- `dist/yomihime_module_sdk-1.4.0-py3-none-any.whl`：独立 SDK 工件，不是插件 ZIP；
+- `dist/yomihime_game_link_sdk-0.1.0a6-py3-none-any.whl`：独立 SDK 工件，不是插件 ZIP；
 - `dist/SHA256SUMS`：上述工件的摘要。
 
 可用 `--tag v0.1.2` 校验 tag 必须与 `metadata.yaml` 中的版本相同。该参数只做版本校验，不创建 tag。发布工件的下载和安装步骤见[README](https://github.com/yomihime/astrbot_plugin_yomihime_game_link/blob/master/README.md)。

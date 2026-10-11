@@ -27,7 +27,7 @@ from ygl_test_subject.modules.ff14.query_resolution import (
     structured_parameters,
 )
 
-from yomihime_sdk.api.results import ErrorCode
+from yomihime_game_link_sdk.results import ErrorCode
 
 from .test_items import _FakeHttp
 
@@ -113,7 +113,7 @@ class NaturalConfirmationTests(unittest.TestCase):
         self.now = 0
         self.registry = CandidateRegistry(clock=lambda: self.now)
         self.owner = TrustedOwner("user", "session", "llm_tool:adapter")
-        self.event = object()
+        self.event = "source-ref"
         self.query = MarketQueryResolver(catalog()).parse(
             {"query": "牛排", "server": "71001", "quality": "hq", "intent": "min"},
             QueryDefaults("cn", 2, 3),
@@ -121,7 +121,7 @@ class NaturalConfirmationTests(unittest.TestCase):
         self.publish()
 
     def publish(self, names=("犎牛牛排", "另一种牛排")):
-        ticket = self.registry.begin(self.owner, source_event=self.event)
+        ticket = self.registry.begin(self.owner, source_ref=self.event)
         self.batch = self.registry.publish(
             ticket,
             self.query,
@@ -129,13 +129,13 @@ class NaturalConfirmationTests(unittest.TestCase):
             False,
         )
 
-    def choose(self, text, *, event=None, owner=None, item_id=90001):
+    def choose(self, text, *, event_ref=None, owner=None, item_id=90001):
         return self.registry.choose_confirmed(
             owner or self.owner,
             self.batch.batch_id,
             self.batch.generation,
             item_id,
-            event=event or object(),
+            event_ref=event_ref or "new-ref",
             text=text,
         )
 
@@ -186,7 +186,7 @@ class NaturalConfirmationTests(unittest.TestCase):
             with self.subTest(text=text), self.assertRaises(QueryResolutionError):
                 self.choose(text)
         with self.assertRaises(QueryResolutionError):
-            self.choose("犎牛牛排", event=self.event)
+            self.choose("犎牛牛排", event_ref=self.event)
         with self.assertRaises(QueryResolutionError):
             self.choose("犎牛牛排", item_id=90002)
         self.assertEqual(self.choose("犎牛牛排那个。").item_id, 90001)
@@ -215,12 +215,12 @@ class NaturalConfirmationTests(unittest.TestCase):
             "刚才那个",
         ):
             with self.subTest(text=text), self.assertRaises(QueryResolutionError):
-                self.registry.tool_query(self.owner, object(), text, "犎牛牛排")
+                self.registry.tool_query(self.owner, "new-ref", text, "犎牛牛排")
         self.publish()
         self.assertIsNone(
-            self.registry.tool_query(self.owner, object(), "新矿石多少钱", "新矿石")
+            self.registry.tool_query(self.owner, "new-ref", "新矿石多少钱", "新矿石")
         )
-        self.registry.begin(self.owner, source_event=object())
+        self.registry.begin(self.owner, source_ref="new-ref")
         with self.assertRaises(QueryResolutionError):
             self.choose("犎牛牛排")
 
@@ -259,7 +259,7 @@ class NaturalConfirmationTests(unittest.TestCase):
                 self.subTest(text=text, query=query),
                 self.assertRaises(QueryResolutionError),
             ):
-                self.registry.tool_query(self.owner, object(), text, query)
+                self.registry.tool_query(self.owner, "new-ref", text, query)
         self.assertEqual(self.choose("犎牛牛排那个。").scope, self.query.scope)
 
     def test_original_word_only_same_event_is_retry_new_questions_are_fresh(self):
@@ -268,15 +268,15 @@ class NaturalConfirmationTests(unittest.TestCase):
             self.batch,
         )
         self.assertIsNone(
-            self.registry.tool_query(self.owner, object(), "牛排国际服什么价？", "牛排")
+            self.registry.tool_query(self.owner, "new-ref", "牛排国际服什么价？", "牛排")
         )
         self.assertIsNone(
             self.registry.tool_query(
-                self.owner, object(), "牛排国服哪里最便宜？", "牛排"
+                self.owner, "new-ref", "牛排国服哪里最便宜？", "牛排"
             )
         )
         with self.assertRaises(QueryResolutionError):
-            self.registry.tool_query(self.owner, object(), "牛排？", "牛排")
+            self.registry.tool_query(self.owner, "new-ref", "牛排？", "牛排")
         self.assertEqual(self.choose("犎牛牛排那个。").scope, self.query.scope)
 
     def test_all_positional_denial_messages_refuse_before_begin_in_every_state(self):
@@ -296,12 +296,12 @@ class NaturalConfirmationTests(unittest.TestCase):
                             self.batch.batch_id,
                             self.batch.generation,
                             90001,
-                            event=object(),
+                            event_ref="new-ref",
                             text="犎牛牛排",
                             retain=True,
                         )
                     with self.assertRaises(QueryResolutionError):
-                        self.registry.tool_query(self.owner, object(), text, text)
+                        self.registry.tool_query(self.owner, "new-ref", text, text)
                     if state == "active":
                         self.assertIs(self.registry._current(ticket).batch, self.batch)
                         self.assertEqual(
@@ -330,7 +330,7 @@ class NaturalConfirmationTests(unittest.TestCase):
             ("我说不要犎牛", "不要犎牛"),
         ):
             with self.subTest(text=text), self.assertRaises(QueryResolutionError):
-                self.registry.tool_query(self.owner, object(), text, query)
+                self.registry.tool_query(self.owner, "new-ref", text, query)
         for name in (
             "第七天堂牛排",
             "第七个勇士徽章",
@@ -338,7 +338,7 @@ class NaturalConfirmationTests(unittest.TestCase):
             "前者的矿石",
         ):
             self.assertIsNone(
-                self.registry.tool_query(self.owner, object(), f"查询{name}价格", name)
+                self.registry.tool_query(self.owner, "new-ref", f"查询{name}价格", name)
             )
         self.publish(("第7个", "另一种牛排"))
         with self.assertRaises(QueryResolutionError):
@@ -807,6 +807,35 @@ class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(
                     all(request.path == "/api/search" for request in http.requests)
                 )
+
+    async def test_s2a_message_guard_refuses_after_config_and_search_without_publish(self):
+        from yomihime_game_link_sdk.errors import AccessDenied
+        for boundary in ("config", "search"):
+            with self.subTest(boundary=boundary):
+                registry = CandidateRegistry(clock=lambda: self.now)
+                coordinator = QueryCoordinator(self.coordinator.resolver, registry)
+                effects = []
+                original_publish, original_finish = registry.publish, registry.finish
+                def publish(*args, **kwargs):
+                    effects.append("publish")
+                    return original_publish(*args, **kwargs)
+                def finish(*args, **kwargs):
+                    effects.append("finish")
+                    return original_finish(*args, **kwargs)
+                registry.publish, registry.finish = publish, finish
+                calls = 0
+                async def guard():
+                    nonlocal calls
+                    calls += 1
+                    if calls == (1 if boundary == "config" else 2):
+                        raise AccessDenied("source_revoked")
+                with self.assertRaises(AccessDenied):
+                    await coordinator.resolve(
+                        self.owner, {"query": "Synthetic"}, self.services,
+                        _Search(), guard=guard
+                    )
+                self.assertEqual(effects, [])
+                self.assertIsNone(next(iter(registry._pending.values())).batch)
 
     async def test_resource_bounds_expiry_and_restart(self):
         registry = CandidateRegistry(

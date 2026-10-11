@@ -14,12 +14,13 @@ from ygl_test_subject.adapters.astrbot.bundled import (
     BundledExtensionError,
     install_bundled_ff14,
 )
+from ygl_test_subject.core.contracts.validation_boundary import validate_contract
 from ygl_test_subject.extensions.discovery import discover_packages
 from ygl_test_subject.extensions.factory_resolver import FilesystemFactorySource
 from ygl_test_subject.extensions.loader import CandidateState, ExtensionCandidate
 
 from scripts.build_release import build_release, build_sdk_wheel
-from yomihime_sdk.api.services import (
+from yomihime_game_link_sdk.services import (
     ConfigSnapshot,
     HealthStatus,
     ModuleFactory,
@@ -67,8 +68,8 @@ class BundledExtensionTests(unittest.IsolatedAsyncioTestCase):
         current_bytes = manifest_path.read_bytes()
         current = json.loads(current_bytes)
         old = json.loads(current_bytes)
-        # A real legacy declaration: R5 native fields/selection/tools/origins
-        # did not exist in the historical package being upgraded.
+        # A previous-shaped declaration admitted under the current ABI.
+        # Historical module ABI versions are intentionally not compatible.
         old_module = old["modules"][0]
         old_module.pop("display")
         old_module["tools"] = []
@@ -82,7 +83,7 @@ class BundledExtensionTests(unittest.IsolatedAsyncioTestCase):
             if capability["capability_id"] == "ff14.market.query":
                 for field in ("query", "server", "dc", "region", "quality", "intent"):
                     capability["input_schema"]["properties"].pop(field)
-        old["contract_version"] = "1.3.0"
+        old["contract_version"] = "2.0"
         old["modules"][0]["pages"] = []
         public_ids = {
             "item.lookup",
@@ -113,13 +114,13 @@ class BundledExtensionTests(unittest.IsolatedAsyncioTestCase):
                 if path.is_file()
             },
         )
-        self.assertEqual(current["contract_version"], "1.8.0")
+        self.assertEqual(current["contract_version"], "2.0")
         self.assertEqual(
             (replacement.package_dir / "yomihime.manifest.json").read_bytes(),
             current_bytes,
         )
         legacy = discover_packages(previous.extension_root)[0].manifest
-        self.assertEqual(legacy.contract_version, "1.3.0")
+        self.assertEqual(legacy.contract_version, "2.0")
         self.assertEqual(legacy.modules[0].tools, ())
         self.assertEqual(
             {capability.capability_id for capability in legacy.modules[0].capabilities},
@@ -136,10 +137,9 @@ class BundledExtensionTests(unittest.IsolatedAsyncioTestCase):
         for capability in old["modules"][0]["capabilities"]:
             if capability["capability_id"] in public_ids:
                 capability["invocation_policy"] = "command_and_public_web"
-        old["contract_version"] = "1.5.0"
+        old["contract_version"] = "2.0"
         old["modules"][0]["pages"] = current["modules"][0]["pages"]
-        # Retain the 1.5 compatibility fixture as well: it remains a different
-        # immutable slot with no R5 field or tool declaration.
+        # A second current-ABI declaration remains a separate immutable slot.
         manifest_path.write_text(
             json.dumps(old, ensure_ascii=False, indent=2), encoding="utf8"
         )
@@ -149,7 +149,7 @@ class BundledExtensionTests(unittest.IsolatedAsyncioTestCase):
             (previous.extension_root, replacement.extension_root),
         )
         package15 = discover_packages(legacy15.extension_root)[0].manifest
-        self.assertEqual(package15.contract_version, "1.5.0")
+        self.assertEqual(package15.contract_version, "2.0")
         self.assertEqual(package15.modules[0].tools, ())
         market15 = next(
             capability
@@ -196,16 +196,18 @@ class BundledExtensionTests(unittest.IsolatedAsyncioTestCase):
             "config",
             AsyncMock(
                 current=AsyncMock(
-                    return_value=ConfigSnapshot(
-                        1,
-                        values
-                        if values is not None
-                        else {
-                            "core_defaults": {"default_region": "cn"},
-                            "ff14_calendar_default_days": 7,
-                            "ff14_calendar_default_timezone": "Asia/Shanghai",
-                            "ff14_calendar_default_delivery_time": "08:00",
-                        },
+                    return_value=validate_contract(
+                        ConfigSnapshot(
+                            1,
+                            values
+                            if values is not None
+                            else {
+                                "core_defaults": {"default_region": "cn"},
+                                "ff14_calendar_default_days": 7,
+                                "ff14_calendar_default_timezone": "Asia/Shanghai",
+                                "ff14_calendar_default_delivery_time": "08:00",
+                            },
+                        )
                     )
                 )
             ),

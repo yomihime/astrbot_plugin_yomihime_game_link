@@ -10,18 +10,22 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 
-from ..api.manifests import ConfigField
-from ..api.services import ConfigSnapshot, ConfigTarget
-from ..api.storage import freeze_json
+from yomihime_game_link_sdk.declarations import ConfigField
+from yomihime_game_link_sdk.services import ConfigSnapshot, ConfigTarget
+
+from ..core.contracts.storage import freeze_json
+from ..core.contracts.validation_boundary import validate_contract
 from .configuration import ConfigValueValidator, validate_configuration_value
 
 CORE_MODULE_ID = "game_link/core"
 CORE_DEFAULTS_FIELD = "core_defaults"
-DEFAULT_REGION = ConfigField(
-    "default_region",
-    default="cn",
-    description="默认查询区域",
-    value_schema={"type": "string", "enum": ["cn", "global"]},
+DEFAULT_REGION = validate_contract(
+    ConfigField(
+        "default_region",
+        default="cn",
+        description="默认查询区域",
+        value_schema={"type": "string", "enum": ["cn", "global"]},
+    )
 )
 CORE_CONFIG_FIELDS = (DEFAULT_REGION,)
 
@@ -72,6 +76,7 @@ def plan_configuration_rollback(
     After any new-authority write the caller must export current defaults before
     restoring the legacy package; this plan never proposes a whole-database restore.
     """
+    validate_contract(fields)
     declarations = tuple(fields)
     if not declarations or any(
         not isinstance(item, ConfigField) or item.sensitive for item in declarations
@@ -103,6 +108,7 @@ def select_configuration_value(
     Explicit invalid new data always rejects. Invalid legacy data only rejects when
     there is no valid new value. Neither input is altered or erased for rollback.
     """
+    validate_contract(field)
     if field.sensitive:
         raise ValueError("selection requires an ordinary config declaration")
     if not isinstance(new_values, Mapping) or not isinstance(legacy_values, Mapping):
@@ -151,7 +157,7 @@ class CoreDefaultsView:
             legacy_defaults = {}
         if not isinstance(legacy_defaults, Mapping):
             raise TypeError("legacy Core defaults require a mapping")
-        legacy = ConfigSnapshot(1, legacy_defaults).values
+        legacy = validate_contract(ConfigSnapshot(1, legacy_defaults)).values
         if set(legacy) - {"default_region"}:
             raise ValueError("legacy Core defaults contain an undeclared field")
 
@@ -163,15 +169,17 @@ class CoreDefaultsView:
                 else legacy
             )
             selected = select_configuration_value(DEFAULT_REGION, raw.values, old)
-            return ConfigSnapshot(
-                raw.revision,
-                {
-                    "default_region": selected.value,
-                    "origin": selected.origin,
-                    "conflict": selected.conflict,
-                    "raw_present": selected.new_present,
-                },
-                target=raw.target,
+            return validate_contract(
+                ConfigSnapshot(
+                    raw.revision,
+                    {
+                        "default_region": selected.value,
+                        "origin": selected.origin,
+                        "conflict": selected.conflict,
+                        "raw_present": selected.new_present,
+                    },
+                    target=raw.target,
+                )
             )
 
         object.__setattr__(self, "_CoreDefaultsView__current", current)
@@ -200,14 +208,19 @@ class CoreDefaultsConfigView:
                 core = await defaults.current()
                 if CORE_DEFAULTS_FIELD in module.values:
                     raise ValueError("module config contains a reserved field")
-                return ConfigSnapshot(
-                    module.revision,
-                    {
-                        **module.values,
-                        CORE_DEFAULTS_FIELD: {**core.values, "revision": core.revision},
-                    },
-                    module.secret_metadata,
-                    module.target,
+                return validate_contract(
+                    ConfigSnapshot(
+                        module.revision,
+                        {
+                            **module.values,
+                            CORE_DEFAULTS_FIELD: {
+                                **core.values,
+                                "revision": core.revision,
+                            },
+                        },
+                        module.secret_metadata,
+                        module.target,
+                    )
                 )
 
         object.__setattr__(self, "_CoreDefaultsConfigView__current", current)
@@ -225,4 +238,4 @@ class CoreDefaultsConfigView:
 
 
 def core_config_target(principal_id: str) -> ConfigTarget:
-    return ConfigTarget(principal_id, CORE_MODULE_ID)
+    return validate_contract(ConfigTarget(principal_id, CORE_MODULE_ID))

@@ -25,39 +25,36 @@ from uuid import uuid4
 # outside the plugin directory. Pin imports to this package's own SDK before
 # importing any host/Core code; never inherit a process-global SDK by accident.
 _PLUGIN_ROOT = Path(__file__).resolve().parents[1]
-_SDK_VERSION = "1.8.0"
-_SDK_CONTRACT_REVISION = "MODULE-DISPLAY-01"
+_SDK_VERSION = "0.1.0a6"
+_SDK_MODULE_ABI_VERSION = "2.0"
 if str(_PLUGIN_ROOT) not in sys.path:
     sys.path.insert(0, str(_PLUGIN_ROOT))
 try:
-    _sdk = importlib.import_module("yomihime_sdk")
-    _sdk_version = importlib.import_module("yomihime_sdk.api.version")
+    _sdk = importlib.import_module("yomihime_game_link_sdk")
+    _sdk_version = importlib.import_module("yomihime_game_link_sdk.version")
     _sdk_root = Path(_sdk.__file__).resolve().parent
     if (
-        _sdk_root != (_PLUGIN_ROOT / "yomihime_sdk").resolve()
+        _sdk_root != (_PLUGIN_ROOT / "yomihime_game_link_sdk").resolve()
         or _sdk.__version__ != _SDK_VERSION
-        or _sdk_version.CONTRACT_VERSION != _SDK_VERSION
-        or _sdk_version.CONTRACT_REVISION != _SDK_CONTRACT_REVISION
+        or _sdk_version.MODULE_ABI_VERSION != _SDK_MODULE_ABI_VERSION
     ):
         raise RuntimeError("unsupported plugin-local SDK")
 except Exception:
     raise RuntimeError("the pinned plugin-local SDK is unavailable") from None
 
+from yomihime_game_link_sdk.declarations import ConfigUpdateMode
+from yomihime_game_link_sdk.display import DisplayLimits
+
 from ..adapters.astrbot.bundled import install_bundled_ff14
 from ..adapters.astrbot.runtime import PLUGIN_NAME
 from ..adapters.astrbot.trusted_assembly import assemble_reviewed
-from ..api.administration import (
+from ..core.contracts.administration import (
     AdminAuthorizationContext,
     AdminOperation,
     ConfigSummary,
 )
-from ..api.display import DisplayLimits
-from ..api.services import (
-    ConfigFieldUpdate,
-    ConfigPatch,
-    ConfigPatchMode,
-    SecretMaterial,
-)
+from ..core.contracts.services import ConfigFieldUpdate, ConfigPatch, SecretMaterial
+from ..core.contracts.validation_boundary import validate_contract
 from ..extensions.factory_resolver import (
     ReviewedInventoryFactorySource,
     ReviewedSupportLease,
@@ -166,7 +163,7 @@ def _new_core(
                 max_members_per_batch=8,
             )
         ),
-        display_limits=DisplayLimits(2, 4096),
+        display_limits=validate_contract(DisplayLimits(2, 4096)),
         message_port=_NoMessagePort(),
         admin_context_validator=authority.validate,
         host_ingress_validator=lambda *_args: False,
@@ -269,7 +266,7 @@ async def _configure(
                 ).encode("utf-8")
                 update = ConfigFieldUpdate(
                     credential_alias,
-                    ConfigPatchMode.REPLACE,
+                    ConfigUpdateMode.REPLACE,
                     secret=SecretMaterial(payload),
                 )
             else:
@@ -280,7 +277,7 @@ async def _configure(
                     )
                 if clear_confirmation != "CLEAR":
                     raise ValueError("clear confirmation did not match")
-                update = ConfigFieldUpdate(credential_alias, ConfigPatchMode.CLEAR)
+                update = ConfigFieldUpdate(credential_alias, ConfigUpdateMode.CLEAR)
 
             core.extension_runtime.scan(installation.extension_root)
             failures = await core.admin_operations.recover_discovered_configuration()

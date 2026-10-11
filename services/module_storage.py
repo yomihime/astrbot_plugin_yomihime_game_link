@@ -7,8 +7,7 @@ import os
 import stat
 from pathlib import Path
 
-from yomihime_sdk.api.storage import ModuleStoragePaths
-
+from ..core.contracts.storage import ModuleStoragePaths
 from ..core.ports import validate_module_id
 
 

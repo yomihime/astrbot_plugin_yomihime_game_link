@@ -16,7 +16,16 @@ from pathlib import Path
 from typing import Protocol
 from uuid import uuid4
 
-from ..api.administration import (
+from yomihime_game_link_sdk.contexts import InvocationView
+from yomihime_game_link_sdk.declarations import ModuleManifest, PackageManifest
+from yomihime_game_link_sdk.services import (
+    ConfigTarget,
+    ModuleFactory,
+    ModuleHandlers,
+    ModuleInstance,
+)
+
+from ..core.contracts.administration import (
     AdminAuthorizationContext,
     AdminAuthorizationDenied,
     AdminAuthorizationGrant,
@@ -25,11 +34,9 @@ from ..api.administration import (
     ModuleLifecycle,
     ModuleStatus,
 )
-from ..api.contexts import InvocationView
-from ..api.manifests import ModuleManifest, PackageManifest
-from ..api.services import ConfigTarget, ModuleFactory, ModuleHandlers, ModuleInstance
+from ..core.contracts.validation_boundary import validate_contract
 from ..core.health import HealthResolver
-from ..core.lifecycle import LifecycleController, LifecycleError
+from ..core.lifecycle import LifecycleController, LifecycleError, _ServiceLifetime
 from ..core.ports import AdminAuthorizationPort, RevisionConflict, RunIdentity
 from ..core.registry import Registry
 from ..extensions.discovery import (
@@ -350,6 +357,7 @@ class ExtensionRuntime:
         authorization: AdminAuthorizationContext | None = None,
     ) -> ModuleStatus:
         """Authorize and serialize one module transition, never the package."""
+        validate_contract(invocation)
         if type(enabled) is not bool:
             raise TypeError("enabled must be bool")
         if (
@@ -1142,17 +1150,32 @@ class ExtensionRuntime:
                     raise ExtensionRuntimeError("factory entry is invalid")
                 local_id = module.module_id
                 module_id = f"{manifest.package_id}/{local_id}"
-                services = self.module_services.for_candidate(module_id, module)
-                instance = await factory.create(services)
+                lifetime = _ServiceLifetime(
+                    (manifest.package_id, module_id, flight.operation_id)
+                )
+                services = self.module_services.for_candidate(
+                    module_id, module, service_lifetime=lifetime
+                )
+                try:
+                    instance = await factory.create(services)
+                except BaseException:
+                    lifetime.revoke()
+                    raise
                 # Ownership is transferred before validation or cancellation
                 # checks so a late create result can never be abandoned.
                 flight.adopted_module_ids.append(module_id)
-                module_handlers = self.lifecycle.adopt_candidate(
-                    manifest.package_id,
-                    module,
-                    flight.operation_id,
-                    instance,
-                )
+                try:
+                    module_handlers = self.lifecycle.adopt_candidate(
+                        manifest.package_id,
+                        module,
+                        flight.operation_id,
+                        instance,
+                        service_lifetime=lifetime,
+                    )
+                except BaseException:
+                    if not self.lifecycle.owns_service_lifetime(lifetime):
+                        lifetime.revoke()
+                    raise
                 instances[module_id] = instance
                 handlers[local_id] = module_handlers
                 self._check_build_live(flight)
@@ -1293,14 +1316,32 @@ class ExtensionRuntime:
             factory = built.lease.resolve(module.factory_entry)
             if not isinstance(factory, ModuleFactory):
                 raise ExtensionRuntimeError("factory entry is invalid")
-            services = self.module_services.for_candidate(operation.module_id, module)
-            instance = await factory.create(services)
+            lifetime = _ServiceLifetime(
+                (operation.package_id, operation.module_id, install_id)
+            )
+            services = self.module_services.for_candidate(
+                operation.module_id, module, service_lifetime=lifetime
+            )
+            try:
+                instance = await factory.create(services)
+            except BaseException:
+                lifetime.revoke()
+                raise
             # Adopt synchronously as the first step after a possibly late
             # factory return; cancellation is checked only after ownership.
             flight.adopted_module_ids.append(operation.module_id)
-            handlers = self.lifecycle.adopt_candidate(
-                operation.package_id, module, install_id, instance
-            )
+            try:
+                handlers = self.lifecycle.adopt_candidate(
+                    operation.package_id,
+                    module,
+                    install_id,
+                    instance,
+                    service_lifetime=lifetime,
+                )
+            except BaseException:
+                if not self.lifecycle.owns_service_lifetime(lifetime):
+                    lifetime.revoke()
+                raise
             if operation.cancel_requested:
                 raise asyncio.CancelledError
             await self._reauthorize_build(flight)
@@ -1717,14 +1758,15 @@ class ExtensionRuntime:
         context: AdminAuthorizationContext | None,
         module_id: str,
     ) -> AdminAuthorizationGrant:
+        validate_contract(invocation)
         grant = await self.authorization.authorize(
             AdminOperation.SET_ENABLED,
             invocation=invocation,
             context=context,
             resources={
-                ConfigTarget(self.module_services._config_principal_id, module_id): {
-                    "__module_lifecycle__"
-                }
+                validate_contract(
+                    ConfigTarget(self.module_services._config_principal_id, module_id)
+                ): {"__module_lifecycle__"}
             },
         )
         if (
@@ -1741,6 +1783,7 @@ class ExtensionRuntime:
         generation: int,
         module_id: str,
     ) -> AdminAuthorizationGrant:
+        validate_contract(invocation)
         grant = await self._authorize(invocation, context, module_id)
         if grant.generation != generation:
             raise AdminAuthorizationDenied
@@ -2067,6 +2110,7 @@ class ExtensionRuntime:
 
     @staticmethod
     def _manifest_module(manifest: PackageManifest, module_id: str) -> ModuleManifest:
+        validate_contract(manifest)
         expected = f"{manifest.package_id}/"
         if not module_id.startswith(expected):
             raise ExtensionCandidateUnavailable("module does not belong to package")

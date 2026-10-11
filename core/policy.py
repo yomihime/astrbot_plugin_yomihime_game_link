@@ -7,17 +7,20 @@ declaration fit the small public/read-only surface implemented in B02.
 
 from __future__ import annotations
 
-from ..api.contexts import InvocationOrigin
-from ..api.manifests import (
+from yomihime_game_link_sdk.contexts import InvocationOrigin
+from yomihime_game_link_sdk.declarations import (
     CapabilityDescriptor,
     CapabilityEffect,
     PrivacyFloor,
 )
 
+from ..core.contracts.validation_boundary import validate_contract
+
 
 def origin_allowed(origin: object, expected: InvocationOrigin) -> bool:
     """Return whether *origin* is the source accepted by an entry point."""
 
+    validate_contract(expected)
     return isinstance(origin, InvocationOrigin) and origin is expected
 
 

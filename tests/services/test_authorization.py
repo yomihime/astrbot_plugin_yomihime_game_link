@@ -8,15 +8,14 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
-from ygl_test_subject.api.contexts import InvocationOrigin
-from ygl_test_subject.api.services import (
+from ygl_test_subject.core.context_issuer import ContextIssuer
+from ygl_test_subject.core.contracts.services import (
     Grant,
     GrantStatus,
     LoginSession,
     LoginSessionStatus,
 )
-from ygl_test_subject.api.storage import GrantReference, SecretRef
-from ygl_test_subject.core.context_issuer import ContextIssuer
+from ygl_test_subject.core.contracts.validation_boundary import validate_contract
 from ygl_test_subject.core.ports import RevisionConflict, ScheduledLease
 from ygl_test_subject.infrastructure.sqlite.repositories_auth import (
     SQLiteAuthRepository,
@@ -28,6 +27,9 @@ from ygl_test_subject.services.authorization import (
     AuthorizationUnavailable,
     LoginSessionExpired,
 )
+
+from yomihime_game_link_sdk.contexts import InvocationOrigin
+from yomihime_game_link_sdk.storage import GrantReference, SecretRef
 
 
 class _ScheduleAdmission:
@@ -332,12 +334,14 @@ class AuthorizationServiceTests(unittest.IsolatedAsyncioTestCase):
             "package/module",
             "account-a",
             ("private.read",),
-            SecretRef(
-                "secret_token_a",
-                "user-a",
-                "package/module",
-                "credential",
-                "exchange-a",
+            validate_contract(
+                SecretRef(
+                    "secret_token_a",
+                    "user-a",
+                    "package/module",
+                    "credential",
+                    "exchange-a",
+                )
             ),
             GrantStatus.ACTIVE,
         )
@@ -384,7 +388,7 @@ class AuthorizationServiceTests(unittest.IsolatedAsyncioTestCase):
         reference = await self.service.complete_login(
             invocation, session_id, _Exchange(self._grant())
         )
-        self.assertEqual(reference, GrantReference("grant-a", 1))
+        self.assertEqual(reference, validate_contract(GrantReference("grant-a", 1)))
         self.assertEqual(await self.service.status(invocation), reference)
         details = await self.service.status_details(invocation)
         self.assertTrue(details.secret_available)
@@ -732,7 +736,7 @@ class AuthorizationServiceTests(unittest.IsolatedAsyncioTestCase):
         rotated = await fresh_service.complete_login(
             invocation, rotated_session_id, _Exchange(self._grant())
         )
-        self.assertEqual(rotated, GrantReference("grant-a", 2))
+        self.assertEqual(rotated, validate_contract(GrantReference("grant-a", 2)))
 
         pending_after_login = await fresh_service.reopen(invocation)
         await fresh_service.revoke(invocation, rotated)
@@ -775,7 +779,7 @@ class AuthorizationServiceTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             reauthorized,
-            GrantReference(first.grant_id, revoked.revision + 1),
+            validate_contract(GrantReference(first.grant_id, revoked.revision + 1)),
         )
         current = await repository.current_grant(first.grant_id)
         self.assertEqual(current.status, GrantStatus.ACTIVE)
@@ -808,12 +812,14 @@ class AuthorizationServiceTests(unittest.IsolatedAsyncioTestCase):
             "package/module",
             "account-b",
             ("private.read",),
-            SecretRef(
-                "secret_token_b",
-                "user-a",
-                "package/module",
-                "credential",
-                "exchange-b",
+            validate_contract(
+                SecretRef(
+                    "secret_token_b",
+                    "user-a",
+                    "package/module",
+                    "credential",
+                    "exchange-b",
+                )
             ),
             GrantStatus.ACTIVE,
         )
@@ -822,7 +828,7 @@ class AuthorizationServiceTests(unittest.IsolatedAsyncioTestCase):
             await service.begin_login(invocation),
             _Exchange(different_account),
         )
-        self.assertEqual(accepted, GrantReference("grant-b", 1))
+        self.assertEqual(accepted, validate_contract(GrantReference("grant-b", 1)))
         self.assertEqual(await service.status(invocation), accepted)
         details = await service.status_details(invocation)
         self.assertEqual(details.grant, accepted)

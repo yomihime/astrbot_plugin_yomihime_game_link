@@ -23,30 +23,13 @@ from ygl_test_subject.adapters.astrbot.command_bridge import (
 )
 from ygl_test_subject.adapters.astrbot.message_port import AstrBotMessagePort
 from ygl_test_subject.adapters.astrbot.runtime import PLUGIN_NAME, AstrBotRuntime
-from ygl_test_subject.api.administration import AdminOperation
-from ygl_test_subject.api.manifests import (
-    CapabilityDescriptor,
-    CapabilityEffect,
-    CommandDescriptor,
-    InvocationPolicy,
-    ModuleCategory,
-    ModuleManifest,
-    PackageManifest,
-    PrivacyFloor,
-)
-from ygl_test_subject.api.services import (
-    CapabilityHealth,
+from ygl_test_subject.core.contracts.administration import AdminOperation
+from ygl_test_subject.core.contracts.services import (
     ConfigFieldUpdate,
     ConfigPatch,
-    ConfigPatchMode,
-    ConfigTarget,
-    HealthStatus,
-    HttpResponse,
-    ModuleHandlers,
     SecretMaterial,
 )
-from ygl_test_subject.api.subscriptions import ConversationKind, ConversationRef
-from ygl_test_subject.api.version import CONTRACT_VERSION
+from ygl_test_subject.core.contracts.validation_boundary import validate_contract
 from ygl_test_subject.core.ports import (
     MessageStatus,
     MessageTarget,
@@ -69,6 +52,27 @@ from ygl_test_subject.services.core_runtime import (
     HostIngress,
     TrustedSubscriptionGate,
 )
+
+from yomihime_game_link_sdk.declarations import (
+    CapabilityDescriptor,
+    CapabilityEffect,
+    CommandDescriptor,
+    ConfigUpdateMode,
+    InvocationPolicy,
+    ModuleCategory,
+    ModuleManifest,
+    PackageManifest,
+    PrivacyFloor,
+)
+from yomihime_game_link_sdk.services import (
+    CapabilityHealth,
+    ConfigTarget,
+    HealthStatus,
+    HttpResponse,
+    ModuleHandlers,
+)
+from yomihime_game_link_sdk.subscriptions import ConversationKind, ConversationRef
+from yomihime_game_link_sdk.version import MODULE_ABI_VERSION
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -107,7 +111,7 @@ class _ClosePendingCore:
         self.close_calls = 0
 
     def current(self, _module_id, _capability_id):
-        return CapabilityHealth(HealthStatus.UNKNOWN), 0
+        return validate_contract(CapabilityHealth(HealthStatus.UNKNOWN)), 0
 
     async def start(self) -> None:
         return None
@@ -154,7 +158,9 @@ class _ItemReplyTransport(_IdleTransport):
             body = {"item": {"id": 100}, "partials": []}
         else:
             raise AssertionError("unexpected source id")
-        return HttpResponse(200, {}, json.dumps(body).encode("utf-8"))
+        return validate_contract(
+            HttpResponse(200, {}, json.dumps(body).encode("utf-8"))
+        )
 
 
 class _Event:
@@ -285,8 +291,8 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
             async def request(self, request):
                 if request.source_id == "fflogs_public_global":
                     self.requests.append(request)
-                    return HttpResponse(
-                        200, {}, json.dumps(self.logs.popleft()).encode()
+                    return validate_contract(
+                        HttpResponse(200, {}, json.dumps(self.logs.popleft()).encode())
                     )
                 if request.source_id.startswith("ff14_calendar"):
                     self.requests.append(request)
@@ -302,15 +308,19 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
                             "SUMMARY:Synthetic event",
                         )
                     )
-                    return HttpResponse(200, {"Content-Type": "text/calendar"}, raw)
+                    return validate_contract(
+                        HttpResponse(200, {"Content-Type": "text/calendar"}, raw)
+                    )
                 return await super().request(request)
 
             async def request_credential_exchange(self, request):
                 self.exchanges += 1
-                return HttpResponse(
-                    200,
-                    {},
-                    b'{"access_token":"synthetic-token","token_type":"Bearer","expires_in":3600}',
+                return validate_contract(
+                    HttpResponse(
+                        200,
+                        {},
+                        b'{"access_token":"synthetic-token","token_type":"Bearer","expires_in":3600}',
+                    )
                 )
 
         class Admin:
@@ -341,7 +351,7 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 core = runtime.core_runtime
                 await core.admin_credential_repository.bootstrap(bytes(range(32)))
                 snapshot = await core.config_repository.current(
-                    ConfigTarget(PLUGIN_NAME, "ff14/ff14")
+                    validate_contract(ConfigTarget(PLUGIN_NAME, "ff14/ff14"))
                 )
                 fields = (
                     core.extension_runtime.candidate("ff14")
@@ -356,7 +366,7 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
                         (
                             ConfigFieldUpdate(
                                 "credential_fflogs_global",
-                                ConfigPatchMode.REPLACE,
+                                ConfigUpdateMode.REPLACE,
                                 secret=SecretMaterial(
                                     b'{"schema":1,"client_id":"synthetic-id","client_secret":"synthetic-secret"}'
                                 ),
@@ -525,7 +535,7 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 candidate._provenance.manifest_sha256, gate.manifest_sha256
             )
             snapshot = await core.config_repository.current(
-                ConfigTarget(PLUGIN_NAME, "ff14/ff14")
+                validate_contract(ConfigTarget(PLUGIN_NAME, "ff14/ff14"))
             )
             self.assertIs(snapshot.values[gate.field], True)
             connection = core.database.connect()
@@ -539,7 +549,9 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 connection.close()
             self.assertTrue(
-                (await runtime.core_runtime.subscription_gate_state("ff14/ff14")).supported
+                (
+                    await runtime.core_runtime.subscription_gate_state("ff14/ff14")
+                ).supported
             )
         finally:
             await runtime.terminate()
@@ -735,7 +747,7 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
         await runtime.initialize()
         core = runtime.core_runtime
         await core.admin_credential_repository.bootstrap(bytes(range(32)))
-        target = ConfigTarget(PLUGIN_NAME, "ff14/ff14")
+        target = validate_contract(ConfigTarget(PLUGIN_NAME, "ff14/ff14"))
         module = core.registry.snapshot().module("ff14/ff14")
         fields = module.manifest.config_fields
         self.assertTrue(
@@ -758,7 +770,7 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
                         snapshot.revision,
                         (
                             ConfigFieldUpdate(
-                                field, ConfigPatchMode.REPLACE, value=value
+                                field, ConfigUpdateMode.REPLACE, value=value
                             ),
                         ),
                         fields,
@@ -779,7 +791,13 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 snapshot.revision,
             )
         )
-        with self.assertRaises(ConfigurationValueError):
+        from yomihime_game_link_sdk.errors import ServiceUnavailable
+
+        stored = await core.config_repository.current(target)
+        self.assertEqual(
+            stored.values["ff14_calendar_default_timezone"], "private-zone"
+        )
+        with self.assertRaises(ServiceUnavailable):
             await core.module_services.for_module("ff14/ff14").config.current()
         await core.admin_facade.update_config(
             None,
@@ -789,7 +807,7 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 (
                     ConfigFieldUpdate(
                         "ff14_calendar_default_timezone",
-                        ConfigPatchMode.REPLACE,
+                        ConfigUpdateMode.REPLACE,
                         value="UTC",
                     ),
                 ),
@@ -811,7 +829,7 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
             CORE_MODULE_ID,
             ConfigPatch(
                 summary.revision,
-                (ConfigFieldUpdate("default_region", ConfigPatchMode.CLEAR),),
+                (ConfigFieldUpdate("default_region", ConfigUpdateMode.CLEAR),),
                 CORE_CONFIG_FIELDS,
             ),
             authorization=admin,
@@ -877,6 +895,7 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 )
             )
             from ygl_test_subject.services.configuration import ConfigurationValueError
+
             with self.assertRaises(ConfigurationValueError):
                 await core.core_defaults.current()
             self.assertTrue(runtime.ready)
@@ -892,14 +911,16 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 [request.path for request in transport.requests],
                 ["/api/v2/worlds", "/api/v2/data-centers"],
             )
-            self.assertIn("request failed", context.calls[-1][1].chain[0].text)
+            self.assertEqual(
+                context.calls[-1][1].chain[0].text, "module temporarily unavailable"
+            )
             self.assertNotIn("synthetic-invalid", context.calls[-1][1].chain[0].text)
             summary = await core.admin_facade.config_snapshot(
                 None, CORE_MODULE_ID, authorization=admin
             )
             update = (
                 ConfigFieldUpdate("default_region", mode, value=region)
-                if mode is ConfigPatchMode.REPLACE
+                if mode is ConfigUpdateMode.REPLACE
                 else ConfigFieldUpdate("default_region", mode)
             )
             await core.admin_facade.update_config(
@@ -944,14 +965,14 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self,
     ):
         await self._assert_current_config_repair_recovers_commands(
-            ConfigPatchMode.REPLACE, "global"
+            ConfigUpdateMode.REPLACE, "global"
         )
 
     async def test_commands_recover_after_page_invalid_config_clear_without_page_read(
         self,
     ):
         await self._assert_current_config_repair_recovers_commands(
-            ConfigPatchMode.CLEAR, "cn"
+            ConfigUpdateMode.CLEAR, "cn"
         )
 
     async def test_prepared_migration_caller_uses_selected_inventory_without_live_catalog(
@@ -1057,7 +1078,7 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             (
                 await rejected.core_runtime.config_repository.current(
-                    ConfigTarget(PLUGIN_NAME, "ff14/ff14")
+                    validate_contract(ConfigTarget(PLUGIN_NAME, "ff14/ff14"))
                 )
             ).values["ff14_calendar_default_timezone"],
             "UTC",
@@ -1123,7 +1144,9 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
         runtime._core = None
         runtime._generation += 1
         runtime._closing = True
-        self.assertEqual(await runtime.public_ff14_page_state(include_values=True), first)
+        self.assertEqual(
+            await runtime.public_ff14_page_state(include_values=True), first
+        )
         self.assertEqual(
             first,
             {
@@ -1156,7 +1179,8 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 settings = await runtime.public_ff14_page_state(include_values=True)
             self.assertEqual(overview, settings)
             self.assertEqual(
-                set(settings), {"schema_version", "state", "reopen_required", "host_path"}
+                set(settings),
+                {"schema_version", "state", "reopen_required", "host_path"},
             )
             self.assertEqual(settings["state"], "retired")
         finally:
@@ -1196,7 +1220,10 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 module["display"],
                 {
                     "default_name": "最终幻想 XIV",
-                    "localized_names": {"zh": "最终幻想 XIV", "en": "FINAL FANTASY XIV"},
+                    "localized_names": {
+                        "zh": "最终幻想 XIV",
+                        "en": "FINAL FANTASY XIV",
+                    },
                     "short_name": "FF14",
                 },
             )
@@ -1279,7 +1306,9 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
         )
         await runtime.terminate()
 
-    async def test_invalid_config_retired_locator_keeps_formal_management_recovery(self):
+    async def test_invalid_config_retired_locator_keeps_formal_management_recovery(
+        self,
+    ):
         runtime = self._runtime(_Context(), config={"ff14_calendar_default_days": 0})
         await runtime.initialize()
         try:
@@ -1291,7 +1320,9 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await runtime.terminate()
 
-    async def test_retired_locator_does_not_borrow_registry_or_declaration_authority(self):
+    async def test_retired_locator_does_not_borrow_registry_or_declaration_authority(
+        self,
+    ):
         from types import SimpleNamespace
         from unittest.mock import Mock
 
@@ -1592,43 +1623,55 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(core)
 
         handler = _OwnerHandler()
-        capability = CapabilityDescriptor(
-            "owner.manage",
-            {
-                "type": "object",
-                "properties": {},
-                "required": [],
-                "additionalProperties": False,
-            },
-            InvocationPolicy.COMMAND_ONLY,
-            CapabilityEffect.READ_ONLY,
-            privacy_floor=PrivacyFloor.OWNER,
+        capability = validate_contract(
+            CapabilityDescriptor(
+                "owner.manage",
+                {
+                    "type": "object",
+                    "properties": {},
+                    "required": [],
+                    "additionalProperties": False,
+                },
+                InvocationPolicy.COMMAND_ONLY,
+                CapabilityEffect.READ_ONLY,
+                privacy_floor=PrivacyFloor.OWNER,
+            )
         )
-        module = ModuleManifest(
-            "owner",
-            "owner",
-            ModuleCategory.GAME,
-            "tests.host.test_astrbot_runtime:_OwnerHandler",
-            "1.0.0",
-            (capability,),
-            commands=(CommandDescriptor("manage", "owner.manage", {}, "owner.manage"),),
+        module = validate_contract(
+            ModuleManifest(
+                "owner",
+                "owner",
+                ModuleCategory.GAME,
+                "tests.host.test_astrbot_runtime:_OwnerHandler",
+                "1.0.0",
+                (capability,),
+                commands=(
+                    validate_contract(
+                        CommandDescriptor("manage", "owner.manage", {}, "owner.manage")
+                    ),
+                ),
+            )
         )
-        package = PackageManifest(
-            "hosttest",
-            "1.0.0",
-            CONTRACT_VERSION,
-            (module,),
-            "Host runtime test",
-            "MIT",
-            "offline test package",
+        package = validate_contract(
+            PackageManifest(
+                "hosttest",
+                "1.0.0",
+                MODULE_ABI_VERSION,
+                (module,),
+                "Host runtime test",
+                "MIT",
+                "offline test package",
+            )
         )
         core.registry.register_package(
             package,
             {
-                "owner": ModuleHandlers(
-                    capabilities={"owner.manage": handler},
-                    collectors={},
-                    evaluators={},
+                "owner": validate_contract(
+                    ModuleHandlers(
+                        capabilities={"owner.manage": handler},
+                        collectors={},
+                        evaluators={},
+                    )
                 )
             },
         )
@@ -1657,11 +1700,13 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
             plain_factory=_Plain,
             chain_factory=lambda components: _MessageChain(list(components)),
         )
-        conversation = ConversationRef(
-            "test-platform-1",
-            ConversationKind.DIRECT,
-            "user-17",
-            "test-platform-1",
+        conversation = validate_contract(
+            ConversationRef(
+                "test-platform-1",
+                ConversationKind.DIRECT,
+                "user-17",
+                "test-platform-1",
+            )
         )
         receipt = await port.send(
             MessageTarget("user-17", conversation=conversation),

@@ -8,8 +8,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
 
-from yomihime_sdk.api.manifests import EXTENSION_MANIFEST_ABI, PackageManifest
+from yomihime_game_link_sdk.declarations import PackageManifest
 
+from ..core.contracts.manifests import EXTENSION_MANIFEST_ABI
 from .disk_manifest import ManifestError, parse_manifest
 from .source_snapshot import (
     PackageProvenance,

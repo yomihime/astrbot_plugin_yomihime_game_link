@@ -4,7 +4,10 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import get_type_hints
 
-from ygl_test_subject.api.display import (
+from ygl_test_subject.core.contracts.validation_boundary import validate_contract
+from ygl_test_subject.examples.contracts import example_result
+
+from yomihime_game_link_sdk.display import (
     DigestMember,
     DisplayAudience,
     DisplayBatch,
@@ -25,19 +28,18 @@ from ygl_test_subject.api.display import (
     TimeValue,
     UnknownBlock,
 )
-from ygl_test_subject.api.results import (
+from yomihime_game_link_sdk.results import (
     CapabilityResult,
     ErrorCode,
     ErrorDetail,
     FactDocument,
     ResultStatus,
 )
-from ygl_test_subject.examples.contracts import example_result
 
 
 class DisplayContractTests(unittest.TestCase):
     def test_all_block_required_flags_and_fallback_are_typed(self):
-        from ygl_test_subject.api.display import (
+        from yomihime_game_link_sdk.display import (
             CommandsBlock,
             FieldsBlock,
             GridItem,
@@ -48,16 +50,20 @@ class DisplayContractTests(unittest.TestCase):
         )
 
         factories = (
-            lambda **kw: TextBlock("x", **kw),
-            lambda **kw: FieldsBlock({"x": 1}, **kw),
-            lambda **kw: MetricsBlock({"x": NumberValue(1)}, **kw),
-            lambda **kw: TableBlock(("x",), ((1,),), **kw),
-            lambda **kw: ItemGridBlock((GridItem("x"),), **kw),
-            lambda **kw: ImageBlock("a", "alt", **kw),
-            lambda **kw: SeriesBlock((), **kw),
-            lambda **kw: LinksBlock((), **kw),
-            lambda **kw: CommandsBlock((), **kw),
-            lambda **kw: UnknownBlock("future", **kw),
+            lambda **kw: validate_contract(TextBlock("x", **kw)),
+            lambda **kw: validate_contract(FieldsBlock({"x": 1}, **kw)),
+            lambda **kw: validate_contract(
+                MetricsBlock({"x": validate_contract(NumberValue(1))}, **kw)
+            ),
+            lambda **kw: validate_contract(TableBlock(("x",), ((1,),), **kw)),
+            lambda **kw: validate_contract(
+                ItemGridBlock((validate_contract(GridItem("x")),), **kw)
+            ),
+            lambda **kw: validate_contract(ImageBlock("a", "alt", **kw)),
+            lambda **kw: validate_contract(SeriesBlock((), **kw)),
+            lambda **kw: validate_contract(LinksBlock((), **kw)),
+            lambda **kw: validate_contract(CommandsBlock((), **kw)),
+            lambda **kw: validate_contract(UnknownBlock("future", **kw)),
         )
         for index, factory in enumerate(factories):
             for kwargs in ({"required": "yes"}, {"fallback_text": 1}):
@@ -67,11 +73,13 @@ class DisplayContractTests(unittest.TestCase):
                 ):
                     factory(**kwargs)
         with self.assertRaises(ValueError):
-            ItemGridBlock(())
-        self.assertEqual(ItemGridBlock((), fallback_text="no items").items, ())
+            validate_contract(ItemGridBlock(()))
+        self.assertEqual(
+            validate_contract(ItemGridBlock((), fallback_text="no items")).items, ()
+        )
 
     def test_nonfinite_values_and_malformed_times_are_rejected(self):
-        from ygl_test_subject.api.display import FieldsBlock
+        from yomihime_game_link_sdk.display import FieldsBlock
 
         for value in (Decimal("NaN"), Decimal("Infinity"), Decimal("-Infinity")):
             for factory in (FieldsBlock, FactDocument):
@@ -79,136 +87,191 @@ class DisplayContractTests(unittest.TestCase):
                     self.subTest(factory=factory, value=value),
                     self.assertRaises(ValueError),
                 ):
-                    factory({"nested": [value]})
+                    validate_contract(factory({"nested": [value]}))
         for value in (date(2026, 1, 1), datetime(2026, 1, 1, tzinfo=timezone.utc)):
             with self.assertRaises(TypeError):
-                TimeValue(value, timezone_name=1)
+                validate_contract(TimeValue(value, timezone_name=1))
 
     def test_result_status_matrix_and_concrete_payload_types(self):
-        document = DisplayDocument("t", "s", (TextBlock("candidate or result"),))
+        document = validate_contract(
+            DisplayDocument(
+                "t", "s", (validate_contract(TextBlock("candidate or result")),)
+            )
+        )
         for status in (
             ResultStatus.SUCCESS,
             ResultStatus.PARTIAL_SUCCESS,
             ResultStatus.NEEDS_SELECTION,
         ):
             self.assertIs(
-                CapabilityResult("r", status, document=document).status, status
+                validate_contract(
+                    CapabilityResult("r", status, document=document)
+                ).status,
+                status,
             )
             with self.assertRaises(ValueError):
-                CapabilityResult("r", status)
+                validate_contract(CapabilityResult("r", status))
         for changes in (
             {"status": 123},
             {"document": object()},
             {"model_facts": object()},
             {"error": object()},
             {"timestamps": ("yesterday",)},
-            {"timestamps": (TimeValue(date(2026, 1, 1), "UTC"),)},
+            {"timestamps": (validate_contract(TimeValue(date(2026, 1, 1), "UTC")),)},
         ):
             with (
                 self.subTest(changes=changes),
                 self.assertRaises((TypeError, ValueError)),
             ):
-                CapabilityResult(
-                    **(
-                        {
-                            "result_id": "r",
-                            "status": ResultStatus.SUCCESS,
-                            "document": document,
-                        }
-                        | changes
+                validate_contract(
+                    CapabilityResult(
+                        **(
+                            {
+                                "result_id": "r",
+                                "status": ResultStatus.SUCCESS,
+                                "document": document,
+                            }
+                            | changes
+                        )
                     )
                 )
         with self.assertRaises(ValueError):
-            CapabilityResult(
-                "r",
-                ResultStatus.ERROR,
-                error=ErrorDetail(ErrorCode.UNKNOWN, "failed"),
-                model_facts=FactDocument({"x": 1}),
+            validate_contract(
+                CapabilityResult(
+                    "r",
+                    ResultStatus.ERROR,
+                    error=validate_contract(ErrorDetail(ErrorCode.UNKNOWN, "failed")),
+                    model_facts=validate_contract(FactDocument({"x": 1})),
+                )
             )
-        instant = TimeValue(datetime(2026, 1, 1, tzinfo=timezone.utc))
+        instant = validate_contract(
+            TimeValue(datetime(2026, 1, 1, tzinfo=timezone.utc))
+        )
         self.assertEqual(
-            CapabilityResult(
-                "r", ResultStatus.SUCCESS, document=document, timestamps=(instant,)
+            validate_contract(
+                CapabilityResult(
+                    "r", ResultStatus.SUCCESS, document=document, timestamps=(instant,)
+                )
             ).timestamps,
             (instant,),
         )
 
     def test_document_and_nested_containers_are_immutable(self):
         fields = {"x": {"y": 1}}
-        from ygl_test_subject.api.display import FieldsBlock
+        from yomihime_game_link_sdk.display import FieldsBlock
 
-        block = FieldsBlock(fields)
+        block = validate_contract(FieldsBlock(fields))
         fields["x"]["y"] = 2
         self.assertEqual(block.fields["x"]["y"], 1)
         with self.assertRaises(TypeError):
             block.fields["x"] = 3
 
     def test_typed_values_and_timezone(self):
-        self.assertEqual(MoneyValue(Decimal("1.2300"), "USD").value, Decimal("1.2300"))
+        self.assertEqual(
+            validate_contract(MoneyValue(Decimal("1.2300"), "USD")).value,
+            Decimal("1.2300"),
+        )
         with self.assertRaises(ValueError):
-            TimeValue(datetime(2026, 1, 1))
-        self.assertEqual(NumberValue("1.20", "ratio").value, "1.20")
+            validate_contract(TimeValue(datetime(2026, 1, 1)))
+        self.assertEqual(validate_contract(NumberValue("1.20", "ratio")).value, "1.20")
 
     def test_grid_table_and_plain_angle_text(self):
-        doc = DisplayDocument(
-            "title", "subject", (TextBlock("x < y"), TableBlock(("a",), ((1,),)))
+        doc = validate_contract(
+            DisplayDocument(
+                "title",
+                "subject",
+                (
+                    validate_contract(TextBlock("x < y")),
+                    validate_contract(TableBlock(("a",), ((1,),))),
+                ),
+            )
         )
         self.assertEqual(doc.ordered_blocks[0].text, "x < y")
 
     def test_resource_and_unknown_block_validation(self):
         with self.assertRaises(ValueError):
-            ImageBlock("../secret", "alt")
+            validate_contract(ImageBlock("../secret", "alt"))
         with self.assertRaises(ValueError):
-            UnknownBlock("future", required=True)
+            validate_contract(UnknownBlock("future", required=True))
         with self.assertRaises(ValueError):
-            UnknownBlock("future")
+            validate_contract(UnknownBlock("future"))
 
     def test_result_privacy_and_status_invariants(self):
-        private = DisplayDocument(
-            "t", "s", (TextBlock("private"),), privacy=Privacy.PRIVATE
-        )
-        with self.assertRaises(ValueError):
-            CapabilityResult(
-                "r",
-                ResultStatus.SUCCESS,
-                document=private,
-                model_facts=FactDocument({"x": 1}),
+        private = validate_contract(
+            DisplayDocument(
+                "t",
+                "s",
+                (validate_contract(TextBlock("private")),),
                 privacy=Privacy.PRIVATE,
             )
+        )
         with self.assertRaises(ValueError):
-            CapabilityResult("r", ResultStatus.ERROR)
-        result = CapabilityResult(
-            "r", ResultStatus.ERROR, error=ErrorDetail(ErrorCode.NOT_FOUND, "missing")
+            validate_contract(
+                CapabilityResult(
+                    "r",
+                    ResultStatus.SUCCESS,
+                    document=private,
+                    model_facts=validate_contract(FactDocument({"x": 1})),
+                    privacy=Privacy.PRIVATE,
+                )
+            )
+        with self.assertRaises(ValueError):
+            validate_contract(CapabilityResult("r", ResultStatus.ERROR))
+        result = validate_contract(
+            CapabilityResult(
+                "r",
+                ResultStatus.ERROR,
+                error=validate_contract(ErrorDetail(ErrorCode.NOT_FOUND, "missing")),
+            )
         )
         self.assertEqual(result.error.code, ErrorCode.NOT_FOUND)
 
     def test_rejects_untrusted_values_and_visibility_leaks(self):
-        from ygl_test_subject.api.display import GridItem, ItemGridBlock, SeriesBlock
+        from yomihime_game_link_sdk.display import GridItem, ItemGridBlock, SeriesBlock
 
         with self.assertRaises((TypeError, ValueError)):
-            NumberValue(float("nan"))
+            validate_contract(NumberValue(float("nan")))
         with self.assertRaises(TypeError):
-            NumberValue(object())
+            validate_contract(NumberValue(object()))
         with self.assertRaises(TypeError):
-            NumberValue(Decimal("1"), unit=object())
+            validate_contract(NumberValue(Decimal("1"), unit=object()))
         with self.assertRaises(TypeError):
-            __import__(
-                "ygl_test_subject.api.results", fromlist=["FactDocument"]
-            ).FactDocument({1: object()})
+            validate_contract(
+                __import__(
+                    "yomihime_game_link_sdk.results", fromlist=["FactDocument"]
+                ).FactDocument({1: object()})
+            )
         with self.assertRaises(ValueError):
-            DisplayDocument(
-                "t",
-                "s",
-                (
-                    ItemGridBlock(
-                        (GridItem("x", asset_id="a", visibility=Privacy.PRIVATE),)
+            validate_contract(
+                DisplayDocument(
+                    "t",
+                    "s",
+                    (
+                        validate_contract(
+                            ItemGridBlock(
+                                (
+                                    validate_contract(
+                                        GridItem(
+                                            "x",
+                                            asset_id="a",
+                                            visibility=Privacy.PRIVATE,
+                                        )
+                                    ),
+                                )
+                            )
+                        ),
                     ),
-                ),
+                )
             )
         with self.assertRaises((TypeError, ValueError)):
-            SeriesBlock(((TimeValue(datetime.now(timezone.utc)), "bad"),))
+            validate_contract(
+                SeriesBlock(
+                    ((validate_contract(TimeValue(datetime.now(timezone.utc))), "bad"),)
+                )
+            )
         self.assertEqual(
-            ErrorDetail(ErrorCode.UNKNOWN, "literal {text}").message, "literal {text}"
+            validate_contract(ErrorDetail(ErrorCode.UNKNOWN, "literal {text}")).message,
+            "literal {text}",
         )
 
 
@@ -239,83 +302,127 @@ class B04DisplayContractTests(unittest.TestCase):
 
     def test_public_document_cannot_expose_private_assets_or_grid_values(self):
         with self.assertRaises(ValueError):
-            DisplayDocument(
-                "Public",
-                "Subject",
-                (ImageBlock("asset-1", "secret", visibility=Privacy.PRIVATE),),
+            validate_contract(
+                DisplayDocument(
+                    "Public",
+                    "Subject",
+                    (
+                        validate_contract(
+                            ImageBlock("asset-1", "secret", visibility=Privacy.PRIVATE)
+                        ),
+                    ),
+                )
             )
         with self.assertRaises(ValueError):
-            DisplayDocument(
-                "Public",
-                "Subject",
-                (
-                    ItemGridBlock(
-                        (
-                            GridItem(
-                                "secret", asset_id="asset-1", visibility=Privacy.PRIVATE
-                            ),
-                        )
+            validate_contract(
+                DisplayDocument(
+                    "Public",
+                    "Subject",
+                    (
+                        validate_contract(
+                            ItemGridBlock(
+                                (
+                                    validate_contract(
+                                        GridItem(
+                                            "secret",
+                                            asset_id="asset-1",
+                                            visibility=Privacy.PRIVATE,
+                                        )
+                                    ),
+                                )
+                            )
+                        ),
                     ),
-                ),
+                )
             )
-        private = DisplayDocument(
-            "Private", "Subject", (TextBlock("secret"),), privacy=Privacy.PRIVATE
+        private = validate_contract(
+            DisplayDocument(
+                "Private",
+                "Subject",
+                (validate_contract(TextBlock("secret")),),
+                privacy=Privacy.PRIVATE,
+            )
         )
         self.assertEqual(private.privacy, Privacy.PRIVATE)
 
     def test_unknown_optional_fallback_and_required_unknown_policy(self):
-        fallback = UnknownBlock("future-card", fallback_text="Summary")
+        fallback = validate_contract(
+            UnknownBlock("future-card", fallback_text="Summary")
+        )
         self.assertEqual(fallback.fallback_text, "Summary")
         with self.assertRaises(ValueError):
-            UnknownBlock("future-card", required=True)
+            validate_contract(UnknownBlock("future-card", required=True))
         with self.assertRaises(TypeError):
-            DisplayDocument("Title", "Subject", (object(),))
+            validate_contract(DisplayDocument("Title", "Subject", (object(),)))
 
     def test_output_and_limits_are_validated_and_have_no_product_default(self):
         self.assertEqual(
-            DisplayOutput("Rendered", ("asset-1",)).resource_ids, ("asset-1",)
+            validate_contract(DisplayOutput("Rendered", ("asset-1",))).resource_ids,
+            ("asset-1",),
         )
         with self.assertRaises(ValueError):
-            DisplayOutput("Rendered", ("../private",))
+            validate_contract(DisplayOutput("Rendered", ("../private",)))
         with self.assertRaises(ValueError):
-            DisplayOutput("Rendered", ("asset-1", "asset-1"))
+            validate_contract(DisplayOutput("Rendered", ("asset-1", "asset-1")))
         with self.assertRaises(ValueError):
-            DisplayLimits(0, 100)
-        self.assertEqual(DisplayLimits(2, 1024).max_pages, 2)
+            validate_contract(DisplayLimits(0, 100))
+        self.assertEqual(validate_contract(DisplayLimits(2, 1024)).max_pages, 2)
         self.assertIs(
             inspect.signature(DisplayRenderer.render).parameters["limits"].default,
             inspect.Parameter.empty,
         )
 
     def test_display_values_remain_renderer_neutral(self):
-        doc = DisplayDocument(
-            "Title", "Subject", (FieldsBlock({"status": "ready"}), TextBlock("Done"))
+        doc = validate_contract(
+            DisplayDocument(
+                "Title",
+                "Subject",
+                (
+                    validate_contract(FieldsBlock({"status": "ready"})),
+                    validate_contract(TextBlock("Done")),
+                ),
+            )
         )
         self.assertEqual(
             tuple(block.kind for block in doc.ordered_blocks), ("fields", "text")
         )
 
     def test_c03_batch_preserves_order_and_public_audience_cannot_promote_private(self):
-        first = DisplayBatchMember(
-            DigestMember("sub-1", 1, "event-1", 1),
-            DisplayDocument("First", "Subject", (TextBlock("one"),)),
+        first = validate_contract(
+            DisplayBatchMember(
+                validate_contract(DigestMember("sub-1", 1, "event-1", 1)),
+                validate_contract(
+                    DisplayDocument(
+                        "First", "Subject", (validate_contract(TextBlock("one")),)
+                    )
+                ),
+            )
         )
-        private = DisplayBatchMember(
-            DigestMember("sub-2", 1, "event-2", 1),
-            DisplayDocument(
-                "Second", "Subject", (TextBlock("two"),), privacy=Privacy.PRIVATE
-            ),
+        private = validate_contract(
+            DisplayBatchMember(
+                validate_contract(DigestMember("sub-2", 1, "event-2", 1)),
+                validate_contract(
+                    DisplayDocument(
+                        "Second",
+                        "Subject",
+                        (validate_contract(TextBlock("two")),),
+                        privacy=Privacy.PRIVATE,
+                    )
+                ),
+            )
         )
-        public_batch = DisplayBatch((first,), DisplayAudience.PUBLIC)
+        public_batch = validate_contract(DisplayBatch((first,), DisplayAudience.PUBLIC))
         self.assertEqual(public_batch.members, (first,))
-        private_batch = DisplayBatch((first, private), DisplayAudience.PRIVATE)
+        private_batch = validate_contract(
+            DisplayBatch((first, private), DisplayAudience.PRIVATE)
+        )
         self.assertEqual(private_batch.members, (first, private))
         with self.assertRaises(ValueError):
-            DisplayBatch((first, private), DisplayAudience.PUBLIC)
+            validate_contract(DisplayBatch((first, private), DisplayAudience.PUBLIC))
         with self.assertRaises(ValueError):
-            DisplayBatch((first, first), DisplayAudience.PRIVATE)
+            validate_contract(DisplayBatch((first, first), DisplayAudience.PRIVATE))
         with self.assertRaises(TypeError):
-            DisplayBatch((object(),), DisplayAudience.PRIVATE)
+            validate_contract(DisplayBatch((object(),), DisplayAudience.PRIVATE))
 
 
 class ExampleResultContractTests(unittest.TestCase):

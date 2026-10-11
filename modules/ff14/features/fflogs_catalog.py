@@ -7,7 +7,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from yomihime_sdk.api.services import HttpRequest, SourceHttp
+from yomihime_game_link_sdk.services import HttpRequest, SourceHttp
 
 from .fflogs_models import (
     DifficultyRecord,

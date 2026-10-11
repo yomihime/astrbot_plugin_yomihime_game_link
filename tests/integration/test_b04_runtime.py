@@ -8,43 +8,19 @@ from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from ygl_test_subject.api.contexts import (
-    InvocationConversationKind,
-    InvocationOrigin,
-    InvocationSubscriptionScope,
-)
-from ygl_test_subject.api.display import (
-    DisplayDocument,
-    ImageBlock,
-    Privacy,
-    TextBlock,
-)
-from ygl_test_subject.api.results import CapabilityResult, FactDocument, ResultStatus
-from ygl_test_subject.api.services import (
-    ConversationKind,
-    ConversationRef,
+from ygl_test_subject.core.contracts.services import (
     Grant,
     GrantStatus,
     SubscriptionOutput,
-    SubscriptionUnavailable,
 )
-from ygl_test_subject.api.storage import (
-    OwnerScope,
-    OwnershipKind,
-    ResourceMetadata,
-)
-from ygl_test_subject.api.subscriptions import (
+from ygl_test_subject.core.contracts.subscriptions import (
     DeliveryAttempt,
     DeliveryEvent,
     DeliveryState,
-    DigestScheduleProfile,
-    DstFoldPolicy,
-    DstGapPolicy,
-    ObservationCompleteness,
-    SubscriptionRequest,
     delivery_idempotency_key,
     digest_envelope_idempotency_key,
 )
+from ygl_test_subject.core.contracts.validation_boundary import validate_contract
 from ygl_test_subject.core.ports import MessageStatus, RevisionConflict, SecretOwner
 from ygl_test_subject.infrastructure.sqlite.database import SQLiteDatabase
 from ygl_test_subject.presentation.rendering import (
@@ -53,13 +29,9 @@ from ygl_test_subject.presentation.rendering import (
 )
 from ygl_test_subject.services.b04_runtime import SQLiteResourceVisibilityProbe
 from ygl_test_subject.services.module_services import (
-    InvocationBindingError,
     ModuleServicesFactory,
 )
 from ygl_test_subject.services.scheduler import digest_window_for_date
-from ygl_test_subject.services.subscriptions import (
-    PrivateRecipientRequired,
-)
 
 from tests.fixtures.b04_runtime import (
     DeterministicClock,
@@ -69,6 +41,33 @@ from tests.fixtures.b04_runtime import (
     create_subscription_event_fixture,
     replace_subscription_gate_fixture,
     synthetic_subscription_gate_bindings,
+)
+from yomihime_game_link_sdk.contexts import (
+    InvocationConversationKind,
+    InvocationOrigin,
+    InvocationSubscriptionScope,
+)
+from yomihime_game_link_sdk.display import (
+    DisplayDocument,
+    ImageBlock,
+    Privacy,
+    TextBlock,
+)
+from yomihime_game_link_sdk.errors import (
+    AccessDenied,
+    InvalidInvocation,
+    ServiceUnavailable,
+)
+from yomihime_game_link_sdk.results import CapabilityResult, FactDocument, ResultStatus
+from yomihime_game_link_sdk.storage import OwnerScope, OwnershipKind, ResourceMetadata
+from yomihime_game_link_sdk.subscriptions import (
+    ConversationKind,
+    ConversationRef,
+    DigestScheduleProfile,
+    DstFoldPolicy,
+    DstGapPolicy,
+    ObservationCompleteness,
+    SubscriptionRequest,
 )
 
 
@@ -88,7 +87,9 @@ class B04RuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
     async def _conversation(
         self, user: str, *, kind: ConversationKind = ConversationKind.DIRECT
     ) -> ConversationRef:
-        ref = ConversationRef("test-adapter", kind, user, f"private-route-{user}")
+        ref = validate_contract(
+            ConversationRef("test-adapter", kind, user, f"private-route-{user}")
+        )
         await self.runtime.host_repositories.conversations.save(ref)
         return ref
 
@@ -107,12 +108,14 @@ class B04RuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
         route = conversation_id or user
         await self._conversation(route, kind=kind)
         invocation = self.runtime.invocation(user, route, grant=grant)
-        request = SubscriptionRequest(
-            type_id,
-            {"region": "global"},
-            {"minimum": minimum},
-            mode,
-            digest_schedule,
+        request = validate_contract(
+            SubscriptionRequest(
+                type_id,
+                {"region": "global"},
+                {"minimum": minimum},
+                mode,
+                digest_schedule,
+            )
         )
         return await self.subscriptions.create_request(invocation, request)
 
@@ -186,25 +189,30 @@ class B04RuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         command = self.runtime.invocation("alice", "alice")
-        with self.assertRaises(SubscriptionUnavailable) as caught:
-            await original.create(command, None)
-        self.assertEqual(caught.exception.code, "subscription_unavailable")
-        with self.assertRaises(SubscriptionUnavailable):
-            await original.revise(command, None)
-        with self.assertRaises(SubscriptionUnavailable):
+        request = validate_contract(
+            SubscriptionRequest(
+                "feed-alert", {"region": "global"}, {"minimum": 1}, "instant"
+            )
+        )
+        with self.assertRaises(ServiceUnavailable) as caught:
+            await original.create_request(command, request)
+        self.assertEqual(caught.exception.code, "service_unavailable")
+        with self.assertRaises(ServiceUnavailable):
+            await original.revise_request(command, request)
+        with self.assertRaises(ServiceUnavailable):
             await original.list_current(command)
-        with self.assertRaises(SubscriptionUnavailable):
+        with self.assertRaises(ServiceUnavailable):
             await original.cancel(command, "sub-missing", expected_revision=1)
         non_command = self.runtime.invocation(
             "alice", "alice", origin=InvocationOrigin.LLM_TOOL
         )
         for call in (
-            original.create(non_command, None),
-            original.revise(non_command, None),
+            original.create_request(non_command, request),
+            original.revise_request(non_command, request),
             original.list_current(non_command),
             original.cancel(non_command, "sub-missing", expected_revision=1),
         ):
-            with self.assertRaises(PermissionError):
+            with self.assertRaises(AccessDenied):
                 await call
         self.assertEqual(
             before,
@@ -231,25 +239,29 @@ class B04RuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
             adapter_id="test-adapter",
             capability_id="manage",
         )
-        with self.assertRaises(InvocationBindingError):
+        with self.assertRaises(InvalidInvocation):
             await b04_bundle.subscriptions.list_current(foreign_module)
         await self._conversation("alice")
         tool = self.runtime.invocation(
             "alice", "alice", origin=InvocationOrigin.LLM_TOOL
         )
         before_tool = self._count("b04_subscriptions")
-        with self.assertRaises(PermissionError):
+        with self.assertRaises(AccessDenied):
             await b04_bundle.subscriptions.create_request(
                 tool,
-                SubscriptionRequest(
-                    "feed-alert", {"region": "global"}, {"minimum": 1}, "instant"
+                validate_contract(
+                    SubscriptionRequest(
+                        "feed-alert", {"region": "global"}, {"minimum": 1}, "instant"
+                    )
                 ),
             )
         self.assertEqual(self._count("b04_subscriptions"), before_tool)
         created = await b04_bundle.subscriptions.create_request(
             self.runtime.invocation("alice", "alice"),
-            SubscriptionRequest(
-                "feed-alert", {"region": "global"}, {"minimum": 1}, "instant"
+            validate_contract(
+                SubscriptionRequest(
+                    "feed-alert", {"region": "global"}, {"minimum": 1}, "instant"
+                )
             ),
         )
         listed = await b04_bundle.subscriptions.list_current(
@@ -258,26 +270,30 @@ class B04RuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(listed, (created,))
         revised = await b04_bundle.subscriptions.revise_request(
             self.runtime.invocation("alice", "alice"),
-            SubscriptionRequest(
-                "feed-alert",
-                {"region": "global"},
-                {"minimum": 2},
-                "instant",
-                subscription_id=created.subscription_id,
-                expected_revision=1,
+            validate_contract(
+                SubscriptionRequest(
+                    "feed-alert",
+                    {"region": "global"},
+                    {"minimum": 2},
+                    "instant",
+                    subscription_id=created.subscription_id,
+                    expected_revision=1,
+                )
             ),
         )
         self.assertEqual(revised.revision, 2)
         with self.assertRaises(RevisionConflict):
             await b04_bundle.subscriptions.revise_request(
                 self.runtime.invocation("alice", "alice"),
-                SubscriptionRequest(
-                    "feed-alert",
-                    {"region": "global"},
-                    {"minimum": 3},
-                    "instant",
-                    subscription_id=created.subscription_id,
-                    expected_revision=1,
+                validate_contract(
+                    SubscriptionRequest(
+                        "feed-alert",
+                        {"region": "global"},
+                        {"minimum": 3},
+                        "instant",
+                        subscription_id=created.subscription_id,
+                        expected_revision=1,
+                    )
                 ),
             )
         await b04_bundle.subscriptions.cancel(
@@ -338,28 +354,34 @@ class B04RuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
         # be rejected if a private AUTHORIZED subscription is proposed.
         invocation = self.runtime.invocation("alice", "group", grant=grant)
         before = self._count("b04_subscriptions")
-        with self.assertRaises(PrivateRecipientRequired):
+        with self.assertRaises(AccessDenied):
             await self.subscriptions.create_request(
                 invocation,
-                SubscriptionRequest(
-                    "private-alert", {"region": "global"}, {"minimum": 1}, "instant"
+                validate_contract(
+                    SubscriptionRequest(
+                        "private-alert", {"region": "global"}, {"minimum": 1}, "instant"
+                    )
                 ),
             )
-        with self.assertRaises(PrivateRecipientRequired):
+        with self.assertRaises(AccessDenied):
             await self.subscriptions.create_request(
                 invocation,
-                SubscriptionRequest(
-                    "private-alert",
-                    {"region": "global"},
-                    {"minimum": 1},
-                    "digest",
-                    DigestScheduleProfile(
-                        "UTC",
-                        "12:00",
-                        3600,
-                        DstFoldPolicy.FIRST_OCCURRENCE,
-                        DstGapPolicy.SKIP,
-                    ),
+                validate_contract(
+                    SubscriptionRequest(
+                        "private-alert",
+                        {"region": "global"},
+                        {"minimum": 1},
+                        "digest",
+                        validate_contract(
+                            DigestScheduleProfile(
+                                "UTC",
+                                "12:00",
+                                3600,
+                                DstFoldPolicy.FIRST_OCCURRENCE,
+                                DstGapPolicy.SKIP,
+                            )
+                        ),
+                    )
                 ),
             )
         self.assertEqual(self._count("b04_subscriptions"), before)
@@ -394,11 +416,13 @@ class B04RuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 public_record.owner_id,
                 None,
                 group_recipient,
-                DisplayDocument(
-                    "Secret",
-                    "Must not send",
-                    (TextBlock("PRIVATE-ONLY"),),
-                    privacy=Privacy.PRIVATE,
+                validate_contract(
+                    DisplayDocument(
+                        "Secret",
+                        "Must not send",
+                        (validate_contract(TextBlock("PRIVATE-ONLY")),),
+                        privacy=Privacy.PRIVATE,
+                    )
                 ),
                 delivery_idempotency_key(
                     group_event_key,
@@ -437,11 +461,13 @@ class B04RuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 alice_record.owner_id,
                 None,
                 alice_record.recipient,
-                DisplayDocument(
-                    "Secret",
-                    "Must not send",
-                    (TextBlock("MISSING-KIND-PRIVATE"),),
-                    privacy=Privacy.PRIVATE,
+                validate_contract(
+                    DisplayDocument(
+                        "Secret",
+                        "Must not send",
+                        (validate_contract(TextBlock("MISSING-KIND-PRIVATE")),),
+                        privacy=Privacy.PRIVATE,
+                    )
                 ),
                 delivery_idempotency_key(
                     corrupt_key,
@@ -627,11 +653,13 @@ class B04RuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 record.owner_id,
                 record.grant,
                 record.recipient,
-                DisplayDocument(
-                    "Private",
-                    "Payload",
-                    (TextBlock("do not send"),),
-                    privacy=Privacy.PRIVATE,
+                validate_contract(
+                    DisplayDocument(
+                        "Private",
+                        "Payload",
+                        (validate_contract(TextBlock("do not send")),),
+                        privacy=Privacy.PRIVATE,
+                    )
                 ),
                 delivery_idempotency_key(
                     key,
@@ -657,12 +685,14 @@ class B04RuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
     async def test_i21_authorized_revise_rejects_group_and_changed_direct_route(self):
         grant = await self._grant("alice", expires_at=self.clock() + timedelta(hours=1))
         due_at = self.clock() + timedelta(minutes=5)
-        profile = DigestScheduleProfile(
-            "UTC",
-            due_at.strftime("%H:%M"),
-            3600,
-            DstFoldPolicy.FIRST_OCCURRENCE,
-            DstGapPolicy.SKIP,
+        profile = validate_contract(
+            DigestScheduleProfile(
+                "UTC",
+                due_at.strftime("%H:%M"),
+                3600,
+                DstFoldPolicy.FIRST_OCCURRENCE,
+                DstGapPolicy.SKIP,
+            )
         )
         view = await self._create(
             "alice",
@@ -682,14 +712,16 @@ class B04RuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
         original_members = self._count("b04_digest_members")
         self.assertEqual(original_members, 1)
         original_windows = self._count("b04_digest_windows")
-        request = SubscriptionRequest(
-            "private-alert",
-            {"region": "global"},
-            {"minimum": 1},
-            "digest",
-            profile,
-            subscription_id=view.subscription_id,
-            expected_revision=record.revision,
+        request = validate_contract(
+            SubscriptionRequest(
+                "private-alert",
+                {"region": "global"},
+                {"minimum": 1},
+                "digest",
+                profile,
+                subscription_id=view.subscription_id,
+                expected_revision=record.revision,
+            )
         )
 
         def set_persisted_conversation(*, kind: ConversationKind, route: str) -> None:
@@ -718,16 +750,18 @@ class B04RuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
         group_invocation = self.runtime.invocation("alice", "alice", grant=grant)
         self.assertEqual(
             await self.runtime.resolver.resolve(group_invocation),
-            ConversationRef(
-                "test-adapter",
-                ConversationKind.GROUP,
-                "alice",
-                "group-route-alice",
+            validate_contract(
+                ConversationRef(
+                    "test-adapter",
+                    ConversationKind.GROUP,
+                    "alice",
+                    "group-route-alice",
+                )
             ),
         )
-        with self.assertRaises(PrivateRecipientRequired) as group_rejected:
+        with self.assertRaises(AccessDenied) as group_rejected:
             await self.subscriptions.revise_request(group_invocation, request)
-        self.assertEqual(group_rejected.exception.code, "private_recipient_required")
+        self.assertEqual(group_rejected.exception.code, "access_denied")
 
         set_persisted_conversation(
             kind=ConversationKind.DIRECT, route="private-route-alice-reassigned"
@@ -737,16 +771,18 @@ class B04RuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             await self.runtime.resolver.resolve(changed_route_invocation),
-            ConversationRef(
-                "test-adapter",
-                ConversationKind.DIRECT,
-                "alice",
-                "private-route-alice-reassigned",
+            validate_contract(
+                ConversationRef(
+                    "test-adapter",
+                    ConversationKind.DIRECT,
+                    "alice",
+                    "private-route-alice-reassigned",
+                )
             ),
         )
-        with self.assertRaises(PrivateRecipientRequired) as route_rejected:
+        with self.assertRaises(AccessDenied) as route_rejected:
             await self.subscriptions.revise_request(changed_route_invocation, request)
-        self.assertEqual(route_rejected.exception.code, "private_recipient_required")
+        self.assertEqual(route_rejected.exception.code, "access_denied")
         current = await self.runtime.repositories.subscriptions.current(
             view.subscription_id
         )
@@ -797,11 +833,13 @@ class B04RuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 record.owner_id,
                 record.grant,
                 record.recipient,
-                DisplayDocument(
-                    "Private alert",
-                    "Forbidden group destination",
-                    (TextBlock("AUTHORIZED-GROUP-SECRET"),),
-                    privacy=Privacy.PRIVATE,
+                validate_contract(
+                    DisplayDocument(
+                        "Private alert",
+                        "Forbidden group destination",
+                        (validate_contract(TextBlock("AUTHORIZED-GROUP-SECRET")),),
+                        privacy=Privacy.PRIVATE,
+                    )
                 ),
                 delivery_idempotency_key(
                     group_key,
@@ -832,11 +870,17 @@ class B04RuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 record.owner_id,
                 record.grant,
                 record.recipient,
-                DisplayDocument(
-                    "Private alert",
-                    "Malformed route kind",
-                    (TextBlock("AUTHORIZED-MISSING-KIND-SECRET"),),
-                    privacy=Privacy.PRIVATE,
+                validate_contract(
+                    DisplayDocument(
+                        "Private alert",
+                        "Malformed route kind",
+                        (
+                            validate_contract(
+                                TextBlock("AUTHORIZED-MISSING-KIND-SECRET")
+                            ),
+                        ),
+                        privacy=Privacy.PRIVATE,
+                    )
                 ),
                 delivery_idempotency_key(
                     missing_kind_key,
@@ -916,7 +960,11 @@ class B04RuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 record.owner_id,
                 record.grant,
                 record.recipient,
-                DisplayDocument("Test", "Timeout", (TextBlock("payload"),)),
+                validate_contract(
+                    DisplayDocument(
+                        "Test", "Timeout", (validate_contract(TextBlock("payload")),)
+                    )
+                ),
                 delivery_idempotency_key(
                     key,
                     1,
@@ -1075,13 +1123,15 @@ class B04RuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
         view = await self._create("alice", minimum=1)
 
         def request(threshold):
-            return SubscriptionRequest(
-                "feed-alert",
-                {"region": "global"},
-                {"minimum": threshold},
-                "instant",
-                subscription_id=view.subscription_id,
-                expected_revision=1,
+            return validate_contract(
+                SubscriptionRequest(
+                    "feed-alert",
+                    {"region": "global"},
+                    {"minimum": threshold},
+                    "instant",
+                    subscription_id=view.subscription_id,
+                    expected_revision=1,
+                )
             )
 
         results = await asyncio.gather(
@@ -1108,11 +1158,13 @@ class B04RuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
         await self._conversation("alice")
 
         def request():
-            return SubscriptionRequest(
-                "feed-alert",
-                {"region": "global"},
-                {"minimum": 1},
-                "instant",
+            return validate_contract(
+                SubscriptionRequest(
+                    "feed-alert",
+                    {"region": "global"},
+                    {"minimum": 1},
+                    "instant",
+                )
             )
 
         first, second = await asyncio.gather(
@@ -1189,14 +1241,16 @@ class B04RuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
         asset_id = "asset_privateembedded"
         await self.runtime.host_repositories.resources.register(
-            ResourceMetadata(
-                asset_id,
-                "text/plain",
-                OwnerScope.user("principal-alice"),
-                12,
-                None,
-                False,
-                1,
+            validate_contract(
+                ResourceMetadata(
+                    asset_id,
+                    "text/plain",
+                    OwnerScope.user("principal-alice"),
+                    12,
+                    None,
+                    False,
+                    1,
+                )
             )
         )
         self.assertTrue(
@@ -1215,14 +1269,16 @@ class B04RuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         await self.runtime.host_repositories.resources.register(
-            ResourceMetadata(
-                "asset_privateoverbound",
-                "text/plain",
-                OwnerScope.user("principal-bob"),
-                12,
-                None,
-                False,
-                1,
+            validate_contract(
+                ResourceMetadata(
+                    "asset_privateoverbound",
+                    "text/plain",
+                    OwnerScope.user("principal-bob"),
+                    12,
+                    None,
+                    False,
+                    1,
+                )
             )
         )
         bounded_probe = SQLiteResourceVisibilityProbe(
@@ -1241,20 +1297,30 @@ class B04RuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(RuntimeError, "probe failed"):
             await failing_probe.contains_non_public_resource_reference("anything")
         candidates = (
-            FactDocument({f"key {asset_id}": "public"}),
-            FactDocument({"nested": {"text": f"source {asset_id}"}}),
-            FactDocument({"answer": "public"}, sources=(f"provider {asset_id}",)),
+            validate_contract(FactDocument({f"key {asset_id}": "public"})),
+            validate_contract(FactDocument({"nested": {"text": f"source {asset_id}"}})),
+            validate_contract(
+                FactDocument({"answer": "public"}, sources=(f"provider {asset_id}",))
+            ),
         )
         for index, facts in enumerate(candidates):
             blocked_tool = await self.runtime.output.route(
                 self.runtime.invocation(
                     "alice", "alice", origin=InvocationOrigin.LLM_TOOL
                 ),
-                CapabilityResult(
-                    f"tool-result-{index}",
-                    ResultStatus.SUCCESS,
-                    document=DisplayDocument("Tool", "Facts", (TextBlock("Public"),)),
-                    model_facts=facts,
+                validate_contract(
+                    CapabilityResult(
+                        f"tool-result-{index}",
+                        ResultStatus.SUCCESS,
+                        document=validate_contract(
+                            DisplayDocument(
+                                "Tool",
+                                "Facts",
+                                (validate_contract(TextBlock("Public")),),
+                            )
+                        ),
+                        model_facts=facts,
+                    )
                 ),
             )
             self.assertEqual(blocked_tool.error_code, "tool_result_not_public")
@@ -1267,11 +1333,17 @@ class B04RuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
             failing_runtime.invocation(
                 "alice", "alice", origin=InvocationOrigin.LLM_TOOL
             ),
-            CapabilityResult(
-                "tool-result-error",
-                ResultStatus.SUCCESS,
-                document=DisplayDocument("Tool", "Facts", (TextBlock("Public"),)),
-                model_facts=FactDocument({"answer": "public"}),
+            validate_contract(
+                CapabilityResult(
+                    "tool-result-error",
+                    ResultStatus.SUCCESS,
+                    document=validate_contract(
+                        DisplayDocument(
+                            "Tool", "Facts", (validate_contract(TextBlock("Public")),)
+                        )
+                    ),
+                    model_facts=validate_contract(FactDocument({"answer": "public"})),
+                )
             ),
         )
         self.assertEqual(
@@ -1331,11 +1403,17 @@ class B04RuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
             )
         oversized_blocked = await recovered.output.route(
             recovered.invocation("alice", "alice", origin=InvocationOrigin.LLM_TOOL),
-            CapabilityResult(
-                "oversized-asset-probe",
-                ResultStatus.SUCCESS,
-                document=DisplayDocument("Tool", "Facts", (TextBlock("Public"),)),
-                model_facts=FactDocument({"answer": "public"}),
+            validate_contract(
+                CapabilityResult(
+                    "oversized-asset-probe",
+                    ResultStatus.SUCCESS,
+                    document=validate_contract(
+                        DisplayDocument(
+                            "Tool", "Facts", (validate_contract(TextBlock("Public")),)
+                        )
+                    ),
+                    model_facts=validate_contract(FactDocument({"answer": "public"})),
+                )
             ),
         )
         self.assertEqual(
@@ -1350,7 +1428,11 @@ class B04RuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
         record = await self.runtime.repositories.subscriptions.current(
             view.subscription_id
         )
-        document = DisplayDocument("Test", "Delivery", (TextBlock("payload"),))
+        document = validate_contract(
+            DisplayDocument(
+                "Test", "Delivery", (validate_contract(TextBlock("payload")),)
+            )
+        )
         events = []
         for version, key in enumerate(
             ("status-accepted", "status-failed", "status-unknown"), 1
@@ -1428,7 +1510,13 @@ class B04RuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
                         record.owner_id,
                         record.grant,
                         record.recipient,
-                        DisplayDocument("Test", "Retry", (TextBlock("payload"),)),
+                        validate_contract(
+                            DisplayDocument(
+                                "Test",
+                                "Retry",
+                                (validate_contract(TextBlock("payload")),),
+                            )
+                        ),
                         delivery_idempotency_key(
                             key,
                             1,
@@ -1519,18 +1607,26 @@ class B04RuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 owner.owner_id,
                 owner.grant,
                 owner.recipient,
-                DisplayDocument(
-                    "Images",
-                    "Fallbacks",
-                    (
-                        ImageBlock("optionalasset", "optional image", required=False),
-                        ImageBlock(
-                            "requiredasset",
-                            "required image",
-                            fallback_text="required image unavailable",
-                            required=True,
+                validate_contract(
+                    DisplayDocument(
+                        "Images",
+                        "Fallbacks",
+                        (
+                            validate_contract(
+                                ImageBlock(
+                                    "optionalasset", "optional image", required=False
+                                )
+                            ),
+                            validate_contract(
+                                ImageBlock(
+                                    "requiredasset",
+                                    "required image",
+                                    fallback_text="required image unavailable",
+                                    required=True,
+                                )
+                            ),
                         ),
-                    ),
+                    )
                 ),
                 delivery_idempotency_key(
                     event_key,
@@ -1571,11 +1667,13 @@ class B04RuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 record.owner_id,
                 record.grant,
                 record.recipient,
-                DisplayDocument(
-                    "Test",
-                    "Restart",
-                    (TextBlock("private payload"),),
-                    privacy=Privacy.PRIVATE,
+                validate_contract(
+                    DisplayDocument(
+                        "Test",
+                        "Restart",
+                        (validate_contract(TextBlock("private payload")),),
+                        privacy=Privacy.PRIVATE,
+                    )
                 ),
                 delivery_idempotency_key(
                     event_key,
@@ -1643,12 +1741,14 @@ class B04RuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
         await self._create(
             "alice",
             mode="digest",
-            digest_schedule=DigestScheduleProfile(
-                "America/New_York",
-                "01:30",
-                3600,
-                DstFoldPolicy.FIRST_OCCURRENCE,
-                DstGapPolicy.NEXT_VALID_INSTANT,
+            digest_schedule=validate_contract(
+                DigestScheduleProfile(
+                    "America/New_York",
+                    "01:30",
+                    3600,
+                    DstFoldPolicy.FIRST_OCCURRENCE,
+                    DstGapPolicy.NEXT_VALID_INSTANT,
+                )
             ),
         )
         record = await self.runtime.repositories.subscriptions.list_for_owner(
@@ -1676,12 +1776,14 @@ class B04RuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(recovered, persisted)
 
         gap_record = record[0]
-        gap_profile = DigestScheduleProfile(
-            "America/New_York",
-            "02:30",
-            3600,
-            DstFoldPolicy.SECOND_OCCURRENCE,
-            DstGapPolicy.NEXT_VALID_INSTANT,
+        gap_profile = validate_contract(
+            DigestScheduleProfile(
+                "America/New_York",
+                "02:30",
+                3600,
+                DstFoldPolicy.SECOND_OCCURRENCE,
+                DstGapPolicy.NEXT_VALID_INSTANT,
+            )
         )
         gap_record = type(gap_record)(
             gap_record.subscription_id,
@@ -1697,12 +1799,14 @@ class B04RuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
             gap_record.type_id,
             gap_profile,
         )
-        second_fold_profile = DigestScheduleProfile(
-            "America/New_York",
-            "01:30",
-            3600,
-            DstFoldPolicy.SECOND_OCCURRENCE,
-            DstGapPolicy.NEXT_VALID_INSTANT,
+        second_fold_profile = validate_contract(
+            DigestScheduleProfile(
+                "America/New_York",
+                "01:30",
+                3600,
+                DstFoldPolicy.SECOND_OCCURRENCE,
+                DstGapPolicy.NEXT_VALID_INSTANT,
+            )
         )
         second_fold_record = type(gap_record)(
             gap_record.subscription_id,
@@ -1735,12 +1839,14 @@ class B04RuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
             gap_record.filters,
             gap_record.status,
             gap_record.type_id,
-            DigestScheduleProfile(
-                "America/New_York",
-                "02:30",
-                3600,
-                DstFoldPolicy.FIRST_OCCURRENCE,
-                DstGapPolicy.NEXT_VALID_INSTANT,
+            validate_contract(
+                DigestScheduleProfile(
+                    "America/New_York",
+                    "02:30",
+                    3600,
+                    DstFoldPolicy.FIRST_OCCURRENCE,
+                    DstGapPolicy.NEXT_VALID_INSTANT,
+                )
             ),
         )
         first_gap = digest_window_for_date(first_gap_record, date(2026, 3, 8))
@@ -1757,12 +1863,14 @@ class B04RuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
             gap_record.filters,
             gap_record.status,
             gap_record.type_id,
-            DigestScheduleProfile(
-                "America/New_York",
-                "02:30",
-                3600,
-                DstFoldPolicy.FIRST_OCCURRENCE,
-                DstGapPolicy.SKIP,
+            validate_contract(
+                DigestScheduleProfile(
+                    "America/New_York",
+                    "02:30",
+                    3600,
+                    DstFoldPolicy.FIRST_OCCURRENCE,
+                    DstGapPolicy.SKIP,
+                )
             ),
         )
         self.assertIsNone(digest_window_for_date(skip_gap_record, date(2026, 3, 8)))
@@ -1804,12 +1912,14 @@ class B04RuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
     ):
         now = self.clock()
         due_at = now + timedelta(minutes=5)
-        profile = DigestScheduleProfile(
-            "UTC",
-            due_at.strftime("%H:%M"),
-            3600,
-            DstFoldPolicy.FIRST_OCCURRENCE,
-            DstGapPolicy.SKIP,
+        profile = validate_contract(
+            DigestScheduleProfile(
+                "UTC",
+                due_at.strftime("%H:%M"),
+                3600,
+                DstFoldPolicy.FIRST_OCCURRENCE,
+                DstGapPolicy.SKIP,
+            )
         )
         first = await self._create(
             "alice", minimum=1, mode="digest", digest_schedule=profile
@@ -1857,12 +1967,14 @@ class B04RuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
         now = self.clock()
         due_at = now + timedelta(minutes=5)
         window_date = due_at.date()
-        profile = DigestScheduleProfile(
-            "UTC",
-            due_at.strftime("%H:%M"),
-            3600,
-            DstFoldPolicy.FIRST_OCCURRENCE,
-            DstGapPolicy.SKIP,
+        profile = validate_contract(
+            DigestScheduleProfile(
+                "UTC",
+                due_at.strftime("%H:%M"),
+                3600,
+                DstFoldPolicy.FIRST_OCCURRENCE,
+                DstGapPolicy.SKIP,
+            )
         )
         digest_view = await self._create(
             "bob", minimum=0, mode="digest", digest_schedule=profile
@@ -2078,19 +2190,23 @@ class B04RuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.clock.current = now
         due_at = now + timedelta(minutes=5)
         tokyo_due_at = due_at.astimezone(ZoneInfo("Asia/Tokyo"))
-        utc_profile = DigestScheduleProfile(
-            "UTC",
-            due_at.strftime("%H:%M"),
-            3600,
-            DstFoldPolicy.FIRST_OCCURRENCE,
-            DstGapPolicy.SKIP,
+        utc_profile = validate_contract(
+            DigestScheduleProfile(
+                "UTC",
+                due_at.strftime("%H:%M"),
+                3600,
+                DstFoldPolicy.FIRST_OCCURRENCE,
+                DstGapPolicy.SKIP,
+            )
         )
-        tokyo_profile = DigestScheduleProfile(
-            "Asia/Tokyo",
-            tokyo_due_at.strftime("%H:%M"),
-            3600,
-            DstFoldPolicy.FIRST_OCCURRENCE,
-            DstGapPolicy.SKIP,
+        tokyo_profile = validate_contract(
+            DigestScheduleProfile(
+                "Asia/Tokyo",
+                tokyo_due_at.strftime("%H:%M"),
+                3600,
+                DstFoldPolicy.FIRST_OCCURRENCE,
+                DstGapPolicy.SKIP,
+            )
         )
         first = await self._create(
             "alice", minimum=0, mode="digest", digest_schedule=utc_profile
@@ -2145,12 +2261,14 @@ class B04RuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
     async def test_i19_digest_rechecks_only_cancelled_member_after_render_barrier(self):
         now = self.clock()
         due_at = now + timedelta(minutes=5)
-        profile = DigestScheduleProfile(
-            "UTC",
-            due_at.strftime("%H:%M"),
-            3600,
-            DstFoldPolicy.FIRST_OCCURRENCE,
-            DstGapPolicy.SKIP,
+        profile = validate_contract(
+            DigestScheduleProfile(
+                "UTC",
+                due_at.strftime("%H:%M"),
+                3600,
+                DstFoldPolicy.FIRST_OCCURRENCE,
+                DstGapPolicy.SKIP,
+            )
         )
         first = await self._create(
             "alice", minimum=1, mode="digest", digest_schedule=profile
@@ -2192,12 +2310,14 @@ class B04RuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
     async def test_i19_digest_with_all_members_cancelled_never_calls_message_port(self):
         now = self.clock()
         due_at = now + timedelta(minutes=5)
-        profile = DigestScheduleProfile(
-            "UTC",
-            due_at.strftime("%H:%M"),
-            3600,
-            DstFoldPolicy.FIRST_OCCURRENCE,
-            DstGapPolicy.SKIP,
+        profile = validate_contract(
+            DigestScheduleProfile(
+                "UTC",
+                due_at.strftime("%H:%M"),
+                3600,
+                DstFoldPolicy.FIRST_OCCURRENCE,
+                DstGapPolicy.SKIP,
+            )
         )
         first = await self._create(
             "alice", minimum=1, mode="digest", digest_schedule=profile
@@ -2232,10 +2352,16 @@ class B04RuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
         # this fixture has no live host and no send authority outside that port.
         invocation = self.runtime.invocation("alice", "alice")
         await self._conversation("alice")
-        result = CapabilityResult(
-            "result",
-            ResultStatus.SUCCESS,
-            document=DisplayDocument("title", "summary", (TextBlock("body"),)),
+        result = validate_contract(
+            CapabilityResult(
+                "result",
+                ResultStatus.SUCCESS,
+                document=validate_contract(
+                    DisplayDocument(
+                        "title", "summary", (validate_contract(TextBlock("body")),)
+                    )
+                ),
+            )
         )
         output = await self.runtime.output.route(invocation, result)
         self.assertEqual(output.status.value, "sent")
@@ -2246,11 +2372,17 @@ class B04RuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
         )
         tool_result = await self.runtime.output.route(
             tool,
-            CapabilityResult(
-                "tool",
-                ResultStatus.SUCCESS,
-                document=DisplayDocument("Tool", "Facts", (TextBlock("public"),)),
-                model_facts=FactDocument({"answer": "public"}),
+            validate_contract(
+                CapabilityResult(
+                    "tool",
+                    ResultStatus.SUCCESS,
+                    document=validate_contract(
+                        DisplayDocument(
+                            "Tool", "Facts", (validate_contract(TextBlock("public")),)
+                        )
+                    ),
+                    model_facts=validate_contract(FactDocument({"answer": "public"})),
+                )
             ),
         )
         self.assertEqual(tool_result.status.value, "tool_result")
@@ -2304,11 +2436,13 @@ class B04RuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
             ),
             subscription_id=subscription_record.subscription_id,
             subscription_revision=subscription_record.revision,
-            conversation_kind=InvocationConversationKind(
-                subscription_record.recipient.kind.value
+            conversation_kind=validate_contract(
+                InvocationConversationKind(subscription_record.recipient.kind.value)
             ),
-            subscription_scope=InvocationSubscriptionScope(
-                subscription_record.collection_key.scope.kind.value
+            subscription_scope=validate_contract(
+                InvocationSubscriptionScope(
+                    subscription_record.collection_key.scope.kind.value
+                )
             ),
         )
         self.runtime.lifecycle.admission.admit(subscription_invocation, "read")

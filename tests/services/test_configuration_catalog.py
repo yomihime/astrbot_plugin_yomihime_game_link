@@ -4,14 +4,13 @@ import json
 import unittest
 from unittest.mock import AsyncMock, patch
 
-from ygl_test_subject.api.administration import AdminAuthorizationDenied, AdminOperation
-from ygl_test_subject.api.manifests import ConfigField
-from ygl_test_subject.api.services import (
-    ConfigFieldUpdate,
-    ConfigPatch,
-    ConfigPatchMode,
-    ConfigTarget,
+from ygl_test_subject.core.contracts.administration import (
+    AdminAuthorizationDenied,
+    AdminOperation,
+    OrdinaryRollbackReceipt,
 )
+from ygl_test_subject.core.contracts.services import ConfigFieldUpdate, ConfigPatch
+from ygl_test_subject.core.contracts.validation_boundary import validate_contract
 from ygl_test_subject.modules.ff14.config import DELIVERY_TIME, TIMEZONE
 from ygl_test_subject.services.configuration_catalog import (
     project_configuration_catalog,
@@ -24,6 +23,8 @@ from ygl_test_subject.services.core_configuration import DEFAULT_REGION
 
 from tests.services import test_ordinary_admin as ordinary_fixture
 from tests.services.test_admin_operations import _config_manifest
+from yomihime_game_link_sdk.declarations import ConfigField, ConfigUpdateMode
+from yomihime_game_link_sdk.services import ConfigTarget
 
 
 class CatalogRuntimeTests(unittest.IsolatedAsyncioTestCase):
@@ -56,7 +57,7 @@ class CatalogRuntimeTests(unittest.IsolatedAsyncioTestCase):
             "raise AssertionError('metadata imported source')", encoding="utf-8"
         )
         self.core.extension_runtime.scan(self.root / "extensions")
-        target = ConfigTarget("fixture", "admin/mod")
+        target = validate_contract(ConfigTarget("fixture", "admin/mod"))
         await self.core.config_repository.current(target)
         await self.core.database.executor.run_transaction(
             lambda unit: self.core.ordinary_config_migration.repository._write(
@@ -101,8 +102,8 @@ class CatalogRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 "admin/mod",
                 ConfigPatch(
                     1,
-                    (ConfigFieldUpdate("mode", ConfigPatchMode.REPLACE, value="new"),),
-                    (ConfigField("mode"),),
+                    (ConfigFieldUpdate("mode", ConfigUpdateMode.REPLACE, value="new"),),
+                    (validate_contract(ConfigField("mode")),),
                 ),
                 authorization=context,
             )
@@ -150,12 +151,12 @@ class CatalogRuntimeTests(unittest.IsolatedAsyncioTestCase):
                     zone["blocked_reason"], "semantic_validator_unavailable"
                 )
                 before = await self.core.config_repository.current(self.ff14target)
-                for mode in (ConfigPatchMode.REPLACE, ConfigPatchMode.CLEAR):
+                for mode in (ConfigUpdateMode.REPLACE, ConfigUpdateMode.CLEAR):
                     context = self.context(AdminOperation.UPDATE_CONFIG)
                     update = ConfigFieldUpdate(
                         TIMEZONE,
                         mode,
-                        value="UTC" if mode is ConfigPatchMode.REPLACE else None,
+                        value="UTC" if mode is ConfigUpdateMode.REPLACE else None,
                     )
                     with self.assertRaisesRegex(ValueError, "semantic validator"):
                         await ops.update_config(
@@ -231,7 +232,7 @@ class CatalogRuntimeTests(unittest.IsolatedAsyncioTestCase):
         }
         await self.core.recover_management(revisions, authorization=context)
         self.source.end(context)
-        unrelated = ConfigTarget("unrelated", "other/mod")
+        unrelated = validate_contract(ConfigTarget("unrelated", "other/mod"))
         await self.core.config_repository.current(unrelated)
         await self.core.database.executor.run_transaction(
             lambda unit: self.core.ordinary_config_migration.repository._write(
@@ -248,7 +249,8 @@ class CatalogRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 revisions, authorization=context
             )
         self.source.end(context)
-        self.assertEqual(result, {"rolled_back": True})
+        self.assertIs(type(result), OrdinaryRollbackReceipt)
+        self.assertIs(result.rolled_back, True)
         self.assertEqual(
             (await self.core.config_repository.current(unrelated)).values["note"],
             "kept",
@@ -285,19 +287,23 @@ class CatalogBudgetTests(unittest.TestCase):
 
     def test_closed_budget_rejects_without_truncation(self):
         with self.assertRaisesRegex(ValueError, "field budget"):
-            self.project(tuple(ConfigField(f"field{i}") for i in range(129)))
+            self.project(
+                tuple(validate_contract(ConfigField(f"field{i}")) for i in range(129))
+            )
         with self.assertRaisesRegex(ValueError, "string budget"):
-            self.project((ConfigField("field", default="x" * 4097),))
+            self.project((validate_contract(ConfigField("field", default="x" * 4097)),))
         with self.assertRaisesRegex(ValueError, "byte budget"):
             self.project(
                 tuple(
-                    ConfigField(f"field{i}", default=chr(0x4E2D) * 1000)
+                    validate_contract(
+                        ConfigField(f"field{i}", default=chr(0x4E2D) * 1000)
+                    )
                     for i in range(128)
                 )
             )
 
     def test_standalone_migration_required_binding_is_frozen_and_guards_writes(self):
-        target = ConfigTarget("fixture", "game_link/core")
+        target = validate_contract(ConfigTarget("fixture", "game_link/core"))
 
         def validator(value):
             pass
@@ -311,7 +317,11 @@ class CatalogBudgetTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "semantic validator"):
             migration.require_semantic_validators()
         migration.require_semantic_validators(
-            {ConfigTarget("fixture", "other/mod"): {"default_region"}}
+            {
+                validate_contract(ConfigTarget("fixture", "other/mod")): {
+                    "default_region"
+                }
+            }
         )
         self.assertIs(
             migration._required_validators[(target, "default_region")], validator
@@ -322,8 +332,8 @@ class CatalogBudgetTests(unittest.TestCase):
     def test_sensitive_declarations_are_omitted(self):
         result = self.project(
             (
-                ConfigField("token", sensitive=True),
-                ConfigField("ordinary", default="safe"),
+                validate_contract(ConfigField("token", sensitive=True)),
+                validate_contract(ConfigField("ordinary", default="safe")),
             )
         )
         self.assertEqual([field["name"] for field in result["fields"]], ["ordinary"])

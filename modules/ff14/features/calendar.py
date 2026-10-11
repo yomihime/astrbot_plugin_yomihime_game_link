@@ -8,22 +8,18 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, time, timedelta
 from typing import Callable, Mapping
 
-from yomihime_sdk.api.contexts import InvocationView
-from yomihime_sdk.api.display import Privacy
-from yomihime_sdk.api.results import (
+from yomihime_game_link_sdk.contexts import InvocationView
+from yomihime_game_link_sdk.display import Privacy
+from yomihime_game_link_sdk.errors import SourceHttpError
+from yomihime_game_link_sdk.results import (
     CapabilityResult,
     ErrorCode,
     ErrorDetail,
     ResultStatus,
 )
-from yomihime_sdk.api.services import (
-    HttpRequest,
-    ModuleServices,
-    SourceHttp,
-    SourceHttpError,
-)
-from yomihime_sdk.api.storage import JsonObject, OwnerScope
-from yomihime_sdk.api.subscriptions import (
+from yomihime_game_link_sdk.services import HttpRequest, ModuleServices, SourceHttp
+from yomihime_game_link_sdk.storage import JsonObject, OwnerScope
+from yomihime_game_link_sdk.subscriptions import (
     CollectionView,
     NormalizedInput,
     Observation,
@@ -273,7 +269,9 @@ class CalendarQuery:
     async def invoke(
         self, context: InvocationView, parameters: JsonObject
     ) -> CapabilityResult:
-        config = self._config or FF14ConfigSnapshot.from_values((await self._services.config.current()).values)
+        config = self._config or FF14ConfigSnapshot.from_values(
+            (await self._services.config.current()).values
+        )
         normalized = _normalize_query(parameters, config)
         if isinstance(normalized, CapabilityResult):
             return normalized

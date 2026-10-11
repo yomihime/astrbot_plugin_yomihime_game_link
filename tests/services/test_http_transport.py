@@ -8,8 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 from urllib.parse import parse_qsl, urlsplit
 
-from ygl_test_subject.api.manifests import SourceDeclaration
-from ygl_test_subject.api.services import HttpRequest
+from ygl_test_subject.core.contracts.validation_boundary import validate_contract
 from ygl_test_subject.infrastructure.http import (
     CredentialLease,
     SourceHttpError,
@@ -18,6 +17,9 @@ from ygl_test_subject.infrastructure.http import (
     _create_credential_exchange_request,
 )
 from ygl_test_subject.infrastructure.http_transport import AioHttpTransport
+
+from yomihime_game_link_sdk.declarations import SourceDeclaration
+from yomihime_game_link_sdk.services import HttpRequest
 
 
 class _Stream:
@@ -333,8 +335,8 @@ class AioHttpTransportTests(unittest.IsolatedAsyncioTestCase):
     async def test_internal_source_service_is_the_only_resource_proof_issuer(
         self,
     ) -> None:
-        declaration = SourceDeclaration(
-            "fflogs", "api.example.test", "credential_fflogs"
+        declaration = validate_contract(
+            SourceDeclaration("fflogs", "api.example.test", "credential_fflogs")
         )
         service = SourceHttpService(
             (declaration,),
@@ -343,7 +345,9 @@ class AioHttpTransportTests(unittest.IsolatedAsyncioTestCase):
             credential_service=_CredentialAuthorizer(),
         )
 
-        response = await service.fetch(HttpRequest("fflogs", "/api/v2/client"))
+        response = await service.fetch(
+            validate_contract(HttpRequest("fflogs", "/api/v2/client"))
+        )
 
         self.assertEqual(response.status_code, 200)
         args, kwargs = self.session.calls[0]

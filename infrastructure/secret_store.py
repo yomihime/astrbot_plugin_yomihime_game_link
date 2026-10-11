@@ -13,13 +13,16 @@ import secrets
 from pathlib import Path
 from typing import Protocol
 
-from ..api.storage import (
+from yomihime_game_link_sdk.storage import SecretRef
+
+from ..core.contracts.storage import (
     ClaimedSecretReceipt,
     SecretReceipt,
     SecretReceiptState,
-    SecretRef,
+    SecretRef_validate,
     SecretTarget,
 )
+from ..core.contracts.validation_boundary import validate_contract
 from ..core.ports import (
     RevisionConflict,
     SecretCompensationState,
@@ -145,8 +148,10 @@ class SQLiteSecretStore:
         ):
             raise ValueError("expected config revision must be non-negative")
         token = f"secret_{secrets.token_urlsafe(24)}"
-        ref = SecretRef(
-            token, target.principal_id, target.module_id, target.field, operation_id
+        ref = validate_contract(
+            SecretRef(
+                token, target.principal_id, target.module_id, target.field, operation_id
+            )
         )
 
         def reserve(unit: SQLiteUnitOfWork) -> int:
@@ -478,7 +483,8 @@ class SQLiteSecretStore:
     async def _owned_row(
         self, secret_ref: SecretRef, owner: SecretOwner
     ) -> tuple[SecretRef, str | None]:
-        ref = SecretRef.validate(secret_ref)
+        validate_contract(secret_ref)
+        ref = SecretRef_validate(secret_ref)
         owner = SecretOwner(
             owner.principal_id, owner.module_id, owner.field, owner.operation_id
         )
@@ -509,6 +515,7 @@ class SQLiteSecretStore:
         return await self.database.executor.run_read(read)
 
     async def read(self, secret_ref: SecretRef, *, owner: SecretOwner) -> bytes | None:
+        validate_contract(secret_ref)
         codec = self._require_codec()
         ref, state = await self._owned_row(secret_ref, owner)
         if state not in {"staged", "claimed", "active"}:
@@ -522,6 +529,7 @@ class SQLiteSecretStore:
             raise SecretStoreUnavailable() from None
 
     async def delete(self, secret_ref: SecretRef, *, owner: SecretOwner) -> None:
+        validate_contract(secret_ref)
         ref, state = await self._owned_row(secret_ref, owner)
         if state is None:
             return
@@ -554,6 +562,7 @@ class SQLiteSecretStore:
     async def mark_orphan(
         self, secret_ref: SecretRef, reason: str, *, owner: SecretOwner
     ) -> None:
+        validate_contract(secret_ref)
         ref, state = await self._owned_row(secret_ref, owner)
         if state is None:
             return

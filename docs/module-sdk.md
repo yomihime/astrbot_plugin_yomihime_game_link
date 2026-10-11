@@ -1,215 +1,177 @@
-# Yomihime module SDK
+# Game Link module SDK
 
-`yomihime-module-sdk` is the supported, host-independent import surface for
-extensions. Import public contracts from `yomihime_sdk`. Their canonical source
-declarations live in `yomihime_sdk/api/`; the repository-root `api/` package is
-a compatibility forwarding surface whose exported objects retain identity
-with the canonical declarations. The SDK does not import Core runtime
-implementations or AstrBot objects.
+The independently installable distribution is `yomihime-game-link-sdk==0.1.0a6`. Import its public declarations with `import yomihime_game_link_sdk as ygl`. It requires Python 3.11 or newer and has no third-party runtime dependencies.
 
-The current artifact is `yomihime-module-sdk` version `1.8.0`, carrying contract
-`1.8.0` (`MODULE-DISPLAY-01`) and compatible contract versions `1.0.0`, `1.1.0`,
-`1.2.0`, `1.3.0`, `1.4.0`, `1.5.0`, `1.6.0`, `1.7.0`, and `1.8.0`.
-Extension declarations use manifest schema v1 and factory ABI v1. The declared
-minimum is Python 3.11 because the public API uses `StrEnum`. A local
-installed-wheel check proves the bundled SDK imports from the installed site
-directory and that compatibility exports share object identity; it does not
-prove activation inside the target AstrBot environment. Host Python selection,
-installation location, and import precedence remain W0-H evidence.
+## Install and import
 
-Contract 1.8 adds optional `ModuleManifest.display`: `ModuleDisplay(default_name,
-localized_names={}, short_name=None)`. Names are non-empty plain text (128
-characters; 32 for the compact name), with no control or formatting characters.
-At most 16 locale keys are accepted: BCP47 language, optional script/region and
-up to four variants, without extensions or private-use tags. Locale keys and
-subtags must not repeat ignoring case; translations use the same name limit.
-The copied translation map is immutable. Disk `display` accepts only these
-three fields and requires `default_name`; its presence requires contract 1.8.
-Contracts 1.0 through 1.7 retain their existing declarations without display.
-Display names do not change package/module identity, command routes, ownership,
-configuration or storage. The public catalog copies only this trusted metadata
-and does not call a module factory or business handler.
-
-Contract 1.6 adds optional `CapabilityDescriptor.invocation_origins`, an immutable
-tuple of `InvocationOrigin.COMMAND`, `WEB_PUBLIC`, and `LLM_TOOL`. Explicit sets
-must include COMMAND, contain no duplicates, preserve the legacy policy's
-entries, and expose only public read-only capabilities outside commands. Older
-package contracts reject this field. If omitted, legacy policies map exactly to
-command; command plus web; or command plus tool. Web deployment remains opt-in.
-The public `effective_origins` property is the normalized declaration.
-
-Public error facts in 1.6 require a closed `status`/`error` envelope matching the
-result's safe error code and message, with optional public `market` facts. Older
-result/fact versions and private results cannot carry this error envelope.
-LLM_TOOL cache defaults to PUBLIC and rejects USER/AUTHORIZED scope; this new
-tool-cache boundary does not change the command cache default or identity model.
-
-Contract 1.2.0 added `SourceHttpError` in the canonical
-`yomihime_sdk.api.services` module and the top-level package. It exposes stable,
-sanitized `code` and optional `status_code` fields for source HTTP failures.
-`HttpRequest.query` remains an ordered tuple of string key/value pairs; raw
-spaces, Unicode, and percent characters are accepted as data and are encoded
-once by the transport. Control characters remain rejected.
-
-Contract 1.3.0 adds `PrivacyFloor.OWNER` to capability declarations. Owner-floor
-capabilities must use `InvocationPolicy.COMMAND_ONLY`, and the manifest rejects
-exposing them through a Tool. This restriction is validated when descriptors
-and manifests are constructed; host Core authorization remains responsible for
-proving the current principal before an owner-scoped operation is dispatched.
-
-Contract 1.4.0 adds `InvocationOrigin.WEB_PUBLIC` and the explicit
-`InvocationPolicy.COMMAND_AND_PUBLIC_WEB` policy. This policy requires
-`PrivacyFloor.PUBLIC` and a read-only capability. `COMMAND_ONLY` continues to
-exclude web invocation. Tools still require `NATURAL_LANGUAGE_ALLOWED`; the new
-web policy does not authorize natural-language invocation. Declaring the policy
-alone does not enable an HTTP endpoint: the host and Core must separately verify
-the request, admit the deployed capability, and enforce its lifetime and limits.
-This SDK contract does not grant an administrator, conversation, or subscription
-owner identity to a web request.
-
-## Offline build and isolated install
-
-The build backend is setuptools `80.9.0` with wheel `0.45.1`, pinned in
-`pyproject.toml`. The checked local build machine already has both versions.
-Build with `--no-build-isolation` and `--no-index` so no build helper is
-downloaded. A different build machine must provide those exact build tools
-before running this command. The standalone SDK wheel has no runtime
-dependencies. The AstrBot Core plugin separately declares its HTTP runtime
-dependencies in the repository-root `requirements.txt`.
-
-The focused artifact test builds from a temporary source copy, installs with
-`--target` into a temporary site directory, and runs its identity probe with
-`python -I`. This avoids leaving setuptools build products in the checkout.
-From the repository root in PowerShell, the equivalent manual build sequence
-is:
+Install the reviewed wheel into your module development environment:
 
 ```powershell
-python -c "import setuptools, wheel; assert setuptools.__version__ == '80.9.0'; assert wheel.__version__ == '0.45.1'"
-$work = Join-Path $env:TEMP 'yomihime-sdk-artifact'
-New-Item -ItemType Directory -Force $work | Out-Null
-$source = Join-Path $work 'source'
-$wheelhouse = Join-Path $work 'wheelhouse'
-$site = Join-Path $work 'site'
-New-Item -ItemType Directory -Force (Join-Path $source 'docs') | Out-Null
-New-Item -ItemType Directory -Force $wheelhouse | Out-Null
-Copy-Item -LiteralPath LICENSE, pyproject.toml, setup.py -Destination $source
-Copy-Item -LiteralPath docs/module-sdk.md -Destination (Join-Path $source 'docs')
-Copy-Item -LiteralPath yomihime_sdk -Destination $source -Recurse
-New-Item -ItemType Directory -Force (Join-Path $source 'examples') | Out-Null
-Copy-Item -LiteralPath examples/empty_module, examples/offline_sample -Destination (Join-Path $source 'examples') -Recurse
-$env:SOURCE_DATE_EPOCH = '315532800'
-python -m pip wheel --no-index --no-deps --no-build-isolation --wheel-dir $wheelhouse $source
-python -m pip install --no-index --no-deps --target $site (Join-Path $wheelhouse 'yomihime_module_sdk-1.5.0-py3-none-any.whl')
-python -I -c "import sys; sys.path.insert(0, r'$site'); import importlib.metadata, yomihime_sdk; assert importlib.metadata.version('yomihime-module-sdk') == '1.5.0'; assert yomihime_sdk.CONTRACT_VERSION == '1.5.0'; assert yomihime_sdk.CONTRACT_REVISION == 'R1-MODULE-PAGES'; print(yomihime_sdk.__version__)"
+python -m pip install --no-deps ./yomihime_game_link_sdk-0.1.0a6-py3-none-any.whl
+python -I -c "import yomihime_game_link_sdk as ygl; assert ygl.__version__ == '0.1.0a6'; assert ygl.MODULE_ABI_VERSION == '2.0'"
 ```
 
-The artifact test performs two builds with the fixed `SOURCE_DATE_EPOCH` and
-compares both wheel hashes with the reviewed pin. It installs the second wheel
-offline into an otherwise empty target directory and uses `python -I` to check
-the installed SDK, compatibility-shim, and Core import identities. It then
-extracts all six example files through `importlib.resources` from that wheel.
-The artifact check proves deterministic packaging and import identity, not
-CoreRuntime activation or AstrBot host compatibility. The separate E scanner
-probe reports platform support or an explicit unsupported result; scanner
-support is not an artifact property.
+The plugin release contains the exact content-pinned SDK from that wheel. Its bootstrap rejects changed contents, foreign package origins, partial preload graphs, and any preloaded retired `yomihime_sdk` graph. The retired root `api` and `yomihime_sdk.api` modules have no compatibility redirects. Historical stored-data readers are separate from module import compatibility.
 
-Run the focused checks from the repository root:
+## Versions and receiving validation
 
-```text
-python -m unittest tests.sdk.test_public_exports tests.sdk.test_empty_template tests.sdk.test_offline_sample tests.packaging.test_sdk_artifact_install -v
-ruff check yomihime_sdk examples/empty_module examples/offline_sample tests/sdk tests/packaging/test_sdk_artifact_install.py
-ruff format --check yomihime_sdk examples/empty_module examples/offline_sample tests/sdk tests/packaging/test_sdk_artifact_install.py
-python -m compileall -q yomihime_sdk examples/empty_module examples/offline_sample tests/sdk tests/packaging/test_sdk_artifact_install.py
-git diff --check -- pyproject.toml yomihime_sdk examples/empty_module examples/offline_sample docs/module-sdk.md tests/sdk tests/packaging/test_sdk_artifact_install.py .coordination/handoffs/CORE-HARDENING-01-K-ARTIFACT.md
+Package manifests use `contract_version: "2.0"` as the current module ABI selector. Disk manifest schema remains 1 and factory ABI remains 1. Old or unknown module ABI versions are rejected before factory resolution or registration. SDK release, module ABI and output formats are distinct: current display, facts and persisted B04 documents remain at output version 1.8.0. An output version of 2.0 is not admitted.
+
+SDK constructors describe data and freeze supported containers; they do not establish permissions or perform Core receiving validation. Core checks the current canonical types and nested invariants at registration, invocation, service, renderer and storage boundaries. Constructing or copying an InvocationView, OwnerScope or grant reference grants no authority. Only the exact issued invocation with its current lifetime and admission proof can bind services.
+
+## Injected services and public failures
+
+Factories receive `ModuleServices` with config, identities, accounts, subscriptions and scopes. The SDK exposes no Core repository, storage router, host administration or filesystem container. Use `await services.scopes.bind(invocation)` for invocation-bound records, cache, HTTP, resources, dependencies, tasks and message access. Binding and operations check authority before and after awaits.
+
+Cache lookup accepts `ygl.CacheQuery(key, visibility=None)`. Core derives user, module and grant partitions from the bound invocation. HIT includes a complete `CacheEntry` with key, payload, expiry and revision; MISS, EXPIRED and REJECTED expose no entry or payload. `get(key)` uses the same default partition and returns that complete HIT entry or `None` for the three nonhit states. It discards their status distinction, not HIT metadata. Default visibility is PUBLIC for Tool, AUTHORIZED with a current grant, USER with an actor, and PUBLIC otherwise. Explicit visibility still requires current origin, identity and grant authority. Stored-row REJECTED (for example an older grant revision) is distinct from current permission revocation, which raises `AccessDenied`. Invalid query, released/copied invocation, deadline, unavailable service and cancellation remain errors; `get` does not turn them into `None`. Public `put(key, payload, *, ttl_seconds)` exposes no internal owner, visibility, revision or invalidation controls. Module cache keys use a private namespace; earlier raw rows remain stored but produce MISS through the new bound route, with no cross-owner fallback or migration.
+
+Record duplicate and CAS errors use the unique SDK `UniqueConstraintViolation` and `RevisionConflict` identities. Invalid proof, denied authority, invalid input, unavailable dependency and deadline failures map to `InvalidInvocation`, `AccessDenied`, `ParameterError`, `ServiceUnavailable` and `OperationTimeout`. Public errors contain fixed messages and safe logical attributes, without raw dependency cause/context chains. Cancellation propagates unchanged; a cancelled or timed-out accepted write may already have committed and is never automatically retried. Existing SourceHttpError codes retain the source policy contract.
+
+Subscriptions use only `create_request(invocation, SubscriptionRequest)`, `revise_request`, `list_current` and `cancel(invocation, id, *, expected_revision)`. Creation omits ID/revision; Core supplies a new ID and revision 1. Revision includes both and must match current CAS. A `SubscriptionView` omits collector command parameters and cannot replace a request. Repeated identical creates can make distinct subscriptions sharing one collection job; no idempotency or automatic deduplication is promised. Revision/cancellation conflicts raise `RevisionConflict`; cancellation removes only the selected association, preserving other subscribers' jobs/data. A paused owner with fresh current proof may list/revise/cancel but cannot create. Command root, exact issuer, route, principal, module epoch and grant checks apply across awaits; old contexts/handles never regain authority on restore. An unconfigured delegate raises `ServiceUnavailable`. Collector input normalization and matching remain module business rules.
+
+`OwnerScope.authorized` is the sole spelling for an authorization-bound descriptive scope; the historical `private` helper is retired. The Core-only `CacheService` synonym is also retired, without adding a module-facing repository API. Host administration remains outside `ModuleServices` and the SDK. Its Core-private unload/rollback receipts acknowledge observed facts only. An unload can disable before a later failure, and cancellation or late authorization failure after an accepted SQLite transaction can leave the commit outcome unknown. Refresh a newly authorized snapshot to reconcile; do not infer rollback or automatically retry from a missing receipt. Configuration, credentials and business data remain retained across unload/restore.
+
+## Current root Tool message
+
+The public read port is `MessageAccess.read() -> MessageContext`, available on
+a bound `InvocationServices.message`. Both declarations are exported by the
+canonical SDK. A module uses only its injected services:
+
+```python
+import yomihime_game_link_sdk as ygl
+
+async def read_tool_input(
+    services: ygl.ModuleServices, invocation: ygl.InvocationView
+) -> ygl.MessageContext:
+    scope = await services.scopes.bind(invocation)
+    return await scope.message.read()
 ```
 
-Both example trees are included in the same wheel under
-`yomihime_sdk/_examples/{empty_module,offline_sample}/`. The empty package has
-no module declarations. The offline sample declares two modules: `status` has
-10 commands, two Tools, two schedules, two subscriptions, and three config
-fields; `source` has one independent public command. The status module
-demonstrates a required capability dependency, configuration-based health,
-command-only account/subscription operations, and public/private collection.
-The package contains no service stubs; component and installed-artifact tests
-provide explicit inert doubles through an actual `ModuleServices` DTO. The
-sample returns deterministic SDK display/fact DTOs and
-does not send host messages, perform network I/O, or start background work.
-Only a later E/CoreRuntime integration can establish host dispatch and
-lifecycle behavior.
+This read requires the exact Core-issued, admitted root LLM Tool invocation and
+current trusted Host source. `MessageContext(text, event_ref)` is a frozen neutral
+DTO, not authority: constructing, copying or retaining it cannot bind services
+or replay a message. The module receives no AstrBot event. Read text inside
+module business rules and use event_ref only for bounded local correlation.
+Neither value belongs automatically in model facts, logs, public errors or UI.
+A cached DTO is not a freshness check; re-read after other awaits and before
+message-dependent effects, candidate publication or results. Core and Host
+recheck issuer identity, module lifetime and current source at their boundaries.
 
-The ordinary, non-sensitive `sample_subscriptions_enabled` field defaults to
-the boolean `true`. It is a sample subscription gate, not an authorization
-grant. A deploying host must explicitly bind the gate to the verified
-`offline_sample/status` manifest using the Core's trusted deployment mapping.
-Discovery alone does not establish that trust; without the mapping,
-subscription creation and delivery remain closed. The integration fixture
-uses unmodified installed-wheel resources and normal Core initialization,
-administrator operations, and scheduler fences to exercise this binding.
+Explicit command and Web entry points use their explicit parameters without
+requiring a chat-message proof. A valid bound command, Web or scheduled scope
+has no root Tool message and `message.read()` raises `ServiceUnavailable`; a
+nested dependency does not inherit its parent's message. No new ADMIN or
+subscription binding entry point is provided. Invalid or copied invocations
+fail with `InvalidInvocation`; ended, timed-out, cancelled, revoked or unloaded
+handles cannot continue reading. Source/current failures use safe public SDK
+errors without raw exception chains; asyncio cancellation still propagates.
 
-## Example resources
+The AstrBot adapter correlates the exact weak-referenceable event object, not
+text or platform message IDs. Same-object retries retain correlation without
+renewing the 300-second maximum lifetime; new objects with the same text are
+new messages. Its in-memory bound is 128 live receipts plus expired tombstones
+combined. A full table rejects new receipts rather than evicting an existing
+one. An expired object cannot be re-signed; weak-reference GC releases its
+entry. Raw text is cleared lazily on access/capture, with no cleanup timer,
+while permission expires immediately. Correlation is also scoped to user,
+session, adapter, module instance and epoch. No restart persistence, stable
+message ID, QQ/NapCat capability or generic wait framework is promised.
 
-The wheel contains these exact entries:
+| Earlier internal path | Supported a2 module path |
+| --- | --- |
+| AstrBot-to-FF14 private `_bind_tool_event` with a raw event | Core-issued invocation → `services.scopes.bind` → `scope.message.read` |
+| Module reading Host event getters or retaining an event | Module receives neutral text/event_ref data and re-reads the bound port |
+| Explicit command/Web parameters | Continue using explicit parameters; no fabricated chat message |
 
-```text
-yomihime_sdk/_examples/empty_module/manifest.json
-yomihime_sdk/_examples/empty_module/module.py
-yomihime_sdk/_examples/empty_module/README.md
-yomihime_sdk/_examples/offline_sample/manifest.json
-yomihime_sdk/_examples/offline_sample/module.py
-yomihime_sdk/_examples/offline_sample/README.md
+The earlier private binding has been removed from active Host/FF14 code; no
+legacy raw-event fallback or second message channel is supported. Item,
+quality, region and candidate-confirmation rules remain FF14 business rules.
+
+## Public ERROR facts
+
+An ERROR result may omit model facts. When it supplies facts, Core accepts only
+`{status, error[, supplement]}`: status is exactly `"error"`, error contains
+exactly `code` and `message`, and both equal the result's public ErrorDetail at
+Core input. Optional supplement is a JSON object. Unknown top-level business
+keys, mismatched messages/status/codes, and ERROR display documents are refused.
+There is no module-ID selector, extension registration or new error DTO.
+
+For example, a module selects fixed public fields and a safe recovery hint:
+
+```python
+import yomihime_game_link_sdk as ygl
+
+error = ygl.ErrorDetail(ygl.ErrorCode.NO_RECORDS,
+                        "No matching public records; choose another source.")
+result = ygl.CapabilityResult(
+    "public-source-error", ygl.ResultStatus.ERROR, error=error,
+    model_facts=ygl.FactDocument({
+        "status": "error",
+        "error": {"code": error.code.value, "message": error.message},
+        "supplement": {
+            "archive": {"attempted_source": "offline", "available": None,
+                        "confidence": 0.25},
+            "recovery_hint": "Choose another public source.",
+        },
+    }),
+)
 ```
 
-Retrieve them from an installed artifact with `importlib.resources`; do not
-copy examples from the source checkout when validating a built wheel. The
-packaging test extracts both resources into temporary extension package roots,
-parses the manifests against the frozen E schema, checks each module's
-declaration counts, and exercises both factories and representative handlers.
-It does not instantiate a second extension runtime.
+ERROR facts use JSON null, booleans, integers, finite floats, strings, arrays and
+objects with nonempty string keys. Arbitrary objects, bytes, display wrappers,
+Decimal, cyclic values and NaN/infinity are refused. Noncyclic aliases count at
+each occurrence. Existing nonerror Decimal facts and DisplayDocument typed-value
+rules keep their previous domains; accepting a fact float does not admit a
+DisplayDocument float.
 
-Unsupported Python is declared through wheel metadata `Requires-Python >=3.11`
-so pip rejects it before installing the artifact. The SDK performs no install
-or upgrade actions. Manifest incompatibility remains the E parser's stable
-reject path; a missing runtime dependency cannot occur because this wheel has
-no runtime dependencies.
+Core retains a total 512-node budget including map keys, values and fact sources,
+a maximum depth of 16 with the root at depth zero, and 4096 characters per
+string/key/source. In addition, the complete ERROR facts body, including its
+status/error/supplement envelope, must fit 256 KiB of UTF-8 using the Tool JSON
+serialization (ensure_ascii=False, allow_nan=False, default separators). The
+independent Web projection has its existing depth-8 and whole-response 256-KiB
+limits and may reject a result that fits Core. Limits are rejection boundaries;
+Core does not silently drop fields or turn an invalid ERROR into success.
 
-## H-ADMIN-02 host-independent administration revision
+FF14 places its selected error-market diagnostics at `supplement.market`.
+SUCCESS, PARTIAL_SUCCESS and NEEDS_SELECTION retain their existing market and
+selection layouts. FF14 owns the distinction between failed and empty sources,
+missing prices, coverage, cache provenance and recovery guidance; a missing
+price remains null, never an invented zero. Other modules choose their own
+supplement keys. Core validates generic structure and the envelope and does not
+read market fields to decide whether an error is valid.
 
-The 2026-10-05 product decision replaces the universal independent-credential requirement. Core authorization is host independent: explicitly trusted authorities attest subjects, authentication sources, exact operations/resources, and live request lifetimes. Native Core credentials remain one source with their own durable ACTIVE/generation checks; a trusted Host source uses its own ownership/epoch/expiry and never fabricates a native key.
+The module must explicitly choose public fields and safe messages/hints. Never
+copy an upstream response, headers, exception attributes, credential material,
+proof, internal message reference or full chat message into facts. JSON validity
+is not secret detection or permission: a legal string can still contain private
+data. The receiver detaches accepted facts and publication rechecks current
+authority after awaits. Already accepted writes, claims or started HTTP effects
+cannot be recovered by rejecting a later public result.
 
-In AstrBot deployment, the normal formally authenticated management user needs no second Core credential. The Adapter attests a server-owned request; JSON roles, page assets, ordinary API keys and public-query proofs cannot mint administrative grants. Core checks the bounded policy again before effects and inside configuration/rollback transactions. Ordinary fields are opened only by the explicit reviewed deployment resource policy. Module declarations do not grant ordinary, credential, lifecycle, subscription or future-module permissions.
+Command replies continue to use Core's fixed code-specific error text. Web's
+public error message is independently masked to its existing safe recovery hint;
+code/message equality is checked at Core input, not between these projected
+messages. SDK service APIs retain canonical safe typed failures and cancellation;
+Gateway retains its existing ERROR-result protocol. Neither a DTO nor a recovery
+hint grants permission to retry or change a user's request.
 
-SDK descriptive IDs and data classes are not authorization evidence. Tests must retain forged, wrong-source/resource, ended/expired/cancelled requests, transaction fencing, revision conflict and recovery rejection cases. Core standalone/test adapters require no AstrBot import or FF14/config-service changes. The exact contract and startup-failure boundaries are frozen in [host-management-authorization-contract.md](host-management-authorization-contract.md). Artifact/source pins must be rebuilt and statically updated for the final implementation; source presence does not claim runtime acceptance.
+## Packaged examples
 
-## Contract 1.5.0
+The wheel includes `_examples/empty_module` and `_examples/offline_sample`, each with manifest.json, module.py and README.md. Extract them using importlib.resources; rename manifest.json to yomihime.manifest.json when installing a package. The empty factory is inert; the offline sample uses deterministic data and the existing injected service contracts. Neither example introduces real model or upstream calls.
 
-`CommandDescriptor.parameter_mode` defaults to `structured`; `raw_tail` declares a single `raw_tail_parameter` referencing a closed capability string property and requires an empty mapping. The generic Host preserves the original tail and Core validates it.
+The offline sample also exercises configuration, USER records, cache put/lookup/get,
+safe public ERROR facts, current Tool message input, subscription revision/CAS and
+finite task cleanup. Its source imports only this SDK and the standard library.
+The separate repository harness `tests.integration.test_s4_core_runtime` installs
+the wheel into a task-local real Core deployment and places the module beside it
+as an external extension. It uses native discovery, SQLite and public Core ingress;
+Host transport and message ports are controlled offline adapters. Host-issued
+administration and trusted subscription gates remain outside ModuleServices.
+Unloading rejects old scopes and instance services; legal recovery preserves
+configuration, records and unexpired USER cache entries while enforcing owner
+isolation. See the packaged example README for cleanup and evidence boundaries.
+This Core exercise does not claim native AstrBot startup, model or IM delivery,
+global Core Ready, or a process sandbox.
 
-`ModuleManifest.pages` and `resources` default to empty tuples. `PageDescriptor(route_id, title, entry, order=0, access="public_web", capability_id=None, styles=())` references `PageResource(path, sha256)` declarations. These are trusted local relative assets with bounded reads and SHA-256 verification; public declarations grant no user authority. Lifecycle ACTIVE and the existing run identity fence callable page catalog entries. SDK 1.4.0 and older examples remain supported.
-
-Optional `ModuleServices.storage` contains read-only `ModuleStoragePaths` describing stable module ownership directories. Existing SQLite config, cache, secrets and records retain their shared transactions. Stop/uninstall never deletes these paths or records.
-
-
-### SDK 1.7 module lifecycle management
-
-SDK 1.7 adds `AdminOperation.UNLOAD_MODULE` and `AdminOperations.unload_module`.
-Previous 1.0 through 1.6 declarations, factories, single-capability public pages
-and invocation policies remain supported. Published 1.6 artifacts are unchanged.
-
-Deployment explicitly registers lifecycle resources as an exact `ConfigTarget`
-with the reserved policy marker `__module_lifecycle__`. This marker is never a
-configuration field and grants no ordinary or sensitive value access.
-`LIST_MODULES` is scoped to the deployment-approved owners. Unload requires both
-`UNLOAD_MODULE` and `SET_ENABLED` for its exact owner, disables and drains that
-instance before Registry detachment, and retains persistent configuration,
-secrets, cache and business data. Failed cleanup retains retryable ownership and
-blocks a replacement instance. A retained trusted candidate may be enabled again;
-the web shell must be reopened for a fresh Host resource projection.
-
-Ordinary configuration authority is injected through `ordinary_config_resources`,
-independently of migration fields. Config schema/group metadata alone never grants
-read/write access. Credential management uses a separate source. Its readiness
-preflight only probes the current injected codec in memory, never existing secret
-files or real key initialization. Readiness does not establish old-ciphertext
-compatibility or OAuth validity.
-
-The SET_ENABLED call signature and closed legacy 1.0-1.6 schemas remain compatible. A legacy Host proof with empty resources or without the exact lifecycle marker does not gain owner management authority. A lifecycle marker grant cannot read or modify ordinary or credential fields.
+ModuleDisplay metadata remains optional, bounded and localized; it never changes module IDs, owner identities, command routing or storage. Unloading a module preserves its existing persisted data. Existing 1.7 display read adaptation retains the historical codec, tags and identities; no data-format migration is included in this SDK change.

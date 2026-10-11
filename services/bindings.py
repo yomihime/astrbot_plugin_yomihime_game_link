@@ -5,16 +5,17 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from uuid import uuid4
 
-from ..api.contexts import InvocationOrigin, InvocationView
-from ..api.services import (
+from yomihime_game_link_sdk.contexts import InvocationOrigin, InvocationView
+from yomihime_game_link_sdk.services import (
     AccountOperations,
-    Binding,
-    BindingDefaultSnapshot,
     BindingView,
-    GrantReference,
     ResolvedIdentity,
 )
+from yomihime_game_link_sdk.storage import GrantReference
+
 from ..core.context_issuer import ContextIssuer
+from ..core.contracts.services import Binding, BindingDefaultSnapshot
+from ..core.contracts.validation_boundary import validate_contract
 from ..core.ports import (
     AdmissionLease,
     AdmissionPort,
@@ -82,6 +83,7 @@ class AccountOperationsService(AccountOperations):
         self._admission = admission
 
     async def _command_scope(self, invocation: InvocationView):
+        validate_contract(invocation)
         result = await self._scope.invocation(
             invocation, origins=(InvocationOrigin.COMMAND,)
         )
@@ -108,16 +110,20 @@ class AccountOperationsService(AccountOperations):
             yield
 
     async def status(self, invocation: InvocationView) -> GrantReference | None:
+        validate_contract(invocation)
         await self._command_scope(invocation)
         raise IdentityBindingUnavailable("account authorization is unavailable")
 
     async def begin_login(self, invocation: InvocationView) -> str:
+        validate_contract(invocation)
         await self._command_scope(invocation)
         raise IdentityBindingUnavailable("account authorization is unavailable")
 
     async def bind(
         self, invocation: InvocationView, identity: ResolvedIdentity
     ) -> BindingView:
+        validate_contract(invocation)
+        validate_contract(identity)
         _, principal_id, module_id, conversation = await self._command_scope(invocation)
         if not isinstance(identity, ResolvedIdentity):
             raise IdentityBindingNotFound("identity is invalid")
@@ -175,6 +181,7 @@ class AccountOperationsService(AccountOperations):
         )
 
     async def bindings(self, invocation: InvocationView) -> tuple[BindingView, ...]:
+        validate_contract(invocation)
         _, principal_id, module_id, conversation = await self._command_scope(invocation)
         try:
             values = await self._scope.binding_repository.list_for(
@@ -199,6 +206,7 @@ class AccountOperationsService(AccountOperations):
     async def replace_default(
         self, invocation: InvocationView, binding_id: str
     ) -> BindingView:
+        validate_contract(invocation)
         _, principal_id, module_id, conversation = await self._command_scope(invocation)
         if type(binding_id) is not str or not binding_id.strip():
             raise IdentityBindingNotFound()
@@ -236,6 +244,7 @@ class AccountOperationsService(AccountOperations):
     async def unbind(
         self, invocation: InvocationView, binding_id: str, *, expected_revision: int
     ) -> None:
+        validate_contract(invocation)
         _, principal_id, module_id, conversation = await self._command_scope(invocation)
         if type(binding_id) is not str or not binding_id.strip():
             raise IdentityBindingNotFound()
@@ -261,10 +270,13 @@ class AccountOperationsService(AccountOperations):
                 raise IdentityBindingUnavailable() from None
 
     async def revoke(self, invocation: InvocationView, grant: GrantReference) -> None:
+        validate_contract(invocation)
+        validate_contract(grant)
         await self._command_scope(invocation)
         raise IdentityBindingUnavailable("account authorization is unavailable")
 
     async def _recheck_command(self, invocation: InvocationView) -> None:
+        validate_contract(invocation)
         try:
             checked = self._scope.issuer.require(invocation)
             if self._admission is not None:

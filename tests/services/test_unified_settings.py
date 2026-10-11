@@ -9,14 +9,12 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
-from ygl_test_subject.api.administration import AdminAuthorizationDenied, AdminOperation
-from ygl_test_subject.api.display import DisplayLimits
-from ygl_test_subject.api.services import (
-    ConfigFieldUpdate,
-    ConfigPatch,
-    ConfigPatchMode,
-    ConfigTarget,
+from ygl_test_subject.core.contracts.administration import (
+    AdminAuthorizationDenied,
+    AdminOperation,
 )
+from ygl_test_subject.core.contracts.services import ConfigFieldUpdate, ConfigPatch
+from ygl_test_subject.core.contracts.validation_boundary import validate_contract
 from ygl_test_subject.core.ports import RevisionConflict
 from ygl_test_subject.services.core_configuration import core_config_target
 from ygl_test_subject.services.core_runtime import CoreRuntime
@@ -26,13 +24,14 @@ from ygl_test_subject.services.managed_source_credentials import (
 
 from tests.fixtures.settings_module import write_settings_module
 from tests.services.test_admin_operations import _Codec, _MessagePort, _Renderer
+from yomihime_game_link_sdk.declarations import ConfigUpdateMode
+from yomihime_game_link_sdk.display import DisplayLimits
+from yomihime_game_link_sdk.services import ConfigTarget
 
 
 class NeutralModuleSettingsTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        workspace = Path.cwd() / ".architecture-refactor/unified-settings/pr-r1-r2"
-        workspace.mkdir(parents=True, exist_ok=True)
-        self.temp = tempfile.TemporaryDirectory(dir=workspace)
+        self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
         extensions = self.root / "extensions"
         self.owner = write_settings_module(extensions)
@@ -43,7 +42,7 @@ class NeutralModuleSettingsTests(unittest.IsolatedAsyncioTestCase):
         )
         manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
         write_settings_module(extensions, "other", "otherdemo")
-        self.target = ConfigTarget("fixture", self.owner)
+        self.target = validate_contract(ConfigTarget("fixture", self.owner))
         self.core_arguments = dict(
             database=self.root / "runtime.sqlite3",
             extension_root=extensions,
@@ -52,7 +51,7 @@ class NeutralModuleSettingsTests(unittest.IsolatedAsyncioTestCase):
             secret_codec=_Codec(),
             http_transport=lambda request: request,
             renderer=_Renderer(),
-            display_limits=DisplayLimits(2, 4096),
+            display_limits=validate_contract(DisplayLimits(2, 4096)),
             message_port=_MessagePort(),
             admin_context_validator=lambda *_: False,
             host_ingress_validator=lambda *_: False,
@@ -126,7 +125,7 @@ class NeutralModuleSettingsTests(unittest.IsolatedAsyncioTestCase):
                 rows[self.owner]["revision"],
                 (
                     ConfigFieldUpdate(
-                        "label", ConfigPatchMode.REPLACE, value="retained"
+                        "label", ConfigUpdateMode.REPLACE, value="retained"
                     ),
                 ),
                 declarations,
@@ -166,10 +165,10 @@ class NeutralModuleSettingsTests(unittest.IsolatedAsyncioTestCase):
                 expected_registry_revision=self.core.registry.snapshot().revision,
                 authorization=modules,
             )
-            self.assertEqual(result["state"], "unloaded")
+            self.assertEqual(result.state, "unloaded")
             self.assertIn(self.owner, self.core.extension_runtime.unloaded_owners)
             captured.assert_not_awaited()
-        revision = result["registry_revision"]
+        revision = result.registry_revision
         repeated = await ops.unload_module(
             None,
             self.owner,
@@ -197,7 +196,7 @@ class NeutralModuleSettingsTests(unittest.IsolatedAsyncioTestCase):
                     before.revision,
                     (
                         ConfigFieldUpdate(
-                            "label", ConfigPatchMode.REPLACE, value="late"
+                            "label", ConfigUpdateMode.REPLACE, value="late"
                         ),
                     ),
                     declarations,
@@ -405,7 +404,7 @@ class NeutralModuleSettingsTests(unittest.IsolatedAsyncioTestCase):
                     before.revision,
                     (
                         ConfigFieldUpdate(
-                            "label", ConfigPatchMode.REPLACE, value="late"
+                            "label", ConfigUpdateMode.REPLACE, value="late"
                         ),
                     ),
                     ops.ordinary_declarations(self.target),
@@ -534,7 +533,7 @@ class NeutralModuleSettingsTests(unittest.IsolatedAsyncioTestCase):
                     1,
                     (
                         ConfigFieldUpdate(
-                            "label", ConfigPatchMode.REPLACE, value="unauthorized"
+                            "label", ConfigUpdateMode.REPLACE, value="unauthorized"
                         ),
                     ),
                     (),
@@ -548,7 +547,7 @@ class NeutralModuleSettingsTests(unittest.IsolatedAsyncioTestCase):
                 rows[self.owner]["revision"],
                 (
                     ConfigFieldUpdate(
-                        "label", ConfigPatchMode.REPLACE, value="persisted"
+                        "label", ConfigUpdateMode.REPLACE, value="persisted"
                     ),
                 ),
                 ops.ordinary_declarations(self.target),
@@ -575,7 +574,7 @@ class NeutralModuleSettingsTests(unittest.IsolatedAsyncioTestCase):
             expected_registry_revision=self.core.registry.snapshot().revision,
             authorization=context,
         )
-        self.assertEqual(result["state"], "unloaded")
+        self.assertEqual(result.state, "unloaded")
         self.assertNotIn(self.owner, self.core.registry.snapshot().modules)
         self.assertEqual(
             (await self.core.config_repository.current(self.target)).values,
@@ -618,7 +617,7 @@ class SharedPackageRestoreTests(unittest.IsolatedAsyncioTestCase):
         )
         manifest["modules"].append(sibling)
         manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-        self.target = ConfigTarget("fixture", self.owner)
+        self.target = validate_contract(ConfigTarget("fixture", self.owner))
         self.core = CoreRuntime(
             database=self.root / "runtime.sqlite3",
             extension_root=extensions,
@@ -627,7 +626,7 @@ class SharedPackageRestoreTests(unittest.IsolatedAsyncioTestCase):
             secret_codec=_Codec(),
             http_transport=lambda request: request,
             renderer=_Renderer(),
-            display_limits=DisplayLimits(2, 4096),
+            display_limits=validate_contract(DisplayLimits(2, 4096)),
             message_port=_MessagePort(),
             admin_context_validator=lambda *_: False,
             host_ingress_validator=lambda *_: False,
@@ -638,7 +637,7 @@ class SharedPackageRestoreTests(unittest.IsolatedAsyncioTestCase):
             ordinary_config_resources={
                 core_config_target("fixture"): {"default_region"},
                 self.target: {"label"},
-                ConfigTarget("fixture", "example/second"): {"label"},
+                validate_contract(ConfigTarget("fixture", "example/second")): {"label"},
             },
             managed_module_owners={self.owner, "example/second"},
         )

@@ -2,7 +2,13 @@ from __future__ import annotations
 
 import unittest
 
-from ygl_test_subject.api.manifests import (
+from ygl_test_subject.core.contracts.validation_boundary import validate_contract
+from ygl_test_subject.core.registry import (
+    Registry,
+    RegistryError,
+)
+
+from yomihime_game_link_sdk.declarations import (
     CapabilityDescriptor,
     CapabilityEffect,
     CommandDescriptor,
@@ -12,18 +18,14 @@ from ygl_test_subject.api.manifests import (
     PackageManifest,
     ToolDescriptor,
 )
-from ygl_test_subject.api.services import ModuleHandlers
-from ygl_test_subject.api.storage import OwnershipKind
-from ygl_test_subject.api.subscriptions import (
+from yomihime_game_link_sdk.services import ModuleHandlers
+from yomihime_game_link_sdk.storage import OwnershipKind
+from yomihime_game_link_sdk.subscriptions import (
     ScheduleDescriptor,
     ScheduleTrigger,
     SubscriptionDescriptor,
 )
-from ygl_test_subject.api.version import CONTRACT_VERSION
-from ygl_test_subject.core.registry import (
-    Registry,
-    RegistryError,
-)
+from yomihime_game_link_sdk.version import MODULE_ABI_VERSION
 
 
 class _Handler:
@@ -96,42 +98,50 @@ def _module(
     schedules: tuple[ScheduleDescriptor, ...] = (),
     subscriptions: tuple[SubscriptionDescriptor, ...] = (),
 ) -> ModuleManifest:
-    capability = CapabilityDescriptor(
-        capability_id=capability_id,
-        input_schema={"type": "object", "additionalProperties": False},
-        invocation_policy=InvocationPolicy.NATURAL_LANGUAGE_ALLOWED,
-        effect=CapabilityEffect.READ_ONLY,
+    capability = validate_contract(
+        CapabilityDescriptor(
+            capability_id=capability_id,
+            input_schema={"type": "object", "additionalProperties": False},
+            invocation_policy=InvocationPolicy.NATURAL_LANGUAGE_ALLOWED,
+            effect=CapabilityEffect.READ_ONLY,
+        )
     )
     tools = (
         ()
         if tool_name is None
         else (
-            ToolDescriptor(
-                name=tool_name,
-                capability_id=capability_id,
-                parameter_mapping={},
-                description="A test tool",
+            validate_contract(
+                ToolDescriptor(
+                    name=tool_name,
+                    capability_id=capability_id,
+                    parameter_mapping={},
+                    description="A test tool",
+                )
             ),
         )
     )
-    return ModuleManifest(
-        module_id=module_id,
-        route=route,
-        category=ModuleCategory.GAME,
-        factory_entry="test.module:Factory",
-        module_version="0.1.0",
-        capabilities=(capability,),
-        commands=(
-            CommandDescriptor(
-                operation_path=operation_path,
-                capability_id=capability_id,
-                parameter_mapping={},
-                help_text="A test command",
+    return validate_contract(
+        ModuleManifest(
+            module_id=module_id,
+            route=route,
+            category=ModuleCategory.GAME,
+            factory_entry="test.module:Factory",
+            module_version="0.1.0",
+            capabilities=(capability,),
+            commands=(
+                validate_contract(
+                    CommandDescriptor(
+                        operation_path=operation_path,
+                        capability_id=capability_id,
+                        parameter_mapping={},
+                        help_text="A test command",
+                    )
+                ),
             ),
-        ),
-        tools=tools,
-        schedules=schedules,
-        subscriptions=subscriptions,
+            tools=tools,
+            schedules=schedules,
+            subscriptions=subscriptions,
+        )
     )
 
 
@@ -139,49 +149,59 @@ def _package(
     package_id: str,
     *modules: ModuleManifest,
 ) -> PackageManifest:
-    return PackageManifest(
-        package_id=package_id,
-        package_version="0.1.0",
-        contract_version=CONTRACT_VERSION,
-        modules=modules,
-        author="Tests",
-        license="AGPL-3.0",
-        source="offline tests",
+    return validate_contract(
+        PackageManifest(
+            package_id=package_id,
+            package_version="0.1.0",
+            contract_version=MODULE_ABI_VERSION,
+            modules=modules,
+            author="Tests",
+            license="AGPL-3.0",
+            source="offline tests",
+        )
     )
 
 
 def _handlers(*capability_ids: str) -> ModuleHandlers:
-    return ModuleHandlers(
-        capabilities={capability_id: _Handler() for capability_id in capability_ids},
-        collectors={},
-        evaluators={},
+    return validate_contract(
+        ModuleHandlers(
+            capabilities={
+                capability_id: _Handler() for capability_id in capability_ids
+            },
+            collectors={},
+            evaluators={},
+        )
     )
 
 
 def _schedule(collector_id: str = "prices") -> ScheduleDescriptor:
-    return ScheduleDescriptor(
-        collector_id=collector_id,
-        key_version=1,
-        source_id="steam",
-        data_version=1,
-        input_schema={"type": "object", "properties": {}, "required": []},
-        shared_scope=OwnershipKind.PUBLIC,
-        trigger=ScheduleTrigger.PERIODIC,
-        minimum_interval_seconds=30,
-        default_interval_seconds=60,
-        interval_config_key="prices_interval",
+    return validate_contract(
+        ScheduleDescriptor(
+            collector_id=collector_id,
+            key_version=1,
+            source_id="steam",
+            data_version=1,
+            input_schema={"type": "object", "properties": {}, "required": []},
+            shared_scope=OwnershipKind.PUBLIC,
+            trigger=ScheduleTrigger.PERIODIC,
+            minimum_interval_seconds=30,
+            default_interval_seconds=60,
+            interval_config_key="prices_interval",
+        )
     )
 
 
 def _subscription(
     collector_id: str = "prices", matcher_id: str = "price_matcher"
 ) -> SubscriptionDescriptor:
-    return SubscriptionDescriptor(
-        type_id="price_alert",
-        collector_id=collector_id,
-        matcher_id=matcher_id,
-        filter_schema={"type": "object", "properties": {}, "required": []},
-        notification_modes=("instant",),
+    return validate_contract(
+        SubscriptionDescriptor(
+            type_id="price_alert",
+            collector_id=collector_id,
+            matcher_id=matcher_id,
+            filter_schema={"type": "object", "properties": {}, "required": []},
+            notification_modes=("instant",),
+        )
     )
 
 
@@ -283,10 +303,12 @@ class RegistryTests(unittest.TestCase):
             registry.register_package(
                 package,
                 {
-                    "mod": ModuleHandlers(
-                        capabilities={"record.query": _NotAHandler()},
-                        collectors={},
-                        evaluators={},
+                    "mod": validate_contract(
+                        ModuleHandlers(
+                            capabilities={"record.query": _NotAHandler()},
+                            collectors={},
+                            evaluators={},
+                        )
                     )
                 },
             )
@@ -371,14 +393,16 @@ class RegistryTests(unittest.TestCase):
         )
 
         def handlers(*, collectors=None, evaluators=None) -> ModuleHandlers:
-            return ModuleHandlers(
-                capabilities={"record.query": _Handler()},
-                collectors={"prices": _Collector()}
-                if collectors is None
-                else collectors,
-                evaluators={"price_matcher": _Evaluator()}
-                if evaluators is None
-                else evaluators,
+            return validate_contract(
+                ModuleHandlers(
+                    capabilities={"record.query": _Handler()},
+                    collectors={"prices": _Collector()}
+                    if collectors is None
+                    else collectors,
+                    evaluators={"price_matcher": _Evaluator()}
+                    if evaluators is None
+                    else evaluators,
+                )
             )
 
         invalid_handlers = (

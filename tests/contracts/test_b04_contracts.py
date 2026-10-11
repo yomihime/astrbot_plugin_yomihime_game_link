@@ -7,31 +7,19 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import get_args, get_type_hints
 
-from ygl_test_subject.api.contexts import (
-    InvocationConversationKind,
-    InvocationOrigin,
-    InvocationSubscriptionScope,
-    InvocationView,
-)
-from ygl_test_subject.api.display import DisplayDocument, Privacy, TextBlock
-from ygl_test_subject.api.results import CapabilityResult, FactDocument
-from ygl_test_subject.api.services import (
+from ygl_test_subject.core.context_issuer import ContextIssuer, InvalidInvocation
+from ygl_test_subject.core.contracts.services import (
     AuthorizedRecipient,
     CommandOutput,
-    ConversationKind,
-    ConversationRef,
-    SubscriptionOperations,
     SubscriptionOutput,
     ToolOutput,
     TrustedConversationResolver,
     TrustedPersistedRouteResolver,
     resolve_authorized_recipient,
 )
-from ygl_test_subject.api.storage import GrantReference, OwnerScope, OwnershipKind
-from ygl_test_subject.api.subscriptions import (
+from ygl_test_subject.core.contracts.subscriptions import (
     ActiveDigestSchedule,
     CadenceConfiguration,
-    CollectionKey,
     DeliveryAttempt,
     DeliveryEvent,
     DeliveryEventCursor,
@@ -39,46 +27,33 @@ from ygl_test_subject.api.subscriptions import (
     DigestEnvelope,
     DigestEnvelopeClaim,
     DigestEnvelopeState,
-    DigestMember,
     DigestMemberAssociation,
     DigestRouteCandidate,
     DigestRouteCursor,
-    DigestScheduleProfile,
     DigestWindow,
     DigestWindowSelector,
-    DstFoldPolicy,
-    DstGapPolicy,
     DueCollectionJob,
     DueJobCursor,
-    EvaluationDecision,
-    EvaluationState,
-    NormalizedInput,
-    Observation,
-    ObservationCompleteness,
     ObservationCursor,
     ObservationEvaluationCommit,
-    ScheduleDescriptor,
-    ScheduleTrigger,
     SubscriptionEvaluationCommit,
     SubscriptionEvaluationSnapshot,
     SubscriptionJobAssociation,
     SubscriptionJobChange,
     SubscriptionJobChangeKind,
     SubscriptionRecord,
-    SubscriptionRequest,
     SubscriptionStatus,
-    SubscriptionView,
     delivery_idempotency_key,
     digest_envelope_idempotency_key,
     validate_evaluation_decision,
 )
-from ygl_test_subject.api.version import (
+from ygl_test_subject.core.contracts.validation_boundary import validate_contract
+from ygl_test_subject.core.contracts.version import (
     B02_CONTRACT_VERSION,
     COMPATIBLE_CONTRACT_VERSIONS,
     CONTRACT_REVISION,
     CONTRACT_VERSION,
 )
-from ygl_test_subject.core.context_issuer import ContextIssuer, InvalidInvocation
 from ygl_test_subject.core.ports import (
     CollectionRunRequest,
     DeliveryRepository,
@@ -98,17 +73,52 @@ from ygl_test_subject.core.ports import (
     SubscriptionStore,
 )
 
+from yomihime_game_link_sdk.contexts import (
+    InvocationConversationKind,
+    InvocationOrigin,
+    InvocationSubscriptionScope,
+    InvocationView,
+)
+from yomihime_game_link_sdk.display import (
+    DigestMember,
+    DisplayDocument,
+    Privacy,
+    TextBlock,
+)
+from yomihime_game_link_sdk.results import CapabilityResult, FactDocument
+from yomihime_game_link_sdk.services import SubscriptionOperations
+from yomihime_game_link_sdk.storage import GrantReference, OwnerScope, OwnershipKind
+from yomihime_game_link_sdk.subscriptions import (
+    CollectionKey,
+    ConversationKind,
+    ConversationRef,
+    DigestScheduleProfile,
+    DstFoldPolicy,
+    DstGapPolicy,
+    EvaluationDecision,
+    EvaluationState,
+    NormalizedInput,
+    Observation,
+    ObservationCompleteness,
+    ScheduleDescriptor,
+    ScheduleTrigger,
+    SubscriptionRequest,
+    SubscriptionView,
+)
+
 NOW = datetime(2026, 9, 25, 0, 0, tzinfo=UTC)
 
 
 def sample_key(scope: OwnerScope | None = None) -> CollectionKey:
-    return CollectionKey(
-        "sample/alpha",
-        "prices",
-        1,
-        "public-api",
-        NormalizedInput({"item": "x"}),
-        scope or OwnerScope.public(),
+    return validate_contract(
+        CollectionKey(
+            "sample/alpha",
+            "prices",
+            1,
+            "public-api",
+            validate_contract(NormalizedInput({"item": "x"})),
+            scope or OwnerScope.public(),
+        )
     )
 
 
@@ -118,15 +128,17 @@ def sample_invocation(
     adapter_id: str | None = "adapter",
     conversation_id: str | None = "direct-1",
 ) -> InvocationView:
-    return InvocationView(
-        "invocation-1",
-        origin,
-        "user-1",
-        conversation_id,
-        "sample/alpha",
-        1,
-        1,
-        adapter_id=adapter_id,
+    return validate_contract(
+        InvocationView(
+            "invocation-1",
+            origin,
+            "user-1",
+            conversation_id,
+            "sample/alpha",
+            1,
+            1,
+            adapter_id=adapter_id,
+        )
     )
 
 
@@ -150,8 +162,8 @@ class B04ContractTests(unittest.TestCase):
         )
         self.assertIn("1.1.0", COMPATIBLE_CONTRACT_VERSIONS)
         expected = {
-            "create": ("self", "invocation", "subscription"),
-            "revise": ("self", "invocation", "subscription"),
+            "create_request": ("self", "invocation", "request"),
+            "revise_request": ("self", "invocation", "request"),
             "list_current": ("self", "invocation"),
             "cancel": ("self", "invocation", "subscription_id", "expected_revision"),
         }
@@ -260,7 +272,11 @@ class B04ContractTests(unittest.TestCase):
             sample_key(),
             "user-1",
             None,
-            ConversationRef("adapter", ConversationKind.DIRECT, "direct-1", "route-1"),
+            validate_contract(
+                ConversationRef(
+                    "adapter", ConversationKind.DIRECT, "direct-1", "route-1"
+                )
+            ),
             "instant",
             {"threshold": 3},
         )
@@ -277,7 +293,7 @@ class B04ContractTests(unittest.TestCase):
             "digest",
             {},
         )
-        grant = GrantReference("grant-1", 4)
+        grant = validate_contract(GrantReference("grant-1", 4))
         authorized_key = sample_key(OwnerScope.authorized("user-1", grant))
         SubscriptionRecord(
             "sub-3",
@@ -309,7 +325,7 @@ class B04ContractTests(unittest.TestCase):
                 "sample/alpha",
                 authorized_key,
                 "user-1",
-                GrantReference("grant-1", 3),
+                validate_contract(GrantReference("grant-1", 3)),
                 public.recipient,
                 "instant",
                 {},
@@ -330,19 +346,21 @@ class B04ContractTests(unittest.TestCase):
                 return True
 
         evil = EvilInt(-4)
-        recipient = ConversationRef(
-            "adapter", ConversationKind.DIRECT, "direct-1", "route-1"
+        recipient = validate_contract(
+            ConversationRef("adapter", ConversationKind.DIRECT, "direct-1", "route-1")
         )
         valid_key = sample_key()
         event_key = delivery_idempotency_key("event", 1, "sub", 1, recipient)
         checks = (
-            lambda: CollectionKey(
-                "sample/alpha",
-                "prices",
-                evil,
-                "public-api",
-                NormalizedInput({}),
-                OwnerScope.public(),
+            lambda: validate_contract(
+                CollectionKey(
+                    "sample/alpha",
+                    "prices",
+                    evil,
+                    "public-api",
+                    validate_contract(NormalizedInput({})),
+                    OwnerScope.public(),
+                )
             ),
             lambda: SubscriptionRecord(
                 "sub",
@@ -355,8 +373,8 @@ class B04ContractTests(unittest.TestCase):
                 "instant",
                 {},
             ),
-            lambda: DigestMember("sub", evil, "event", 1),
-            lambda: DigestMember("sub", 1, "event", evil),
+            lambda: validate_contract(DigestMember("sub", evil, "event", 1)),
+            lambda: validate_contract(DigestMember("sub", 1, "event", evil)),
             lambda: DeliveryAttempt(evil, DeliveryState.SENDING, "key", NOW),
             lambda: DeliveryEvent(
                 "event",
@@ -366,7 +384,11 @@ class B04ContractTests(unittest.TestCase):
                 "user-1",
                 None,
                 recipient,
-                DisplayDocument("Title", "Subject", (TextBlock("x"),)),
+                validate_contract(
+                    DisplayDocument(
+                        "Title", "Subject", (validate_contract(TextBlock("x")),)
+                    )
+                ),
                 event_key,
             ),
             lambda: DeliveryEvent(
@@ -377,39 +399,51 @@ class B04ContractTests(unittest.TestCase):
                 "user-1",
                 None,
                 recipient,
-                DisplayDocument("Title", "Subject", (TextBlock("x"),)),
+                validate_contract(
+                    DisplayDocument(
+                        "Title", "Subject", (validate_contract(TextBlock("x")),)
+                    )
+                ),
                 event_key,
             ),
-            lambda: Observation(
-                "obs",
-                valid_key,
-                evil,
-                NOW,
-                NOW,
-                ObservationCompleteness.COMPLETE,
-                (),
-                {},
+            lambda: validate_contract(
+                Observation(
+                    "obs",
+                    valid_key,
+                    evil,
+                    NOW,
+                    NOW,
+                    ObservationCompleteness.COMPLETE,
+                    (),
+                    {},
+                )
             ),
-            lambda: SubscriptionView("sub", evil, "user-1", None, "direct-1", {}),
-            lambda: ScheduleDescriptor(
-                "prices",
-                evil,
-                "source",
-                1,
-                {"type": "object", "properties": {}, "required": []},
-                OwnershipKind.PUBLIC,
-                ScheduleTrigger.ON_DEMAND,
-                1.0,
+            lambda: validate_contract(
+                SubscriptionView("sub", evil, "user-1", None, "direct-1", {})
             ),
-            lambda: ScheduleDescriptor(
-                "prices",
-                1,
-                "source",
-                evil,
-                {"type": "object", "properties": {}, "required": []},
-                OwnershipKind.PUBLIC,
-                ScheduleTrigger.ON_DEMAND,
-                1.0,
+            lambda: validate_contract(
+                ScheduleDescriptor(
+                    "prices",
+                    evil,
+                    "source",
+                    1,
+                    {"type": "object", "properties": {}, "required": []},
+                    OwnershipKind.PUBLIC,
+                    ScheduleTrigger.ON_DEMAND,
+                    1.0,
+                )
+            ),
+            lambda: validate_contract(
+                ScheduleDescriptor(
+                    "prices",
+                    1,
+                    "source",
+                    evil,
+                    {"type": "object", "properties": {}, "required": []},
+                    OwnershipKind.PUBLIC,
+                    ScheduleTrigger.ON_DEMAND,
+                    1.0,
+                )
             ),
             lambda: CollectionRunRequest(valid_key, NOW, 10, evil, 1, 1),
             lambda: CollectionRunRequest(valid_key, NOW, 10, 1, evil, 1),
@@ -422,17 +456,23 @@ class B04ContractTests(unittest.TestCase):
             with self.subTest(construct=construct):
                 with self.assertRaises(ValueError):
                     construct()
-        from ygl_test_subject.api.subscriptions import EvaluationState
+        from yomihime_game_link_sdk.subscriptions import EvaluationState
 
         with self.assertRaises(ValueError):
-            EvaluationState(evil, {})
+            validate_contract(EvaluationState(evil, {}))
         with self.assertRaises(ValueError):
-            EvaluationDecision(
-                {},
-                True,
-                "event",
-                evil,
-                DisplayDocument("Title", "Subject", (TextBlock("x"),)),
+            validate_contract(
+                EvaluationDecision(
+                    {},
+                    True,
+                    "event",
+                    evil,
+                    validate_contract(
+                        DisplayDocument(
+                            "Title", "Subject", (validate_contract(TextBlock("x")),)
+                        )
+                    ),
+                )
             )
 
     def test_c03_resolver_contract_cannot_elevate_tool_origin(self):
@@ -447,8 +487,10 @@ class B04ContractTests(unittest.TestCase):
 
             async def resolve(self, invocation):
                 self.calls += 1
-                return ConversationRef(
-                    "adapter", ConversationKind.DIRECT, "direct-1", "route-1"
+                return validate_contract(
+                    ConversationRef(
+                        "adapter", ConversationKind.DIRECT, "direct-1", "route-1"
+                    )
                 )
 
         resolver = Resolver()
@@ -462,71 +504,96 @@ class B04ContractTests(unittest.TestCase):
 
     def test_c04_observation_completeness_and_coverage_are_explicit(self):
         for state in ObservationCompleteness:
-            observation = Observation(
-                f"obs-{state.value}",
-                sample_key(),
-                1,
-                NOW,
-                NOW,
-                state,
-                ("item-1",) if state is ObservationCompleteness.PARTIAL else (),
-                {"items": []},
+            observation = validate_contract(
+                Observation(
+                    f"obs-{state.value}",
+                    sample_key(),
+                    1,
+                    NOW,
+                    NOW,
+                    state,
+                    ("item-1",) if state is ObservationCompleteness.PARTIAL else (),
+                    {"items": []},
+                )
             )
             self.assertEqual(observation.completeness, state)
         with self.assertRaises(ValueError):
-            Observation(
-                "dup",
-                sample_key(),
-                1,
-                NOW,
-                NOW,
-                ObservationCompleteness.PARTIAL,
-                ("x", "x"),
-                {},
+            validate_contract(
+                Observation(
+                    "dup",
+                    sample_key(),
+                    1,
+                    NOW,
+                    NOW,
+                    ObservationCompleteness.PARTIAL,
+                    ("x", "x"),
+                    {},
+                )
             )
         with self.assertRaises(ValueError):
-            Observation(
-                "failed-coverage",
-                sample_key(),
-                1,
-                NOW,
-                NOW,
-                ObservationCompleteness.FAILED,
-                ("item-1",),
-                {},
+            validate_contract(
+                Observation(
+                    "failed-coverage",
+                    sample_key(),
+                    1,
+                    NOW,
+                    NOW,
+                    ObservationCompleteness.FAILED,
+                    ("item-1",),
+                    {},
+                )
             )
 
     def test_c05_matcher_remains_sync_pure_and_event_versioned(self):
-        from ygl_test_subject.api.subscriptions import SubscriptionEvaluator
+        from yomihime_game_link_sdk.subscriptions import SubscriptionEvaluator
 
         self.assertFalse(inspect.iscoroutinefunction(SubscriptionEvaluator.evaluate))
         self.assertEqual(
             tuple(inspect.signature(SubscriptionEvaluator.evaluate).parameters),
             ("self", "subscription", "observation", "previous_state"),
         )
-        view = SubscriptionView("sub", 1, "user-1", None, "direct-1", {})
-        observation = Observation(
-            "obs", sample_key(), 1, NOW, NOW, ObservationCompleteness.COMPLETE, (), {}
+        view = validate_contract(
+            SubscriptionView("sub", 1, "user-1", None, "direct-1", {})
         )
-        decision = EvaluationDecision(
-            {},
-            True,
-            "event-1",
-            1,
-            DisplayDocument("Title", "Subject", (TextBlock("x"),)),
+        observation = validate_contract(
+            Observation(
+                "obs",
+                sample_key(),
+                1,
+                NOW,
+                NOW,
+                ObservationCompleteness.COMPLETE,
+                (),
+                {},
+            )
+        )
+        decision = validate_contract(
+            EvaluationDecision(
+                {},
+                True,
+                "event-1",
+                1,
+                validate_contract(
+                    DisplayDocument(
+                        "Title", "Subject", (validate_contract(TextBlock("x")),)
+                    )
+                ),
+            )
         )
         self.assertEqual(
             validate_evaluation_decision(view, observation, decision), decision
         )
-        private_observation = Observation(
-            "private",
-            sample_key(OwnerScope.user("user-1")),
-            1,
-            NOW,
-            NOW,
-            ObservationCompleteness.COMPLETE,
-            (),
-            {},
+        private_observation = validate_contract(
+            Observation(
+                "private",
+                sample_key(OwnerScope.user("user-1")),
+                1,
+                NOW,
+                NOW,
+                ObservationCompleteness.COMPLETE,
+                (),
+                {},
+            )
         )
         with self.assertRaises(ValueError):
             validate_evaluation_decision(view, private_observation, decision)
@@ -535,8 +602,8 @@ class B04ContractTests(unittest.TestCase):
         for status in MessageStatus:
             receipt = MessageReceipt(status)
             self.assertEqual(receipt.status, status)
-        recipient = ConversationRef(
-            "adapter", ConversationKind.DIRECT, "direct-1", "route-1"
+        recipient = validate_contract(
+            ConversationRef("adapter", ConversationKind.DIRECT, "direct-1", "route-1")
         )
         key = delivery_idempotency_key("event-1", 1, "sub-1", 1, recipient)
         attempt = DeliveryAttempt(1, DeliveryState.UNKNOWN, key, NOW, completed_at=NOW)
@@ -552,8 +619,13 @@ class B04ContractTests(unittest.TestCase):
             "user-1",
             None,
             recipient,
-            DisplayDocument(
-                "Title", "Subject", (TextBlock("private"),), privacy=Privacy.PRIVATE
+            validate_contract(
+                DisplayDocument(
+                    "Title",
+                    "Subject",
+                    (validate_contract(TextBlock("private")),),
+                    privacy=Privacy.PRIVATE,
+                )
             ),
             key,
             DeliveryState.UNKNOWN,
@@ -582,8 +654,10 @@ class B04ContractTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             MessageTarget(
                 "group-1",
-                conversation=ConversationRef(
-                    "adapter", ConversationKind.GROUP, "group-1", "route-g"
+                conversation=validate_contract(
+                    ConversationRef(
+                        "adapter", ConversationKind.GROUP, "group-1", "route-g"
+                    )
                 ),
                 authorized=True,
             )
@@ -594,18 +668,24 @@ class B04ContractTests(unittest.TestCase):
                 1,
                 "sub-1",
                 2,
-                ConversationRef(
-                    "adapter", ConversationKind.DIRECT, "direct-1", "route-1"
+                validate_contract(
+                    ConversationRef(
+                        "adapter", ConversationKind.DIRECT, "direct-1", "route-1"
+                    )
                 ),
             ),
         )
 
     def test_c06_shared_event_has_independent_subscription_delivery_identity(self):
-        recipient_a = ConversationRef(
-            "adapter", ConversationKind.DIRECT, "direct-a", "route-a"
+        recipient_a = validate_contract(
+            ConversationRef("adapter", ConversationKind.DIRECT, "direct-a", "route-a")
         )
         recipient_b = recipient_a
-        document = DisplayDocument("Title", "Subject", (TextBlock("shared"),))
+        document = validate_contract(
+            DisplayDocument(
+                "Title", "Subject", (validate_contract(TextBlock("shared")),)
+            )
+        )
         event_a = DeliveryEvent(
             "shared-event",
             1,
@@ -652,22 +732,35 @@ class B04ContractTests(unittest.TestCase):
             self.assertTrue(get_type_hints(method), method.__qualname__)
 
     def test_c08_private_documents_do_not_enter_tool_output(self):
-        private_doc = DisplayDocument(
-            "Private", "Subject", (TextBlock("secret"),), privacy=Privacy.PRIVATE
-        )
-        with self.assertRaises(ValueError):
-            CapabilityResult(
-                "result",
-                "success",
-                private_doc,
-                FactDocument({}),
+        private_doc = validate_contract(
+            DisplayDocument(
+                "Private",
+                "Subject",
+                (validate_contract(TextBlock("secret")),),
                 privacy=Privacy.PRIVATE,
             )
-        public_facts = CapabilityResult(
-            "tool-result",
-            "success",
-            DisplayDocument("Public", "Subject", (TextBlock("summary"),)),
-            FactDocument({}),
+        )
+        with self.assertRaises(ValueError):
+            validate_contract(
+                CapabilityResult(
+                    "result",
+                    "success",
+                    private_doc,
+                    validate_contract(FactDocument({})),
+                    privacy=Privacy.PRIVATE,
+                )
+            )
+        public_facts = validate_contract(
+            CapabilityResult(
+                "tool-result",
+                "success",
+                validate_contract(
+                    DisplayDocument(
+                        "Public", "Subject", (validate_contract(TextBlock("summary")),)
+                    )
+                ),
+                validate_contract(FactDocument({})),
+            )
         )
         self.assertEqual(
             ToolOutput(public_facts.model_facts).facts, public_facts.model_facts
@@ -690,7 +783,11 @@ class B04ContractTests(unittest.TestCase):
             sample_key(),
             "user-1",
             None,
-            ConversationRef("adapter", ConversationKind.DIRECT, "direct-1", "route-1"),
+            validate_contract(
+                ConversationRef(
+                    "adapter", ConversationKind.DIRECT, "direct-1", "route-1"
+                )
+            ),
             "digest",
             {},
         )
@@ -698,7 +795,7 @@ class B04ContractTests(unittest.TestCase):
         self.assertEqual(config.allowed_seconds, (10.0, 30.0, 90.0))
 
     def test_c10_c11_digest_window_persists_utc_bounds_policy_and_members(self):
-        member = DigestMember("sub-1", 3, "event-1", 2)
+        member = validate_contract(DigestMember("sub-1", 3, "event-1", 2))
         window = DigestWindow(
             "window-2026-09-25",
             "Europe/Paris",
@@ -825,8 +922,8 @@ class B04ContractTests(unittest.TestCase):
             adapter_id="adapter",
             conversation_id="direct-1",
         )
-        direct = ConversationRef(
-            "adapter", ConversationKind.DIRECT, "direct-1", "route-1"
+        direct = validate_contract(
+            ConversationRef("adapter", ConversationKind.DIRECT, "direct-1", "route-1")
         )
         resolver = Resolver(issuer, direct)
         self.assertEqual(
@@ -850,15 +947,15 @@ class B04ContractTests(unittest.TestCase):
         )
         self.assertEqual(resolver.lookups, calls_after_issued)
 
-        group = ConversationRef(
-            "adapter", ConversationKind.GROUP, "direct-1", "route-1"
+        group = validate_contract(
+            ConversationRef("adapter", ConversationKind.GROUP, "direct-1", "route-1")
         )
         self.assertEqual(
             asyncio.run(resolve_authorized_recipient(issued, Resolver(issuer, group))),
             AuthorizedRecipient.refused(),
         )
-        mismatched = ConversationRef(
-            "adapter", ConversationKind.DIRECT, "other", "route-1"
+        mismatched = validate_contract(
+            ConversationRef("adapter", ConversationKind.DIRECT, "other", "route-1")
         )
         self.assertEqual(
             asyncio.run(
@@ -900,12 +997,16 @@ class B04ContractTests(unittest.TestCase):
             CollectionRunRequest(sample_key(), NOW, 0, 1, 1, 1)
 
     def test_c03_atomic_commit_digest_claim_and_delivery_cas_contracts(self):
-        member = DigestMember("sub-1", 3, "event-1", 2)
-        recipient = ConversationRef(
-            "adapter", ConversationKind.DIRECT, "direct-1", "route-1"
+        member = validate_contract(DigestMember("sub-1", 3, "event-1", 2))
+        recipient = validate_contract(
+            ConversationRef("adapter", ConversationKind.DIRECT, "direct-1", "route-1")
         )
-        digest_document = DisplayDocument(
-            "Digest event", "Saved subject", (TextBlock("Saved body"),)
+        digest_document = validate_contract(
+            DisplayDocument(
+                "Digest event",
+                "Saved subject",
+                (validate_contract(TextBlock("Saved body")),),
+            )
         )
         digest_event = DeliveryEvent(
             "event-1",
@@ -928,21 +1029,23 @@ class B04ContractTests(unittest.TestCase):
             "sub-1",
             3,
             None,
-            EvaluationState(1, {"counter": 1}),
+            validate_contract(EvaluationState(1, {"counter": 1})),
             ObservationCursor("observation-1", 1, ObservationCompleteness.COMPLETE, ()),
             delivery_events=(digest_event,),
             digest_members=(association,),
         )
         self.assertEqual(evaluation.digest_members, (association,))
-        observation = Observation(
-            "observation-1",
-            sample_key(),
-            1,
-            None,
-            NOW,
-            ObservationCompleteness.COMPLETE,
-            (),
-            {},
+        observation = validate_contract(
+            Observation(
+                "observation-1",
+                sample_key(),
+                1,
+                None,
+                NOW,
+                ObservationCompleteness.COMPLETE,
+                (),
+                {},
+            )
         )
         commit = ObservationEvaluationCommit(observation, (evaluation,))
         self.assertEqual(commit.subscriptions, (evaluation,))
@@ -951,7 +1054,7 @@ class B04ContractTests(unittest.TestCase):
                 "sub-1",
                 3,
                 None,
-                EvaluationState(1, {}),
+                validate_contract(EvaluationState(1, {})),
                 ObservationCursor(
                     "observation-1", 1, ObservationCompleteness.COMPLETE, ()
                 ),
@@ -968,7 +1071,7 @@ class B04ContractTests(unittest.TestCase):
                 "sub-1",
                 3,
                 None,
-                EvaluationState(1, {}),
+                validate_contract(EvaluationState(1, {})),
                 ObservationCursor(
                     "observation-1", 1, ObservationCompleteness.COMPLETE, ()
                 ),
@@ -976,8 +1079,12 @@ class B04ContractTests(unittest.TestCase):
             )
         forged_document_event = replace(
             digest_event,
-            display_data=DisplayDocument(
-                "Different document", "Other subject", (TextBlock("other"),)
+            display_data=validate_contract(
+                DisplayDocument(
+                    "Different document",
+                    "Other subject",
+                    (validate_contract(TextBlock("other")),),
+                )
             ),
         )
         with self.assertRaises(ValueError):
@@ -985,7 +1092,7 @@ class B04ContractTests(unittest.TestCase):
                 "sub-1",
                 3,
                 None,
-                EvaluationState(1, {}),
+                validate_contract(EvaluationState(1, {})),
                 ObservationCursor(
                     "observation-1", 1, ObservationCompleteness.COMPLETE, ()
                 ),
@@ -1000,7 +1107,7 @@ class B04ContractTests(unittest.TestCase):
             DigestMemberAssociation(
                 "window-1",
                 recipient,
-                DigestMember("sub-1", 3, "event-1", 1),
+                validate_contract(DigestMember("sub-1", 3, "event-1", 1)),
                 digest_event,
             )
         with self.assertRaises(ValueError):
@@ -1163,8 +1270,8 @@ class B04ContractTests(unittest.TestCase):
 
     def test_c04_subscription_job_change_bundles_lifecycle_cas(self):
         key = sample_key()
-        recipient = ConversationRef(
-            "adapter", ConversationKind.DIRECT, "direct-1", "route-1"
+        recipient = validate_contract(
+            ConversationRef("adapter", ConversationKind.DIRECT, "direct-1", "route-1")
         )
         active = SubscriptionRecord(
             "sub-1",
@@ -1206,8 +1313,8 @@ class B04ContractTests(unittest.TestCase):
 
     def test_c05_current_evaluation_snapshot_is_subscription_and_scope_bound(self):
         key = sample_key(OwnerScope.user("user-1"))
-        recipient = ConversationRef(
-            "adapter", ConversationKind.DIRECT, "direct-1", "route-1"
+        recipient = validate_contract(
+            ConversationRef("adapter", ConversationKind.DIRECT, "direct-1", "route-1")
         )
         subscription = SubscriptionRecord(
             "sub-private",
@@ -1220,15 +1327,17 @@ class B04ContractTests(unittest.TestCase):
             "instant",
             {"min": 5},
         )
-        observation = Observation(
-            "private-observation",
-            key,
-            3,
-            None,
-            NOW,
-            ObservationCompleteness.PARTIAL,
-            ("item-1",),
-            {"value": 8},
+        observation = validate_contract(
+            Observation(
+                "private-observation",
+                key,
+                3,
+                None,
+                NOW,
+                ObservationCompleteness.PARTIAL,
+                ("item-1",),
+                {"value": 8},
+            )
         )
         cursor = ObservationCursor(
             observation.observation_id,
@@ -1238,7 +1347,7 @@ class B04ContractTests(unittest.TestCase):
         )
         snapshot = SubscriptionEvaluationSnapshot(
             subscription,
-            EvaluationState(4, {"count": 2}),
+            validate_contract(EvaluationState(4, {"count": 2})),
             cursor,
             observation,
         )
@@ -1283,7 +1392,7 @@ class B04ContractTests(unittest.TestCase):
                 )
             )
         )
-        grant = GrantReference("grant-1", 3)
+        grant = validate_contract(GrantReference("grant-1", 3))
         authorized_key = sample_key(OwnerScope.authorized("user-1", grant))
         authorized_subscription = SubscriptionRecord(
             "sub-authorized",
@@ -1296,19 +1405,21 @@ class B04ContractTests(unittest.TestCase):
             "instant",
             {},
         )
-        authorized_observation = Observation(
-            "authorized-observation",
-            authorized_key,
-            1,
-            None,
-            NOW,
-            ObservationCompleteness.COMPLETE,
-            (),
-            {},
+        authorized_observation = validate_contract(
+            Observation(
+                "authorized-observation",
+                authorized_key,
+                1,
+                None,
+                NOW,
+                ObservationCompleteness.COMPLETE,
+                (),
+                {},
+            )
         )
         authorized_snapshot = SubscriptionEvaluationSnapshot(
             authorized_subscription,
-            EvaluationState(1, {}),
+            validate_contract(EvaluationState(1, {})),
             ObservationCursor(
                 authorized_observation.observation_id,
                 authorized_observation.data_version,
@@ -1332,27 +1443,33 @@ class B04ContractTests(unittest.TestCase):
                 GrantReadProbe().current_evaluation(
                     "sub-authorized",
                     sample_key(
-                        OwnerScope.authorized("user-1", GrantReference("grant-1", 4))
+                        OwnerScope.authorized(
+                            "user-1", validate_contract(GrantReference("grant-1", 4))
+                        )
                     ),
                 )
             )
         )
 
     def test_c07_subscription_request_and_digest_schedule_contract(self):
-        profile = DigestScheduleProfile(
-            "Asia/Shanghai",
-            "08:00",
-            3600,
-            DstFoldPolicy.FIRST_OCCURRENCE,
-            DstGapPolicy.SKIP,
-            2,
+        profile = validate_contract(
+            DigestScheduleProfile(
+                "Asia/Shanghai",
+                "08:00",
+                3600,
+                DstFoldPolicy.FIRST_OCCURRENCE,
+                DstGapPolicy.SKIP,
+                2,
+            )
         )
-        create_request = SubscriptionRequest(
-            "dota2.match",
-            {"account": "42"},
-            {"threshold": 3},
-            "digest",
-            profile,
+        create_request = validate_contract(
+            SubscriptionRequest(
+                "dota2.match",
+                {"account": "42"},
+                {"threshold": 3},
+                "digest",
+                profile,
+            )
         )
         self.assertIsNone(create_request.subscription_id)
         self.assertIsNone(create_request.expected_revision)
@@ -1362,38 +1479,46 @@ class B04ContractTests(unittest.TestCase):
         with self.assertRaises(TypeError):
             create_request.filters["threshold"] = 4
 
-        revise_request = SubscriptionRequest(
-            "dota2.match",
-            {"account": "42"},
-            {"threshold": 4},
-            "instant",
-            None,
-            "sub-1",
-            3,
+        revise_request = validate_contract(
+            SubscriptionRequest(
+                "dota2.match",
+                {"account": "42"},
+                {"threshold": 4},
+                "instant",
+                None,
+                "sub-1",
+                3,
+            )
         )
         self.assertEqual(revise_request.subscription_id, "sub-1")
         self.assertEqual(revise_request.expected_revision, 3)
         with self.assertRaises(ValueError):
-            SubscriptionRequest("type", {}, {}, "instant", None, "sub-1", None)
-        with self.assertRaises(ValueError):
-            DigestScheduleProfile(
-                "Asia/Shanghai",
-                "24:00",
-                3600,
-                DstFoldPolicy.FIRST_OCCURRENCE,
-                DstGapPolicy.SKIP,
+            validate_contract(
+                SubscriptionRequest("type", {}, {}, "instant", None, "sub-1", None)
             )
         with self.assertRaises(ValueError):
-            DigestScheduleProfile(
-                "No/SuchZone",
-                "08:00",
-                3600,
-                DstFoldPolicy.FIRST_OCCURRENCE,
-                DstGapPolicy.SKIP,
+            validate_contract(
+                DigestScheduleProfile(
+                    "Asia/Shanghai",
+                    "24:00",
+                    3600,
+                    DstFoldPolicy.FIRST_OCCURRENCE,
+                    DstGapPolicy.SKIP,
+                )
+            )
+        with self.assertRaises(ValueError):
+            validate_contract(
+                DigestScheduleProfile(
+                    "No/SuchZone",
+                    "08:00",
+                    3600,
+                    DstFoldPolicy.FIRST_OCCURRENCE,
+                    DstGapPolicy.SKIP,
+                )
             )
 
-        recipient = ConversationRef(
-            "adapter", ConversationKind.DIRECT, "direct-1", "route-1"
+        recipient = validate_contract(
+            ConversationRef("adapter", ConversationKind.DIRECT, "direct-1", "route-1")
         )
         window = DigestWindow(
             "window-1",
@@ -1451,10 +1576,14 @@ class B04ContractTests(unittest.TestCase):
             ActiveDigestSchedule(replace(scheduled_record, digest_schedule=None))
 
     def test_c07_known_failure_retry_contract_and_routes(self):
-        recipient = ConversationRef(
-            "adapter", ConversationKind.DIRECT, "direct-1", "route-1"
+        recipient = validate_contract(
+            ConversationRef("adapter", ConversationKind.DIRECT, "direct-1", "route-1")
         )
-        document = DisplayDocument("Notice", "Event", (TextBlock("notice"),))
+        document = validate_contract(
+            DisplayDocument(
+                "Notice", "Event", (validate_contract(TextBlock("notice")),)
+            )
+        )
         key = delivery_idempotency_key("event", 1, "sub", 1, recipient)
         failed_attempt = DeliveryAttempt(
             1, DeliveryState.FAILED, key, NOW, NOW, error_code="host_rejected"

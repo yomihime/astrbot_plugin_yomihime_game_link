@@ -9,15 +9,16 @@ from datetime import datetime
 from typing import get_type_hints
 
 from ygl_test_subject.core import ports
+from ygl_test_subject.core.contracts.administration import AdminAuthorizationGrant
+from ygl_test_subject.core.contracts.services import PersistedConfigPatch
 
-import yomihime_sdk
-from yomihime_sdk.api.administration import AdminAuthorizationGrant
-from yomihime_sdk.api.contexts import (
+import yomihime_game_link_sdk
+from yomihime_game_link_sdk.contexts import (
     InvocationConversationKind,
     InvocationSubscriptionScope,
     InvocationView,
 )
-from yomihime_sdk.api.services import ConfigSnapshot, HealthReport, PersistedConfigPatch
+from yomihime_game_link_sdk.services import ConfigSnapshot, HealthReport
 
 
 class CoreHardeningContractTests(unittest.TestCase):
@@ -196,8 +197,8 @@ class CoreHardeningContractTests(unittest.TestCase):
         self.assertIs(ports.InvocationConversationKind, InvocationConversationKind)
         self.assertIs(ports.InvocationSubscriptionScope, InvocationSubscriptionScope)
         self.assertIs(ports.HealthReport, HealthReport)
-        self.assertFalse(hasattr(yomihime_sdk, "AdmissionLease"))
-        self.assertFalse(hasattr(yomihime_sdk, "AdmissionPort"))
+        self.assertFalse(hasattr(yomihime_game_link_sdk, "AdmissionLease"))
+        self.assertFalse(hasattr(yomihime_game_link_sdk, "AdmissionPort"))
 
     def test_send_abort_and_scheduler_probe_are_additive_repository_ports(self) -> None:
         method_expectations = (
@@ -298,7 +299,7 @@ class CoreHardeningContractTests(unittest.TestCase):
                 ports.ResourceRepository,
                 "registration_state",
                 ("self", "asset_id", "scope"),
-                {"return": yomihime_sdk.api.storage.ResourceMetadata | None},
+                {"return": yomihime_game_link_sdk.storage.ResourceMetadata | None},
             ),
         )
         for protocol, method_name, parameters, hints in expectations:
@@ -311,7 +312,7 @@ class CoreHardeningContractTests(unittest.TestCase):
                 for name, expected_type in hints.items():
                     self.assertEqual(actual_hints[name], expected_type)
         self.assertIs(ports.AuthorizationWindowExpired.__bases__[0], PermissionError)
-        self.assertFalse(hasattr(yomihime_sdk, "AuthorizationWindowExpired"))
+        self.assertFalse(hasattr(yomihime_game_link_sdk, "AuthorizationWindowExpired"))
 
 
 if __name__ == "__main__":

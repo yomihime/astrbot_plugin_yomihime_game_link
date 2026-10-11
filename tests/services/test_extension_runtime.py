@@ -11,29 +11,13 @@ from pathlib import Path
 from secrets import token_urlsafe
 from unittest.mock import patch
 
-from ygl_test_subject.api.administration import (
+from ygl_test_subject.core.context_issuer import ContextIssuer
+from ygl_test_subject.core.contracts.administration import (
     AdminAuthorizationDenied,
     AdminOperation,
     ModuleLifecycle,
 )
-from ygl_test_subject.api.manifests import (
-    CapabilityDescriptor,
-    CapabilityEffect,
-    CommandDescriptor,
-    InvocationPolicy,
-    ModuleCategory,
-    ModuleManifest,
-    PackageManifest,
-)
-from ygl_test_subject.api.services import (
-    CapabilityHealth,
-    HealthReport,
-    HealthStatus,
-    ModuleHandlers,
-    ModuleServices,
-)
-from ygl_test_subject.api.version import CONTRACT_VERSION
-from ygl_test_subject.core.context_issuer import ContextIssuer
+from ygl_test_subject.core.contracts.validation_boundary import validate_contract
 from ygl_test_subject.core.health import HealthResolver
 from ygl_test_subject.core.lifecycle import (
     LifecycleController,
@@ -71,6 +55,25 @@ from ygl_test_subject.services.module_services import (
     RegistryRegistrationLookup,
 )
 
+from yomihime_game_link_sdk.declarations import (
+    CapabilityDescriptor,
+    CapabilityEffect,
+    CommandDescriptor,
+    InvocationPolicy,
+    ModuleCategory,
+    ModuleManifest,
+    PackageManifest,
+)
+from yomihime_game_link_sdk.errors import InvalidInvocation
+from yomihime_game_link_sdk.services import (
+    CapabilityHealth,
+    HealthReport,
+    HealthStatus,
+    ModuleHandlers,
+    ModuleServices,
+)
+from yomihime_game_link_sdk.version import MODULE_ABI_VERSION
+
 
 class _AttestedContext:
     adapter_id = "test-adapter"
@@ -95,7 +98,7 @@ class _Instance:
         fail_health: bool = False,
         stop_failures: int = 0,
     ) -> None:
-        self._handlers = ModuleHandlers({"read": _Handler()}, {}, {})
+        self._handlers = validate_contract(ModuleHandlers({"read": _Handler()}, {}, {}))
         self.invalid_handlers = invalid_handlers
         self.fail_start = fail_start
         self.fail_health = fail_health
@@ -120,7 +123,11 @@ class _Instance:
     async def check_health(self) -> HealthReport:
         if self.fail_health:
             raise RuntimeError("injected health failure")
-        return HealthReport({"read": CapabilityHealth(HealthStatus.AVAILABLE)})
+        return validate_contract(
+            HealthReport(
+                {"read": validate_contract(CapabilityHealth(HealthStatus.AVAILABLE))}
+            )
+        )
 
 
 class _Factory:
@@ -148,11 +155,13 @@ class _Factory:
         self.release_create = asyncio.Event()
         self.instances: list[_Instance] = []
         self.create_calls = 0
+        self.services_seen: list[ModuleServices] = []
 
     async def create(self, services: ModuleServices) -> _Instance:
         if not isinstance(services, ModuleServices):
             raise TypeError("the real candidate services must be supplied")
         self.create_calls += 1
+        self.services_seen.append(services)
         self.create_started.set()
         if self.block_create:
             await self.release_create.wait()
@@ -407,11 +416,16 @@ class ExtensionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(active_again.lifecycle, ModuleLifecycle.ACTIVE)
         self.assertEqual((source.capture_calls, source.factory.create_calls), (1, 1))
         self.assertIs(self.lifecycle.instance("sample/mod"), instance)
+        # Disable retains this exact instance; its configuration is still usable.
+        await source.factory.services_seen[0].config.current()
 
         await runtime.close(timeout=0.5)
         self.assertTrue(runtime.closed)
         self.assertEqual(instance.stopped, 2)
         self.assertEqual(source.leases[0].release_calls, 1)
+        await runtime.module_services.close_credentials()
+        with self.assertRaises(InvalidInvocation):
+            await source.factory.services_seen[0].config.current()
 
     async def test_candidate_detach_does_not_build_and_restore_requires_exact_source(
         self,
@@ -505,6 +519,8 @@ class ExtensionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(source.leases[0].release_calls, 1)
         self.assertEqual(self.registry.snapshot().modules, {})
         self.assertFalse(runtime._build_flights)
+        with self.assertRaises(InvalidInvocation):
+            await factory.services_seen[0].config.current()
         await runtime.close(timeout=0.5)
 
     async def test_cancel_after_sqlite_commit_drains_to_published_result(self):
@@ -949,7 +965,11 @@ class ExtensionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         )
         self.registry.register_package(
             external_manifest,
-            {"external": ModuleHandlers({"read": _Handler()}, {}, {})},
+            {
+                "external": validate_contract(
+                    ModuleHandlers({"read": _Handler()}, {}, {})
+                )
+            },
         )
         disable = asyncio.create_task(
             runtime.set_enabled(
@@ -1402,43 +1422,76 @@ class ExtensionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(factory.instances[0].stopped, 1)
         self.assertEqual(source.leases[0].release_calls, 1)
         self.assertFalse(runtime._build_flights)
+        with self.assertRaises(InvalidInvocation):
+            await factory.services_seen[0].config.current()
         await runtime.close(timeout=0.5)
+
+    async def test_factory_failure_revokes_only_its_exact_bundle(self):
+        factory = _Factory(fail_create=True)
+        runtime, _candidate, source = await self._runtime(factory=factory)
+        runtime.scan()
+        with self.assertRaises(ExtensionRuntimeError):
+            await self._enable(runtime, 0)
+        self.assertEqual(factory.create_calls, 1)
+        self.assertFalse(self.registry.snapshot().modules)
+        with self.assertRaises(InvalidInvocation):
+            await factory.services_seen[0].config.current()
+        factory.fail_create = False
+        active = await self._enable(runtime, self.registry.snapshot().revision)
+        self.assertTrue(active.enabled)
+        self.assertEqual(factory.create_calls, 2)
+        await factory.services_seen[1].config.current()
+        with self.assertRaises(InvalidInvocation):
+            await factory.services_seen[0].config.current()
+        self.assertIs(self.lifecycle.instance("sample/mod"), factory.instances[0])
+        await runtime.close(timeout=0.5)
+        await runtime.module_services.close_credentials()
+        with self.assertRaises(InvalidInvocation):
+            await factory.services_seen[1].config.current()
 
 
 def _package_manifest(module_ids: tuple[str, ...] = ("mod",)) -> PackageManifest:
-    capability = CapabilityDescriptor(
-        capability_id="read",
-        input_schema={"type": "object"},
-        invocation_policy=InvocationPolicy.NATURAL_LANGUAGE_ALLOWED,
-        effect=CapabilityEffect.READ_ONLY,
+    capability = validate_contract(
+        CapabilityDescriptor(
+            capability_id="read",
+            input_schema={"type": "object"},
+            invocation_policy=InvocationPolicy.NATURAL_LANGUAGE_ALLOWED,
+            effect=CapabilityEffect.READ_ONLY,
+        )
     )
     modules = tuple(
-        ModuleManifest(
-            module_id=module_id,
-            route=module_id,
-            category=ModuleCategory.GAME,
-            factory_entry="factory:build",
-            module_version="1.0.0",
-            capabilities=(capability,),
-            commands=(
-                CommandDescriptor(
-                    operation_path="read",
-                    capability_id="read",
-                    parameter_mapping={},
-                    help_text="read",
+        validate_contract(
+            ModuleManifest(
+                module_id=module_id,
+                route=module_id,
+                category=ModuleCategory.GAME,
+                factory_entry="factory:build",
+                module_version="1.0.0",
+                capabilities=(capability,),
+                commands=(
+                    validate_contract(
+                        CommandDescriptor(
+                            operation_path="read",
+                            capability_id="read",
+                            parameter_mapping={},
+                            help_text="read",
+                        )
+                    ),
                 ),
-            ),
+            )
         )
         for module_id in module_ids
     )
-    return PackageManifest(
-        package_id="sample",
-        package_version="1.0.0",
-        contract_version=CONTRACT_VERSION,
-        modules=modules,
-        author="tests",
-        license="MIT",
-        source="captured test bundle",
+    return validate_contract(
+        PackageManifest(
+            package_id="sample",
+            package_version="1.0.0",
+            contract_version=MODULE_ABI_VERSION,
+            modules=modules,
+            author="tests",
+            license="MIT",
+            source="captured test bundle",
+        )
     )
 
 

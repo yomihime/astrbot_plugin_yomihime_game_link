@@ -11,41 +11,15 @@ from time import monotonic
 from unittest.mock import patch
 from uuid import uuid4
 
-from ygl_test_subject.api.contexts import InvocationOrigin
-from ygl_test_subject.api.manifests import (
-    CapabilityDescriptor,
-    CapabilityEffect,
-    CommandDescriptor,
-    InvocationPolicy,
-    ModuleCategory,
-    ModuleManifest,
-    PackageManifest,
-)
-from ygl_test_subject.api.services import (
-    CacheAccessRequest,
-    CapabilityHealth,
-    Grant,
-    GrantStatus,
-    HealthReport,
-    HealthStatus,
-    ModuleHandlers,
-    Principal,
-)
-from ygl_test_subject.api.storage import (
-    CacheVisibility,
-    GrantReference,
-    OwnerScope,
-    OwnershipKind,
-)
-from ygl_test_subject.api.subscriptions import (
-    CollectionKey,
-    NormalizedInput,
-    ScheduleDescriptor,
-    ScheduleTrigger,
-)
-from ygl_test_subject.api.version import CONTRACT_VERSION
 from ygl_test_subject.core.admission import AdmissionError
 from ygl_test_subject.core.context_issuer import ContextIssuer
+from ygl_test_subject.core.contracts.services import (
+    CacheAccessRequest,
+    Grant,
+    GrantStatus,
+    Principal,
+)
+from ygl_test_subject.core.contracts.validation_boundary import validate_contract
 from ygl_test_subject.core.lifecycle import LifecycleController
 from ygl_test_subject.core.ports import ExecutionLease, RevisionConflict
 from ygl_test_subject.core.registry import Registry
@@ -60,12 +34,43 @@ from ygl_test_subject.infrastructure.sqlite.repositories_identity import (
     SQLiteIdentityRepository,
 )
 from ygl_test_subject.services import resources as resource_service_module
-from ygl_test_subject.services.cache import CacheAccessError, CacheAccessService
+from ygl_test_subject.services.cache import CacheAccessService
 from ygl_test_subject.services.identity import InvocationPrincipalResolver
 from ygl_test_subject.services.resources import (
     ResourceAccessError,
     ResourceAccessService,
 )
+
+import yomihime_game_link_sdk as ygl
+from yomihime_game_link_sdk.contexts import InvocationOrigin
+from yomihime_game_link_sdk.declarations import (
+    CapabilityDescriptor,
+    CapabilityEffect,
+    CommandDescriptor,
+    InvocationPolicy,
+    ModuleCategory,
+    ModuleManifest,
+    PackageManifest,
+)
+from yomihime_game_link_sdk.services import (
+    CapabilityHealth,
+    HealthReport,
+    HealthStatus,
+    ModuleHandlers,
+)
+from yomihime_game_link_sdk.storage import (
+    CacheVisibility,
+    GrantReference,
+    OwnerScope,
+    OwnershipKind,
+)
+from yomihime_game_link_sdk.subscriptions import (
+    CollectionKey,
+    NormalizedInput,
+    ScheduleDescriptor,
+    ScheduleTrigger,
+)
+from yomihime_game_link_sdk.version import MODULE_ABI_VERSION
 
 
 class _Handler:
@@ -95,7 +100,11 @@ class _Instance:
         return None
 
     async def check_health(self):
-        return HealthReport({"read": CapabilityHealth(HealthStatus.AVAILABLE)})
+        return validate_contract(
+            HealthReport(
+                {"read": validate_contract(CapabilityHealth(HealthStatus.AVAILABLE))}
+            )
+        )
 
 
 class _PausedIdentityRepository:
@@ -247,52 +256,70 @@ class _SwitchableDateTime(datetime):
 
 
 def _package() -> tuple[PackageManifest, ModuleHandlers]:
-    manifest = ModuleManifest(
-        module_id="cache",
-        route="cache",
-        category=ModuleCategory.GAME,
-        factory_entry="tests:Factory",
-        module_version="1.0.0",
-        capabilities=(
-            CapabilityDescriptor(
-                capability_id="read",
-                input_schema={"type": "object", "properties": {}, "required": []},
-                invocation_policy=InvocationPolicy.NATURAL_LANGUAGE_ALLOWED,
-                effect=CapabilityEffect.READ_ONLY,
+    manifest = validate_contract(
+        ModuleManifest(
+            module_id="cache",
+            route="cache",
+            category=ModuleCategory.GAME,
+            factory_entry="tests:Factory",
+            module_version="1.0.0",
+            capabilities=(
+                validate_contract(
+                    CapabilityDescriptor(
+                        capability_id="read",
+                        input_schema={
+                            "type": "object",
+                            "properties": {},
+                            "required": [],
+                        },
+                        invocation_policy=InvocationPolicy.NATURAL_LANGUAGE_ALLOWED,
+                        effect=CapabilityEffect.READ_ONLY,
+                    )
+                ),
             ),
-        ),
-        commands=(
-            CommandDescriptor(
-                operation_path="read",
-                capability_id="read",
-                parameter_mapping={},
-                help_text="read",
+            commands=(
+                validate_contract(
+                    CommandDescriptor(
+                        operation_path="read",
+                        capability_id="read",
+                        parameter_mapping={},
+                        help_text="read",
+                    )
+                ),
             ),
-        ),
-        schedules=(
-            ScheduleDescriptor(
-                collector_id="cache-collector",
-                key_version=1,
-                source_id="cache-source",
-                data_version=1,
-                input_schema={"type": "object", "properties": {}, "required": []},
-                shared_scope=OwnershipKind.PUBLIC,
-                trigger=ScheduleTrigger.ON_DEMAND,
-                minimum_interval_seconds=30,
+            schedules=(
+                validate_contract(
+                    ScheduleDescriptor(
+                        collector_id="cache-collector",
+                        key_version=1,
+                        source_id="cache-source",
+                        data_version=1,
+                        input_schema={
+                            "type": "object",
+                            "properties": {},
+                            "required": [],
+                        },
+                        shared_scope=OwnershipKind.PUBLIC,
+                        trigger=ScheduleTrigger.ON_DEMAND,
+                        minimum_interval_seconds=30,
+                    )
+                ),
             ),
-        ),
+        )
     )
-    package = PackageManifest(
-        package_id="pkg",
-        package_version="1.0.0",
-        contract_version=CONTRACT_VERSION,
-        modules=(manifest,),
-        author="tests",
-        license="AGPL-3.0",
-        source="offline",
+    package = validate_contract(
+        PackageManifest(
+            package_id="pkg",
+            package_version="1.0.0",
+            contract_version=MODULE_ABI_VERSION,
+            modules=(manifest,),
+            author="tests",
+            license="AGPL-3.0",
+            source="offline",
+        )
     )
-    return package, ModuleHandlers(
-        {"read": _Handler()}, {"cache-collector": _Collector()}, {}
+    return package, validate_contract(
+        ModuleHandlers({"read": _Handler()}, {"cache-collector": _Collector()}, {})
     )
 
 
@@ -407,13 +434,15 @@ class CacheResourcesServiceTests(unittest.IsolatedAsyncioTestCase):
         return self.lifecycle.state("pkg/cache").registry_revision
 
     def _scheduled_view(self, *, deadline: float | None = None):
-        key = CollectionKey(
-            "pkg/cache",
-            "cache-collector",
-            1,
-            "cache-source",
-            NormalizedInput({}),
-            OwnerScope.public(),
+        key = validate_contract(
+            CollectionKey(
+                "pkg/cache",
+                "cache-collector",
+                1,
+                "cache-source",
+                validate_contract(NormalizedInput({})),
+                OwnerScope.public(),
+            )
         )
         execution = ExecutionLease(
             key=key,
@@ -560,12 +589,14 @@ class CacheResourcesServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await authorised.get("private")).payload["owner"], "alice")
 
         await self.grants.revoke_grant(grant, expected_revision=1)
-        with self.assertRaises(CacheAccessError) as cache_error:
+        with self.assertRaises(ygl.AccessDenied) as cache_error:
             await authorised.get("private")
         self.assertEqual(cache_error.exception.code, "grant_revoked")
 
         content = b"private"
-        authorized_scope = OwnerScope.authorized("alice", GrantReference("grant-a", 1))
+        authorized_scope = OwnerScope.authorized(
+            "alice", validate_contract(GrantReference("grant-a", 1))
+        )
         resource = self._resource(
             self._invocation("alice", grant=grant), grant_store=self.grants
         )
@@ -577,7 +608,9 @@ class CacheResourcesServiceTests(unittest.IsolatedAsyncioTestCase):
         fresh_resource = self._resource(
             self._invocation("alice", grant=fresh_grant), grant_store=self.grants
         )
-        fresh_scope = OwnerScope.authorized("alice", GrantReference("grant-b", 1))
+        fresh_scope = OwnerScope.authorized(
+            "alice", validate_contract(GrantReference("grant-b", 1))
+        )
         fresh_asset_id = await self._asset_id(content, fresh_scope)
         await fresh_resource.register(
             fresh_asset_id, "application/octet-stream", content
@@ -624,7 +657,8 @@ class CacheResourcesServiceTests(unittest.IsolatedAsyncioTestCase):
             "principal-alice",
         )
         private_scope = OwnerScope.authorized(
-            "principal-alice", GrantReference(grant.grant_id, grant.revision)
+            "principal-alice",
+            validate_contract(GrantReference(grant.grant_id, grant.revision)),
         )
 
         payload = b"principal-owned-resource"
@@ -671,7 +705,7 @@ class CacheResourcesServiceTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.wait_for(paused_repository.entered.wait(), timeout=1)
         self.issuer.release(view)
         paused_repository.release.set()
-        with self.assertRaises(CacheAccessError):
+        with self.assertRaises(ygl.AccessDenied):
             await pending
         lookup = await self.cache_repository.get(
             CacheAccessRequest(
@@ -708,7 +742,7 @@ class CacheResourcesServiceTests(unittest.IsolatedAsyncioTestCase):
         await paused_cache_repository.started.wait()
         await self._revoke_under_gate(cache_grant)
         paused_cache_repository.resume.set()
-        with self.assertRaises(CacheAccessError) as cache_error:
+        with self.assertRaises(ygl.AccessDenied) as cache_error:
             await pending_cache_read
         self.assertEqual(cache_error.exception.code, "grant_revoked")
 
@@ -717,7 +751,10 @@ class CacheResourcesServiceTests(unittest.IsolatedAsyncioTestCase):
         resource = self._resource(resource_view, grant_store=self.grants)
         payload = b"private-resource-bytes"
         scope = OwnerScope.authorized(
-            "alice", GrantReference(resource_grant.grant_id, resource_grant.revision)
+            "alice",
+            validate_contract(
+                GrantReference(resource_grant.grant_id, resource_grant.revision)
+            ),
         )
         asset_id = await self._asset_id(payload, scope)
         await resource.register(
@@ -765,7 +802,7 @@ class CacheResourcesServiceTests(unittest.IsolatedAsyncioTestCase):
         await paused_repository.started.wait()
         await asyncio.sleep(0.8)
         paused_repository.resume.set()
-        with self.assertRaises(CacheAccessError) as error:
+        with self.assertRaises(ygl.AccessDenied) as error:
             await pending
         self.assertEqual(error.exception.code, "grant_expired")
 
@@ -773,7 +810,9 @@ class CacheResourcesServiceTests(unittest.IsolatedAsyncioTestCase):
         grant = await self._grant("stage-revocation-grant")
         view = self._invocation("alice", grant=grant)
         payload = b"must-be-discarded"
-        scope = OwnerScope.authorized("alice", GrantReference(grant.grant_id, 1))
+        scope = OwnerScope.authorized(
+            "alice", validate_contract(GrantReference(grant.grant_id, 1))
+        )
         asset_id = await self._asset_id(payload, scope)
         paused_files = _ObservedMethod(
             self.files, "stage", pause=True, pause_after=True
@@ -810,7 +849,7 @@ class CacheResourcesServiceTests(unittest.IsolatedAsyncioTestCase):
         grant = await self._grant("stage-cleanup")
         view = self._invocation("alice", grant=grant)
         scope = OwnerScope.authorized(
-            "alice", GrantReference(grant.grant_id, grant.revision)
+            "alice", validate_contract(GrantReference(grant.grant_id, grant.revision))
         )
         mismatch_content = b"mismatched-stage-content"
         wrong_asset = await self._asset_id(b"different-content", scope)
@@ -907,7 +946,10 @@ class CacheResourcesServiceTests(unittest.IsolatedAsyncioTestCase):
         )
         content = b"serialized-resource"
         scope = OwnerScope.authorized(
-            "alice", GrantReference(resource_grant.grant_id, resource_grant.revision)
+            "alice",
+            validate_contract(
+                GrantReference(resource_grant.grant_id, resource_grant.revision)
+            ),
         )
         asset_id = await self._asset_id(content, scope)
         resource_write = asyncio.create_task(
@@ -955,7 +997,7 @@ class CacheResourcesServiceTests(unittest.IsolatedAsyncioTestCase):
         service = self._cache(self._invocation("alice"))
         with self.assertRaises(ValueError):
             await service.put("expired", {}, ttl_seconds=0)
-        with self.assertRaises(CacheAccessError):
+        with self.assertRaises(ygl.ParameterError):
             await service.lookup(
                 CacheAccessRequest("x", CacheVisibility.USER, OwnerScope.user("bob"))
             )
@@ -995,25 +1037,29 @@ class CacheResourcesServiceTests(unittest.IsolatedAsyncioTestCase):
         content = b"still-active"
         asset_id = await self._asset_id(content, OwnerScope.user("alice"))
 
-        module = ModuleManifest(
-            module_id="other",
-            route="other",
-            category=ModuleCategory.GAME,
-            factory_entry="tests:OtherFactory",
-            module_version="1.0.0",
-            capabilities=(),
+        module = validate_contract(
+            ModuleManifest(
+                module_id="other",
+                route="other",
+                category=ModuleCategory.GAME,
+                factory_entry="tests:OtherFactory",
+                module_version="1.0.0",
+                capabilities=(),
+            )
         )
         self.registry.register_package(
-            PackageManifest(
-                "other-package",
-                "1.0.0",
-                CONTRACT_VERSION,
-                (module,),
-                "tests",
-                "AGPL-3.0",
-                "offline",
+            validate_contract(
+                PackageManifest(
+                    "other-package",
+                    "1.0.0",
+                    MODULE_ABI_VERSION,
+                    (module,),
+                    "tests",
+                    "AGPL-3.0",
+                    "offline",
+                )
             ),
-            {"other": ModuleHandlers({}, {}, {})},
+            {"other": validate_contract(ModuleHandlers({}, {}, {}))},
         )
 
         await resource.register(asset_id, "application/octet-stream", content)
@@ -1043,7 +1089,7 @@ class CacheResourcesServiceTests(unittest.IsolatedAsyncioTestCase):
             self.files,
             issuer=self.issuer,
         )
-        with self.assertRaises(CacheAccessError):
+        with self.assertRaises(ygl.ServiceUnavailable):
             await unbound.get("x")
         with self.assertRaises(ResourceAccessError):
             await unbound_resource.metadata("x")
@@ -1053,7 +1099,7 @@ class CacheResourcesServiceTests(unittest.IsolatedAsyncioTestCase):
         copied = replace(valid_lease)
         self.issuer.detach_lease(valid_view, valid_lease)
         self.issuer.attach_lease(valid_view, copied)
-        with self.assertRaises(CacheAccessError):
+        with self.assertRaises(ygl.InvalidInvocation):
             await self._cache(valid_view).get("x")
         with self.assertRaises(AdmissionError):
             self.admission.check(copied)
@@ -1065,7 +1111,7 @@ class CacheResourcesServiceTests(unittest.IsolatedAsyncioTestCase):
         deadline_service = self._cache(deadline_view)
         deadline_resource = self._resource(deadline_view)
         self.clock_value[0] += 2.0
-        with self.assertRaises(CacheAccessError):
+        with self.assertRaises(ygl.OperationTimeout):
             await deadline_service.get("x")
         with self.assertRaises(ResourceAccessError):
             await deadline_resource.metadata("x")
@@ -1075,7 +1121,7 @@ class CacheResourcesServiceTests(unittest.IsolatedAsyncioTestCase):
         released_cache = self._cache(released_view)
         released_resource = self._resource(released_view)
         self.issuer.release(released_view)
-        with self.assertRaises(CacheAccessError):
+        with self.assertRaises(ygl.InvalidInvocation):
             await released_cache.get("x")
         with self.assertRaises(ResourceAccessError):
             await released_resource.metadata("x")
@@ -1094,7 +1140,7 @@ class CacheResourcesServiceTests(unittest.IsolatedAsyncioTestCase):
             "confirm-expiry", expires_at=datetime.now(UTC) + timedelta(hours=1)
         )
         scope = OwnerScope.authorized(
-            "alice", GrantReference(grant.grant_id, grant.revision)
+            "alice", validate_contract(GrantReference(grant.grant_id, grant.revision))
         )
         content = b"commit-approved-before-expiry"
         asset_id = await self._asset_id(content, scope)
@@ -1133,7 +1179,10 @@ class CacheResourcesServiceTests(unittest.IsolatedAsyncioTestCase):
     async def test_confirm_error_and_cancellation_preserve_registered_resource(self):
         error_grant = await self._grant("confirm-error")
         error_scope = OwnerScope.authorized(
-            "alice", GrantReference(error_grant.grant_id, error_grant.revision)
+            "alice",
+            validate_contract(
+                GrantReference(error_grant.grant_id, error_grant.revision)
+            ),
         )
         error_content = b"confirm-error-content"
         error_asset = await self._asset_id(error_content, error_scope)
@@ -1166,7 +1215,10 @@ class CacheResourcesServiceTests(unittest.IsolatedAsyncioTestCase):
 
         cancel_grant = await self._grant("confirm-cancel")
         cancel_scope = OwnerScope.authorized(
-            "alice", GrantReference(cancel_grant.grant_id, cancel_grant.revision)
+            "alice",
+            validate_contract(
+                GrantReference(cancel_grant.grant_id, cancel_grant.revision)
+            ),
         )
         cancel_content = b"confirm-cancel-content"
         cancel_asset = await self._asset_id(cancel_content, cancel_scope)
@@ -1210,7 +1262,7 @@ class CacheResourcesServiceTests(unittest.IsolatedAsyncioTestCase):
     ):
         grant = await self._grant("queue-cancel")
         scope = OwnerScope.authorized(
-            "alice", GrantReference(grant.grant_id, grant.revision)
+            "alice", validate_contract(GrantReference(grant.grant_id, grant.revision))
         )
         content = b"queued-resource-cancel"
         asset_id = await self._asset_id(content, scope)
@@ -1313,7 +1365,7 @@ class CacheResourcesServiceTests(unittest.IsolatedAsyncioTestCase):
             grant_store=self.grants,
         )
         scope = OwnerScope.authorized(
-            "alice", GrantReference(grant.grant_id, grant.revision)
+            "alice", validate_contract(GrantReference(grant.grant_id, grant.revision))
         )
         content = b"deadline-forwarded-resource"
         asset_id = await self._asset_id(content, scope)

@@ -2,7 +2,7 @@
   "schema_version": 1,
   "package_id": "offline_sample",
   "package_version": "1.0.0",
-  "contract_version": "1.1.0",
+  "contract_version": "2.0",
   "author": "Yomihime SDK example",
   "license": "MIT",
   "source": "https://example.invalid/yomihime/offline-sample",
@@ -52,17 +52,26 @@
           },
           "invocation_policy": "natural_language_allowed",
           "effect": "read_only",
-          "required_config": ["region"]
+          "required_config": [
+            "region"
+          ]
         },
         {
           "capability_id": "account_bind",
           "input_schema": {
             "type": "object",
             "properties": {
-              "provider": {"type": "string"},
-              "subject": {"type": "string"}
+              "provider": {
+                "type": "string"
+              },
+              "subject": {
+                "type": "string"
+              }
             },
-            "required": ["provider", "subject"],
+            "required": [
+              "provider",
+              "subject"
+            ],
             "additionalProperties": false
           },
           "invocation_policy": "command_only",
@@ -84,10 +93,18 @@
           "input_schema": {
             "type": "object",
             "properties": {
-              "binding_id": {"type": "string"},
-              "expected_revision": {"type": "integer", "minimum": 1}
+              "binding_id": {
+                "type": "string"
+              },
+              "expected_revision": {
+                "type": "integer",
+                "minimum": 1
+              }
             },
-            "required": ["binding_id", "expected_revision"],
+            "required": [
+              "binding_id",
+              "expected_revision"
+            ],
             "additionalProperties": false
           },
           "invocation_policy": "command_only",
@@ -100,14 +117,35 @@
             "properties": {
               "type_id": {
                 "type": "string",
-                "enum": ["public_watch", "private_watch"]
+                "enum": [
+                  "public_watch",
+                  "private_watch"
+                ]
               },
-              "region": {"type": "string"},
-              "minimum": {"type": "integer", "minimum": 0},
-              "mode": {"type": "string", "enum": ["instant", "digest"]},
-              "digest_time": {"type": "string"}
+              "region": {
+                "type": "string"
+              },
+              "minimum": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "mode": {
+                "type": "string",
+                "enum": [
+                  "instant",
+                  "digest"
+                ]
+              },
+              "digest_time": {
+                "type": "string"
+              }
             },
-            "required": ["type_id", "region", "minimum", "mode"],
+            "required": [
+              "type_id",
+              "region",
+              "minimum",
+              "mode"
+            ],
             "additionalProperties": false
           },
           "invocation_policy": "command_only",
@@ -129,10 +167,18 @@
           "input_schema": {
             "type": "object",
             "properties": {
-              "subscription_id": {"type": "string"},
-              "expected_revision": {"type": "integer", "minimum": 1}
+              "subscription_id": {
+                "type": "string"
+              },
+              "expected_revision": {
+                "type": "integer",
+                "minimum": 1
+              }
             },
-            "required": ["subscription_id", "expected_revision"],
+            "required": [
+              "subscription_id",
+              "expected_revision"
+            ],
             "additionalProperties": false
           },
           "invocation_policy": "command_only",
@@ -149,6 +195,95 @@
           "invocation_policy": "command_only",
           "effect": "read_only",
           "privacy_floor": "private"
+        },
+        {
+          "capability_id": "state",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "action": {
+                "type": "string",
+                "enum": [
+                  "write",
+                  "read",
+                  "cache",
+                  "command_message",
+                  "hold",
+                  "late"
+                ]
+              },
+              "value": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "action"
+            ],
+            "additionalProperties": false
+          },
+          "invocation_policy": "command_only",
+          "effect": "write",
+          "privacy_floor": "owner"
+        },
+        {
+          "capability_id": "message",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "hold": {
+                "type": "boolean"
+              }
+            },
+            "required": [],
+            "additionalProperties": false
+          },
+          "invocation_policy": "natural_language_allowed",
+          "effect": "read_only",
+          "privacy_floor": "public"
+        },
+        {
+          "capability_id": "public_error",
+          "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+            "additionalProperties": false
+          },
+          "invocation_policy": "natural_language_allowed",
+          "effect": "read_only",
+          "privacy_floor": "public"
+        },
+        {
+          "capability_id": "subscription_revise",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "subscription_id": {
+                "type": "string"
+              },
+              "expected_revision": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "region": {
+                "type": "string"
+              },
+              "minimum": {
+                "type": "integer",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "subscription_id",
+              "expected_revision",
+              "region",
+              "minimum"
+            ],
+            "additionalProperties": false
+          },
+          "invocation_policy": "command_only",
+          "effect": "write",
+          "privacy_floor": "public"
         }
       ],
       "commands": [
@@ -173,7 +308,10 @@
         {
           "operation_path": "account bind",
           "capability_id": "account_bind",
-          "parameter_mapping": {"provider": "provider", "subject": "subject"},
+          "parameter_mapping": {
+            "provider": "provider",
+            "subject": "subject"
+          },
           "help_text": "Bind a default sample identity."
         },
         {
@@ -223,6 +361,40 @@
           "capability_id": "private_status",
           "parameter_mapping": {},
           "help_text": "Check authorized private sample access."
+        },
+        {
+          "operation_path": "state",
+          "capability_id": "state",
+          "parameter_mapping": {
+            "action": "action",
+            "value": "value"
+          },
+          "help_text": "Run the finite offline state demonstration."
+        },
+        {
+          "operation_path": "message",
+          "capability_id": "message",
+          "parameter_mapping": {
+            "hold": "hold"
+          },
+          "help_text": "Run the finite offline message demonstration."
+        },
+        {
+          "operation_path": "public error",
+          "capability_id": "public_error",
+          "parameter_mapping": {},
+          "help_text": "Run the finite offline public_error demonstration."
+        },
+        {
+          "operation_path": "subscription revise",
+          "capability_id": "subscription_revise",
+          "parameter_mapping": {
+            "subscription_id": "subscription_id",
+            "expected_revision": "expected_revision",
+            "region": "region",
+            "minimum": "minimum"
+          },
+          "help_text": "Run the finite offline subscription_revise demonstration."
         }
       ],
       "tools": [
@@ -237,6 +409,14 @@
           "capability_id": "from_source",
           "parameter_mapping": {},
           "description": "Return one public source capability through the declared dependency."
+        },
+        {
+          "name": "sample_message",
+          "capability_id": "message",
+          "parameter_mapping": {
+            "hold": "hold"
+          },
+          "description": "Read the current trusted message and return a fixed public receipt."
         }
       ],
       "schedules": [
@@ -247,8 +427,14 @@
           "data_version": 1,
           "input_schema": {
             "type": "object",
-            "properties": {"region": {"type": "string"}},
-            "required": ["region"],
+            "properties": {
+              "region": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "region"
+            ],
             "additionalProperties": false
           },
           "shared_scope": "public",
@@ -264,8 +450,14 @@
           "data_version": 1,
           "input_schema": {
             "type": "object",
-            "properties": {"region": {"type": "string"}},
-            "required": ["region"],
+            "properties": {
+              "region": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "region"
+            ],
             "additionalProperties": false
           },
           "shared_scope": "authorized",
@@ -282,11 +474,21 @@
           "matcher_id": "sample_matcher",
           "filter_schema": {
             "type": "object",
-            "properties": {"minimum": {"type": "integer", "minimum": 0}},
-            "required": ["minimum"],
+            "properties": {
+              "minimum": {
+                "type": "integer",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "minimum"
+            ],
             "additionalProperties": false
           },
-          "notification_modes": ["instant", "digest"]
+          "notification_modes": [
+            "instant",
+            "digest"
+          ]
         },
         {
           "type_id": "private_watch",
@@ -294,11 +496,21 @@
           "matcher_id": "sample_matcher",
           "filter_schema": {
             "type": "object",
-            "properties": {"minimum": {"type": "integer", "minimum": 0}},
-            "required": ["minimum"],
+            "properties": {
+              "minimum": {
+                "type": "integer",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "minimum"
+            ],
             "additionalProperties": false
           },
-          "notification_modes": ["instant", "digest"]
+          "notification_modes": [
+            "instant",
+            "digest"
+          ]
         }
       ],
       "config_fields": [
@@ -329,6 +541,13 @@
           "host": "offline.invalid",
           "timeout_seconds": 1,
           "requests_per_minute": 60
+        }
+      ],
+      "collections": [
+        {
+          "name": "notebook",
+          "schema_version": 1,
+          "owner_kind": "user"
         }
       ]
     },

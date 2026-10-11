@@ -7,36 +7,9 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from ygl_test_subject.api.display import DisplayDocument, Privacy, TextBlock
-from ygl_test_subject.api.manifests import (
-    CapabilityDescriptor,
-    CapabilityEffect,
-    CapabilityReference,
-    CommandDescriptor,
-    ConfigField,
-    InvocationPolicy,
-    ModuleCategory,
-    ModuleManifest,
-    PackageManifest,
-    PrivacyFloor,
-    SourceDeclaration,
-)
-from ygl_test_subject.api.results import CapabilityResult, ResultStatus
-from ygl_test_subject.api.services import (
-    CapabilityHealth,
-    ConfigSnapshot,
-    ConfigTarget,
-    ConversationKind,
-    ConversationRef,
-    HealthReport,
-    HealthStatus,
-    ModuleHandlers,
-    Principal,
-)
-from ygl_test_subject.api.storage import CollectionDescriptor, OwnershipKind
-from ygl_test_subject.api.subscriptions import ScheduleDescriptor, ScheduleTrigger
-from ygl_test_subject.api.version import CONTRACT_VERSION
 from ygl_test_subject.core.context_issuer import ContextIssuer
+from ygl_test_subject.core.contracts.services import Principal
+from ygl_test_subject.core.contracts.validation_boundary import validate_contract
 from ygl_test_subject.core.health import HealthResolver
 from ygl_test_subject.core.lifecycle import LifecycleController
 from ygl_test_subject.core.registry import Registry
@@ -54,6 +27,38 @@ from ygl_test_subject.services.module_services import (
     RegistryRegistrationLookup,
 )
 from ygl_test_subject.services.scheduler import ExecutionClaimProofRegistry
+
+from yomihime_game_link_sdk.declarations import (
+    CapabilityDescriptor,
+    CapabilityEffect,
+    CapabilityReference,
+    CommandDescriptor,
+    ConfigField,
+    InvocationPolicy,
+    ModuleCategory,
+    ModuleManifest,
+    PackageManifest,
+    PrivacyFloor,
+    SourceDeclaration,
+)
+from yomihime_game_link_sdk.display import DisplayDocument, Privacy, TextBlock
+from yomihime_game_link_sdk.results import CapabilityResult, ResultStatus
+from yomihime_game_link_sdk.services import (
+    CapabilityHealth,
+    ConfigSnapshot,
+    ConfigTarget,
+    HealthReport,
+    HealthStatus,
+    ModuleHandlers,
+)
+from yomihime_game_link_sdk.storage import CollectionDescriptor, OwnershipKind
+from yomihime_game_link_sdk.subscriptions import (
+    ConversationKind,
+    ConversationRef,
+    ScheduleDescriptor,
+    ScheduleTrigger,
+)
+from yomihime_game_link_sdk.version import MODULE_ABI_VERSION
 
 
 class _TestCodec:
@@ -77,9 +82,11 @@ class OfflineHttpTransport(HttpTransport):
 
     async def request(self, request: TransportRequest):
         self.requests.append(request)
-        from ygl_test_subject.api.services import HttpResponse
+        from yomihime_game_link_sdk.services import HttpResponse
 
-        return HttpResponse(200, {"content-type": "text/plain"}, b"offline")
+        return validate_contract(
+            HttpResponse(200, {"content-type": "text/plain"}, b"offline")
+        )
 
 
 class _Handler:
@@ -98,21 +105,28 @@ class _Handler:
         privacy = (
             Privacy.PRIVATE if self.capability_id == "private.read" else Privacy.PUBLIC
         )
-        return CapabilityResult(
-            "b03-test",
-            ResultStatus.SUCCESS,
-            document=DisplayDocument(
-                "B03", "test", (TextBlock("offline"),), privacy=privacy
-            ),
-            privacy=privacy,
+        return validate_contract(
+            CapabilityResult(
+                "b03-test",
+                ResultStatus.SUCCESS,
+                document=validate_contract(
+                    DisplayDocument(
+                        "B03",
+                        "test",
+                        (validate_contract(TextBlock("offline")),),
+                        privacy=privacy,
+                    )
+                ),
+                privacy=privacy,
+            )
         )
 
 
 class _Collector:
     def normalize(self, parameters):
-        from ygl_test_subject.api.subscriptions import NormalizedInput
+        from yomihime_game_link_sdk.subscriptions import NormalizedInput
 
-        return NormalizedInput(parameters)
+        return validate_contract(NormalizedInput(parameters))
 
     async def collect(self, context, parameters, previous):
         raise AssertionError("the B03 scheduled collector is not run by this fixture")
@@ -135,84 +149,106 @@ class _RuntimeInstance:
         return None
 
     async def check_health(self) -> HealthReport:
-        return HealthReport(
-            {
-                capability_id: CapabilityHealth(HealthStatus.AVAILABLE)
-                for capability_id in self._capabilities
-            }
+        return validate_contract(
+            HealthReport(
+                {
+                    capability_id: validate_contract(
+                        CapabilityHealth(HealthStatus.AVAILABLE)
+                    )
+                    for capability_id in self._capabilities
+                }
+            )
         )
 
 
 def _manifest(module_id: str, dependencies=()) -> ModuleManifest:
-    descriptor = CapabilityDescriptor(
-        "read",
-        {
-            "type": "object",
-            "properties": {},
-            "required": [],
-            "additionalProperties": False,
-        },
-        InvocationPolicy.NATURAL_LANGUAGE_ALLOWED,
-        CapabilityEffect.READ_ONLY,
-        required_capabilities=tuple(dependencies),
+    descriptor = validate_contract(
+        CapabilityDescriptor(
+            "read",
+            {
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": False,
+            },
+            InvocationPolicy.NATURAL_LANGUAGE_ALLOWED,
+            CapabilityEffect.READ_ONLY,
+            required_capabilities=tuple(dependencies),
+        )
     )
-    private_descriptor = CapabilityDescriptor(
-        "private.read",
-        {
-            "type": "object",
-            "properties": {},
-            "required": [],
-            "additionalProperties": False,
-        },
-        InvocationPolicy.COMMAND_ONLY,
-        CapabilityEffect.READ_ONLY,
-        privacy_floor=PrivacyFloor.PRIVATE,
+    private_descriptor = validate_contract(
+        CapabilityDescriptor(
+            "private.read",
+            {
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": False,
+            },
+            InvocationPolicy.COMMAND_ONLY,
+            CapabilityEffect.READ_ONLY,
+            privacy_floor=PrivacyFloor.PRIVATE,
+        )
     )
     capabilities = (
         (descriptor, private_descriptor) if module_id == "alpha" else (descriptor,)
     )
-    return ModuleManifest(
-        module_id,
-        module_id,
-        ModuleCategory.GAME,
-        "tests.fixtures.b03_runtime:build_runtime",
-        "1.0.0",
-        capabilities,
-        commands=(
-            (CommandDescriptor("private", "private.read", {}, "private read"),)
-            if module_id == "alpha"
-            else ()
-        ),
-        config_fields=(ConfigField("region", default="global"),),
-        sources=(SourceDeclaration("catalog", "example.test"),),
-        collections=(
-            CollectionDescriptor("profiles", 1, OwnershipKind.USER),
-            CollectionDescriptor("announcements", 1, OwnershipKind.PUBLIC),
-            CollectionDescriptor("account_records", 1, OwnershipKind.AUTHORIZED),
-        ),
-        schedules=(
-            (
-                ScheduleDescriptor(
-                    "account-collector",
-                    1,
-                    "catalog",
-                    1,
-                    {
-                        "type": "object",
-                        "properties": {},
-                        "required": [],
-                        "additionalProperties": False,
-                    },
-                    OwnershipKind.AUTHORIZED,
-                    ScheduleTrigger.PERIODIC,
-                    60.0,
-                    60.0,
-                    "cadence",
+    return validate_contract(
+        ModuleManifest(
+            module_id,
+            module_id,
+            ModuleCategory.GAME,
+            "tests.fixtures.b03_runtime:build_runtime",
+            "1.0.0",
+            capabilities,
+            commands=(
+                (
+                    validate_contract(
+                        CommandDescriptor("private", "private.read", {}, "private read")
+                    ),
+                )
+                if module_id == "alpha"
+                else ()
+            ),
+            config_fields=(validate_contract(ConfigField("region", default="global")),),
+            sources=(validate_contract(SourceDeclaration("catalog", "example.test")),),
+            collections=(
+                validate_contract(
+                    CollectionDescriptor("profiles", 1, OwnershipKind.USER)
                 ),
-            )
-            if module_id == "alpha"
-            else ()
-        ),
+                validate_contract(
+                    CollectionDescriptor("announcements", 1, OwnershipKind.PUBLIC)
+                ),
+                validate_contract(
+                    CollectionDescriptor("account_records", 1, OwnershipKind.AUTHORIZED)
+                ),
+            ),
+            schedules=(
+                (
+                    validate_contract(
+                        ScheduleDescriptor(
+                            "account-collector",
+                            1,
+                            "catalog",
+                            1,
+                            {
+                                "type": "object",
+                                "properties": {},
+                                "required": [],
+                                "additionalProperties": False,
+                            },
+                            OwnershipKind.AUTHORIZED,
+                            ScheduleTrigger.PERIODIC,
+                            60.0,
+                            60.0,
+                            "cadence",
+                        )
+                    ),
+                )
+                if module_id == "alpha"
+                else ()
+            ),
+        )
     )
 
 
@@ -246,32 +282,39 @@ async def build_runtime(
     if registry is None:
         registry = Registry()
         handler = _Handler()
-        beta = _manifest("beta", (CapabilityReference("sample/alpha", "private.read"),))
+        beta = _manifest(
+            "beta",
+            (validate_contract(CapabilityReference("sample/alpha", "private.read")),),
+        )
         alpha = _manifest(
             "alpha",
             (
-                CapabilityReference("sample/beta", "read"),
-                CapabilityReference("sample/alpha", "private.read"),
+                validate_contract(CapabilityReference("sample/beta", "read")),
+                validate_contract(CapabilityReference("sample/alpha", "private.read")),
             ),
         )
-        package = PackageManifest(
-            "sample",
-            "1.0.0",
-            CONTRACT_VERSION,
-            (alpha, beta),
-            "tests",
-            "MIT",
-            "offline B03 integration fixture",
+        package = validate_contract(
+            PackageManifest(
+                "sample",
+                "1.0.0",
+                MODULE_ABI_VERSION,
+                (alpha, beta),
+                "tests",
+                "MIT",
+                "offline B03 integration fixture",
+            )
         )
         registry.register_package(
             package,
             {
-                "alpha": ModuleHandlers(
-                    {"read": handler, "private.read": _Handler("private.read")},
-                    {"account-collector": _Collector()},
-                    {},
+                "alpha": validate_contract(
+                    ModuleHandlers(
+                        {"read": handler, "private.read": _Handler("private.read")},
+                        {"account-collector": _Collector()},
+                        {},
+                    )
                 ),
-                "beta": ModuleHandlers({"read": handler}, {}, {}),
+                "beta": validate_contract(ModuleHandlers({"read": handler}, {}, {})),
             },
         )
     handler = registry.snapshot().module("sample/alpha").handlers.capabilities["read"]
@@ -290,9 +333,15 @@ async def build_runtime(
     async def config_snapshot(module_id: str) -> ConfigSnapshot:
         module = registry.snapshot().module(module_id)
         if not module.manifest.config_fields:
-            return ConfigSnapshot(1, {}, target=ConfigTarget("host-config", module_id))
+            return validate_contract(
+                ConfigSnapshot(
+                    1,
+                    {},
+                    target=validate_contract(ConfigTarget("host-config", module_id)),
+                )
+            )
         return await ConfigurationService(
-            ConfigTarget("host-config", module_id),
+            validate_contract(ConfigTarget("host-config", module_id)),
             module.manifest.config_fields,
             repositories.config,
             repositories.secret_store,
@@ -301,7 +350,7 @@ async def build_runtime(
     async def source_health(module_id: str, source_id: str) -> CapabilityHealth:
         # The fixture uses a deterministic offline transport and explicitly
         # publishes its locally available source. Production defaults to UNKNOWN.
-        return CapabilityHealth(HealthStatus.AVAILABLE)
+        return validate_contract(CapabilityHealth(HealthStatus.AVAILABLE))
 
     health = HealthResolver(
         config_snapshot=config_snapshot,
@@ -323,7 +372,11 @@ async def build_runtime(
     )
     await repositories.identities.save_principal(Principal("bob", "test-users", "bob"))
     await repositories.conversations.save(
-        ConversationRef("test-adapter", ConversationKind.GROUP, "room", "test-route")
+        validate_contract(
+            ConversationRef(
+                "test-adapter", ConversationKind.GROUP, "room", "test-route"
+            )
+        )
     )
     for module_id in ("sample/beta", "sample/alpha"):
         if lifecycle.state(module_id).active:

@@ -12,7 +12,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
 
-from ..api.display import (
+from yomihime_game_link_sdk.display import (
     CommandsBlock,
     DisplayDocument,
     FieldsBlock,
@@ -29,6 +29,8 @@ from ..api.display import (
     TimeValue,
     UnknownBlock,
 )
+
+from ..core.contracts.validation_boundary import validate_contract
 
 _TRUNCATION_NOTICE = "[内容已截断]"
 
@@ -55,6 +57,7 @@ class TextPresenter:
         performed only after the complete projection has been built, leaving
         the immutable input document untouched.
         """
+        validate_contract(document)
         if not isinstance(document, DisplayDocument):
             raise TypeError("document must be a DisplayDocument")
         if not isinstance(max_chars, int) or isinstance(max_chars, bool):
@@ -149,6 +152,7 @@ class TextPresenter:
         return lines
 
     def _render_grid_item(self, item: GridItem, budget: int) -> str:
+        validate_contract(item)
         return f"{item.label}: {self._format_value(item.value, budget)}"
 
     def _format_value(self, value: Any, budget: int) -> str:
@@ -309,6 +313,7 @@ class TextPresenter:
         return prefix[:budget]
 
     def _format_time(self, value: TimeValue) -> str:
+        validate_contract(value)
         moment: datetime | date = value.value
         rendered = moment.isoformat()
         if value.timezone_name:

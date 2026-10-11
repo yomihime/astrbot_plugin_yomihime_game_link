@@ -17,8 +17,8 @@ class Forbidden(importlib.abc.MetaPathFinder):
             raise AssertionError('unexpected host/game import: ' + fullname)
 sys.meta_path.insert(0, Forbidden())
 import tests
-from ygl_test_subject.api.administration import AdminOperation
-from ygl_test_subject.api.display import DisplayLimits
+from ygl_test_subject.core.contracts.administration import AdminOperation
+from yomihime_game_link_sdk.display import DisplayLimits
 from ygl_test_subject.services.core_runtime import CoreRuntime
 from ygl_test_subject.services.core_configuration import DEFAULT_REGION, core_config_target
 from ygl_test_subject.services.configuration_migration import OrdinaryMigrationField

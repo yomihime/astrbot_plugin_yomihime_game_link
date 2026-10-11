@@ -10,17 +10,12 @@ import unittest
 from pathlib import Path
 from urllib.parse import parse_qs
 
-from ygl_test_subject.api.manifests import ConfigField, SourceDeclaration
-from ygl_test_subject.api.services import (
+from ygl_test_subject.core.contracts.services import (
     ConfigFieldUpdate,
-    ConfigPatchMode,
-    ConfigSnapshot,
-    ConfigTarget,
-    HttpRequest,
-    HttpResponse,
     PersistedConfigPatch,
 )
-from ygl_test_subject.api.storage import SecretTarget
+from ygl_test_subject.core.contracts.storage import SecretTarget
+from ygl_test_subject.core.contracts.validation_boundary import validate_contract
 from ygl_test_subject.extensions.disk_manifest import ManifestError, parse_manifest
 from ygl_test_subject.infrastructure.http import SourceHttpService
 from ygl_test_subject.infrastructure.key_provider import SecretKeyUnavailable
@@ -36,8 +31,19 @@ from ygl_test_subject.services.source_credentials import (
     bind_source_credential_declarations,
 )
 
-from yomihime_sdk.api.services import SourceHttpError
-from yomihime_sdk.api.storage import (
+from yomihime_game_link_sdk.declarations import (
+    ConfigField,
+    ConfigUpdateMode,
+    SourceDeclaration,
+)
+from yomihime_game_link_sdk.errors import SourceHttpError
+from yomihime_game_link_sdk.services import (
+    ConfigSnapshot,
+    ConfigTarget,
+    HttpRequest,
+    HttpResponse,
+)
+from yomihime_game_link_sdk.storage import (
     SecretMetadata,
     SecretMetadataState,
     SecretRef,
@@ -75,7 +81,7 @@ class _CredentialTransport:
         self.exchange_gate: asyncio.Event | None = None
         self.exchange_error: Exception | None = None
         self.expires_in: object = 3600
-        self.resource_response = HttpResponse(200, {}, b"ok")
+        self.resource_response = validate_contract(HttpResponse(200, {}, b"ok"))
 
     async def request_credential_exchange(self, request):
         self.exchanges.append(request)
@@ -88,10 +94,12 @@ class _CredentialTransport:
         token_payload = {"access_token": token, "token_type": "Bearer"}
         if self.expires_in is not _MISSING:
             token_payload["expires_in"] = self.expires_in
-        return HttpResponse(
-            200,
-            {"Content-Type": "application/json"},
-            json.dumps(token_payload).encode(),
+        return validate_contract(
+            HttpResponse(
+                200,
+                {"Content-Type": "application/json"},
+                json.dumps(token_payload).encode(),
+            )
         )
 
     async def request(self, request):
@@ -104,7 +112,7 @@ def _document() -> dict[str, object]:
         "schema_version": 1,
         "package_id": "sample_pkg",
         "package_version": "1.0.0",
-        "contract_version": "1.1.0",
+        "contract_version": "2.0",
         "author": "Example",
         "license": "MIT",
         "source": "https://example.invalid/project",
@@ -145,8 +153,10 @@ class SourceCredentialTests(unittest.IsolatedAsyncioTestCase):
         self.store = SQLiteSecretStore(
             self.database, self.root / "secrets", codec=self.codec
         )
-        self.field = ConfigField(ALIAS, sensitive=True, required=True)
-        self.source = SourceDeclaration(SOURCE_ID, RESOURCE_HOST)
+        self.field = validate_contract(
+            ConfigField(ALIAS, sensitive=True, required=True)
+        )
+        self.source = validate_contract(SourceDeclaration(SOURCE_ID, RESOURCE_HOST))
         self.policy = SourceCredentialPolicy(
             MODULE_ID,
             SOURCE_ID,
@@ -179,7 +189,7 @@ class SourceCredentialTests(unittest.IsolatedAsyncioTestCase):
         client_id: str,
         client_secret: str,
     ):
-        target = ConfigTarget(PRINCIPAL_ID, MODULE_ID)
+        target = validate_contract(ConfigTarget(PRINCIPAL_ID, MODULE_ID))
         secret_target = SecretTarget(PRINCIPAL_ID, MODULE_ID, ALIAS)
         payload = json.dumps(
             {"schema": 1, "client_id": client_id, "client_secret": client_secret}
@@ -199,7 +209,7 @@ class SourceCredentialTests(unittest.IsolatedAsyncioTestCase):
         )
         patch = PersistedConfigPatch(
             expected_revision,
-            (ConfigFieldUpdate(ALIAS, ConfigPatchMode.REPLACE, receipt=receipt),),
+            (ConfigFieldUpdate(ALIAS, ConfigUpdateMode.REPLACE, receipt=receipt),),
             (self.field,),
             operation_id,
             target,
@@ -249,7 +259,9 @@ class SourceCredentialTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ManifestError):
             parse_manifest(json.dumps(malicious).encode())
 
-        wrong = SourceDeclaration(SOURCE_ID, RESOURCE_HOST, "credential_other")
+        wrong = validate_contract(
+            SourceDeclaration(SOURCE_ID, RESOURCE_HOST, "credential_other")
+        )
         with self.assertRaises(ValueError):
             bind_source_credential_declarations(
                 MODULE_ID, (wrong,), (self.field,), (self.policy,)
@@ -264,7 +276,9 @@ class SourceCredentialTests(unittest.IsolatedAsyncioTestCase):
     async def test_real_sqlite_metadata_drives_basic_exchange_and_resource_bearer(self):
         service = self._credential_service()
         response = await self._source_http(service).fetch(
-            HttpRequest(SOURCE_ID, RESOURCE_PATH, "GET", (("name", "Mina"),))
+            validate_contract(
+                HttpRequest(SOURCE_ID, RESOURCE_PATH, "GET", (("name", "Mina"),))
+            )
         )
         self.assertEqual(response.body, b"ok")
         self.assertEqual(len(self.transport.exchanges), 1)
@@ -301,7 +315,7 @@ class SourceCredentialTests(unittest.IsolatedAsyncioTestCase):
     async def test_cached_token_still_requires_current_key_and_intact_payload(self):
         service = self._credential_service()
         http = self._source_http(service)
-        request = HttpRequest(SOURCE_ID, RESOURCE_PATH)
+        request = validate_contract(HttpRequest(SOURCE_ID, RESOURCE_PATH))
         await http.fetch(request)
         self.assertEqual(len(self.transport.resources), 1)
 
@@ -324,7 +338,7 @@ class SourceCredentialTests(unittest.IsolatedAsyncioTestCase):
     async def test_ref_rotation_invalidates_cached_token(self):
         service = self._credential_service()
         http = self._source_http(service)
-        request = HttpRequest(SOURCE_ID, RESOURCE_PATH)
+        request = validate_contract(HttpRequest(SOURCE_ID, RESOURCE_PATH))
         await http.fetch(request)
         self.assertEqual(len(self.transport.exchanges), 1)
 
@@ -350,7 +364,7 @@ class SourceCredentialTests(unittest.IsolatedAsyncioTestCase):
         )
         try:
             snapshot = await reopened_config.current(
-                ConfigTarget(PRINCIPAL_ID, MODULE_ID)
+                validate_contract(ConfigTarget(PRINCIPAL_ID, MODULE_ID))
             )
             self.assertEqual(len(snapshot.secret_metadata), 1)
             self.assertEqual(snapshot.secret_metadata[0].secret_ref.field, ALIAS)
@@ -370,7 +384,7 @@ class SourceCredentialTests(unittest.IsolatedAsyncioTestCase):
                 module_id=MODULE_ID,
                 credential_service=service,
             )
-            await http.fetch(HttpRequest(SOURCE_ID, RESOURCE_PATH))
+            await http.fetch(validate_contract(HttpRequest(SOURCE_ID, RESOURCE_PATH)))
             self.assertEqual(len(self.transport.exchanges), 1)
             self.assertEqual(len(self.transport.resources), 1)
         finally:
@@ -381,7 +395,7 @@ class SourceCredentialTests(unittest.IsolatedAsyncioTestCase):
         self.transport.exchange_gate = asyncio.Event()
         service = self._credential_service(clock=lambda: now[0])
         deadline = asyncio.get_running_loop().time() + 5
-        request = HttpRequest(SOURCE_ID, RESOURCE_PATH)
+        request = validate_contract(HttpRequest(SOURCE_ID, RESOURCE_PATH))
         first = asyncio.create_task(
             service.authorize(MODULE_ID, self.effective[0], request, deadline)
         )
@@ -412,7 +426,7 @@ class SourceCredentialTests(unittest.IsolatedAsyncioTestCase):
         lease = await service.authorize(
             MODULE_ID,
             self.effective[0],
-            HttpRequest(SOURCE_ID, RESOURCE_PATH),
+            validate_contract(HttpRequest(SOURCE_ID, RESOURCE_PATH)),
             asyncio.get_running_loop().time() + 5,
         )
 
@@ -429,7 +443,7 @@ class SourceCredentialTests(unittest.IsolatedAsyncioTestCase):
                 service = self._credential_service()
                 with self.assertRaises(SourceHttpError) as caught:
                     await self._source_http(service).fetch(
-                        HttpRequest(SOURCE_ID, RESOURCE_PATH)
+                        validate_contract(HttpRequest(SOURCE_ID, RESOURCE_PATH))
                     )
                 self.assertEqual(caught.exception.code, "invalid_response")
                 self.assertEqual(len(self.transport.resources), 0)
@@ -441,7 +455,7 @@ class SourceCredentialTests(unittest.IsolatedAsyncioTestCase):
             service.authorize(
                 MODULE_ID,
                 self.effective[0],
-                HttpRequest(SOURCE_ID, RESOURCE_PATH),
+                validate_contract(HttpRequest(SOURCE_ID, RESOURCE_PATH)),
                 asyncio.get_running_loop().time() + 5,
             )
         )
@@ -454,13 +468,13 @@ class SourceCredentialTests(unittest.IsolatedAsyncioTestCase):
     async def test_http_binding_close_clears_cache_and_rejects_future_auth(self):
         credential_service = self._credential_service()
         http = self._source_http(credential_service)
-        await http.fetch(HttpRequest(SOURCE_ID, RESOURCE_PATH))
+        await http.fetch(validate_contract(HttpRequest(SOURCE_ID, RESOURCE_PATH)))
         self.assertEqual(len(self.transport.resources), 1)
 
         await http.close_credentials()
 
         with self.assertRaises(SourceHttpError) as caught:
-            await http.fetch(HttpRequest(SOURCE_ID, RESOURCE_PATH))
+            await http.fetch(validate_contract(HttpRequest(SOURCE_ID, RESOURCE_PATH)))
         self.assertEqual(caught.exception.code, "credentials_unavailable")
         self.assertEqual(len(self.transport.resources), 1)
 
@@ -471,7 +485,7 @@ class SourceCredentialTests(unittest.IsolatedAsyncioTestCase):
         service = self._credential_service()
         with self.assertRaises(SourceHttpError) as caught:
             await self._source_http(service).fetch(
-                HttpRequest(SOURCE_ID, RESOURCE_PATH)
+                validate_contract(HttpRequest(SOURCE_ID, RESOURCE_PATH))
             )
         self.assertEqual(caught.exception.code, "timeout")
         self.assertNotIn("private", str(caught.exception))
@@ -488,12 +502,14 @@ class SourceCredentialTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(status=status):
 
                 async def exchange(_request):
-                    return HttpResponse(status, {}, b"private-upstream-body")
+                    return validate_contract(
+                        HttpResponse(status, {}, b"private-upstream-body")
+                    )
 
                 self.transport.request_credential_exchange = exchange
                 with self.assertRaises(SourceHttpError) as caught:
                     await self._source_http().fetch(
-                        HttpRequest(SOURCE_ID, RESOURCE_PATH)
+                        validate_contract(HttpRequest(SOURCE_ID, RESOURCE_PATH))
                     )
                 self.assertEqual(caught.exception.code, code)
                 self.assertEqual(
@@ -516,17 +532,19 @@ class SourceCredentialTests(unittest.IsolatedAsyncioTestCase):
                 self.transport.request_credential_exchange = exchange
                 with self.assertRaises(SourceHttpError) as caught:
                     await self._source_http().fetch(
-                        HttpRequest(SOURCE_ID, RESOURCE_PATH)
+                        validate_contract(HttpRequest(SOURCE_ID, RESOURCE_PATH))
                     )
                 self.assertEqual(caught.exception.code, code)
                 self.assertNotIn("private", str(caught.exception))
 
         async def oversized(_request):
-            return HttpResponse(200, {}, b"x" * (64 * 1024 + 1))
+            return validate_contract(HttpResponse(200, {}, b"x" * (64 * 1024 + 1)))
 
         self.transport.request_credential_exchange = oversized
         with self.assertRaises(SourceHttpError) as caught:
-            await self._source_http().fetch(HttpRequest(SOURCE_ID, RESOURCE_PATH))
+            await self._source_http().fetch(
+                validate_contract(HttpRequest(SOURCE_ID, RESOURCE_PATH))
+            )
         self.assertEqual(caught.exception.code, "response_too_large")
         self.assertEqual(self.transport.resources, [])
 
@@ -540,7 +558,7 @@ class SourceCredentialTests(unittest.IsolatedAsyncioTestCase):
             TOKEN_HOST,
             TOKEN_PATH,
         )
-        other = SourceDeclaration("other-source", RESOURCE_HOST)
+        other = validate_contract(SourceDeclaration("other-source", RESOURCE_HOST))
         with self.assertRaises(ValueError):
             bind_source_credential_declarations(
                 MODULE_ID,
@@ -554,7 +572,7 @@ class SourceCredentialTests(unittest.IsolatedAsyncioTestCase):
             await service.authorize(
                 MODULE_ID,
                 self.effective[0],
-                HttpRequest(SOURCE_ID, "/api/v2/other"),
+                validate_contract(HttpRequest(SOURCE_ID, "/api/v2/other")),
                 asyncio.get_running_loop().time() + 5,
             )
         self.assertEqual(
@@ -563,25 +581,31 @@ class SourceCredentialTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.transport.exchanges, [])
 
     async def test_config_secret_ref_cannot_cross_module_or_principal(self):
-        foreign_ref = SecretRef(
-            "secret_foreign",
-            "operator-b",
-            "other_pkg/status",
-            ALIAS,
-            "foreign-operation",
+        foreign_ref = validate_contract(
+            SecretRef(
+                "secret_foreign",
+                "operator-b",
+                "other_pkg/status",
+                ALIAS,
+                "foreign-operation",
+            )
         )
 
         class _ForeignConfig:
             async def current(self, target):
-                return ConfigSnapshot(
-                    2,
-                    {},
-                    (
-                        SecretMetadata(
-                            ALIAS, foreign_ref, 2, SecretMetadataState.ACTIVE
+                return validate_contract(
+                    ConfigSnapshot(
+                        2,
+                        {},
+                        (
+                            validate_contract(
+                                SecretMetadata(
+                                    ALIAS, foreign_ref, 2, SecretMetadataState.ACTIVE
+                                )
+                            ),
                         ),
-                    ),
-                    target,
+                        target,
+                    )
                 )
 
         class _NeverReadStore:
@@ -607,7 +631,7 @@ class SourceCredentialTests(unittest.IsolatedAsyncioTestCase):
             await service.authorize(
                 MODULE_ID,
                 self.effective[0],
-                HttpRequest(SOURCE_ID, RESOURCE_PATH),
+                validate_contract(HttpRequest(SOURCE_ID, RESOURCE_PATH)),
                 asyncio.get_running_loop().time() + 5,
             )
         self.assertEqual(caught.exception.code, "credentials_unavailable")
@@ -615,7 +639,7 @@ class SourceCredentialTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_late_401_for_old_lease_does_not_invalidate_new_token(self):
         service = self._credential_service()
-        request = HttpRequest(SOURCE_ID, RESOURCE_PATH)
+        request = validate_contract(HttpRequest(SOURCE_ID, RESOURCE_PATH))
         deadline = asyncio.get_running_loop().time() + 5
         old_lease = await service.authorize(
             MODULE_ID, self.effective[0], request, deadline

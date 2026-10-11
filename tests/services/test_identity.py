@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from ygl_test_subject.api.services import Principal
+from ygl_test_subject.core.contracts.services import Principal
 from ygl_test_subject.infrastructure.sqlite.database import SQLiteDatabase
 from ygl_test_subject.infrastructure.sqlite.repositories_identity import (
     SQLiteIdentityRepository,

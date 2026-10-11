@@ -11,10 +11,10 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from extensions.factory_resolver import (
+from ygl_test_subject.extensions.factory_resolver import (
     FilesystemFactorySource,
 )
-from extensions.source_snapshot import SourceBundle, _bundle_digest
+from ygl_test_subject.extensions.source_snapshot import SourceBundle, _bundle_digest
 
 
 def _bundle(files: dict[str, bytes]) -> SourceBundle:
@@ -44,7 +44,7 @@ class FactoryResolverTests(unittest.TestCase):
             "pkg/b.py": b"from . import a\nVALUE = a.VALUE\n",
         }
         with patch(
-            "extensions.factory_resolver.capture_source_bundle",
+            "ygl_test_subject.extensions.factory_resolver.capture_source_bundle",
             return_value=_bundle(files),
         ):
             lease = asyncio.run(source.capture(_candidate()))  # type: ignore[arg-type]
@@ -89,7 +89,7 @@ class FactoryResolverTests(unittest.TestCase):
             "module.py": b"class Factory:\n    value = 'b'\n    async def create(self, services): return None\n"
         }
         with patch(
-            "extensions.factory_resolver.capture_source_bundle",
+            "ygl_test_subject.extensions.factory_resolver.capture_source_bundle",
             side_effect=[_bundle(files_a), _bundle(files_b)],
         ):
             first, second = asyncio.run(_capture_pair(source))
@@ -132,7 +132,7 @@ class FactoryResolverTests(unittest.TestCase):
             ).encode()
         }
         with patch(
-            "extensions.factory_resolver.capture_source_bundle",
+            "ygl_test_subject.extensions.factory_resolver.capture_source_bundle",
             return_value=_bundle(files),
         ):
             lease = asyncio.run(source.capture(_candidate()))  # type: ignore[arg-type]
@@ -156,7 +156,7 @@ class FactoryResolverTests(unittest.TestCase):
 
         async def exercise() -> None:
             with patch(
-                "extensions.factory_resolver.capture_source_bundle",
+                "ygl_test_subject.extensions.factory_resolver.capture_source_bundle",
                 side_effect=slow_reader,
             ):
                 capture = asyncio.create_task(source.capture(_candidate()))  # type: ignore[arg-type]

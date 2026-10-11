@@ -1,38 +1,43 @@
 import unittest
 
-from ygl_test_subject.api.manifests import (
+from ygl_test_subject.core.contracts.validation import validate_parameters
+from ygl_test_subject.core.contracts.validation_boundary import validate_contract
+
+from yomihime_game_link_sdk.declarations import (
     CapabilityDescriptor,
     CapabilityEffect,
     InvocationPolicy,
 )
-from ygl_test_subject.api.validation import ParameterError, validate_parameters
+from yomihime_game_link_sdk.errors import ParameterError
 
 
 class ParameterValidationTests(unittest.TestCase):
     def setUp(self):
-        self.capability = CapabilityDescriptor(
-            "records.query",
-            {
-                "type": "object",
-                "properties": {
-                    "ids": {
-                        "type": "array",
-                        "items": {"type": "integer", "minimum": 1},
+        self.capability = validate_contract(
+            CapabilityDescriptor(
+                "records.query",
+                {
+                    "type": "object",
+                    "properties": {
+                        "ids": {
+                            "type": "array",
+                            "items": {"type": "integer", "minimum": 1},
+                        },
+                        "region": {
+                            "type": "string",
+                            "enum": ["cn", "jp"],
+                            "minLength": 2,
+                            "maxLength": 2,
+                        },
+                        "limit": {"type": "number", "minimum": 0, "maximum": 10},
+                        "enabled": {"type": "boolean"},
+                        "options": {"type": "object", "properties": {}},
                     },
-                    "region": {
-                        "type": "string",
-                        "enum": ["cn", "jp"],
-                        "minLength": 2,
-                        "maxLength": 2,
-                    },
-                    "limit": {"type": "number", "minimum": 0, "maximum": 10},
-                    "enabled": {"type": "boolean"},
-                    "options": {"type": "object", "properties": {}},
+                    "required": ["ids", "region"],
                 },
-                "required": ["ids", "region"],
-            },
-            InvocationPolicy.NATURAL_LANGUAGE_ALLOWED,
-            CapabilityEffect.READ_ONLY,
+                InvocationPolicy.NATURAL_LANGUAGE_ALLOWED,
+                CapabilityEffect.READ_ONLY,
+            )
         )
 
     def test_detaches_nested_inputs(self):

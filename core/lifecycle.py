@@ -12,16 +12,18 @@ from types import MappingProxyType
 from typing import Any, Mapping
 from uuid import uuid4
 
-from ..api.administration import ModuleHealth, ModuleLifecycle, ModuleStatus
-from ..api.contexts import InvocationView
-from ..api.manifests import ModuleManifest
-from ..api.services import (
+from yomihime_game_link_sdk.contexts import InvocationView
+from yomihime_game_link_sdk.declarations import ModuleManifest
+from yomihime_game_link_sdk.services import (
     CapabilityHealth,
     HealthReport,
     HealthStatus,
     ModuleHandlers,
     ModuleInstance,
 )
+
+from ..core.contracts.administration import ModuleHealth, ModuleLifecycle, ModuleStatus
+from ..core.contracts.validation_boundary import validate_contract
 from .admission import AdmissionController, AdmissionError
 from .context_issuer import ContextIssuer, InvalidInvocation
 from .ports import AdmissionPort, ExecutionLease, RunIdentity
@@ -108,6 +110,28 @@ class _InstanceRecord:
     ever_active: bool = False
     setup_task: asyncio.Task[Any] | None = None
     stop_task: asyncio.Task[Any] | None = None
+    service_lifetime: "_ServiceLifetime | None" = None
+
+
+class _ServiceLifetime:
+    """Core-private lifetime of one exact constructed instance's services.
+
+    This is a local cleanup fence, not an authorization proof. Invocation,
+    principal, admission and permission checks remain owned by their services.
+    """
+
+    __slots__ = ("candidate_key", "_active", "__weakref__")
+
+    def __init__(self, candidate_key: tuple[str, str, str]):
+        self.candidate_key = candidate_key
+        self._active = True
+
+    def check(self) -> None:
+        if not self._active:
+            raise InvalidInvocation()
+
+    def revoke(self) -> None:
+        self._active = False
 
 
 class LifecycleController:
@@ -135,6 +159,7 @@ class LifecycleController:
         execution_claim_prover: Callable[[ExecutionLease], bool] | None = None,
         utc_clock: Callable[[], datetime] | None = None,
     ) -> None:
+        validate_contract(capability_health_query)
         if not isinstance(registry, Registry):
             raise TypeError("registry must be a Registry")
         _finite_timeout(stop_timeout, "stop_timeout")
@@ -201,6 +226,8 @@ class LifecycleController:
         handlers: ModuleHandlers,
     ) -> None:
         """Transfer one constructed, non-started instance to Lifecycle."""
+        validate_contract(instance)
+        validate_contract(handlers)
         snapshot, module = self._module_snapshot(module_id)
         _operation_text(operation_id)
         if not isinstance(package_id, str) or not package_id.strip():
@@ -635,6 +662,8 @@ class LifecycleController:
             return self._mark_rollback_pending(module_id, "rollback_failed")
 
         self._instances.pop(module_id, None)
+        if record.service_lifetime is not None:
+            record.service_lifetime.revoke()
         self._states.pop(module_id, None)
         if self._operations.get(module_id) == operation_id:
             self._operations.pop(module_id, None)
@@ -777,6 +806,7 @@ class LifecycleController:
     ) -> LifecycleState:
         """Check Lifecycle liveness; invocation authority is owned by Admission."""
 
+        validate_contract(invocation)
         snapshot, module = self._module_snapshot(module_id)
         state = self._states.get(module_id)
         if epoch is not None and module.epoch != epoch:
@@ -857,6 +887,8 @@ class LifecycleController:
             raise LifecycleError("module cleanup has not completed")
         self.registry._detach_lifecycle_module(self, module_id)
         self._instances.pop(module_id, None)
+        if record is not None and record.service_lifetime is not None:
+            record.service_lifetime.revoke()
         self._states.pop(module_id, None)
         self._operations.pop(module_id, None)
 
@@ -878,14 +910,34 @@ class LifecycleController:
             raise ModuleNotFound("module has no installed handlers")
         return handlers
 
+    def service_lifetime(self, module_id: str) -> _ServiceLifetime:
+        record = self._instances.get(module_id)
+        if record is None or record.service_lifetime is None:
+            raise ModuleNotFound("module has no installed service lifetime")
+        record.service_lifetime.check()
+        return record.service_lifetime
+
+    def owns_service_lifetime(self, lifetime: _ServiceLifetime) -> bool:
+        return any(
+            record.service_lifetime is lifetime for record in self._instances.values()
+        ) or any(
+            record.service_lifetime is lifetime
+            for records in self._candidates.values()
+            for record in records
+        )
+
     def adopt_candidate(
         self,
         package_id: str,
         manifest: ModuleManifest,
         operation_id: str,
         instance: ModuleInstance,
+        *,
+        service_lifetime: _ServiceLifetime | None = None,
     ) -> ModuleHandlers:
         """Own a factory result before calling user code or validating handlers."""
+        validate_contract(manifest)
+        validate_contract(instance)
         if not isinstance(package_id, str) or not package_id.strip():
             raise ValueError("package_id must be non-empty text")
         if not isinstance(manifest, ModuleManifest):
@@ -893,6 +945,11 @@ class LifecycleController:
         _operation_text(operation_id)
         module_id = f"{package_id}/{manifest.module_id}"
         key = (package_id, module_id, operation_id)
+        if service_lifetime is not None and (
+            type(service_lifetime) is not _ServiceLifetime
+            or service_lifetime.candidate_key != key
+        ):
+            raise LifecycleError("service lifetime does not belong to candidate")
         if self._is_instance_owned(instance):
             raise LifecycleError("instance is already owned by Lifecycle")
         record = _InstanceRecord(
@@ -902,6 +959,7 @@ class LifecycleController:
             installation_operation_id=operation_id,
             manifest=manifest,
             candidate_key=key,
+            service_lifetime=service_lifetime or _ServiceLifetime(key),
         )
         # Ownership is established before even looking up instance.handlers.
         self._candidates.setdefault(key, []).append(record)
@@ -1000,12 +1058,16 @@ class LifecycleController:
             )
         except asyncio.CancelledError:
             if task.done() and not _task_failed(task):
+                if record.service_lifetime is not None:
+                    record.service_lifetime.revoke()
                 self._remove_candidate(key, record)
             raise
         except BaseException:
             return False
         if not completed:
             return False
+        if record.service_lifetime is not None:
+            record.service_lifetime.revoke()
         self._remove_candidate(key, record)
         return True
 
@@ -1094,16 +1156,18 @@ class LifecycleController:
         return state is not None and state.lifecycle is ModuleLifecycle.ACTIVE
 
     def _make_scope(self, identity: RunIdentity) -> TaskScope:
-        return TaskScope(
-            identity.module_id,
-            identity.module_epoch,
-            current_check=lambda: self.guard(
-                identity.module_id, epoch=identity.module_epoch
-            ),
-            cleanup_timeout=self._stop_timeout,
-            on_cleanup_timeout=lambda reason: self._scope_cleanup_timeout(
-                identity.module_id, identity, reason
-            ),
+        return validate_contract(
+            TaskScope(
+                identity.module_id,
+                identity.module_epoch,
+                current_check=lambda: self.guard(
+                    identity.module_id, epoch=identity.module_epoch
+                ),
+                cleanup_timeout=self._stop_timeout,
+                on_cleanup_timeout=lambda reason: self._scope_cleanup_timeout(
+                    identity.module_id, identity, reason
+                ),
+            )
         )
 
     async def _run_instance_method(
@@ -1401,6 +1465,7 @@ def _operation_text(value: str) -> None:
 
 
 def _validate_instance_methods(instance: ModuleInstance) -> None:
+    validate_contract(instance)
     for name in ("handlers", "start", "stop", "check_health"):
         try:
             method = getattr(instance, name)
@@ -1411,8 +1476,10 @@ def _validate_instance_methods(instance: ModuleInstance) -> None:
 
 
 def _validate_health(manifest: ModuleManifest, health: object) -> None:
-    if not isinstance(health, HealthReport):
+    validate_contract(manifest)
+    if type(health) is not HealthReport:
         raise TypeError("instance check_health must return HealthReport")
+    validate_contract(health)
     expected = {item.capability_id for item in manifest.capabilities}
     if set(health.capabilities) != expected:
         raise LifecycleError("health report must cover every declared capability")

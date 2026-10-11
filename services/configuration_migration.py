@@ -6,8 +6,11 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 
-from ..api.manifests import ConfigField
-from ..api.services import ConfigTarget
+from yomihime_game_link_sdk.declarations import ConfigField
+from yomihime_game_link_sdk.services import ConfigTarget
+
+from ..core.contracts.services import ConfigTarget_validate
+from ..core.contracts.validation_boundary import validate_contract
 from .configuration import ConfigValueValidator
 from .core_configuration import ConfigurationSelection, select_configuration_value
 
@@ -20,7 +23,7 @@ class OrdinaryMigrationField:
     validator: ConfigValueValidator | None = None
 
     def __post_init__(self):
-        ConfigTarget.validate(self.target)
+        ConfigTarget_validate(self.target)
         if not isinstance(self.declaration, ConfigField) or self.declaration.sensitive:
             raise ValueError("migration requires ordinary declarations")
         if type(self.legacy_field) is not str or not self.legacy_field:
@@ -126,6 +129,7 @@ class OrdinaryConfigurationMigration:
     async def rollback(
         self, expected_revisions: Mapping[ConfigTarget, int], *, grant=None
     ):
+        validate_contract(expected_revisions)
         return await self.repository.rollback(self, expected_revisions, grant=grant)
 
     async def complete_from_current(self, expected_revisions, *, grant):

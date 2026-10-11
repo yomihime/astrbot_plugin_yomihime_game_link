@@ -6,6 +6,7 @@ from dataclasses import replace
 from datetime import UTC, date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
+from ygl_test_subject.core.contracts.validation_boundary import validate_contract
 from ygl_test_subject.presentation.rendering import (
     GenericDisplayRenderer,
     RenderingBounds,
@@ -17,9 +18,9 @@ from modules.ff14.features.calendar_evaluator import (
     filter_occurrences,
     load_timezone,
 )
-from yomihime_sdk.api.display import DisplayLimits, Privacy, TableBlock
-from yomihime_sdk.api.storage import OwnerScope
-from yomihime_sdk.api.subscriptions import (
+from yomihime_game_link_sdk.display import DisplayLimits, Privacy, TableBlock
+from yomihime_game_link_sdk.storage import OwnerScope
+from yomihime_game_link_sdk.subscriptions import (
     CollectionKey,
     EvaluationState,
     NormalizedInput,
@@ -57,18 +58,20 @@ def _subscription(
     timezone_name: str = "Asia/Shanghai",
     local_time: str = "08:00",
 ) -> SubscriptionView:
-    return SubscriptionView(
-        "sub-calendar",
-        revision,
-        "owner-private",
-        None,
-        "conversation-private",
-        {
-            "kind": "daily_summary",
-            "region": region,
-            "timezone": timezone_name,
-            "time": local_time,
-        },
+    return validate_contract(
+        SubscriptionView(
+            "sub-calendar",
+            revision,
+            "owner-private",
+            None,
+            "conversation-private",
+            {
+                "kind": "daily_summary",
+                "region": region,
+                "timezone": timezone_name,
+                "time": local_time,
+            },
+        )
     )
 
 
@@ -113,13 +116,15 @@ def _observation(
         ("global", PRIMARY): "global_google",
         ("global", FALLBACK): "global_icloud",
     }[(region, source_id)]
-    key = CollectionKey(
-        "ff14/ff14",
-        "ff14.calendar.collect",
-        1,
-        PRIMARY,
-        NormalizedInput({"region": region}),
-        OwnerScope.public(),
+    key = validate_contract(
+        CollectionKey(
+            "ff14/ff14",
+            "ff14.calendar.collect",
+            1,
+            PRIMARY,
+            validate_contract(NormalizedInput({"region": region})),
+            OwnerScope.public(),
+        )
     )
     payload: dict[str, object] = {
         "schema_version": 1,
@@ -133,20 +138,22 @@ def _observation(
         "window_end": end.isoformat(),
         "occurrences": occurrences,
     }
-    return Observation(
-        f"obs-{collected_at.isoformat()}-{source_id}-{completeness.value}",
-        key,
-        1,
-        None,
-        collected_at,
-        completeness,
-        covered_ids,
-        payload,
+    return validate_contract(
+        Observation(
+            f"obs-{collected_at.isoformat()}-{source_id}-{completeness.value}",
+            key,
+            1,
+            None,
+            collected_at,
+            completeness,
+            covered_ids,
+            payload,
+        )
     )
 
 
 def _state(decision, revision: int = 1) -> EvaluationState:
-    return EvaluationState(revision, decision.state)
+    return validate_contract(EvaluationState(revision, decision.state))
 
 
 class CalendarEvaluationTests(unittest.TestCase):
@@ -648,7 +655,9 @@ class CalendarSummaryRenderingTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(decision.triggered)
                 rendered = await renderer.render(
                     decision.display_data,
-                    limits=DisplayLimits(max_pages=2, max_image_bytes=16),
+                    limits=validate_contract(
+                        DisplayLimits(max_pages=2, max_image_bytes=16)
+                    ),
                 )
                 text = rendered.text
                 self.assertIn("已使用合格备用日历来源", text)

@@ -8,44 +8,45 @@ import html
 import json
 import os
 import stat
+import sys
 import zipfile
+from importlib import import_module
 from io import BytesIO
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 ARCHIVE = ROOT / "dist" / "astrbot_plugin_yomihime_game_link-local.zip"
 EXPECTED_WHEEL_SHA256 = (
-    "84cd029d271c1dce09935a7eba26a1b0f3229fa44369ee618d82ce03774ad73e"
+    "54d5a0766ae5b626e575ff0d1936b49ce14a7d7f57b6db1f62882653eea9c81e"
 )
 EXPECTED_WHEEL_ENTRIES = {
-    "yomihime_module_sdk-1.8.0.dist-info/licenses/LICENSE",
-    "yomihime_module_sdk-1.8.0.dist-info/METADATA",
-    "yomihime_module_sdk-1.8.0.dist-info/WHEEL",
-    "yomihime_module_sdk-1.8.0.dist-info/top_level.txt",
-    "yomihime_module_sdk-1.8.0.dist-info/RECORD",
-    "yomihime_sdk/__init__.py",
-    "yomihime_sdk/py.typed",
-    "yomihime_sdk/_examples/empty_module/README.md",
-    "yomihime_sdk/_examples/empty_module/manifest.json",
-    "yomihime_sdk/_examples/empty_module/module.py",
-    "yomihime_sdk/_examples/offline_sample/README.md",
-    "yomihime_sdk/_examples/offline_sample/manifest.json",
-    "yomihime_sdk/_examples/offline_sample/module.py",
-    "yomihime_sdk/api/__init__.py",
-    "yomihime_sdk/api/administration.py",
-    "yomihime_sdk/api/contexts.py",
-    "yomihime_sdk/api/display.py",
-    "yomihime_sdk/api/manifests.py",
-    "yomihime_sdk/api/results.py",
-    "yomihime_sdk/api/schema.py",
-    "yomihime_sdk/api/services.py",
-    "yomihime_sdk/api/storage.py",
-    "yomihime_sdk/api/subscriptions.py",
-    "yomihime_sdk/api/validation.py",
-    "yomihime_sdk/api/version.py",
+    "yomihime_game_link_sdk/_examples/offline_sample/manifest.json",
+    "yomihime_game_link_sdk/_examples/offline_sample/module.py",
+    "yomihime_game_link_sdk/errors.py",
+    "yomihime_game_link_sdk/display.py",
+    "yomihime_game_link_sdk/services.py",
+    "yomihime_game_link_sdk/declarations.py",
+    "yomihime_game_link_sdk/_examples/offline_sample/README.md",
+    "yomihime_game_link_sdk/version.py",
+    "yomihime_game_link_sdk/results.py",
+    "yomihime_game_link_sdk/_examples/empty_module/README.md",
+    "yomihime_game_link_sdk-0.1.0a6.dist-info/licenses/LICENSE",
+    "yomihime_game_link_sdk-0.1.0a6.dist-info/METADATA",
+    "yomihime_game_link_sdk/_examples/empty_module/module.py",
+    "yomihime_game_link_sdk/storage.py",
+    "yomihime_game_link_sdk-0.1.0a6.dist-info/top_level.txt",
+    "yomihime_game_link_sdk/subscriptions.py",
+    "yomihime_game_link_sdk/contexts.py",
+    "yomihime_game_link_sdk-0.1.0a6.dist-info/WHEEL",
+    "yomihime_game_link_sdk/py.typed",
+    "yomihime_game_link_sdk/__init__.py",
+    "yomihime_game_link_sdk-0.1.0a6.dist-info/RECORD",
+    "yomihime_game_link_sdk/_examples/empty_module/manifest.json",
 }
 PACKAGE_ENTRY_NAMES = {
-    name for name in EXPECTED_WHEEL_ENTRIES if name.startswith("yomihime_sdk/")
+    name
+    for name in EXPECTED_WHEEL_ENTRIES
+    if name.startswith("yomihime_game_link_sdk/")
 }
 ROOT_FILES = (
     "main.py",
@@ -132,7 +133,6 @@ FF14_BUNDLE_CACHE_DIRS = {
 }
 RUNTIME_DIRS = (
     "adapters",
-    "api",
     "core",
     "extensions",
     "services",
@@ -290,11 +290,11 @@ def validate_wheel(path: Path) -> dict[str, bytes]:
                 "SDK wheel entry manifest differs from the reviewed artifact"
             )
         metadata_lines = set(
-            wheel.read("yomihime_module_sdk-1.8.0.dist-info/METADATA")
+            wheel.read("yomihime_game_link_sdk-0.1.0a6.dist-info/METADATA")
             .decode("utf-8")
             .splitlines()
         )
-        if not {"Name: yomihime-module-sdk", "Version: 1.8.0"} <= metadata_lines:
+        if not {"Name: yomihime-game-link-sdk", "Version: 0.1.0a6"} <= metadata_lines:
             raise ValueError("SDK wheel distribution metadata is unsupported")
         package = {name: wheel.read(name) for name in sorted(PACKAGE_ENTRY_NAMES)}
     return package
@@ -369,8 +369,7 @@ def _ff14_bundle_files(repository_root: Path) -> list[Path]:
     missing = FF14_BUNDLE_REQUIRED_FILES - found_names
     if missing:
         raise ValueError(f"FF14 bundle is missing required files: {sorted(missing)}")
-    from extensions.disk_manifest import parse_manifest
-    from extensions.page_resources import read_page_resources
+    parse_manifest, read_page_resources = _bundle_readers()
 
     manifest = parse_manifest(
         _read_snapshot(
@@ -385,8 +384,12 @@ def _ff14_bundle_files(repository_root: Path) -> list[Path]:
         projected = repository_root / "pages/ff14" / Path(relative).name
         if _read_snapshot(
             canonical, repository_root, "Canonical compatibility locator"
-        ) != _read_snapshot(projected, repository_root, "Projected compatibility locator"):
-            raise ValueError("Compatibility locator projection differs from canonical source")
+        ) != _read_snapshot(
+            projected, repository_root, "Projected compatibility locator"
+        ):
+            raise ValueError(
+                "Compatibility locator projection differs from canonical source"
+            )
         found.append(canonical)
     legacy_root = package_root / "pages/compat"
     if {path.name for path in legacy_root.iterdir()} != {
@@ -402,10 +405,26 @@ def _ff14_bundle_files(repository_root: Path) -> list[Path]:
     return found
 
 
+def _bundle_readers():
+    # Load validators through the plugin package so their Core-relative imports
+    # retain the same package boundary in both CLI and imported build execution.
+    parent = str(ROOT.parent)
+    sys.path.insert(0, parent)
+    try:
+        parse_manifest = import_module(
+            f"{ROOT.name}.extensions.disk_manifest"
+        ).parse_manifest
+        read_page_resources = import_module(
+            f"{ROOT.name}.extensions.page_resources"
+        ).read_page_resources
+    finally:
+        sys.path.remove(parent)
+    return parse_manifest, read_page_resources
+
+
 def projected_page_assets(repository_root: Path) -> dict[str, bytes]:
     """Publish trusted, hash-verified bundle assets below the Host's page root."""
-    from extensions.disk_manifest import parse_manifest
-    from extensions.page_resources import read_page_resources
+    parse_manifest, read_page_resources = _bundle_readers()
 
     package_root = repository_root / FF14_BUNDLE_ROOT
     manifest = parse_manifest(

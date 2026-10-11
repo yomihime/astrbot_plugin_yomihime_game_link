@@ -11,55 +11,21 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from ygl_test_subject.api.display import (
-    DisplayDocument,
-    DisplayLimits,
-    DisplayOutput,
-    Privacy,
-    TextBlock,
-)
-from ygl_test_subject.api.manifests import (
-    CapabilityDescriptor,
-    CapabilityEffect,
-    InvocationPolicy,
-    ModuleCategory,
-    ModuleManifest,
-    PackageManifest,
-    SourceDeclaration,
-)
-from ygl_test_subject.api.services import (
-    CapabilityHealth,
-    Grant,
-    GrantStatus,
-    HealthReport,
-    HealthStatus,
-    ModuleHandlers,
-)
-from ygl_test_subject.api.storage import GrantReference, OwnerScope, OwnershipKind
-from ygl_test_subject.api.subscriptions import (
-    CollectionKey,
-    ConversationKind,
-    ConversationRef,
+from ygl_test_subject.core.context_issuer import ContextIssuer
+from ygl_test_subject.core.contracts.services import Grant, GrantStatus
+from ygl_test_subject.core.contracts.subscriptions import (
     DeliveryEvent,
     DeliveryState,
     DigestEnvelope,
     DigestEnvelopeState,
-    DigestMember,
     DigestMemberAssociation,
     DigestMemberDisposition,
-    DigestScheduleProfile,
     DigestWindow,
-    DstFoldPolicy,
-    DstGapPolicy,
-    NormalizedInput,
-    ScheduleDescriptor,
-    ScheduleTrigger,
     SubscriptionRecord,
     SubscriptionStatus,
     delivery_idempotency_key,
 )
-from ygl_test_subject.api.version import CONTRACT_VERSION
-from ygl_test_subject.core.context_issuer import ContextIssuer
+from ygl_test_subject.core.contracts.validation_boundary import validate_contract
 from ygl_test_subject.core.lifecycle import LifecycleController
 from ygl_test_subject.core.ports import MessageReceipt, MessageStatus
 from ygl_test_subject.core.registry import Registry
@@ -80,6 +46,42 @@ from tests.fixtures.b04_runtime import (
     replace_subscription_gate_fixture,
     synthetic_subscription_gate_bindings,
 )
+from yomihime_game_link_sdk.declarations import (
+    CapabilityDescriptor,
+    CapabilityEffect,
+    InvocationPolicy,
+    ModuleCategory,
+    ModuleManifest,
+    PackageManifest,
+    SourceDeclaration,
+)
+from yomihime_game_link_sdk.display import (
+    DigestMember,
+    DisplayDocument,
+    DisplayLimits,
+    DisplayOutput,
+    Privacy,
+    TextBlock,
+)
+from yomihime_game_link_sdk.services import (
+    CapabilityHealth,
+    HealthReport,
+    HealthStatus,
+    ModuleHandlers,
+)
+from yomihime_game_link_sdk.storage import GrantReference, OwnerScope, OwnershipKind
+from yomihime_game_link_sdk.subscriptions import (
+    CollectionKey,
+    ConversationKind,
+    ConversationRef,
+    DigestScheduleProfile,
+    DstFoldPolicy,
+    DstGapPolicy,
+    NormalizedInput,
+    ScheduleDescriptor,
+    ScheduleTrigger,
+)
+from yomihime_game_link_sdk.version import MODULE_ABI_VERSION
 
 
 async def _resolved(value):
@@ -112,12 +114,12 @@ class _Renderer:
 
     async def render(self, document, *, limits, audience):
         self.calls.append((document, audience))
-        return DisplayOutput(self.text or document.title)
+        return validate_contract(DisplayOutput(self.text or document.title))
 
     async def render_batch(self, batch, limits):
         self.calls.append(batch)
-        return DisplayOutput(
-            "digest:" + ",".join(x.document.title for x in batch.members)
+        return validate_contract(
+            DisplayOutput("digest:" + ",".join(x.document.title for x in batch.members))
         )
 
 
@@ -185,7 +187,7 @@ class _DeliveryHandler:
 
 class _DeliveryCollector:
     def normalize(self, parameters):
-        return NormalizedInput(dict(parameters))
+        return validate_contract(NormalizedInput(dict(parameters)))
 
     async def collect(self, *_args):
         return None
@@ -205,7 +207,11 @@ class _DeliveryModuleInstance:
         return None
 
     async def check_health(self):
-        return HealthReport({"read": CapabilityHealth(HealthStatus.AVAILABLE)})
+        return validate_contract(
+            HealthReport(
+                {"read": validate_contract(CapabilityHealth(HealthStatus.AVAILABLE))}
+            )
+        )
 
 
 class DeliveryTests(unittest.IsolatedAsyncioTestCase):
@@ -224,46 +230,58 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.now = datetime(2026, 9, 25, 12, tzinfo=UTC)
         self.registry = Registry()
         self.issuer = ContextIssuer()
-        capability = CapabilityDescriptor(
-            "read",
-            {"type": "object", "properties": {}, "required": []},
-            InvocationPolicy.COMMAND_ONLY,
-            CapabilityEffect.READ_ONLY,
+        capability = validate_contract(
+            CapabilityDescriptor(
+                "read",
+                {"type": "object", "properties": {}, "required": []},
+                InvocationPolicy.COMMAND_ONLY,
+                CapabilityEffect.READ_ONLY,
+            )
         )
-        schedule = ScheduleDescriptor(
-            "collector",
-            1,
-            "source",
-            1,
-            {"type": "object", "properties": {}, "required": []},
-            OwnershipKind.USER,
-            ScheduleTrigger.PERIODIC,
-            60,
-            60,
-            "cadence",
+        schedule = validate_contract(
+            ScheduleDescriptor(
+                "collector",
+                1,
+                "source",
+                1,
+                {"type": "object", "properties": {}, "required": []},
+                OwnershipKind.USER,
+                ScheduleTrigger.PERIODIC,
+                60,
+                60,
+                "cadence",
+            )
         )
-        manifest = ModuleManifest(
-            "game",
-            "game",
-            ModuleCategory.GAME,
-            "tests:DeliveryFixture",
-            "1.0.0",
-            (capability,),
-            schedules=(schedule,),
-            sources=(SourceDeclaration("source", "example.test"),),
+        manifest = validate_contract(
+            ModuleManifest(
+                "game",
+                "game",
+                ModuleCategory.GAME,
+                "tests:DeliveryFixture",
+                "1.0.0",
+                (capability,),
+                schedules=(schedule,),
+                sources=(
+                    validate_contract(SourceDeclaration("source", "example.test")),
+                ),
+            )
         )
-        handlers = ModuleHandlers(
-            {"read": _DeliveryHandler()}, {"collector": _DeliveryCollector()}, {}
+        handlers = validate_contract(
+            ModuleHandlers(
+                {"read": _DeliveryHandler()}, {"collector": _DeliveryCollector()}, {}
+            )
         )
         self.registry.register_package(
-            PackageManifest(
-                "sample",
-                "1.0.0",
-                CONTRACT_VERSION,
-                (manifest,),
-                "Tests",
-                "MIT",
-                "offline",
+            validate_contract(
+                PackageManifest(
+                    "sample",
+                    "1.0.0",
+                    MODULE_ABI_VERSION,
+                    (manifest,),
+                    "Tests",
+                    "MIT",
+                    "offline",
+                )
             ),
             {"game": handlers},
         )
@@ -291,12 +309,19 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.routes = _Routes()
         self.renderer = _Renderer()
         self.port = _MessagePort()
-        self.recipient = ConversationRef(
-            "adapter", ConversationKind.DIRECT, "u1", "private-u1"
+        self.recipient = validate_contract(
+            ConversationRef("adapter", ConversationKind.DIRECT, "u1", "private-u1")
         )
         self.scope = OwnerScope.user("u1")
-        self.key = CollectionKey(
-            "sample/game", "collector", 1, "source", NormalizedInput({}), self.scope
+        self.key = validate_contract(
+            CollectionKey(
+                "sample/game",
+                "collector",
+                1,
+                "source",
+                validate_contract(NormalizedInput({})),
+                self.scope,
+            )
         )
         self.record = SubscriptionRecord(
             subscription_id="sub-1",
@@ -317,8 +342,13 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.temp.cleanup()
 
     def _event(self, *, key="event-1", title="saved-title", privacy=Privacy.PUBLIC):
-        document = DisplayDocument(
-            title, "subject", (TextBlock("saved body"),), privacy=privacy
+        document = validate_contract(
+            DisplayDocument(
+                title,
+                "subject",
+                (validate_contract(TextBlock("saved body")),),
+                privacy=privacy,
+            )
         )
         return DeliveryEvent(
             key,
@@ -346,7 +376,7 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
             routes=self.routes,
             renderer=renderer or self.renderer,
             message_port=port or self.port,
-            limits=DisplayLimits(2, 1024),
+            limits=validate_contract(DisplayLimits(2, 1024)),
             now=lambda: self.now,
         )
 
@@ -381,6 +411,43 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(saved.attempt.platform_message_id, "platform-1")
         self.assertEqual(len(self.port.calls), 1)
         self.assertEqual(self.port.calls[0][1].text, "saved-title")
+
+    async def test_eligibility_structure_rejection_preserves_authority_and_cancel(self):
+        from yomihime_game_link_sdk.errors import AccessDenied
+
+        async def check(recipient, privacy):
+            return await self.service._eligibility(
+                "sub-1", 1, "u1", None, recipient, privacy, self.now
+            )
+
+        self.assertTrue((await check(self.recipient, Privacy.PUBLIC)).allowed)
+        before = await self.subscriptions.current("sub-1")
+        for recipient, privacy in (
+            (replace(self.recipient, kind=None), Privacy.PUBLIC),
+            (self.recipient, replace(self.event.display_data, privacy=None)),
+        ):
+            with self.subTest(recipient_kind=recipient.kind, privacy=privacy):
+                result = await check(recipient, privacy)
+                self.assertFalse(result.allowed)
+                self.assertEqual(result.code, "privacy_rejected")
+        self.assertEqual(await self.subscriptions.current("sub-1"), before)
+        self.assertEqual(self.port.calls, [])
+        for failure in (
+            AccessDenied(),
+            RuntimeError("internal"),
+            asyncio.CancelledError(),
+        ):
+            with self.subTest(failure=type(failure).__name__):
+                with (
+                    patch(
+                        "ygl_test_subject.services.delivery.validate_contract",
+                        side_effect=failure,
+                    ),
+                    self.assertRaises(type(failure)),
+                ):
+                    await check(self.recipient, Privacy.PUBLIC)
+        self.assertEqual(await self.subscriptions.current("sub-1"), before)
+        self.assertEqual(self.port.calls, [])
 
     async def test_scheduled_pause_resume_aborts_before_actual_io(self):
         scheduled = self.send_scheduler.schedule
@@ -585,11 +652,13 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
 
     async def _digest_receipt_fixture(self, suffix):
         event = self._event(key="receipt-" + suffix)
-        member = DigestMember(
-            event.subscription_id,
-            event.subscription_revision,
-            event.event_key,
-            event.event_version,
+        member = validate_contract(
+            DigestMember(
+                event.subscription_id,
+                event.subscription_revision,
+                event.event_key,
+                event.event_version,
+            )
         )
         due = self.now - timedelta(minutes=1)
         window = DigestWindow(
@@ -848,7 +917,9 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(offset=offset):
                 self.now = base_now
                 suffix = str(offset)
-                grant_ref = GrantReference("queued-grant-" + suffix, 1)
+                grant_ref = validate_contract(
+                    GrantReference("queued-grant-" + suffix, 1)
+                )
                 record = SubscriptionRecord(
                     "queued-private-" + suffix,
                     1,
@@ -871,11 +942,13 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
                     "u1",
                     grant_ref,
                     self.recipient,
-                    DisplayDocument(
-                        "private",
-                        "subject",
-                        (TextBlock("private body"),),
-                        privacy=Privacy.PRIVATE,
+                    validate_contract(
+                        DisplayDocument(
+                            "private",
+                            "subject",
+                            (validate_contract(TextBlock("private body")),),
+                            privacy=Privacy.PRIVATE,
+                        )
                     ),
                     delivery_idempotency_key(
                         key, 1, record.subscription_id, 1, self.recipient
@@ -949,12 +1022,14 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
             subscription_id="sub-digest-direct",
             notification_mode="digest",
             type_id="sample-type",
-            digest_schedule=DigestScheduleProfile(
-                "UTC",
-                "12:00",
-                86400,
-                DstFoldPolicy.FIRST_OCCURRENCE,
-                DstGapPolicy.SKIP,
+            digest_schedule=validate_contract(
+                DigestScheduleProfile(
+                    "UTC",
+                    "12:00",
+                    86400,
+                    DstFoldPolicy.FIRST_OCCURRENCE,
+                    DstGapPolicy.SKIP,
+                )
             ),
         )
         await self.subscriptions.create(digest_record)
@@ -967,11 +1042,13 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
             digest_record.owner_id,
             digest_record.grant,
             digest_record.recipient,
-            DisplayDocument(
-                "digest-only-title",
-                "subject",
-                (TextBlock("digest-only body"),),
-                privacy=Privacy.PUBLIC,
+            validate_contract(
+                DisplayDocument(
+                    "digest-only-title",
+                    "subject",
+                    (validate_contract(TextBlock("digest-only body")),),
+                    privacy=Privacy.PUBLIC,
+                )
             ),
             delivery_idempotency_key(
                 event_key,
@@ -1075,7 +1152,7 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
             routes=self.routes,
             renderer=self.renderer,
             message_port=port,
-            limits=DisplayLimits(2, 1024),
+            limits=validate_contract(DisplayLimits(2, 1024)),
             now=lambda: self.now,
             send_timeout=0.1,
         )
@@ -1103,7 +1180,9 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
         members = tuple(
-            DigestMember(event.subscription_id, 1, event.event_key, 1)
+            validate_contract(
+                DigestMember(event.subscription_id, 1, event.event_key, 1)
+            )
             for event in (obsolete, survivor)
         )
         due = self.now - timedelta(minutes=1)
@@ -1198,10 +1277,17 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
     async def test_grant_expiry_during_sqlite_event_sending_cas_aborts_before_port(
         self,
     ):
-        grant_ref = GrantReference("grant-event-expiry", 1)
+        grant_ref = validate_contract(GrantReference("grant-event-expiry", 1))
         scope = OwnerScope.authorized("u1", grant_ref)
-        key = CollectionKey(
-            "sample/game", "collector", 1, "source", NormalizedInput({}), scope
+        key = validate_contract(
+            CollectionKey(
+                "sample/game",
+                "collector",
+                1,
+                "source",
+                validate_contract(NormalizedInput({})),
+                scope,
+            )
         )
         record = SubscriptionRecord(
             subscription_id="sub-expiry",
@@ -1224,11 +1310,13 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
             record.owner_id,
             grant_ref,
             record.recipient,
-            DisplayDocument(
-                "private title",
-                "subject",
-                (TextBlock("private body"),),
-                privacy=Privacy.PRIVATE,
+            validate_contract(
+                DisplayDocument(
+                    "private title",
+                    "subject",
+                    (validate_contract(TextBlock("private body")),),
+                    privacy=Privacy.PRIVATE,
+                )
             ),
             delivery_idempotency_key(
                 "event-expiry", 1, record.subscription_id, 1, record.recipient
@@ -1259,7 +1347,7 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
             routes=self.routes,
             renderer=self.renderer,
             message_port=self.port,
-            limits=DisplayLimits(2, 1024),
+            limits=validate_contract(DisplayLimits(2, 1024)),
             now=lambda: self.now,
         )
 
@@ -1293,7 +1381,7 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
             routes=self.routes,
             renderer=self.renderer,
             message_port=self.port,
-            limits=DisplayLimits(2, 1024),
+            limits=validate_contract(DisplayLimits(2, 1024)),
             now=lambda: self.now,
         )
         dispatch = asyncio.create_task(service.dispatch_event("event-1", 1, "sub-1", 1))
@@ -1315,7 +1403,7 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
     ):
         start = self.now - timedelta(hours=2)
         due = self.now - timedelta(minutes=1)
-        member = DigestMember("sub-1", 1, "event-claim-expiry", 1)
+        member = validate_contract(DigestMember("sub-1", 1, "event-claim-expiry", 1))
         event = self._event(key="event-claim-expiry")
         window = DigestWindow(
             "window-claim-expiry",
@@ -1355,7 +1443,7 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
             routes=self.routes,
             renderer=self.renderer,
             message_port=self.port,
-            limits=DisplayLimits(2, 1024),
+            limits=validate_contract(DisplayLimits(2, 1024)),
             now=lambda: self.now,
             claim_lease=timedelta(seconds=1),
         )
@@ -1389,14 +1477,16 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
     ):
         start = self.now - timedelta(hours=2)
         due = self.now - timedelta(minutes=1)
-        grant_ref = GrantReference("grant-digest-expiry", 1)
-        private_key = CollectionKey(
-            "sample/game",
-            "collector",
-            1,
-            "source",
-            NormalizedInput({}),
-            OwnerScope.authorized("u1", grant_ref),
+        grant_ref = validate_contract(GrantReference("grant-digest-expiry", 1))
+        private_key = validate_contract(
+            CollectionKey(
+                "sample/game",
+                "collector",
+                1,
+                "source",
+                validate_contract(NormalizedInput({})),
+                OwnerScope.authorized("u1", grant_ref),
+            )
         )
         private_record = SubscriptionRecord(
             subscription_id="sub-digest-private",
@@ -1419,11 +1509,13 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
             private_record.owner_id,
             grant_ref,
             private_record.recipient,
-            DisplayDocument(
-                "expired-private-title",
-                "subject",
-                (TextBlock("private body"),),
-                privacy=Privacy.PRIVATE,
+            validate_contract(
+                DisplayDocument(
+                    "expired-private-title",
+                    "subject",
+                    (validate_contract(TextBlock("private body")),),
+                    privacy=Privacy.PRIVATE,
+                )
             ),
             delivery_idempotency_key(
                 "event-digest-private",
@@ -1440,10 +1532,12 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
         await create_subscription_event_fixture(
             self.deliveries, self.bindings, public_event
         )
-        private_member = DigestMember(
-            private_record.subscription_id, 1, private_event.event_key, 1
+        private_member = validate_contract(
+            DigestMember(private_record.subscription_id, 1, private_event.event_key, 1)
         )
-        public_member = DigestMember("sub-1", 1, public_event.event_key, 1)
+        public_member = validate_contract(
+            DigestMember("sub-1", 1, public_event.event_key, 1)
+        )
         window = DigestWindow(
             "window-digest-grant-expiry",
             "UTC",
@@ -1499,7 +1593,7 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
             routes=self.routes,
             renderer=self.renderer,
             message_port=self.port,
-            limits=DisplayLimits(2, 1024),
+            limits=validate_contract(DisplayLimits(2, 1024)),
             now=lambda: self.now,
         )
 
@@ -1557,7 +1651,13 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
             other.owner_id,
             None,
             other.recipient,
-            DisplayDocument("remaining-title", "subject", (TextBlock("body"),)),
+            validate_contract(
+                DisplayDocument(
+                    "remaining-title",
+                    "subject",
+                    (validate_contract(TextBlock("body")),),
+                )
+            ),
             delivery_idempotency_key(
                 "event-pruned-valid", 1, other.subscription_id, 1, self.recipient
             ),
@@ -1568,8 +1668,12 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
         await create_subscription_event_fixture(
             self.deliveries, self.bindings, valid_event
         )
-        removed_member = DigestMember("sub-1", 1, removed_event.event_key, 1)
-        valid_member = DigestMember(other.subscription_id, 1, valid_event.event_key, 1)
+        removed_member = validate_contract(
+            DigestMember("sub-1", 1, removed_event.event_key, 1)
+        )
+        valid_member = validate_contract(
+            DigestMember(other.subscription_id, 1, valid_event.event_key, 1)
+        )
         window = DigestWindow(
             "window-pruned-cancel",
             "UTC",
@@ -1676,7 +1780,7 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         start = self.now - timedelta(hours=2)
         due = self.now - timedelta(minutes=1)
-        member = DigestMember("sub-1", 1, "event-retry", 1)
+        member = validate_contract(DigestMember("sub-1", 1, "event-retry", 1))
         event = self._event(key="event-retry")
         window = DigestWindow(
             "window-retry",
@@ -1717,7 +1821,7 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
             routes=self.routes,
             renderer=self.renderer,
             message_port=failed_port,
-            limits=DisplayLimits(2, 1024),
+            limits=validate_contract(DisplayLimits(2, 1024)),
             now=lambda: self.now,
             retry_at=lambda _event, _completed: retry_at,
         )
@@ -1744,12 +1848,21 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(accepted_port.calls), 1)
 
     async def test_authorized_group_recipient_is_rejected_before_render_or_send(self):
-        grant_ref = GrantReference("grant-1", 1)
+        grant_ref = validate_contract(GrantReference("grant-1", 1))
         scope = OwnerScope.authorized("u1", grant_ref)
-        key = CollectionKey(
-            "sample/game", "collector", 1, "source", NormalizedInput({}), scope
+        key = validate_contract(
+            CollectionKey(
+                "sample/game",
+                "collector",
+                1,
+                "source",
+                validate_contract(NormalizedInput({})),
+                scope,
+            )
         )
-        group = ConversationRef("adapter", ConversationKind.GROUP, "g1", "group-g1")
+        group = validate_contract(
+            ConversationRef("adapter", ConversationKind.GROUP, "g1", "group-g1")
+        )
         # Storage rejects this malformed authority/route combination. Feed it
         # directly to D to prove its independent persisted-data guard as well.
         record = SimpleNamespace(
@@ -1765,11 +1878,13 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.service._subscriptions = SimpleNamespace(
             current=lambda _subscription_id: _resolved(record)
         )
-        document = DisplayDocument(
-            "private title",
-            "subject",
-            (TextBlock("private body"),),
-            privacy=Privacy.PRIVATE,
+        document = validate_contract(
+            DisplayDocument(
+                "private title",
+                "subject",
+                (validate_contract(TextBlock("private body")),),
+                privacy=Privacy.PRIVATE,
+            )
         )
         event = object.__new__(DeliveryEvent)
         for field, value in {
@@ -1826,9 +1941,9 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
     async def test_digest_uses_saved_association_and_claims_once(self) -> None:
         start = self.now - timedelta(hours=2)
         due = self.now - timedelta(minutes=1)
-        member = DigestMember("sub-1", 1, "event-digest", 1)
+        member = validate_contract(DigestMember("sub-1", 1, "event-digest", 1))
         event = self._event(key="event-digest")
-        from ygl_test_subject.api.subscriptions import (
+        from ygl_test_subject.core.contracts.subscriptions import (
             DigestMemberAssociation,
             DigestWindow,
         )
@@ -1868,7 +1983,7 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
     async def test_unknown_digest_receipt_is_never_reclaimed(self) -> None:
         start = self.now - timedelta(hours=2)
         due = self.now - timedelta(minutes=1)
-        member = DigestMember("sub-1", 1, "event-digest-unknown", 1)
+        member = validate_contract(DigestMember("sub-1", 1, "event-digest-unknown", 1))
         event = self._event(key="event-digest-unknown")
         window = DigestWindow(
             "window-digest-unknown",
@@ -1944,11 +2059,13 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
             other.owner_id,
             None,
             other.recipient,
-            DisplayDocument(
-                "remaining-title",
-                "subject",
-                (TextBlock("body"),),
-                privacy=Privacy.PUBLIC,
+            validate_contract(
+                DisplayDocument(
+                    "remaining-title",
+                    "subject",
+                    (validate_contract(TextBlock("body")),),
+                    privacy=Privacy.PUBLIC,
+                )
             ),
             delivery_idempotency_key("event-two", 1, "sub-2", 1, self.recipient),
         )
@@ -1958,8 +2075,8 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
         await create_subscription_event_fixture(
             self.deliveries, self.bindings, event_two
         )
-        member_one = DigestMember("sub-1", 1, "event-one", 1)
-        member_two = DigestMember("sub-2", 1, "event-two", 1)
+        member_one = validate_contract(DigestMember("sub-1", 1, "event-one", 1))
+        member_two = validate_contract(DigestMember("sub-2", 1, "event-two", 1))
         window = DigestWindow(
             "window-members",
             "UTC",
@@ -2014,12 +2131,14 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
     async def test_cancel_during_final_digest_route_check_removes_private_member(self):
         start = self.now - timedelta(hours=2)
         due = self.now - timedelta(minutes=1)
-        profile = DigestScheduleProfile(
-            "UTC",
-            "12:00",
-            86400,
-            DstFoldPolicy.FIRST_OCCURRENCE,
-            DstGapPolicy.SKIP,
+        profile = validate_contract(
+            DigestScheduleProfile(
+                "UTC",
+                "12:00",
+                86400,
+                DstFoldPolicy.FIRST_OCCURRENCE,
+                DstGapPolicy.SKIP,
+            )
         )
         private_record = SubscriptionRecord(
             subscription_id="sub-1",
@@ -2059,11 +2178,13 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
             private_record.owner_id,
             private_record.grant,
             private_record.recipient,
-            DisplayDocument(
-                "PRIVATE-REVOKED",
-                "subject",
-                (TextBlock("private body"),),
-                privacy=Privacy.PRIVATE,
+            validate_contract(
+                DisplayDocument(
+                    "PRIVATE-REVOKED",
+                    "subject",
+                    (validate_contract(TextBlock("private body")),),
+                    privacy=Privacy.PRIVATE,
+                )
             ),
             delivery_idempotency_key(
                 "event-final-private",
@@ -2081,8 +2202,13 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
             other.owner_id,
             None,
             other.recipient,
-            DisplayDocument(
-                "PUBLIC-VALID", "subject", (TextBlock("body"),), privacy=Privacy.PUBLIC
+            validate_contract(
+                DisplayDocument(
+                    "PUBLIC-VALID",
+                    "subject",
+                    (validate_contract(TextBlock("body")),),
+                    privacy=Privacy.PUBLIC,
+                )
             ),
             delivery_idempotency_key(
                 "event-final-valid", 1, other.subscription_id, 1, self.recipient
@@ -2094,8 +2220,12 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
         await create_subscription_event_fixture(
             self.deliveries, self.bindings, valid_event
         )
-        revoked_member = DigestMember("sub-1", 2, revoked_event.event_key, 1)
-        valid_member = DigestMember(other.subscription_id, 1, valid_event.event_key, 1)
+        revoked_member = validate_contract(
+            DigestMember("sub-1", 2, revoked_event.event_key, 1)
+        )
+        valid_member = validate_contract(
+            DigestMember(other.subscription_id, 1, valid_event.event_key, 1)
+        )
         window = DigestWindow(
             "window-final-route",
             "UTC",
@@ -2159,7 +2289,7 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
     async def test_digest_with_no_valid_members_is_cancelled_without_send(self) -> None:
         start = self.now - timedelta(hours=2)
         due = self.now - timedelta(minutes=1)
-        member = DigestMember("sub-1", 1, "event-all-revoked", 1)
+        member = validate_contract(DigestMember("sub-1", 1, "event-all-revoked", 1))
         event = DeliveryEvent(
             "event-all-revoked",
             1,
@@ -2168,11 +2298,13 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
             "u1",
             None,
             self.recipient,
-            DisplayDocument(
-                "private revoked title",
-                "subject",
-                (TextBlock("private body"),),
-                privacy=Privacy.PRIVATE,
+            validate_contract(
+                DisplayDocument(
+                    "private revoked title",
+                    "subject",
+                    (validate_contract(TextBlock("private body")),),
+                    privacy=Privacy.PRIVATE,
+                )
             ),
             delivery_idempotency_key(
                 "event-all-revoked", 1, "sub-1", 1, self.recipient

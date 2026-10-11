@@ -13,34 +13,62 @@ from datetime import UTC, datetime
 from time import monotonic
 from types import MappingProxyType
 from typing import Any
+from uuid import uuid4
+from weakref import WeakSet
 
-from ..api.contexts import InvocationOrigin, InvocationView
-from ..api.manifests import (
+from yomihime_game_link_sdk.contexts import (
+    InvocationOrigin,
+    InvocationView,
+    MessageContext,
+)
+from yomihime_game_link_sdk.declarations import (
     ConfigField,
     ModuleManifest,
     PrivacyFloor,
 )
-from ..api.results import CapabilityResult, ErrorCode, ErrorDetail, ResultStatus
-from ..api.services import (
+from yomihime_game_link_sdk.errors import (
+    AccessDenied,
+    ParameterError,
+    ServiceUnavailable,
+)
+from yomihime_game_link_sdk.results import (
+    CapabilityResult,
+    ErrorCode,
+    ErrorDetail,
+    ResultStatus,
+)
+from yomihime_game_link_sdk.services import (
     AccountOperations,
     BindingView,
     CallerCapability,
     ConfigSnapshot,
     ConfigTarget,
-    GrantReference,
     HttpRequest,
     HttpResponse,
     InvocationServices,
     ModuleServices,
     ResolvedIdentity,
+    ResourceReference,
     SubscriptionOperations,
-    SubscriptionUnavailable,
-    SubscriptionView,
 )
-from ..api.storage import OwnerScope, OwnershipKind
-from ..api.subscriptions import SubscriptionRequest
+from yomihime_game_link_sdk.storage import (
+    CacheEntry,
+    CacheLookup,
+    CacheQuery,
+    DeclaredIndexQuery,
+    GrantReference,
+    OwnerScope,
+    OwnershipKind,
+    QueryOperator,
+    RecordPage,
+    VersionedRecord,
+)
+from yomihime_game_link_sdk.subscriptions import SubscriptionRequest, SubscriptionView
+
 from ..core.context_issuer import ContextIssuer
-from ..core.lifecycle import LifecycleController
+from ..core.contracts.storage import _record_cursor_offset
+from ..core.contracts.validation_boundary import validate_contract
+from ..core.lifecycle import LifecycleController, _ServiceLifetime
 from ..core.policy import tool_allowed
 from ..core.ports import (
     AdmissionLease,
@@ -50,13 +78,14 @@ from ..core.ports import (
     ModuleRegistrationSnapshot,
     ScheduledLease,
 )
+from ..core.public_errors import parameters, proof, public_boundary
 from ..core.registry import RegisteredModule, Registry
 from ..core.task_scope import TaskScope
 from ..infrastructure.http import SourceHttpError, SourceHttpService
 from ..infrastructure.sqlite.repositories import SQLiteRepositories
 from .authorization import AuthorizationService, SecretAvailability
 from .bindings import AccountOperationsService
-from .cache import CacheAccessService
+from .cache import CacheAccessService, ModuleCacheRepository
 from .configuration import ConfigurationCoordinator
 from .core_configuration import (
     CORE_DEFAULTS_FIELD,
@@ -67,8 +96,8 @@ from .core_configuration import (
 from .dependency_calls import DependencyInvoker
 from .identity import IdentityResolverService, InvocationPrincipalResolver
 from .module_storage import ModuleStorageRouter
-from .records import ModuleRecordsService
-from .resources import ResourceAccessService
+from .records import ModuleRecordsService, _collection_name
+from .resources import ResourceAccessService, _asset_id
 from .source_credentials import (
     SourceCredentialPolicy,
     SourceCredentialService,
@@ -122,11 +151,14 @@ class _IssuerCallerCapabilityIssuer(CallerCapabilityIssuer):
         self._unsubscribe = issuer.add_release_observer(self._on_release)
 
     def _on_release(self, view: InvocationView) -> None:
+        validate_contract(view)
         for key in tuple(self._issued):
             if key[0] == view.invocation_id:
                 self._issued.pop(key, None)
 
+    @public_boundary("proof")
     def issue(self, invocation: InvocationView, capability_id: str) -> CallerCapability:
+        validate_contract(invocation)
         try:
             view = self._issuer.require(invocation)
             snapshot = self._registry.snapshot()
@@ -141,17 +173,22 @@ class _IssuerCallerCapabilityIssuer(CallerCapabilityIssuer):
                 )
             ):
                 raise ValueError
-            caller = CallerCapability(
-                view.module_id, capability_id, view.registry_revision, module.epoch
+            caller = validate_contract(
+                CallerCapability(
+                    view.module_id, capability_id, view.registry_revision, module.epoch
+                )
             )
         except Exception:
-            raise InvocationBindingError() from None
+            raise
         self._issued[(view.invocation_id, capability_id)] = caller
         return caller
 
+    @public_boundary("proof")
     def require(
         self, invocation: InvocationView, caller: CallerCapability
     ) -> CallerCapability:
+        validate_contract(invocation)
+        validate_contract(caller)
         try:
             view = self._issuer.require(invocation)
             snapshot = self._registry.snapshot()
@@ -168,7 +205,7 @@ class _IssuerCallerCapabilityIssuer(CallerCapabilityIssuer):
             ):
                 raise ValueError
         except Exception:
-            raise InvocationBindingError() from None
+            raise
         return caller
 
 
@@ -184,6 +221,7 @@ class UnavailableSubscriptionOperations(SubscriptionOperations):
         self._module_id = module_id
 
     def _command(self, invocation: InvocationView) -> None:
+        validate_contract(invocation)
         view = self._issuer.require(invocation)
         if (
             view.module_id != self._module_id
@@ -192,35 +230,28 @@ class UnavailableSubscriptionOperations(SubscriptionOperations):
         ):
             raise PermissionError("subscription operation is not permitted")
 
-    async def create(
-        self, invocation: InvocationView, subscription: SubscriptionView
-    ) -> SubscriptionView:
-        self._command(invocation)
-        raise SubscriptionUnavailable()
-
-    async def revise(
-        self, invocation: InvocationView, subscription: SubscriptionView
-    ) -> SubscriptionView:
-        self._command(invocation)
-        raise SubscriptionUnavailable()
-
     async def create_request(
         self, invocation: InvocationView, request: SubscriptionRequest
     ) -> SubscriptionView:
+        validate_contract(invocation)
+        validate_contract(request)
         self._command(invocation)
-        raise SubscriptionUnavailable()
+        raise ServiceUnavailable()
 
     async def revise_request(
         self, invocation: InvocationView, request: SubscriptionRequest
     ) -> SubscriptionView:
+        validate_contract(invocation)
+        validate_contract(request)
         self._command(invocation)
-        raise SubscriptionUnavailable()
+        raise ServiceUnavailable()
 
     async def list_current(
         self, invocation: InvocationView
     ) -> tuple[SubscriptionView, ...]:
+        validate_contract(invocation)
         self._command(invocation)
-        raise SubscriptionUnavailable()
+        raise ServiceUnavailable()
 
     async def cancel(
         self,
@@ -229,10 +260,12 @@ class UnavailableSubscriptionOperations(SubscriptionOperations):
         *,
         expected_revision: int,
     ) -> None:
+        validate_contract(invocation)
         self._command(invocation)
-        raise SubscriptionUnavailable()
+        raise ServiceUnavailable()
 
 
+@public_boundary("proof")
 def _require_command_only_entry(
     issuer: ContextIssuer,
     registry: Registry,
@@ -240,6 +273,7 @@ def _require_command_only_entry(
     module_id: str,
     invocation: InvocationView,
 ) -> RegisteredModule:
+    validate_contract(invocation)
     try:
         view = issuer.require(invocation)
         if (
@@ -264,7 +298,7 @@ def _require_command_only_entry(
         lifecycle.admission.check(lease)
         return module
     except Exception:
-        raise InvocationBindingError() from None
+        raise
 
 
 class _BoundSubscriptionOperations(SubscriptionOperations):
@@ -288,6 +322,7 @@ class _BoundSubscriptionOperations(SubscriptionOperations):
         delegate: SubscriptionOperations,
         owner_authority: object | None,
     ) -> None:
+        validate_contract(delegate)
         self._issuer = issuer
         self._registry = registry
         self._lifecycle = lifecycle
@@ -296,6 +331,7 @@ class _BoundSubscriptionOperations(SubscriptionOperations):
         self._owner_authority = owner_authority
 
     def _command(self, invocation: InvocationView) -> RegisteredModule:
+        proof(validate_contract, invocation)
         return _require_command_only_entry(
             self._issuer,
             self._registry,
@@ -305,6 +341,7 @@ class _BoundSubscriptionOperations(SubscriptionOperations):
         )
 
     async def _owner_check(self, invocation: InvocationView) -> None:
+        proof(validate_contract, invocation)
         module = self._command(invocation)
         capability = next(
             (
@@ -325,49 +362,48 @@ class _BoundSubscriptionOperations(SubscriptionOperations):
         try:
             await self._owner_authority.require_current(invocation)
         except Exception:
-            raise InvocationBindingError() from None
+            raise
         self._command(invocation)
 
-    async def create(
-        self, invocation: InvocationView, subscription: SubscriptionView
-    ) -> SubscriptionView:
-        await self._owner_check(invocation)
-        result = await self._delegate.create(invocation, subscription)
-        await self._owner_check(invocation)
-        return result
-
-    async def revise(
-        self, invocation: InvocationView, subscription: SubscriptionView
-    ) -> SubscriptionView:
-        await self._owner_check(invocation)
-        result = await self._delegate.revise(invocation, subscription)
-        await self._owner_check(invocation)
-        return result
-
+    @public_boundary("service")
     async def create_request(
         self, invocation: InvocationView, request: SubscriptionRequest
     ) -> SubscriptionView:
+        proof(validate_contract, invocation)
         await self._owner_check(invocation)
+        parameters(_canonical_input, request, SubscriptionRequest)
         result = await self._delegate.create_request(invocation, request)
         await self._owner_check(invocation)
+        _canonical_input(result, SubscriptionView)
         return result
 
+    @public_boundary("service")
     async def revise_request(
         self, invocation: InvocationView, request: SubscriptionRequest
     ) -> SubscriptionView:
+        proof(validate_contract, invocation)
         await self._owner_check(invocation)
+        parameters(_canonical_input, request, SubscriptionRequest)
         result = await self._delegate.revise_request(invocation, request)
         await self._owner_check(invocation)
+        _canonical_input(result, SubscriptionView)
         return result
 
+    @public_boundary("service")
     async def list_current(
         self, invocation: InvocationView
     ) -> tuple[SubscriptionView, ...]:
+        proof(validate_contract, invocation)
         await self._owner_check(invocation)
         result = await self._delegate.list_current(invocation)
         await self._owner_check(invocation)
+        if type(result) is not tuple:
+            raise ValueError("subscription response is invalid")
+        for item in result:
+            _canonical_input(item, SubscriptionView)
         return result
 
+    @public_boundary("service")
     async def cancel(
         self,
         invocation: InvocationView,
@@ -375,7 +411,14 @@ class _BoundSubscriptionOperations(SubscriptionOperations):
         *,
         expected_revision: int,
     ) -> None:
+        proof(validate_contract, invocation)
         await self._owner_check(invocation)
+        parameters(
+            _record_input,
+            "delete",
+            (subscription_id,),
+            {"expected_revision": expected_revision},
+        )
         await self._delegate.cancel(
             invocation, subscription_id, expected_revision=expected_revision
         )
@@ -394,27 +437,35 @@ class _AccountOperations(AccountOperations):
         self._authorization = authorization
 
     async def status(self, invocation: InvocationView) -> GrantReference | None:
+        validate_contract(invocation)
         return await self._authorization.status(invocation)
 
     async def begin_login(self, invocation: InvocationView) -> str:
+        validate_contract(invocation)
         return await self._authorization.begin_login(invocation)
 
     async def bind(
         self, invocation: InvocationView, identity: ResolvedIdentity
     ) -> BindingView:
+        validate_contract(invocation)
+        validate_contract(identity)
         return await self._bindings.bind(invocation, identity)
 
     async def bindings(self, invocation: InvocationView) -> tuple[BindingView, ...]:
+        validate_contract(invocation)
         return await self._bindings.bindings(invocation)
 
     async def unbind(
         self, invocation: InvocationView, binding_id: str, *, expected_revision: int
     ) -> None:
+        validate_contract(invocation)
         await self._bindings.unbind(
             invocation, binding_id, expected_revision=expected_revision
         )
 
     async def revoke(self, invocation: InvocationView, grant: GrantReference) -> None:
+        validate_contract(invocation)
+        validate_contract(grant)
         await self._authorization.revoke(invocation, grant)
 
 
@@ -428,7 +479,9 @@ class _BoundIdentityResolver:
         self._module_id = module_id
         self._delegate = delegate
 
+    @public_boundary("service")
     async def default_identity(self, invocation: InvocationView):
+        proof(validate_contract, invocation)
         _require_command_only_entry(
             self._issuer, self._registry, self._lifecycle, self._module_id, invocation
         )
@@ -436,6 +489,8 @@ class _BoundIdentityResolver:
         _require_command_only_entry(
             self._issuer, self._registry, self._lifecycle, self._module_id, invocation
         )
+        if result is not None:
+            _canonical_input(result, ResolvedIdentity)
         return result
 
 
@@ -449,7 +504,9 @@ class _BoundAccountOperations(AccountOperations):
         self._module_id = module_id
         self._delegate = delegate
 
+    @public_boundary("service")
     async def _call(self, name: str, invocation: InvocationView, *args, **kwargs):
+        proof(validate_contract, invocation)
         _require_command_only_entry(
             self._issuer, self._registry, self._lifecycle, self._module_id, invocation
         )
@@ -457,29 +514,128 @@ class _BoundAccountOperations(AccountOperations):
         _require_command_only_entry(
             self._issuer, self._registry, self._lifecycle, self._module_id, invocation
         )
+        _account_output(name, result)
         return result
 
     async def status(self, invocation: InvocationView):
+        proof(validate_contract, invocation)
         return await self._call("status", invocation)
 
     async def begin_login(self, invocation: InvocationView):
+        proof(validate_contract, invocation)
         return await self._call("begin_login", invocation)
 
+    @public_boundary("service")
     async def bind(self, invocation: InvocationView, identity: ResolvedIdentity):
+        proof(validate_contract, invocation)
+        parameters(_canonical_input, identity, ResolvedIdentity)
         return await self._call("bind", invocation, identity)
 
     async def bindings(self, invocation: InvocationView):
+        proof(validate_contract, invocation)
         return await self._call("bindings", invocation)
 
     async def unbind(
         self, invocation: InvocationView, binding_id: str, *, expected_revision: int
     ) -> None:
+        proof(validate_contract, invocation)
+        parameters(
+            _record_input,
+            "delete",
+            (binding_id,),
+            {"expected_revision": expected_revision},
+        )
         await self._call(
             "unbind", invocation, binding_id, expected_revision=expected_revision
         )
 
+    @public_boundary("service")
     async def revoke(self, invocation: InvocationView, grant: GrantReference) -> None:
+        proof(validate_contract, invocation)
+        parameters(_canonical_input, grant, GrantReference)
         await self._call("revoke", invocation, grant)
+
+
+def _canonical_input(value, expected):
+    if type(value) is not expected:
+        raise TypeError("input must be canonical")
+    validate_contract(value)
+
+
+def _account_output(name, result):
+    expected = {"status": GrantReference, "bind": BindingView, "bindings": BindingView}
+    if name == "begin_login":
+        if type(result) is not str or not result.strip():
+            raise ValueError("login response is invalid")
+    elif name == "bindings":
+        if type(result) is not tuple:
+            raise ValueError("binding response is invalid")
+        for item in result:
+            _canonical_input(item, BindingView)
+    elif name in expected:
+        if name != "status" or result is not None:
+            _canonical_input(result, expected[name])
+    elif name not in expected and result is not None:
+        raise ValueError("operation response is invalid")
+
+
+def _record_input(method, args, kwargs):
+    def key_input(key):
+        if (
+            type(key) is not str
+            or not key.strip()
+            or any(c in key for c in ("/", "\\", "\n", "\r"))
+        ):
+            raise ValueError("record key is invalid")
+
+    def revision_input(revision):
+        if type(revision) is not int or revision < 1:
+            raise ValueError("record revision is invalid")
+
+    def get(key):
+        key_input(key)
+
+    def create(key, value):
+        key_input(key)
+        validate_contract(VersionedRecord(key, 1, value))
+
+    def replace(key, value, *, expected_revision):
+        revision_input(expected_revision)
+        create(key, value)
+
+    def query(query):
+        if type(query) is not DeclaredIndexQuery:
+            raise TypeError("query must be canonical")
+        validate_contract(query)
+        if query.operator is QueryOperator.PREFIX and type(query.value) is not str:
+            raise ValueError("prefix query requires text")
+        if query.cursor is not None and type(query.cursor) is not str:
+            raise ValueError("query cursor is invalid")
+        _record_cursor_offset(query.cursor)
+
+    def delete(key, *, expected_revision):
+        key_input(key)
+        revision_input(expected_revision)
+
+    {
+        "get": get,
+        "create": create,
+        "replace": replace,
+        "query": query,
+        "delete": delete,
+    }[method](*args, **kwargs)
+
+
+def _record_output(method, result):
+    if method == "delete":
+        if result is not None:
+            raise ValueError("record deletion returned invalid data")
+    elif method == "get" and result is None:
+        return
+    elif type(result) is not (RecordPage if method == "query" else VersionedRecord):
+        raise ValueError("record operation returned invalid data")
+    else:
+        validate_contract(result)
 
 
 class _BoundRecordCollection:
@@ -499,17 +655,29 @@ class _BoundRecordCollection:
     def __getattr__(self, name: str) -> object:
         if name not in self._allowed:
             raise AttributeError(name)
-        target = getattr(self.__collection, name)
         if name == "scope":
-            self.__check_sync()
-            return target
+
+            @public_boundary()
+            def current_scope():
+                self.__check_sync()
+                result = getattr(self.__collection, name)
+                if type(result) is not OwnerScope:
+                    raise ValueError("record scope is invalid")
+                validate_contract(result)
+                return result
+
+            return current_scope()
+        target = getattr(self.__collection, name)
         if not callable(target):
             raise AttributeError(name)
 
+        @public_boundary()
         async def invoke(*args: object, **kwargs: object) -> object:
             await self.__check()
+            parameters(_record_input, name, args, kwargs)
             result = await target(*args, **kwargs)
             await self.__check()
+            _record_output(name, result)
             return result
 
         return invoke
@@ -528,8 +696,10 @@ class _BoundRecords:
         object.__setattr__(self, "_BoundRecords__check_sync", check_sync)
         object.__setattr__(self, "_BoundRecords__check", check)
 
+    @public_boundary("service")
     async def collection(self, name: str) -> _BoundRecordCollection:
         await self.__check()
+        parameters(_collection_name, name)
         collection = await self.__collection(name)
         await self.__check()
         return _BoundRecordCollection(collection, self.__check_sync, self.__check)
@@ -548,18 +718,21 @@ class _BoundCache:
         object.__setattr__(self, "_BoundCache__check_sync", check_sync)
         object.__setattr__(self, "_BoundCache__check", check)
 
-    async def get(self, key: str):
+    @public_boundary("service")
+    async def get(self, key: str) -> CacheEntry | None:
         await self.__check()
         result = await self.__cache.get(key)
         await self.__check()
         return result
 
-    async def lookup(self, request: object):
+    @public_boundary("service")
+    async def lookup(self, request: CacheQuery) -> CacheLookup:
         await self.__check()
         result = await self.__cache.lookup(request)
         await self.__check()
         return result
 
+    @public_boundary("service")
     async def put(self, key: str, payload: Mapping[str, object], *, ttl_seconds: float):
         await self.__check()
         result = await self.__cache.put(key, payload, ttl_seconds=ttl_seconds)
@@ -580,16 +753,31 @@ class _BoundResources:
         object.__setattr__(self, "_BoundResources__check_sync", check_sync)
         object.__setattr__(self, "_BoundResources__check", check)
 
+    @public_boundary("resource")
     async def register(self, asset_id: str, media_type: str, content: bytes):
         await self.__check()
+        parameters(_asset_id, asset_id)
+        if (
+            type(content) is not bytes
+            or type(media_type) is not str
+            or not media_type.strip()
+            or "\n" in media_type
+            or "\r" in media_type
+        ):
+            raise ParameterError("parameters are invalid")
         result = await self.__resources.register(asset_id, media_type, content)
         await self.__check()
+        _canonical_input(result, ResourceReference)
         return result
 
+    @public_boundary("resource")
     async def read(self, asset_id: str) -> bytes:
         await self.__check()
+        parameters(_asset_id, asset_id)
         result = await self.__resources.read(asset_id)
         await self.__check()
+        if type(result) is not bytes:
+            raise ValueError("resource response is invalid")
         return result
 
 
@@ -606,16 +794,19 @@ class _BoundHttp:
         object.__setattr__(self, "_BoundHttp__check_sync", check_sync)
         object.__setattr__(self, "_BoundHttp__check", check)
 
+    @public_boundary("service")
     async def fetch(self, request: HttpRequest) -> HttpResponse:
+        parameters(_canonical_input, request, HttpRequest)
         try:
             await self.__check()
-        except InvocationBindingError:
+        except (InvocationBindingError, AccessDenied):
             raise SourceHttpError("request_rejected") from None
         response = await self.__http.fetch(request)
         try:
             await self.__check()
-        except InvocationBindingError:
+        except (InvocationBindingError, AccessDenied):
             raise SourceHttpError("request_rejected") from None
+        _canonical_input(response, HttpResponse)
         return response
 
 
@@ -628,10 +819,12 @@ class _BoundTasks:
         check_sync: Callable[[], None],
         check: Callable[[], Awaitable[None]],
     ) -> None:
+        validate_contract(scope)
         object.__setattr__(self, "_BoundTasks__scope", scope)
         object.__setattr__(self, "_BoundTasks__check_sync", check_sync)
         object.__setattr__(self, "_BoundTasks__check", check)
 
+    @public_boundary("invocation")
     def create_task(self, work: Awaitable[object], *, name: str):
         try:
             self.__check_sync()
@@ -671,6 +864,7 @@ class _BoundTasks:
         task.add_done_callback(close_unstarted)
         return task
 
+    @public_boundary("invocation")
     async def await_result(self, work: Awaitable[Any]) -> Any:
         try:
             await self.__check()
@@ -684,6 +878,7 @@ class _BoundTasks:
         return result
 
     @property
+    @public_boundary("proof")
     def deadline_monotonic(self) -> float | None:
         self.__check_sync()
         return self.__scope.deadline_monotonic
@@ -697,36 +892,70 @@ class _BoundDependencies:
         dependencies: DependencyInvoker | None,
         check: Callable[[], Awaitable[None]],
     ) -> None:
+        validate_contract(dependencies)
         object.__setattr__(self, "_BoundDependencies__dependencies", dependencies)
         object.__setattr__(self, "_BoundDependencies__check", check)
 
     @property
+    @public_boundary("proof")
     def caller_capability(self) -> CallerCapability:
         if self.__dependencies is None:
             raise InvocationBindingError()
         return self.__dependencies.caller_capability
 
+    @public_boundary("service")
     async def invoke(
         self, invocation: InvocationView, capability: object, parameters: object
     ):
+        proof(validate_contract, invocation)
         await self.__check()
         if self.__dependencies is None:
-            return CapabilityResult(
-                "dependency-unavailable",
-                ResultStatus.ERROR,
-                error=ErrorDetail(
-                    ErrorCode.UNSUPPORTED,
-                    "dependency invocation is unavailable for this context",
-                ),
+            return validate_contract(
+                CapabilityResult(
+                    "dependency-unavailable",
+                    ResultStatus.ERROR,
+                    error=validate_contract(
+                        ErrorDetail(
+                            ErrorCode.UNSUPPORTED,
+                            "dependency invocation is unavailable for this context",
+                        )
+                    ),
+                )
             )
         result = await self.__dependencies.invoke(invocation, capability, parameters)
         await self.__check()
         return result
 
 
+class _BoundMessage:
+    """No source objects escape the Core-owned exact invocation sidecar."""
+
+    __slots__ = ("__issuer", "__view", "__check_sync", "__check")
+
+    def __init__(self, issuer, view, check_sync, check):
+        self.__issuer, self.__view = issuer, view
+        self.__check_sync, self.__check = check_sync, check
+
+    @public_boundary("proof")
+    async def read(self) -> MessageContext:
+        self.__check_sync()
+        await self.__check()
+        await self.__issuer._check_message_source(self.__view)
+        await self.__check()
+        # Build the descriptive copy before the final current-source check.
+        # No await or user hook follows the synchronous issuer/lease/binder and
+        # source checks below, so an old async True cannot authorize this read.
+        snapshot = self.__issuer._message_for(self.__view).snapshot
+        result = MessageContext(snapshot.text, snapshot.event_ref)
+        self.__check_sync()
+        self.__issuer._require_message_current(self.__view)
+        return result
+
+
 @dataclass(frozen=True, slots=True)
 class _InvocationServices(InvocationServices):
     invocation: InvocationView
+    message: _BoundMessage
     records: _BoundRecords
     cache: _BoundCache
     http: _BoundHttp
@@ -788,10 +1017,12 @@ class InvocationServiceBinder:
         self._clock = clock
         self._utc_clock = utc_clock or (lambda: datetime.now(UTC))
 
+    @public_boundary("proof")
     def _check(
         self,
         invocation: InvocationView,
     ) -> RegisteredModule:
+        proof(validate_contract, invocation)
         try:
             view = self._issuer.require(invocation)
             if view.module_id != self._module_id:
@@ -849,9 +1080,11 @@ class InvocationServiceBinder:
                 raise ValueError
             return module
         except Exception:
-            raise InvocationBindingError() from None
+            raise
 
+    @public_boundary("proof")
     async def _admit(self, invocation: InvocationView) -> RegisteredModule:
+        proof(validate_contract, invocation)
         module = self._check(invocation)
         capability = next(
             (
@@ -868,12 +1101,14 @@ class InvocationServiceBinder:
             try:
                 await self._require_invocation_grant(invocation)
             except Exception:
-                raise InvocationBindingError() from None
+                raise
         return module
 
+    @public_boundary("proof")
     async def _require_invocation_grant(self, invocation: InvocationView) -> None:
         """Revalidate the grant through the authority for this exact origin."""
 
+        proof(validate_contract, invocation)
         if invocation.origin is InvocationOrigin.COMMAND:
             if invocation.parent_id is None:
                 await self._authorization.require_current_grant(invocation)
@@ -888,9 +1123,11 @@ class InvocationServiceBinder:
             return
         raise ValueError
 
+    @public_boundary("service")
     async def _resolve_principal(
         self, invocation: InvocationView, *, authorized: bool
     ) -> str:
+        proof(validate_contract, invocation)
         try:
             principal_id = await self._principal_resolver.principal_id(invocation)
             self._check(invocation)
@@ -899,9 +1136,11 @@ class InvocationServiceBinder:
                 self._check(invocation)
             return principal_id
         except Exception:
-            raise InvocationBindingError() from None
+            raise
 
+    @public_boundary("service")
     async def bind(self, invocation: InvocationView) -> _InvocationServices:
+        proof(validate_contract, invocation)
         module = await self._admit(invocation)
         caller_id = invocation.capability_id
         owner_capability = next(
@@ -926,7 +1165,7 @@ class InvocationServiceBinder:
             try:
                 await self._owner_authority.require_current(invocation)
             except Exception:
-                raise InvocationBindingError() from None
+                raise
         is_scheduler = invocation.origin is InvocationOrigin.SCHEDULER
         if is_scheduler:
             caller_capability = None
@@ -935,43 +1174,39 @@ class InvocationServiceBinder:
             if caller_id is None:
                 raise InvocationBindingError()
             caller_capability = self._caller_issuer.issue(invocation, caller_id)
-            dependencies = DependencyInvoker(
-                self._registry,
-                self._issuer,
-                self._lifecycle,
-                self._caller_issuer,
-                caller_capability,
-                private_authorizer=self._authorization.require_dependency_grant,
-                clock=self._clock,
-                utc_clock=self._utc_clock,
+            dependencies = validate_contract(
+                DependencyInvoker(
+                    self._registry,
+                    self._issuer,
+                    self._lifecycle,
+                    self._caller_issuer,
+                    caller_capability,
+                    private_authorizer=self._authorization.require_dependency_grant,
+                    clock=self._clock,
+                    utc_clock=self._utc_clock,
+                )
             )
 
+        @public_boundary("proof")
         def check_sync() -> None:
             try:
                 self._check(invocation)
                 if caller_capability is not None:
                     self._caller_issuer.require(invocation, caller_capability)
             except Exception:
-                raise InvocationBindingError() from None
+                raise
 
+        @public_boundary("proof")
         async def check() -> None:
             check_sync()
             if is_owner:
                 try:
                     await self._owner_authority.require_current(invocation)
                 except Exception:
-                    raise InvocationBindingError() from None
+                    raise
                 check_sync()
-            if invocation.grant_id is not None:
-                await self._admit(invocation)
-                check_sync()
-            elif invocation.capability_id is not None and any(
-                item.capability_id == invocation.capability_id
-                and item.privacy_floor is PrivacyFloor.PRIVATE
-                for item in module.manifest.capabilities
-            ):
-                await self._authorization.require_current_grant(invocation)
-                check_sync()
+            await self._admit(invocation)
+            check_sync()
 
         grant_store = self._repositories.authorization
         record_repository = self._repositories.records_for(module)
@@ -987,7 +1222,7 @@ class InvocationServiceBinder:
                 None,
             )
             if descriptor is None:
-                raise ValueError("collection is not declared for this module")
+                raise ParameterError("parameters are invalid")
             if descriptor.owner_kind is OwnershipKind.PUBLIC:
                 owner = OwnerScope.public()
             elif descriptor.owner_kind is OwnershipKind.USER:
@@ -1004,7 +1239,9 @@ class InvocationServiceBinder:
                 )
                 owner = OwnerScope.authorized(
                     principal_id,
-                    GrantReference(invocation.grant_id, invocation.grant_revision),
+                    validate_contract(
+                        GrantReference(invocation.grant_id, invocation.grant_revision)
+                    ),
                 )
             else:
                 raise InvocationBindingError()
@@ -1018,7 +1255,7 @@ class InvocationServiceBinder:
 
         cache = CacheAccessService(
             invocation,
-            self._repositories.cache,
+            ModuleCacheRepository(self._repositories.cache, invocation.module_id),
             issuer=self._issuer,
             grant_store=grant_store,
             registration_lookup=self._repositories.registration_lookup,
@@ -1039,6 +1276,7 @@ class InvocationServiceBinder:
         tasks = self._lifecycle.scope(module.module_id)
         bound = _InvocationServices(
             invocation=invocation,
+            message=_BoundMessage(self._issuer, invocation, check_sync, check),
             records=_BoundRecords(collection_for_invocation, check_sync, check),
             cache=_BoundCache(cache, check_sync, check),
             http=_BoundHttp(self._http, check_sync, check),
@@ -1068,6 +1306,8 @@ class ModuleServicesFactory:
         "_exchange_verifier",
         "_caller_issuer",
         "_http_by_module",
+        "_service_lifetimes",
+        "_services_closed",
         "_credential_services",
         "_subscriptions",
         "_secret_available",
@@ -1102,6 +1342,7 @@ class ModuleServicesFactory:
         module_config_validators: Mapping[str, Mapping[str, object]] | None = None,
         storage_router: ModuleStorageRouter | None = None,
     ) -> None:
+        validate_contract(subscriptions)
         if not isinstance(registry, Registry) or not isinstance(issuer, ContextIssuer):
             raise TypeError("module services require the host Registry and issuer")
         if not isinstance(lifecycle, LifecycleController):
@@ -1140,8 +1381,6 @@ class ModuleServicesFactory:
         if subscriptions is not None and any(
             not callable(getattr(subscriptions, name, None))
             for name in (
-                "create",
-                "revise",
                 "create_request",
                 "revise_request",
                 "list_current",
@@ -1180,6 +1419,8 @@ class ModuleServicesFactory:
         self._source_credential_policies = credential_policies
         self._exchange_verifier = exchange_verifier
         self._caller_issuer = _IssuerCallerCapabilityIssuer(issuer, registry)
+        self._service_lifetimes: WeakSet[_ServiceLifetime] = WeakSet()
+        self._services_closed = False
         self._http_by_module: dict[str, tuple[ModuleManifest, SourceHttpService]] = {}
         self._credential_services: list[
             tuple[str, ModuleManifest, SourceCredentialService]
@@ -1204,11 +1445,20 @@ class ModuleServicesFactory:
             registered = self._registry.snapshot().module(module_id)
         except Exception:
             raise ValueError("module is not registered") from None
-        return self._build_module(module_id, registered.manifest)
+        return self._build_module(
+            module_id, registered.manifest, self._lifecycle.service_lifetime(module_id)
+        )
 
-    def for_candidate(self, module_id: str, manifest: ModuleManifest) -> ModuleServices:
+    def for_candidate(
+        self,
+        module_id: str,
+        manifest: ModuleManifest,
+        *,
+        service_lifetime: _ServiceLifetime | None = None,
+    ) -> ModuleServices:
         """Build dormant candidate services without consulting Registry."""
 
+        validate_contract(manifest)
         if not isinstance(manifest, ModuleManifest):
             raise TypeError("manifest must be a ModuleManifest")
         if (
@@ -1217,7 +1467,11 @@ class ModuleServicesFactory:
             or module_id.rsplit("/", 1)[-1] != manifest.module_id
         ):
             raise ValueError("candidate module ID must match the manifest")
-        return self._build_module(module_id, manifest)
+        if service_lifetime is None:
+            service_lifetime = _ServiceLifetime(
+                (module_id.split("/")[0], module_id, uuid4().hex)
+            )
+        return self._build_module(module_id, manifest, service_lifetime)
 
     def _new_authorization(self) -> AuthorizationService:
         return AuthorizationService(
@@ -1240,12 +1494,13 @@ class ModuleServicesFactory:
     async def authorize_private(self, invocation: InvocationView):
         """Host callback for Gateway/DependencyInvoker private entries."""
 
+        validate_contract(invocation)
         if not isinstance(invocation, InvocationView):
             raise InvocationBindingError()
         try:
             self._registry.snapshot().module(invocation.module_id)
         except Exception:
-            raise InvocationBindingError() from None
+            raise
         authorization = self._new_authorization()
         return await authorization.require_current_grant(invocation)
 
@@ -1256,6 +1511,9 @@ class ModuleServicesFactory:
         closes that separately after module work has stopped.
         """
 
+        self._services_closed = True
+        for lifetime in tuple(self._service_lifetimes):
+            lifetime.revoke()
         services = tuple(self._credential_services)
         for _, _, service in services:
             await service.close()
@@ -1266,6 +1524,7 @@ class ModuleServicesFactory:
     ) -> None:
         """Retire one stopped manifest binding after a module replacement."""
 
+        validate_contract(manifest)
         if type(module_id) is not str or not module_id.strip():
             raise ValueError("module ID is required to retire credentials")
         if not isinstance(manifest, ModuleManifest):
@@ -1281,7 +1540,17 @@ class ModuleServicesFactory:
         if cached is not None and cached[0] == manifest:
             self._http_by_module.pop(module_id, None)
 
-    def _build_module(self, module_id: str, manifest: ModuleManifest) -> ModuleServices:
+    def _build_module(
+        self,
+        module_id: str,
+        manifest: ModuleManifest,
+        service_lifetime: _ServiceLifetime,
+    ) -> ModuleServices:
+        if self._services_closed:
+            raise ServiceUnavailable()
+        service_lifetime.check()
+        self._service_lifetimes.add(service_lifetime)
+        validate_contract(manifest)
         fields: tuple[ConfigField, ...] = manifest.config_fields
         if module_id == CORE_MODULE_ID or any(
             field.name in {CORE_DEFAULTS_FIELD, "default_region"} for field in fields
@@ -1294,7 +1563,7 @@ class ModuleServicesFactory:
             raise ValueError("host config conflicts with declared Core config fields")
         if fields:
             config = ConfigurationCoordinator(
-                ConfigTarget(self._config_principal_id, module_id),
+                validate_contract(ConfigTarget(self._config_principal_id, module_id)),
                 fields,
                 self._repositories.config,
                 self._repositories.secret_store,
@@ -1302,7 +1571,7 @@ class ModuleServicesFactory:
             ).view()
         else:
             config = _EmptyConfigView(
-                ConfigTarget(self._config_principal_id, module_id)
+                validate_contract(ConfigTarget(self._config_principal_id, module_id))
             )
         if host_values:
             config = _HostConfigView(config, host_values)
@@ -1366,19 +1635,21 @@ class ModuleServicesFactory:
             self._http_by_module[module_id] = (manifest, http)
         else:
             http = cached_http[1]
-        binder = InvocationServiceBinder(
-            module_id,
-            self._registry,
-            self._issuer,
-            self._lifecycle,
-            self._repositories,
-            authorization,
-            self._caller_issuer,
-            http,
-            principal_resolver=self._principal_resolver,
-            owner_authority=self._owner_authority,
-            clock=self._clock,
-            utc_clock=self._utc_clock,
+        binder = validate_contract(
+            InvocationServiceBinder(
+                module_id,
+                self._registry,
+                self._issuer,
+                self._lifecycle,
+                self._repositories,
+                authorization,
+                self._caller_issuer,
+                http,
+                principal_resolver=self._principal_resolver,
+                owner_authority=self._owner_authority,
+                clock=self._clock,
+                utc_clock=self._utc_clock,
+            )
         )
         subscription_delegate: SubscriptionOperations = self._subscriptions
         if subscription_delegate is None:
@@ -1393,23 +1664,41 @@ class ModuleServicesFactory:
             subscription_delegate,
             self._owner_authority,
         )
-        return ModuleServices(
-            config=config,
-            identities=_BoundIdentityResolver(
-                self._issuer, self._registry, self._lifecycle, module_id, identities
-            ),
-            accounts=_BoundAccountOperations(
-                self._issuer,
-                self._registry,
-                self._lifecycle,
-                module_id,
-                _AccountOperations(bindings, authorization),
-            ),
-            subscriptions=subscriptions,
-            scopes=binder,
-            storage=self._storage_router.paths(module_id)
-            if self._storage_router is not None
-            else None,
+        bundle = validate_contract(
+            ModuleServices(
+                config=_PublicConfigView(config),
+                identities=_BoundIdentityResolver(
+                    self._issuer, self._registry, self._lifecycle, module_id, identities
+                ),
+                accounts=_BoundAccountOperations(
+                    self._issuer,
+                    self._registry,
+                    self._lifecycle,
+                    module_id,
+                    _AccountOperations(bindings, authorization),
+                ),
+                subscriptions=subscriptions,
+                scopes=binder,
+            )
+        )
+        return validate_contract(
+            ModuleServices(
+                config=_LifetimePort(bundle.config, service_lifetime, {"current"}),
+                identities=_LifetimePort(
+                    bundle.identities, service_lifetime, {"default_identity"}
+                ),
+                accounts=_LifetimePort(
+                    bundle.accounts,
+                    service_lifetime,
+                    {"status", "begin_login", "bind", "bindings", "unbind", "revoke"},
+                ),
+                subscriptions=_LifetimePort(
+                    bundle.subscriptions,
+                    service_lifetime,
+                    {"create_request", "revise_request", "list_current", "cancel"},
+                ),
+                scopes=_LifetimePort(bundle.scopes, service_lifetime, {"bind"}),
+            )
         )
 
 
@@ -1423,11 +1712,51 @@ def _freeze_host_config_snapshots(
         raise TypeError("module host config snapshots must be a mapping")
     frozen = {}
     for module_id, values in snapshots.items():
-        target = ConfigTarget("host-config", module_id)
+        target = validate_contract(ConfigTarget("host-config", module_id))
         if not isinstance(values, Mapping):
             raise TypeError("module host config values must be a mapping")
-        frozen[module_id] = ConfigSnapshot(1, values, target=target).values
+        frozen[module_id] = validate_contract(
+            ConfigSnapshot(1, values, target=target)
+        ).values
     return MappingProxyType(frozen)
+
+
+class _LifetimePort:
+    """Existing SDK operations fenced by their exact Core instance lifetime."""
+
+    __slots__ = ("__delegate", "__lifetime", "__methods")
+
+    def __init__(self, delegate, lifetime, methods):
+        self.__delegate = delegate
+        self.__lifetime = lifetime
+        self.__methods = frozenset(methods)
+
+    def __getattr__(self, name):
+        if name not in self.__methods:
+            raise AttributeError(name)
+        target = getattr(self.__delegate, name)
+
+        @public_boundary("service")
+        async def invoke(*args, **kwargs):
+            self.__lifetime.check()
+            result = await target(*args, **kwargs)
+            self.__lifetime.check()
+            return result
+
+        return invoke
+
+
+class _PublicConfigView:
+    __slots__ = ("_delegate",)
+
+    def __init__(self, delegate):
+        self._delegate = delegate
+
+    @public_boundary("service")
+    async def current(self):
+        result = await self._delegate.current()
+        _canonical_input(result, ConfigSnapshot)
+        return result
 
 
 class _HostConfigView:
@@ -1443,11 +1772,13 @@ class _HostConfigView:
         core = await self._core.current()
         if set(core.values) & set(self._host_values):
             raise ValueError("host config conflicts with Core config values")
-        return ConfigSnapshot(
-            core.revision,
-            {**core.values, **self._host_values},
-            secret_metadata=core.secret_metadata,
-            target=core.target,
+        return validate_contract(
+            ConfigSnapshot(
+                core.revision,
+                {**core.values, **self._host_values},
+                secret_metadata=core.secret_metadata,
+                target=core.target,
+            )
         )
 
 
@@ -1457,10 +1788,11 @@ class _EmptyConfigView:
     __slots__ = ("_target",)
 
     def __init__(self, target: ConfigTarget) -> None:
+        validate_contract(target)
         self._target = target
 
     async def current(self) -> ConfigSnapshot:
-        return ConfigSnapshot(1, {}, target=self._target)
+        return validate_contract(ConfigSnapshot(1, {}, target=self._target))
 
 
 __all__ = [

@@ -31,9 +31,7 @@ class InstalledCoreHardeningWorkspace:
     """Build one pinned wheel and run real-Core scenarios in isolated children."""
 
     def __init__(self) -> None:
-        self._temporary = tempfile.TemporaryDirectory(
-            prefix="core-hardening-r-", dir=REPOSITORY_ROOT
-        )
+        self._temporary = tempfile.TemporaryDirectory(prefix="core-hardening-r-")
         self.root = Path(self._temporary.name)
         self.installed: InstalledSdk = build_and_install_pinned_sdk(self.root)
 
@@ -89,10 +87,10 @@ def _isolated_probe_main() -> None:
     from datetime import UTC, datetime, timedelta
     from types import MappingProxyType
 
-    sdk = importlib.import_module("yomihime_sdk")
+    sdk = importlib.import_module("yomihime_game_link_sdk")
     if not Path(sdk.__file__).resolve().is_relative_to(site_root.resolve()):
         raise AssertionError("canonical SDK did not load from the installed site")
-    if importlib.metadata.version("yomihime-module-sdk") != "1.8.0":
+    if importlib.metadata.version("yomihime-game-link-sdk") != "0.1.0a6":
         raise AssertionError("installed SDK version changed")
 
     sys.path.insert(1, str(repository_root))
@@ -107,28 +105,30 @@ def _isolated_probe_main() -> None:
     sys.modules[spec.name] = plugin
     spec.loader.exec_module(plugin)
 
-    from ygl_core_hardening_subject.api import contexts as core_contexts
-    from ygl_core_hardening_subject.api import services as core_services
-    from ygl_core_hardening_subject.api import storage as core_storage
-    from ygl_core_hardening_subject.api.administration import (
+    from ygl_core_hardening_subject.core.contracts import contexts as core_contexts
+    from ygl_core_hardening_subject.core.contracts import services as core_services
+    from ygl_core_hardening_subject.core.contracts import storage as core_storage
+    from ygl_core_hardening_subject.core.contracts.administration import (
         AdminAuthorizationDenied,
         AdminOperation,
     )
-    from ygl_core_hardening_subject.api.display import (
+    from ygl_core_hardening_subject.core.contracts.display import (
         DisplayLimits,
         DisplayOutput,
     )
-    from ygl_core_hardening_subject.api.services import (
+    from ygl_core_hardening_subject.core.contracts.services import (
         ConfigFieldUpdate,
         ConfigPatch,
-        ConfigPatchMode,
         ConversationKey,
         Grant,
         GrantStatus,
         HealthStatus,
         Principal,
     )
-    from ygl_core_hardening_subject.api.storage import GrantReference
+    from ygl_core_hardening_subject.core.contracts.storage import GrantReference
+    from ygl_core_hardening_subject.core.contracts.validation_boundary import (
+        validate_contract,
+    )
     from ygl_core_hardening_subject.core.help_catalog import HelpCatalog
     from ygl_core_hardening_subject.core.ports import (
         MessageReceipt,
@@ -157,14 +157,17 @@ def _isolated_probe_main() -> None:
         TrustedSubscriptionGate,
     )
 
-    from yomihime_sdk.api import contexts as sdk_contexts
-    from yomihime_sdk.api import services as sdk_services
-    from yomihime_sdk.api import storage as sdk_storage
+    from yomihime_game_link_sdk import contexts as sdk_contexts
+    from yomihime_game_link_sdk import services as sdk_services
+    from yomihime_game_link_sdk import storage as sdk_storage
+    from yomihime_game_link_sdk.declarations import ConfigUpdateMode
 
     if core_contexts.InvocationOrigin is not sdk_contexts.InvocationOrigin:
         raise AssertionError("Core and installed SDK InvocationOrigin diverged")
-    if core_services.Grant is not sdk_services.Grant:
-        raise AssertionError("Core and installed SDK Grant class identity diverged")
+    if core_services.ResolvedIdentity is not sdk_services.ResolvedIdentity:
+        raise AssertionError("Core and installed SDK ResolvedIdentity diverged")
+    if hasattr(sdk_services, "Grant") or hasattr(sdk, "Grant"):
+        raise AssertionError("Core authority Grant must not be exported by the SDK")
     if core_storage.GrantReference is not sdk_storage.GrantReference:
         raise AssertionError("Core and installed SDK GrantReference identity diverged")
 
@@ -197,12 +200,12 @@ def _isolated_probe_main() -> None:
     class _Renderer:
         async def render(self, document, *, limits, audience):
             del limits, audience
-            return DisplayOutput(document.title)
+            return validate_contract(DisplayOutput(document.title))
 
         async def render_batch(self, batch, limits):
             del limits
-            return DisplayOutput(
-                "\n".join(item.document.title for item in batch.members)
+            return validate_contract(
+                DisplayOutput("\n".join(item.document.title for item in batch.members))
             )
 
     class _MessagePort:
@@ -214,9 +217,94 @@ def _isolated_probe_main() -> None:
             return MessageReceipt(MessageStatus.ACCEPTED, f"offline-{len(self.calls)}")
 
     class _HttpTransport:
+        def __init__(self):
+            self.calls = 0
+
         async def request(self, request):
+            self.calls += 1
             del request
             raise AssertionError("offline sample must not issue HTTP requests")
+
+    class _ControlledHost:
+        def __init__(self):
+            self.receipts = {}
+
+        @staticmethod
+        def facts(event):
+            return (
+                event.adapter_id,
+                event.actor_id,
+                event.conversation_id,
+                event.delivery_route,
+                event.conversation_kind,
+                event.message_text,
+                event.message_correlation,
+            )
+
+        def tool_ingress(self, runtime, user):
+            module = runtime.registry.snapshot().module("offline_sample/status")
+            if runtime.registry.snapshot().tool("sample_status") != (
+                "offline_sample/status",
+                "status",
+            ):
+                raise AssertionError("sample_status is not registered")
+            event = HostIngress(
+                "offline-host",
+                f"external-{user}",
+                f"dm-{user}",
+                f"route-{user}",
+                core_services.ConversationKind.DIRECT,
+                object(),
+                message_text="offline fixture status request",
+                message_correlation=f"offline-status-{user}",
+            )
+            self.receipts[id(event.evidence)] = (
+                event,
+                self.facts(event),
+                runtime,
+                module,
+                module.epoch,
+            )
+            if not self.current(core_contexts.InvocationOrigin.LLM_TOOL, event):
+                raise AssertionError("Host tool source is not current")
+            return event
+
+        def current(self, origin, event):
+            if origin is not core_contexts.InvocationOrigin.LLM_TOOL:
+                return False
+            owned = self.receipts.get(id(event.evidence))
+            if owned is None or owned[0] is not event or owned[1] != self.facts(event):
+                return False
+            _, _, runtime, module, epoch = owned
+            state = runtime.lifecycle.state("offline_sample/status")
+            return bool(
+                event.grant_reference is None
+                and runtime.accepting
+                and runtime.registry.snapshot().modules.get("offline_sample/status")
+                is module
+                and module.enabled
+                and module.epoch == epoch
+                and state.lifecycle.value == "active"
+                and state.identity is not None
+                and state.identity.module_epoch == epoch
+                and runtime.registry.snapshot().tools.get("sample_status")
+                == ("offline_sample/status", "status")
+            )
+
+        def validate(self, origin, event):
+            if origin is core_contexts.InvocationOrigin.LLM_TOOL:
+                return self.current(origin, event)
+            return (
+                origin is core_contexts.InvocationOrigin.COMMAND
+                and event.evidence == f"trusted-host:{event.actor_id}"
+                and event.adapter_id == "offline-host"
+            )
+
+        def revoke(self, event):
+            self.receipts.pop(id(event.evidence), None)
+
+        def close(self):
+            self.receipts.clear()
 
     async def _run() -> dict[str, object]:
         work_root.mkdir(parents=True, exist_ok=False)
@@ -234,13 +322,17 @@ def _isolated_probe_main() -> None:
 
         clock = _Clock()
         message_port = _MessagePort()
+        http_transport = _HttpTransport()
+        host = _ControlledHost()
         trusted_sessions: dict[str, int] = {}
         trusted_deployment = False
         manifests = MappingProxyType({})
         gates = MappingProxyType({})
         if scenario in {"subscriptions", "reopen"}:
             resource = (
-                importlib.resources.files("yomihime_sdk._examples.offline_sample")
+                importlib.resources.files(
+                    "yomihime_game_link_sdk._examples.offline_sample"
+                )
                 .joinpath("manifest.json")
                 .read_bytes()
             )
@@ -300,17 +392,6 @@ def _isolated_probe_main() -> None:
                 )
             )
 
-        def ingress_validator(origin, ingress):
-            return (
-                origin
-                in (
-                    core_contexts.InvocationOrigin.COMMAND,
-                    core_contexts.InvocationOrigin.LLM_TOOL,
-                )
-                and ingress.evidence == f"trusted-host:{ingress.actor_id}"
-                and ingress.adapter_id == "offline-host"
-            )
-
         def create_runtime() -> CoreRuntime:
             return CoreRuntime(
                 database=SQLiteDatabase(work_root / "runtime.sqlite3"),
@@ -318,14 +399,15 @@ def _isolated_probe_main() -> None:
                 file_root=work_root / "files",
                 secret_root=work_root / "secrets",
                 secret_codec=_Codec(),
-                http_transport=_HttpTransport(),
+                http_transport=http_transport,
                 renderer=GenericDisplayRenderer(
                     RenderingBounds(2000, 100, 100, 100, 1024 * 1024, 2048, 8, 64, 100)
                 ),
-                display_limits=DisplayLimits(4, 1024 * 1024),
+                display_limits=validate_contract(DisplayLimits(4, 1024 * 1024)),
                 message_port=message_port,
                 admin_context_validator=admin_validator,
-                host_ingress_validator=ingress_validator,
+                host_ingress_validator=host.validate,
+                host_message_current_validator=host.current,
                 config_principal_id="host-config",
                 identity_namespace="host-bridge",
                 utc_clock=clock,
@@ -534,9 +616,13 @@ def _isolated_probe_main() -> None:
                 raise AssertionError("installed sample status command did not send")
             command_send_count = len(message_port.calls)
 
-            tool = await runtime.invoke_tool(
-                "offline_sample/status", "sample_status", {}, ingress=ingress("alice")
-            )
+            tool_event = host.tool_ingress(runtime, "alice")
+            try:
+                tool = await runtime.invoke_tool(
+                    "offline_sample/status", "sample_status", {}, ingress=tool_event
+                )
+            finally:
+                host.revoke(tool_event)
             if (
                 tool.output.status.value != "tool_result"
                 or len(message_port.calls) != command_send_count
@@ -621,7 +707,7 @@ def _isolated_probe_main() -> None:
             )
             patch = ConfigPatch(
                 config.config.revision,
-                (ConfigFieldUpdate("region", ConfigPatchMode.REPLACE, value="north"),),
+                (ConfigFieldUpdate("region", ConfigUpdateMode.REPLACE, value="north"),),
                 manifest.config_fields,
             )
             await runtime.admin_operations.update_config(
@@ -1051,7 +1137,9 @@ def _isolated_probe_main() -> None:
                 await runtime.repositories.authorization.create_grant(
                     grant, expected_revision=0
                 )
-                grant_ref = GrantReference(grant.grant_id, grant.revision)
+                grant_ref = validate_contract(
+                    GrantReference(grant.grant_id, grant.revision)
+                )
 
                 private_status = await command(
                     "alice", "private status", {}, grant=grant_ref
@@ -1484,17 +1572,27 @@ def _isolated_probe_main() -> None:
                 )
                 tool_denials = {}
                 for tool_name in ("account_list", "subscription_list"):
+                    tool_event = host.tool_ingress(runtime, "alice")
                     try:
                         await runtime.invoke_tool(
                             "offline_sample/status",
                             tool_name,
                             {},
-                            ingress=ingress("alice"),
+                            ingress=tool_event,
                         )
-                    except PermissionError:
+                    except PermissionError as error:
+                        if (
+                            type(error) is not PermissionError
+                            or str(error) != "Tool is not declared"
+                        ):
+                            raise AssertionError(
+                                "management Tool failed before its declaration gate"
+                            ) from error
                         tool_denials[tool_name] = True
                     else:
                         tool_denials[tool_name] = False
+                    finally:
+                        host.revoke(tool_event)
                 tool_bindings_after = (
                     await runtime.repositories.bindings.list_for(
                         "principal-alice",
@@ -1524,6 +1622,9 @@ def _isolated_probe_main() -> None:
                     or len(message_port.calls) != tool_send_count
                     or tool_bindings_after != tool_bindings_before
                     or tool_subscriptions_after != tool_subscriptions_before
+                    or runtime._host_flights
+                    or http_transport.calls != 0
+                    or host.receipts
                 ):
                     raise AssertionError(
                         "a denied management Tool call sent or changed persisted data"
@@ -1841,8 +1942,13 @@ def _isolated_probe_main() -> None:
 
             raise AssertionError("unexpected CoreHardening scenario")
         finally:
+            host.close()
             if not runtime.closed:
                 await runtime.close(timeout=1.0)
+            if http_transport.calls != 0 or runtime._host_flights or host.receipts:
+                raise AssertionError(
+                    "offline Host/Core probe retained a request or issued HTTP"
+                )
 
     result = asyncio.run(_run())
     print(json.dumps(result, sort_keys=True))

@@ -3,9 +3,10 @@
 import asyncio
 import json
 
-from ygl_test_subject.api.services import HttpResponse
+from ygl_test_subject.core.contracts.validation_boundary import validate_contract
 
 from tests.host.test_market_integration import MarketHostIntegrationTests
+from yomihime_game_link_sdk.services import HttpResponse
 
 
 async def market_public_samples() -> dict:
@@ -36,7 +37,7 @@ async def market_public_samples() -> dict:
 
         async def partial(request):
             if "/Japan/" in request.path:
-                return HttpResponse(429, {}, b"{}")
+                return validate_contract(HttpResponse(429, {}, b"{}"))
 
         fixture.transport.callback = partial
         samples["partial"] = await fixture.public(dict(query="44091", region="global"))

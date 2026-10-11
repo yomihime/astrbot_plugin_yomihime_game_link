@@ -2,38 +2,52 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 
-from yomihime_sdk import (
-    CapabilityHealth,
-    CapabilityReference,
+from yomihime_game_link_sdk.contexts import InvocationView, MessageContext
+from yomihime_game_link_sdk.declarations import CapabilityReference
+from yomihime_game_link_sdk.display import DisplayDocument, Privacy, TextBlock
+from yomihime_game_link_sdk.errors import (
+    AccessDenied,
+    OperationTimeout,
+    RevisionConflict,
+    ServiceUnavailable,
+    UniqueConstraintViolation,
+)
+from yomihime_game_link_sdk.results import (
     CapabilityResult,
-    CollectionView,
-    DigestScheduleProfile,
-    DisplayDocument,
-    DstFoldPolicy,
-    DstGapPolicy,
     ErrorCode,
     ErrorDetail,
-    EvaluationDecision,
-    EvaluationState,
     FactDocument,
+    ResultStatus,
+)
+from yomihime_game_link_sdk.services import (
+    CapabilityHealth,
     HealthReport,
     HealthStatus,
-    InvocationView,
-    JsonObject,
     ModuleHandlers,
     ModuleServices,
+    ResolvedIdentity,
+)
+from yomihime_game_link_sdk.storage import (
+    CacheLookupStatus,
+    CacheQuery,
+    JsonObject,
+    OwnershipKind,
+)
+from yomihime_game_link_sdk.subscriptions import (
+    CollectionView,
+    DigestScheduleProfile,
+    DstFoldPolicy,
+    DstGapPolicy,
+    EvaluationDecision,
+    EvaluationState,
     NormalizedInput,
     Observation,
     ObservationCompleteness,
-    OwnershipKind,
-    Privacy,
-    ResolvedIdentity,
-    ResultStatus,
     SubscriptionRequest,
     SubscriptionView,
-    TextBlock,
 )
 
 _OBSERVED_AT = datetime(2026, 1, 1, tzinfo=UTC)
@@ -42,11 +56,54 @@ _SOURCE_CAPABILITY = "read"
 _SAMPLE_VALUE = 7
 
 
+async def read_tool_message(
+    services: ModuleServices, invocation: InvocationView
+) -> MessageContext:
+    """Read a current root Tool message through the public bound SDK port.
+
+    The returned value is module input, not authority or public output. Call
+    again after other awaits and before using it for effects or results.
+    Commands, Web and nested invocations do not acquire a message here.
+    """
+    scope = await services.scopes.bind(invocation)
+    return await scope.message.read()
+
+
+def public_error_example() -> CapabilityResult:
+    """Fixed public JSON error example, not a registered handler or authority."""
+    error = ErrorDetail(
+        ErrorCode.NO_RECORDS,
+        "No matching public records; choose another source.",
+    )
+    return CapabilityResult(
+        "offline-public-error",
+        ResultStatus.ERROR,
+        error=error,
+        model_facts=FactDocument(
+            {
+                "status": "error",
+                "error": {"code": error.code.value, "message": error.message},
+                "supplement": {
+                    "archive": {
+                        "attempted_source": "offline",
+                        "available": None,
+                        "confidence": 0.25,
+                    },
+                    "recovery_hint": "Choose another public source.",
+                },
+            }
+        ),
+    )
+
+
 class Factory:
     """Factory for the command, Tool, account, subscription, and collector module."""
 
     async def create(self, services: ModuleServices) -> "OfflineSampleModule":
-        return OfflineSampleModule(services)
+        configuration = await services.config.current()
+        instance = OfflineSampleModule(services)
+        instance.factory_config_revision = configuration.revision
+        return instance
 
 
 class SourceFactory:
@@ -60,6 +117,15 @@ class SourceFactory:
 class OfflineSampleModule:
     def __init__(self, services: ModuleServices) -> None:
         self._services = services
+        self.observations = {}
+        self.last_scope = None
+        self.hold_entered = asyncio.Event()
+        self.hold_release = asyncio.Event()
+        self.task_started = asyncio.Event()
+        self.task_finished = asyncio.Event()
+        self.start_count = 0
+        self.stop_count = 0
+        self.late_returns = 0
 
     def handlers(self) -> ModuleHandlers:
         return ModuleHandlers(
@@ -74,6 +140,10 @@ class OfflineSampleModule:
                 "subscription_list": _SubscriptionListCapability(self._services),
                 "subscription_cancel": _SubscriptionCancelCapability(self._services),
                 "private_status": _PrivateStatusCapability(self._services),
+                "state": _StateCapability(self),
+                "message": _MessageCapability(self),
+                "public_error": _PublicErrorCapability(),
+                "subscription_revise": _SubscriptionReviseCapability(self._services),
             },
             collectors={
                 "public_catalog": _OfflineCollector(),
@@ -83,10 +153,14 @@ class OfflineSampleModule:
         )
 
     async def start(self) -> None:
-        return None
+        configuration = await self._services.config.current()
+        self.start_config_revision = configuration.revision
+        self.start_count += 1
 
     async def stop(self) -> None:
-        return None
+        configuration = await self._services.config.current()
+        self.stop_config_revision = configuration.revision
+        self.stop_count += 1
 
     async def check_health(self) -> HealthReport:
         # HealthResolver applies required_config/source/dependency availability
@@ -266,6 +340,7 @@ class _AccountUnbindCapability:
 class _SubscriptionCreateCapability:
     def __init__(self, services: ModuleServices) -> None:
         self._subscriptions = services.subscriptions
+        self.last_view = None
 
     async def invoke(
         self, context: InvocationView, parameters: JsonObject
@@ -287,19 +362,20 @@ class _SubscriptionCreateCapability:
             notification_mode=mode,
             digest_schedule=digest_schedule,
         )
-        await self._subscriptions.create_request(context, request)
+        self.last_view = await self._subscriptions.create_request(context, request)
         return _subscription_management_receipt()
 
 
 class _SubscriptionListCapability:
     def __init__(self, services: ModuleServices) -> None:
         self._subscriptions = services.subscriptions
+        self.last_views = ()
 
     async def invoke(
         self, context: InvocationView, parameters: JsonObject
     ) -> CapabilityResult:
         del parameters
-        await self._subscriptions.list_current(context)
+        self.last_views = await self._subscriptions.list_current(context)
         return _subscription_management_receipt()
 
 
@@ -316,6 +392,191 @@ class _SubscriptionCancelCapability:
             context, subscription_id, expected_revision=revision
         )
         return _subscription_management_receipt()
+
+
+class _SubscriptionReviseCapability:
+    def __init__(self, services: ModuleServices) -> None:
+        self._subscriptions = services.subscriptions
+        self.last_view = None
+
+    async def invoke(
+        self, context: InvocationView, parameters: JsonObject
+    ) -> CapabilityResult:
+        self.last_view = await self._subscriptions.revise_request(
+            context,
+            SubscriptionRequest(
+                type_id="public_watch",
+                collector_parameters={"region": str(parameters["region"])},
+                filters={"minimum": int(parameters["minimum"])},
+                notification_mode="instant",
+                subscription_id=str(parameters["subscription_id"]),
+                expected_revision=int(parameters["expected_revision"]),
+            ),
+        )
+        return _subscription_management_receipt()
+
+
+class _StateCapability:
+    """Small USER-owned notebook; receipts never expose notebook contents.
+
+    Observations and finite barriers are local demonstration state. They are
+    never authority and are not exported as public facts or SDK services.
+    """
+
+    def __init__(self, owner: OfflineSampleModule) -> None:
+        self.owner = owner
+
+    async def invoke(
+        self, context: InvocationView, parameters: JsonObject
+    ) -> CapabilityResult:
+        owner = self.owner
+        scope = await owner._services.scopes.bind(context)
+        owner.last_scope = scope
+        action = str(parameters["action"])
+        try:
+            config = await owner._services.config.current()
+            notebook = await scope.records.collection("notebook")
+            record = await notebook.get("note")
+            if action == "write":
+                value = {
+                    "value": int(parameters.get("value", 7)),
+                    "marker": "sample-private-note",
+                }
+                if record is None:
+                    record = await notebook.create("note", value)
+                else:
+                    record = await notebook.replace(
+                        "note", value, expected_revision=record.revision
+                    )
+                assert await notebook.get("note") == record
+            owner.observations = {
+                "region": config.values.get("region"),
+                "record": record,
+            }
+            if action == "cache":
+                entry = await scope.cache.put("note", {"value": 7}, ttl_seconds=600)
+                lookup = await scope.cache.lookup(CacheQuery("note"))
+                projection = await scope.cache.get("note")
+                missing = await scope.cache.lookup(CacheQuery("absent"))
+                assert (
+                    lookup.status is CacheLookupStatus.HIT
+                    and lookup.entry == entry == projection
+                )
+                assert (
+                    missing.status is CacheLookupStatus.MISS
+                    and await scope.cache.get("absent") is None
+                )
+                owner.observations.update(cache=entry, lookup=lookup, missing=missing)
+                await scope.cache.put("expired", {"value": 0}, ttl_seconds=0.001)
+                await asyncio.sleep(0.003)
+                expired = await scope.cache.lookup(CacheQuery("expired"))
+                assert (
+                    expired.status is CacheLookupStatus.EXPIRED
+                    and await scope.cache.get("expired") is None
+                )
+                owner.observations["expired"] = expired
+            elif action == "read":
+                owner.observations["cache"] = await scope.cache.lookup(
+                    CacheQuery("note")
+                )
+            elif action == "command_message":
+                await scope.message.read()
+            elif action in {"hold", "late"}:
+                owner.task_started.clear()
+                owner.task_finished.clear()
+                work_end = asyncio.Event()
+
+                async def local_work():
+                    owner.task_started.set()
+                    try:
+                        await work_end.wait()
+                    finally:
+                        owner.task_finished.set()
+
+                scope.tasks.create_task(local_work(), name="offline-local-work")
+                await owner.task_started.wait()
+                owner.hold_entered.set()
+                release_deadline = asyncio.get_running_loop().time() + 2.0
+                cancellations = 0
+                try:
+                    while not owner.hold_release.is_set():
+                        try:
+                            remaining = (
+                                release_deadline - asyncio.get_running_loop().time()
+                            )
+                            if remaining <= 0:
+                                raise TimeoutError("sample barrier ended")
+                            await asyncio.wait_for(owner.hold_release.wait(), remaining)
+                        except asyncio.CancelledError:
+                            cancellations += 1
+                            if action != "late":
+                                raise
+                            if cancellations > 3:
+                                raise
+                finally:
+                    # SDK work belongs to the module lifecycle. This finite
+                    # demonstration also owns its per-call completion signal.
+                    work_end.set()
+                    await owner.task_finished.wait()
+                if action == "late":
+                    owner.late_returns += 1
+            return _result(
+                "offline-state",
+                "Sample notebook",
+                "The notebook request was processed.",
+                "This fixed private receipt contains no notebook data.",
+                privacy=Privacy.PRIVATE,
+            )
+        except (
+            AccessDenied,
+            RevisionConflict,
+            ServiceUnavailable,
+            OperationTimeout,
+            UniqueConstraintViolation,
+        ) as error:
+            owner.observations["public_error_code"] = error.code
+            return CapabilityResult(
+                "offline-state-denied",
+                ResultStatus.ERROR,
+                error=ErrorDetail(
+                    ErrorCode.MODULE_UNAVAILABLE, "The sample operation is unavailable."
+                ),
+                privacy=Privacy.PRIVATE,
+            )
+
+
+class _MessageCapability:
+    def __init__(self, owner: OfflineSampleModule) -> None:
+        self.owner = owner
+
+    async def invoke(
+        self, context: InvocationView, parameters: JsonObject
+    ) -> CapabilityResult:
+        scope = await self.owner._services.scopes.bind(context)
+        self.owner.last_scope = scope
+        message = await scope.message.read()
+        self.owner.observations = {
+            "message_read": bool(message.text),
+            "message_type": type(message),
+        }
+        if parameters.get("hold", False):
+            self.owner.hold_entered.set()
+            await self.owner.hold_release.wait()
+            await scope.message.read()
+        return _result(
+            "offline-message",
+            "Sample message",
+            "The current message was read.",
+            "This fixed receipt contains no message text or correlation.",
+        )
+
+
+class _PublicErrorCapability:
+    async def invoke(
+        self, context: InvocationView, parameters: JsonObject
+    ) -> CapabilityResult:
+        del context, parameters
+        return public_error_example()
 
 
 class _PrivateStatusCapability:
@@ -400,4 +661,4 @@ class _SampleEvaluator:
         )
 
 
-__all__ = ["Factory", "SourceFactory"]
+__all__ = ["Factory", "SourceFactory", "read_tool_message", "public_error_example"]

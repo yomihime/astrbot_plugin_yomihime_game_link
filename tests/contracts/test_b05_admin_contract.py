@@ -4,7 +4,7 @@ import inspect
 import unittest
 from typing import get_type_hints
 
-from ygl_test_subject.api.administration import (
+from ygl_test_subject.core.contracts.administration import (
     ADMIN_CONTRACT_REVISION,
     ADMIN_ERROR_MESSAGES,
     AdminAuthorizationContext,
@@ -19,8 +19,8 @@ from ygl_test_subject.api.administration import (
     ModuleLifecycle,
     ModuleStatus,
 )
-from ygl_test_subject.api.services import ConfigPatch
-from ygl_test_subject.api.version import (
+from ygl_test_subject.core.contracts.services import ConfigPatch
+from ygl_test_subject.core.contracts.version import (
     COMPATIBLE_CONTRACT_VERSIONS,
     CONTRACT_REVISION,
     CONTRACT_VERSION,

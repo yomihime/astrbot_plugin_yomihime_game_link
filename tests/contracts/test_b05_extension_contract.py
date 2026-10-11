@@ -5,31 +5,39 @@ import unittest
 from dataclasses import fields
 from typing import get_type_hints
 
-from ygl_test_subject.api.manifests import (
+from ygl_test_subject.core.contracts.manifests import (
     EXTENSION_DESCRIPTOR_FIELDS,
     EXTENSION_FACTORY_ABI_VERSION,
     EXTENSION_MANIFEST_ABI,
     EXTENSION_MANIFEST_FILENAME,
     EXTENSION_MANIFEST_MAX_BYTES,
     EXTENSION_PACKAGE_FIELDS,
+    ExtensionManifestABI,
+)
+from ygl_test_subject.core.contracts.validation_boundary import validate_contract
+from ygl_test_subject.core.contracts.version import (
+    COMPATIBLE_CONTRACT_VERSIONS,
+    CONTRACT_VERSION,
+)
+
+from yomihime_game_link_sdk.declarations import (
     CapabilityDescriptor,
     CapabilityEffect,
     CapabilityReference,
-    ExtensionManifestABI,
     InvocationPolicy,
     ModuleCategory,
     ModuleManifest,
     PackageManifest,
     PrivacyFloor,
 )
-from ygl_test_subject.api.services import (
+from yomihime_game_link_sdk.services import (
     HealthReport,
     ModuleFactory,
     ModuleHandlers,
     ModuleInstance,
     ModuleServices,
 )
-from ygl_test_subject.api.version import COMPATIBLE_CONTRACT_VERSIONS, CONTRACT_VERSION
+from yomihime_game_link_sdk.version import MODULE_ABI_VERSION
 
 
 class B05ExtensionContractTests(unittest.TestCase):
@@ -75,22 +83,26 @@ class B05ExtensionContractTests(unittest.TestCase):
 
     def test_package_mapping_preserves_existing_contract_compatibility(self):
         self.assertIn(CONTRACT_VERSION, COMPATIBLE_CONTRACT_VERSIONS)
-        module = ModuleManifest(
-            module_id="sample",
-            route="sample",
-            category=ModuleCategory.GAME,
-            factory_entry="sample.module:create",
-            module_version="1.0.0",
-            capabilities=(),
+        module = validate_contract(
+            ModuleManifest(
+                module_id="sample",
+                route="sample",
+                category=ModuleCategory.GAME,
+                factory_entry="sample.module:create",
+                module_version="1.0.0",
+                capabilities=(),
+            )
         )
-        package = PackageManifest(
-            package_id="sample_pkg",
-            package_version="1.0.0",
-            contract_version=CONTRACT_VERSION,
-            modules=(module,),
-            author="Example",
-            license="MIT",
-            source="https://example.invalid/sample",
+        package = validate_contract(
+            PackageManifest(
+                package_id="sample_pkg",
+                package_version="1.0.0",
+                contract_version=MODULE_ABI_VERSION,
+                modules=(module,),
+                author="Example",
+                license="MIT",
+                source="https://example.invalid/sample",
+            )
         )
         self.assertEqual(package.global_module_id("sample"), "sample_pkg/sample")
         self.assertEqual(
@@ -106,14 +118,16 @@ class B05ExtensionContractTests(unittest.TestCase):
             ),
         )
         with self.assertRaises(ValueError):
-            PackageManifest(
-                package_id="sample_pkg",
-                package_version="1.0.0",
-                contract_version="99.0.0",
-                modules=(module,),
-                author="Example",
-                license="MIT",
-                source="https://example.invalid/sample",
+            validate_contract(
+                PackageManifest(
+                    package_id="sample_pkg",
+                    package_version="1.0.0",
+                    contract_version="99.0.0",
+                    modules=(module,),
+                    author="Example",
+                    license="MIT",
+                    source="https://example.invalid/sample",
+                )
             )
 
     def test_factory_abi_is_async_and_does_not_expand_services(self):
@@ -134,20 +148,20 @@ class B05ExtensionContractTests(unittest.TestCase):
         )
         self.assertEqual(
             tuple(ModuleServices.__dataclass_fields__),
-            ("config", "identities", "accounts", "subscriptions", "scopes", "storage"),
+            ("config", "identities", "accounts", "subscriptions", "scopes"),
         )
         signature = inspect.signature(ModuleServices)
         self.assertEqual(
             tuple(signature.parameters),
-            ("config", "identities", "accounts", "subscriptions", "scopes", "storage"),
+            ("config", "identities", "accounts", "subscriptions", "scopes"),
         )
-        self.assertIsNone(signature.parameters["storage"].default)
+        self.assertNotIn("storage", signature.parameters)
         self.assertEqual(CONTRACT_VERSION, "1.8.0")
         self.assertIn("1.4.0", COMPATIBLE_CONTRACT_VERSIONS)
         # The five positional handles used by old factories remain valid.
         handles = tuple(object() for _ in range(5))
-        legacy_services = ModuleServices(*handles)
-        self.assertIsNone(legacy_services.storage)
+        legacy_services = validate_contract(ModuleServices(*handles))
+        self.assertFalse(hasattr(legacy_services, "storage"))
         self.assertEqual(
             tuple(
                 getattr(legacy_services, name)
@@ -156,7 +170,7 @@ class B05ExtensionContractTests(unittest.TestCase):
             handles,
         )
         with self.assertRaises(TypeError):
-            ModuleServices(*handles, host=object())
+            validate_contract(ModuleServices(*handles, host=object()))
         from ygl_test_subject.examples.empty_module.module import (
             Factory as EmptyFactory,
         )
@@ -186,38 +200,46 @@ class B05ExtensionContractTests(unittest.TestCase):
         self.assertEqual(
             set(reference_fixture), EXTENSION_DESCRIPTOR_FIELDS["capability_reference"]
         )
-        reference = CapabilityReference(**reference_fixture)
+        reference = validate_contract(CapabilityReference(**reference_fixture))
         self.assertEqual(reference.module_id, "other_pkg/status")
         self.assertEqual(reference.capability_id, "lookup")
-        descriptor = CapabilityDescriptor(
-            capability_id="status",
-            input_schema={
-                "type": "object",
-                "properties": {},
-                "required": (),
-                "additionalProperties": False,
-            },
-            invocation_policy=InvocationPolicy.NATURAL_LANGUAGE_ALLOWED,
-            effect=CapabilityEffect.READ_ONLY,
-            privacy_floor=PrivacyFloor.PUBLIC,
+        descriptor = validate_contract(
+            CapabilityDescriptor(
+                capability_id="status",
+                input_schema={
+                    "type": "object",
+                    "properties": {},
+                    "required": (),
+                    "additionalProperties": False,
+                },
+                invocation_policy=InvocationPolicy.NATURAL_LANGUAGE_ALLOWED,
+                effect=CapabilityEffect.READ_ONLY,
+                privacy_floor=PrivacyFloor.PUBLIC,
+            )
         )
         self.assertFalse(descriptor.input_schema["additionalProperties"])
-        dependent = CapabilityDescriptor(
-            capability_id="dependent",
-            input_schema={"type": "object"},
-            invocation_policy=InvocationPolicy.NATURAL_LANGUAGE_ALLOWED,
-            effect=CapabilityEffect.READ_ONLY,
-            required_capabilities=(reference,),
+        dependent = validate_contract(
+            CapabilityDescriptor(
+                capability_id="dependent",
+                input_schema={"type": "object"},
+                invocation_policy=InvocationPolicy.NATURAL_LANGUAGE_ALLOWED,
+                effect=CapabilityEffect.READ_ONLY,
+                required_capabilities=(reference,),
+            )
         )
         self.assertEqual(dependent.required_capabilities, (reference,))
         with self.assertRaises((TypeError, ValueError)):
-            CapabilityReference(**{**reference_fixture, "extra": "rejected"})
+            validate_contract(
+                CapabilityReference(**{**reference_fixture, "extra": "rejected"})
+            )
         with self.assertRaises(ValueError):
-            CapabilityDescriptor(
-                capability_id="status",
-                input_schema={"type": "object", "additionalProperties": True},
-                invocation_policy=InvocationPolicy.NATURAL_LANGUAGE_ALLOWED,
-                effect=CapabilityEffect.READ_ONLY,
+            validate_contract(
+                CapabilityDescriptor(
+                    capability_id="status",
+                    input_schema={"type": "object", "additionalProperties": True},
+                    invocation_policy=InvocationPolicy.NATURAL_LANGUAGE_ALLOWED,
+                    effect=CapabilityEffect.READ_ONLY,
+                )
             )
 
 

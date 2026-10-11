@@ -1,14 +1,16 @@
 import unittest
 
-from ygl_test_subject.api.contexts import InvocationOrigin
-from ygl_test_subject.api.storage import GrantReference, OwnerScope
-from ygl_test_subject.api.subscriptions import (
+from ygl_test_subject.core.collection_context import require_collection_context
+from ygl_test_subject.core.context_issuer import ContextIssuer, InvalidInvocation
+from ygl_test_subject.core.contracts.validation_boundary import validate_contract
+
+from yomihime_game_link_sdk.contexts import InvocationOrigin
+from yomihime_game_link_sdk.storage import GrantReference, OwnerScope
+from yomihime_game_link_sdk.subscriptions import (
     CollectionKey,
     CollectionView,
     NormalizedInput,
 )
-from ygl_test_subject.core.collection_context import require_collection_context
-from ygl_test_subject.core.context_issuer import ContextIssuer, InvalidInvocation
 
 
 class _RecordingBinder:
@@ -28,13 +30,15 @@ class CollectorContextContractTests(unittest.TestCase):
         self.issuer = ContextIssuer(clock=lambda: self.now)
 
     def key(self, scope):
-        return CollectionKey(
-            self.MODULE,
-            "prices",
-            1,
-            "steam",
-            NormalizedInput({"app": 1}),
-            scope,
+        return validate_contract(
+            CollectionKey(
+                self.MODULE,
+                "prices",
+                1,
+                "steam",
+                validate_contract(NormalizedInput({"app": 1})),
+                scope,
+            )
         )
 
     def issue(self, **kwargs):
@@ -49,7 +53,9 @@ class CollectorContextContractTests(unittest.TestCase):
 
     def test_cc01_public_scheduler_view_is_bound_as_same_object(self):
         invocation = self.issue()
-        context = CollectionView(self.key(OwnerScope.public()), invocation=invocation)
+        context = validate_contract(
+            CollectionView(self.key(OwnerScope.public()), invocation=invocation)
+        )
         binder = _RecordingBinder()
 
         validated = require_collection_context(
@@ -64,7 +70,9 @@ class CollectorContextContractTests(unittest.TestCase):
 
     def test_cc02_forged_copy_and_missing_invocation_are_rejected(self):
         invocation = self.issue()
-        context = CollectionView(self.key(OwnerScope.public()), invocation=invocation)
+        context = validate_contract(
+            CollectionView(self.key(OwnerScope.public()), invocation=invocation)
+        )
         forged = type(invocation)(
             invocation_id=invocation.invocation_id,
             origin=invocation.origin,
@@ -82,14 +90,17 @@ class CollectorContextContractTests(unittest.TestCase):
         )
         with self.assertRaises(InvalidInvocation):
             require_collection_context(
-                self.issuer, CollectionView(context.key, invocation=forged)
+                self.issuer,
+                validate_contract(CollectionView(context.key, invocation=forged)),
             )
         with self.assertRaises(InvalidInvocation):
-            require_collection_context(self.issuer, CollectionView(context.key))
+            require_collection_context(
+                self.issuer, validate_contract(CollectionView(context.key))
+            )
 
     def test_cc03_module_owner_and_grant_mismatches_are_rejected(self):
         owner = "owner-1"
-        grant = GrantReference("grant-1", 2)
+        grant = validate_contract(GrantReference("grant-1", 2))
         cases = (
             self.issue(module_id="example/hbr"),
             self.issue(actor_id="other"),
@@ -108,7 +119,10 @@ class CollectorContextContractTests(unittest.TestCase):
                 self.assertRaises(InvalidInvocation),
             ):
                 require_collection_context(
-                    self.issuer, CollectionView(self.key(scope), invocation=invocation)
+                    self.issuer,
+                    validate_contract(
+                        CollectionView(self.key(scope), invocation=invocation)
+                    ),
                 )
 
     def test_cc04_non_scheduler_and_public_private_grant_are_rejected(self):
@@ -120,13 +134,17 @@ class CollectorContextContractTests(unittest.TestCase):
         with self.assertRaises(InvalidInvocation):
             require_collection_context(
                 self.issuer,
-                CollectionView(self.key(OwnerScope.public()), invocation=command),
+                validate_contract(
+                    CollectionView(self.key(OwnerScope.public()), invocation=command)
+                ),
             )
         private = self.issue(actor_id="owner", grant_id="grant-1", grant_revision=1)
         with self.assertRaises(InvalidInvocation):
             require_collection_context(
                 self.issuer,
-                CollectionView(self.key(OwnerScope.public()), invocation=private),
+                validate_contract(
+                    CollectionView(self.key(OwnerScope.public()), invocation=private)
+                ),
             )
 
     def test_cc05_deadline_cannot_extend_expire_or_survive_release(self):
@@ -134,22 +152,28 @@ class CollectorContextContractTests(unittest.TestCase):
         with self.assertRaises(InvalidInvocation):
             require_collection_context(
                 self.issuer,
-                CollectionView(self.key(OwnerScope.public()), invocation=invocation),
+                validate_contract(
+                    CollectionView(self.key(OwnerScope.public()), invocation=invocation)
+                ),
                 clock=lambda: self.now,
             )
         with self.assertRaises(InvalidInvocation):
             require_collection_context(
                 self.issuer,
-                CollectionView(
-                    self.key(OwnerScope.public()),
-                    deadline_monotonic=111.0,
-                    invocation=invocation,
+                validate_contract(
+                    CollectionView(
+                        self.key(OwnerScope.public()),
+                        deadline_monotonic=111.0,
+                        invocation=invocation,
+                    )
                 ),
             )
-        context = CollectionView(
-            self.key(OwnerScope.public()),
-            deadline_monotonic=105.0,
-            invocation=invocation,
+        context = validate_contract(
+            CollectionView(
+                self.key(OwnerScope.public()),
+                deadline_monotonic=105.0,
+                invocation=invocation,
+            )
         )
         self.assertIs(
             require_collection_context(self.issuer, context, clock=lambda: self.now),
@@ -163,7 +187,7 @@ class CollectorContextContractTests(unittest.TestCase):
             require_collection_context(self.issuer, context, clock=lambda: 100.0)
 
     def test_cc06_legacy_collection_view_is_constructible_but_not_authorized(self):
-        context = CollectionView(self.key(OwnerScope.public()))
+        context = validate_contract(CollectionView(self.key(OwnerScope.public())))
         with self.assertRaises(InvalidInvocation):
             require_collection_context(self.issuer, context)
 
