@@ -226,8 +226,30 @@ test('neutral owner groups form separate labeled fieldsets and share one exact C
  declarations.fields=declarations.fields.filter(field=>field.module_id!=='example/demo').concat([b,a]);
  const values=snapshot();values['example/demo']={revision:7,fields:{frequency:{value:'daily',state:'valid',present:true,source:'sqlite'},appearance:{value:'compact',state:'valid',present:true,source:'sqlite'}}};
  try{await load(f,declarations,values);const card=f.document.querySelector('section.card[data-owner="example/demo"]'),groups=[...card.querySelectorAll('fieldset.config-group')];
-  assert.equal(groups.length,2);assert.deepEqual(groups.map(group=>group.dataset.group),['beta','alpha']);assert.deepEqual(groups.map(group=>group.querySelector('legend').textContent),['设置组 1','设置组 2']);assert.ok(groups.every(group=>group.querySelector('legend')?.textContent));assert.deepEqual(groups.map(group=>[...group.querySelectorAll('[data-field]')].map(field=>field.dataset.field)),[['appearance'],['frequency']]);
+  assert.equal(groups.length,2);assert.deepEqual(groups.map(group=>group.dataset.group),['beta','alpha']);assert.deepEqual(groups.map(group=>group.querySelector('legend').textContent),['beta','alpha']);assert.ok(groups.every(group=>group.querySelector('legend')?.textContent));assert.deepEqual(groups.map(group=>[...group.querySelectorAll('[data-field]')].map(field=>field.dataset.field)),[['appearance'],['frequency']]);
   for(const [name,value] of [['frequency','weekly'],['appearance','expanded']]){const node=input(f,name);node.value=value;node.dispatchEvent(new f.dom.window.Event('input'));}
   assert.equal(card.querySelectorAll('[data-action=save]').length,1);save(f,'example/demo').click();assert.equal(f.calls.filter(call=>call.endpoint==='admin/update').length,1);assert.deepEqual(pending(f,'update').body,{module_id:'example/demo',expected_revision:7,updates:[{field:'appearance',mode:'replace',value:'expanded'},{field:'frequency',mode:'replace',value:'weekly'}]});
+ }finally{f.close();}
+});
+
+// Success expires on the controlled clock; failures have no dismissal timer.
+for(const action of ['recover','rollback'])for(const succeeds of [true,false])test(`${action} ${succeeds?'success expires after 3500ms':'failure remains an error without auto-dismiss'}`,async()=>{
+ const f=fixture(),timers=new Map();let timerId=0;
+ f.dom.window.setTimeout=(callback,delay)=>{const id=++timerId;timers.set(id,{callback,delay});return id;};f.dom.window.clearTimeout=id=>timers.delete(id);
+ try{
+  await load(f);click(f,action);const call=pending(f,action);
+  if(succeeds){call.resolve(action==='recover'?{recovered:true}:{rolled_back:true});await flush();await load(f,catalog(),snapshot(2));}
+  else{call.reject(Error('operation_unavailable'));await flush();}
+  const node=f.document.getElementById('status'),message=node.textContent;
+  assert.equal(f.calls.filter(c=>c.endpoint==='admin/'+action).length,1);
+  assert.equal(node.dataset.tone,succeeds?'success':'error');assert.ok(message.length>0);
+  if(succeeds){
+   assert.match(message,action==='recover'?/业务运行已恢复/:/限定回退/);
+   assert.equal(timers.size,1);const [id,timer]=[...timers][0];assert.equal(timer.delay,3500);
+   assert.equal(node.textContent,message,'success must remain before its deadline');timers.delete(id);timer.callback();assert.equal(node.textContent,'');
+  }else{
+   assert.match(message,/未取得成功确认/);assert.equal(timers.size,0,'failure must cancel any earlier success dismissal and schedule none');
+   for(const timer of timers.values())timer.callback();assert.equal(node.textContent,message);assert.equal(node.dataset.tone,'error');
+  }
  }finally{f.close();}
 });

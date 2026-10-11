@@ -6,10 +6,11 @@ import type {Bridge} from './contracts';
 
 type Status={module_id:string;enabled:boolean;lifecycle:string;health:string;epoch:number;registry_revision:number;reason_code:string|null};
 export type ModuleOperation={owner:string;action:'enable'|'disable'|'unload';revision:number;isCurrent():boolean;canRestoreFocus():boolean};
-export function createModuleManagement(container:HTMLElement,bridge:Bridge,window:Window,expectedPage:string,onChanged:()=>void,beforeOperate:(operation:ModuleOperation)=>boolean|Promise<boolean>=()=>true,sharedConfirmation?:InlineConfirmation,interactionKey:()=>string=()=>'', home?:{onSettings(owner:string):void;labels():Map<string,string>;catalog(value:unknown):{fields:{module_id:string;name:string;readable:boolean;editable:boolean}[]};snapshot(value:unknown,catalog:unknown):Record<string,{fields:Record<string,{state:string}>}>} ) {
+export function createModuleManagement(container:HTMLElement,bridge:Bridge,window:Window,expectedPage:string,onChanged:()=>void,beforeOperate:(operation:ModuleOperation)=>boolean|Promise<boolean>=()=>true,sharedConfirmation?:InlineConfirmation,interactionKey:()=>string=()=>'', home?:{hasSettings?(owner:string):boolean;onSettings(owner:string):void;labels():Map<string,string>;catalog(value:unknown):{fields:{module_id:string;name:string;readable:boolean;editable:boolean}[]};snapshot(value:unknown,catalog:unknown):Record<string,{fields:Record<string,{state:string}>}>} ) {
   const rows=shallowRef<Status[]>([]),message=shallowRef('尚未读取模块管理状态。'),busy=shallowRef(false),stale=shallowRef(true);
+  const settingOwners=shallowRef<Set<string>>(new Set());
   const confirmation=sharedConfirmation??createInlineConfirmation(container.ownerDocument),waiting=shallowRef<number|null>(null);
-  const presentation=shallowRef<Record<string,unknown>>({}),labels=shallowRef<Map<string,string>>(new Map()),configuration=shallowRef<Record<string,string>>({});
+  const presentation=shallowRef<Record<string,unknown>>({}),labels=shallowRef<Map<string,string>>(new Map()),configuration=shallowRef<Record<string,string>>({}),selectedOwner=shallowRef<string|null>(null);
   let closed=false,ready=false,generation=0,boundary='',registryRevision=0,operationSerial=0,off:(()=>void)|undefined;
   let configurationVersion=0,configurationDirty=true,configurationAttempted=false,homeVisible=false,configurationFlight:Promise<void>|null=null;
   const valid=(value:unknown):value is Record<string,unknown>=>value!==null&&typeof value==='object'&&!Array.isArray(value);
@@ -23,6 +24,7 @@ export function createModuleManagement(container:HTMLElement,bridge:Bridge,windo
       try{
         const declarations=home.catalog(await bridge.apiPost('admin/catalog',{}));
         if(!current(version)||ticket!==configurationVersion)return;
+        settingOwners.value=new Set(declarations.fields.map(field=>field.module_id));
         const snapshot=home.snapshot(await bridge.apiPost('admin/read',{}),declarations);
         if(!current(version)||ticket!==configurationVersion)return;
         const values:Record<string,string>={};
@@ -75,8 +77,8 @@ export function createModuleManagement(container:HTMLElement,bridge:Bridge,windo
   const app=createApp(defineComponent({setup(){return()=>h(NConfigProvider,{preflightStyleDisabled:true,theme:presentation.value.isDark===true||presentation.value.theme==='dark'?darkTheme:null,locale:presentation.value.locale==='en-US'?enUS:zhCN,styleMountTarget:container},{default:()=>h(NCard,{title:'模块',class:'module-management'}, {default:()=>[
     h(NAlert,{type:stale.value?'warning':'info',showIcon:false},{default:()=>message.value}),
     h(NButton,{disabled:busy.value||!ready,onClick:refresh},()=>busy.value?'正在处理…':'刷新模块管理状态'),
-    !rows.value.length&&!stale.value?h('p','尚无已注册模块。全局设置仍可使用。'):null,...rows.value.map(row=>h('section',{class:'module-management-row',key:row.module_id,'data-module-owner':row.module_id},[
-      h('h3',labels.value.get(row.module_id)||row.module_id),h('p',{class:'module-status'},`${row.enabled?'已启用':'已禁用'} · ${({'active':'运行中','stopped':'已停止','failed':'运行失败','unloaded':'已解除挂载','discovered':'待启动','starting':'启动中','stopping':'停止中'} as Record<string,string>)[row.lifecycle]||row.lifecycle}`),home?h('p',{class:'config-readiness'},configuration.value[row.module_id]||'普通设置未核对'):null,row.reason_code?h('p',{role:'status'},'需要处理：'+row.reason_code):null,home?h(NButton,{onClick:()=>home.onSettings(row.module_id)},()=> '进入设置'):null,
+    !rows.value.length&&!stale.value?h('p','尚无已注册模块。全局设置仍可使用。'):null,...rows.value.filter(row=>selectedOwner.value===null||row.module_id===selectedOwner.value).map(row=>h('section',{class:'module-management-row',key:row.module_id,'data-module-owner':row.module_id},[
+      h('h3',labels.value.get(row.module_id)||row.module_id),h('p',{class:'module-status'},`${row.enabled?'已启用':'已禁用'} · ${({'active':'运行中','stopped':'已停止','failed':'运行失败','unloaded':'已解除挂载','discovered':'待启动','starting':'启动中','stopping':'停止中'} as Record<string,string>)[row.lifecycle]||row.lifecycle}`),home?h('p',{class:'config-readiness'},configuration.value[row.module_id]||'普通设置未核对'):null,row.reason_code?h('p',{role:'status'},'需要处理：'+row.reason_code):null,home&&(settingOwners.value.has(row.module_id)||home.hasSettings?.(row.module_id))?h(NButton,{onClick:()=>home.onSettings(row.module_id)},()=> '进入设置'):null,
       ...(['enable','disable','unload'] as const).map(action=>h(NButton,{disabled:busy.value||waiting.value!==null||stale.value||!ready||(action==='enable'&&row.enabled)||(action==='disable'&&!row.enabled),onClick:()=>operate(row,action)},()=>({enable:'启用 / 恢复',disable:'禁用',unload:'解除挂载（保留数据）'})[action])),
     ])),!sharedConfirmation?confirmation.render():null,h('details',{class:'technical-details'},[h('summary','高级详情与操作说明'),h('p','禁用仍可配置；解除挂载退出活动入口并保留配置、凭据、缓存及业务数据。恢复后须正式重开。'),...rows.value.map(row=>h('p',`${row.module_id} · ${row.lifecycle} · ${row.health} · 注册版本 ${registryRevision}`)),h('p',{'data-reopen-guidance':''},'请在宿主左侧点击“插件”，找到 astrbot_plugin_yomihime_game_link，在插件详情中重新打开 monitor 页面，以取得当前资源授权。')]),
   ]})});}}));app.mount(container);
@@ -84,5 +86,5 @@ export function createModuleManagement(container:HTMLElement,bridge:Bridge,windo
     if(closed)return;presentation.value=valid(context)?context:{};let next='';try {if(!valid(context)||context.pluginName!=='astrbot_plugin_yomihime_game_link'||context.pageName!==expectedPage)throw Error();next=contextBoundary(context);}catch {confirmation.cancel();waiting.value=null;ready=false;generation++;rows.value=[];busy.value=false;stale.value=true;message.value='管理上下文无效，请正式重开页面。';return;}
     if(ready&&next===boundary)return;confirmation.cancel();waiting.value=null;generation++;boundary=next;ready=true;rows.value=[];busy.value=false;void refresh();
   }
-  return {start(){off=bridge.onContext(accept);Promise.resolve(bridge.ready()).then(accept).catch(()=>{message.value='宿主会话不可用，请正式重开页面。';});},refresh,invalidateConfiguration,setHomeVisible(value:boolean){homeVisible=value;if(value)void refreshConfiguration();},presentationLabels(value:Map<string,string>){labels.value=value;},cancelConfirmation(){confirmation.cancel();waiting.value=null;},dispose(){confirmation.cancel();waiting.value=null;if(!sharedConfirmation)confirmation.dispose();closed=true;generation++;ready=false;off?.();app.unmount();}};
+  return {start(){off=bridge.onContext(accept);Promise.resolve(bridge.ready()).then(accept).catch(()=>{message.value='宿主会话不可用，请正式重开页面。';});},refresh,invalidateConfiguration,setHomeVisible(value:boolean){homeVisible=value;if(value)void refreshConfiguration();},selectOwner(value:string|null){selectedOwner.value=value;},presentationLabels(value:Map<string,string>){labels.value=value;},cancelConfirmation(){confirmation.cancel();waiting.value=null;},dispose(){confirmation.cancel();waiting.value=null;if(!sharedConfirmation)confirmation.dispose();closed=true;generation++;ready=false;off?.();app.unmount();}};
 }

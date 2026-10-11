@@ -31,7 +31,7 @@ const action=name=>window.document.querySelector('[data-action="'+name+'"]');
 const section=()=>window.document.querySelector('section[data-owner="ff14/ff14"]');
 const field=()=>window.document.querySelector('[data-field="ff14_calendar_default_timezone"]');
 const goHome=()=>click(window.document.querySelector('nav[aria-label="主要导航"] a'));
-const goSettings=()=>click(window.document.querySelector('nav[aria-label="模块设置"] a'));
+const goSettings=()=>click(find('进入设置'));
 const count=endpoint=>calls.filter(call=>call.endpoint===endpoint).length;
 const invalidSnapshot=revision=>{const value=snapshot(revision);Object.assign(value['ff14/ff14'].fields.ff14_calendar_default_timezone,{state:'invalid',value:null});return value;};
 const settle=(endpoint,value,position=0)=>{const call=pending.filter(call=>call.endpoint===endpoint)[position];assert.ok(call,'pending '+endpoint);pending.splice(pending.indexOf(call),1);call.resolve(value);};
@@ -66,7 +66,7 @@ try{
     const readsAfterFailure=count('admin/read');goSettings();await flush();goHome();await flush();if(action('confirm-navigation')){click(action('confirm-navigation'));await flush();}
     assert.equal(count('admin/read'),readsAfterFailure+1,'failed home refresh must not loop on every navigation');
     // Explicit refresh recovers; a conflicting write keeps the valid home snapshot.
-    rejectRead=false;click(find('刷新状态'));await flush();assert.match(window.document.querySelector('.config-readiness').textContent,/已校验/);
+    rejectRead=false;click(find('刷新模块状态'));await flush();assert.match(window.document.querySelector('.config-readiness').textContent,/已校验/);
     goSettings();await flush();rejectUpdate=true;click(field().querySelector('[data-action="default"]'));click(section().querySelector('[data-action="save"]'));await flush();click(section().querySelector('[data-action="discard"]'));goHome();await flush();assert.match(window.document.querySelector('.config-readiness').textContent,/已校验/);
     // One home read stays in flight across rapid switches and ignores an old snapshot.
     rejectUpdate=false;holdRead=false;goSettings();await flush();click(field().querySelector('[data-action="default"]'));click(section().querySelector('[data-action="save"]'));settle('admin/update',{module_id:'ff14/ff14',revision:3});await flush();
@@ -78,7 +78,7 @@ try{
     goHome();await flush();const oldValues=invalidSnapshot(2);settle('admin/read',oldValues);await flush();assert.doesNotMatch(window.document.querySelector('.config-readiness').textContent,/待处理/);assert.equal(count('admin/modules'),life);
     settle('admin/read',snapshot(4));await flush();assert.match(window.document.querySelector('.config-readiness').textContent,/已校验/);
     // A context boundary fences another late snapshot independently of the ACK ticket.
-    click(find('刷新状态'));await flush();vm.runInContext("emitContext({...context,session:'two'})",realm);await flush();settle('admin/read',oldValues);await flush();assert.doesNotMatch(window.document.querySelector('.config-readiness').textContent,/待处理/);holdRead=false;while(pending.some(call=>call.endpoint==='admin/read'))settle('admin/read',snapshot(5));await flush();assert.match(window.document.querySelector('.config-readiness').textContent,/已校验/);
+    click(find('刷新模块状态'));await flush();vm.runInContext("emitContext({...context,session:'two'})",realm);await flush();settle('admin/read',oldValues);await flush();assert.doesNotMatch(window.document.querySelector('.config-readiness').textContent,/待处理/);holdRead=false;while(pending.some(call=>call.endpoint==='admin/read'))settle('admin/read',snapshot(5));await flush();assert.match(window.document.querySelector('.config-readiness').textContent,/已校验/);
   }
   assert.equal(nativeCalls,0);assert.equal(count('invoke'),0);window.dispatchEvent(new window.Event('pagehide'));await flush();console.log(process.argv[2]+' built management revisions passed');
 }finally{dom.window.close();}
