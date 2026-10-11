@@ -886,6 +886,14 @@ function z(e, t, n, { expectedPage: i = "management", container: a = e.getElemen
 	}
 	let me = () => [...A.values()].some((e) => e.mode?.value !== "keep") || [...F.values()].some((e) => e.mode?.value !== "keep" || e.clientId?.value || e.clientSecret?.value);
 	function he() {
+		let e = [...new Set([...A.values()].filter((e) => (B === null || e.field.module_id === B) && ["replace", "clear"].includes(e.mode?.value)).map((e) => e.field.module_id))], t = [...new Set([...F.values()].filter((e) => e.mode && e.mode.value !== "keep" || e.clientId?.value || e.clientSecret?.value || e.confirm?.checked).map((e) => e.field.module_id))];
+		return {
+			ordinaryOwners: e,
+			credentialOwners: t,
+			requiresConfirmation: e.length > 0 || t.length > 0
+		};
+	}
+	function ge() {
 		let t = e.activeElement;
 		z = a.contains(t) && t?.id ? {
 			id: t.id,
@@ -893,7 +901,7 @@ function z(e, t, n, { expectedPage: i = "management", container: a = e.getElemen
 			end: t.selectionEnd
 		} : null, X(), _++, w = null, g = !0, J();
 	}
-	function ge() {
+	function _e() {
 		!h && m && Q(async (e) => {
 			if (await Z(e), U("设置已更新。", "success"), z) {
 				let e = l(z.id);
@@ -921,8 +929,9 @@ function z(e, t, n, { expectedPage: i = "management", container: a = e.getElemen
 		},
 		close: $,
 		dirty: me,
-		suspend: he,
-		resume: ge,
+		navigationImpact: he,
+		suspend: ge,
+		resume: _e,
 		selectOwner(e) {
 			B = e, O.owner(e), J();
 		},

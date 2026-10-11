@@ -1412,6 +1412,14 @@ function pe(e, t, n, { expectedPage: i = "management", container: a = e.getEleme
 	}
 	let pe = () => [...w.values()].some((e) => e.mode?.value !== "keep") || [...E.values()].some((e) => e.mode?.value !== "keep" || e.clientId?.value || e.clientSecret?.value);
 	function me() {
+		let e = [...new Set([...w.values()].filter((e) => (k === null || e.field.module_id === k) && ["replace", "clear"].includes(e.mode?.value)).map((e) => e.field.module_id))], t = [...new Set([...E.values()].filter((e) => e.mode && e.mode.value !== "keep" || e.clientId?.value || e.clientSecret?.value || e.confirm?.checked).map((e) => e.field.module_id))];
+		return {
+			ordinaryOwners: e,
+			credentialOwners: t,
+			requiresConfirmation: e.length > 0 || t.length > 0
+		};
+	}
+	function he() {
 		let t = e.activeElement;
 		O = a.contains(t) && t?.id ? {
 			id: t.id,
@@ -1419,7 +1427,7 @@ function pe(e, t, n, { expectedPage: i = "management", container: a = e.getEleme
 			end: t.selectionEnd
 		} : null, K(), _++, x = null, g = !0, R();
 	}
-	function he() {
+	function ge() {
 		!h && m && $(async (e) => {
 			if (await Q(e), M("设置已更新。", "success"), O) {
 				let e = l(O.id);
@@ -1430,7 +1438,7 @@ function pe(e, t, n, { expectedPage: i = "management", container: a = e.getEleme
 			}
 		});
 	}
-	function ge() {
+	function _e() {
 		h || (j !== null && n.clearTimeout(j), c(null), K(), h = !0, _++, m = !1, x = null, u = null, d = null, f = null, p = null, b?.(), R());
 	}
 	return {
@@ -1443,17 +1451,18 @@ function pe(e, t, n, { expectedPage: i = "management", container: a = e.getEleme
 				y || de(e);
 			}).catch(() => {
 				!y && !h && (m = !1, M("宿主管理会话不可用。"), R());
-			}), n?.addEventListener("pagehide", ge, { once: !0 });
+			}), n?.addEventListener("pagehide", _e, { once: !0 });
 		},
-		close: ge,
+		close: _e,
 		dirty: pe,
-		suspend: me,
-		resume: he,
+		navigationImpact: me,
+		suspend: he,
+		resume: ge,
 		selectOwner(e) {
 			k = e, S.owner(e), R();
 		},
 		dispose() {
-			ge(), n?.removeEventListener("pagehide", ge), S.dispose();
+			_e(), n?.removeEventListener("pagehide", _e), S.dispose();
 		}
 	};
 }
@@ -1740,14 +1749,18 @@ var ge = t({ setup() {
 	]), U = async (e) => {
 		let t = ++L, n = H();
 		k.cancel();
-		let r = () => !B && F && t === L && n === H();
-		u?.state.settings && b?.dirty() && !await k.ask({
-			kind: "navigation",
-			title: "离开当前设置？",
-			message: "保留普通配置草稿并离开设置？取消可继续编辑。秘密输入将清空。",
-			confirmLabel: "保留普通草稿并离开",
-			isCurrent: r
-		}) || r() && (e(), A = window.location.hash);
+		let r = () => !B && F && t === L && n === H(), i = u?.state.settings ? b?.navigationImpact() : null;
+		if (i?.requiresConfirmation) {
+			let e = O(u?.state.catalog?.modules || [], u?.state.locale || "zh-CN"), t = (t) => t.map((t) => t === "game_link/core" ? "全局设置" : e.get(t) || t).join("、"), n = [i.ordinaryOwners.length ? `${t(i.ordinaryOwners)}的普通设置草稿将保留。` : "", i.credentialOwners.length ? `${t(i.credentialOwners)}的凭据输入及操作草稿将清空。` : ""].join("");
+			if (!await k.ask({
+				kind: "navigation",
+				title: "离开设置？",
+				message: n,
+				confirmLabel: "确认离开",
+				isCurrent: r
+			})) return;
+		}
+		r() && (e(), A = window.location.hash);
 	}, W = (e) => {
 		let t = window.location.hash;
 		if (t === j) {
@@ -1755,7 +1768,7 @@ var ge = t({ setup() {
 			return;
 		}
 		if (t !== A) {
-			if (C && b?.dirty()) {
+			if (C && b?.navigationImpact().requiresConfirmation) {
 				e.stopImmediatePropagation(), window.history.replaceState(null, "", A || "#/"), U(() => {
 					j = t, window.location.hash = t;
 				});

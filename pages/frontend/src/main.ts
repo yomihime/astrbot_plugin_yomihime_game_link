@@ -23,12 +23,18 @@ const App = defineComponent({setup() {
   const navigate=async(action:()=>void)=>{
     const serial=++navigationSerial,snapshot=interactionKey();confirmation.cancel();
     const current=()=>!closed&&contextValid&&serial===navigationSerial&&snapshot===interactionKey();
-    if(shell?.state.settings&&management?.dirty()&&!await confirmation.ask({kind:'navigation',title:'离开当前设置？',message:'保留普通配置草稿并离开设置？取消可继续编辑。秘密输入将清空。',confirmLabel:'保留普通草稿并离开',isCurrent:current}))return;
+    const impact=shell?.state.settings?management?.navigationImpact():null;
+    if(impact?.requiresConfirmation){
+      const labels=moduleLabels(shell?.state.catalog?.modules||[],shell?.state.locale||'zh-CN');
+      const owners=(ids:string[])=>ids.map(owner=>owner==='game_link/core'?'全局设置':labels.get(owner)||owner).join('、');
+      const message=[impact.ordinaryOwners.length?`${owners(impact.ordinaryOwners)}的普通设置草稿将保留。`:'',impact.credentialOwners.length?`${owners(impact.credentialOwners)}的凭据输入及操作草稿将清空。`:''].join('');
+      if(!await confirmation.ask({kind:'navigation',title:'离开设置？',message,confirmLabel:'确认离开',isCurrent:current}))return;
+    }
     if(!current())return;action();lastHash=window.location.hash;
   };
   const guardHash=(event:HashChangeEvent)=>{
     const requested=window.location.hash;if(requested===approvedHash){approvedHash='';lastHash=requested;return;}if(requested===lastHash)return;
-    if(wasSettings&&management?.dirty()){
+    if(wasSettings&&management?.navigationImpact().requiresConfirmation){
       event.stopImmediatePropagation();window.history.replaceState(null,'',lastHash||'#/');
       void navigate(()=>{approvedHash=requested;window.location.hash=requested;});return;
     }confirmation.cancel();lastHash=requested;

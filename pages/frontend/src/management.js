@@ -236,13 +236,20 @@ export function createManagementPage(document,bridge,window,{expectedPage='manag
     run(async attempt=>{await refresh(attempt);notice('设置已更新。','success');});
   }
   const dirty=()=>[...controls.values()].some(c=>c.mode?.value!=='keep')||[...credentialControls.values()].some(c=>c.mode?.value!=='keep'||c.clientId?.value||c.clientSecret?.value);
+  // Navigation preserves ordinary drafts but suspend clears credentials across
+  // all owners. Keep this scope separate from global module-operation guards.
+  function navigationImpact(){
+    const ordinaryOwners=[...new Set([...controls.values()].filter(c=>(selectedOwner===null||c.field.module_id===selectedOwner)&&['replace','clear'].includes(c.mode?.value)).map(c=>c.field.module_id))];
+    const credentialOwners=[...new Set([...credentialControls.values()].filter(c=>c.mode&&c.mode.value!=='keep'||c.clientId?.value||c.clientSecret?.value||c.confirm?.checked).map(c=>c.field.module_id))];
+    return {ordinaryOwners,credentialOwners,requiresConfirmation:ordinaryOwners.length>0||credentialOwners.length>0};
+  }
   function suspend(){const node=document.activeElement;savedFocus=container.contains(node)&&node?.id?{id:node.id,start:node.selectionStart,end:node.selectionEnd}:null;clearSecrets();generation++;active=null;stale=true;buttons();}
   function resume(){if(closed||!ready)return;run(async attempt=>{await refresh(attempt);notice('设置已更新。','success');if(savedFocus){const node=element(savedFocus.id);node?.focus({preventScroll:true});if(node&&savedFocus.start!==null&&node.setSelectionRange)try{node.setSelectionRange(savedFocus.start,savedFocus.end);}catch{}savedFocus=null;}});}
   function close(){if(closed)return;if(statusTimer!==null)window.clearTimeout(statusTimer);onCapabilities(null);clearSecrets();closed=true;generation++;ready=false;active=null;catalog=null;snapshot=null;credentialCatalog=null;credentialSnapshot=null;off?.();buttons();}
   return {start(){
     if(!bridge||typeof bridge.apiPost!=='function'||typeof bridge.ready!=='function'||typeof bridge.onContext!=='function'){notice('请从宿主插件管理页面打开此页。');return;}
     off=bridge.onContext(accept);Promise.resolve(bridge.ready()).then(context=>{if(!contextSeen)accept(context);}).catch(()=>{if(!contextSeen&&!closed){ready=false;notice('宿主管理会话不可用。');buttons();}});window?.addEventListener('pagehide',close,{once:true});
-  },close,dirty,suspend,resume,selectOwner(owner){selectedOwner=owner;view.owner(owner);buttons();},dispose(){close();window?.removeEventListener('pagehide',close);view.dispose();}};
+  },close,dirty,navigationImpact,suspend,resume,selectOwner(owner){selectedOwner=owner;view.owner(owner);buttons();},dispose(){close();window?.removeEventListener('pagehide',close);view.dispose();}};
 }
 
 
