@@ -13,13 +13,16 @@ import {contextBoundary} from './lifecycle';
 import {moduleLabels} from './catalog';
 declare global {interface Window {AstrBotPluginPage: Bridge}}
 const App = defineComponent({setup() {
-  const revision = ref(0), root = ref<HTMLElement|null>(null), main = ref<HTMLElement|null>(null), settingsRoot=ref<HTMLElement|null>(null), modulesRoot=ref<HTMLElement|null>(null);
+  const revision = ref(0), root = ref<HTMLElement|null>(null), main = ref<HTMLElement|null>(null), settingsRoot=ref<HTMLElement|null>(null), modulesRoot=ref<HTMLElement|null>(null),maintenanceRoot=ref<HTMLElement|null>(null),maintenanceOpen=ref(false);
+  let maintenance:ReturnType<typeof createManagementPage>|null=null;
   let shell: ReturnType<typeof createShell> | null = null, management:ReturnType<typeof createManagementPage>|null=null, modulesView:ReturnType<typeof createModuleManagement>|null=null, wasSettings=false,lastSettingsOwner:string|null=null;
   const pageName=document.documentElement.dataset.pageName||'shell';
   const configurationOwners=ref<string[]|null>(null),configurationComplete=ref(false);
   const confirmation=createInlineConfirmation(document);
   let lastHash=window.location.hash,approvedHash='',contextGeneration=0,contextKey='',contextValid=false,draftGeneration=0,navigationSerial=0,closed=false,offContext:(()=>void)|undefined;
-  const interactionKey=()=>JSON.stringify([contextGeneration,contextKey,contextValid,draftGeneration,shell?.state.home,shell?.state.settings,shell?.state.settingsOwner,shell?.state.selected,shell?.state.catalog?.catalog_revision,shell?.state.busy,shell?.state.stale,window.location.hash]);
+  const interactionKey=()=>JSON.stringify([contextGeneration,contextKey,contextValid,draftGeneration,maintenanceOpen.value,shell?.state.home,shell?.state.settings,shell?.state.settingsOwner,shell?.state.selected,shell?.state.catalog?.catalog_revision,shell?.state.busy,shell?.state.stale,window.location.hash]);
+  const closeMaintenance=()=>{if(!maintenance&&!maintenanceOpen.value)return;confirmation.cancel();maintenance?.dispose();maintenance=null;maintenanceOpen.value=false;};
+  const openMaintenance=()=>{if(maintenance||!maintenanceRoot.value||!contextValid)return;maintenanceOpen.value=true;maintenance=createManagementPage(document,window.AstrBotPluginPage,window,{expectedPage:pageName,container:maintenanceRoot.value,scope:'maintenance',onDraftMutation:draftEdited,onConfigurationSaved:()=>{management?.resume();modulesView?.invalidateConfiguration();},beforeMaintenance:operation=>{const snapshot=interactionKey();return confirmation.ask({kind:'maintenance',title:operation.action==='rollback'?'确认回退受审迁移？':'确认重新校验并恢复？',message:(management?.dirty()?'存在未保存草稿；维护后仍需重新核对。':'')+'仅处理受审普通配置，其他持久数据保留。',confirmLabel:'确认维护',isCurrent:()=>contextValid&&!closed&&maintenanceOpen.value&&snapshot===interactionKey()&&operation.isCurrent()});}});maintenance.start();};
   const navigate=async(action:()=>void)=>{
     const serial=++navigationSerial,snapshot=interactionKey();confirmation.cancel();
     const current=()=>!closed&&contextValid&&serial===navigationSerial&&snapshot===interactionKey();
@@ -30,18 +33,21 @@ const App = defineComponent({setup() {
       const message=[impact.ordinaryOwners.length?`${owners(impact.ordinaryOwners)}的普通设置草稿将保留。`:'',impact.credentialOwners.length?`${owners(impact.credentialOwners)}的凭据输入及操作草稿将清空。`:''].join('');
       if(!await confirmation.ask({kind:'navigation',title:'离开设置？',message,confirmLabel:'确认离开',isCurrent:current}))return;
     }
-    if(!current())return;action();lastHash=window.location.hash;
+    if(!current())return;closeMaintenance();action();lastHash=window.location.hash;
   };
   const guardHash=(event:HashChangeEvent)=>{
     const requested=window.location.hash;if(requested===approvedHash){approvedHash='';lastHash=requested;return;}if(requested===lastHash)return;
     if(wasSettings&&management?.navigationImpact().requiresConfirmation){
       event.stopImmediatePropagation();window.history.replaceState(null,'',lastHash||'#/');
       void navigate(()=>{approvedHash=requested;window.location.hash=requested;});return;
-    }confirmation.cancel();lastHash=requested;
+    }confirmation.cancel();closeMaintenance();lastHash=requested;
   };
   const draftEdited=()=>{draftGeneration++;confirmation.cancel();modulesView?.cancelConfirmation();};
   function changed(){confirmation.invalidate();revision.value++;const settings=shell?.state.settings||false;
+    const showModules=Boolean(shell?.state.home||shell?.state.moduleSection==='home');
+    if(!showModules)closeMaintenance();
     if(shell?.state.catalog&&!modulesView&&modulesRoot.value){modulesView=createModuleManagement(modulesRoot.value,window.AstrBotPluginPage,window,pageName,()=>{void shell?.refresh();management?.resume();},operation=>{const snapshot=interactionKey();return !management?.dirty()||confirmation.ask({kind:'module-draft',owner:operation.owner,title:'确认模块操作 '+operation.owner,message:`存在未提交的配置草稿。模块状态变化可能撤销其字段，继续执行？取消可先保存草稿。注册版本 ${operation.revision}。`,confirmLabel:'保留草稿并继续核对',isCurrent:()=>snapshot===interactionKey()&&operation.isCurrent(),canRestoreFocus:()=>snapshot===interactionKey()&&operation.canRestoreFocus()});},confirmation,interactionKey,{hasSettings:owner=>configurationOwners.value?.includes(owner)||false,onSettings:owner=>void navigate(()=>shell?.selectSettings(owner)),labels:()=>moduleLabels(shell?.state.catalog?.modules||[],shell?.state.locale||'zh-CN'),catalog:configurationCatalog,snapshot:configurationSnapshot});modulesView.start();}
+    modulesView?.setRenderVisible(showModules);
     modulesView?.presentationLabels(moduleLabels(shell?.state.catalog?.modules||[],shell?.state.locale||'zh-CN'));
     modulesView?.setHomeVisible(Boolean(shell?.state.home||shell?.state.moduleSection==='home'));
     modulesView?.selectOwner(shell?.state.moduleOwner||null);
@@ -51,7 +57,7 @@ const App = defineComponent({setup() {
     else if(!settings&&wasSettings)management?.suspend();lastSettingsOwner=shell?.state.settingsOwner||null;if(settings)management?.selectOwner(shell?.state.settingsOwner||'game_link/core');wasSettings=settings;
   }
   onMounted(() => {offContext=window.AstrBotPluginPage?.onContext(context=>{let next='';try{if(context.pluginName!=='astrbot_plugin_yomihime_game_link'||context.pageName!==pageName)throw Error();next=contextBoundary(context);}catch{contextValid=false;contextGeneration++;confirmation.cancel();modulesView?.cancelConfirmation();return;}if(next!==contextKey){contextGeneration++;contextKey=next;confirmation.cancel();modulesView?.cancelConfirmation();}contextValid=true;});window.addEventListener('hashchange',guardHash);shell = createShell({bridge: window.AstrBotPluginPage, container: root.value!, window, loadPage, expectedPage: document.documentElement.dataset.pageName || 'shell', changed}); shell.start();});
-  onBeforeUnmount(() => {closed=true;contextGeneration++;confirmation.dispose();offContext?.();window.removeEventListener('hashchange',guardHash);management?.dispose();modulesView?.dispose();shell?.dispose();});
+  onBeforeUnmount(() => {closed=true;contextGeneration++;closeMaintenance();confirmation.dispose();offContext?.();window.removeEventListener('hashchange',guardHash);management?.dispose();modulesView?.dispose();shell?.dispose();});
   return () => {
     revision.value;
     const state = shell?.state, selection = shell?.selected(), modules = state?.catalog?.modules || [];
@@ -73,7 +79,7 @@ const App = defineComponent({setup() {
         h('div',{class:'shell-content'},[
           h('div',{class:'shell-mobile'},[h('p',{class:'shell-brand'},'如月怜的游戏连结'),h('nav',{'aria-label':'移动导航'},[link('首页','#/',home,()=>shell?.selectHome()),link('全局设置','#/settings',Boolean(state?.settings&&state.settingsOwner===null),()=>shell?.selectSettings())]),moduleSelect('module-select-mobile')]),
           h('main',{ref:main,id:'page-root',tabindex:-1,'aria-labelledby':'page-title'},[
-            h(PageHeader,{class:'shell-heading',titleId:'page-title',title:currentModule?label(currentModule.module_id):state?.settings&&state.settingsOwner===null?'全局设置':home?'首页':'页面不可用'},{default:()=>h(NButton,{onClick:()=>{if(!shell?.state.busy){void shell?.refresh();if(home||moduleHome)void modulesView?.refresh();}},'aria-disabled':String(busy),'aria-busy':String(busy),'aria-label':'刷新模块状态'},()=>busy?'正在刷新…':'刷新模块状态')}),
+            h(PageHeader,{class:'shell-heading',titleId:'page-title',title:currentModule?label(currentModule.module_id):state?.settings&&state.settingsOwner===null?'全局设置':home?'首页':'页面不可用'},{default:()=>h(NButton,{onClick:()=>{if(!shell?.state.busy){void shell?.refresh();if(home||moduleHome)void modulesView?.refresh(true);}},'aria-disabled':String(busy),'aria-busy':String(busy),'aria-label':'刷新模块状态'},()=>busy?'正在刷新…':'刷新模块状态')}),
             currentModule?h('nav',{class:'module-tabs','aria-label':'模块内分页'},[
               link('主页','#/module/'+encodeURIComponent(currentModule.module_id),moduleHome,()=>shell?.selectModule(currentModule.module_id)),
               configurationOwners.value?.includes(currentModule.module_id)?link('配置','#/settings/module/'+encodeURIComponent(currentModule.module_id),Boolean(state?.settings),()=>shell?.selectSettings(currentModule.module_id)):null,
@@ -88,7 +94,8 @@ const App = defineComponent({setup() {
             queries&&!selection?h('p',{class:'shell-empty'},'选择一项辅助查询；仅在手动提交时请求数据。'):null,
             h('div',{ref:root,id:'module-container',hidden:!selection}),
             h('div',{class:'settings-container',hidden:!state?.settings||Boolean(state.settingsOwner&&!currentModule)},[h('div',{ref:settingsRoot,id:'settings-container'})]),
-            h('details',{class:'module-dashboard',open:home||moduleHome,hidden:!home&&!moduleHome&&!state?.settings},[h('summary',home||moduleHome?'模块状态与管理':'高级模块管理'),h('div',{ref:modulesRoot,id:'module-management-container'})]),
+            h('div',{class:'module-dashboard',hidden:!home&&!moduleHome},[h('div',{ref:modulesRoot,id:'module-management-container',hidden:maintenanceOpen.value}),home||moduleHome?h(NButton,{size:'large',onClick:maintenanceOpen.value?closeMaintenance:openMaintenance},()=>maintenanceOpen.value?'关闭配置维护':'配置维护'):null]),
+            h('div',{ref:maintenanceRoot,id:'maintenance-container',hidden:!maintenanceOpen.value}),
             !home&&!state?.settings&&!moduleHome&&!queries&&!state?.mounted||Boolean(state?.settingsOwner&&!currentModule)?h('p',{class:'shell-empty'},state?.cleanupPending?'页面清理未完成，请重新打开页面。':selection?'模块页面正在准备。':'此路由当前没有可用的注册页面。恢复模块后请从宿主插件详情正式重开。'):null,
           ]),
         ]),

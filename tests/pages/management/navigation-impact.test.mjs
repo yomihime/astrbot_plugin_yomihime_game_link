@@ -64,8 +64,8 @@ test('suspend clears every owner and region together but preserves ordinary draf
 for(const denied of ['admin/catalog','admin/read','admin/credential-catalog','admin/credential-status','admin/credential-readiness'])test(`fresh ${denied} authorization failure has no navigation impact`,async()=>{
  const f=await fixture(denied);try{
   assert.deepEqual(f.page.navigationImpact(),empty);assert.equal(f.page.dirty(),false);assert.equal(f.mutations(),0);
-  if(['admin/catalog','admin/read'].includes(denied)){assert.equal(f.dom.window.document.querySelector('#recover').disabled,true);assert.match(f.dom.window.document.querySelector('#status').textContent,/授权不可用/);}
-  else {assert.match(f.dom.window.document.querySelector('#credential-status').textContent,/授权不可用|暂不能填写/);assert.ok([...f.dom.window.document.querySelectorAll('[data-role=client_secret]')].every(node=>node.disabled));}
+  if(['admin/catalog','admin/read'].includes(denied)){assert.equal(f.dom.window.document.querySelector('#recover'),null);assert.equal(f.dom.window.document.querySelectorAll('[data-action=save]').length,0);assert.match(f.dom.window.document.querySelector('#status').textContent,/授权不可用/);}
+  else {assert.match(f.dom.window.document.querySelector('#status').textContent,/授权不可用/);assert.equal(f.dom.window.document.querySelector('#status').dataset.tone,'error');assert.ok([...f.dom.window.document.querySelectorAll('[data-role=client_secret]')].every(node=>node.disabled));}
   assert.equal(f.calls.some(endpoint=>['admin/update','admin/credential-update'].includes(endpoint)),false);
  }finally{f.close();}
 });

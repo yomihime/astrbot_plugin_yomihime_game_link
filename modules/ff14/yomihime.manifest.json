@@ -562,6 +562,9 @@
           "sensitive": false,
           "required": false,
           "default": true,
+          "value_schema": {
+            "type": "boolean"
+          },
           "description": "FF14 本人订阅推送开关；暂停保留记录，恢复仅处理之后的未来窗口。"
         },
         {

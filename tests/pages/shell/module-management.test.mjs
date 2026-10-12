@@ -16,6 +16,7 @@ const confirmationURL='data:text/javascript;base64,'+Buffer.from(confirmationSou
 const {createInlineConfirmation}=await import(confirmationURL);
 let source=stripTypeScriptTypes(await readFile(new URL('pages/frontend/src/module-management.ts',root),'utf8'),{mode:'strip'});
 source=source.replace("from 'vue'",'from '+JSON.stringify(runtimeURL)).replace("from 'naive-ui'",'from '+JSON.stringify(runtimeURL)).replace("from './lifecycle'",'from '+JSON.stringify(new URL('pages/frontend/src/lifecycle.ts',root).href)).replace("from './confirmation'",'from '+JSON.stringify(confirmationURL));
+source=source.replace("from './ui/notice'",'from '+JSON.stringify(new URL('pages/frontend/src/ui/notice.ts',root).href));
 const {createModuleManagement}=await import('data:text/javascript;base64,'+Buffer.from(source).toString('base64'));
 const {validateCatalog:configurationCatalog,validateSnapshot:configurationSnapshot}=await import(new URL('pages/management/app.js',root));
 const configurationFixture=await import('../management/fixtures.mjs');
@@ -38,6 +39,15 @@ test('home ordinary settings status uses authorized catalog/read and never claim
  try{await load(f);assert.match(f.container.textContent,/普通设置未核对/);pending(f,'admin/catalog').resolve(configurationFixture.catalog());await flush();pending(f,'admin/read').resolve(configurationFixture.snapshot());await flush();assert.match(f.container.textContent,/普通设置已校验/);assert.match(f.container.textContent,/最终幻想 XIV/);assert.doesNotMatch(f.container.textContent,/上游可用|配置已就绪/);assert.deepEqual(f.calls.map(call=>call.endpoint),['admin/modules','admin/catalog','admin/read']);const refresh=f.view.refresh();await load(f);pending(f,'admin/catalog').reject(Error('admin_authorization_denied'));await refresh;await flush();assert.match(f.container.textContent,/普通设置未核对/);assert.doesNotMatch(f.container.textContent,/普通设置已校验/);assert.equal(f.calls.filter(call=>['admin/module-enabled','admin/module-unload','admin/update','admin/credential-update'].includes(call.endpoint)).length,0);}finally{f.close();}
 });
 const open=async f=>{button(f,'解除挂载（保留数据）').click();await flush();};
+test('home distinguishes unreadable, readonly, invalid and unknown ordinary state without raw health codes',async()=>{
+ for(const [readable,editable,state,expected] of [[false,false,'valid','普通设置无读取权限'],[true,false,'valid','普通设置有效，当前只读'],[true,true,'invalid','普通设置需要修改'],[true,true,'unknown','普通设置未核对']]){
+  const options={onSettings(){},labels:()=>new Map(),catalog:()=>({fields:[{module_id:'ff14/ff14',name:'value',readable,editable}]}),snapshot:()=>({'ff14/ff14':{fields:{value:{state}}}})},f=fixture(undefined,undefined,options);
+  try{const value=status();value.modules[0].health='unknown';value.modules[0].reason_code='health_unknown';await load(f,value);pending(f,'admin/catalog').resolve({});await flush();pending(f,'admin/read').resolve({});await flush();assert.match(f.container.textContent,new RegExp(expected));assert.match(f.container.textContent,/健康状态尚未确认/);assert.doesNotMatch(f.container.textContent,/health_unknown|配置已就绪|模块管理状态已刷新/);}finally{f.close();}
+ }
+});
+test('module initial read is silent and ACK followed by read failure stays fenced without repeat write',async()=>{
+ const f=fixture();try{await load(f);assert.equal(f.container.querySelector('.n-alert'),null);button(f,'启用 / 恢复').click();await flush();pending(f,'admin/module-enabled').resolve({module_id:'ff14/ff14',registry_revision:6});await flush();pending(f,'admin/modules').reject(Error('offline'));await flush();assert.match(f.container.textContent,/已提交，模块状态暂未核实/);assert.equal(f.changed,0);assert.equal(button(f,'启用 / 恢复').disabled,true);assert.equal(f.calls.filter(c=>c.endpoint==='admin/module-enabled').length,1);const refresh=f.view.refresh(true);await load(f,status(6));await refresh;await flush();assert.match(f.container.textContent,/已刷新/);}finally{f.close();}
+});
 const confirm=f=>f.container.querySelector('[data-action="confirm-unload"]');
 const cancel=f=>f.container.querySelector('[data-action="cancel-unload"]');
 test('sandboxed unload uses accessible in-page confirmation, cancellation and one exact CAS request',async()=>{

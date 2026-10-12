@@ -40,6 +40,7 @@ try{
   assert.match(window.document.querySelector('.config-readiness').textContent,/已校验/);
   goSettings();await flush();
   if(process.argv[2]==='draft'){
+    goHome();await flush();
     click(find('解除挂载（保留数据）'));await flush();const old=action('confirm-unload');assert.ok(old);
     click(field().querySelector('[data-action="default"]'));await flush();
     assert.equal(action('confirm-unload'),null,'restore default must revoke pristine unload consent');
@@ -47,15 +48,15 @@ try{
     click(find('解除挂载（保留数据）'));await flush();assert.ok(action('confirm-module-draft'));
     click(action('confirm-module-draft'));await flush();const afterDraft=action('confirm-unload');assert.ok(afterDraft);
     click(section().querySelector('[data-action="discard"]'));await flush();assert.equal(action('confirm-unload'),null);afterDraft.click();await flush();assert.equal(count('admin/module-unload'),0);
-    const input=field().querySelector('[data-role="value"]');input.value='Europe/London';input.dispatchEvent(new window.Event('input',{bubbles:true}));goHome();await flush();const oldNavigation=action('confirm-navigation');assert.ok(oldNavigation);
+    const input=field().querySelector('[data-role="value"]');input.value='Europe/London';input.dispatchEvent(new window.Event('input',{bubbles:true}));goSettings();await flush();goHome();await flush();const oldNavigation=action('confirm-navigation');assert.ok(oldNavigation);
     click(section().querySelector('[data-action="discard"]'));await flush();assert.equal(action('confirm-navigation'),null);oldNavigation.click();await flush();assert.match(window.location.hash,/settings/);
-    click(find('解除挂载（保留数据）'));await flush();vm.runInContext("emitContext({...context,isDark:true,locale:'en-US'})",realm);await flush();assert.ok(action('confirm-unload'));click(action('confirm-unload'));await flush();assert.equal(count('admin/module-unload'),1);
+    goHome();await flush();click(find('解除挂载（保留数据）'));await flush();vm.runInContext("emitContext({...context,isDark:true,locale:'en-US'})",realm);await flush();assert.ok(action('confirm-unload'));click(action('confirm-unload'));await flush();assert.equal(count('admin/module-unload'),1);
   }else if(process.argv[2]==='configuration-success'){
     click(field().querySelector('[data-action="default"]'));holdUpdate=true;click(section().querySelector('[data-action="save"]'));await flush();
     const life=count('admin/modules');settle('admin/update',{module_id:'ff14/ff14',revision:2});await flush();assert.equal(action('confirm-navigation'),null);
     holdRead=true;const reads=count('admin/read');goHome();await flush();assert.match(window.document.querySelector('.config-readiness').textContent,/未核对/);assert.equal(count('admin/read'),reads+1);assert.equal(count('admin/modules'),life);
-    goHome();await flush();assert.equal(count('admin/read'),reads+1);settle('admin/read',invalidSnapshot(2));await flush();assert.match(window.document.querySelector('.config-readiness').textContent,/待处理/);
-    holdRead=false;goSettings();await flush();goHome();await flush();assert.match(window.document.querySelector('.config-readiness').textContent,/待处理/);assert.equal(count('admin/read'),reads+2);assert.equal(count('admin/modules'),life);
+    goHome();await flush();assert.equal(count('admin/read'),reads+1);settle('admin/read',invalidSnapshot(2));await flush();assert.match(window.document.querySelector('.config-readiness').textContent,/需要修改/);
+    holdRead=false;goSettings();await flush();goHome();await flush();assert.match(window.document.querySelector('.config-readiness').textContent,/需要修改/);assert.equal(count('admin/read'),reads+2);assert.equal(count('admin/modules'),life);
   }else{
     // A validated ACK dirties home immediately, even if settings readback fails.
     click(field().querySelector('[data-action="default"]'));holdUpdate=true;click(section().querySelector('[data-action="save"]'));await flush();
@@ -75,10 +76,10 @@ try{
     goSettings();await flush();settle('admin/read',snapshot(3),1);await flush(); // older settings read was fenced by suspend
     settle('admin/read',snapshot(3),1);await flush(); // current settings read, home read is still oldest
     click(field().querySelector('[data-action="default"]'));click(section().querySelector('[data-action="save"]'));settle('admin/update',{module_id:'ff14/ff14',revision:4});await flush();settle('admin/read',snapshot(4),1);await flush();
-    goHome();await flush();const oldValues=invalidSnapshot(2);settle('admin/read',oldValues);await flush();assert.doesNotMatch(window.document.querySelector('.config-readiness').textContent,/待处理/);assert.equal(count('admin/modules'),life);
+    goHome();await flush();const oldValues=invalidSnapshot(2);settle('admin/read',oldValues);await flush();assert.doesNotMatch(window.document.querySelector('.config-readiness').textContent,/需要修改/);assert.equal(count('admin/modules'),life);
     settle('admin/read',snapshot(4));await flush();assert.match(window.document.querySelector('.config-readiness').textContent,/已校验/);
     // A context boundary fences another late snapshot independently of the ACK ticket.
-    click(find('刷新模块状态'));await flush();vm.runInContext("emitContext({...context,session:'two'})",realm);await flush();settle('admin/read',oldValues);await flush();assert.doesNotMatch(window.document.querySelector('.config-readiness').textContent,/待处理/);holdRead=false;while(pending.some(call=>call.endpoint==='admin/read'))settle('admin/read',snapshot(5));await flush();assert.match(window.document.querySelector('.config-readiness').textContent,/已校验/);
+    click(find('刷新模块状态'));await flush();vm.runInContext("emitContext({...context,session:'two'})",realm);await flush();settle('admin/read',oldValues);await flush();assert.doesNotMatch(window.document.querySelector('.config-readiness').textContent,/需要修改/);holdRead=false;while(pending.some(call=>call.endpoint==='admin/read'))settle('admin/read',snapshot(5));await flush();assert.match(window.document.querySelector('.config-readiness').textContent,/已校验/);
   }
   assert.equal(nativeCalls,0);assert.equal(count('invoke'),0);window.dispatchEvent(new window.Event('pagehide'));await flush();console.log(process.argv[2]+' built management revisions passed');
 }finally{dom.window.close();}

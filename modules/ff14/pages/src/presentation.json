@@ -1,12 +1,12 @@
 {
   "owner": "ff14/ff14",
-  "saveLabel": "保存日历设置",
+  "saveLabel": "保存普通设置",
   "groups": {"calendar": {"title": "日历"}, "fflogs": {"title": "FFLogs"}, "": {"title": "订阅"}},
   "fields": {
     "ff14_calendar_default_days": {"label": "默认天数", "width": "short", "order": 1},
     "ff14_calendar_default_delivery_time": {"label": "投递时间", "width": "short", "input": "time", "order": 2},
     "ff14_calendar_default_timezone": {"label": "时区", "width": "medium", "order": 3},
-    "ff14_subscriptions_enabled": {"label": "启用订阅", "width": "short", "advanced": true}
+    "ff14_subscriptions_enabled": {"label": "订阅推送", "width": "short", "booleanLabels": {"true": "开启", "false": "关闭"}, "reset": "replace-default", "hint": "暂停保留订阅；恢复仅处理之后的未来窗口。"}
   },
   "credentials": {"credential_fflogs_cn": {"label": "国服"}, "credential_fflogs_global": {"label": "国际服"}}
 }

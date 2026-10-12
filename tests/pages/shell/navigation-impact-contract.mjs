@@ -20,7 +20,7 @@ async function fixture(hash='#/settings',denied=''){
  const flush=async()=>{for(let i=0;i<15;i++){await new Promise(resolve=>setTimeout(resolve,0));await cache.get('/runtime.js').namespace.nextTick();}};
  const app=module('/app.js');await app.link((specifier,referencing)=>module(new URL(specifier,referencing.identifier).pathname));await app.evaluate();await flush();
  const document=window.document,action=name=>document.querySelector(`[data-action="${name}"]`),click=node=>{assert.ok(node);node.focus();node.click();};
- return {window,document,flush,action,click,find:text=>[...document.querySelectorAll('button')].find(node=>node.textContent===text),link:href=>document.querySelector(`a[href="${href}"]`),field:name=>document.querySelector(`[data-field="${name}"]`),credential:name=>document.querySelector(`[data-credential="${name}"]`),edit(node,value,event='change'){if(node.type==='checkbox')node.checked=value;else node.value=value;node.dispatchEvent(new window.Event(event,{bubbles:true}));},async close(){assert.equal(nativeCalls,0);assert.equal(calls.some(endpoint=>['admin/update','admin/credential-update','admin/module-unload','admin/module-enabled'].includes(endpoint)),false);window.dispatchEvent(new window.Event('pagehide'));await flush();dom.window.close();}};
+ return {window,document,flush,action,click,find:text=>[...document.querySelectorAll('button')].find(node=>node.textContent===text),link:href=>document.querySelector(`a[href="${href}"]`),field:name=>document.querySelector(`[data-field="${name}"]`),credential:name=>document.querySelector(`[data-credential="${name}"]`),edit(node,value,event='change'){if(node.type==='checkbox')node.checked=value;else node.value=value;node.dispatchEvent(new window.Event(event,{bubbles:true}));},async close(){assert.equal(nativeCalls,0);assert.equal(calls.some(endpoint=>['admin/update','admin/credential-update','admin/module-unload','admin/module-enabled','admin/recover','admin/rollback'].includes(endpoint)),false);window.dispatchEvent(new window.Event('pagehide'));await flush();dom.window.close();}};
 }
 const ffSettings='#/settings/module/ff14%2Fff14',ffHome='#/module/ff14%2Fff14';
 async function go(f,href){f.click(f.link(href));await f.flush();}
@@ -40,16 +40,27 @@ for(const denied of ['', 'admin/catalog']){
   await go(f,ffHome);await confirm(f);await go(f,ffSettings);assert.equal(f.window.location.hash,ffSettings);
   // Current FF14 is clean, Core history remains dirty. Module operations still
   // guard that global draft even though navigation no longer blocks on it.
+  await go(f,ffHome);assert.equal(f.action('confirm-navigation'),null);assert.equal(f.window.location.hash,ffHome);assert.equal(core.value,'replace');
   for(const label of ['禁用','解除挂载（保留数据）']){
    f.click(f.find(label));await f.flush();assert.ok(f.action('confirm-module-draft'));f.click(f.action('cancel-module-draft'));await f.flush();
   }
-  await go(f,ffHome);assert.equal(f.action('confirm-navigation'),null);assert.equal(f.window.location.hash,ffHome);assert.equal(core.value,'replace');
   f.click(f.find('全局设置'));await f.flush();assert.equal(core.value,'replace');
   // Current clear mode, history hash, cancellation and reentry preserve drafts.
   f.edit(core,'clear');f.window.location.hash=ffSettings;await f.flush();assert.equal(f.window.location.hash,'#/settings');assert.ok(f.action('confirm-navigation'));
   f.click(f.action('cancel-navigation'));await f.flush();assert.equal(core.value,'clear');
   f.window.location.hash=ffSettings;await f.flush();await confirm(f);assert.equal(f.window.location.hash,ffSettings);
   await go(f,ffHome);assert.equal(f.action('confirm-navigation'),null);assert.equal(core.value,'clear');
+ }finally{await f.close();}
+}
+{
+ const f=await fixture();try{
+  const core=f.field('default_region').querySelector('[data-role=mode]');f.edit(core,'replace');await go(f,ffHome);await confirm(f);
+  f.click(f.find('配置维护'));await f.flush();const panel=f.document.querySelector('#maintenance-container');assert.equal(panel.querySelector('#fields,#credentials'),null);assert.ok(panel.querySelector('#recover'));assert.equal(f.field('default_region').querySelector('[data-role=mode]'),core);
+  f.click(panel.querySelector('#recover'));await f.flush();assert.match(f.document.querySelector('[data-confirmation=maintenance]').textContent,/存在未保存草稿/);f.click(f.action('cancel-maintenance'));await f.flush();assert.equal(core.value,'replace');
+  f.click(panel.querySelector('#recover'));await f.flush();const old=f.action('confirm-maintenance');f.edit(core,'clear');await f.flush();assert.equal(f.action('confirm-maintenance'),null);old.click();await f.flush();assert.equal(f.window.location.hash,ffHome);
+  f.click(panel.querySelector('#recover'));await f.flush();const replacementConsent=f.action('confirm-maintenance');assert.equal(panel.querySelector('#replacement').disabled,true);f.edit(panel.querySelector('#replacement'),true);await f.flush();assert.equal(f.action('confirm-maintenance'),null);replacementConsent.click();await f.flush();
+  f.click(panel.querySelector('#rollback'));await f.flush();const closeConsent=f.action('confirm-maintenance'),oldRecover=panel.querySelector('#recover');f.click(f.find('关闭配置维护'));await f.flush();assert.equal(panel.children.length,0);assert.equal(f.action('confirm-maintenance'),null);closeConsent.click();oldRecover.dispatchEvent(new f.window.Event('click'));await f.flush();
+  await go(f,ffSettings);assert.equal(f.document.querySelector('#module-management-container .module-management'),null);assert.equal(f.document.querySelector('#settings-container #recover,#settings-container .technical-details'),null);
  }finally{await f.close();}
 }
 for(const start of ['#/settings',ffSettings])for(const region of ['cn','global'])for(const kind of ['client_secret','replace','clear','confirm']){
