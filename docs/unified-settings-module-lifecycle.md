@@ -20,6 +20,8 @@
 
 加密预检仅检测当前注入的 provider/codec，不读取存量凭据、不生成真实主钥、不落盘测试密文。默认保留外部 `YGL_SECRET_KEY`；本批不自动初始化或轮换真实密钥。就绪不代表旧密文可解密、OAuth 有效或 FFLogs 查询成功。
 
+受权管理端 `credential-readiness` 的普通 `{}` 请求保持 `ready/state/reason_code` 三字段。仅精确 `{"diagnostics":true}` 可额外取得安全分类 `diagnostics`：`key_state` 为 `not_provided`、`invalid_encoding_or_length`、`valid_format` 或 `cannot_safely_confirm`；`codec_state` 为 `not_run`、`available`、`component_unavailable`、`self_test_failed` 或 `unknown`。此私有 Host 预检沿同一 READ_CONFIG、请求身份及代次保护，不是公开接口或 SDK 合同扩展。AES 诊断只读取一次当前运行宿主的外部密钥并在内存自检；不返回值、长度、摘要、异常文本或存量凭据。格式有效并不证明旧密文对应此密钥；外部启动环境修改后须由操作者正常重启同一宿主以继承，新终端环境不代表已运行宿主。预检不会生成、保存或轮换主密钥。
+
 共享 SQLite 及其事务保持不变。解除挂载不删除配置、凭据、缓存、业务数据或代码包。恢复若需要正式重新打开插件页面取得新资源投影，应明确提示，不能复用初次模板的过期授权 URL。
 
 ## 页面与配置分层

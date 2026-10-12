@@ -6,7 +6,7 @@ import os
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-from .key_provider import KeyProvider
+from .key_provider import KeyProvider, SecretKeyUnavailable
 
 _MAGIC = b"YHSC\x01"
 _NONCE_BYTES = 12
@@ -38,9 +38,7 @@ class AESGCMSecretCodec:
             raise TypeError("secret payload must be bytes")
         key = self._key()
         try:
-            nonce = os.urandom(_NONCE_BYTES)
-            ciphertext = AESGCM(key).encrypt(nonce, value, _AAD)
-            return _MAGIC + nonce + ciphertext
+            return self._encrypt_payload(value, AESGCM(key))
         except Exception:
             raise ValueError("secret payload could not be encrypted") from None
 
@@ -51,11 +49,63 @@ class AESGCMSecretCodec:
         if len(value) < offset + _NONCE_BYTES + _TAG_BYTES:
             raise ValueError("secret payload is unavailable") from None
         try:
-            nonce = value[offset : offset + _NONCE_BYTES]
-            ciphertext = value[offset + _NONCE_BYTES :]
-            return AESGCM(self._key()).decrypt(nonce, ciphertext, _AAD)
+            return self._decrypt_payload(value, AESGCM(self._key()))
         except Exception:
             raise ValueError("secret payload is unavailable") from None
+
+    @staticmethod
+    def _encrypt_payload(value: bytes, cipher: AESGCM) -> bytes:
+        nonce = os.urandom(_NONCE_BYTES)
+        ciphertext = cipher.encrypt(nonce, value, _AAD)
+        if type(ciphertext) is not bytes or ciphertext == value:
+            raise ValueError("secret payload could not be encrypted") from None
+        return _MAGIC + nonce + ciphertext
+
+    @staticmethod
+    def _decrypt_payload(value: bytes, cipher: AESGCM) -> bytes:
+        offset = len(_MAGIC)
+        if (
+            type(value) is not bytes
+            or not value.startswith(_MAGIC)
+            or len(value) < offset + _NONCE_BYTES + _TAG_BYTES
+        ):
+            raise ValueError("secret payload is unavailable") from None
+        nonce = value[offset : offset + _NONCE_BYTES]
+        ciphertext = value[offset + _NONCE_BYTES :]
+        return cipher.decrypt(nonce, ciphertext, _AAD)
+
+    def encryption_diagnostics(self) -> tuple[str, str]:
+        """Classify one in-memory probe, never inspect stored payloads."""
+        try:
+            key = self._key_provider.get_key()
+        except SecretKeyUnavailable as error:
+            reason = error.reason
+            if reason not in {
+                "not_provided",
+                "invalid_encoding_or_length",
+                "cannot_safely_confirm",
+            }:
+                reason = "cannot_safely_confirm"
+            return reason, "not_run"
+        except Exception:
+            return "cannot_safely_confirm", "not_run"
+        if type(key) is not bytes or len(key) != 32:
+            return "cannot_safely_confirm", "not_run"
+        try:
+            cipher = AESGCM(key)
+        except Exception:
+            return "valid_format", "component_unavailable"
+        try:
+            probe = b"yomihime:encryption-readiness:v1"
+            encrypted = self._encrypt_payload(probe, cipher)
+            if type(encrypted) is not bytes or encrypted == probe:
+                return "valid_format", "self_test_failed"
+            decrypted = self._decrypt_payload(encrypted, cipher)
+            if type(decrypted) is not bytes or decrypted != probe:
+                return "valid_format", "self_test_failed"
+        except Exception:
+            return "valid_format", "self_test_failed"
+        return "valid_format", "available"
 
     def __repr__(self) -> str:
         return "AESGCMSecretCodec(<external key provider>)"

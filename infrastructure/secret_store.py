@@ -70,8 +70,12 @@ class SQLiteSecretStore:
             raise SecretStoreUnavailable()
         return codec
 
-    def encryption_readiness(self) -> dict[str, str | bool]:
+    def encryption_readiness(self, *, diagnostics: bool = False) -> dict[str, object]:
         """Probe only the current injected codec in memory, never stored secrets."""
+        if type(diagnostics) is not bool:
+            raise ValueError("diagnostics must be boolean")
+        if diagnostics:
+            return self._encryption_diagnostics()
         try:
             codec = self._require_codec()
             probe = b"yomihime:encryption-readiness:v1"
@@ -87,6 +91,62 @@ class SQLiteSecretStore:
                 "reason_code": "secret_encryption_unavailable",
             }
         return {"ready": True, "state": "ready", "reason_code": "ready"}
+
+    def _encryption_diagnostics(self) -> dict[str, object]:
+        key_state, codec_state = "cannot_safely_confirm", "component_unavailable"
+        try:
+            from .secret_codec import AESGCMSecretCodec
+
+            codec = self._require_codec()
+        except (ImportError, SecretStoreUnavailable):
+            pass
+        except Exception:
+            key_state, codec_state = "cannot_safely_confirm", "unknown"
+        else:
+            if type(codec) is AESGCMSecretCodec:
+                try:
+                    key_state, codec_state = codec.encryption_diagnostics()
+                except Exception:
+                    key_state, codec_state = "cannot_safely_confirm", "unknown"
+            else:
+                # An opaque injected codec cannot establish an external key state.
+                try:
+                    probe = b"yomihime:encryption-readiness:v1"
+                    encrypted = codec.encrypt(probe)
+                    if type(encrypted) is not bytes or encrypted == probe:
+                        raise ValueError
+                    decrypted = codec.decrypt(encrypted)
+                    if type(decrypted) is not bytes or decrypted != probe:
+                        raise ValueError
+                except Exception:
+                    codec_state = "self_test_failed"
+                else:
+                    codec_state = "available"
+        allowed = {
+            ("not_provided", "not_run"),
+            ("invalid_encoding_or_length", "not_run"),
+            ("valid_format", "available"),
+            ("valid_format", "component_unavailable"),
+            ("valid_format", "self_test_failed"),
+            ("cannot_safely_confirm", "not_run"),
+            ("cannot_safely_confirm", "available"),
+            ("cannot_safely_confirm", "component_unavailable"),
+            ("cannot_safely_confirm", "self_test_failed"),
+            ("cannot_safely_confirm", "unknown"),
+        }
+        if (
+            type(key_state) is not str
+            or type(codec_state) is not str
+            or (key_state, codec_state) not in allowed
+        ):
+            key_state, codec_state = "cannot_safely_confirm", "unknown"
+        ready = codec_state == "available"
+        return {
+            "ready": ready,
+            "state": "ready" if ready else "unavailable",
+            "reason_code": "ready" if ready else "secret_encryption_unavailable",
+            "diagnostics": {"key_state": key_state, "codec_state": codec_state},
+        }
 
     @staticmethod
     def _target(target: SecretTarget) -> SecretTarget:
