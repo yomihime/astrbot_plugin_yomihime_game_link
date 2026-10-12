@@ -12,7 +12,14 @@ from typing import Protocol
 class SecretKeyUnavailable(RuntimeError):
     """A deployment key is missing or invalid; plaintext fallback is forbidden."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, reason: str = "cannot_safely_confirm") -> None:
+        if reason not in {
+            "not_provided",
+            "invalid_encoding_or_length",
+            "cannot_safely_confirm",
+        }:
+            raise ValueError("invalid secret key failure category")
+        self.reason = reason
         super().__init__("secret encryption key is unavailable")
 
 
@@ -37,13 +44,13 @@ class EnvironmentKeyProvider:
     def get_key(self) -> bytes:
         encoded = os.environ.get(self._variable_name)
         if not encoded:
-            raise SecretKeyUnavailable() from None
+            raise SecretKeyUnavailable(reason="not_provided") from None
         try:
             key = base64.b64decode(encoded, validate=True)
         except (binascii.Error, ValueError):
-            raise SecretKeyUnavailable() from None
+            raise SecretKeyUnavailable(reason="invalid_encoding_or_length") from None
         if len(key) != 32:
-            raise SecretKeyUnavailable() from None
+            raise SecretKeyUnavailable(reason="invalid_encoding_or_length") from None
         return key
 
     def __repr__(self) -> str:

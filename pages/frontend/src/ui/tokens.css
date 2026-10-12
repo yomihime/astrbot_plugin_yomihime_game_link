@@ -1,0 +1,38 @@
+:root,.game-shell {
+  --ui-space-1:4px;--ui-space-2:8px;--ui-space-3:12px;--ui-space-4:16px;--ui-space-5:24px;--ui-space-6:32px;
+  --ui-control-height:40px;--ui-label-width:128px;--ui-control-short:210px;--ui-control-medium:320px;--ui-control-long:560px;
+  --ui-background:#f5f6fa;--ui-panel:#fff;--ui-text:#25283a;--ui-muted:#656c80;--ui-border:#e2e3ec;--ui-accent:#6656c5;--ui-error:#a32d38;--ui-warning:#805918;--ui-success:#256344;
+}
+:root[data-theme=dark],.game-shell[data-theme=dark] {color-scheme:dark;--ui-background:#181a23;--ui-panel:#21242f;--ui-text:#edeef5;--ui-muted:#a9b0c3;--ui-border:#343847;--ui-accent:#b5a4ff;--ui-error:#ffb4b9;--ui-warning:#ebc878;--ui-success:#8cd7ad}
+.ui-page-header{display:flex;justify-content:space-between;align-items:center;gap:var(--ui-space-5);margin-bottom:var(--ui-space-4)}
+.ui-page-header h1{margin:0;font-size:28px;line-height:1.4}
+.ui-settings-group{min-width:0;background:var(--ui-panel);border:1px solid var(--ui-border);border-radius:8px;padding:20px;margin:0 0 var(--ui-space-4)}
+.ui-group-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;border-bottom:1px solid var(--ui-border);padding-bottom:10px;margin-bottom:16px}
+.ui-group-heading h2{font-size:18px;line-height:1.5;margin:0;color:var(--ui-text)}
+.ui-settings-row{display:grid;grid-template-columns:var(--ui-label-width) minmax(0,var(--ui-control-long)) auto;align-items:center;justify-content:start;gap:12px;margin:12px 0;min-width:0}
+.ui-settings-row>label{font-size:15px;overflow-wrap:anywhere}.ui-settings-row [data-role=value],.ui-settings-row>.ui-control{width:100%;min-width:0}
+.ui-settings-row[data-width=short]{grid-template-columns:var(--ui-label-width) minmax(0,var(--ui-control-short)) auto}.ui-settings-row[data-width=medium]{grid-template-columns:var(--ui-label-width) minmax(0,var(--ui-control-medium)) auto}
+.ui-action-bar{display:flex;align-items:center;flex-wrap:wrap;gap:12px;margin:16px 0 0}.ui-status-hint{font-size:13px;line-height:1.6;color:var(--ui-muted);margin:8px 0;overflow-wrap:anywhere}.ui-status-hint:empty{display:none}.ui-status-hint[data-tone=error]{color:var(--ui-error)}.ui-status-hint[data-tone=warning]{color:var(--ui-warning)}.ui-status-hint[data-tone=success]{color:var(--ui-success)}
+.management{color:var(--ui-text);font:15px/1.7 system-ui,"Microsoft YaHei",sans-serif;min-width:0}
+.management button,.management input:not([type=checkbox]):not([type=radio]),.management select{font:inherit;min-height:var(--ui-control-height);padding:7px 12px;border:1px solid var(--ui-border);border-radius:6px;background:var(--ui-panel);color:inherit;max-width:100%;margin:0}
+.management button{cursor:pointer}.management button:disabled,.management button[aria-disabled=true],.management input:disabled,.management select:disabled{color:var(--ui-muted);cursor:default;opacity:.75}.management input[type=hidden]{display:none}
+.management button[data-action=save],.management button[data-action=credential-save]{background:var(--ui-accent);border-color:var(--ui-accent);color:var(--ui-panel)}
+.management [data-action=default]{font-size:13px;color:var(--ui-muted);white-space:nowrap}.management :focus-visible,.module-tabs a:focus-visible{outline:3px solid var(--ui-accent);outline-offset:3px}
+.management .field-detail{grid-column:2/-1;margin:0;font-size:13px;color:var(--ui-error)}
+.management .field-hint{grid-column:2/-1;margin:0;font-size:13px;color:var(--ui-muted)}
+.management .management-toolbar{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:12px;min-height:40px}.management .management-toolbar #status{flex:1;margin:0}
+.management .technical-details,.management .advanced-maintenance,.management .advanced-config{font-size:13px;color:var(--ui-muted);margin:12px 0}.management summary{cursor:pointer}.management .technical-details p{margin:4px 0}.management .advanced-config .ui-settings-group{margin-top:12px}
+.credential-tabs{display:flex;gap:16px;border-bottom:1px solid var(--ui-border);margin:0 0 12px}.credential-tabs button{border:0;border-bottom:2px solid transparent;border-radius:0;background:transparent;padding:8px 12px}.credential-tabs button[aria-pressed=true]{border-bottom-color:var(--ui-accent);color:var(--ui-accent);font-weight:650}
+.credential-input{display:flex;gap:8px;align-items:center;min-width:0}.credential-input input{width:100%;min-width:0}.credential-input button{flex-shrink:0;font-size:13px}
+.ui-check-label{display:flex;align-items:flex-start;gap:8px;font-size:15px;line-height:1.6;cursor:pointer;min-width:0}.ui-check-label>span{min-width:0;overflow-wrap:anywhere}.management .ui-check-label input[type=checkbox],.management .ui-check-label input[type=radio]{width:20px;height:20px;min-width:20px;min-height:20px;flex:0 0 20px;margin:2px 0 0;padding:0;accent-color:var(--ui-accent)}.ui-check-label:has(input:disabled){color:var(--ui-muted);cursor:default}
+.management .card{min-width:0}.management .credential-detail{margin:0 0 8px}.management .dirty-indicator{color:var(--ui-warning);font-size:13px}.management .credential-save-hint{font-size:13px;color:var(--ui-muted)}
+@media(max-width:850px){.ui-settings-row,.ui-settings-row[data-width]{grid-template-columns:110px minmax(0,1fr) auto;gap:10px}}
+@media(max-width:599px){.ui-settings-row,.ui-settings-row[data-width]{grid-template-columns:minmax(0,1fr);gap:8px;margin:16px 0}.ui-settings-row>button{justify-self:start}.management .field-detail,.management .field-hint{grid-column:1}.ui-settings-group{padding:16px}.ui-page-header{flex-wrap:wrap;gap:12px}.ui-page-header h1{font-size:24px}.credential-tabs{gap:4px;flex-wrap:wrap}.credential-input{flex-wrap:wrap}.management .management-toolbar{flex-wrap:wrap}}
+[hidden]{display:none!important}#management-root{max-width:1000px;margin:32px auto;padding:0 24px}body:has(>#management-root){margin:0;background:var(--ui-background);color:var(--ui-text)}#management-root .management>h1{font-size:28px;margin:0 0 16px}.management input[type=checkbox]{width:20px;padding:0}.management .ordinary-actions{margin-bottom:8px}.management #credentials{margin-top:16px}
+/* Explicit Naive overrides avoid intermediate wrong-theme colors on status updates. */
+.management{--text:var(--ui-text);--surface:var(--ui-panel)}.management #status{color:var(--text);transition:none}.management .n-alert{background-color:var(--surface);transition:none;flex:1;padding:0;background:transparent}.management .n-alert .n-alert-body{padding:0;margin:0}.management .n-alert:has(#status:empty){visibility:hidden}.management #status[data-tone=error]{color:var(--ui-error)}.management #status[data-tone=warning]{color:var(--ui-warning)}.management #status[data-tone=success]{color:var(--ui-success)}.ui-group-legend{font-size:18px;line-height:1.5;font-weight:650;padding:0 4px}.management fieldset.ui-settings-group{padding-top:8px}
+.management .n-alert .n-alert-body .n-alert-body__content{color:var(--text);transition:none}
+.management .n-alert{background-color:var(--surface)}
+/* Compact geometry keeps both configuration save actions in a desktop viewport. */
+.ui-settings-group{padding:16px;margin-bottom:12px}.ui-group-heading{margin-bottom:8px;padding-bottom:8px}.ui-settings-row{margin:8px 0}.credential-tabs{margin-bottom:8px}.management .credential-detail{margin-bottom:4px}.management .management-toolbar{margin-bottom:8px}.management .ordinary-actions{margin-top:8px}.management .technical-details,.management .advanced-config{margin:8px 0}.management #credentials{margin-top:12px}.ui-action-bar{margin-top:12px}.management fieldset.ui-settings-group{padding-bottom:12px}
+.management,.management *{box-sizing:border-box}

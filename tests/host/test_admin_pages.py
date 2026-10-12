@@ -112,7 +112,7 @@ class AdminPagesTests(unittest.IsolatedAsyncioTestCase):
         data = response.json()["data"]
         self.assertEqual(set(data), {"schema_version", "fields"})
         self.assertEqual(
-            len([field for field in data["fields"] if field["readable"]]), 4
+            len([field for field in data["fields"] if field["readable"]]), 5
         )
         self.assertNotIn("PRIVATE-INVALID-LEGACY", response.text)
         self.assertEqual(
@@ -131,6 +131,79 @@ class AdminPagesTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             (await self.call("catalog", {}, headers=asset)).status_code, 401
         )
+        self.assertEqual(self.pages.requests, {})
+        self.assertEqual(self.runtime._admin_source._proofs, {})
+
+    async def test_reviewed_subscription_gate_bool_grant_and_exact_cas_boundaries(self):
+        """Real reviewed composition, isolated storage; never starts delivery."""
+        from ygl_test_subject.modules.ff14.config import ORDINARY_FIELDS
+
+        gate = "ff14_subscriptions_enabled"
+        self.assertNotIn(gate, ORDINARY_FIELDS)
+        declarations = (await self.call("catalog", {})).json()["data"]["fields"]
+        visible = {
+            f["name"]
+            for f in declarations
+            if f["module_id"] == "ff14/ff14" and f["readable"]
+        }
+        self.assertEqual(
+            visible,
+            {
+                gate,
+                "ff14_calendar_default_days",
+                "ff14_calendar_default_timezone",
+                "ff14_calendar_default_delivery_time",
+            },
+        )
+        field = next(f for f in declarations if f["name"] == gate)
+        self.assertEqual(field["value_schema"], {"type": "boolean"})
+        self.assertIs(field["default"], True)
+        self.assertTrue(field["editable"])
+        row = (await self.call("read", {})).json()["data"]["ff14/ff14"]
+        self.assertIs(row["fields"][gate]["value"], True)
+        revision = row["revision"]
+
+        def body(value, module="ff14/ff14", name=gate, mode="replace"):
+            update = {"field": name, "mode": mode}
+            if mode == "replace":
+                update["value"] = value
+            return {
+                "module_id": module,
+                "expected_revision": revision,
+                "updates": [update],
+            }
+
+        for value in (1, 0, "true", "false", None, {}, []):
+            response = await self.call("update", body(value))
+            self.assertEqual(response.status_code, 400)
+        for payload in (
+            body(None, mode="clear"),
+            body(False, module="game_link/core"),
+            body(False, module="other/mod"),
+            body(False, name="ff14_calendar_interval_seconds"),
+        ):
+            self.assertEqual((await self.call("update", payload)).status_code, 400)
+        for headers in (
+            {},
+            {**self.headers, "Origin": "https://other.test"},
+            {"X-API-Key": "synthetic-active-api-key", "Origin": "https://ui.test"},
+        ):
+            self.assertNotEqual(
+                (await self.call("update", body(False), headers=headers)).status_code,
+                200,
+            )
+        self.assertEqual((await self.call("read", {})).json()["data"]["ff14/ff14"], row)
+        for value in (False, True):
+            old = body(value)
+            response = await self.call("update", old)
+            self.assertEqual(response.status_code, 200)
+            revision = response.json()["data"]["revision"]
+            self.assertEqual((await self.call("update", old)).status_code, 409)
+            current = (await self.call("read", {})).json()["data"]["ff14/ff14"]
+            self.assertEqual(current["revision"], revision)
+            self.assertIs(current["fields"][gate]["value"], value)
+        self.assertFalse(self.runtime.ready)
+        self.assertFalse(self.runtime.core_runtime.started)
         self.assertEqual(self.pages.requests, {})
         self.assertEqual(self.runtime._admin_source._proofs, {})
 

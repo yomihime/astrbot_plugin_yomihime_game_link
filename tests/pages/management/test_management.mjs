@@ -74,28 +74,19 @@ test('switching settings owner fences hidden old controls without clearing their
  const f=fixture();try{await load(f);const node=input(f,zone);node.value='Europe/London';node.dispatchEvent(new f.dom.window.Event('input'));const old=save(f,'ff14/ff14');f.app.selectOwner('game_link/core');await flush();assert.equal(old.getAttribute('aria-disabled'),'true');old.dispatchEvent(new f.dom.window.Event('click'));assert.equal(f.calls.filter(c=>c.endpoint==='admin/update').length,0);f.app.selectOwner('ff14/ff14');await flush();assert.equal(node.value,'Europe/London');assert.equal(field(f,zone).querySelector('[data-role="mode"]').value,'replace');assert.equal(node.disabled,false);}finally{f.close();}
 });
 
-test('production status and actual Naive content node explicitly override their own color transitions',async()=>{
-  const f=fixture();try{
-    await load(f);const node=f.document.getElementById('status'),content=node.closest('.n-alert-body__content'),alert=node.closest('.n-alert');assert.ok(content);assert.ok(alert);
-    const stylesheet=f.document.createElement('style');stylesheet.textContent=await readFile(new URL('../../../pages/management/styles.css',import.meta.url),'utf8');f.document.head.append(stylesheet);
-    const rules=[...stylesheet.sheet.cssRules],matches=(element,property)=>rules.flatMap(rule=>rule.selectorText?.split(',').filter(selector=>element.matches(selector)).map(selector=>({selector,value:rule.style.getPropertyValue(property)}))||[]).filter(rule=>rule.value);
-    const foreground=matches(content,'color').find(rule=>rule.value==='var(--text)'),transition=matches(content,'transition').find(rule=>rule.value==='none'),background=matches(alert,'background-color').find(rule=>rule.value==='var(--surface)');assert.ok(foreground);assert.ok(transition);assert.ok(background);
-    // The paragraph must have an explicit declaration; parent inheritance alone
-    // does not override Naive's content-level color and 0.3s transition.
-    assert.ok(matches(node,'color').some(rule=>rule.selector.includes('#status')&&rule.value==='var(--text)'));assert.ok(matches(node,'transition').some(rule=>rule.selector.includes('#status')&&rule.value==='none'));
-    const classes=selector=>(selector.match(/\.[\w-]+/g)||[]).length;
-    const native=runtimeDOM.window.document.querySelector('style[cssr-id="n-alert"]');assert.ok(native);let nativeContentTransitions=0,nativeContentColors=0;
-    for(const rule of native.sheet.cssRules)for(const selector of rule.selectorText?.split(',')||[])if(content.matches(selector)){
-      if(rule.style.getPropertyValue('color')){nativeContentColors++;assert.ok(classes(foreground.selector)>classes(selector));}
-      if(rule.style.getPropertyValue('transition').includes('color')){nativeContentTransitions++;assert.ok(classes(transition.selector)>classes(selector));}
-    }assert.ok(nativeContentTransitions>0);assert.ok(nativeContentColors>0);
-    for(const isDark of [true,false]){f.context({...context,isDark});await flush();assert.equal(f.document.getElementById('status'),node);assert.equal(node.closest('.n-alert-body__content'),content);assert.equal(f.document.documentElement.dataset.theme,isDark?'dark':'light');assert.equal(node.getAttribute('aria-live'),'polite');assert.equal(node.getAttribute('role'),'status');}
-  }finally{f.close();}
+test('production status has direct theme colors with no empty alert wrapper or color transition',async()=>{
+ const f=fixture();try{
+  await load(f);const node=f.document.getElementById('status');assert.equal(node.textContent,'');assert.equal(node.closest('.n-alert'),null);
+  const stylesheet=f.document.createElement('style');stylesheet.textContent=await readFile(new URL('../../../pages/management/styles.css',import.meta.url),'utf8');f.document.head.append(stylesheet);
+  const rules=[...stylesheet.sheet.cssRules],matches=property=>rules.flatMap(rule=>rule.selectorText?.split(',').filter(selector=>node.matches(selector)).map(selector=>({selector,value:rule.style.getPropertyValue(property)}))||[]).filter(rule=>rule.value);
+  assert.ok(matches('color').some(rule=>rule.selector.includes('#status')&&rule.value==='var(--text)'));assert.ok(matches('transition').some(rule=>rule.value==='none'));
+  for(const isDark of [true,false]){f.context({...context,isDark});await flush();assert.equal(f.document.getElementById('status'),node);assert.equal(node.closest('.n-alert'),null);assert.equal(f.document.documentElement.dataset.theme,isDark?'dark':'light');assert.equal(node.getAttribute('aria-live'),'polite');assert.equal(node.getAttribute('role'),'status');}
+ }finally{f.close();}
 });
 
 test('synchronous onContext/ready issue one catalog, then one read; tiny metadata needs no root branch',async()=>{
   const f=fixture();try{await flush();assert.equal(f.calls.length,1);assert.equal(f.calls[0].endpoint,'admin/catalog');await load(f);
-    assert.equal(f.document.querySelectorAll('#fields > section').length,3);assert.match(field(f,'sample').textContent,/无存量读取与修改授权/);assert.equal(input(f,'sample').value,'');assert.equal(input(f,'sample').disabled,true);assert.equal(save(f,'example/demo').disabled,true);
+    assert.equal(f.document.querySelectorAll('#fields > section').length,3);assert.match(field(f,'sample').textContent,/无读取或修改权限/);assert.equal(input(f,'sample').value,'');assert.equal(input(f,'sample').disabled,true);assert.equal(save(f,'example/demo').disabled,true);
     assert.equal(input(f,region).tagName,'SELECT');assert.equal(input(f,days).type,'number');assert.equal(input(f,zone).type,'text');
     f.context({...context});f.context({...context,theme:'dark',locale:'en-US'});await flush();assert.equal(f.calls.length,2);assert.equal(f.document.documentElement.dataset.theme,'dark');
   }finally{f.close();}
@@ -119,7 +110,7 @@ test('refresh failure retains drafts and nodes, gates writes until explicit reco
 });
 test('real unknown boundary change fences late read and clears drafts across identities',async()=>{
   const f=fixture();try{pending(f,'catalog').resolve(catalog());await flush();const old=pending(f,'read');f.context({...context,session:'mock-two',instance:{revision:2}});await flush();assert.equal(f.calls.length,3);old.resolve(snapshot(99));await flush();assert.equal(f.document.querySelectorAll('.config-field').length,0);
-    await load(f,catalog(),snapshot(2));assert.match(f.document.querySelector('section[data-owner="game_link/core"]').textContent,/配置版本：2/);assert.ok(!f.document.querySelector('#fields').textContent.includes('99'));
+    await load(f,catalog(),snapshot(2));mode(f,region,'clear');save(f,'game_link/core').click();assert.equal(pending(f,'update').body.expected_revision,2);pending(f,'update').reject(Error('revision_conflict'));await flush();assert.ok(!f.document.querySelector('#fields').textContent.includes('99'));
     mode(f,zone,'replace');input(f,zone).value='DIRTY-OLD';f.context({...context,session:'mock-three'});await load(f,catalog(),snapshot(3));assert.equal(input(f,zone).value,'Asia/Shanghai');
   }finally{f.close();}
 });
@@ -139,7 +130,7 @@ test('unrepresentable unknown lifecycle fields reject instead of collapsing the 
 });
 test('exact update/CAS body and explicit clear, then catalog/read refresh; no implicit recover',async()=>{
   const f=fixture();try{await load(f);mode(f,region,'clear');save(f,'game_link/core').click();assert.deepEqual(pending(f,'update').body,{module_id:'game_link/core',expected_revision:1,updates:[{field:region,mode:'clear'}]});
-    pending(f,'update').resolve({module_id:'game_link/core',revision:2});await flush();await load(f,catalog(),snapshot(2));assert.match(status(f),/设置已保存/);assert.equal(f.calls.filter(c=>c.endpoint==='admin/recover').length,0);assert.equal(field(f,region).querySelector('[data-role=mode]').value,'keep');
+    pending(f,'update').resolve({module_id:'game_link/core',revision:2});await flush();await load(f,catalog(),snapshot(2));assert.match(status(f),/已保存/);assert.equal(f.calls.filter(c=>c.endpoint==='admin/recover').length,0);assert.equal(field(f,region).querySelector('[data-role=mode]').value,'keep');
   }finally{f.close();}
 });
 test('invalid stored values are hidden and repair uses schema conversion with no fabricated value',async()=>{
@@ -153,20 +144,20 @@ test('client input failure posts nothing; server authorization/validation failur
 });
 test('missing semantic validator blocks replace/clear/recovery and preserves readable values',async()=>{
   const f=fixture(),declarations=catalog();Object.assign(declarations.fields.find(f=>f.name===zone),{editable:false,blocked_reason:'semantic_validator_unavailable'});
-  try{await load(f,declarations);assert.equal(input(f,zone).value,'Asia/Shanghai');assert.equal(field(f,zone).querySelector('[data-role=mode]').disabled,true);assert.equal(f.document.getElementById('recover').disabled,true);assert.match(field(f,zone).textContent,/当前不可修改/);assert.throws(()=>updateBody('ff14/ff14',1,{[zone]:{mode:'clear'}},validateCatalog(declarations)));assert.equal(f.calls.length,2);}finally{f.close();}
+  try{await load(f,declarations);assert.equal(input(f,zone).value,'Asia/Shanghai');assert.equal(field(f,zone).querySelector('[data-role=mode]').disabled,true);assert.equal(f.document.getElementById('recover'),null);assert.match(field(f,zone).textContent,/当前只读/);assert.throws(()=>updateBody('ff14/ff14',1,{[zone]:{mode:'clear'}},validateCatalog(declarations)));assert.equal(f.calls.length,2);const m=fixture(context,true,{scope:'maintenance',beforeMaintenance:async()=>true});try{await load(m,declarations);assert.equal(m.document.getElementById('recover').disabled,true);}finally{m.close();}}finally{f.close();}
 });
 test('unsupported object schema is explicitly readonly and an added declaration needs no app edit',async()=>{
   const f=fixture(),declarations=catalog();declarations.fields.push({...declarations.fields[0],name:'new_number',description:'新增数字',value_schema:{type:'integer',minimum:0},default:2});
   declarations.fields[0].value_schema={type:'object',properties:{label:{type:'string'}},required:['label'],additionalProperties:false};declarations.fields[0].default={label:'example'};
-  try{await load(f,declarations);assert.match(field(f,'sample').textContent,/无存量读取与修改授权|此类型暂不支持编辑/);assert.equal(input(f,'sample').disabled,true);assert.equal(input(f,'new_number').type,'number');assert.equal(input(f,'new_number').value,'');assert.equal(save(f,'example/demo').disabled,true);}finally{f.close();}
+  try{await load(f,declarations);assert.match(field(f,'sample').textContent,/无读取或修改权限|此类型暂不支持编辑/);assert.equal(input(f,'sample').disabled,true);assert.equal(input(f,'new_number').type,'number');assert.equal(input(f,'new_number').value,'');assert.equal(save(f,'example/demo').disabled,true);}finally{f.close();}
 });
 test('recover/rollback retain old exact bodies and only exact successful confirmations claim success',async()=>{
-  const f=fixture();try{await load(f);f.document.getElementById('replacement').checked=true;click(f,'recover');assert.deepEqual(pending(f,'recover').body,{expected_revisions:{'game_link/core':1,'ff14/ff14':1},complete_from_current:true});pending(f,'recover').resolve({recovered:true});await flush();await load(f,catalog(),snapshot(2));assert.match(status(f),/业务运行已恢复/);
-    click(f,'rollback');assert.deepEqual(pending(f,'rollback').body,{expected_revisions:{'game_link/core':2,'ff14/ff14':2}});pending(f,'rollback').resolve({rolled_back:true});await flush();await load(f,catalog(),snapshot(3));assert.match(status(f),/限定回退/);
+  const f=fixture(context,true,{scope:'maintenance',beforeMaintenance:async()=>true});try{await load(f);f.document.getElementById('replacement').checked=true;click(f,'recover');await flush();assert.deepEqual(pending(f,'recover').body,{expected_revisions:{'game_link/core':1,'ff14/ff14':1},complete_from_current:true});pending(f,'recover').resolve({recovered:true});await flush();await load(f,catalog(),snapshot(2));assert.match(status(f),/业务运行已恢复/);
+    click(f,'rollback');await flush();assert.deepEqual(pending(f,'rollback').body,{expected_revisions:{'game_link/core':2,'ff14/ff14':2}});pending(f,'rollback').resolve({rolled_back:true});await flush();await load(f,catalog(),snapshot(3));assert.match(status(f),/限定回退/);
   }finally{f.close();}
 });
 test('malformed update/recover/rollback and read envelopes never become successful',async()=>{
-  for(const endpoint of ['update','recover','rollback']){const f=fixture();try{await load(f);if(endpoint==='update'){mode(f,region,'clear');save(f,'game_link/core').click();}else click(f,endpoint);pending(f,endpoint).resolve(endpoint==='update'?{module_id:'other/module',revision:2}:endpoint==='recover'?{recovered:false}:{rolled_back:true,extra:'PRIVATE'});await flush();assert.match(status(f),/未取得成功确认/);assert.equal(f.calls.length,3);}finally{f.close();}}
+  for(const endpoint of ['update','recover','rollback']){const f=fixture(context,true,{scope:endpoint==='update'?'settings':'maintenance',beforeMaintenance:async()=>true});try{await load(f);if(endpoint==='update'){mode(f,region,'clear');save(f,'game_link/core').click();}else {click(f,endpoint);await flush();}pending(f,endpoint).resolve(endpoint==='update'?{module_id:'other/module',revision:2}:endpoint==='recover'?{recovered:false}:{rolled_back:true,extra:'PRIVATE'});await flush();assert.match(status(f),/未取得成功确认/);assert.equal(f.calls.length,3);}finally{f.close();}}
   const f=fixture();try{pending(f,'catalog').resolve(catalog());await flush();pending(f,'read').resolve({status:'ok',data:snapshot()});await flush();assert.match(status(f),/未通过校验/);assert.equal(f.document.querySelectorAll('.config-field').length,0);}finally{f.close();}
 });
 test('a newer draft during save survives response and refresh',async()=>{
@@ -182,22 +173,22 @@ test('focused refresh retains its node and focus while aria-disabled prevents du
   const f=fixture();try{await load(f);const button=f.document.getElementById('refresh');button.focus();button.click();await flush();assert.equal(f.document.activeElement,button);assert.equal(button.getAttribute('aria-disabled'),'true');assert.equal(button.disabled,false);button.click();await flush();assert.equal(f.calls.length,3);await load(f,catalog(),snapshot(2));assert.equal(f.document.activeElement,button);assert.equal(button.getAttribute('aria-disabled'),'false');assert.equal(f.document.getElementById('refresh'),button);}finally{f.close();}
 });
 test('blocked writes and recover cannot be posted by forced events after refresh failure or validator loss',async()=>{
-  const f=fixture();try{await load(f);mode(f,region,'clear');const button=save(f,'game_link/core');button.focus();click(f,'refresh');pending(f,'catalog').reject(Error('operation_unavailable'));await flush();assert.equal(button.getAttribute('aria-disabled'),'true');button.dispatchEvent(new f.dom.window.Event('click'));f.document.getElementById('recover').dispatchEvent(new f.dom.window.Event('click'));await flush();assert.equal(f.calls.length,3);
-    click(f,'refresh');const declarations=catalog();Object.assign(declarations.fields.find(f=>f.name===zone),{editable:false,blocked_reason:'semantic_validator_unavailable'});await load(f,declarations);f.document.getElementById('recover').dispatchEvent(new f.dom.window.Event('click'));await flush();assert.equal(f.calls.length,5);
+  const f=fixture();try{await load(f);mode(f,region,'clear');const button=save(f,'game_link/core');button.focus();click(f,'refresh');pending(f,'catalog').reject(Error('operation_unavailable'));await flush();assert.equal(button.getAttribute('aria-disabled'),'true');button.dispatchEvent(new f.dom.window.Event('click'));assert.equal(f.document.getElementById('recover'),null);await flush();assert.equal(f.calls.length,3);
+    click(f,'refresh');const declarations=catalog();Object.assign(declarations.fields.find(f=>f.name===zone),{editable:false,blocked_reason:'semantic_validator_unavailable'});await load(f,declarations);assert.equal(f.document.getElementById('recover'),null);await flush();assert.equal(f.calls.length,5);
   }finally{f.close();}
 });
 test('invalid catalog fails before any value read and missing schema stays visibly readonly',async()=>{
-  const f=fixture();try{pending(f,'catalog').resolve({schema_version:1,fields:[],extra:true});await flush();assert.equal(f.calls.length,1);assert.equal(f.document.querySelectorAll('.config-field').length,0);click(f,'refresh');const declarations=catalog();declarations.fields[0].value_schema=null;await load(f,declarations);assert.equal(input(f,'sample').disabled,true);assert.match(field(f,'sample').textContent,/无存量读取与修改授权|此类型暂不支持编辑/);}finally{f.close();}
+  const f=fixture();try{pending(f,'catalog').resolve({schema_version:1,fields:[],extra:true});await flush();assert.equal(f.calls.length,1);assert.equal(f.document.querySelectorAll('.config-field').length,0);click(f,'refresh');const declarations=catalog();declarations.fields[0].value_schema=null;await load(f,declarations);assert.equal(input(f,'sample').disabled,true);assert.match(field(f,'sample').textContent,/无读取或修改权限|此类型暂不支持编辑/);}finally{f.close();}
 });
 test('ungranted metadata beside an authorized field is never read or submitted and does not break save confirmation',async()=>{
   const f=fixture(),declarations=catalog();declarations.fields.push({...declarations.fields[0],module_id:'game_link/core',name:'extra_declared'});
-  try{await load(f,declarations);assert.equal(input(f,'extra_declared').value,'');assert.equal(input(f,'extra_declared').disabled,true);mode(f,region,'clear');save(f,'game_link/core').click();assert.deepEqual(pending(f,'update').body.updates,[{field:region,mode:'clear'}]);pending(f,'update').resolve({module_id:'game_link/core',revision:2});await flush();await load(f,declarations,snapshot(2));assert.match(status(f),/设置已保存/);assert.equal(input(f,'extra_declared').value,'');}finally{f.close();}
+  try{await load(f,declarations);assert.equal(input(f,'extra_declared').value,'');assert.equal(input(f,'extra_declared').disabled,true);mode(f,region,'clear');save(f,'game_link/core').click();assert.deepEqual(pending(f,'update').body.updates,[{field:region,mode:'clear'}]);pending(f,'update').resolve({module_id:'game_link/core',revision:2});await flush();await load(f,declarations,snapshot(2));assert.match(status(f),/已保存/);assert.equal(input(f,'extra_declared').value,'');}finally{f.close();}
 });
 
 test('embedded shell management keeps exact context and scoped container; resume clears pending status',async()=>{
  const dom=new JSDOM('<div id="management-root">outside</div><div id="embedded"></div>',{pretendToBeVisual:true}),calls=[];const binding={...context,pageName:'00-game-link'};
  const bridge={onContext(fn){fn(binding);return()=>{};},ready:()=>Promise.resolve(binding),apiPost(endpoint){calls.push(endpoint);return Promise.resolve(endpoint==='admin/catalog'?catalog():endpoint==='admin/read'?snapshot():endpoint==='admin/credential-catalog'?credentialCatalog():endpoint==='admin/credential-status'?credentialStatus():{ready:false,state:'unavailable',reason_code:'secret_encryption_unavailable'});}};
- const container=dom.window.document.getElementById('embedded'),page=createManagementPage(dom.window.document,bridge,dom.window,{expectedPage:'00-game-link',container});page.start();await flush();try{assert.equal(dom.window.document.getElementById('management-root').textContent,'outside');assert.ok(container.querySelector('[data-owner="game_link/core"]'));page.selectOwner('game_link/core');await flush();assert.equal(container.querySelector('#fields [data-owner="ff14/ff14"]').hidden,true);page.suspend();page.resume();await flush();assert.doesNotMatch(container.querySelector('#status').textContent,/正在执行/);assert.match(container.querySelector('#status').textContent,/设置已更新/);assert.equal(calls.filter(x=>x==='admin/catalog').length,2);}finally{page.dispose();dom.window.close();}
+ const container=dom.window.document.getElementById('embedded'),page=createManagementPage(dom.window.document,bridge,dom.window,{expectedPage:'00-game-link',container});page.start();await flush();try{assert.equal(dom.window.document.getElementById('management-root').textContent,'outside');assert.ok(container.querySelector('[data-owner="game_link/core"]'));page.selectOwner('game_link/core');await flush();assert.equal(container.querySelector('#fields [data-owner="ff14/ff14"]').hidden,true);page.suspend();page.resume();await flush();assert.doesNotMatch(container.querySelector('#status').textContent,/正在执行/);assert.equal(container.querySelector('#status').textContent,'');assert.equal(calls.filter(x=>x==='admin/catalog').length,2);}finally{page.dispose();dom.window.close();}
 });
 
 // Host 4.28.2 PluginPagePage forwards response.data.message for HTTP errors;
@@ -207,10 +198,10 @@ test('Host bridge conflict text preserves the Core draft and requires a fresh re
     await load(f,catalog(),snapshot(8));mode(f,region,'replace');const node=input(f,region);node.value='0';save(f,'game_link/core').click();
     const rejected=pending(f,'update');assert.deepEqual(rejected.body,{module_id:'game_link/core',expected_revision:8,updates:[{field:region,mode:'replace',value:'cn'}]});
     const error=Error('配置版本冲突，请刷新并重新核对后修改。');assert.equal(error.code,undefined);assert.equal(error.response,undefined);rejected.reject(error);await flush();
-    assert.match(status(f),/配置已变化/);assert.equal(input(f,region),node);assert.equal(node.value,'0');assert.equal(field(f,region).querySelector('[data-role=mode]').value,'replace');assert.match(f.document.querySelector('section[data-owner="game_link/core"]').textContent,/配置版本：8/);assert.equal(save(f,'game_link/core').getAttribute('aria-disabled'),'true');assert.equal(f.calls.length,3);
+    assert.match(status(f),/配置已变化/);assert.equal(input(f,region),node);assert.equal(node.value,'0');assert.equal(field(f,region).querySelector('[data-role=mode]').value,'replace');assert.equal(f.calls.find(c=>c.endpoint==='admin/update').body.expected_revision,8);assert.equal(save(f,'game_link/core').getAttribute('aria-disabled'),'true');assert.equal(f.calls.length,3);
     save(f,'game_link/core').dispatchEvent(new f.dom.window.Event('click'));await flush();assert.equal(f.calls.length,3);
     click(f,'refresh');const latest=snapshot(9);latest['game_link/core'].fields.default_region.value='global';await load(f,catalog(),latest);assert.equal(input(f,region),node);assert.equal(node.value,'0');assert.equal(save(f,'game_link/core').getAttribute('aria-disabled'),'false');
-    save(f,'game_link/core').click();assert.equal(pending(f,'update').body.expected_revision,9);pending(f,'update').resolve({module_id:'game_link/core',revision:10});await flush();await load(f,catalog(),snapshot(10));assert.match(status(f),/设置已保存/);assert.equal(field(f,region).querySelector('[data-role=mode]').value,'keep');
+    save(f,'game_link/core').click();assert.equal(pending(f,'update').body.expected_revision,9);pending(f,'update').resolve({module_id:'game_link/core',revision:10});await flush();await load(f,catalog(),snapshot(10));assert.match(status(f),/已保存/);assert.equal(field(f,region).querySelector('[data-role=mode]').value,'keep');
   }finally{f.close();}
 });
 test('unknown bridge errors and decorated conflict text stay redacted and gate Core writes',async()=>{
@@ -226,8 +217,30 @@ test('neutral owner groups form separate labeled fieldsets and share one exact C
  declarations.fields=declarations.fields.filter(field=>field.module_id!=='example/demo').concat([b,a]);
  const values=snapshot();values['example/demo']={revision:7,fields:{frequency:{value:'daily',state:'valid',present:true,source:'sqlite'},appearance:{value:'compact',state:'valid',present:true,source:'sqlite'}}};
  try{await load(f,declarations,values);const card=f.document.querySelector('section.card[data-owner="example/demo"]'),groups=[...card.querySelectorAll('fieldset.config-group')];
-  assert.equal(groups.length,2);assert.deepEqual(groups.map(group=>group.dataset.group),['beta','alpha']);assert.deepEqual(groups.map(group=>group.querySelector('legend').textContent),['设置组 1','设置组 2']);assert.ok(groups.every(group=>group.querySelector('legend')?.textContent));assert.deepEqual(groups.map(group=>[...group.querySelectorAll('[data-field]')].map(field=>field.dataset.field)),[['appearance'],['frequency']]);
+  assert.equal(groups.length,2);assert.deepEqual(groups.map(group=>group.dataset.group),['beta','alpha']);assert.deepEqual(groups.map(group=>group.querySelector('legend').textContent),['beta','alpha']);assert.ok(groups.every(group=>group.querySelector('legend')?.textContent));assert.deepEqual(groups.map(group=>[...group.querySelectorAll('[data-field]')].map(field=>field.dataset.field)),[['appearance'],['frequency']]);
   for(const [name,value] of [['frequency','weekly'],['appearance','expanded']]){const node=input(f,name);node.value=value;node.dispatchEvent(new f.dom.window.Event('input'));}
   assert.equal(card.querySelectorAll('[data-action=save]').length,1);save(f,'example/demo').click();assert.equal(f.calls.filter(call=>call.endpoint==='admin/update').length,1);assert.deepEqual(pending(f,'update').body,{module_id:'example/demo',expected_revision:7,updates:[{field:'appearance',mode:'replace',value:'expanded'},{field:'frequency',mode:'replace',value:'weekly'}]});
+ }finally{f.close();}
+});
+
+// Success expires on the controlled clock; failures have no dismissal timer.
+for(const action of ['recover','rollback'])for(const succeeds of [true,false])test(`${action} ${succeeds?'success expires after 3500ms':'failure remains an error without auto-dismiss'}`,async()=>{
+ const f=fixture(context,true,{scope:'maintenance',beforeMaintenance:async()=>true}),timers=new Map();let timerId=0;
+ f.dom.window.setTimeout=(callback,delay)=>{const id=++timerId;timers.set(id,{callback,delay});return id;};f.dom.window.clearTimeout=id=>timers.delete(id);
+ try{
+  await load(f);click(f,action);await flush();const call=pending(f,action);
+  if(succeeds){call.resolve(action==='recover'?{recovered:true}:{rolled_back:true});await flush();await load(f,catalog(),snapshot(2));}
+  else{call.reject(Error('operation_unavailable'));await flush();}
+  const node=f.document.getElementById('status'),message=node.textContent;
+  assert.equal(f.calls.filter(c=>c.endpoint==='admin/'+action).length,1);
+  assert.equal(node.dataset.tone,succeeds?'success':'error');assert.ok(message.length>0);
+  if(succeeds){
+   assert.match(message,action==='recover'?/业务运行已恢复/:/限定回退/);
+   assert.equal(timers.size,1);const [id,timer]=[...timers][0];assert.equal(timer.delay,3500);
+   assert.equal(node.textContent,message,'success must remain before its deadline');timers.delete(id);timer.callback();assert.equal(node.textContent,'');
+  }else{
+   assert.match(message,/未取得成功确认/);assert.equal(timers.size,0,'failure must cancel any earlier success dismissal and schedule none');
+   for(const timer of timers.values())timer.callback();assert.equal(node.textContent,message);assert.equal(node.dataset.tone,'error');
+  }
  }finally{f.close();}
 });

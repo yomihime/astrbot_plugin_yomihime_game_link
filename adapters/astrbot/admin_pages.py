@@ -239,9 +239,13 @@ class AdminPages:
                 )
             )
         if endpoint == "credential-readiness":
-            if data:
-                raise ValueError("readiness parameters must be empty")
-            return await ops.credential_readiness(authorization=context)
+            if data and (
+                set(data) != {"diagnostics"} or data["diagnostics"] is not True
+            ):
+                raise ValueError("invalid readiness parameters")
+            return await ops.credential_readiness(
+                authorization=context, diagnostics=bool(data)
+            )
         if endpoint in ("credential-catalog", "credential-status"):
             if data:
                 raise ValueError("credential read parameters must be empty")

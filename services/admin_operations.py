@@ -223,7 +223,9 @@ class AdminOperationsService(AdminOperations):
         )
 
     @_tracked_admin_request
-    async def credential_readiness(self, *, authorization):
+    async def credential_readiness(self, *, authorization, diagnostics=False):
+        if type(diagnostics) is not bool:
+            raise ValueError("diagnostics must be boolean")
         grant = await self.authorization.authorize(
             AdminOperation.READ_CONFIG,
             invocation=None,
@@ -235,7 +237,11 @@ class AdminOperationsService(AdminOperations):
                 grant, operation=AdminOperation.READ_CONFIG
             )
             self._require_accepting()
-            result = self.secret_store.encryption_readiness()
+            result = (
+                self.secret_store.encryption_readiness(diagnostics=True)
+                if diagnostics
+                else self.secret_store.encryption_readiness()
+            )
             await self.authorization.validate_generation(
                 grant, operation=AdminOperation.READ_CONFIG
             )

@@ -48,7 +48,7 @@ try{
   input.value='44091';input.dispatchEvent(new window.InputEvent('input',{bubbles:true}));await runtime.nextTick();
   window.document.querySelector('form').dispatchEvent(new window.Event('submit',{bubbles:true,cancelable:true}));
   for(let i=0;i<12;i++){await Promise.resolve();await runtime.nextTick();}
-  assert.equal(calls.filter(c=>c.kind==='post').length,1);assert.ok(window.document.querySelector('.ff14-result'));
+  assert.equal(calls.filter(c=>c.kind==='post'&&c.endpoint==='invoke').length,1);assert.ok(window.document.querySelector('.ff14-result'));assert.ok(calls.filter(c=>c.kind==='post').every(c=>['invoke','admin/catalog','admin/modules','admin/read','admin/credential-catalog','admin/credential-status','admin/credential-readiness'].includes(c.endpoint)));
   window.dispatchEvent(new window.Event('pagehide'));await runtime.nextTick();
   console.log('production shell/runtime/module: cold evaluation, mount, query, disposal without Node globals passed');
 }finally{dom.window.close();}

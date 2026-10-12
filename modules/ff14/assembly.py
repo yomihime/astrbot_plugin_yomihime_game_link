@@ -93,14 +93,15 @@ class ReviewedSupport:
     module_id: str = "ff14/ff14"
     validators: object = None
     metadata: object = None
-    ordinary_config_fields = tuple(field.name for field in CALENDAR_CONFIG_FIELDS)
+    ordinary_config_fields = tuple(field.name for field in CALENDAR_CONFIG_FIELDS) + (
+        "ff14_subscriptions_enabled",
+    )
 
     def with_metadata(self, metadata):
         return replace(self, metadata=metadata)
 
     ordinary_snapshot = staticmethod(ordinary_snapshot)
     query_parameters = staticmethod(query_parameters)
-
 
 
 SUPPORT = ReviewedSupport(validators=CALENDAR_VALUE_VALIDATORS)
