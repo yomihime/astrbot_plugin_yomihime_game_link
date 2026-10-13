@@ -612,7 +612,7 @@ class LLMToolTests(unittest.IsolatedAsyncioTestCase):
         self,
     ):
         await self.start()
-        self.assertEqual(len(self.manager.func_list), 4)
+        self.assertEqual(len(self.manager.func_list), 5)
         raw = self.manager.func_list[0]
         self.assertIsNone(raw.handler)
         self.assertNotIn("command", raw.parameters["properties"])
@@ -1739,7 +1739,7 @@ class LLMToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.runtime.core_runtime)
         self.context.add_llm_tools = original
         await self.runtime.initialize()
-        self.assertEqual(len(self.manager.func_list), 4)
+        self.assertEqual(len(self.manager.func_list), 5)
 
     async def test_module_stop_revoke_and_pending_observer_cleanup(self):
         await self.start()

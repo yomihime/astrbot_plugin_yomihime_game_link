@@ -69,6 +69,7 @@ class FF14Module:
         self._started = False
         self._market = MarketQueryHandler(services)
         self._items = ItemLookup(services)
+        self._logs = FFLogsCharacterLookup(services)
         self._handlers = ModuleHandlers(
             capabilities={
                 CAPABILITY_STATUS: _StatusHandler(),
@@ -76,7 +77,7 @@ class FF14Module:
                 CAPABILITY_ITEM_SELECT: self._items,
                 CAPABILITY_MARKET_QUERY: self._market,
                 CAPABILITY_MARKET_SELECT: self._market,
-                CAPABILITY_FFLOGS_CHARACTER: FFLogsCharacterLookup(services),
+                CAPABILITY_FFLOGS_CHARACTER: self._logs,
                 CAPABILITY_FFLOGS_OUTPUT: FFLogsOutputPercentiles(services),
                 CAPABILITY_CALENDAR_QUERY: CalendarQuery(services, config=config),
                 CAPABILITY_CALENDAR_SUBSCRIPTION_CREATE: CalendarSubscriptionHandler(
@@ -106,6 +107,7 @@ class FF14Module:
         self._started = False
         self._market.close()
         self._items.close()
+        self._logs.close()
 
     async def check_health(self) -> HealthReport:
         if not self._started:

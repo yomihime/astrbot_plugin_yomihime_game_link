@@ -8,7 +8,7 @@ import re
 from html.parser import HTMLParser
 from urllib.parse import quote
 
-from yomihime_game_link_sdk.contexts import InvocationView
+from yomihime_game_link_sdk.contexts import InvocationOrigin, InvocationView
 from yomihime_game_link_sdk.display import (
     DisplayDocument,
     Link,
@@ -16,7 +16,7 @@ from yomihime_game_link_sdk.display import (
     Privacy,
     TextBlock,
 )
-from yomihime_game_link_sdk.errors import SourceHttpError
+from yomihime_game_link_sdk.errors import ServiceUnavailable, SourceHttpError
 from yomihime_game_link_sdk.results import (
     CapabilityResult,
     ErrorCode,
@@ -93,9 +93,22 @@ class FFLogsCharacterLookup:
 
     def __init__(self, services: ModuleServices) -> None:
         self._services = services
+        self._lifecycle = object()
+
+    def close(self) -> None:
+        self._lifecycle = object()
 
     async def invoke(
         self, context: InvocationView, parameters: JsonObject
+    ) -> CapabilityResult:
+        if context is not None and context.origin is InvocationOrigin.LLM_TOOL:
+            from .fflogs_chat import invoke_character_tool
+
+            return await invoke_character_tool(self, context, parameters)
+        return await self._execute(context, parameters)
+
+    async def _execute(
+        self, context, parameters, *, scope=None, tool=False, guard=None
     ) -> CapabilityResult:
         inputs = _character_inputs(parameters)
         if isinstance(inputs, CapabilityResult):
@@ -103,21 +116,34 @@ class FFLogsCharacterLookup:
         realm, server_label, name, server_hint, metric, zone_tuple = inputs
         source_id, host = _realm_source(realm)
         credential_state = await _credential_state(self._services, realm)
+
+        def source_error(error):
+            result = _http_error(error, credential_state=credential_state)
+            if tool:
+                from .fflogs_chat import credential_error_facts
+
+                return credential_error_facts(result, credential_state, error.code)
+            return result
+
+        if guard is not None:
+            await guard()
         if credential_state != "configured":
-            return _http_error(
-                SourceHttpError("credentials_unavailable"),
-                credential_state=credential_state,
-            )
+            return source_error(SourceHttpError("credentials_unavailable"))
         try:
-            scope = await self._services.scopes.bind(context)
+            if scope is None:
+                scope = await self._services.scopes.bind(context)
             catalog = FFLogsCatalog(scope.http, source_id)
             resolution = await catalog.resolve_server(realm, server_label)
         except SourceHttpError as exc:
-            return _http_error(exc, credential_state=credential_state)
+            return source_error(exc)
         except (FFLogsPayloadError, FFLogsGraphQLError):
             return _error(
                 ErrorCode.UNPARSED, "FFLogs 服务器目录格式暂不可用，未尝试自动猜测。"
             )
+        except (PermissionError, ServiceUnavailable, TimeoutError):
+            if tool:
+                raise
+            return _error(ErrorCode.MODULE_UNAVAILABLE, "FFLogs 来源服务暂不可用。")
         except Exception:
             return _error(ErrorCode.MODULE_UNAVAILABLE, "FFLogs 来源服务暂不可用。")
 
@@ -137,12 +163,20 @@ class FFLogsCharacterLookup:
                 "所选区服目录中没有匹配的服务器名称。",
             )
         if len(matches) > 1:
-            choices = tuple(_server_choice(item) for item in matches[:20])
-            return _selection(
+            limit = 6 if tool else 20
+            choices = tuple(_server_choice(item) for item in matches[:limit])
+            result = _selection(
                 "服务器名称有重名，请选择区域",
                 choices,
                 "可将某个区域或数据中心名称作为 server_hint 后重试。",
             )
+            if tool:
+                from .fflogs_chat import server_facts, tool_result
+
+                return tool_result(
+                    result, {"fflogs": server_facts(matches, realm, server_label, name)}
+                )
+            return result
         server = matches[0]
 
         variables: dict[str, object] = {
@@ -188,6 +222,16 @@ class FFLogsCharacterLookup:
                     "该角色的 FFLogs 记录已隐藏；本模块不会查询私密数据。",
                 )
             character = parse_public_character(raw_character)
+            if tool and (
+                " ".join(character.name.casefold().split())
+                != " ".join(name.casefold().split())
+                or " ".join(character.server_name.casefold().split())
+                != " ".join(server.name.casefold().split())
+            ):
+                return _error(
+                    ErrorCode.UNPARSED,
+                    "FFLogs 返回的角色或服务器与本次目标不一致，未展示战绩。",
+                )
             if character.metric != metric:
                 return _error(
                     ErrorCode.UNPARSED,
@@ -207,7 +251,7 @@ class FFLogsCharacterLookup:
                     "FFLogs返回的副本、难度或分区与请求不一致。未展示战绩。",
                 )
         except SourceHttpError as exc:
-            return _http_error(exc, credential_state=credential_state)
+            return source_error(exc)
         except FFLogsGraphQLError:
             return _error(ErrorCode.UPSTREAM_ERROR, "FFLogs 未接受公开角色查询。")
         except FFLogsPayloadError:
@@ -215,11 +259,34 @@ class FFLogsCharacterLookup:
                 ErrorCode.UNPARSED,
                 "FFLogs 角色记录格式暂不可用，未提取不认识的字段。",
             )
+        except (PermissionError, ServiceUnavailable, TimeoutError):
+            if tool:
+                raise
+            return _error(ErrorCode.MODULE_UNAVAILABLE, "FFLogs 来源服务暂不可用。")
         except Exception:
             return _error(ErrorCode.MODULE_UNAVAILABLE, "FFLogs 来源服务暂不可用。")
-        return _character_result(
-            character, host, server.region, metric, zone_tuple, realm
+        result = _character_result(
+            character,
+            host,
+            server.region,
+            metric,
+            zone_tuple,
+            realm,
+            limit=20 if tool else 40,
+            partial_on_truncation=tool,
         )
+        if tool and result.error is None:
+            from .fflogs_chat import character_facts, fetched_at, tool_result
+
+            facts = character_facts(
+                character, server, realm, metric, zone_tuple, host, fetched_at()
+            )
+            facts.update(
+                partial=result.status is ResultStatus.PARTIAL_SUCCESS,
+                warnings=list(result.warnings),
+            )
+            return tool_result(result, {"fflogs": facts})
+        return result
 
 
 class FFLogsOutputPercentiles:
@@ -504,6 +571,9 @@ def _character_result(
     metric: str,
     zone: tuple[int, int, int] | None,
     realm: str,
+    *,
+    limit: int = 40,
+    partial_on_truncation: bool = False,
 ) -> CapabilityResult:
     if character.hidden:
         return _error(
@@ -529,7 +599,7 @@ def _character_result(
     if character.partition == -1:
         blocks.append(TextBlock("分区范围：全部分区。"))
 
-    visible = character.rankings[:40]
+    visible = character.rankings[:limit]
     for ranking in visible:
         parts = [ranking.encounter_name]
         if ranking.best_amount is not None:
@@ -543,7 +613,7 @@ def _character_result(
     if not verified:
         warnings.append("国际服角色数据尚未完成核验，当前结果仅供参考。")
     if len(character.rankings) > len(visible):
-        warnings.append("战绩较多，结果仅显示前 40 项。")
+        warnings.append(f"战绩较多，结果仅显示前 {limit} 项。")
     url = (
         f"{host}/character/{quote(server_region, safe='')}/"
         f"{quote(character.server_name, safe='')}/{quote(character.name, safe='')}"
@@ -558,7 +628,10 @@ def _character_result(
     )
     return CapabilityResult(
         result_id=f"ff14-fflogs-character-{character.character_id}",
-        status=ResultStatus.SUCCESS if verified else ResultStatus.PARTIAL_SUCCESS,
+        status=ResultStatus.SUCCESS
+        if verified
+        and (not partial_on_truncation or len(visible) == len(character.rankings))
+        else ResultStatus.PARTIAL_SUCCESS,
         document=document,
         privacy=Privacy.PUBLIC,
         warnings=tuple(warnings),
@@ -666,7 +739,7 @@ def _http_error(
             if credential_state == "unset"
             else "无法确认该 FFLogs 区域的凭据配置状态；请管理员从 AstrBot 插件管理页核对来源凭据。"
             if credential_state == "unknown"
-            else "该 FFLogs 区域已配置但凭据暂不可用；请管理员核对加密密钥与来源凭据。",
+            else "该 FFLogs 区域已配置但凭据暂不可用；原因未公开，请管理员核对配置管理中的来源凭据与加密状态。",
         )
     if error.code == "rate_limited" or error.status_code == 429:
         return _error(ErrorCode.RATE_LIMITED, "FFLogs 请求过于频繁，请稍后再试。")
@@ -681,6 +754,8 @@ def _http_error(
         )
     if error.code == "invalid_response":
         return _error(ErrorCode.UNPARSED, "FFLogs 返回了无法识别的响应。")
+    if error.code == "timeout":
+        return _error(ErrorCode.UPSTREAM_ERROR, "FFLogs 请求超时，请稍后按原条件重试。")
     if page and error.status_code == 404:
         return _error(ErrorCode.NOT_FOUND, "FFLogs 中没有找到所请求的页面或角色。")
     return _error(ErrorCode.UPSTREAM_ERROR, "FFLogs 服务暂时不可用。")

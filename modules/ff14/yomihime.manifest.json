@@ -267,6 +267,11 @@
             "additionalProperties": false
           },
           "invocation_policy": "command_and_public_web",
+          "invocation_origins": [
+            "command",
+            "web_public",
+            "llm_tool"
+          ],
           "effect": "read_only",
           "privacy_floor": "public"
         },
@@ -616,6 +621,21 @@
             "item_id": "item_id"
           },
           "description": "Continue only the same user's current pending item lookup batch after a new real user message confirms a unique full candidate name (name, name + 那个, 选/选择/就/就选 + name) or 选择物品 <ID>. Use the item lookup batch_id/generation and matching item_id, never a market batch. The module validates the real message. Questions, negations, multiple or duplicate names and ordinal choices require clarification. Cite sources and preserve unknown fields, partial warnings and finite route coverage; missing routes do not prove an item is unobtainable. Do not infer uses or prices."
+        },
+        {
+          "name": "ff14_logs_character",
+          "capability_id": "ff14.logs.character",
+          "parameter_mapping": {
+            "realm": "realm",
+            "server": "server",
+            "character": "character",
+            "server_hint": "server_hint",
+            "metric": "metric",
+            "zone_id": "zone_id",
+            "difficulty": "difficulty",
+            "partition": "partition"
+          },
+          "description": "Query public FFLogs character rankings only. All target fields must come from the current real user message: realm (cn/global/国服/国际服), full server and full character name. If missing, ask the user to provide all three in one new message, for example 查 FFLogs 国际服 Cerberus \"Synthetic Hero\". Names containing spaces must be quoted. Do not borrow model history, shorten names, guess a server or use an item/market candidate. Optional server_hint, rdps/ndps/cdps metric and the complete zone_id+difficulty+partition group must also be explicit in that current message; omitted metric defaults rdps, omitted filters use FFLogs defaults. If servers are ambiguous, show offered regions/DCs and request a new complete message with server_hint=that name; no ordinal or first-choice guessing. Return actual source metric/filters, finite ranking rows and FFLogs link; retain unknown/null, partial warnings and truncation. Retrieval time is not fight/source-update time. Character rank percent is not a global output-percentile dataset, battle analysis, historical-date analysis or job comparison. Missing records do not prove inactivity. Explain errors and wait for user clarification; do not change targets/filters. Configured credentials do not prove decryption or authentication; configured-but-unavailable has an unpublished cause."
         }
       ],
       "config_fields": [

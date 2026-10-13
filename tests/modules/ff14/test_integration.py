@@ -231,6 +231,20 @@ class FF14InstalledModuleTests(unittest.IsolatedAsyncioTestCase):
                             "item_id": "item_id",
                         },
                     ),
+                    (
+                        "ff14_logs_character",
+                        "ff14.logs.character",
+                        {
+                            "realm": "realm",
+                            "server": "server",
+                            "character": "character",
+                            "server_hint": "server_hint",
+                            "metric": "metric",
+                            "zone_id": "zone_id",
+                            "difficulty": "difficulty",
+                            "partition": "partition",
+                        },
+                    ),
                 ),
             )
             self.assertEqual(
