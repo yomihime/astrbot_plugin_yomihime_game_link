@@ -156,6 +156,50 @@
             "additionalProperties": false
           },
           "invocation_policy": "command_and_public_web",
+          "invocation_origins": [
+            "command",
+            "web_public",
+            "llm_tool"
+          ],
+          "effect": "read_only",
+          "privacy_floor": "public",
+          "required_sources": [
+            "xivapi_items"
+          ]
+        },
+        {
+          "capability_id": "ff14.item.select",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "batch_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "generation": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "item_id": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 2147483647
+              }
+            },
+            "required": [
+              "batch_id",
+              "generation",
+              "item_id"
+            ],
+            "additionalProperties": false
+          },
+          "invocation_policy": "natural_language_allowed",
+          "invocation_origins": [
+            "command",
+            "llm_tool"
+          ],
           "effect": "read_only",
           "privacy_floor": "public",
           "required_sources": [
@@ -554,6 +598,24 @@
             "item_id": "item_id"
           },
           "description": "Continue the current user's pending FF14 query only after a new user message confirms a unique full candidate name: name, name + 那个, 选/选择/就/就选 + name; or 选择物品 <ID>. Use prior batch_id/generation and the matching item_id. The module validates the real event, not model assertions. Questions, negations, multiple names, duplicate names and ordinal choices require clarification. Preserve original scope, quality, intent and configuration revisions. After success or usable partial facts suffice, answer directly with source and limited coverage/non-realtime caveat adjacent to prices; do not issue extra server queries without a new user instruction. Unknown world names remain unknown; do not infer HQ uses or restocking advice. Titles, table headers and prices must say lowest listing in the data returned for this query; listings are at most five finite samples, never a complete list. minimums.time is World data upload; listings.reviewed is source last review and listings.uploaded is World upload, none is listing creation time. source.fetched_at/fetched_age_seconds describes retrieval separately from price source age; unknown times remain unknown. Avoid realtime-price or realtime-interface wording."
+        },
+        {
+          "name": "ff14_item_lookup",
+          "capability_id": "item.lookup",
+          "parameter_mapping": {
+            "query": "query"
+          },
+          "description": "Look up FF14 item information and bounded acquisition routes by name or numeric item ID explicitly provided in the current real user message. This is an item information tool; no market scope or price intent. Exact names take priority. On ambiguity show the finite candidates and wait for a new user message confirming a unique full name or 选择物品 <ID>, then call ff14_item_select with this item batch. Never guess, use an ordinal, or change query to bypass selection. Answer directly after success or usable partial facts; cite XIVAPI-compatible/Garland sources, keep missing values unknown and disclose partial/truncated routes. Missing routes do not mean an item cannot be obtained. Do not infer uses or prices. On error explain and await user clarification."
+        },
+        {
+          "name": "ff14_item_select",
+          "capability_id": "ff14.item.select",
+          "parameter_mapping": {
+            "batch_id": "batch_id",
+            "generation": "generation",
+            "item_id": "item_id"
+          },
+          "description": "Continue only the same user's current pending item lookup batch after a new real user message confirms a unique full candidate name (name, name + 那个, 选/选择/就/就选 + name) or 选择物品 <ID>. Use the item lookup batch_id/generation and matching item_id, never a market batch. The module validates the real message. Questions, negations, multiple or duplicate names and ordinal choices require clarification. Cite sources and preserve unknown fields, partial warnings and finite route coverage; missing routes do not prove an item is unobtainable. Do not infer uses or prices."
         }
       ],
       "config_fields": [

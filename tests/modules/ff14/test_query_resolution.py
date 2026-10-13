@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import unittest
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 from types import SimpleNamespace
 
 from ygl_test_subject.modules.ff14.features.item_sources import ItemSourceClient
@@ -268,7 +268,9 @@ class NaturalConfirmationTests(unittest.TestCase):
             self.batch,
         )
         self.assertIsNone(
-            self.registry.tool_query(self.owner, "new-ref", "牛排国际服什么价？", "牛排")
+            self.registry.tool_query(
+                self.owner, "new-ref", "牛排国际服什么价？", "牛排"
+            )
         )
         self.assertIsNone(
             self.registry.tool_query(
@@ -278,6 +280,54 @@ class NaturalConfirmationTests(unittest.TestCase):
         with self.assertRaises(QueryResolutionError):
             self.registry.tool_query(self.owner, "new-ref", "牛排？", "牛排")
         self.assertEqual(self.choose("犎牛牛排那个。").scope, self.query.scope)
+
+    def test_duplicate_original_name_fresh_queries_and_consumed_event_fences(self):
+        self.query = replace(self.query, query="Same")
+        for consumed in (False, True):
+            with self.subTest(consumed=consumed):
+                self.publish(("Same", "Same"))
+                if consumed:
+                    self.registry.choose_confirmed(
+                        self.owner,
+                        self.batch.batch_id,
+                        self.batch.generation,
+                        90001,
+                        event_ref="confirmation-ref",
+                        text="选择物品 90001",
+                        retain=True,
+                    )
+                    for event in (self.event, "confirmation-ref"):
+                        with self.assertRaises(QueryResolutionError):
+                            self.registry.tool_query(
+                                self.owner, event, "再查Same", "Same"
+                            )
+                else:
+                    self.assertIs(
+                        self.registry.tool_query(
+                            self.owner, self.event, "查Same", "Same"
+                        ),
+                        self.batch,
+                    )
+                for text in (
+                    "Same",
+                    "Same那个",
+                    "不是Same",
+                    "Same？",
+                    "再查Same？",
+                    "第一个",
+                    "选择Same",
+                ):
+                    with (
+                        self.subTest(text=text),
+                        self.assertRaises(QueryResolutionError),
+                    ):
+                        self.registry.tool_query(self.owner, "next-ref", text, "Same")
+                self.assertIsNone(
+                    self.registry.tool_query(self.owner, "next-ref", "再查Same", "Same")
+                )
+                self.registry.begin(self.owner, source_ref="next-ref")
+                with self.assertRaises(QueryResolutionError):
+                    self.choose("选择物品 90001")
 
     def test_all_positional_denial_messages_refuse_before_begin_in_every_state(self):
         # Candidate capacity is not a boundary on rejected ordinal syntax.
@@ -808,31 +858,42 @@ class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
                     all(request.path == "/api/search" for request in http.requests)
                 )
 
-    async def test_s2a_message_guard_refuses_after_config_and_search_without_publish(self):
+    async def test_s2a_message_guard_refuses_after_config_and_search_without_publish(
+        self,
+    ):
         from yomihime_game_link_sdk.errors import AccessDenied
+
         for boundary in ("config", "search"):
             with self.subTest(boundary=boundary):
                 registry = CandidateRegistry(clock=lambda: self.now)
                 coordinator = QueryCoordinator(self.coordinator.resolver, registry)
                 effects = []
                 original_publish, original_finish = registry.publish, registry.finish
+
                 def publish(*args, **kwargs):
                     effects.append("publish")
                     return original_publish(*args, **kwargs)
+
                 def finish(*args, **kwargs):
                     effects.append("finish")
                     return original_finish(*args, **kwargs)
+
                 registry.publish, registry.finish = publish, finish
                 calls = 0
+
                 async def guard():
                     nonlocal calls
                     calls += 1
                     if calls == (1 if boundary == "config" else 2):
                         raise AccessDenied("source_revoked")
+
                 with self.assertRaises(AccessDenied):
                     await coordinator.resolve(
-                        self.owner, {"query": "Synthetic"}, self.services,
-                        _Search(), guard=guard
+                        self.owner,
+                        {"query": "Synthetic"},
+                        self.services,
+                        _Search(),
+                        guard=guard,
                     )
                 self.assertEqual(effects, [])
                 self.assertIsNone(next(iter(registry._pending.values())).batch)

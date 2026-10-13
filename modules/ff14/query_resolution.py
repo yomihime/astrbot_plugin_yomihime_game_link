@@ -172,6 +172,16 @@ class MarketQuery:
 
 
 @dataclass(frozen=True, slots=True)
+class ItemQuery:
+    """Item-only selection context; no market scope, price intent or defaults."""
+
+    query: str
+    item_id: int | None = None
+    original_query: str | None = None
+    item_name: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class RequestPlan:
     endpoint: str
     scopes: tuple[str | int, ...]
@@ -469,7 +479,7 @@ class QueryTicket:
 class CandidateBatch:
     batch_id: str
     generation: str
-    query: MarketQuery
+    query: MarketQuery | ItemQuery
     candidates: tuple[ItemCandidate, ...]
     truncated: bool
 
@@ -533,6 +543,18 @@ def _continuation_message(value: str, query: str) -> bool:
                 r"选择物品\s+[0-9]+|就选.+|就.+|选择.+|选.+|(?:不要|不是|不选).*|.+那个[？?]?",
                 text,
             )
+        )
+    )
+
+
+def _explicit_new_query(message: str, query: str) -> bool:
+    """A closed real-message query intent, not a bare candidate confirmation."""
+    return not _continuation_message(message, query) and bool(
+        re.fullmatch(
+            r"(?:再查|再查询|重新查|重新查询|查一下|查询物品|查物品|查询|查)\s*"
+            + re.escape(query)
+            + r"(?:的?(?:信息|详情|获取途径|怎么获得))?",
+            message,
         )
     )
 
@@ -614,6 +636,15 @@ class CandidateRegistry:
             and name == original
         ):
             return batch  # Retry keeps the complete frozen context and ticket.
+        if (
+            event_ref not in (pending.source_ref, pending.confirmation_ref)
+            and name == original
+            and _explicit_new_query(message, original)
+        ):
+            # Duplicate exact names may equal the original query. A distinct
+            # real event explicitly asking to query again supersedes that batch;
+            # bare/ordinal/negated/question confirmations still go to select.
+            return None
         candidate_names = tuple(
             _confirmation_text(item.name) for item in batch.candidates
         )
@@ -666,11 +697,12 @@ class CandidateRegistry:
         event_ref: str,
         text: str,
         retain: bool = False,
-    ) -> MarketQuery:
+    ) -> MarketQuery | ItemQuery:
         """Derive the choice from a new trusted event before checking model ID."""
         if (
             not isinstance(owner, TrustedOwner)
-            or type(event_ref) is not str or not event_ref
+            or type(event_ref) is not str
+            or not event_ref
             or type(text) is not str
         ):
             raise QueryResolutionError("缺少可信用户消息绑定。", ErrorCode.UNSUPPORTED)
@@ -739,9 +771,19 @@ class CandidateRegistry:
         ):
             del self._pending[ticket.owner]
 
+    def abandon(self, ticket: QueryTicket) -> None:
+        """Release only this flight, never a superseding query's generation."""
+        pending = self._pending.get(ticket.owner)
+        if pending is not None and pending.generation == ticket.generation:
+            del self._pending[ticket.owner]
+
     def finish(
-        self, ticket: QueryTicket, query: MarketQuery, *, retain: bool = False
-    ) -> MarketQuery:
+        self,
+        ticket: QueryTicket,
+        query: MarketQuery | ItemQuery,
+        *,
+        retain: bool = False,
+    ) -> MarketQuery | ItemQuery:
         self._current(ticket)
         if not retain:
             del self._pending[ticket.owner]
@@ -750,7 +792,7 @@ class CandidateRegistry:
     def publish(
         self,
         ticket: QueryTicket,
-        query: MarketQuery,
+        query: MarketQuery | ItemQuery,
         candidates: tuple[ItemCandidate, ...],
         truncated: bool,
     ) -> CandidateBatch:
@@ -784,7 +826,7 @@ class CandidateRegistry:
         item_id: int,
         *,
         retain: bool = False,
-    ) -> MarketQuery:
+    ) -> MarketQuery | ItemQuery:
         if not isinstance(owner, TrustedOwner):
             raise QueryResolutionError("缺少可信用户/会话绑定。", ErrorCode.UNSUPPORTED)
         self._prune()
@@ -814,7 +856,8 @@ class CandidateRegistry:
             pending.batch = (
                 None  # Consume selection immediately, retain late-result fence.
             )
-            pending.source_ref = None
+            # Preserve the original event fence while the chosen lookup is in
+            # flight, so that event cannot re-enter as a fresh same-name query.
         else:
             del self._pending[owner]
         return query

@@ -221,6 +221,16 @@ class FF14InstalledModuleTests(unittest.IsolatedAsyncioTestCase):
                             "item_id": "item_id",
                         },
                     ),
+                    ("ff14_item_lookup", "item.lookup", {"query": "query"}),
+                    (
+                        "ff14_item_select",
+                        "ff14.item.select",
+                        {
+                            "batch_id": "batch_id",
+                            "generation": "generation",
+                            "item_id": "item_id",
+                        },
+                    ),
                 ),
             )
             self.assertEqual(
@@ -234,6 +244,20 @@ class FF14InstalledModuleTests(unittest.IsolatedAsyncioTestCase):
                 tuple(
                     origin.value
                     for origin in capabilities["ff14.market.select"].invocation_origins
+                ),
+                ("command", "llm_tool"),
+            )
+            self.assertEqual(
+                tuple(
+                    origin.value
+                    for origin in capabilities["item.lookup"].invocation_origins
+                ),
+                ("command", "web_public", "llm_tool"),
+            )
+            self.assertEqual(
+                tuple(
+                    origin.value
+                    for origin in capabilities["ff14.item.select"].invocation_origins
                 ),
                 ("command", "llm_tool"),
             )

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from yomihime_game_link_sdk.contexts import InvocationView
+from yomihime_game_link_sdk.contexts import InvocationOrigin, InvocationView
 from yomihime_game_link_sdk.display import (
     DisplayDocument,
     Link,
@@ -34,10 +34,21 @@ class ItemLookup:
 
     def __init__(self, services: ModuleServices) -> None:
         self._services = services
+        from .item_chat import ItemChat
+
+        self._chat = ItemChat(services)
+
+    def close(self) -> None:
+        self._chat.close()
 
     async def invoke(
         self, context: InvocationView, parameters: JsonObject
     ) -> CapabilityResult:
+        if context is not None and (
+            context.origin is InvocationOrigin.LLM_TOOL
+            or context.capability_id == "ff14.item.select"
+        ):
+            return await self._chat.invoke(context, parameters)
         try:
             query = validate_item_query(parameters.get("query"))
         except ValueError as exc:
