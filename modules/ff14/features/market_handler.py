@@ -33,10 +33,12 @@ from ..query_resolution import (
     TrustedOwner,
     validate_tool_query,
 )
+from .chat_context import chat_owner, semantic_action
 from .item_sources import ItemPayloadError, ItemSourceClient
 from .market import MarketClient, _diagnostic
 from .market import _world_name as _catalog_world_name
 from .market_models import MarketExecution
+from .market_scope_chat import MarketScopeChoices
 from .market_sources import MarketDeadlineError, MarketPayloadError, MarketSourceClient
 from .public_projection import validate_public_market_facts
 
@@ -76,9 +78,7 @@ def _quote_context(execution: MarketExecution, world_id, region):
             ).total_seconds()
             if provenance
             else None,
-            cached=provenance.cached if provenance else None,
         ),
-        limitation="仅本次返回数据中的最低挂牌/最多5条有限样本；非全部World覆盖，非实时可买；Gil/件。minimums.time是World数据上传，listings.reviewed是来源最近审核，uploaded是World上传，均非上架时间；source.fetched_at及获取年龄与价格来源年龄分开，未知不互替。",
     )
 
 
@@ -86,9 +86,16 @@ def _execution_facts(execution: MarketExecution) -> dict:
     """Public typed prices from execution values, never display text or raw HTTP."""
     query, observed = execution.query, execution.observed_at
     facts = _query_facts(query)
+    facts["scope"]["default_basis"] = query.scope.default_basis
     facts.update(
         fact_projection_version=3,
-        answer_guidance="成功或可用partial足够时直接回答；标题/表头和价格紧邻注明本次返回数据中的最低挂牌，挂牌明细最多5条有限样本，不能称完整列表或实时价格。紧邻价格保留Universalis、可信服务器名、来源获取/缓存年龄与World上传年龄；minimums.time是World数据上传，listings.reviewed是来源最近审核，listings.uploaded是World上传，均非挂牌发布时间，source.fetched_at是来源获取；缺失时间写未知，不互替。无新用户范围不补查服务器，不推断HQ用途、补货或购买建议。",
+        time_semantics=dict(
+            minimum="world_upload",
+            reviewed="source_review",
+            uploaded="world_upload",
+            fetched_at="source_retrieval",
+            listing_created_at=None,
+        ),
         item_id=query.item_id,
         item_name=query.item_name,
         original_query=query.original_query or query.query,
@@ -98,6 +105,10 @@ def _execution_facts(execution: MarketExecution) -> dict:
         truncated=execution.truncated,
         partial=execution.result.status is ResultStatus.PARTIAL_SUCCESS,
     )
+    if facts["original_query"] == facts["query"]:
+        del facts[
+            "original_query"
+        ]  # Preserve distinct originals, omit exact duplicate.
     facts["limitations"] = dict(
         complete_world_coverage=False,
         realtime_availability=False,
@@ -286,6 +297,7 @@ def _error_execution_facts(execution: MarketExecution) -> dict:
             )
         )
     facts = _query_facts(query)
+    facts["scope"]["default_basis"] = query.scope.default_basis
     facts.update(
         item_id=query.item_id,
         item_name=query.item_name,
@@ -296,7 +308,6 @@ def _error_execution_facts(execution: MarketExecution) -> dict:
         coverage=coverage,
         minimums=[],
         listings=[],
-        answer_guidance="本次没有可用市场结果；保留失败或暂无记录的区别，不能据此判断无挂牌或不可交易。请等待用户明确新指令，不自行更换范围或参数。",
     )
     return facts
 
@@ -353,6 +364,8 @@ def _tool_facts(result: CapabilityResult, facts: dict | None = None) -> FactDocu
 
 
 def _owner(context: InvocationView) -> TrustedOwner:
+    if context.origin is InvocationOrigin.LLM_TOOL:
+        return chat_owner(context)
     if context.origin is InvocationOrigin.WEB_PUBLIC and context.public_session_id:
         # Authenticated bearer-session grouping, not a Core actor or tab identity.
         return TrustedOwner(
@@ -392,8 +405,6 @@ def _query_facts(query: MarketQuery) -> dict:
 
 
 def _error(code: ErrorCode, message: str, *, tool: bool = False) -> CapabilityResult:
-    if tool:
-        message += " 请等待用户明确新指令，不要自行换参数或改 query 绕过确认。"
     result = CapabilityResult(
         "ff14-market-query",
         ResultStatus.ERROR,
@@ -418,6 +429,8 @@ class MarketQueryHandler:
     def __init__(self, services: ModuleServices, *, clock=monotonic) -> None:
         self.services, self.clock = services, clock
         self.registry = CandidateRegistry(clock=clock)
+        self._lifecycle = object()
+        self.scope_choices = MarketScopeChoices(clock=clock)
         # Only start_bound is used: each query gets freshly authorized ports.
         self.source = MarketSourceClient(None, clock=clock)
 
@@ -427,6 +440,9 @@ class MarketQueryHandler:
         started = self.clock()
         deadline = min(started + 30, context.deadline or started + 30)
         ticket = None
+        scope_state = None
+        scope_values = None
+        lifecycle = self._lifecycle
 
         def failure(code, message):
             return _error(
@@ -438,10 +454,22 @@ class MarketQueryHandler:
             message = None
 
             async def guard():
+                if self._lifecycle is not lifecycle:
+                    raise PermissionError("module lifecycle changed")
+                if ticket is not None:
+                    self.registry._current(ticket)
+                if scope_state is not None:
+                    self.scope_choices.current(owner, scope_state)
                 if context.origin is InvocationOrigin.LLM_TOOL:
                     current = await scope.message.read()
                     if message is not None and current != message:
                         raise PermissionError("message context changed")
+                if self._lifecycle is not lifecycle:
+                    raise PermissionError("module lifecycle changed")
+                if ticket is not None:
+                    self.registry._current(ticket)
+                if scope_state is not None:
+                    self.scope_choices.current(owner, scope_state)
 
             if context.origin is InvocationOrigin.LLM_TOOL:
                 message = await scope.message.read()
@@ -485,40 +513,99 @@ class MarketQueryHandler:
             if not selecting:
                 if context.origin is InvocationOrigin.LLM_TOOL:
                     # Validate before any registry mutation, including retries.
-                    validate_tool_query(parameters.get("query"), message.text)
+                    if not isinstance(parameters, Mapping):
+                        raise QueryResolutionError("查询参数必须为对象。")
+                    action = semantic_action(parameters)
+                    if action not in ("continue", "clarify") or "query" in parameters:
+                        validate_tool_query(parameters.get("query"), message.text)
+                    scope_retry = self.scope_choices.event_query(
+                        owner, message.event_ref, action
+                    )
+                    if scope_retry is not None:
+                        scope_state = scope_retry
+                        ticket = scope_state.values["ticket"]
+                        await guard()
+                        return self._scope_candidates(scope_state)
                     retry = self.registry.tool_query(
                         owner,
                         message.event_ref,
                         message.text,
                         parameters.get("query", ""),
+                        action=action,
                     )
                     if retry is not None:
+                        ticket = QueryTicket(owner, retry.generation)
+                        await guard()
                         return self._candidates(context, retry)
+                self.scope_choices.invalidate(owner)
                 ticket = self.registry.begin(
                     owner,
                     source_ref=message.event_ref
                     if context.origin is InvocationOrigin.LLM_TOOL
                     else None,
                 )  # Before bind/config/catalog await.
+            scope_selection = False
+            if selecting and context.origin is InvocationOrigin.LLM_TOOL:
+                choice = parameters["selection"]
+                if isinstance(choice, Mapping) and "scope_kind" in choice:
+                    if set(choice) - {
+                        "batch_id",
+                        "generation",
+                        "scope_kind",
+                        "world_id",
+                        "dc_id",
+                        "action",
+                    }:
+                        raise QueryResolutionError("范围选择包含未知参数。")
+                    scope_state, scope_values = self.scope_choices.choose(
+                        owner, message.event_ref, choice
+                    )
+                    ticket = scope_state.values["ticket"]
+                    await guard()
+                    if scope_values is None:
+                        return self._scope_candidates(scope_state)
+                    scope_selection = True
             async with asyncio.timeout(max(0, deadline - self.clock())):
                 session = self.source.start_bound(
                     scope.http, scope.cache, deadline=deadline
                 )
-                if selecting:
+                if selecting and not scope_selection:
                     if set(parameters) != {"selection"}:
                         raise QueryResolutionError("候选选择不能同时提交新查询。")
                     choice = parameters["selection"]
-                    if not isinstance(choice, Mapping) or set(choice) != {
-                        "batch_id",
-                        "generation",
-                        "item_id",
-                    }:
+                    if (
+                        not isinstance(choice, Mapping)
+                        or set(choice) - {"batch_id", "generation", "item_id", "action"}
+                        or not {"batch_id", "generation"}.issubset(choice)
+                    ):
+                        raise QueryResolutionError("候选选择参数无效。")
+                    if context.origin is InvocationOrigin.LLM_TOOL:
+                        action = choice.get("action", "select")
+                        if action == "clarify" and "item_id" not in choice:
+                            retry = self.registry.clarify(
+                                owner,
+                                choice["batch_id"],
+                                choice["generation"],
+                                event_ref=message.event_ref,
+                            )
+                            ticket = QueryTicket(owner, retry.generation)
+                            await guard()
+                            return self._candidates(context, retry)
+                        if action != "select" or "item_id" not in choice:
+                            raise QueryResolutionError(
+                                "选择必须唯一；未明确时使用 clarify。"
+                            )
+                    elif set(choice) != {"batch_id", "generation", "item_id"}:
                         raise QueryResolutionError("候选选择参数无效。")
                     choose = (
                         self.registry.choose_confirmed
                         if context.origin is InvocationOrigin.LLM_TOOL
                         else self.registry.choose
                     )
+                    if context.origin is InvocationOrigin.LLM_TOOL:
+                        scope_state = self.scope_choices.item_event(
+                            owner, message.event_ref, choice["generation"]
+                        )
                     query = choose(
                         owner,
                         choice["batch_id"],
@@ -535,12 +622,28 @@ class MarketQueryHandler:
                     catalog = await session.catalog()
                     await guard()
                 else:
-                    catalog = await session.catalog()
+                    catalog = (
+                        scope_state.values["catalog"]
+                        if scope_selection
+                        else await session.catalog()
+                    )
                     await guard()
                     coordinator = QueryCoordinator(
-                        MarketQueryResolver(catalog.catalog), self.registry
+                        MarketQueryResolver(
+                            self.scope_choices.selection_catalog(scope_state).catalog
+                            if scope_selection
+                            else catalog.catalog
+                        ),
+                        self.registry,
                     )
-                    entry, values = "structured", parameters
+                    entry, values = (
+                        (
+                            "tool"
+                            if context.origin is InvocationOrigin.LLM_TOOL
+                            else "structured"
+                        ),
+                        scope_values if scope_selection else parameters,
+                    )
                     if isinstance(parameters, Mapping) and "command" in parameters:
                         if context.origin is not InvocationOrigin.COMMAND or set(
                             parameters
@@ -559,42 +662,51 @@ class MarketQueryHandler:
                             )
                             else "command"
                         )
-                    resolved = await session.run(
-                        coordinator.resolve(
-                            owner,
-                            values,
-                            self.services,
-                            ItemSourceClient(scope.http),
-                            entry=entry,
-                            ticket=ticket,
-                            retain_until_result=True,
-                            guard=guard,
+                    try:
+                        resolved = await session.run(
+                            coordinator.resolve(
+                                owner,
+                                values,
+                                self.services,
+                                ItemSourceClient(scope.http),
+                                entry=entry,
+                                ticket=ticket,
+                                retain_until_result=True,
+                                guard=guard,
+                                defaults=scope_state.values["defaults"]
+                                if scope_selection
+                                else None,
+                            )
                         )
-                    )
+                    except QueryResolutionError as exc:
+                        if context.origin is InvocationOrigin.LLM_TOOL and exc.choices:
+                            scope_state = self.scope_choices.publish(
+                                owner, message.event_ref, ticket, exc, catalog
+                            )
+                            await guard()
+                            return self._scope_candidates(scope_state)
+                        raise
                     await guard()
                     if isinstance(resolved, CandidateBatch):
                         self.registry._current(ticket)
+                        if scope_selection:
+                            self.registry._current(
+                                ticket
+                            ).confirmation_ref = message.event_ref
                         return self._candidates(
                             context,
                             resolved,
                             sources=tuple(p.url for p in catalog.provenance),
                         )
                     query = resolved
+                if scope_state is not None:
+                    catalog = self.scope_choices.selection_catalog(scope_state, catalog)
                 execution = await MarketClient(session, catalog).execute(query)
                 await guard()
                 self.registry.finish(
                     ticket, query
                 )  # Fence late market results before publishing.
                 result = execution.result
-                if context.origin is InvocationOrigin.LLM_TOOL and result.error:
-                    result = replace(
-                        result,
-                        error=ErrorDetail(
-                            result.error.code,
-                            result.error.message
-                            + " 请等待用户明确新指令，不要自行换参数或改 query 绕过确认。",
-                        ),
-                    )
                 if result.status is ResultStatus.ERROR:
                     if context.origin is not InvocationOrigin.LLM_TOOL:
                         return result
@@ -659,6 +771,64 @@ class MarketQueryHandler:
             if ticket is not None:
                 self.registry._release_confirmed(ticket)
 
+    @staticmethod
+    def _scope_candidates(state):
+        kind = state.candidates[0].kind
+        candidates = []
+        for index, entry in enumerate(state.candidates):
+            values = {"ordinal": index + 1, "name": entry.name, "region": entry.region}
+            if kind == "world":
+                values.update(world_id=entry.id, dc_id=str(entry.dc_id))
+            else:
+                values["dc_id"] = str(entry.id)
+            candidates.append(values)
+        return CapabilityResult(
+            "ff14-market-scope-selection",
+            ResultStatus.NEEDS_SELECTION,
+            DisplayDocument(
+                "FF14 市场范围候选",
+                state.values["parameters"]["query"],
+                tuple(
+                    TextBlock(f"{row['name']} / {row['region']} / {row['dc_id']}")
+                    for row in candidates
+                ),
+            ),
+            model_facts=FactDocument(
+                {
+                    "status": "needs_selection",
+                    "error": None,
+                    "market": {
+                        "request": dict(state.values["parameters"]),
+                        "core_revision": state.values["defaults"].core_revision,
+                        "module_revision": state.values["defaults"].module_revision,
+                        "actual_scope": None,
+                        "source": {
+                            "provider": "Universalis",
+                            "directory_urls": [
+                                row.url for row in state.values["catalog"].provenance
+                            ],
+                            "retrieved_at": [
+                                row.fetched_at.isoformat()
+                                for row in state.values["catalog"].provenance
+                            ],
+                            "cached": [
+                                row.cached for row in state.values["catalog"].provenance
+                            ],
+                        },
+                    },
+                    "selection": {
+                        "kind": "scope",
+                        "scope_kind": kind,
+                        "batch_id": state.batch_id,
+                        "generation": state.generation,
+                        "state": "active",
+                        "candidates": candidates,
+                        "truncated": state.values["truncated"],
+                    },
+                }
+            ),
+        )
+
     def _candidates(self, context, resolved, *, sources=()):
         facts = _query_facts(resolved.query)
         candidates = [
@@ -671,6 +841,13 @@ class MarketQueryHandler:
             candidates=candidates,
             truncated=resolved.truncated,
         )
+        if context.origin is InvocationOrigin.LLM_TOOL:
+            facts["scope"]["default_basis"] = resolved.query.scope.default_basis
+            selection["state"] = "active"
+            selection["candidates"] = [
+                dict(row, ordinal=i + 1, distinction={"quality": None})
+                for i, row in enumerate(candidates)
+            ]
         blocks = [TextBlock("请选择物品；范围、品质与配置版本保持本次查询上下文。")]
         blocks.extend(
             TextBlock(f"{item['item_id']}：{item['name']}") for item in candidates
@@ -682,11 +859,7 @@ class MarketQueryHandler:
                 )
             )
         elif context.origin is InvocationOrigin.LLM_TOOL:
-            blocks.append(
-                TextBlock(
-                    "请回复唯一完整名称或“完整名称那个”；也可回复“选择物品 <ID>”。暂不支持序号。"
-                )
-            )
+            blocks.append(TextBlock("请明确选择一个候选；有疑问可继续澄清。"))
         return CapabilityResult(
             "ff14-market-selection",
             ResultStatus.NEEDS_SELECTION,
@@ -702,9 +875,6 @@ class MarketQueryHandler:
                     error=None,
                     market=facts,
                     selection=selection,
-                    user_confirmation="回复唯一完整名称或“完整名称那个”；暂不支持序号",
-                    id_confirmation="选择物品 <ID>（兼容方式）",
-                    name_confirmation="回复唯一完整名称或“完整名称那个”；暂不支持序号",
                 )
                 if context.origin is InvocationOrigin.LLM_TOOL
                 else validate_public_market_facts(
@@ -715,3 +885,5 @@ class MarketQueryHandler:
 
     def close(self) -> None:
         self.registry = CandidateRegistry(clock=self.clock)
+        self.scope_choices.close()
+        self._lifecycle = object()

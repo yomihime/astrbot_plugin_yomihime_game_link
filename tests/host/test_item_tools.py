@@ -77,10 +77,10 @@ class ItemToolHostTests(unittest.IsolatedAsyncioTestCase):
         await self.start_items()
         tools = self.manager.get_full_tool_set()
         schema = tools.get_tool("ff14_item_lookup").parameters
-        self.assertEqual(set(schema["properties"]), {"query"})
+        self.assertEqual(set(schema["properties"]), {"query", "action"})
         self.assertEqual(
             set(tools.get_tool("ff14_item_select").parameters["properties"]),
-            {"batch_id", "generation", "item_id"},
+            {"batch_id", "generation", "item_id", "action"},
         )
         exact = await self.item("查Exact怎么获得", "Exact")
         self.assertEqual(exact["status"], "success")
@@ -96,25 +96,34 @@ class ItemToolHostTests(unittest.IsolatedAsyncioTestCase):
         self,
     ):
         await self.start_items()
-        pending = await self.item("帮我查Synthetic的信息")
-        self.assertEqual(pending["status"], "needs_selection")
+        original = self.wrapper("查Synthetic")
+        pending = await self.call("ff14_item_lookup", {"query": "Synthetic"}, original)
         args = self.selection(pending)
-        # Synthetic tool arguments submit the candidate ID; the real event must
-        # independently establish that same choice before any detail fetch.
         before = len(self.transport.requests)
-        denied = await self.call("ff14_item_select", args, self.wrapper("第一个"))
-        self.assertEqual(denied["status"], "error")
-        self.assertEqual(len(self.transport.requests), before)
-        facts = await self.call(
-            "ff14_item_select", args, self.wrapper("Synthetic Item 44091那个。")
+        self.assertEqual(
+            (await self.call("ff14_item_select", args, original))["status"], "error"
         )
+        choice = {key: value for key, value in args.items() if key != "item_id"}
+        self.assertEqual(
+            (
+                await self.call(
+                    "ff14_item_select",
+                    {**choice, "action": "clarify"},
+                    self.wrapper("哪个更好?"),
+                )
+            )["status"],
+            "needs_selection",
+        )
+        self.assertEqual(len(self.transport.requests), before)
+        facts = await self.call("ff14_item_select", args, self.wrapper("第一个"))
         self.assertEqual(facts["status"], "success")
         self.assertEqual(facts["item"]["query"], "Synthetic")
-        self.assertEqual(facts["item"]["name"], "Synthetic Item 44091")
-        replay = await self.call(
-            "ff14_item_select", args, self.wrapper("选择物品 44091")
+        self.assertEqual(
+            (await self.call("ff14_item_select", args, self.wrapper("第一个")))[
+                "status"
+            ],
+            "error",
         )
-        self.assertEqual(replay["status"], "error")
 
     async def test_formal_identity_and_cross_capability_batches_are_isolated(self):
         await self.start_items()
@@ -156,7 +165,7 @@ class ItemToolHostTests(unittest.IsolatedAsyncioTestCase):
         for field in ("description", "item_level", "equip_level"):
             self.assertIsNone(result["item"][field])
             self.assertIn(field, result["item"]["missing"])
-        invented = await self.item("只查Synthetic", "Unprovided")
+        invented = await self.item("只查Synthetic", "0")
         self.assertEqual(invented["status"], "error")
 
     async def test_direct_command_keeps_display_and_does_not_call_model(self):
@@ -194,47 +203,42 @@ class ItemToolHostTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_duplicate_exact_original_name_new_event_replaces_batch(self):
         await self.start_items()
-        source_event = self.wrapper("查Same")
-        old = await self.call("ff14_item_lookup", {"query": "Same"}, source_event)
-        self.assertEqual(old["status"], "needs_selection")
-        self.assertEqual(
-            [item["name"] for item in old["selection"]["candidates"]],
-            ["Same", "Same"],
-        )
-        retry = await self.call("ff14_item_lookup", {"query": "Same"}, source_event)
+        source = self.wrapper("查Same")
+        old = await self.call("ff14_item_lookup", {"query": "Same"}, source)
+        retry = await self.call("ff14_item_lookup", {"query": "Same"}, source)
         self.assertEqual(old["selection"], retry["selection"])
         before = len(self.transport.requests)
-        for text in (
-            "Same",
-            "Same那个",
-            "Same？",
-            "再查Same？",
-            "不是Same",
-            "第一个",
-            "选择Same",
-        ):
-            with self.subTest(text=text):
-                denied = await self.item(text, "Same")
-                self.assertEqual(denied["status"], "error")
-                self.assertEqual(len(self.transport.requests), before)
-        new = await self.item("再查Same", "Same")
-        self.assertEqual(new["status"], "needs_selection")
+        choice = {key: old["selection"][key] for key in ("batch_id", "generation")}
+        self.assertEqual(
+            (
+                await self.call(
+                    "ff14_item_select",
+                    {**choice, "action": "clarify"},
+                    self.wrapper("叫Same的那个"),
+                )
+            )["status"],
+            "needs_selection",
+        )
+        self.assertEqual(len(self.transport.requests), before)
+        new = await self.item("重新查相同物品", "Same")
         for field in ("batch_id", "generation"):
             self.assertNotEqual(old["selection"][field], new["selection"][field])
-        before_selection = len(self.transport.requests)
-        denied = await self.call(
-            "ff14_item_select", self.selection(old), self.wrapper("选择物品 44091")
+        self.assertEqual(
+            (
+                await self.call(
+                    "ff14_item_select", self.selection(old), self.wrapper("第一个")
+                )
+            )["status"],
+            "error",
         )
-        self.assertEqual(denied["status"], "error")
-        self.assertEqual(len(self.transport.requests), before_selection)
-        ambiguous = await self.call(
-            "ff14_item_select", self.selection(new), self.wrapper("Same")
+        self.assertEqual(
+            (
+                await self.call(
+                    "ff14_item_select", self.selection(new), self.wrapper("第一个")
+                )
+            )["status"],
+            "success",
         )
-        self.assertEqual(ambiguous["status"], "error")
-        result = await self.call(
-            "ff14_item_select", self.selection(new), self.wrapper("选择物品 44091")
-        )
-        self.assertEqual(result["status"], "success")
 
 
 if __name__ == "__main__":

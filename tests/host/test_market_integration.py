@@ -160,15 +160,23 @@ class MarketHostIntegrationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(result["status"], "success")
             self.assertTrue(calls)
             calls.clear()
-            with patch.dict(
-                globals_, {"_query_facts": lambda _: {"private": "fixture"}}
-            ):
+
+            # Inject at the actual public projection boundary, with otherwise valid fields.
+            def corrupted(facts):
+                value = dict(facts)
+                value["private"] = "SYNTHETIC_PRIVATE_PROJECTION_CANARY"
+                return checked(value)
+
+            with patch.dict(globals_, {"validate_public_market_facts": corrupted}):
                 result = await self.public(
                     dict(query="44091", server="90001", quality="hq", intent="min")
                 )
                 self.assertEqual(result["status"], "error")
                 self.assertTrue(calls)
                 self.assertNotIn("private", json.dumps(result))
+                self.assertNotIn(
+                    "SYNTHETIC_PRIVATE_PROJECTION_CANARY", json.dumps(result)
+                )
 
     async def test_registered_handler_real_http_cache_sdk_and_public_projection(self):
         await self.start()

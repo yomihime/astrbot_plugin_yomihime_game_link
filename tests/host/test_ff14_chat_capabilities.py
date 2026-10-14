@@ -83,10 +83,9 @@ class FF14ChatCapabilitiesHostTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(item_args["batch_id"], market_args["batch_id"])
 
         before = len(self.transport.requests)
-        incomplete = await self.role("国服")
-        self.assertEqual(set(incomplete), {"status", "error"})
-        self.assertEqual(incomplete["error"]["code"], "parameter_error")
-        self.assertIn("一条新消息", incomplete["error"]["message"])
+        incomplete = await self.role("国服", {"realm": "cn"})
+        self.assertEqual(incomplete["status"], "needs_selection")
+        self.assertEqual(incomplete["fflogs"]["missing"], ["character", "server"])
         self.assertEqual(len(self.transport.requests), before)
         role = await self.role()
         self.assertEqual(role["status"], "success")
@@ -139,7 +138,8 @@ class FF14ChatCapabilitiesHostTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(row["reviewed"]["source_time"])
         self.assertTrue(row["uploaded"]["source_time"])
         self.assertNotEqual(row["reviewed"], row["uploaded"])
-        self.assertIn("均非上架时间", row["limitation"])
+        self.assertEqual(prices["time_semantics"]["uploaded"], "world_upload")
+        self.assertIsNone(prices["time_semantics"]["listing_created_at"])
         for facts, own_key in ((item, "item"), (market, "market"), (role, "fflogs")):
             self.assertEqual(
                 set(facts).intersection({"item", "market", "fflogs"}), {own_key}

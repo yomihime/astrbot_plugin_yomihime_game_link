@@ -79,9 +79,9 @@ class MarketFactsTests(unittest.TestCase):
             self.assertEqual(row["world_id"], REGION_IDS["China"])
             self.assertEqual(row["time"]["age_seconds"], 7200)
             self.assertEqual(row["source"]["fetched_age_seconds"], 1200)
-            self.assertTrue(row["source"]["cached"])
+            self.assertNotIn("cached", row["source"])
+            self.assertTrue(facts["coverage"][0]["cached"])
             self.assertEqual(row["source"]["provider"], "Universalis")
-            self.assertIn("非实时", row["limitation"])
             metrics = facts["coverage"][0]["quotes"][i]
             self.assertEqual(metrics["minimum_ref"], f"market.minimums[{i}]")
             self.assertNotIn("minimum", metrics)
@@ -90,11 +90,8 @@ class MarketFactsTests(unittest.TestCase):
         self.assertTrue(facts["coverage_complete"])
         self.assertFalse(facts["limitations"]["complete_world_coverage"])
         self.assertFalse(facts["limitations"]["realtime_availability"])
-        self.assertIn("World数据上传", facts["answer_guidance"])
-        self.assertIn("最多5条有限样本", facts["answer_guidance"])
-        self.assertIn("标题/表头", facts["answer_guidance"])
-        self.assertIn("source.fetched_at", facts["minimums"][0]["limitation"])
-        self.assertIn("未知不互替", facts["minimums"][0]["limitation"])
+        self.assertEqual(facts["time_semantics"]["minimum"], "world_upload")
+        self.assertIsNone(facts["time_semantics"]["listing_created_at"])
 
     def test_missing_catalog_unknown_world_region_and_scope_do_not_guess(self):
         original = self.execution()
@@ -271,7 +268,7 @@ class MarketFactsTests(unittest.TestCase):
         self.assertEqual(body["supplement"]["market"]["minimums"], ())
         self.assertNotIn("warnings", body["supplement"]["market"])
         self.assertNotIn("original_query", body["supplement"]["market"])
-        self.assertIn("等待用户明确新指令", facts["answer_guidance"])
+        self.assertNotIn("answer_guidance", facts)
         rendered = repr(body)
         for canary in ("PRIVATE_WARNING_CANARY", "PRIVATE_MESSAGE_CANARY"):
             self.assertNotIn(canary, rendered)

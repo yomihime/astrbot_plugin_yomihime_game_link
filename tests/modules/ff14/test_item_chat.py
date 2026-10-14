@@ -213,18 +213,18 @@ class ItemChatTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_illegal_and_model_invented_query_do_not_fetch(self):
         self.setup_handler()
-        for query, message in (
-            ("0", "物品ID0"),
-            ("2147483648", "物品ID2147483648"),
-            ("NotProvided", "查Ore"),
-            ("90001", "花90001金币买Ore"),
-            ('Ore" OR 1', "查Ore"),
-        ):
-            with self.subTest(query=query):
-                self.assertIs(
-                    (await self.call(message, query)).status, ResultStatus.ERROR
-                )
+        for query in ("0", "2147483648", 'Ore" OR 1', True, None, "x" * 121, "Ore\n"):
+            self.assertIs(
+                (await self.call("查相关物品", query)).status, ResultStatus.ERROR
+            )
         self.assertEqual(self.http.requests, [])
+        self.setup_handler(
+            [{"results": [{"row_id": 90001, "fields": {"Name": NAMES[0]}}]}]
+        )
+        self.detail_responses()
+        self.assertIs(
+            (await self.call("相关前文里的矿石", NAMES[0])).status, ResultStatus.SUCCESS
+        )
 
     async def test_name_confirmation_and_consumed_replay(self):
         pending = await self.pending()
@@ -249,20 +249,18 @@ class ItemChatTests(unittest.IsolatedAsyncioTestCase):
     async def test_id_confirmation_requires_real_matching_new_event(self):
         pending = await self.pending()
         choice = self.choice(pending)
-        for text, event, override in (
-            ("选择物品 90001", "request", {}),
-            ("选择物品 90002", "confirm", {}),
-            ("Sample Ore Alpha", "confirm", {"item_id": 90002}),
-        ):
+        for event, item_id in (("request", 90001), ("confirm", 99999), ("bool", True)):
             self.assertIs(
                 (
-                    await self.call(text, event=event, select={**choice, **override})
+                    await self.call(
+                        "第一个", event=event, select={**choice, "item_id": item_id}
+                    )
                 ).status,
                 ResultStatus.ERROR,
             )
         self.detail_responses()
         self.assertIs(
-            (await self.call("选择物品 90001", event="new", select=choice)).status,
+            (await self.call("第一个", event="new", select=choice)).status,
             ResultStatus.SUCCESS,
         )
 
@@ -270,22 +268,24 @@ class ItemChatTests(unittest.IsolatedAsyncioTestCase):
         self,
     ):
         pending = await self.pending()
-        choice = self.choice(pending)
-        for text in (
-            "第一个",
-            "不要Sample Ore Alpha",
-            "Sample Ore Alpha?",
-            "Sample Ore Alpha和Sample Ore Beta",
-            "刚才那个",
-            "就那个",
-        ):
-            with self.subTest(text=text):
-                self.assertIs(
-                    (await self.call(text, event=text, select=choice)).status,
-                    ResultStatus.ERROR,
-                )
+        choice = {
+            key: value
+            for key, value in self.choice(pending).items()
+            if key != "item_id"
+        }
+        for text in ("不要", "哪个好", "两个都行", "刚才那个?"):
+            result = await self.call(
+                text, event=text, select={**choice, "action": "clarify"}
+            )
+            self.assertIs(result.status, ResultStatus.NEEDS_SELECTION)
         self.assertEqual(len(self.http.requests), 1)
-        self.assertEqual(self.handler._chat.registry.size, 1)
+        self.detail_responses()
+        self.assertIs(
+            (
+                await self.call("第一个", event="ordinal", select=self.choice(pending))
+            ).status,
+            ResultStatus.SUCCESS,
+        )
 
     async def test_duplicate_names_need_explicit_id(self):
         self.setup_handler(
@@ -298,18 +298,25 @@ class ItemChatTests(unittest.IsolatedAsyncioTestCase):
                 }
             ]
         )
-        pending = await self.call("查Same", "Same")
+        pending = await self.call("查同名", "Same")
+        choice = {
+            key: value
+            for key, value in self.choice(pending).items()
+            if key != "item_id"
+        }
         self.assertIs(
             (
-                await self.call("Same", event="confirm", select=self.choice(pending))
+                await self.call(
+                    "叫Same的", event="unclear", select={**choice, "action": "clarify"}
+                )
             ).status,
-            ResultStatus.ERROR,
+            ResultStatus.NEEDS_SELECTION,
         )
         self.detail_responses()
         self.assertIs(
             (
                 await self.call(
-                    "选择物品 90001", event="id", select=self.choice(pending)
+                    "第一个", event="distinct", select={**choice, "item_id": 90001}
                 )
             ).status,
             ResultStatus.SUCCESS,
@@ -339,56 +346,37 @@ class ItemChatTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.http.requests), 1)
 
     async def test_duplicate_original_name_explicit_new_query_replaces_batch(self):
-        exact = {
-            "results": [
-                {"row_id": item_id, "fields": {"Name": "Same"}}
-                for item_id in (90001, 90002)
+        self.setup_handler(
+            [
+                {
+                    "results": [
+                        {"row_id": i, "fields": {"Name": "Same"}}
+                        for i in (90001, 90002)
+                    ]
+                }
             ]
-        }
-        self.setup_handler([exact, exact])
-        old = await self.call("查Same", "Same", event="source-old")
-        self.assertIs(old.status, ResultStatus.NEEDS_SELECTION)
-        retry = await self.call("查Same", "Same", event="source-old")
-        self.assertEqual(self.choice(old), self.choice(retry))
-        self.assertEqual(len(self.http.requests), 1)
-
-        for text in (
-            "Same",
-            "Same那个",
-            "第一个",
-            "不是Same",
-            "不要Same",
-            "Same？",
-            "再查Same？",
-            "选择Same",
-            "就选Same",
-            "查Same或Same",
-        ):
-            with self.subTest(text=text):
-                result = await self.call(text, "Same", event="continuation:" + text)
-                self.assertIs(result.status, ResultStatus.ERROR)
-                self.assertEqual(len(self.http.requests), 1)
-                self.assertEqual(self.handler._chat.registry.size, 1)
-
-        new = await self.call("再查Same", "Same", event="source-new")
-        self.assertIs(new.status, ResultStatus.NEEDS_SELECTION)
-        self.assertEqual(len(self.http.requests), 2)
-        for field in ("batch_id", "generation"):
-            self.assertNotEqual(self.choice(old)[field], self.choice(new)[field])
-        stale = await self.call(
-            "选择物品 90001", event="stale", select=self.choice(old)
         )
-        self.assertIs(stale.status, ResultStatus.ERROR)
-        self.assertEqual(len(self.http.requests), 2)
-        same_name = await self.call(
-            "Same", event="ambiguous-confirm", select=self.choice(new)
+        pending = await self.call("查询Same", "Same")
+        self.assertEqual(
+            self.choice(pending), self.choice(await self.call("查询Same", "Same"))
         )
-        self.assertIs(same_name.status, ResultStatus.ERROR)
-        self.detail_responses()
-        selected = await self.call(
-            "选择物品 90001", event="id-confirm", select=self.choice(new)
+        self.http.responses.append(
+            {
+                "results": [
+                    {"row_id": i, "fields": {"Name": "Same"}} for i in (90001, 90002)
+                ]
+            }
         )
-        self.assertIs(selected.status, ResultStatus.SUCCESS)
+        new = await self.call("再查询同一个", "Same", event="new")
+        self.assertNotEqual(
+            self.choice(pending)["generation"], self.choice(new)["generation"]
+        )
+        self.assertIs(
+            (
+                await self.call("第一个", event="old", select=self.choice(pending))
+            ).status,
+            ResultStatus.ERROR,
+        )
 
     async def test_command_origin_select_is_denied_without_consuming_llm_batch(self):
         pending = await self.pending()
@@ -409,13 +397,10 @@ class ItemChatTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_pending_query_cannot_be_bypassed_by_model_candidate_query(self):
         pending = await self.pending()
-        for query, text in (
-            (NAMES[0], NAMES[0]),
-            ("90001", "选择物品 90001"),
-            ("Ore", "Ore那个"),
-        ):
+        for query in (NAMES[0], "90001"):
             self.assertIs(
-                (await self.call(text, query, event=query)).status, ResultStatus.ERROR
+                (await self.call("查Ore", query, event="request")).status,
+                ResultStatus.ERROR,
             )
         self.assertEqual(len(self.http.requests), 1)
         self.assertEqual(self.handler._chat.registry.size, 1)

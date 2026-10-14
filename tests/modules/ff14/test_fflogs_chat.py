@@ -21,6 +21,7 @@ from yomihime_game_link_sdk.contexts import (
 )
 from yomihime_game_link_sdk.errors import SourceHttpError
 from yomihime_game_link_sdk.results import ErrorCode, ResultStatus
+from yomihime_game_link_sdk.services import HttpResponse
 
 from . import test_fflogs as fixture
 
@@ -51,6 +52,23 @@ class FFLogsChatTests(unittest.IsolatedAsyncioTestCase):
         self.http = fixture._FakeHttp(
             fixture._character_responses() if responses is None else responses
         )
+        original_fetch = self.http.fetch
+        self.public_requests = []
+
+        async def fetch(request):
+            if request.source_id == "universalis_market":
+                self.public_requests.append(request)
+                payload = (
+                    [{"id": 71001, "name": "Synthetic Public World"}]
+                    if request.path.endswith("worlds")
+                    else [
+                        {"name": "Synthetic DC", "region": "Europe", "worlds": [71001]}
+                    ]
+                )
+                return HttpResponse(200, {}, json.dumps(payload).encode())
+            return await original_fetch(request)
+
+        self.http.fetch = fetch
         self.services = fixture._services(self.http, configured=configured)
         self.messages = {}
         outer = self
@@ -102,91 +120,77 @@ class FFLogsChatTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_required_fields_complete_new_message_after_clarification(self):
         self.setup_handler()
-        for text in (
-            "查Logs",
-            "国际服",
-            "国际服 Cerberus",
-            '国际服 "Synthetic Hero"',
-            "刚才那个",
-            "第一个",
-        ):
-            with self.subTest(text=text):
-                error = await self.call(text, event=text)
-                self.assertIs(error.error.code, ErrorCode.PARAMETER_ERROR)
-                self.assertIn("一条新消息", error.error.message)
+        partial = await self.call("查询角色", {"character": "Synthetic Hero"})
+        self.assertIs(partial.status, ResultStatus.NEEDS_SELECTION)
+        self.assertEqual(partial.model_facts.facts["fflogs"]["missing"], ("server",))
         self.assertEqual(self.http.requests, [])
         self.assertIs(
-            (await self.call(event="complete-new")).status, ResultStatus.PARTIAL_SUCCESS
+            (
+                await self.call(
+                    "补充服务器",
+                    {"realm": "global", "server": "Cerberus", "action": "continue"},
+                    event="supplement",
+                )
+            ).status,
+            ResultStatus.PARTIAL_SUCCESS,
         )
 
     async def test_missing_parameters_and_model_shortening_invention_are_rejected(self):
         self.setup_handler()
         for parameters in (
-            {"realm": "global"},
-            {**TARGET, "character": "Hero"},
-            {**TARGET, "server": "Cer"},
-            {**TARGET, "character": "Invented"},
-            {**TARGET, "realm": "cn"},
-            {**TARGET, "metric": "ndps"},
-            {**TARGET, "server_hint": "Aether"},
             {**TARGET, "token": SENTINEL},
+            {**TARGET, "server": "x" * 101},
+            {**TARGET, "character": "x" * 121},
+            {**TARGET, "metric": "pdps"},
+            {**TARGET, "zone_id": 2},
+            {**TARGET, "server_id": 999},
+            {**TARGET, "confirmed": True},
         ):
-            with self.subTest(parameters=parameters):
-                self.assertIs(
-                    (await self.call(parameters=parameters)).status, ResultStatus.ERROR
-                )
+            self.assertIs(
+                (await self.call(parameters=parameters)).status, ResultStatus.ERROR
+            )
         self.assertEqual(self.http.requests, [])
+        self.assertEqual(self.public_requests, [])
 
     async def test_negations_multiple_targets_and_history_only_messages_are_rejected(
         self,
     ):
         self.setup_handler()
-        for text in (
-            '不要查 FFLogs 国际服 Cerberus "Synthetic Hero"',
-            '不是国际服 Cerberus "Synthetic Hero"',
-            MESSAGE + ' 或 "Another Hero"',
-            MESSAGE + " 国服",
-            "同一个角色",
-            "还是之前那个",
-            "国际服？",
-        ):
-            with self.subTest(text=text):
-                self.assertIs(
-                    (await self.call(text, event=text)).status, ResultStatus.ERROR
-                )
+        for text in ("不要查", "两个角色都行", "那个是谁?", "没有相关前文"):
+            result = await self.call(text, {"action": "clarify"}, event=text)
+            self.assertIs(result.status, ResultStatus.ERROR)
         self.assertEqual(self.http.requests, [])
+        self.assertEqual(self.public_requests, [])
+        self.assertIs(
+            (
+                await self.call("还是相关前文的角色", TARGET, event="related-context")
+            ).status,
+            ResultStatus.PARTIAL_SUCCESS,
+        )
 
     async def test_aliases_command_grammar_and_labelled_fields_accept_full_names(self):
+        # Synthetic semantic DTO equivalence; no claim of actual LLM abbreviation understanding.
         for text in (
-            '查一下 FFLogs GLOBAL Cerberus "Synthetic Hero"',
-            '帮我查 logs 国际服 Cerberus "Synthetic Hero"',
-            '/ygl ff14 logs global Cerberus "Synthetic Hero"',
-            'realm=国际服 server=Cerberus character="Synthetic Hero"',
-            "帮我查一下国际服Cerberus上的Synthetic Hero战绩",
-            "查 FFLogs global Cerberus的Synthetic Hero战绩",
+            "帮我查一下 Cerberus Synthetic Hero 的 logs",
+            "Synthetic Hero@Cerberus",
+            "cer 的 Synthetic Hero",
         ):
-            with self.subTest(text=text):
-                self.setup_handler()
-                self.assertIs(
-                    (await self.call(text)).status, ResultStatus.PARTIAL_SUCCESS
-                )
+            self.setup_handler()
+            result = await self.call(text, TARGET)
+            self.assertIs(result.status, ResultStatus.PARTIAL_SUCCESS)
+            self.assertEqual(
+                result.model_facts.facts["fflogs"]["character"]["name"],
+                "Synthetic Hero",
+            )
+            self.assertEqual(
+                json.loads(self.http.requests[-1].body)["variables"]["serverSlug"],
+                "cerberus",
+            )
         values = message_parameters(
             '查 FFLogs 国服 "Synthetic Server" "Synthetic Hero"'
         )
         self.assertEqual(values["server"], "Synthetic Server")
         self.assertEqual(values["character"], "Synthetic Hero")
-        self.setup_handler([])
-        for parameters in (
-            {**TARGET, "server": "Cer"},
-            {**TARGET, "character": "Hero"},
-        ):
-            self.assertIs(
-                (
-                    await self.call("查国际服Cerberus的Synthetic Hero战绩", parameters)
-                ).status,
-                ResultStatus.ERROR,
-            )
-        self.assertEqual(self.http.requests, [])
 
     async def test_explicit_metrics_and_complete_filters_are_source_verified(self):
         for metric in ("rdps", "ndps", "cdps"):
@@ -221,15 +225,16 @@ class FFLogsChatTests(unittest.IsolatedAsyncioTestCase):
                     metric,
                 )
         self.setup_handler([])
-        for tail in (
-            "zone_id=2",
-            "zone_id=2 difficulty=3",
-            "zone_id=2 difficulty=3 partition=0",
-            "metric=pdps",
-            "metric=rdps metric=ndps",
+        for fields in (
+            {"zone_id": 2},
+            {"zone_id": 2, "difficulty": 3},
+            {"zone_id": 2, "difficulty": 3, "partition": 0},
+            {"metric": "pdps"},
+            {"metric": True},
         ):
             self.assertIs(
-                (await self.call(MESSAGE + " " + tail)).status, ResultStatus.ERROR
+                (await self.call(MESSAGE, {**TARGET, **fields})).status,
+                ResultStatus.ERROR,
             )
         self.assertEqual(self.http.requests, [])
 
@@ -238,34 +243,56 @@ class FFLogsChatTests(unittest.IsolatedAsyncioTestCase):
             fixture._server_row(901, subregion="Aether"),
             fixture._server_row(902, slug="cerberus-2", subregion="Chaos"),
         ]
-        # Ambiguity returns after the directory, before a character fetch. Each
-        # completed synthetic invocation gets only the responses it can consume.
         self.setup_handler(fixture._character_responses(first_rows=rows)[:-1])
         pending = await self.call()
         self.assertIs(pending.status, ResultStatus.NEEDS_SELECTION)
-        choices = pending.model_facts.facts["fflogs"]["candidates"]
-        self.assertEqual([row["subregion"] for row in choices], ["Aether", "Chaos"])
-        self.assertEqual(len(self.http.requests), 5)
+        details = pending.model_facts.facts["fflogs"]
+        self.assertEqual(
+            [row["server_id"] for row in details["candidates"]], [901, 902]
+        )
+        choice = {key: details[key] for key in ("batch_id", "generation")}
+        before = len(self.http.requests)
+        for event, server_id in (("one", 902), ("wrong", 71001)):
+            self.assertIs(
+                (
+                    await self.call(
+                        "第二个",
+                        {**choice, "server_id": server_id, "action": "continue"},
+                        event=event,
+                    )
+                ).status,
+                ResultStatus.ERROR,
+            )
         self.assertIs(
             (
                 await self.call(
-                    "Chaos", {**TARGET, "server_hint": "Chaos"}, event="partial-retry"
+                    "区别?", {**choice, "action": "clarify"}, event="clarify"
                 )
             ).status,
-            ResultStatus.ERROR,
+            ResultStatus.NEEDS_SELECTION,
         )
-        self.assertEqual(len(self.http.requests), 5)
-        self.assertEqual(len(self.http.responses), 0)
-        self.http.responses.extend(fixture._character_responses(first_rows=rows))
+        self.assertEqual(len(self.http.requests), before)
+        self.http.responses.append(fixture._character())
         result = await self.call(
-            MESSAGE + " server_hint=Chaos",
-            {**TARGET, "server_hint": "Chaos"},
-            event="complete-retry",
+            "Chaos那个",
+            {**choice, "server_id": 902, "action": "continue"},
+            event="select",
         )
         self.assertIs(result.status, ResultStatus.PARTIAL_SUCCESS)
         self.assertEqual(
             json.loads(self.http.requests[-1].body)["variables"]["serverSlug"],
             "cerberus-2",
+        )
+        self.assertEqual(len(self.http.requests), before + 1)
+        self.assertIs(
+            (
+                await self.call(
+                    "第二个",
+                    {**choice, "server_id": 902, "action": "continue"},
+                    event="replay",
+                )
+            ).status,
+            ResultStatus.ERROR,
         )
 
     async def test_missing_values_are_null_while_source_zero_is_preserved(self):
@@ -434,7 +461,8 @@ class FFLogsChatTests(unittest.IsolatedAsyncioTestCase):
 
         self.http.fetch = changed
         self.assertIs((await self.call()).error.code, ErrorCode.UNSUPPORTED)
-        self.assertEqual(len(self.http.requests), 1)
+        self.assertEqual(len(self.http.requests), 0)
+        self.assertGreater(len(self.public_requests), 0)
         self.setup_handler()
         fetch = self.http.fetch
 
@@ -445,7 +473,8 @@ class FFLogsChatTests(unittest.IsolatedAsyncioTestCase):
 
         self.http.fetch = closed
         self.assertIs((await self.call()).error.code, ErrorCode.UNSUPPORTED)
-        self.assertEqual(len(self.http.requests), 1)
+        self.assertEqual(len(self.http.requests), 0)
+        self.assertGreater(len(self.public_requests), 0)
 
     async def test_deadline_and_cancel_close_own_inflight_query(self):
         self.setup_handler([])

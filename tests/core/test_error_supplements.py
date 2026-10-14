@@ -829,7 +829,8 @@ class ErrorSupplementMarketProducerTests(unittest.IsolatedAsyncioTestCase):
             result["supplement"]["market"]["coverage"][0]["state"], "empty"
         )
         self.assertEqual(result["supplement"]["market"]["minimums"], [])
-        self.assertIn("等待用户明确新指令", result["error"]["message"])
+        self.assertTrue(result["error"]["message"])
+        self.assertNotIn("answer_guidance", result["supplement"]["market"])
         for canary in (
             "PRIVATE_HEADER_CANARY",
             "PRIVATE_BODY_CANARY",
@@ -854,7 +855,8 @@ class ErrorSupplementMarketProducerTests(unittest.IsolatedAsyncioTestCase):
             wrapper=case.wrapper("全球物品ID 44092多少钱"),
         )
         self.assertEqual(failure["status"], "error")
-        self.assertIn("等待用户明确新指令", failure["error"]["message"])
+        self.assertTrue(failure["error"]["message"])
+        self.assertEqual(failure["error"]["code"], "upstream_error")
         self.assertNotIn("PRIVATE_EXCEPTION", json.dumps(failure, ensure_ascii=False))
         self.trace.append(
             "actual_owned_tool_Core_FF_error_source_body_headers_exception_message_white_selection"
@@ -900,12 +902,14 @@ class ErrorSupplementMarketProducerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["error"]["code"], "upstream_error")
         self.assertEqual(set(result), {"status", "error", "supplement"})
         self.assertIn("市场来源查询未完成", result["error"]["message"])
-        self.assertIn("等待用户明确新指令", result["error"]["message"])
+        self.assertTrue(result["error"]["message"])
+        self.assertNotIn("answer_guidance", result["supplement"]["market"])
         market = result["supplement"]["market"]
         self.assertEqual(market["item_id"], 44092)
         self.assertEqual(market["minimums"], [])
         self.assertEqual(market["listings"], [])
-        self.assertIn("等待用户明确新指令", market["answer_guidance"])
+        self.assertNotIn("answer_guidance", market)
+        self.assertEqual(market["scope"]["default_basis"], "explicit_region")
         self.assertEqual(len(market["coverage"]), 4)
         self.assertEqual({row["region"] for row in market["coverage"]}, set(regions))
         for row in market["coverage"]:

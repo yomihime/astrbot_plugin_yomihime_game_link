@@ -94,9 +94,13 @@ class FFLogsCharacterLookup:
     def __init__(self, services: ModuleServices) -> None:
         self._services = services
         self._lifecycle = object()
+        from .chat_context import PendingTargets
+
+        self._chat_pending = PendingTargets()
 
     def close(self) -> None:
         self._lifecycle = object()
+        self._chat_pending.close()
 
     async def invoke(
         self, context: InvocationView, parameters: JsonObject
@@ -108,7 +112,15 @@ class FFLogsCharacterLookup:
         return await self._execute(context, parameters)
 
     async def _execute(
-        self, context, parameters, *, scope=None, tool=False, guard=None
+        self,
+        context,
+        parameters,
+        *,
+        scope=None,
+        tool=False,
+        guard=None,
+        resolved_server=None,
+        server_candidates=None,
     ) -> CapabilityResult:
         inputs = _character_inputs(parameters)
         if isinstance(inputs, CapabilityResult):
@@ -132,8 +144,13 @@ class FFLogsCharacterLookup:
         try:
             if scope is None:
                 scope = await self._services.scopes.bind(context)
-            catalog = FFLogsCatalog(scope.http, source_id)
-            resolution = await catalog.resolve_server(realm, server_label)
+            if resolved_server is None:
+                catalog = FFLogsCatalog(scope.http, source_id)
+                resolution = await catalog.resolve_server(realm, server_label)
+            else:
+                from types import SimpleNamespace
+
+                resolution = SimpleNamespace(complete=True, matches=(resolved_server,))
         except SourceHttpError as exc:
             return source_error(exc)
         except (FFLogsPayloadError, FFLogsGraphQLError):
@@ -173,8 +190,15 @@ class FFLogsCharacterLookup:
             if tool:
                 from .fflogs_chat import server_facts, tool_result
 
+                selection = server_candidates(matches) if server_candidates else {}
                 return tool_result(
-                    result, {"fflogs": server_facts(matches, realm, server_label, name)}
+                    result,
+                    {
+                        "fflogs": {
+                            **server_facts(matches, realm, server_label, name),
+                            **selection,
+                        }
+                    },
                 )
             return result
         server = matches[0]

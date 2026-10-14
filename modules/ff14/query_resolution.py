@@ -155,6 +155,7 @@ class QueryScope:
     regions: tuple[str, ...]
     target: str | int | None
     source: str
+    default_basis: str = "core_default"
 
 
 @dataclass(frozen=True, slots=True)
@@ -235,33 +236,11 @@ def _region(value: object) -> tuple[str, ...]:
 
 
 def validate_tool_query(query: object, message: str) -> str:
-    """FF14 item evidence from the privately bound real user message only."""
+    """Validate a semantic business query; message binding is checked by caller."""
     try:
         query = validate_item_query(query)
     except ValueError as exc:
         raise QueryResolutionError(str(exc)) from exc
-    if query.isascii() and query.isdigit():
-        item_id = re.escape(str(int(query)))
-        if not (
-            re.search(
-                r"(?:物品\s*ID|(?<![a-z0-9_])item\s+ID)\s*[:：#]?\s*"
-                + item_id
-                + r"(?![0-9])",
-                message,
-                re.I,
-            )
-            or re.fullmatch(
-                r"\s*(?:查价|查一下|查询)?\s*" + item_id + r"\s*(?:多少钱|什么价)?\s*",
-                message,
-            )
-        ):
-            raise QueryResolutionError(
-                "物品 ID 需要本条真实用户消息明确提供。", ErrorCode.UNSUPPORTED
-            )
-    elif " ".join(query.casefold().split()) not in " ".join(message.casefold().split()):
-        raise QueryResolutionError(
-            "物品名称需要本条真实用户消息明确提供。", ErrorCode.UNSUPPORTED
-        )
     return query
 
 
@@ -270,8 +249,24 @@ class MarketQueryResolver:
         self.catalog = catalog
 
     def parse(
-        self, parameters: Mapping[str, object], defaults: QueryDefaults
+        self, parameters: Mapping[str, object], defaults: QueryDefaults, *, chat=False
     ) -> MarketQuery:
+        basis = "core_default"
+        if chat:
+            from .features.chat_context import language_region, semantic_action
+
+            if not isinstance(parameters, Mapping) or any(
+                key not in _KEYS | {"action", "request_language", "context_language"}
+                for key in parameters
+            ):
+                raise QueryResolutionError("查询包含未知参数。")
+            semantic_action(parameters)
+            region, basis = language_region(parameters, defaults.default_region)
+            parameters = {
+                key: value for key, value in parameters.items() if key in _KEYS
+            }
+            if not any(key in parameters for key in ("region", "server", "dc")):
+                defaults = replace(defaults, default_region=region)
         if not isinstance(parameters, Mapping) or any(
             key not in _KEYS for key in parameters
         ):
@@ -299,12 +294,18 @@ class MarketQueryResolver:
         if narrow and regions and narrow.region not in regions:
             raise QueryResolutionError("服务器/大区与区域冲突。")
         if narrow:
-            scope = QueryScope(narrow.kind, (narrow.region,), narrow.id, "explicit")
+            scope = QueryScope(
+                narrow.kind,
+                (narrow.region,),
+                narrow.id,
+                "explicit",
+                "explicit_region" if regions else "server_region",
+            )
         elif regions:
-            scope = QueryScope("region", regions, None, "explicit")
+            scope = QueryScope("region", regions, None, "explicit", "explicit_region")
         else:
             scope = QueryScope(
-                "region", _region(defaults.default_region), None, "default"
+                "region", _region(defaults.default_region), None, "default", basis
             )
         return MarketQuery(
             query,
@@ -494,71 +495,6 @@ class _Pending:
     confirmation_ref: str | None = None
 
 
-def _confirmation_text(value: str) -> str:
-    return " ".join(value.casefold().split()).rstrip("。.!！")
-
-
-def _closed_reference(text: str) -> bool:
-    """Whole-message position/denial syntax, independent of capacity."""
-    return bool(
-        re.fullmatch(
-            r"第\s*[+-]?(?:[0-9０-９]+(?:[.．][0-9０-９]+)?|[零〇一二三四五六七八九十百千万亿两]+)\s*[个個项項条條]?[？?]?",
-            text,
-        )
-        or text.rstrip("？?")
-        in {
-            "最后一个",
-            "最后那个",
-            "前一个",
-            "后一个",
-            "前者",
-            "后者",
-            "前面那个",
-            "后面那个",
-            "上一个",
-            "下一个",
-            "第几个",
-            "刚才那个",
-            "就那个",
-            "那个",
-            "这个",
-            "这一个",
-            "那一个",
-            "不是",
-            "不要",
-            "不选",
-        }
-    )
-
-
-def _continuation_message(value: str, query: str) -> bool:
-    text = _confirmation_text(value)
-    query_text = _confirmation_text(query)
-    return (
-        _closed_reference(text)
-        or _closed_reference(query_text)
-        or bool(re.fullmatch(r"(?:不要|不是|不选).*", query_text))
-        or bool(
-            re.fullmatch(
-                r"选择物品\s+[0-9]+|就选.+|就.+|选择.+|选.+|(?:不要|不是|不选).*|.+那个[？?]?",
-                text,
-            )
-        )
-    )
-
-
-def _explicit_new_query(message: str, query: str) -> bool:
-    """A closed real-message query intent, not a bare candidate confirmation."""
-    return not _continuation_message(message, query) and bool(
-        re.fullmatch(
-            r"(?:再查|再查询|重新查|重新查询|查一下|查询物品|查物品|查询|查)\s*"
-            + re.escape(query)
-            + r"(?:的?(?:信息|详情|获取途径|怎么获得))?",
-            message,
-        )
-    )
-
-
 class CandidateRegistry:
     """Initial ephemeral policy: TTL 5 min, 128 owners, at most 6 candidates.
 
@@ -614,77 +550,30 @@ class CandidateRegistry:
         return ticket
 
     def tool_query(
-        self, owner: TrustedOwner, event_ref: str, text: str, query: str
+        self,
+        owner: TrustedOwner,
+        event_ref: str,
+        text: str,
+        query: str,
+        *,
+        action: str = "query",
     ) -> CandidateBatch | None:
-        """Keep candidate continuations out of the new-query invalidation path."""
+        """Business intent is semantic; trusted event and state remain mandatory."""
+        if action not in ("query", "correction", "continue", "clarify"):
+            raise QueryResolutionError("查询 action 无效。")
         self._prune()
         pending = self._pending.get(owner)
-        if pending is None or (
-            pending.batch is None and pending.consumed_batch is None
+        if pending is not None and event_ref in (
+            pending.source_ref,
+            pending.confirmation_ref,
         ):
-            if _continuation_message(text, query):
-                raise QueryResolutionError(
-                    "没有有效候选可供确认，请先明确提出新的物品查询。"
-                )
-            return None
-        batch = pending.batch or pending.consumed_batch
-        name, message = _confirmation_text(query), _confirmation_text(text)
-        original = _confirmation_text(batch.query.query)
-        if (
-            pending.batch is not None
-            and event_ref == pending.source_ref
-            and name == original
-        ):
-            return batch  # Retry keeps the complete frozen context and ticket.
-        if (
-            event_ref not in (pending.source_ref, pending.confirmation_ref)
-            and name == original
-            and _explicit_new_query(message, original)
-        ):
-            # Duplicate exact names may equal the original query. A distinct
-            # real event explicitly asking to query again supersedes that batch;
-            # bare/ordinal/negated/question confirmations still go to select.
-            return None
-        candidate_names = tuple(
-            _confirmation_text(item.name) for item in batch.candidates
-        )
-        candidate_ids = tuple(str(item.item_id) for item in batch.candidates)
-        if (
-            event_ref == pending.source_ref
-            or event_ref == pending.confirmation_ref
-            or _continuation_message(text, query)
-            or name in candidate_names
-            or name in candidate_ids
-            or (
-                name != original
-                and bool(name)
-                and any(name in candidate for candidate in candidate_names)
-            )
-            or any(candidate and candidate in message for candidate in candidate_names)
-            or any(
-                re.search(r"(?<![0-9])" + candidate + r"(?![0-9])", message)
-                for candidate in candidate_ids
-            )
-            or (
-                original in message
-                and (
-                    re.search(r"那个|这个|不要|不是|不选|选择|就选", message)
-                    or (
-                        re.search(r"[？?]", message)
-                        and (name != original or message.rstrip("？?") == original)
-                    )
-                )
-            )
-        ):
-            raise QueryResolutionError(
-                "当前候选请通过选择工具确认唯一完整名称或物品 ID，原查询上下文保持不变。"
-            )
-        if name == original:
-            if pending.batch is None:
-                raise QueryResolutionError(
-                    "本次选择正在查询，请等待结果或明确提出无关的新物品查询。"
-                )
-            return None  # A different real event starts a fresh query/context.
+            if pending.batch is not None and query == pending.batch.query.query:
+                return pending.batch
+            raise QueryResolutionError("原始消息不能改变待选查询或猜选。")
+        if action in ("continue", "clarify"):
+            if pending is None or pending.batch is None:
+                raise QueryResolutionError("没有有效候选，请明确查询条件。")
+            return pending.batch
         return None
 
     def choose_confirmed(
@@ -698,7 +587,12 @@ class CandidateRegistry:
         text: str,
         retain: bool = False,
     ) -> MarketQuery | ItemQuery:
-        """Derive the choice from a new trusted event before checking model ID."""
+        """Validate a typed semantic choice against a fresh trusted user event.
+
+        The model resolves name/ordinal/distinction to an ID. It must use
+        clarify for denial, questions or multiple unresolved choices. No model
+        identity, confirmed flag, or free-form evidence authorizes this method.
+        """
         if (
             not isinstance(owner, TrustedOwner)
             or type(event_ref) is not str
@@ -713,46 +607,28 @@ class CandidateRegistry:
             or pending.batch is None
             or pending.generation != generation
             or pending.batch.batch_id != batch_id
-            or event_ref == pending.source_ref
+            or event_ref in (pending.source_ref, pending.confirmation_ref)
         ):
-            raise QueryResolutionError(
-                "候选确认无效或已过期，请重新查询或回复当前候选的完整名称。"
-            )
-        message = _confirmation_text(text)
-        explicit = re.fullmatch(r"选择物品\s+([0-9]+)", message)
-        if explicit:
-            confirmed = int(explicit[1])
-        else:
-            matches = [
-                candidate.item_id
-                for candidate in pending.batch.candidates
-                for name in (_confirmation_text(candidate.name),)
-                if not _closed_reference(name)
-                and message
-                in {
-                    name,
-                    name + "那个",
-                    name + " 那个",
-                    *(
-                        prefix + separator + name
-                        for prefix in ("选", "选择", "就", "就选")
-                        for separator in ("", " ")
-                    ),
-                }
-            ]
-            if len(matches) != 1:
-                raise QueryResolutionError(
-                    "请回复当前候选的唯一完整名称；疑问、否定、多项及序号不能确认选择。"
-                )
-            confirmed = matches[0]
-        if type(item_id) is not int or item_id != confirmed:
-            raise QueryResolutionError("模型提交的物品 ID 与真实用户确认不一致。")
+            raise QueryResolutionError("候选确认无效或已过期，请重新查询。")
         batch = pending.batch
-        selected = self.choose(owner, batch_id, generation, confirmed, retain=retain)
+        selected = self.choose(owner, batch_id, generation, item_id, retain=retain)
         if retain:
             pending.consumed_batch = batch
             pending.confirmation_ref = event_ref
         return selected
+
+    def clarify(self, owner, batch_id, generation, *, event_ref):
+        self._prune()
+        pending = self._pending.get(owner)
+        if (
+            pending is None
+            or pending.batch is None
+            or pending.batch.batch_id != batch_id
+            or pending.generation != generation
+            or event_ref == pending.source_ref
+        ):
+            raise QueryResolutionError("候选批次无效或已过期。")
+        return pending.batch
 
     def _current(self, ticket: QueryTicket) -> _Pending:
         self._prune()
@@ -889,6 +765,7 @@ class QueryCoordinator:
         ticket: QueryTicket | None = None,
         retain_until_result: bool = False,
         guard: Callable[[], Awaitable[None]] | None = None,
+        defaults: QueryDefaults | None = None,
     ) -> MarketQuery | CandidateBatch:
         if ticket is None:
             ticket = self.start(owner)
@@ -903,10 +780,17 @@ class QueryCoordinator:
             parameters = natural_parameters(parameters)
         else:
             raise QueryResolutionError("未知查询入口。")
-        defaults = await QueryDefaults.capture(services)
+        if defaults is None:
+            defaults = await QueryDefaults.capture(services)
         if guard is not None:
             await guard()
-        query = self.resolver.parse(parameters, defaults)
+        try:
+            query = self.resolver.parse(parameters, defaults, chat=entry == "tool")
+        except QueryResolutionError as exc:
+            if entry == "tool" and exc.choices:
+                exc.parameters = dict(parameters)
+                exc.defaults = defaults
+            raise
         if query.item_id is not None:
             return self.registry.finish(ticket, query, retain=retain_until_result)
         candidates, truncated = await search_item_candidates(source, query.query)

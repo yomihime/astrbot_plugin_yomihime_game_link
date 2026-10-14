@@ -12,8 +12,17 @@ from time import monotonic
 from types import SimpleNamespace
 from urllib.parse import quote
 
-from yomihime_game_link_sdk.errors import ServiceUnavailable
-from yomihime_game_link_sdk.results import CapabilityResult, ErrorCode, FactDocument
+from yomihime_game_link_sdk.display import DisplayDocument, TextBlock
+from yomihime_game_link_sdk.errors import ServiceUnavailable, SourceHttpError
+from yomihime_game_link_sdk.results import (
+    CapabilityResult,
+    ErrorCode,
+    FactDocument,
+    ResultStatus,
+)
+
+from ..query_resolution import QueryResolutionError
+from .chat_context import chat_owner, language_region, semantic_action
 
 ROLE_FIELDS = frozenset({"realm", "server", "character"})
 OPTIONAL_FIELDS = frozenset(
@@ -22,11 +31,7 @@ OPTIONAL_FIELDS = frozenset(
 FILTER_FIELDS = frozenset({"zone_id", "difficulty", "partition"})
 ROW_LIMIT = 20
 SERVER_LIMIT = 6
-CLARIFICATION = (
-    "请在一条新消息中完整提供区域、服务器和角色名，例如："
-    '查 FFLogs 国际服 Cerberus "Synthetic Hero"。角色名或服务器名含空格时请加引号；'
-    "只补充区域或说“刚才那个”不能续接。"
-)
+CLARIFICATION = "请补充缺少的服务器或角色名；有歧义时请明确一个目标。"
 
 
 def message_parameters(text: str) -> dict:
@@ -85,25 +90,47 @@ def message_parameters(text: str) -> dict:
     return values
 
 
+CHAT_FIELDS = frozenset(
+    {
+        "action",
+        "request_language",
+        "context_language",
+        "batch_id",
+        "generation",
+        "server_id",
+    }
+)
+
+
 def validate_message_parameters(parameters, text):
+    """Semantic DTO validation only. No parsing or copying Host private history."""
     from .fflogs import _character_inputs
 
-    if not isinstance(parameters, Mapping) or any(
-        key not in ROLE_FIELDS | OPTIONAL_FIELDS for key in parameters
+    if not isinstance(parameters, Mapping) or set(parameters) - (
+        ROLE_FIELDS | OPTIONAL_FIELDS | CHAT_FIELDS
     ):
         raise ValueError(CLARIFICATION)
-    actual = message_parameters(text)
-    requested = _character_inputs(parameters)
-    supplied = _character_inputs(actual)
-    if isinstance(requested, CapabilityResult) or isinstance(
-        supplied, CapabilityResult
-    ):
-        raise ValueError(CLARIFICATION)
-    # Compare canonical realm/metric, exact full role/server/hint and filter trio.
-    # Only the existing service's omitted defaults may be added by the model.
-    if requested != supplied:
-        raise ValueError(CLARIFICATION)
-    return actual
+    semantic_action(parameters)
+    language_region(parameters, "cn")  # validates enum even on explicit scopes
+    values = {
+        key: value
+        for key, value in parameters.items()
+        if key in ROLE_FIELDS | OPTIONAL_FIELDS
+    }
+    probe = {
+        "realm": "cn",
+        "server": "Synthetic Server",
+        "character": "Synthetic Hero",
+        **values,
+    }
+    validated = _character_inputs(probe)
+    if isinstance(validated, CapabilityResult):
+        raise ValueError(validated.error.message)
+    if "realm" in values:
+        values["realm"] = validated[0]
+    if "metric" in values:
+        values["metric"] = validated[4]
+    return values
 
 
 def tool_result(result, values=None):
@@ -195,13 +222,6 @@ def character_facts(character, server, realm, metric, zone, host, retrieved_at):
             "battle_analysis": False,
             "global_output_percentiles": False,
         },
-        "answer_guidance": (
-            "仅回答本次公开角色排名与实际指标/筛选，注明FFLogs来源及有限返回项。"
-            "retrieved_at是获取时间，source_updated_at未知，不推断战斗日期。"
-            "None/missing是未知，不补零；保留partial、warnings与truncated。"
-            "角色rank_percent不代表全体输出分位、战斗分析或职业比较。"
-            "结果足够时直接回答，不自行改角色、服务器、区域或过滤条件。"
-        ),
     }
 
 
@@ -212,32 +232,29 @@ def server_facts(matches, realm, server_label, name):
         "character": name,
         "candidates": [
             {
+                "server_id": server.server_id,
+                "ordinal": i + 1,
                 "name": server.name,
                 "region": server.region,
                 "directory_region": server.directory_region_name,
                 "subregion": server.subregion,
             }
-            for server in matches[:SERVER_LIMIT]
+            for i, server in enumerate(matches[:SERVER_LIMIT])
         ],
         "truncated": len(matches) > SERVER_LIMIT,
-        "user_confirmation": (
-            "服务器名称有重名，请在一条新消息中完整重述区域、服务器和角色，"
-            "并加server_hint=上方区域或数据中心名称（含空格加引号）；不能猜选或只回复序号。"
-        ),
     }
 
 
 async def invoke_character_tool(handler, context, parameters):
     from .fflogs import _error
+    from .market_sources import MarketPayloadError, MarketSourceClient
 
+    state = None
+    key = None
     try:
-        if not all((context.actor_id, context.conversation_id, context.adapter_id)):
-            return tool_result(
-                _error(
-                    ErrorCode.UNSUPPORTED, "缺少可信用户/会话绑定，无法发起角色查询。"
-                )
-            )
-        generation = handler._lifecycle
+        owner = chat_owner(context)
+        key = (owner, context.capability_id)
+        lifecycle = handler._lifecycle
         started = monotonic()
         deadline = min(
             started + 30,
@@ -248,24 +265,234 @@ async def invoke_character_tool(handler, context, parameters):
         async with asyncio.timeout(max(0, deadline - monotonic())):
             scope = await handler._services.scopes.bind(context)
             message = await scope.message.read()
-            actual = validate_message_parameters(parameters, message.text)
+            values = validate_message_parameters(parameters, message.text)
+            action = semantic_action(parameters)
+            pending = handler._chat_pending.get(key)
 
             async def guard():
-                if handler._lifecycle is not generation:
+                if handler._lifecycle is not lifecycle or monotonic() >= deadline:
+                    if monotonic() >= deadline:
+                        raise TimeoutError
                     raise PermissionError
-                if monotonic() >= deadline:
-                    raise TimeoutError
-                if await scope.message.read() != message:
+                if (
+                    await scope.message.read() != message
+                    or handler._lifecycle is not lifecycle
+                ):
                     raise PermissionError
-                if handler._lifecycle is not generation:
-                    raise PermissionError
+                if state is not None:
+                    handler._chat_pending.current(key, state)
 
             class GuardedHttp:
                 async def fetch(self, request):
                     await guard()
-                    result = await scope.http.fetch(request)
+                    response = await scope.http.fetch(request)
                     await guard()
-                    return result
+                    return response
+
+            async def clarification(current, *, missing=()):
+                await guard()
+                facts = {
+                    "pending": True,
+                    "missing": list(missing),
+                    "target": dict(current.values),
+                    "generation": current.generation,
+                    "state": "active",
+                }
+                if current.batch_id:
+                    facts.update(
+                        server_facts(
+                            current.candidates,
+                            current.values["realm"],
+                            current.values["server"],
+                            current.values["character"],
+                        )
+                    )
+                    facts["batch_id"] = current.batch_id
+                return tool_result(
+                    CapabilityResult(
+                        "ff14-logs-pending",
+                        ResultStatus.NEEDS_SELECTION,
+                        document=DisplayDocument(
+                            "FFLogs 查询待补充",
+                            "公开角色目标",
+                            (TextBlock(CLARIFICATION),),
+                        ),
+                    ),
+                    {"fflogs": facts},
+                )
+
+            selected = None
+            if (
+                "server_id" in parameters
+                or "batch_id" in parameters
+                or "generation" in parameters
+            ):
+                if (
+                    pending is None
+                    or pending.consumed
+                    or not pending.batch_id
+                    or pending.event_ref == message.event_ref
+                    or parameters.get("batch_id") != pending.batch_id
+                    or parameters.get("generation") != pending.generation
+                ):
+                    raise ValueError("服务器候选批次无效或已过期。")
+                state = pending
+                if action == "clarify" and "server_id" not in parameters and not values:
+                    return await clarification(state)
+                if action != "continue" or values:
+                    raise ValueError("候选续接不能同时更改角色或查询条件。")
+                server_id = parameters.get("server_id")
+                if type(server_id) is not int:
+                    raise ValueError("请选择唯一服务器候选。")
+                matches = [
+                    row for row in pending.candidates if row.server_id == server_id
+                ]
+                if len(matches) != 1:
+                    raise ValueError("服务器 ID 不属于当前候选。")
+                selected = matches[0]
+                state.consumed = True
+                state.confirmation_ref = message.event_ref
+                actual = dict(state.values)
+                basis = state.default_basis
+            else:
+                if (
+                    pending is not None
+                    and message.event_ref == pending.confirmation_ref
+                ):
+                    raise ValueError("确认消息不能更改正在查询或已消费的角色目标。")
+                if pending is not None and pending.event_ref == message.event_ref:
+                    if values != pending.values or pending.consumed:
+                        raise ValueError("原消息不能更改待选目标或确认候选。")
+                    state = pending
+                    return await clarification(state)
+                if action == "clarify":
+                    if values:
+                        raise ValueError("未明确目标时不得提交猜选参数。")
+                    if pending is None:
+                        return tool_result(
+                            _error(ErrorCode.PARAMETER_ERROR, CLARIFICATION)
+                        )
+                    state = pending
+                    return await clarification(state)
+                actual = (
+                    dict(pending.values)
+                    if pending is not None
+                    and not pending.consumed
+                    and action in ("continue", "correction")
+                    else {}
+                )
+                # A correction updates the supplied fields while preserving only
+                # existing validated missing fields; it always starts a new generation.
+                if (
+                    pending is not None
+                    and action == "correction"
+                    and not pending.consumed
+                ):
+                    actual = dict(pending.values)
+                actual.update(values)
+                explicit_realm = "realm" in values or (
+                    pending is not None
+                    and action in ("continue", "correction")
+                    and pending.explicit_realm
+                    and "realm" in actual
+                )
+                if not explicit_realm:
+                    actual.pop("realm", None)
+                if (
+                    pending is not None
+                    and pending.batch_id
+                    and action == "continue"
+                    and values == pending.values
+                ):
+                    state = pending
+                    return await clarification(state)
+                state = handler._chat_pending.begin(key, message.event_ref, actual)
+                state.explicit_realm = explicit_realm
+                missing = {"server", "character"} - actual.keys()
+                if missing:
+                    return await clarification(state, missing=sorted(missing))
+
+                # Independent namespaces: Universalis supplies region only;
+                # FFLogs resolves its own server_id and slug in _execute.
+                if "realm" in actual:
+                    from .fflogs import _credential_state
+
+                    credential_state = await _credential_state(
+                        handler._services, actual["realm"]
+                    )
+                    await guard()
+                    if credential_state != "configured":
+                        return tool_result(
+                            await handler._execute(
+                                context,
+                                actual,
+                                scope=SimpleNamespace(http=GuardedHttp()),
+                                tool=True,
+                                guard=guard,
+                            )
+                        )
+                server_region = None
+                public_source = MarketSourceClient(None)
+                session = public_source.start_bound(
+                    GuardedHttp(), getattr(scope, "cache", None), deadline=deadline
+                )
+                try:
+                    public = await session.catalog()
+                    try:
+                        world = public.catalog.find("world", actual["server"])
+                    except QueryResolutionError as exc:
+                        regions = {entry.region for entry in exc.choices}
+                        world = None
+                        if len(regions) == 1:
+                            server_region = "cn" if regions == {"China"} else "global"
+                    if world is not None:
+                        server_region = "cn" if world.region == "China" else "global"
+                except (SourceHttpError, MarketPayloadError, ServiceUnavailable):
+                    # An unavailable or missing public directory never proves a
+                    # Logs server absent. Its authenticated directory remains authoritative.
+                    pass
+                await guard()
+                explicit = actual.get("realm")
+                if (
+                    explicit is not None
+                    and server_region is not None
+                    and explicit != server_region
+                ):
+                    return tool_result(
+                        _error(
+                            ErrorCode.PARAMETER_ERROR,
+                            "明确区域与服务器归属冲突，请澄清。",
+                        )
+                    )
+                if explicit is not None:
+                    basis = "explicit_region"
+                elif server_region is not None:
+                    actual["realm"], basis = server_region, "server_region"
+                else:
+                    snapshot = await handler._services.config.current()
+                    await guard()
+                    core = snapshot.values.get("core_defaults", {})
+                    default = core.get("default_region")
+                    # A complete scope must be known, not guessed from a name.
+                    region, basis = language_region(parameters, default)
+                    if region not in ("cn", "global"):
+                        return await clarification(state, missing=("realm",))
+                    actual["realm"] = region
+                state.values = dict(actual)
+                state.default_basis = basis
+
+            def candidates(matches):
+                import secrets
+
+                handler._chat_pending.current(key, state)
+                state.candidates = tuple(matches[:SERVER_LIMIT])
+                state.batch_id = secrets.token_urlsafe(24)
+                state.event_ref = message.event_ref
+                return {
+                    "batch_id": state.batch_id,
+                    "generation": state.generation,
+                    "state": "active",
+                }
 
             result = await handler._execute(
                 context,
@@ -273,28 +500,32 @@ async def invoke_character_tool(handler, context, parameters):
                 scope=SimpleNamespace(http=GuardedHttp()),
                 tool=True,
                 guard=guard,
+                resolved_server=selected,
+                server_candidates=candidates,
             )
             await guard()
-            return tool_result(result)
-    except ValueError:
-        return tool_result(_error(ErrorCode.PARAMETER_ERROR, CLARIFICATION))
+            result = tool_result(result)
+            if result.error is None and not state.batch_id:
+                state.consumed = True
+            if result.error is None and "fflogs" in result.model_facts.facts:
+                facts = dict(result.model_facts.facts)
+                details = dict(facts["fflogs"])
+                details["default_basis"] = state.default_basis
+                facts["fflogs"] = details
+                result = replace(result, model_facts=FactDocument(facts))
+            return result
+    except (ValueError, QueryResolutionError) as exc:
+        return tool_result(_error(ErrorCode.PARAMETER_ERROR, str(exc)))
     except PermissionError:
         return tool_result(
-            _error(
-                ErrorCode.UNSUPPORTED,
-                "当前真实用户消息或模块生命周期已失效，请重新完整查询。",
-            )
+            _error(ErrorCode.UNSUPPORTED, "当前真实用户消息或模块生命周期已失效。")
         )
     except ServiceUnavailable:
         return tool_result(
             _error(ErrorCode.MODULE_UNAVAILABLE, "FFLogs 来源服务暂不可用。")
         )
     except TimeoutError:
-        return tool_result(
-            _error(
-                ErrorCode.UPSTREAM_ERROR, "FFLogs 角色查询超时，请稍后按原条件重试。"
-            )
-        )
+        return tool_result(_error(ErrorCode.UPSTREAM_ERROR, "FFLogs 角色查询超时。"))
 
 
 def fetched_at():

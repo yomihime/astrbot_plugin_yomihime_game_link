@@ -140,60 +140,40 @@ class NaturalConfirmationTests(unittest.TestCase):
         )
 
     def test_closed_positive_templates_restore_frozen_context_and_consume(self):
-        for text in (
-            "犎牛牛排",
-            "犎牛牛排那个。",
-            "选犎牛牛排",
-            "选择犎牛牛排",
-            "就犎牛牛排",
-            "就选犎牛牛排",
-            "选犎牛牛排",
-            "就犎牛牛排！",
-            "就选犎牛牛排",
-            "选择物品 90001",
-        ):
-            with self.subTest(text=text):
-                self.publish()
-                selected = self.choose(text)
-                self.assertEqual(selected.item_id, 90001)
-                self.assertEqual(selected.item_name, "犎牛牛排")
-                self.assertEqual(selected.original_query, "牛排")
-                for field in (
-                    "scope",
-                    "quality",
-                    "intent",
-                    "core_revision",
-                    "module_revision",
-                ):
-                    self.assertEqual(
-                        getattr(selected, field), getattr(self.query, field)
-                    )
-                with self.assertRaises(QueryResolutionError):
-                    self.choose(text)
+        # Offline semantic ID fixtures, not evidence of a real model understanding.
+        for text in ("第一个", "就它吧", "犎牛牛排", "I want the first one"):
+            self.publish()
+            selected = self.choose(text)
+            self.assertEqual(selected.item_id, 90001)
+            self.assertEqual(selected.original_query, "牛排")
+            for field in (
+                "scope",
+                "quality",
+                "intent",
+                "core_revision",
+                "module_revision",
+            ):
+                self.assertEqual(getattr(selected, field), getattr(self.query, field))
+            with self.assertRaises(QueryResolutionError):
+                self.choose(text)
 
     def test_rejections_preserve_ticket_and_do_not_let_model_choose(self):
-        for text in (
-            "犎牛牛排？",
-            "不是犎牛牛排",
-            "不要犎牛牛排",
-            "犎牛牛排或另一种牛排",
-            "牛排那个",
-            "第一/第二个",
-            "第二个",
-            "犎牛牛排2个",
-            "刚才那个",
-        ):
-            with self.subTest(text=text), self.assertRaises(QueryResolutionError):
-                self.choose(text)
+        for item_id in (True, 0, 99999, "90001"):
+            with self.assertRaises(QueryResolutionError):
+                self.choose("第一个", item_id=item_id)
         with self.assertRaises(QueryResolutionError):
-            self.choose("犎牛牛排", event_ref=self.event)
-        with self.assertRaises(QueryResolutionError):
-            self.choose("犎牛牛排", item_id=90002)
-        self.assertEqual(self.choose("犎牛牛排那个。").item_id, 90001)
-        self.publish(("同名牛排", "同名牛排"))
-        with self.assertRaises(QueryResolutionError):
-            self.choose("同名牛排")
-        self.assertEqual(self.choose("选择物品 90001").item_id, 90001)
+            self.choose("第一个", event_ref=self.event)
+        for text in ("不要", "两个都要", "哪个更好", "那个?"):
+            self.assertIs(
+                self.registry.clarify(
+                    self.owner,
+                    self.batch.batch_id,
+                    self.batch.generation,
+                    event_ref=text,
+                ),
+                self.batch,
+            )
+        self.assertEqual(self.choose("第一个").item_id, 90001)
 
     def test_owner_ttl_absence_and_new_query_invalidation(self):
         for owner in (
@@ -202,185 +182,122 @@ class NaturalConfirmationTests(unittest.TestCase):
             TrustedOwner("user", "session", "adapter"),
         ):
             with self.assertRaises(QueryResolutionError):
-                self.choose("犎牛牛排", owner=owner)
+                self.choose("第一个", owner=owner)
         self.now = 301
         with self.assertRaises(QueryResolutionError):
-            self.choose("犎牛牛排")
-
-        for text in (
-            "犎牛牛排那个。",
-            "选择犎牛牛排",
-            "选择物品 90001",
-            "第二个",
-            "刚才那个",
-        ):
-            with self.subTest(text=text), self.assertRaises(QueryResolutionError):
-                self.registry.tool_query(self.owner, "new-ref", text, "犎牛牛排")
+            self.choose("第一个")
+        with self.assertRaises(QueryResolutionError):
+            self.registry.tool_query(
+                self.owner, "new-ref", "那个", "", action="continue"
+            )
         self.publish()
         self.assertIsNone(
-            self.registry.tool_query(self.owner, "new-ref", "新矿石多少钱", "新矿石")
+            self.registry.tool_query(
+                self.owner, "new-ref", "换个物品", "新矿石", action="correction"
+            )
         )
         self.registry.begin(self.owner, source_ref="new-ref")
         with self.assertRaises(QueryResolutionError):
-            self.choose("犎牛牛排")
+            self.choose("第一个")
 
     def test_names_with_spaces_normalize_and_duplicate_names_remain_ambiguous(self):
-        self.publish(("Synthetic Steak", "Other Steak"))
-        self.assertEqual(self.choose("就选 SYNTHETIC   STEAK。").item_id, 90001)
-        self.publish(("Synthetic Steak", "synthetic   steak"))
-        with self.assertRaises(QueryResolutionError):
-            self.choose("Synthetic Steak那个")
-        with self.assertRaises(QueryResolutionError):
-            self.choose("不是 Synthetic Steak")
-        self.assertEqual(self.choose("选择物品 90001").item_id, 90001)
-
-    def test_pending_query_cannot_recalculate_context_from_confirmation(self):
+        self.publish(("Synthetic Steak", "synthetic steak"))
+        # Same names have only known ID/ordinal differences; unresolved name -> clarify.
         self.assertIs(
-            self.registry.tool_query(
-                self.owner, self.event, "牛排国服哪里最便宜？", "牛排"
+            self.registry.clarify(
+                self.owner,
+                self.batch.batch_id,
+                self.batch.generation,
+                event_ref="duplicate",
             ),
             self.batch,
         )
-        for text, query in (
-            ("犎牛牛排那个。", "犎牛牛排"),
-            ("犎牛牛排那个。", "牛排"),
-            ("犎牛牛排那个。", "犎"),
-            ("犎牛牛排？", "犎牛牛排"),
-            ("不是犎牛牛排", "犎牛牛排"),
-            ("不是犎牛", "犎牛"),
-            ("就犎牛", "犎牛"),
-            ("犎牛？", "犎牛"),
-            ("犎牛牛排或另一种牛排", "另一种牛排"),
-            ("物品ID 90001", "90001"),
-            ("第二个", "第二个"),
-            ("牛排国服哪里最便宜？", "犎牛牛排"),
-        ):
-            with (
-                self.subTest(text=text, query=query),
-                self.assertRaises(QueryResolutionError),
-            ):
-                self.registry.tool_query(self.owner, "new-ref", text, query)
-        self.assertEqual(self.choose("犎牛牛排那个。").scope, self.query.scope)
+        self.assertEqual(self.choose("第二个", item_id=90002).item_id, 90002)
+
+    def test_pending_query_cannot_recalculate_context_from_confirmation(self):
+        self.assertIs(
+            self.registry.tool_query(self.owner, self.event, "查价", "牛排"), self.batch
+        )
+        for query in ("90001", "犎牛牛排", "另一种牛排"):
+            with self.assertRaises(QueryResolutionError):
+                self.registry.tool_query(
+                    self.owner, self.event, "查价", query, action="correction"
+                )
+        self.assertIs(
+            self.registry.tool_query(
+                self.owner, "new-ref", "区别?", "", action="clarify"
+            ),
+            self.batch,
+        )
+        self.assertEqual(self.choose("第一个").scope, self.query.scope)
 
     def test_original_word_only_same_event_is_retry_new_questions_are_fresh(self):
         self.assertIs(
-            self.registry.tool_query(self.owner, self.event, "牛排什么价？", "牛排"),
+            self.registry.tool_query(self.owner, self.event, "查价", "牛排"), self.batch
+        )
+        self.assertIsNone(
+            self.registry.tool_query(
+                self.owner, "new-ref", "改国际服", "牛排", action="correction"
+            )
+        )
+        self.assertIs(
+            self.registry.tool_query(
+                self.owner, "next-ref", "区别?", "", action="clarify"
+            ),
             self.batch,
         )
-        self.assertIsNone(
-            self.registry.tool_query(
-                self.owner, "new-ref", "牛排国际服什么价？", "牛排"
-            )
-        )
-        self.assertIsNone(
-            self.registry.tool_query(
-                self.owner, "new-ref", "牛排国服哪里最便宜？", "牛排"
-            )
-        )
-        with self.assertRaises(QueryResolutionError):
-            self.registry.tool_query(self.owner, "new-ref", "牛排？", "牛排")
-        self.assertEqual(self.choose("犎牛牛排那个。").scope, self.query.scope)
 
     def test_duplicate_original_name_fresh_queries_and_consumed_event_fences(self):
         self.query = replace(self.query, query="Same")
-        for consumed in (False, True):
-            with self.subTest(consumed=consumed):
-                self.publish(("Same", "Same"))
-                if consumed:
-                    self.registry.choose_confirmed(
-                        self.owner,
-                        self.batch.batch_id,
-                        self.batch.generation,
-                        90001,
-                        event_ref="confirmation-ref",
-                        text="选择物品 90001",
-                        retain=True,
-                    )
-                    for event in (self.event, "confirmation-ref"):
-                        with self.assertRaises(QueryResolutionError):
-                            self.registry.tool_query(
-                                self.owner, event, "再查Same", "Same"
-                            )
-                else:
-                    self.assertIs(
-                        self.registry.tool_query(
-                            self.owner, self.event, "查Same", "Same"
-                        ),
-                        self.batch,
-                    )
-                for text in (
-                    "Same",
-                    "Same那个",
-                    "不是Same",
-                    "Same？",
-                    "再查Same？",
-                    "第一个",
-                    "选择Same",
-                ):
-                    with (
-                        self.subTest(text=text),
-                        self.assertRaises(QueryResolutionError),
-                    ):
-                        self.registry.tool_query(self.owner, "next-ref", text, "Same")
-                self.assertIsNone(
-                    self.registry.tool_query(self.owner, "next-ref", "再查Same", "Same")
+        self.publish(("Same", "Same"))
+        self.registry.choose_confirmed(
+            self.owner,
+            self.batch.batch_id,
+            self.batch.generation,
+            90001,
+            event_ref="confirmation-ref",
+            text="第一个",
+            retain=True,
+        )
+        for event in (self.event, "confirmation-ref"):
+            with self.assertRaises(QueryResolutionError):
+                self.registry.tool_query(
+                    self.owner, event, "再查", "Same", action="correction"
                 )
-                self.registry.begin(self.owner, source_ref="next-ref")
-                with self.assertRaises(QueryResolutionError):
-                    self.choose("选择物品 90001")
+        self.assertIsNone(
+            self.registry.tool_query(
+                self.owner, "new-query", "改范围", "Same", action="correction"
+            )
+        )
+        self.registry.begin(self.owner, source_ref="new-query")
+        with self.assertRaises(QueryResolutionError):
+            self.choose("第一个")
 
     def test_all_positional_denial_messages_refuse_before_begin_in_every_state(self):
-        # Candidate capacity is not a boundary on rejected ordinal syntax.
-        for state in ("active", "absent", "expired", "consumed"):
-            for text in self.continuations:
-                with self.subTest(state=state, text=text):
-                    self.publish()
-                    ticket = QueryTicket(self.owner, self.batch.generation)
-                    if state == "absent":
-                        self.registry.finish(ticket, self.query)
-                    elif state == "expired":
-                        self.now += 301
-                    elif state == "consumed":
-                        self.registry.choose_confirmed(
-                            self.owner,
-                            self.batch.batch_id,
-                            self.batch.generation,
-                            90001,
-                            event_ref="new-ref",
-                            text="犎牛牛排",
-                            retain=True,
-                        )
-                    with self.assertRaises(QueryResolutionError):
-                        self.registry.tool_query(self.owner, "new-ref", text, text)
-                    if state == "active":
-                        self.assertIs(self.registry._current(ticket).batch, self.batch)
-                        self.assertEqual(
-                            self.choose("犎牛牛排").scope, self.query.scope
-                        )
-                    elif state == "consumed":
-                        pending = self.registry._current(ticket)
-                        self.assertIsNone(pending.batch)
-                        self.assertIs(pending.consumed_batch, self.batch)
-                        self.registry._release_confirmed(ticket)
-                        self.assertEqual(self.registry.size, 0)
-                    else:
-                        self.assertEqual(self.registry.size, 0)
+        for action in ("continue", "clarify"):
+            self.assertIs(
+                self.registry.tool_query(
+                    self.owner, "new-ref", "不确定", "", action=action
+                ),
+                self.batch,
+            )
+        ticket = QueryTicket(self.owner, self.batch.generation)
+        self.registry.finish(ticket, self.query)
+        for action in ("continue", "clarify"):
+            with self.assertRaises(QueryResolutionError):
+                self.registry.tool_query(
+                    self.owner, "new-ref", "不确定", "", action=action
+                )
+        self.publish()
+        self.now += 301
+        with self.assertRaises(QueryResolutionError):
+            self.registry.tool_query(
+                self.owner, "new-ref", "不确定", "", action="clarify"
+            )
 
     def test_positional_query_token_refuses_but_unrelated_full_names_remain_queries(
         self,
     ):
-        for text, query in (
-            ("第七个多少钱", "第七个"),
-            ("看看最后一个价格", "最后一个"),
-            ("第7个吗？", "第7个"),
-            ("帮我看后者", "后者"),
-            ("不是吧", "不是"),
-            ("我说不要", "不要"),
-            ("我说不选", "不选"),
-            ("我说不要犎牛", "不要犎牛"),
-        ):
-            with self.subTest(text=text), self.assertRaises(QueryResolutionError):
-                self.registry.tool_query(self.owner, "new-ref", text, query)
         for name in (
             "第七天堂牛排",
             "第七个勇士徽章",
@@ -388,12 +305,10 @@ class NaturalConfirmationTests(unittest.TestCase):
             "前者的矿石",
         ):
             self.assertIsNone(
-                self.registry.tool_query(self.owner, "new-ref", f"查询{name}价格", name)
+                self.registry.tool_query(self.owner, "new-ref", "查询", name)
             )
         self.publish(("第7个", "另一种牛排"))
-        with self.assertRaises(QueryResolutionError):
-            self.choose("选第7个")
-        self.assertEqual(self.choose("选择物品 90001").item_id, 90001)
+        self.assertEqual(self.choose("叫第7个的那个").item_id, 90001)
 
 
 class ParsingTests(unittest.TestCase):

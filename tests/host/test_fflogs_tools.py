@@ -155,7 +155,7 @@ class FFLogsToolHostTests(unittest.IsolatedAsyncioTestCase):
         await self.start_logs()
         tools = self.manager.get_full_tool_set()
         schema = tools.get_tool("ff14_logs_character").parameters
-        self.assertEqual(set(schema["required"]), {"realm", "server", "character"})
+        self.assertEqual(set(schema.get("required", [])), set())
         self.assertEqual(
             set(schema["properties"]),
             {
@@ -167,6 +167,12 @@ class FFLogsToolHostTests(unittest.IsolatedAsyncioTestCase):
                 "zone_id",
                 "difficulty",
                 "partition",
+                "action",
+                "request_language",
+                "context_language",
+                "batch_id",
+                "generation",
+                "server_id",
             },
         )
         self.assertEqual(
@@ -201,32 +207,24 @@ class FFLogsToolHostTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_current_complete_message_only_no_model_history_or_shortening(self):
         await self.start_logs()
-        for text, parameters in (
-            ("国服", TARGET),
-            ("刚才那个", TARGET),
-            ("不要" + MESSAGE, TARGET),
-            (MESSAGE, {**TARGET, "character": "Hero"}),
-            (MESSAGE, {**TARGET, "server": "Cer"}),
-            (MESSAGE, {**TARGET, "realm": "global"}),
-        ):
-            with self.subTest(text=text, fields=tuple(parameters)):
-                denied = await self.role(text, parameters)
-                self.assertEqual(denied["status"], "error")
-                self.assertEqual(denied["error"]["code"], "parameter_error")
-                self.assertIn("一条新消息", denied["error"]["message"])
+        pending = await self.role("查角色", {"character": "Synthetic Hero"})
+        self.assertEqual(pending["status"], "needs_selection")
+        self.assertEqual(pending["fflogs"]["missing"], ["server"])
         self.assertEqual(self.transport.requests, [])
-        valid = await self.role()
+        valid = await self.role(
+            "补充Cerberus国服",
+            {"server": "Cerberus", "realm": "cn", "action": "continue"},
+        )
         self.assertEqual(valid["status"], "success")
         self.assertGreater(self.transport.exchanges, 0)
         foreign_context = self.host.Context()
-        self.assertIsNot(foreign_context, self.context)
         foreign = self.wrapper(MESSAGE, context=foreign_context)
-        request_count = len(self.transport.requests)
-        exchange_count = self.transport.exchanges
+        before = len(self.transport.requests)
+        exchanges = self.transport.exchanges
         with self.assertRaises(PermissionError):
             await self.call("ff14_logs_character", TARGET, foreign)
-        self.assertEqual(len(self.transport.requests), request_count)
-        self.assertEqual(self.transport.exchanges, exchange_count)
+        self.assertEqual(len(self.transport.requests), before)
+        self.assertEqual(self.transport.exchanges, exchanges)
 
     async def test_unset_credentials_are_explicit_without_http(self):
         await self.start_logs(configured=False)
