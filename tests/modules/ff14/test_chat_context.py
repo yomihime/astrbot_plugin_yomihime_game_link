@@ -187,6 +187,13 @@ class LogsAdaptiveTests(unittest.IsolatedAsyncioTestCase):
         state = self.handler._chat_pending.get(key)
         generation = state.generation
         try:
+            clarified = await self.call(
+                "还在查吗", {"action": "clarify"}, event="inflight-clarify"
+            )
+            self.assertEqual(
+                clarified.model_facts.facts["fflogs"],
+                {"pending": False, "state": "inflight"},
+            )
             for action in ("query", "correction", "continue"):
                 for server in ("Cerberus", "cerberus"):
                     denied = await self.call(
@@ -294,6 +301,8 @@ class LogsAdaptiveTests(unittest.IsolatedAsyncioTestCase):
     async def test_correction_supersedes_pending_and_same_event_cannot_change(self):
         self.setup_handler()
         old = await self.call("查旧角色", {"character": "Old Synthetic"})
+        key = (chat_owner(invocation()), "ff14.logs.character")
+        old_generation = self.handler._chat_pending.get(key).generation
         self.assertIs(
             (
                 await self.call(
@@ -309,9 +318,12 @@ class LogsAdaptiveTests(unittest.IsolatedAsyncioTestCase):
             event="correct",
         )
         self.assertNotEqual(
-            old.model_facts.facts["fflogs"]["generation"],
-            new.model_facts.facts["fflogs"]["generation"],
+            old_generation,
+            self.handler._chat_pending.get(key).generation,
         )
+        self.assertIs(old.status, ResultStatus.NEEDS_SELECTION)
+        self.assertIs(new.status, ResultStatus.NEEDS_SELECTION)
+        self.assertNotIn("generation", new.model_facts.facts["fflogs"])
         result = await self.call(
             "补服务器国际服",
             {"server": "Cerberus", "realm": "global", "action": "continue"},

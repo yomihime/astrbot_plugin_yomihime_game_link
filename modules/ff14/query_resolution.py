@@ -500,7 +500,8 @@ class CandidateRegistry:
 
     No persistence, timers, or runtime acceptance claims. The clock is injected
     in tests. One latest generation per trusted owner; random generations avoid
-    keeping an unbounded per-user counter/tombstone collection after eviction.
+    keeping an unbounded per-user counter after pending eviction. Consumed
+    flights have a separate bounded table and are never evicted before expiry.
     """
 
     def __init__(
@@ -520,12 +521,46 @@ class CandidateRegistry:
         self._clock, self._ttl = clock, ttl
         self._capacity, self._max_candidates = capacity, max_candidates
         self._pending: OrderedDict[TrustedOwner, _Pending] = OrderedDict()
+        # Separate from replaceable pending targets. A consumed flight keeps
+        # its event fences through success, failure, replacement and eviction.
+        self._consumed: dict[QueryTicket, tuple[frozenset[str], float]] = {}
 
     def _prune(self) -> None:
         now = self._clock()
         for owner in tuple(self._pending):
             if self._pending[owner].expires <= now:
                 del self._pending[owner]
+        for ticket, (_, expires) in tuple(self._consumed.items()):
+            if expires <= now:
+                del self._consumed[ticket]
+
+    def require_fresh_event(self, owner: TrustedOwner, event_ref: str) -> None:
+        self._prune()
+        if any(
+            ticket.owner == owner and event_ref in refs
+            for ticket, (refs, _) in self._consumed.items()
+        ):
+            raise QueryResolutionError("已消费的原始或确认消息不能重新查询。")
+
+    def consume_events(self, ticket: QueryTicket, refs) -> None:
+        """Reserve bounded proof before business IO; never evict live fences.
+
+        Host receipts expire within 300s and keep a live Event tombstone after
+        expiry instead of signing it again. Starting this fence at consumption
+        covers the source's remaining lifetime, even for a shorter pending TTL.
+        Full tables reject new consumption. Module close replaces the registry;
+        old issued views are then rejected by lifecycle/epoch guards.
+        """
+        self._current(ticket)
+        previous = self._consumed.get(ticket)
+        events = frozenset(ref for ref in refs if ref is not None)
+        if previous is not None:
+            events |= previous[0]
+        if not events or len(events) > 4:
+            raise QueryResolutionError("候选消息绑定超出边界。")
+        if previous is None and len(self._consumed) >= self._capacity:
+            raise QueryResolutionError("候选消费记录已满，请稍后用新消息查询。")
+        self._consumed[ticket] = (events, self._clock() + 300)
 
     @property
     def size(self) -> int:
@@ -561,6 +596,7 @@ class CandidateRegistry:
         """Business intent is semantic; trusted event and state remain mandatory."""
         if action not in ("query", "correction", "continue", "clarify"):
             raise QueryResolutionError("查询 action 无效。")
+        self.require_fresh_event(owner, event_ref)
         self._prune()
         pending = self._pending.get(owner)
         if pending is not None and event_ref in (
@@ -610,6 +646,14 @@ class CandidateRegistry:
             or event_ref in (pending.source_ref, pending.confirmation_ref)
         ):
             raise QueryResolutionError("候选确认无效或已过期，请重新查询。")
+        self.require_fresh_event(owner, event_ref)
+        if type(item_id) is not int or item_id not in tuple(
+            candidate.item_id for candidate in pending.batch.candidates
+        ):
+            raise QueryResolutionError("请选择当前列表中的物品 ID。")
+        self.consume_events(
+            QueryTicket(owner, generation), (pending.source_ref, event_ref)
+        )
         batch = pending.batch
         selected = self.choose(owner, batch_id, generation, item_id, retain=retain)
         if retain:
@@ -618,6 +662,7 @@ class CandidateRegistry:
         return selected
 
     def clarify(self, owner, batch_id, generation, *, event_ref):
+        self.require_fresh_event(owner, event_ref)
         self._prune()
         pending = self._pending.get(owner)
         if (

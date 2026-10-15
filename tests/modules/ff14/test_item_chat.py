@@ -80,6 +80,28 @@ class _Services:
 
 
 class ItemChatTests(unittest.IsolatedAsyncioTestCase):
+    async def test_consumed_confirmation_and_source_cannot_restart_after_success(self):
+        pending = await self.pending()
+        self.detail_responses()
+        chosen = await self.call("第一个", event="confirm", select=self.choice(pending))
+        self.assertIs(chosen.status, ResultStatus.SUCCESS)
+        before = len(self.http.requests)
+        for event in ("confirm", "request"):
+            for action in ("query", "correction"):
+                self.detail_responses()
+                self.services.messages[event] = MessageContext(
+                    "same trusted event", event
+                )
+                result = await self.handler.invoke(
+                    context(event), {"query": "90001", "action": action}
+                )
+                self.assertIs(result.status, ResultStatus.ERROR)
+                self.assertEqual(len(self.http.requests), before)
+                self.http.responses.clear()
+        self.detail_responses()
+        fresh = await self.call("重新查询90001", "90001", event="new-request")
+        self.assertIs(fresh.status, ResultStatus.SUCCESS)
+
     def setup_handler(self, responses=()):
         self.http = _FakeHttp(list(responses))
         self.services = _Services(self.http)

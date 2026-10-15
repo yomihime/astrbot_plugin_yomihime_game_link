@@ -510,6 +510,8 @@ class MarketQueryHandler:
             selecting = isinstance(parameters, Mapping) and set(parameters) == {
                 "selection"
             }
+            if context.origin is InvocationOrigin.LLM_TOOL:
+                self.registry.require_fresh_event(owner, message.event_ref)
             if not selecting:
                 if context.origin is InvocationOrigin.LLM_TOOL:
                     # Validate before any registry mutation, including retries.
@@ -561,6 +563,10 @@ class MarketQueryHandler:
                         owner, message.event_ref, choice
                     )
                     ticket = scope_state.values["ticket"]
+                    if scope_values is not None:
+                        self.registry.consume_events(
+                            ticket, scope_state.values["event_refs"]
+                        )
                     await guard()
                     if scope_values is None:
                         return self._scope_candidates(scope_state)

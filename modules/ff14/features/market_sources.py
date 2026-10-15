@@ -23,8 +23,10 @@ SOURCE_ROOT = "https://universalis.app"
 WORLDS_PATH = "/api/v2/worlds"
 DCS_PATH = "/api/v2/data-centers"
 SOURCE_VERSION = "universalis-market-v1"
-DIRECTORY_TTL = 300
-MARKET_TTL = 30
+# Resource reuse only; cached facts retain original fetch/upload timestamps.
+# Expiry is checked on demand, with no background refresh or stale fallback.
+DIRECTORY_TTL = 3600
+MARKET_TTL = 300
 MAX_RESPONSE_BYTES = 1_048_576
 T = TypeVar("T")
 

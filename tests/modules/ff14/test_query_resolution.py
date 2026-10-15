@@ -121,6 +121,8 @@ class NaturalConfirmationTests(unittest.TestCase):
         self.publish()
 
     def publish(self, names=("犎牛牛排", "另一种牛排")):
+        self.event = f"source-ref-{getattr(self, 'publications', 0)}"
+        self.publications = getattr(self, "publications", 0) + 1
         ticket = self.registry.begin(self.owner, source_ref=self.event)
         self.batch = self.registry.publish(
             ticket,
@@ -135,7 +137,7 @@ class NaturalConfirmationTests(unittest.TestCase):
             self.batch.batch_id,
             self.batch.generation,
             item_id,
-            event_ref=event_ref or "new-ref",
+            event_ref=event_ref or "new-ref-" + self.batch.generation,
             text=text,
         )
 
@@ -174,6 +176,72 @@ class NaturalConfirmationTests(unittest.TestCase):
                 self.batch,
             )
         self.assertEqual(self.choose("第一个").item_id, 90001)
+
+    def test_consumed_fences_survive_replacement_failure_pending_eviction_and_ttl(self):
+        selected = self.registry.choose_confirmed(
+            self.owner,
+            self.batch.batch_id,
+            self.batch.generation,
+            90001,
+            event_ref="confirm",
+            text="第一个",
+            retain=True,
+        )
+        consumed_ticket = QueryTicket(self.owner, self.batch.generation)
+        source_ref = self.event
+        self.registry.finish(consumed_ticket, selected)
+        newer = self.registry.begin(self.owner, source_ref="new-source")
+        self.registry.abandon(consumed_ticket)
+        self.registry._release_confirmed(consumed_ticket)
+        self.registry._current(newer)
+        for i in range(129):
+            self.registry.begin(TrustedOwner(str(i), "other", "llm_tool:other"))
+        for action in ("query", "correction", "continue", "clarify"):
+            for event_ref in (source_ref, "confirm"):
+                with self.assertRaises(QueryResolutionError):
+                    self.registry.tool_query(
+                        self.owner, event_ref, "旧事件", "90001", action=action
+                    )
+        self.now = 299.999
+        with self.assertRaises(QueryResolutionError):
+            self.registry.require_fresh_event(self.owner, "confirm")
+        self.now = 300
+        self.registry.require_fresh_event(self.owner, "confirm")
+        self.assertFalse(self.registry._consumed)
+        # Expired strings are no longer module proof. The Host separately
+        # rejects that exact live old Event and never signs it again.
+
+    def test_consumed_capacity_refuses_new_flight_without_evicting_old_fences(self):
+        registry = CandidateRegistry(clock=lambda: self.now, capacity=1)
+        first = registry.begin(self.owner, source_ref="first")
+        registry.consume_events(first, ("first", "confirmation"))
+        registry.abandon(first)
+        second = registry.begin(self.owner, source_ref="second")
+        with self.assertRaises(QueryResolutionError):
+            registry.consume_events(second, ("second", "second-confirm"))
+        self.assertEqual(len(registry._consumed), 1)
+        with self.assertRaises(QueryResolutionError):
+            registry.require_fresh_event(self.owner, "confirmation")
+        self.now = 300
+        # pending itself expired too; a genuinely new flight is required.
+        fresh = registry.begin(self.owner, source_ref="third")
+        registry.consume_events(fresh, ("third", "third-confirm"))
+        registry.require_fresh_event(
+            TrustedOwner("other", "session", "llm_tool:adapter"), "third"
+        )
+        CandidateRegistry().require_fresh_event(self.owner, "third")
+
+    def test_consumed_fences_are_owner_epoch_and_business_registry_scoped(self):
+        self.choose("第一个", event_ref="confirmation")
+        for owner in (
+            TrustedOwner("other", self.owner.session, self.owner.origin),
+            TrustedOwner(self.owner.user, "other", self.owner.origin),
+            TrustedOwner(
+                self.owner.user, self.owner.session, "llm_tool:adapter:epoch2"
+            ),
+        ):
+            self.registry.require_fresh_event(owner, "confirmation")
+        CandidateRegistry().require_fresh_event(self.owner, "confirmation")
 
     def test_owner_ttl_absence_and_new_query_invalidation(self):
         for owner in (

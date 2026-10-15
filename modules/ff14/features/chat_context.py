@@ -61,6 +61,7 @@ class PendingTarget:
     batch_id: str | None = None
     candidates: tuple = ()
     consumed: bool = False
+    inflight: bool = False
     default_basis: str = "core_default"
     explicit_realm: bool = False
     confirmation_ref: str | None = None

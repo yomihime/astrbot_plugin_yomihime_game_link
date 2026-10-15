@@ -251,6 +251,7 @@ async def invoke_character_tool(handler, context, parameters):
 
     state = None
     key = None
+    owns_flight = False
     try:
         owner = chat_owner(context)
         key = (owner, context.capability_id)
@@ -267,7 +268,11 @@ async def invoke_character_tool(handler, context, parameters):
             message = await scope.message.read()
             values = validate_message_parameters(parameters, message.text)
             action = semantic_action(parameters)
+            previous = handler._chat_pending.states.get(key)
             pending = handler._chat_pending.get(key)
+            absent_state = (
+                "expired" if previous is not None and pending is None else "invalid"
+            )
 
             async def guard():
                 if handler._lifecycle is not lifecycle or monotonic() >= deadline:
@@ -291,11 +296,40 @@ async def invoke_character_tool(handler, context, parameters):
 
             async def clarification(current, *, missing=()):
                 await guard()
+                if current is not None and not current.batch_id:
+                    missing = (
+                        sorted({"server", "character"} - current.values.keys())
+                        or missing
+                    )
+                if (
+                    current is None
+                    or current.inflight
+                    or current.consumed
+                    or (not current.batch_id and not missing)
+                ):
+                    status = (
+                        absent_state
+                        if current is None
+                        else "inflight"
+                        if current.inflight
+                        else "consumed"
+                        if current.consumed
+                        else "invalid"
+                    )
+                    return tool_result(
+                        CapabilityResult(
+                            "ff14-logs-state",
+                            ResultStatus.SUCCESS,
+                            document=DisplayDocument(
+                                "FFLogs 查询状态", "公开角色查询", (TextBlock(status),)
+                            ),
+                        ),
+                        {"fflogs": {"pending": False, "state": status}},
+                    )
                 facts = {
                     "pending": True,
                     "missing": list(missing),
                     "target": dict(current.values),
-                    "generation": current.generation,
                     "state": "active",
                 }
                 if current.batch_id:
@@ -308,6 +342,7 @@ async def invoke_character_tool(handler, context, parameters):
                         )
                     )
                     facts["batch_id"] = current.batch_id
+                    facts["generation"] = current.generation
                 return tool_result(
                     CapabilityResult(
                         "ff14-logs-pending",
@@ -328,8 +363,20 @@ async def invoke_character_tool(handler, context, parameters):
                 or "generation" in parameters
             ):
                 if (
+                    action == "clarify"
+                    and "server_id" not in parameters
+                    and not values
+                    and pending is not None
+                    and parameters.get("batch_id") == pending.batch_id
+                    and parameters.get("generation") == pending.generation
+                    and (pending.consumed or pending.inflight)
+                ):
+                    state = pending
+                    return await clarification(state)
+                if (
                     pending is None
                     or pending.consumed
+                    or pending.inflight
                     or not pending.batch_id
                     or pending.event_ref == message.event_ref
                     or parameters.get("batch_id") != pending.batch_id
@@ -355,6 +402,18 @@ async def invoke_character_tool(handler, context, parameters):
                 actual = dict(state.values)
                 basis = state.default_basis
             else:
+                if action == "clarify":
+                    if values:
+                        raise ValueError("未明确目标时不得提交猜选参数。")
+                    if (
+                        pending is not None
+                        and not pending.consumed
+                        and pending.batch_id
+                        and pending.event_ref == message.event_ref
+                    ):
+                        raise ValueError("原消息不能确认或澄清自己的候选。")
+                    state = pending
+                    return await clarification(state)
                 if (
                     pending is not None
                     and message.event_ref == pending.confirmation_ref
@@ -363,15 +422,6 @@ async def invoke_character_tool(handler, context, parameters):
                 if pending is not None and pending.event_ref == message.event_ref:
                     if values != pending.values or pending.consumed:
                         raise ValueError("原消息不能更改待选目标或确认候选。")
-                    state = pending
-                    return await clarification(state)
-                if action == "clarify":
-                    if values:
-                        raise ValueError("未明确目标时不得提交猜选参数。")
-                    if pending is None:
-                        return tool_result(
-                            _error(ErrorCode.PARAMETER_ERROR, CLARIFICATION)
-                        )
                     state = pending
                     return await clarification(state)
                 actual = (
@@ -411,6 +461,8 @@ async def invoke_character_tool(handler, context, parameters):
                 missing = {"server", "character"} - actual.keys()
                 if missing:
                     return await clarification(state, missing=sorted(missing))
+                state.inflight = True
+                owns_flight = True
 
                 # Independent namespaces: Universalis supplies region only;
                 # FFLogs resolves its own server_id and slug in _execute.
@@ -488,21 +540,27 @@ async def invoke_character_tool(handler, context, parameters):
                 state.candidates = tuple(matches[:SERVER_LIMIT])
                 state.batch_id = secrets.token_urlsafe(24)
                 state.event_ref = message.event_ref
+                state.inflight = False
                 return {
                     "batch_id": state.batch_id,
                     "generation": state.generation,
                     "state": "active",
                 }
 
-            result = await handler._execute(
-                context,
-                actual,
-                scope=SimpleNamespace(http=GuardedHttp()),
-                tool=True,
-                guard=guard,
-                resolved_server=selected,
-                server_candidates=candidates,
-            )
+            state.inflight = True
+            owns_flight = True
+            try:
+                result = await handler._execute(
+                    context,
+                    actual,
+                    scope=SimpleNamespace(http=GuardedHttp()),
+                    tool=True,
+                    guard=guard,
+                    resolved_server=selected,
+                    server_candidates=candidates,
+                )
+            finally:
+                state.inflight = False
             await guard()
             result = tool_result(result)
             if result.error is None and not state.batch_id:
@@ -526,6 +584,9 @@ async def invoke_character_tool(handler, context, parameters):
         )
     except TimeoutError:
         return tool_result(_error(ErrorCode.UPSTREAM_ERROR, "FFLogs 角色查询超时。"))
+    finally:
+        if owns_flight and state is not None:
+            state.inflight = False
 
 
 def fetched_at():

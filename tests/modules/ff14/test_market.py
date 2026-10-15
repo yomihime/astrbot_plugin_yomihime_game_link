@@ -356,6 +356,116 @@ class MarketParserTests(unittest.TestCase):
 
 
 class MarketExecutionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_cache_keys_keep_source_version_item_scope_quality_and_parameters(
+        self,
+    ):
+        from unittest.mock import patch
+
+        from ygl_test_subject.modules.ff14.features import market_sources
+
+        cache = FakeCache()
+        http = FakeHttp(lambda request: {"public": 7})
+        factory = MarketSourceClient(
+            http, cache, clock=lambda: 0, wall_clock=lambda: NOW
+        )
+        cases = (
+            ("/api/v2/aggregated/China/44091", (), ("parser1", "region", "hq", "min")),
+            ("/api/v2/aggregated/China/44092", (), ("parser1", "region", "hq", "min")),
+            ("/api/v2/aggregated/Europe/44091", (), ("parser1", "region", "hq", "min")),
+            ("/api/v2/aggregated/China/44091", (), ("parser1", "region", "nq", "min")),
+            (
+                "/api/v2/aggregated/China/44091",
+                (("entries", "0"),),
+                ("parser1", "region", "hq", "min"),
+            ),
+            ("/api/v2/aggregated/China/44091", (), ("parser2", "region", "hq", "min")),
+        )
+
+        async def read(case):
+            path, parameters, context = case
+            return await factory.start().read(
+                path, parameters, lambda value: value, key_context=context
+            )
+
+        for case in cases:
+            await read(case)
+        self.assertEqual(len(http.requests), len(cases))
+        self.assertEqual(len(cache.values), len(cases))
+        for case in cases:
+            _, provenance = await read(case)
+            self.assertTrue(provenance.cached)
+        with patch.object(market_sources, "SOURCE_VERSION", "test-source-version2"):
+            await read(cases[0])
+        self.assertEqual(len(http.requests), len(cases) + 1)
+        self.assertEqual(len(cache.values), len(cases) + 1)
+
+    async def test_market_cache_300s_before_exact_after_expiry_and_failure(self):
+        wall = [NOW]
+        cache = FakeCache(wall=lambda: wall[0])
+        failure = [False]
+
+        def response(request):
+            return (
+                SourceHttpError("upstream_error", status_code=503)
+                if failure[0]
+                else currently()
+            )
+
+        factory = MarketSourceClient(
+            FakeHttp(response), cache, clock=lambda: 0, wall_clock=lambda: wall[0]
+        )
+
+        async def execute():
+            return await MarketClient(factory.start(), catalog()).execute(
+                query(intent="listings")
+            )
+
+        first = await execute()
+        original_uploaded = first.listings[0].uploaded_at
+        self.assertEqual(cache.puts[0][2], 300)
+        wall[0] = NOW + timedelta(seconds=299.999)
+        cached = await execute()
+        self.assertEqual(len(factory.http.requests), 1)
+        self.assertTrue(cached.outcomes[0].provenance.cached)
+        self.assertEqual(cached.outcomes[0].provenance.fetched_at, NOW)
+        self.assertEqual(cached.listings[0].uploaded_at, original_uploaded)
+        self.assertEqual(cached.observed_at, wall[0])
+        wall[0] = NOW + timedelta(seconds=300)
+        refreshed = await execute()
+        self.assertFalse(refreshed.outcomes[0].provenance.cached)
+        self.assertEqual(len(factory.http.requests), 2)
+        wall[0] = NOW + timedelta(seconds=600.001)
+        failure[0] = True
+        failed = await execute()
+        self.assertIs(failed.result.status, ResultStatus.ERROR)
+        self.assertFalse(failed.minimums)
+        self.assertFalse(failed.listings)
+        self.assertEqual(len(factory.http.requests), 3)
+
+    async def test_directory_cache_3600s_before_exact_after_boundary(self):
+        wall = [NOW]
+        cache = FakeCache(wall=lambda: wall[0])
+        http = FakeHttp(lambda request: WORLDS if request.path == WORLDS_PATH else DCS)
+        factory = MarketSourceClient(
+            http, cache, clock=lambda: 0, wall_clock=lambda: wall[0]
+        )
+        first = await factory.start().catalog()
+        self.assertEqual(cache.puts[0][2], 3600)
+        wall[0] = NOW + timedelta(seconds=3599.999)
+        cached = await factory.start().catalog()
+        self.assertTrue(all(p.cached for p in cached.provenance))
+        self.assertEqual(
+            cached.provenance[0].fetched_at, first.provenance[0].fetched_at
+        )
+        self.assertEqual(len(http.requests), 2)
+        wall[0] = NOW + timedelta(seconds=3600)
+        exact = await factory.start().catalog()
+        self.assertFalse(any(p.cached for p in exact.provenance))
+        self.assertEqual(len(http.requests), 4)
+        wall[0] = NOW + timedelta(seconds=7200.001)
+        await factory.start().catalog()
+        self.assertEqual(len(http.requests), 6)
+
     async def test_direct_prices_keep_all_source_digits_without_six_digit_rounding(
         self,
     ):
@@ -724,7 +834,7 @@ class MarketExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             [request.path for request in http.requests], [WORLDS_PATH, DCS_PATH]
         )
-        self.assertEqual(cache.puts[0][2], 300)
+        self.assertEqual(cache.puts[0][2], 3600)
         bad = FakeHttp(
             lambda request: WORLDS if request.path == WORLDS_PATH else DCS[:-1]
         )

@@ -48,6 +48,65 @@ def invocation(event="one", **changes):
 
 
 class FFLogsChatTests(unittest.IsolatedAsyncioTestCase):
+    async def test_missing_field_facts_have_no_candidate_keys(self):
+        self.setup_handler()
+        partial = await self.call("查角色", {"character": "Synthetic Hero"})
+        facts = partial.model_facts.facts["fflogs"]
+        self.assertNotIn("generation", facts)
+        self.assertNotIn("batch_id", facts)
+        self.assertNotIn("server_id", facts)
+        result = await self.call(
+            "Cerberus",
+            {"server": "Cerberus", "realm": "global", "action": "continue"},
+            event="supplement",
+        )
+        self.assertIs(result.status, ResultStatus.PARTIAL_SUCCESS)
+
+    async def test_clarify_after_success_is_consumed_without_active_target(self):
+        self.setup_handler()
+        self.assertIs((await self.call()).status, ResultStatus.PARTIAL_SUCCESS)
+        before = len(self.http.requests)
+        for event in ("clarify", "clarify-repeat"):
+            result = await self.call("情况?", {"action": "clarify"}, event=event)
+            facts = result.model_facts.facts["fflogs"]
+            self.assertFalse(facts["pending"])
+            self.assertEqual(facts["state"], "consumed")
+            self.assertNotIn("target", facts)
+            self.assertNotIn("generation", facts)
+            self.assertEqual(len(self.http.requests), before)
+
+    async def test_clarify_missing_expiry_replacement_and_foreign_owner(self):
+        self.setup_handler()
+        partial = await self.call("角色", {"character": "Synthetic Hero"})
+        clarified = await self.call("缺什么", {"action": "clarify"}, event="question")
+        self.assertEqual(clarified.model_facts.facts["fflogs"]["missing"], ("server",))
+        self.assertNotIn("generation", clarified.model_facts.facts["fflogs"])
+        self.assertIs(partial.status, ResultStatus.NEEDS_SELECTION)
+        from ygl_test_subject.modules.ff14.features.chat_context import chat_owner
+
+        key = (chat_owner(invocation()), "ff14.logs.character")
+        self.handler._chat_pending.get(key).expires = -1
+        expired = await self.call("缺什么", {"action": "clarify"}, event="expired")
+        self.assertEqual(
+            expired.model_facts.facts["fflogs"], {"pending": False, "state": "expired"}
+        )
+        await self.call("新查询", {"server": "Cerberus"}, event="new")
+        current = await self.call("缺什么", {"action": "clarify"}, event="current")
+        self.assertEqual(current.model_facts.facts["fflogs"]["missing"], ("character",))
+        foreign = await self.call(
+            "缺什么", {"action": "clarify"}, event="foreign", actor_id="other"
+        )
+        self.assertEqual(
+            foreign.model_facts.facts["fflogs"], {"pending": False, "state": "invalid"}
+        )
+        self.handler.close()
+        closed = await self.call("缺什么", {"action": "clarify"}, event="closed")
+        self.assertEqual(
+            closed.model_facts.facts["fflogs"], {"pending": False, "state": "invalid"}
+        )
+        self.assertEqual(self.http.requests, [])
+        self.assertEqual(self.public_requests, [])
+
     def setup_handler(self, responses=None, *, configured=True, config=None):
         self.http = fixture._FakeHttp(
             fixture._character_responses() if responses is None else responses
@@ -158,7 +217,11 @@ class FFLogsChatTests(unittest.IsolatedAsyncioTestCase):
         self.setup_handler()
         for text in ("不要查", "两个角色都行", "那个是谁?", "没有相关前文"):
             result = await self.call(text, {"action": "clarify"}, event=text)
-            self.assertIs(result.status, ResultStatus.ERROR)
+            self.assertIs(result.status, ResultStatus.SUCCESS)
+            self.assertEqual(
+                result.model_facts.facts["fflogs"],
+                {"pending": False, "state": "invalid"},
+            )
         self.assertEqual(self.http.requests, [])
         self.assertEqual(self.public_requests, [])
         self.assertIs(
@@ -283,6 +346,17 @@ class FFLogsChatTests(unittest.IsolatedAsyncioTestCase):
             json.loads(self.http.requests[-1].body)["variables"]["serverSlug"],
             "cerberus-2",
         )
+        self.assertEqual(len(self.http.requests), before + 1)
+        for event, parameters in (
+            ("status-unkeyed", {"action": "clarify"}),
+            ("status-keyed", {**choice, "action": "clarify"}),
+            ("status-repeated", {**choice, "action": "clarify"}),
+        ):
+            status = await self.call("状态?", parameters, event=event)
+            self.assertEqual(
+                status.model_facts.facts["fflogs"],
+                {"pending": False, "state": "consumed"},
+            )
         self.assertEqual(len(self.http.requests), before + 1)
         self.assertIs(
             (

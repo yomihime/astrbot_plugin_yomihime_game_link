@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import gc
+import json
 import tempfile
 import unittest
 from datetime import timedelta
@@ -142,6 +143,152 @@ class _OfflineHost:
 class ControlledMessageTests(unittest.IsolatedAsyncioTestCase):
     wrapper = legacy.LLMToolTests.wrapper
     call = legacy.LLMToolTests.call
+
+    async def test_consumed_market_success_replay_replacement_ttl_and_cross_item_tool(
+        self,
+    ):
+        """Published tool -> receipt -> real Core/FF14, fixture transport only."""
+        await self.start()
+        now = [0.0]
+        self.receipts._clock = lambda: now[0]
+        handler = (
+            self.runtime.registry.snapshot()
+            .module("ff14/ff14")
+            .handlers.capabilities["ff14.market.query"]
+        )
+        handler.registry._clock = lambda: now[0]
+        source = self.wrapper("查Synthetic")
+        pending = await self.call(
+            parameters={
+                "query": "Synthetic",
+                "region": "cn",
+                "quality": "hq",
+                "intent": "min",
+            },
+            wrapper=source,
+        )
+        choice = {key: pending["selection"][key] for key in ("batch_id", "generation")}
+        confirmation = self.wrapper("第一个")
+        result = await self.call(
+            "ff14_market_select", {**choice, "item_id": 44091}, confirmation
+        )
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(
+            (result["market"]["quality"], result["market"]["intent"]), ("hq", "min")
+        )
+        before = len(self.transport.requests)
+        for wrapper in (source, confirmation):
+            for action in ("query", "correction"):
+                denied = await self.call(
+                    parameters={
+                        "query": "44092",
+                        "region": "global",
+                        "quality": "nq",
+                        "intent": "listings",
+                        "action": action,
+                    },
+                    wrapper=wrapper,
+                )
+                self.assertEqual(denied["status"], "error")
+                self.assertEqual(len(self.transport.requests), before)
+        # A different capability can legitimately use the same user event.
+        other = await self.call(
+            "ff14_item_lookup", {"query": "Synthetic"}, confirmation
+        )
+        self.assertEqual(other["status"], "needs_selection")
+        fresh = await self.call(
+            parameters={"query": "Synthetic", "action": "correction"},
+            wrapper=self.wrapper("新查询"),
+        )
+        self.assertEqual(fresh["status"], "needs_selection")
+        before = len(self.transport.requests)
+        replay = await self.call(parameters={"query": "44091"}, wrapper=confirmation)
+        self.assertEqual(replay["status"], "error")
+        self.assertEqual(len(self.transport.requests), before)
+        now[0] = 300
+        handler.registry._prune()
+        self.assertFalse(handler.registry._consumed)
+        with self.assertRaises(ygl.OperationTimeout):
+            await self.call(parameters={"query": "44091"}, wrapper=confirmation)
+        self.assertTrue(self.receipts._records[id(confirmation.context.event)].closed)
+        self.assertEqual(len(self.transport.requests), before)
+        self.assertFalse(self.b03.issuer._issued)
+
+    async def test_logs_missing_followup_server_candidate_and_consumed_clarify_through_tools(
+        self,
+    ):
+        """Real message/Core tool chain, synthetic credential-metadata and HTTP fixtures.
+
+        This is not OAuth/decrypt, real Host readiness or actual model evidence.
+        No live config or secret is read or written.
+        """
+        from tests.modules.ff14 import test_fflogs as logs_fixture
+
+        await self.start()
+        handler = (
+            self.runtime.registry.snapshot()
+            .module("ff14/ff14")
+            .handlers.capabilities["ff14.logs.character"]
+        )
+        handler._services = SimpleNamespace(
+            scopes=handler._services.scopes, config=logs_fixture._services(None).config
+        )
+        rows = [
+            logs_fixture._server_row(901),
+            logs_fixture._server_row(902, slug="cerberus-2", subregion="Chaos"),
+        ]
+        responses = list(logs_fixture._character_responses(first_rows=rows)[:-1])
+
+        async def response(request):
+            if request.source_id.startswith("fflogs_public"):
+                self.assertTrue(responses)
+                return responses.pop(0)
+            return None
+
+        self.transport.callback = response
+        initial = await self.call(
+            "ff14_logs_character",
+            {"character": "Synthetic Hero"},
+            self.wrapper("查角色"),
+        )
+        self.assertEqual(initial["fflogs"]["missing"], ["server"])
+        self.assertNotIn("generation", initial["fflogs"])
+        candidate = await self.call(
+            "ff14_logs_character",
+            {"server": "Cerberus", "realm": "global", "action": "continue"},
+            self.wrapper("补服务器"),
+        )
+        self.assertEqual(candidate["status"], "needs_selection")
+        facts = candidate["fflogs"]
+        choice = {key: facts[key] for key in ("batch_id", "generation")}
+        before = len(self.transport.requests)
+        wrong = await self.call(
+            "ff14_logs_character",
+            {**choice, "generation": "wrong", "server_id": 902, "action": "continue"},
+            self.wrapper("错批次"),
+        )
+        self.assertEqual(wrong["status"], "error")
+        self.assertEqual(len(self.transport.requests), before)
+        responses.append(logs_fixture._character())
+        chosen = await self.call(
+            "ff14_logs_character",
+            {**choice, "server_id": 902, "action": "continue"},
+            self.wrapper("第二个"),
+        )
+        self.assertEqual(chosen["status"], "partial_success")
+        self.assertEqual(
+            json.loads(self.transport.requests[-1].body)["variables"]["serverSlug"],
+            "cerberus-2",
+        )
+        before = len(self.transport.requests)
+        for parameters in ({"action": "clarify"}, {**choice, "action": "clarify"}):
+            status = await self.call(
+                "ff14_logs_character", parameters, self.wrapper("状态")
+            )
+            self.assertEqual(status["fflogs"], {"pending": False, "state": "consumed"})
+        self.assertEqual(len(self.transport.requests), before)
+        self.assertFalse(responses)
+        self.assertFalse(self.b03.issuer._issued)
 
     async def asyncSetUp(self):
         self.temporary = tempfile.TemporaryDirectory(

@@ -433,6 +433,10 @@ class MarketScopeTests(unittest.IsolatedAsyncioTestCase):
     async def test_scope_then_item_flight_fences_queries_and_late_results(self):
         for boundary in ("new_event", "close"):
             with self.subTest(boundary=boundary):
+                if boundary == "close":
+                    # Independent trial, with genuinely fresh module state.
+                    # Reusing the first trial's consumed refs must stay denied.
+                    self.handler.close()
                 self.fetches.clear()
                 choice, state = await self.double_ambiguity()
                 self.entered, self.blocked = asyncio.Event(), asyncio.Event()
@@ -757,6 +761,19 @@ class MarketScopeTests(unittest.IsolatedAsyncioTestCase):
         finally:
             self.blocked.set()
         self.assertIs((await flight).status, ResultStatus.SUCCESS)
+
+        del self.blocked
+        fresh = await self.call(
+            "new-query", {"query": "44092", "region": "global", "action": "correction"}
+        )
+        self.assertIs(fresh.status, ResultStatus.SUCCESS)
+        before = (len(self.fetches), self.catalog_calls, self.config_calls)
+        for event in ("confirmation", "issuing"):
+            replay = await self.call(event, {"query": "44092", "action": "correction"})
+            self.assertIs(replay.status, ResultStatus.ERROR)
+        self.assertEqual(
+            (len(self.fetches), self.catalog_calls, self.config_calls), before
+        )
 
     async def test_real_new_event_supersedes_late_scope_flight_and_close_clears(self):
         choice = await self.pending()
