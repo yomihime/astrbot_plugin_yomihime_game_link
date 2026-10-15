@@ -140,6 +140,22 @@ RUNTIME_DIRS = (
     "presentation",
 )
 ALLOWED_SUFFIXES = {".py", ".sql"}
+# Exact reviewed binary/legal inputs. Never broaden the runtime suffix set or
+# recursively admit presentation/assets (including Python files placed there).
+FONT_ASSETS = {
+    "presentation/assets/fonts/NotoSansCJKsc-Regular.otf": (
+        16_437_364,
+        "2c76254f6fc379fddfce0a7e84fb5385bb135d3e399294f6eeb6680d0365b74b",
+    ),
+    "presentation/assets/fonts/OFL.txt": (
+        4301,
+        "6a73f9541c2de74158c0e7cf6b0a58ef774f5a780bf191f2d7ec9cc53efe2bf2",
+    ),
+    "presentation/assets/fonts/NOTICE.md": (
+        1052,
+        "4005fbea2177c102014756ea4f838a6cf71290c4094524200e0a517ffc258e37",
+    ),
+}
 EXCLUDED_RUNTIME_DIRS = {
     "__pycache__",
     ".cache",
@@ -231,7 +247,10 @@ def _file_token(metadata: os.stat_result) -> tuple[int, int, int, int, int]:
 
 
 def _read_snapshot(
-    path: Path, allowed_root: Path | None = None, label: str = "Package input"
+    path: Path,
+    allowed_root: Path | None = None,
+    label: str = "Package input",
+    max_bytes: int | None = None,
 ) -> bytes:
     """Read one opened file object after checking its path and handle identity."""
     candidate = Path(path)
@@ -258,7 +277,7 @@ def _read_snapshot(
             raise ValueError(f"{label} changed while it was being opened: {candidate}")
 
         with os.fdopen(descriptor, "rb", closefd=False) as stream:
-            content = stream.read()
+            content = stream.read() if max_bytes is None else stream.read(max_bytes + 1)
 
         opened_after = os.fstat(descriptor)
         current_path = (
@@ -309,6 +328,8 @@ def _runtime_files(directory: Path, repository_root: Path) -> list[Path]:
             resolved = validate_source_path(entry, repository_root, "Runtime source")
             metadata = resolved.stat()
             if stat.S_ISDIR(metadata.st_mode):
+                if entry == repository_root / "presentation/assets":
+                    continue
                 if entry.name not in EXCLUDED_RUNTIME_DIRS:
                     pending.append(resolved)
             elif stat.S_ISREG(metadata.st_mode):
@@ -319,6 +340,17 @@ def _runtime_files(directory: Path, repository_root: Path) -> list[Path]:
                     f"Runtime source is not a regular file or directory: {entry}"
                 )
     return found
+
+
+def _font_asset_snapshot(path: Path, repository_root: Path) -> bytes:
+    name = path.relative_to(repository_root).as_posix()
+    size, digest = FONT_ASSETS[name]
+    content = _read_snapshot(
+        path, repository_root, "Bundled font asset", max_bytes=size
+    )
+    if len(content) != size or _sha256(content) != digest:
+        raise ValueError("Bundled font asset differs from its reviewed size/hash")
+    return content
 
 
 def _ff14_bundle_files(repository_root: Path) -> list[Path]:
@@ -509,6 +541,12 @@ def included_files(root: Path = ROOT) -> list[Path]:
             repository_root / directory, repository_root, "Runtime directory"
         )
         files.extend(_runtime_files(runtime_root, repository_root))
+    for name in FONT_ASSETS:
+        path = validate_source_path(
+            repository_root / name, repository_root, "Bundled font asset"
+        )
+        _font_asset_snapshot(path, repository_root)
+        files.append(path)
     files.extend(_ff14_bundle_files(repository_root))
     has_pages = "pages/shell/module-loader.js" in projected_page_assets(repository_root)
     for name in SHELL_FILES:
@@ -551,7 +589,11 @@ def build(
     ) as archive:
         for path in files:
             name = path.relative_to(repository_root).as_posix()
-            content = _read_snapshot(path, repository_root, "Runtime source")
+            content = (
+                _font_asset_snapshot(path, repository_root)
+                if name in FONT_ASSETS
+                else _read_snapshot(path, repository_root, "Runtime source")
+            )
             if name in page_assets:
                 content = page_assets[name]
             _write_entry(archive, name, content)

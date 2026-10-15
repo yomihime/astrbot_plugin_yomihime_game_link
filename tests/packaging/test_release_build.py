@@ -20,6 +20,7 @@ from scripts.build_dashboard_zip import (
     FF14_BUNDLE_REQUIRED_FILES,
     FF14_BUNDLE_ROOT,
     FF14_COMPAT_FILES,
+    FONT_ASSETS,
     MAINTENANCE_HELPER_FILES,
     OPERATOR_SCRIPT_FILES,
     PAGE_FILES,
@@ -39,6 +40,10 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def _write_operator_script_fixtures(root: Path) -> None:
+    for filename in FONT_ASSETS:
+        path = root / filename
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes((ROOT / filename).read_bytes())
     for filename in (*OPERATOR_SCRIPT_FILES, *PAGE_FILES, *MAINTENANCE_HELPER_FILES):
         path = root / filename
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -112,6 +117,34 @@ def _fixture_manifest():
 
 
 class ReleaseBuildTests(unittest.TestCase):
+    def test_font_assets_are_exact_and_required_with_link_protection(self) -> None:
+        from scripts.build_dashboard_zip import _font_asset_snapshot
+
+        with tempfile.TemporaryDirectory(prefix="yomihime-font-assets-") as work:
+            root = Path(work).resolve()
+            _write_operator_script_fixtures(root)
+            for name, (size, digest) in FONT_ASSETS.items():
+                with self.subTest(asset=name):
+                    path = root / name
+                    original = path.read_bytes()
+                    self.assertEqual(len(original), size)
+                    self.assertEqual(hashlib.sha256(original).hexdigest(), digest)
+                    self.assertEqual(_font_asset_snapshot(path, root), original)
+                    path.write_bytes(original[:-1] + bytes([original[-1] ^ 1]))
+                    with self.assertRaisesRegex(ValueError, "reviewed size/hash"):
+                        _font_asset_snapshot(path, root)
+                    path.unlink()
+                    with self.assertRaises(FileNotFoundError):
+                        _font_asset_snapshot(path, root)
+                    sentinel = root / "sentinel"
+                    sentinel.write_bytes(original)
+                    os.link(sentinel, path)
+                    with self.assertRaisesRegex(ValueError, "must not be a hard link"):
+                        _font_asset_snapshot(path, root)
+                    path.unlink()
+                    sentinel.unlink()
+                    path.write_bytes(original)
+
     def test_tag_must_be_valid_and_match_metadata_version(self) -> None:
         _, metadata_version = plugin_metadata(ROOT)
         self.assertEqual(
@@ -203,6 +236,26 @@ class ReleaseBuildTests(unittest.TestCase):
 
             self.assertIn("core/module.py", names)
             self.assertFalse(any("private.py" in name for name in names))
+
+            for relative in (
+                "unreviewed.otf",
+                "unreviewed.txt",
+                "unreviewed.md",
+                "helper.py",
+            ):
+                (root / "presentation/assets/fonts" / relative).write_bytes(b"private")
+            names = {path.relative_to(root).as_posix() for path in included_files(root)}
+            self.assertEqual(
+                {name for name in names if name.startswith("presentation/assets/")},
+                set(FONT_ASSETS),
+            )
+            for name in FONT_ASSETS:
+                path = root / name
+                original = path.read_bytes()
+                path.unlink()
+                with self.assertRaises(FileNotFoundError):
+                    included_files(root)
+                path.write_bytes(original)
 
     def test_pages_are_exact_required_assets_and_reject_hard_links(self) -> None:
         with tempfile.TemporaryDirectory(prefix="yomihime-release-pages-") as work:
@@ -393,6 +446,8 @@ class ReleaseBuildTests(unittest.TestCase):
                 self.assertIsNone(archive.testzip())
                 names = set(archive.namelist())
                 self.assertIn("requirements.txt", names)
+                for name in FONT_ASSETS:
+                    self.assertEqual(archive.read(name), (ROOT / name).read_bytes())
                 self.assertEqual(
                     archive.read("requirements.txt"),
                     (ROOT / "requirements.txt").read_bytes(),

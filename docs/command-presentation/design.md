@@ -94,13 +94,23 @@ FF14 原型图标参考经典陨石意象进行绘制；它不是官方矢量原
 
 ### P3 首个纯绘图切片的边界
 
-`presentation/card_bitmap.py` 提供不接 Host 的通用 PNG 绘图基础。调用方传入不可变 `CardSpec`、`Section`、`Row`、`BitmapBounds` 与可信 `FontProvider`，`render_card` 返回 PNG 字节、宽高与媒体类型；完整换行，超尺寸、像素或字节预算抛出限定原因码的 `BitmapUnavailable`，不裁字或删行。Pillow 懒加载为可选依赖，字体由可信调用方显式注入，不捆绑或下载字体。首片不处理 SVG、不迁入原型图标，不实施物品卡或 Logs 业务布局。
+`presentation/card_bitmap.py` 提供不接 Host 的通用 PNG 绘图基础。调用方传入不可变 `CardSpec`、`Section`、`Row`、`BitmapBounds` 与可信 `FontProvider`，`render_card` 返回 PNG 字节、宽高与媒体类型；完整换行，超尺寸、像素或字节预算抛出限定原因码的 `BitmapUnavailable`，不裁字或删行。Pillow 懒加载为可选依赖，字体由可信调用方显式注入，渲染器不自行发现或下载字体。首片不处理 SVG、不迁入原型图标，不实施物品卡或 Logs 业务布局。
 
 绘图测试固定 [Pillow 12.3.0](https://pypi.org/project/pillow/12.3.0/)，其声明支持 Python 3.10 及以上；这不提高 SDK 最低版本，也不把测试库加入插件根运行依赖。`requirements-test.txt` 包含独立的 `requirements-presentation-test.txt`，缺库不能 skip 后记绿。版本选择依据[官方稳定版发布说明](https://pillow.readthedocs.io/en/stable/releasenotes/)，实际验证环境和工件另行记录。
 
 纯绘图硬预算为宽 2048、高 8192、总像素 8,000,000、PNG 1 MiB，以及独立的输入、行列和测量次数上限；调用方只能降低。它们不是平台发送上限，也不扩大 SDK facts、32 blocks 或现有 Host 文本/资源预算。先测量完整布局，再分配画布；固定输入、字体和预设可重复输出。
 
-`FontProvider.supports` 是可信调用方针对确切字体和 face 的覆盖声明，渲染器逐字符检查声明，但不能证明声明为真。当前没有生产字体 provider；有限 ASCII 测试和本机中文样张不代表通用 cmap 验证、任意字形覆盖或字体再分发许可。依赖与字体缺失时只返回明确的不可用原因，不自动扫描路径、下载字体或进入发送链。
+`FontProvider.supports` 是可信调用方针对确切字体和 face 的覆盖声明，渲染器逐字符检查声明，但不能证明任意 provider 的声明为真。依赖与字体缺失时只返回明确的不可用原因，不自动扫描路径、下载字体或进入发送链。
+
+### 固定字体与许可
+
+`presentation/bundled_font.py` 提供显式构造的 `BundledFontProvider`。采用未修改的 Noto Sans CJK SC Regular 2.004、face 0，固定[上游版本](https://github.com/notofonts/noto-cjk/tree/523d033d6cb47f4a80c58a35753646f5c3608a78)；原版 OTF 为 16,437,364 bytes，SHA256 `2c76254f6fc379fddfce0a7e84fb5385bb135d3e399294f6eeb6680d0365b74b`。原 [OFL 1.1 许可](../../presentation/assets/fonts/OFL.txt)与[来源说明](../../presentation/assets/fonts/NOTICE.md)随包保留，不改字体或保留名称，不推定其他素材的授权。
+
+导入不读取资产或加载可选库；显式构造时有界读取精确 package 资产、核对长度与摘要，再从同一份不可变字节加载指定 face，避免校验后重开路径。没有路径参数、系统字体扫描、网络下载或全局缓存。每次渲染持有四个字号的字体对象，Pillow 可能保留副本；该边界不等于精确 heap/RSS 预算或内存擦除。
+
+`_font_coverage.py` 由该 face 的 `getBestCmap` 排除 `.notdef`/glyph 0 后生成：44,810 码点、2,032 个连续范围。测试使用独立固定的 fontTools 4.67.0 重建并逐项核对；fontTools 只作测试依赖，不进入插件运行依赖。这是字体 cmap 清单，不是游戏名称映射，也不保证任意 Unicode、字体塑形或每个字形的目视正确。有限样图另验中文标点、数字、长名与罕见字。
+
+打包只允许字体、OFL、NOTICE 三个精确资产，复用既有路径、链接、打开句柄和快照校验，再核资产长度与摘要；不放宽通用文件后缀。缺失或损坏即构建失败。加入原版字体后候选包体约 15 MB，不能沿用早期不含字体的候选大小；具体字节与摘要见当前检查点。字体 provider 尚未由生产命令或 Host 图片出口调用。
 
 ## 四 Logs 一张完整长卡
 

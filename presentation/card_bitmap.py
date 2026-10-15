@@ -3,7 +3,8 @@
 FontProvider is a trusted injection point, not a font parser. Its coverage claim
 must have been reviewed against the exact font/face returned by ``load``. This
 module checks every visible codepoint against that claim; it cannot establish
-the truth of an arbitrary provider's claim. No production provider is supplied.
+the truth of an arbitrary provider's claim. ``bundled_font`` supplies a separate
+explicit provider for one pinned, reviewed face; no provider is selected here.
 """
 
 from dataclasses import dataclass, fields
