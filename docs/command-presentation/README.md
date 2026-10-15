@@ -27,7 +27,20 @@
 - 作者初版冻结相关集：Python 3.13 为 81 passed / 0 failed / 0 errors / 1 既有符号链接权限 skipped，3.12 为 70 passed / 0 failed / 0 errors / 0 skipped。独审相关集另为 80 passed / 0 failed / 0 errors / 1 相同权限 skipped；该独验未运行重建 SDK 的单项打包测试，作者初版已运行该项。首轮错误测试入口、辅助脚本序列化失败与补验分开保留，不等同全过程全绿。
 - 第 1 轮机械返修仅删除字体 loader 的重复异常分支；修后两版 Python 字体最小集各 6 项通过，独审另独跑 6 项通过，相关 Ruff、格式通过，最终源码及实际候选独审 0 Blocker / 0 Important / 0 Polish。审查者曾误读截取内容并推断源码变化，后经实际 SHA、大小及修改时间核对撤回；没有并发改写证据，原记录及更正均保留。
 - 最新字体候选 **269 成员、14,988,428 bytes，SHA256 `04245f02dccbddfd75a4f1396698af3f66c72cae6ca5428599e11ed9ba882713`**。246 项源码输入、10 项页面投影、17 项固定 SDK payload 中有 4 项同路径覆盖，269 是精确并集。作者和独审均打开实际 ZIP 逐项核对全部字节、CRC、字体/许可/来源、排除规则，有限敏感模式扫描 0 发现。原字体约 16.4 MB，不能沿用早期小包体。三套配色有限中文图已目视；修后重新在内存渲染，严格 PNG 验证及与原图字节比较通过，没有冒充重新保存或目视新图。
-- 最终集成已冻结源码，Python 3.12 全仓 unittest 正在执行；最终汇总尚待，不用之前相关集或此时进度代替全量结论。前端无改动，真实 UI、Host 和 IM 仍未验。
+- 最终集成全仓检查已自然结束，结果未通过；以下定点补验单独记录，不改写该次全量结果。前端无改动，真实 UI、Host 和 IM 仍未验。
+
+## P5 本轮集成结果
+
+Python 3.12 全仓只运行一次：`Ran 1766 tests in 2025.707s`，`FAILED (failures=12, errors=1, skipped=14)`，自然退出 1。12 个 failure 条目属于 6 个测试方法，其中确认上下文的同一方法产生 7 个子测试或末尾断言失败；不能按条目数从 1766 中推算通过数。14 个跳过来自平台能力或符号链接权限限制，相应分支未获验证。
+
+- 唯一 error 是新增必需字体资产与旧 SDK 成功夹具不兼容，且其快照 mock 未转发新增的有界读取参数。独立审查列为 1 Important。字体片最后一轮 R2/2 只修该测试文件：精确复制三个既有资产，转发 `max_bytes`，保留原快照变更行为、两条安全断言及其他负例；生产校验未改。原字节单项先复现 1 error，修后单项通过，Python 3.12 / 3.13 整份 bootstrap 各 14 项通过。3.13 打包及 SDK pins 为 15 passed / 0 failed / 0 errors / 1 既有权限 skipped。独立 R2 复审关闭该 Important，0 Blocker / 0 Important / 0 Polish；独跑单项、两版 bootstrap 各 14 项及另外 3 项资产打包检查均通过，不代替全仓门槛。
+- 严格版本控制原失败是缺少 `YGL_TEST_SDK_WHEEL`，尚未进入严格控制断言；显式提供原固定 a6 wheel 后，该单项另行通过。与另外两个调用者同批为 3 passed / 0 failed / 2 errors / 0 skipped；两项页面 error 来自私有 runner 的 Host 源码路径，修正 runner 后仅补验该两项通过，不将两批拼为一次全绿。
+- 三处 bundle 失败均为旧能力集合断言遗漏已存在的 `ff14.item.select`；基线和当前相关测试、模块及清单字节一致。有界对照在当前字节和固定基线 `8251a525` 各独跑一个代表方法，均以同一断言失败。确认上下文的同一个方法在两边均产生 7 个失败条目，确认权限合同仍未通过，保留为需另行修复的既有问题。两边的合成 HTTP 超时方法本次各运行一次均通过，只能说明定点未复现原 full 超时，未证明根因或修复。
+- 全仓 `ruff check` 通过；`ruff format --check` 失败，报告 `tests/fixtures/version_domain_module.py`、`tests/sdk/test_message_sample.py` 两项需格式化、335 项已格式化。两文件均与基线相同，保留为已有格式门槛债务，未自动修改。
+
+R2 仅改不入包的测试，字体片生产输入和内部资源输入摘要保持不变。原 269 成员候选重新逐项核对源字节、投影、SDK、CRC 和排除规则后复用，SHA256 仍为 `04245f02dccbddfd75a4f1396698af3f66c72cae6ca5428599e11ed9ba882713`；未重建或安装。历史源码、工件审查与这次未通过的全量门槛分别保留，候选尚未获得整体合并、发布或部署验收。
+
+上述对照共六次单方法运行，各自自然结束，无重试或全仓重跑；没有删除断言、补 skip、变更权限或调用真实模型、Host 或平台接口。基线归因不等于相关功能验收通过。
 
 基线打包脚本的静态检查表明，[SDK 构建脚本](https://github.com/yomihime/astrbot_plugin_yomihime_game_link/blob/8251a52580b8839964f8f232d45706a98c1fd02d/scripts/build_release.py)只收录既有 SDK 示例，[插件打包清单](https://github.com/yomihime/astrbot_plugin_yomihime_game_link/blob/8251a52580b8839964f8f232d45706a98c1fd02d/scripts/build_dashboard_zip.py)不包含本目录和 `examples/command_cards/`。这不是候选包构建验证，也不是工件字节一致性声明。
 
