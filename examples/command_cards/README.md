@@ -1,8 +1,60 @@
-# 游戏连结：离线命令卡片视觉原型
+# 游戏连结：离线命令卡片原型与样式参考
 
-这份可重复运行的 Python 样例用于评审版式与数据展示语义。默认采用已选定的「暖桃纸」配色，另保留两个明确命名的配色预设。**不是插件功能实现**：没有更改 Host、API、模型、SDK、真实模块加载器或消息发送链路，也不查询实时市场或 FFLogs。
+这组可重复运行的 Python 样例用于评审版式与数据展示语义。初版默认采用「暖桃纸」配色并保留两个预设；这些脚本默认值不代表当前最终主题已确定。**不是插件功能实现**：没有更改 Host、API、模型、SDK、真实模块加载器或消息发送链路，也不查询实时市场或 FFLogs。
 
-## 先看样张
+## 最新：模块富文本与 Logs 样式参考
+
+本轮新增三个独立文件；规范以 [模块开发者展示样式 Spec](../../docs/command-presentation/module-display-style-spec.md) 为准：
+
+- `rich_text_reference.py`：受限的 `TextSpan` / `TextRole` / `Grade`、行内富文本和右对齐数值绘制，不包含 FF14 评分映射
+- `ff14_logs_reference.py`：FF14 百分位分级、rDPS / 击杀数字符格式及一张 Logs 长卡；角色 `ChatGPT@OpenAI` 与成绩全部为合成样例，不代表真实 FFLogs 结果或发布目录
+- `test_style_reference.py`：该参考实现的定向测试，不能代替生产查询、Host 或全仓验收
+
+新样张：[冷白长卡](samples/logs_style_cool_white.png)、[深靛长卡](samples/logs_style_deep_indigo.png)，均为 1040 × 2944；逐格颜色、实际背景、字效和边界记录见 [核验清单](samples/style_reference_checks.json)。7 行绝境战＋13 行零式是覆盖完整多层布局的合成 fixture，不是已核实的地区目录；当前两图分别为 666,994 / 710,164 bytes，与最终独立审阅输出逐字节一致。主图 M12S 本体使用 99.7；99.96 舍入仍为粉色的边界留在 Spec 与测试中。
+
+字面始终使用标准 FFLogs 等级色，金色为 `#e5cc80`。已选 B「居中柔影」只在字面与实际背景对比度 `< 1.5` 时触发：原始蒙版、零偏移、无扩张或硬描边；保留反色背景中点配色和约 1 px / 35 px 字号、235/255 透明度的原型参数，最后绘制清晰字面。A「贴字柔光」是独立的真实金色满分装饰。对比度门槛是选定效果的触发规则，不是可访问性合规认证；不能把对比图强制灰字效果带入生产规则。
+
+新参考的富文本 helper 不处理 SVG；完整 Logs 卡沿用下文已披露的可信本地 FF14 图标，需要已安装的 CairoSVG 或 Inkscape。默认明确使用仓库现有的 Noto Sans CJK SC Regular 字体，沿用其 [许可](../../presentation/assets/fonts/OFL.txt)与[来源](../../presentation/assets/fonts/NOTICE.md)，不扫描系统或下载字体；粗体请求默认复用 Regular，除非显式传入已有的粗体文件。仍需安装本目录已有 Pillow 依赖，并按下文准备一种图标转换器：
+
+```sh
+cd examples/command_cards
+python -m pip install -r requirements.txt
+python ff14_logs_reference.py --theme both --output-dir ./style-preview
+python -m unittest -v test_style_reference.py
+```
+
+`--theme` 可选 `cool_white`、`deep_indigo`、`both`；CLI 默认输出两种主题，只用于比较，不确认深色或浅色为生产默认。可传 `--font PATH`、`--bold-font PATH`、`--font-index N` 选择已有本地字体。输出目录不能复用已存在的同名 PNG；换新目录重新运行，不覆盖历史样图。
+
+局部 helper 用法如下，在本目录运行；这些是示例内部接口，不是 SDK 公共契约：
+
+```python
+from decimal import Decimal
+
+from ff14_logs_reference import count, percentile, rdps
+from rich_text_reference import Grade, TextSpan
+
+shown = percentile(Decimal("99.96"))
+assert shown.grade is Grade.PINK  # 一位小数会显示 100.0，原始等级不变
+spans = (TextSpan("击杀数 "), count(0), TextSpan("  rDPS "), rdps("41234.5"))
+```
+
+`percentile` 只负责已验证 FFLogs 百分位的模块展示映射，不是任意业务评分函数。真实接入前，模块必须验证来源、范围与满分含义；示例的原始 100 是预设满足该条件的合成 fixture，不证明任何角色全球第一。rDPS 的 `ROUND_HALF_UP` 是本参考选择，仍未转成用户确认的最终取整要求。
+
+新参考保持统一单元格背景、百分位实际字形右对齐和垂直居中；底部来源仅取实际选择的地区域名，不加汇总记录数、样式图例或长统计脚注。真实目录发现、本地化、每 Boss `totalKills` 和图片发送仍待实现/核验。新 helper 接受受限文字和语义样式，不接受任意 HTML、SVG、网络资源或资源路径；超出文字、布局或栅格预算时报错，由未来调用方在发送前完整回退或请用户缩小范围，参考本身不发送消息。
+
+在仓库根目录复验新旧离线样例：
+
+```sh
+python -m unittest discover -s examples/command_cards -p 'test_*.py' -v
+ruff check examples/command_cards
+ruff format --check examples/command_cards
+```
+
+本轮在 Python 3.12.14 下独立运行 37 passed / 0 failures / 0 errors / 0 skipped（19 项新增＋18 项既有，39.758 秒）。随后仅改主图 99.7 夹具并重生成图片；最终字节另跑新增集 19 passed / 0 failures / 0 errors / 0 skipped（41.287 秒），源码摘要稳定；14 项字效一致性探针另列通过，不合并批次数。本轮 Ruff 不可用，安装尝试取消后未重试，lint / format 未验证；未跑全仓或真实 Host/API。详细状态见 [交接入口](../../docs/command-presentation/README.md#样式参考续作2026-10-15)。
+
+下文的旧 PNG、字体发现、SVG 说明及初版 18 项记录属于历史范围；历史图里的记录数、缩字或省略行为不作为新 Spec 的生产要求。旧 `renderer.py`、`render_logs.py` 和原有 `samples/` 文件保留，不通过改写历史图片来宣称它们符合新字效。
+
+## 初版样张（历史布局参考）
 
 | 样张 | 尺寸 | 内容 |
 | --- | --- | --- |
@@ -95,7 +147,7 @@ Canvas 对最终宽、高与像素数设置上限（2048 × 8192 范围内、最
 
 SVG 使用 `currentColor`，由配色的 `accent` 替换后转换；中空部分保持透明。转换器只面向项目中可信的本地静态素材。元素 / 属性白名单仅检查支持的格式，**不是不可信 SVG 安全沙箱**，不得直接用于任意用户上传文件。Inkscape 后备同样仅供可信资产的离线原型预览。
 
-## 验证范围
+## 初版验证范围（历史记录）
 
 ```sh
 # 在本目录运行
@@ -104,7 +156,7 @@ python -m unittest -v test_renderers.py
 python -m unittest discover -s examples/command_cards -p 'test_*.py' -v
 ```
 
-新增 Python 文件也已按仓库基线 Ruff 0.12.0（Python 3.12、88 列、E4 / E7 / E9 / F / I）格式化并检查。请从仓库根目录运行，保持 import sorting 的项目发现上下文一致：
+初版 Python 文件当时已按仓库基线 Ruff 0.12.0（Python 3.12、88 列、E4 / E7 / E9 / F / I）格式化并检查；这不覆盖本轮新增参考文件，本轮 lint / format 仍未验证。下列是可复验命令，请从仓库根目录运行，保持 import sorting 的项目发现上下文一致：
 
 ```sh
 ruff check examples/command_cards
