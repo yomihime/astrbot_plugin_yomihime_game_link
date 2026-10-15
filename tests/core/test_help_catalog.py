@@ -234,7 +234,7 @@ class HelpCatalogTests(unittest.TestCase):
 
         self.assertIsInstance(document.ordered_blocks[0], TextBlock)
         text = document.ordered_blocks[0].text
-        self.assertIn("没有已注册模块", text)
+        self.assertIn("没有活跃可用模块", text)
         self.assertIn("/ygl help", text)
         self.assertIsInstance(document.ordered_blocks[1], CommandsBlock)
 

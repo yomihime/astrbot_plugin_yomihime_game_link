@@ -56,7 +56,8 @@ class HelpCatalog:
 
         if modules:
             summaries = "\n".join(
-                f"{module.manifest.route}：" + self._module_summary(module)
+                f"{self.display_name(module)}（{module.manifest.route}）："
+                + self._module_summary(module)
                 for module in modules
             )
             intro = validate_contract(
@@ -67,8 +68,8 @@ class HelpCatalog:
             blocks = (
                 validate_contract(
                     TextBlock(
-                        "当前没有已注册模块。使用 /ygl help 查看帮助；接入模块后，"
-                        "这里会显示模块帮助入口。"
+                        "当前没有活跃可用模块。使用 /ygl help 查看帮助；"
+                        "模块可用后，这里会显示模块帮助入口。"
                     )
                 ),
                 validate_contract(
@@ -78,6 +79,13 @@ class HelpCatalog:
         return validate_contract(
             DisplayDocument("Yomihime Game Link 帮助", "ygl", blocks)
         )
+
+    @staticmethod
+    def display_name(module: RegisteredModule) -> str:
+        """Use declared display metadata, with the declared route as fallback."""
+
+        display = module.manifest.display
+        return display.default_name if display is not None else module.manifest.route
 
     @staticmethod
     def _module_summary(module: RegisteredModule) -> str:

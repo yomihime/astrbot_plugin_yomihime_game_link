@@ -5,8 +5,9 @@ from __future__ import annotations
 import json
 import math
 import re
+import secrets
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Protocol
 
 from yomihime_game_link_sdk.declarations import CapabilityDescriptor, CommandDescriptor
@@ -19,6 +20,7 @@ from ...core.registry import (
     Registry,
     RegistryError,
 )
+from ...presentation.command_text import FULL_BRAND, command_title, render_total_help
 from ...presentation.text import TextPresenter
 
 _ROUTE = re.compile(r"[a-z][a-z0-9_]*(?:[.-][a-z0-9_]+)*\Z")
@@ -63,6 +65,9 @@ class AstrBotCommandBridge:
         self._catalog = catalog or HelpCatalog(active_query=registry.is_active)
         self._presenter = presenter or TextPresenter()
         self._max_chars = max_chars
+        # A bridge-lifetime salt gives each event an independent selection,
+        # without retaining events or requiring hashability/weakref support.
+        self._help_salt = secrets.randbits(128)
 
     def handle(self, event: MessageTextEvent) -> str:
         """Retain the text-only help/usage view for callers without dispatch."""
@@ -110,7 +115,11 @@ class AstrBotCommandBridge:
                         return self._render(
                             self._catalog.command(
                                 snapshot, module.manifest.route, command.operation_path
-                            )
+                            ),
+                            title=command_title(
+                                self._catalog.display_name(module),
+                                f"{command.operation_path} 帮助",
+                            ),
                         )
                     if command.parameter_mode == "raw_tail":
                         raw = message[end:].lstrip()
@@ -132,7 +141,27 @@ class AstrBotCommandBridge:
             return _USAGE
         snapshot = self._registry.snapshot()
         if not tokens or tokens == ["help"]:
-            return self._render(self._catalog.total(snapshot))
+            document = self._catalog.total(snapshot)
+            # Use only routes in the already-filtered directory, never a
+            # second availability query or a stale cached recommendation.
+            commands = document.ordered_blocks[1].commands
+            modules = tuple(
+                (
+                    self._catalog.display_name(snapshot.module_for_route(route)),
+                    route,
+                )
+                for command in commands
+                for route in (command.split()[1],)
+            )
+            return CommandHelp(
+                render_total_help(
+                    document,
+                    modules,
+                    seed=self._help_salt ^ id(event),
+                    presenter=self._presenter,
+                    max_chars=self._max_chars,
+                )
+            )
         if _ROUTE.fullmatch(tokens[0]) is None:
             return _USAGE
         try:
@@ -143,7 +172,10 @@ class AstrBotCommandBridge:
             return "模块当前不可用。请使用 /ygl help 查看活跃模块。"
         tail = tokens[1:]
         if not tail or tail == ["help"]:
-            return self._render(self._catalog.module(snapshot, module.manifest.route))
+            return self._render(
+                self._catalog.module(snapshot, module.manifest.route),
+                title=command_title(self._catalog.display_name(module), "模块帮助"),
+            )
         invocation = self._parse_module_command(module, tail)
         if invocation is None:
             matches = [
@@ -167,8 +199,12 @@ class AstrBotCommandBridge:
         validate_contract(command)
         return f"参数无效。请使用 /ygl {module.manifest.route} {command.operation_path} help 查看参数帮助。"
 
-    def _render(self, document) -> CommandHelp:
-        return CommandHelp(self._presenter.render(document, max_chars=self._max_chars))
+    def _render(self, document, *, title: str = FULL_BRAND) -> CommandHelp:
+        return CommandHelp(
+            self._presenter.render(
+                replace(document, title=title), max_chars=self._max_chars
+            )
+        )
 
     @staticmethod
     def _tokens(event: MessageTextEvent) -> list[str] | None:
