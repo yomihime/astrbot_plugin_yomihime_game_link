@@ -10,11 +10,10 @@ from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
 
-from PIL import Image, ImageChops, ImageDraw, ImageFilter
-
 import ff14_logs_reference as logs
 import renderer as cards
 import rich_text_reference as rich
+from PIL import Image, ImageChops, ImageDraw, ImageFilter
 
 
 class MetricContractTests(unittest.TestCase):
@@ -26,7 +25,7 @@ class MetricContractTests(unittest.TestCase):
             "#a335ee",
             "#ff8000",
             "#e268a8",
-            "#e5cc80"
+            "#e5cc80",
         )
         self.assertEqual(tuple(rich.GRADE_COLORS.values()), expected)
         for raw, grade in (
@@ -42,7 +41,7 @@ class MetricContractTests(unittest.TestCase):
             ("98.999", rich.Grade.ORANGE),
             (99, rich.Grade.PINK),
             ("99.999999", rich.Grade.PINK),
-            (100, rich.Grade.GOLD)
+            (100, rich.Grade.GOLD),
         ):
             with self.subTest(raw=raw):
                 self.assertIs(logs.percentile(raw).grade, grade)
@@ -50,7 +49,7 @@ class MetricContractTests(unittest.TestCase):
     def test_rounding_never_promotes_to_max(self):
         self.assertEqual(
             logs.percentile(Decimal("99.96")),
-            rich.TextSpan("100.0%", rich.TextRole.GRADED, rich.Grade.PINK)
+            rich.TextSpan("100.0%", rich.TextRole.GRADED, rich.Grade.PINK),
         )
         self.assertEqual(logs.percentile("44.65").text, "44.7%")
         self.assertIs(logs.percentile("100.000").grade, rich.Grade.GOLD)
@@ -62,7 +61,9 @@ class MetricContractTests(unittest.TestCase):
         for fn in (logs.percentile, logs.rdps, logs.count):
             with self.subTest(function=fn.__name__):
                 self.assertEqual(fn(None), rich.TextSpan("—"))
-                self.assertEqual(fn(logs.Unevaluable("无法评价")), rich.TextSpan("无法评价"))
+                self.assertEqual(
+                    fn(logs.Unevaluable("无法评价")), rich.TextSpan("无法评价")
+                )
                 self.assertNotEqual(fn(0).text, "—")
                 for raw in (
                     True,
@@ -76,7 +77,7 @@ class MetricContractTests(unittest.TestCase):
                     "9" * 129,
                     10**1000,
                     Decimal("1e1000000"),
-                    Decimal("1e-1000000")
+                    Decimal("1e-1000000"),
                 ):
                     self.assertEqual(fn(raw), rich.TextSpan("ERR", rich.TextRole.ERROR))
         self.assertEqual(logs.percentile(0).text, "0.0%")
@@ -92,13 +93,13 @@ class MetricContractTests(unittest.TestCase):
         self.assertEqual(rich.face_color(logs.count(100), p), p.text)
         self.assertEqual(
             rich.face_color(rich.TextSpan("ERR", rich.TextRole.ERROR), p),
-            rich.ERROR_COLOR
+            rich.ERROR_COLOR,
         )
         for role, color in (
             (rich.TextRole.NORMAL, p.text),
             (rich.TextRole.SECONDARY, p.secondary),
             (rich.TextRole.STRONG, p.title),
-            (rich.TextRole.EMPHASIS, p.accent)
+            (rich.TextRole.EMPHASIS, p.accent),
         ):
             self.assertEqual(rich.face_color(rich.TextSpan("评价文字", role), p), color)
         for args in (
@@ -107,7 +108,7 @@ class MetricContractTests(unittest.TestCase):
             ("a\nb",),
             ("x", "normal"),
             ("x", rich.TextRole.NORMAL, rich.Grade.GOLD),
-            ("x", rich.TextRole.GRADED)
+            ("x", rich.TextRole.GRADED),
         ):
             with self.assertRaises(ValueError):
                 rich.TextSpan(*args)
@@ -146,12 +147,7 @@ class EffectTests(unittest.TestCase):
         c, p = self.canvas("deep_indigo")
         c.rect((50, 50, 550, 190), "#edf1f5")
         info = rich.draw_metric(
-            c,
-            logs.percentile(25),
-            right=460,
-            center=120,
-            size=35,
-            palette=p
+            c, logs.percentile(25), right=460, center=120, size=35, palette=p
         )
         self.assertEqual(info.background, "#edf1f5")
         self.assertTrue(info.shadow)
@@ -159,12 +155,7 @@ class EffectTests(unittest.TestCase):
         c, p = self.canvas()
         c.rect((50, 50, 550, 190), rich.GRADE_COLORS[rich.Grade.GREEN])
         info = rich.draw_metric(
-            c,
-            logs.percentile(25),
-            right=460,
-            center=120,
-            size=35,
-            palette=p
+            c, logs.percentile(25), right=460, center=120, size=35, palette=p
         )
         self.assertEqual(info.contrast, 1)
         self.assertTrue(info.shadow)
@@ -178,13 +169,12 @@ class EffectTests(unittest.TestCase):
                     self.assertEqual(info.face, rich.GRADE_COLORS[grade])
                     self.assertEqual(
                         info.shadow,
-                        rich.needs_shadow(rich.contrast_ratio(info.face, p.tint))
+                        rich.needs_shadow(rich.contrast_ratio(info.face, p.tint)),
                     )
                     self.assertEqual(info.gold_glow, grade is rich.Grade.GOLD)
                     self.assertEqual(info.bounds[2], 460)
                     self.assertLessEqual(
-                        abs((info.bounds[1] + info.bounds[3]) / 2 - 120),
-                        0.25
+                        abs((info.bounds[1] + info.bounds[3]) / 2 - 120), 0.25
                     )
                     x0, y0, x1, y1 = info.patch_bounds
                     for bounds in (info.mask_bounds, info.effect_bounds):
@@ -199,16 +189,12 @@ class EffectTests(unittest.TestCase):
                     mask = Image.new("L", (x1 - x0, y1 - y0))
                     pad = 54
                     ImageDraw.Draw(mask).text(
-                        (pad - box[0], pad - box[1]),
-                        span.text,
-                        font=font,
-                        fill=255
+                        (pad - box[0], pad - box[1]), span.text, font=font, fill=255
                     )
                     crop = c.im.crop(info.patch_bounds)
                     interior = mask.point(lambda value: 255 if value == 255 else 0)
                     difference = ImageChops.difference(
-                        crop,
-                        Image.new("RGB", crop.size, info.face)
+                        crop, Image.new("RGB", crop.size, info.face)
                     ).convert("L")
                     self.assertIsNotNone(interior.getbbox())
                     self.assertIsNone(
@@ -236,11 +222,11 @@ class EffectTests(unittest.TestCase):
                 rich.TextSpan("结果 "),
                 logs.percentile("99.96"),
                 rich.TextSpan(" / "),
-                rich.TextSpan("异常", rich.TextRole.ERROR)
+                rich.TextSpan("异常", rich.TextRole.ERROR),
             ),
             xy=(60, 120),
             size=24,
-            palette=p
+            palette=p,
         )
         self.assertEqual(len(infos), 4)
         self.assertEqual(c.drawn_text, ["结果 ", "100.0%", " / ", "异常"])
@@ -251,15 +237,14 @@ class EffectTests(unittest.TestCase):
             logs.percentile(100),
             logs.percentile(0),
             logs.percentile(None),
-            rich.TextSpan("ERR", rich.TextRole.ERROR)
+            rich.TextSpan("ERR", rich.TextRole.ERROR),
         ):
             _, _, info = self.metric(span)
             x, y, _, _ = info.patch_bounds
             left, top, right, bottom = info.mask_bounds
             self.assertEqual((x + right) / cards.SCALE, 460)
             self.assertLessEqual(
-                abs((y + (top + bottom) / 2) / cards.SCALE - 120),
-                0.25
+                abs((y + (top + bottom) / 2) / cards.SCALE - 120), 0.25
             )
 
     def test_adjacent_gold_effect_does_not_recolor_previous_solid_face(self):
@@ -267,15 +252,10 @@ class EffectTests(unittest.TestCase):
             c, p = self.canvas(theme)
             spans = (
                 rich.TextSpan("A", rich.TextRole.GRADED, rich.Grade.BLUE),
-                logs.percentile(100)
+                logs.percentile(100),
             )
             infos = rich.draw_rich_line(
-                c,
-                spans,
-                xy=(100, 120),
-                size=35,
-                palette=p,
-                bold=True
+                c, spans, xy=(100, 120), size=35, palette=p, bold=True
             )
             first = infos[0]
             font = c.font(35, True)
@@ -283,15 +263,11 @@ class EffectTests(unittest.TestCase):
             x0, y0, x1, y1 = first.patch_bounds
             mask = Image.new("L", (x1 - x0, y1 - y0))
             ImageDraw.Draw(mask).text(
-                (54 - box[0], 54 - box[1]),
-                "A",
-                font=font,
-                fill=255
+                (54 - box[0], 54 - box[1]), "A", font=font, fill=255
             )
             interior = mask.point(lambda value: 255 if value == 255 else 0)
             delta = ImageChops.difference(
-                c.im.crop(first.patch_bounds),
-                Image.new("RGB", mask.size, "#0070ff")
+                c.im.crop(first.patch_bounds), Image.new("RGB", mask.size, "#0070ff")
             ).convert("L")
             self.assertIsNone(ImageChops.multiply(delta, interior).getbbox())
             self.assertEqual(infos[1].background, p.paper.lower())
@@ -306,7 +282,7 @@ class EffectTests(unittest.TestCase):
                 right=460,
                 center=120,
                 size=35,
-                palette=p
+                palette=p,
             )
             self.assertTrue(info.shadow)
             self.assertFalse(info.gold_glow)
@@ -316,11 +292,7 @@ class EffectTests(unittest.TestCase):
         c, p = self.canvas()
         before = c.im.tobytes()
         infos = rich.draw_rich_line(
-            c,
-            (rich.TextSpan(" "),),
-            xy=(60, 120),
-            size=24,
-            palette=p
+            c, (rich.TextSpan(" "),), xy=(60, 120), size=24, palette=p
         )
         self.assertIsNone(infos[0].mask_bounds)
         self.assertFalse(infos[0].shadow)
@@ -332,7 +304,7 @@ class EffectTests(unittest.TestCase):
                     (rich.TextSpan("A"), rich.TextSpan("B")),
                     xy=(60, 120),
                     size=35,
-                    palette=p
+                    palette=p,
                 )
         self.assertEqual(c.im.tobytes(), before)
         with self.assertRaisesRegex(ValueError, "clipped"):
@@ -341,7 +313,7 @@ class EffectTests(unittest.TestCase):
                 (rich.TextSpan("A"), rich.TextSpan("W" * 15)),
                 xy=(200, 120),
                 size=35,
-                palette=p
+                palette=p,
             )
         self.assertEqual(c.im.tobytes(), before)
 
@@ -350,7 +322,7 @@ class EffectTests(unittest.TestCase):
         c.font(96, True)
         with patch(
             "rich_text_reference.Image.new",
-            side_effect=AssertionError("No mask allocation expected")
+            side_effect=AssertionError("No mask allocation expected"),
         ):
             with self.assertRaisesRegex(ValueError, "raster budget"):
                 rich.draw_metric(
@@ -359,34 +331,20 @@ class EffectTests(unittest.TestCase):
                     right=460,
                     center=120,
                     size=96,
-                    palette=p
+                    palette=p,
                 )
         for size in (0, 97, True):
             with self.assertRaises(ValueError):
                 rich.draw_metric(
-                    c,
-                    logs.percentile(25),
-                    right=460,
-                    center=120,
-                    size=size,
-                    palette=p
+                    c, logs.percentile(25), right=460, center=120, size=size, palette=p
                 )
         with self.assertRaisesRegex(ValueError, "clipped"):
             rich.draw_metric(
-                c,
-                logs.percentile(100),
-                right=599,
-                center=120,
-                size=35,
-                palette=p
+                c, logs.percentile(100), right=599, center=120, size=35, palette=p
             )
         with self.assertRaises(ValueError):
             rich.draw_rich_line(
-                c,
-                (rich.TextSpan("a"),) * 33,
-                xy=(60, 120),
-                size=24,
-                palette=p
+                c, (rich.TextSpan("a"),) * 33, xy=(60, 120), size=24, palette=p
             )
 
 
@@ -399,8 +357,7 @@ class CardReferenceTests(unittest.TestCase):
                 self.assertEqual(len(logs.DEMO_LOGS.savage), 13)
                 self.assertEqual(len(canvas.metric_layout), 20)
                 self.assertEqual(
-                    sum(info.gold_glow for info in canvas.metric_layout),
-                    1
+                    sum(info.gold_glow for info in canvas.metric_layout), 1
                 )
                 self.assertIn("ChatGPT", canvas.drawn_text)
                 self.assertIn("@ OpenAI", canvas.drawn_text)
@@ -423,18 +380,17 @@ class CardReferenceTests(unittest.TestCase):
                         canvas.save(path)
 
     def test_fonts_are_explicit_and_render_never_fetches_or_scans(self):
-        with patch(
-            "renderer.discover_fonts",
-            side_effect=AssertionError("No installed-font scan")
-        ), patch(
-            "pathlib.Path.rglob",
-            side_effect=AssertionError("No font scan")
-        ), patch(
-            "socket.create_connection",
-            side_effect=AssertionError("No network")
-        ), patch(
-            "urllib.request.urlopen",
-            side_effect=AssertionError("No resource fetch")
+        with (
+            patch(
+                "renderer.discover_fonts",
+                side_effect=AssertionError("No installed-font scan"),
+            ),
+            patch("pathlib.Path.rglob", side_effect=AssertionError("No font scan")),
+            patch("socket.create_connection", side_effect=AssertionError("No network")),
+            patch(
+                "urllib.request.urlopen",
+                side_effect=AssertionError("No resource fetch"),
+            ),
         ):
             canvas = logs.render_card(replace(logs.DEMO_LOGS, ultimate=(), savage=()))
         self.assertEqual(canvas.font_config.regular, rich.BUNDLED_FONT)
@@ -449,7 +405,7 @@ class CardReferenceTests(unittest.TestCase):
             logs.DEMO_LOGS,
             ultimate=logs.DEMO_LOGS.ultimate[:1],
             savage=(),
-            region="GLOBAL"
+            region="GLOBAL",
         )
         canvas = logs.render_card(one)
         self.assertIn("数据源：www.fflogs.com", canvas.drawn_text)
@@ -459,7 +415,10 @@ class CardReferenceTests(unittest.TestCase):
             replace(one, region="unknown"),
             replace(one, character="x" * 129),
             replace(one, ultimate=one.ultimate * 49),
-            replace(one, ultimate=(replace(one.ultimate[0], encounter="很长的副本名称" * 10),))
+            replace(
+                one,
+                ultimate=(replace(one.ultimate[0], encounter="很长的副本名称" * 10),),
+            ),
         ):
             with self.assertRaises(ValueError):
                 logs.render_card(data)
@@ -467,22 +426,20 @@ class CardReferenceTests(unittest.TestCase):
     def test_import_has_no_render_or_output(self):
         with tempfile.TemporaryDirectory() as folder:
             environment = dict(
-                os.environ,
-                PYTHONPATH=str(cards.ROOT),
-                PYTHONDONTWRITEBYTECODE="1"
+                os.environ, PYTHONPATH=str(cards.ROOT), PYTHONDONTWRITEBYTECODE="1"
             )
             result = subprocess.run(
                 [
                     sys.executable,
                     "-B",
                     "-c",
-                    "import ff14_logs_reference; import rich_text_reference"
+                    "import ff14_logs_reference; import rich_text_reference",
                 ],
                 cwd=folder,
                 env=environment,
                 capture_output=True,
                 text=True,
-                check=True
+                check=True,
             )
             self.assertEqual(result.stdout, "")
             self.assertEqual(result.stderr, "")

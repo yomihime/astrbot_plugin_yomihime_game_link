@@ -1114,9 +1114,22 @@ class LLMToolTests(unittest.IsolatedAsyncioTestCase):
     async def test_consumed_selection_flight_rejects_query_bypass_and_fences_new_item(
         self,
     ):
+        from unittest.mock import patch
+
         from .test_market_integration import aggregated
 
         await self.start()
+        handler = (
+            self.runtime.core_runtime.registry.snapshot()
+            .module("ff14/ff14")
+            .handlers.capabilities["ff14.market.query"]
+        )
+        # Native Runtime uses a captured extension snapshot, while the controlled
+        # receiver composition uses the checkout. Patch only this actual source
+        # class, and restore it before leaving each selected flight.
+        session_type = handler.source.start_bound.__func__.__globals__["MarketSession"]
+        self.assertEqual(session_type.__module__, type(handler.source).__module__)
+        original_fetch = session_type._fetch
         for item_id, replace_query in ((44091, False), (44092, True)):
             with self.subTest(item_id=item_id):
                 self.transport.callback = None
@@ -1135,7 +1148,7 @@ class LLMToolTests(unittest.IsolatedAsyncioTestCase):
                 args["item_id"] = item_id
                 entered, release = asyncio.Event(), asyncio.Event()
 
-                async def blocked(request):
+                async def response(request):
                     if request.source_id == "xivapi_items":
                         return {
                             "results": [
@@ -1144,9 +1157,6 @@ class LLMToolTests(unittest.IsolatedAsyncioTestCase):
                         }
                     if "/aggregated/" in request.path:
                         current_id = int(request.path.rsplit("/", 1)[-1])
-                        if current_id == item_id:
-                            entered.set()
-                            await release.wait()
                         payload = aggregated(
                             "China",
                             level="world" if current_id == item_id else "region",
@@ -1155,79 +1165,103 @@ class LLMToolTests(unittest.IsolatedAsyncioTestCase):
                         return payload
                     return None
 
-                self.transport.callback = blocked
+                async def hold_fetched_result(session, path, parameters):
+                    body = await original_fetch(session, path, parameters)
+                    if "/aggregated/" in path and path.endswith(f"/{item_id}"):
+                        # HTTP's real 10s timer and JSON decoding have finished.
+                        # Hold an acquired result before the capability consumes
+                        # it; this is a live capability flight, not in-flight HTTP.
+                        entered.set()
+                        await release.wait()
+                    return body
+
+                self.transport.callback = response
                 confirmation = self.wrapper(f"Synthetic Item {item_id}")
-                selected = asyncio.create_task(
-                    self.call("ff14_market_select", args, confirmation)
-                )
-                try:
-                    await asyncio.wait_for(entered.wait(), 3)
-                    before = len(self.transport.requests)
-                    denials = []
-                    for query in (f"Synthetic Item {item_id}", "Synthetic"):
-                        denials.append(
-                            self.call(
-                                parameters={
-                                    "query": query,
-                                    "region": "global",
-                                    "quality": "nq",
-                                },
-                                wrapper=confirmation,
-                            )
-                        )
-                    for text in (
-                        "第7个",
-                        "第七个",
-                        "第十个",
-                        "最后一个",
-                        "不是",
-                        "不要",
-                        "不选",
-                        "后者",
-                    ):
-                        denials.append(
-                            self.call(
-                                parameters={
-                                    "action": "clarify",
-                                },
-                                wrapper=self.wrapper(text),
-                            )
-                        )
-                    # All negatives exercise this one live consumed flight.
-                    # Serial Core fences can exhaust the real 10s request cap
-                    # before the synthetic HTTP barrier is released.
-                    values = await asyncio.gather(
-                        *denials, self.call("ff14_market_select", args, confirmation)
+                with patch.object(session_type, "_fetch", hold_fetched_result):
+                    selected = asyncio.create_task(
+                        self.call("ff14_market_select", args, confirmation)
                     )
-                    for denied in values[:-1]:
-                        self.assertEqual(denied["status"], "error")
-                        self.assertEqual(denied["error"]["code"], "parameter_error")
-                    replay = values[-1]
-                    self.assertEqual(replay["status"], "error")
-                    self.assertEqual(replay["error"]["code"], "parameter_error")
-                    self.assertEqual(len(self.transport.requests), before)
-                    self.assertFalse(
-                        selected.done(), "consumed flight must remain live"
-                    )
-                    if replace_query:
-                        fresh = await self.call(
-                            parameters={
-                                "query": "Unrelated Item",
-                                "region": "cn",
-                                "intent": "min",
-                            },
-                            wrapper=self.wrapper("Unrelated Item多少钱"),
+                    try:
+                        await asyncio.wait_for(entered.wait(), 3)
+                        self.assertEqual(
+                            [
+                                r.path
+                                for r in self.transport.requests
+                                if r.path.endswith(f"/aggregated/90001/{item_id}")
+                            ],
+                            [f"/api/v2/aggregated/90001/{item_id}"],
                         )
-                        self.assertEqual(fresh["status"], "success")
-                        self.assertEqual(fresh["market"]["item_id"], 44093)
-                finally:
-                    release.set()
-                result = await selected
+                        before = len(self.transport.requests)
+                        denials = []
+                        for query in (f"Synthetic Item {item_id}", "Synthetic"):
+                            denials.append(
+                                self.call(
+                                    parameters={
+                                        "query": query,
+                                        "region": "global",
+                                        "quality": "nq",
+                                    },
+                                    wrapper=confirmation,
+                                )
+                            )
+                        for text in (
+                            "第7个",
+                            "第七个",
+                            "第十个",
+                            "最后一个",
+                            "不是",
+                            "不要",
+                            "不选",
+                            "后者",
+                        ):
+                            denials.append(
+                                self.call(
+                                    parameters={
+                                        "action": "clarify",
+                                    },
+                                    wrapper=self.wrapper(text),
+                                )
+                            )
+                        # All negatives share the same acquired-but-uncommitted
+                        # result. Production HTTP and total deadlines stay intact.
+                        values = await asyncio.gather(
+                            *denials,
+                            self.call("ff14_market_select", args, confirmation),
+                        )
+                        for denied in values[:-1]:
+                            self.assertEqual(denied["status"], "error")
+                            self.assertEqual(denied["error"]["code"], "parameter_error")
+                        replay = values[-1]
+                        self.assertEqual(replay["status"], "error")
+                        self.assertEqual(replay["error"]["code"], "parameter_error")
+                        self.assertEqual(len(self.transport.requests), before)
+                        self.assertFalse(
+                            selected.done(), "consumed flight must remain live"
+                        )
+                        if replace_query:
+                            fresh = await self.call(
+                                parameters={
+                                    "query": "Unrelated Item",
+                                    "region": "cn",
+                                    "intent": "min",
+                                },
+                                wrapper=self.wrapper("Unrelated Item多少钱"),
+                            )
+                            self.assertEqual(fresh["status"], "success")
+                            self.assertEqual(fresh["market"]["item_id"], 44093)
+                    finally:
+                        release.set()
+                        await asyncio.gather(selected, return_exceptions=True)
+                    result = selected.result()
+                self.assertIs(session_type._fetch, original_fetch)
                 if replace_query:
                     self.assertEqual(result["status"], "error")
+                    self.assertEqual(result["error"]["code"], "parameter_error")
+                    self.assertTrue(result["error"]["message"].startswith("候选已失效"))
                     self.assertNotIn("market", result)
                 else:
                     self.assertEqual(result["status"], "success", result)
+                    self.assertEqual(result["market"]["item_id"], item_id)
                     for field in (
                         "scope",
                         "quality",

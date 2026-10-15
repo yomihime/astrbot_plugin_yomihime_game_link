@@ -14,7 +14,6 @@ from pathlib import Path
 from typing import Sequence
 
 from PIL import Image, ImageChops, ImageDraw, ImageFilter
-
 from renderer import SCALE, Canvas, FontConfig, Palette
 
 MAX_SPAN_CHARS = 512
@@ -206,14 +205,11 @@ def _gold_glow(patch: Image.Image, mask: Image.Image, size: int, dark: bool):
         else:
             alpha = alpha.point(
                 lambda value, p=power: min(
-                    GLOW_LIGHT_OPACITY_CAP,
-                    round(value * p * GLOW_LIGHT_POWER)
+                    GLOW_LIGHT_OPACITY_CAP, round(value * p * GLOW_LIGHT_POWER)
                 )
             )
             patch = Image.composite(
-                Image.new("RGB", mask.size, GLOW_LIGHT_COLOR),
-                patch,
-                alpha
+                Image.new("RGB", mask.size, GLOW_LIGHT_COLOR), patch, alpha
             )
         extent = ImageChops.lighter(extent, alpha)
     if dark:
@@ -259,16 +255,12 @@ def _prepare_span(
     pad = math.ceil(27 * size / 35 * SCALE)
     dimensions = (width + pad * 2, height + pad * 2)
     if max(dimensions) > MAX_PATCH_SIDE or dimensions[0] * dimensions[1] > min(
-        MAX_PATCH_PIXELS,
-        remaining_pixels
+        MAX_PATCH_PIXELS, remaining_pixels
     ):
         raise ValueError("Text effect exceeds the bounded local raster budget")
     mask = Image.new("L", dimensions)
     ImageDraw.Draw(mask).text(
-        (pad - box[0], pad - box[1]),
-        span.text,
-        font=font,
-        fill=255
+        (pad - box[0], pad - box[1]), span.text, font=font, fill=255
     )
     ink_bounds = mask.getbbox()
     if right is not None and ink_bounds is not None:
@@ -295,8 +287,7 @@ def _prepare_span(
     colors = surface.getcolors(MAX_PATCH_PIXELS)
     actual = {"#%02x%02x%02x" % color[:3] for _, color in colors if color[3]}
     background = min(
-        actual or {face.lower()},
-        key=lambda color: (contrast_ratio(face, color), color)
+        actual or {face.lower()}, key=lambda color: (contrast_ratio(face, color), color)
     )
     ratio = contrast_ratio(face, background)
     shadow = bool(ink_bounds) and needs_shadow(ratio)
@@ -312,10 +303,17 @@ def _prepare_span(
         extent = ImageChops.lighter(extent, shadow_mask(mask, size))
     bounds = ink_bounds or (pad, pad, pad + width, pad + height)
     info = DrawInfo(
-        span.text, face, background, ratio, shadow,
-        shadow_color(face, background) if shadow else None, gold,
+        span.text,
+        face,
+        background,
+        ratio,
+        shadow,
+        shadow_color(face, background) if shadow else None,
+        gold,
         tuple((origin + edge) / SCALE for origin, edge in zip((x, y, x, y), bounds)),
-        patch_bounds, ink_bounds, extent.getbbox(),
+        patch_bounds,
+        ink_bounds,
+        extent.getbbox(),
     )
     return _PreparedSpan(info, mask, size)
 
@@ -329,9 +327,7 @@ def _paint_effects(canvas: Canvas, prepared: _PreparedSpan) -> None:
         patch, _ = _gold_glow(patch, mask, size, luminance(info.background) < 0.179)
     if info.shadow:
         patch = Image.composite(
-            Image.new("RGB", mask.size, info.shade),
-            patch,
-            shadow_mask(mask, size)
+            Image.new("RGB", mask.size, info.shade), patch, shadow_mask(mask, size)
         )
     canvas.im.paste(patch, info.patch_bounds[:2])
 
@@ -362,7 +358,7 @@ def draw_metric(
         center=center,
         size=size,
         palette=palette,
-        bold=bold
+        bold=bold,
     )
     _paint_effects(canvas, prepared)
     _paint_face(canvas, prepared)
@@ -387,9 +383,10 @@ def draw_rich_line(
     No partial line is painted if validation/aggregate mask budgets fail.
     """
     _validate_size(size)
-    if not 0 < len(spans) <= MAX_SPANS or sum(
-        len(span.text) for span in spans
-    ) > MAX_LINE_CHARS:
+    if (
+        not 0 < len(spans) <= MAX_SPANS
+        or sum(len(span.text) for span in spans) > MAX_LINE_CHARS
+    ):
         raise ValueError("Rich line exceeds span/character budget")
     x, baseline = xy
     font = canvas.font(size, bold)
@@ -405,7 +402,7 @@ def draw_rich_line(
             size=size,
             palette=palette,
             bold=bold,
-            remaining_pixels=remaining
+            remaining_pixels=remaining,
         )
         remaining -= item.mask.width * item.mask.height
         prepared.append(item)

@@ -44,19 +44,44 @@ MAX_INTEGER_DIGITS = 18
 FOOTER = "Powered by yomihime/astrbot_plugin_yomihime_game_link"
 THEMES = {
     "cool_white": Palette(
-        "冷白", "#E8EDF5", "#F8FAFC", "#CCD6E2", "#DFE5EC", "#FFFFFF",
-        "#EDF1F5", "#4C5A69", "#293645", "#7E94AB", "#5C7186", "#738291", "#95A0AD",
+        "冷白",
+        "#E8EDF5",
+        "#F8FAFC",
+        "#CCD6E2",
+        "#DFE5EC",
+        "#FFFFFF",
+        "#EDF1F5",
+        "#4C5A69",
+        "#293645",
+        "#7E94AB",
+        "#5C7186",
+        "#738291",
+        "#95A0AD",
     ),
     "deep_indigo": Palette(
-        "深靛", "#0F1423", "#1C2337", "#3B4561", "#333E58", "#222C42",
-        "#11182B", "#D0D8E7", "#EDF0F6", "#8A9FD2", "#B8C8E8", "#A3AFC8", "#8F9AB2",
+        "深靛",
+        "#0F1423",
+        "#1C2337",
+        "#3B4561",
+        "#333E58",
+        "#222C42",
+        "#11182B",
+        "#D0D8E7",
+        "#EDF0F6",
+        "#8A9FD2",
+        "#B8C8E8",
+        "#A3AFC8",
+        "#8F9AB2",
     ),
 }
 # Business mapping belongs to this FF14 example, never the generic rich-text file.
 PERCENTILE_GRADES = (
-    (Decimal("100"), Grade.GOLD), (Decimal("99"), Grade.PINK),
-    (Decimal("95"), Grade.ORANGE), (Decimal("75"), Grade.PURPLE),
-    (Decimal("50"), Grade.BLUE), (Decimal("25"), Grade.GREEN),
+    (Decimal("100"), Grade.GOLD),
+    (Decimal("99"), Grade.PINK),
+    (Decimal("95"), Grade.ORANGE),
+    (Decimal("75"), Grade.PURPLE),
+    (Decimal("50"), Grade.BLUE),
+    (Decimal("25"), Grade.GREEN),
     (Decimal("0"), Grade.GRAY),
 )
 
@@ -100,7 +125,9 @@ class LogsData:
 # Synthetic catalog fixture: seven ultimates plus ALL three illustrative raid
 # tiers (13 boss/phase rows), not just the latest tier. It is not a live catalog.
 DEMO_LOGS = LogsData(
-    "ChatGPT", "OpenAI", "CN",
+    "ChatGPT",
+    "OpenAI",
+    "CN",
     (
         Record("妖星绝境战", "100", "武士", "41234.567890123", 31, "7.51"),
         Record("光暗未来绝境战", "99.3", "占星术士", "16123.456789012", 46, "7.4"),
@@ -176,8 +203,7 @@ def percentile(raw: object) -> TextSpan:
         if value > 100:
             raise ValueError("Out-of-range percentile")
         grade = next(
-            grade for threshold,
-            grade in PERCENTILE_GRADES if value >= threshold
+            grade for threshold, grade in PERCENTILE_GRADES if value >= threshold
         )
         with localcontext() as context:
             context.prec = MAX_NUMERIC_CHARS + MAX_INTEGER_DIGITS
@@ -216,13 +242,9 @@ def count(raw: object) -> TextSpan:
 
 def _name_lines(canvas: Canvas, name: str) -> list[str]:
     lines = [
-        line for part in name.split("\n") for line in wrap_text(
-            canvas,
-            part,
-            NAME_W,
-            29,
-            True
-        )
+        line
+        for part in name.split("\n")
+        for line in wrap_text(canvas, part, NAME_W, 29, True)
     ]
     if not 1 <= len(lines) <= 2:
         raise ValueError(
@@ -257,11 +279,7 @@ def _cell_text(canvas, text, x, y, width, size, color, bold=False, anchor="lt"):
 
 
 def _group(
-    canvas: Canvas,
-    title: str,
-    rows: tuple[Record, ...],
-    y: int,
-    palette: Palette
+    canvas: Canvas, title: str, rows: tuple[Record, ...], y: int, palette: Palette
 ) -> int:
     p = palette
     _cell_text(canvas, title, LEFT, y, RIGHT - LEFT, 33, p.title, True)
@@ -275,7 +293,7 @@ def _group(
         (JOB_X, "职业", "lt"),
         (RDPS_R, "最高 rDPS", "rt"),
         (COUNT_R, "过本次数", "rt"),
-        (PCT_R, "最佳百分位", "rt")
+        (PCT_R, "最佳百分位", "rt"),
     ):
         canvas.text((x, top + 19), text, 23, p.secondary, True, anchor)
     canvas.line((LEFT, top + 62, RIGHT, top + 62), p.border)
@@ -298,13 +316,13 @@ def _group(
             yy + 26 + len(lines) * 36,
             NAME_W,
             22,
-            p.secondary
+            p.secondary,
         )
         mid = yy + height / 2 - 17
         _cell_text(canvas, row.job, JOB_X, mid + 3, 125, 27, p.text)
         for value, right, size, width in (
             (rdps(row.highest_rdps), RDPS_R, 31, 140),
-            (count(row.total_kills), COUNT_R - 20, 29, 85)
+            (count(row.total_kills), COUNT_R - 20, 29, 85),
         ):
             _cell_text(
                 canvas,
@@ -315,23 +333,16 @@ def _group(
                 size,
                 face_color(value, p),
                 True,
-                "rt"
+                "rt",
             )
         span = percentile(row.best_percentile)
         if canvas.width(span.text, 35, True) > 140:
             raise ValueError("Percentile text exceeds cell; use complete text fallback")
         canvas.rr(
-            (816, yy + (height - 54) / 2, 968, yy + (height + 54) / 2),
-            11,
-            p.tint
+            (816, yy + (height - 54) / 2, 968, yy + (height + 54) / 2), 11, p.tint
         )
         info = draw_metric(
-            canvas,
-            span,
-            right=955,
-            center=yy + height / 2,
-            size=35,
-            palette=p
+            canvas, span, right=955, center=yy + height / 2, size=35, palette=p
         )
         canvas.metric_layout.append(info)
         yy += height
@@ -394,7 +405,7 @@ def main() -> None:
                 "theme": theme,
                 "size": [canvas.w, canvas.h],
                 "bytes": path.stat().st_size,
-                "metrics": [asdict(info) for info in canvas.metric_layout]
+                "metrics": [asdict(info) for info in canvas.metric_layout],
             }
         )
     manifest = {
@@ -403,17 +414,16 @@ def main() -> None:
             "fixtures; no API/catalog verification or query occurred."
         ),
         "font": (
-            "Explicit local font; bundled Regular is reused for bold "
-            "unless overridden."
+            "Explicit local font; bundled Regular is reused for bold unless overridden."
         ),
-        "results": results
+        "results": results,
     }
     with (output / "style_reference_checks.json").open("x", encoding="utf-8") as stream:
         json.dump(manifest, stream, ensure_ascii=False, indent=2)
     print(
         json.dumps(
             {"output": str(output), "files": [result["file"] for result in results]},
-            ensure_ascii=False
+            ensure_ascii=False,
         )
     )
 
