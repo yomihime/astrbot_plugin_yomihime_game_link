@@ -151,11 +151,23 @@ FF14 原型图标参考经典陨石意象进行绘制；它不是官方矢量原
 
 模块提供领域事实和展示结构；通用 presentation 提供纯绘图能力并返回有界位图；Host 负责能力选择、资源注册、授权读取、投递和回收。模块 logo 作为可选资产输入，不把 FF14 逻辑塞入绘图基础设施。
 
-在现有 SDK 下，优先评估 Host 内部受控注册路径：由可信调用上下文完成暂存与 asset ID 生成，再复用现有授权、TTL、文件生命周期与资源引用校验。该路径必须审查，不能绕过 ownership/grant 检查，也不能以全局公共文件路径替代授权资源。
+在现有 SDK 下，`services/generated_png.py` 提供 Core 私有、有界的内存生成 PNG 注册：只服务当前根命令、当前结果，不落文件或跨请求缓存。上下文从真实 OutputService 的 issuer、admission、principal、owner proof/Grant 和可信 route 派生，不能接受模块自报 owner。该服务不替代模块已有 ResourceAccessService，也不暴露全局 asset ID 或路径读取入口；尚未接入运行时或真实发送。
+
+每个上下文只注册一张图片、取得一次 pin、读取一次；读取本身不授予发送许可。普通操作自行进入真实 mutation gate，不能把子任务继承的 ContextVar 当作持门身份。单图沿用 1 MiB、2048×8192、8,000,000 像素上限；资源总量额外限制为 8 个上下文或保留项、4 MiB 原始 PNG、16 MiB 编码转换预留，解码并发为 1、RGBA 像素暂存预算 32 MiB。TTL 默认 30 秒、最多 60 秒，其余上限只能降低。这些是数据预算，不是 Python heap、RSS 或 CPU 硬沙箱。
+
+`presentation/png_validation.py` 只接受生成用的 8-bit RGB/RGBA、非交错、无附加 metadata 的 PNG；核对容器、CRC、连续 IDAT、有界 deflate 流、扫描行长度和 filter 枚举，再由 Pillow verify/load。不依赖宿主允许截断图片的设置，也不修改 Pillow 全局配置。过期、撤权、取消或 close 后不能晚注册；尚在 await 或被 pin 持有的字节继续计量，实际释放后才扣除。
+
+不落文件的范围内无需新增文件 ledger、GC 或数据库迁移；若以后引入文件或持久缓存，必须重新审查独占资源和物理回收。内存中已交出的 bytes/base64 副本也不能承诺清零或撤回。随机临时 handle 不进入现有 `resource_ids` 或持久化 fingerprint；稳定内容摘要、发送许可和真实任务 pin 的组合留到发送切片单独验证。
 
 P3 需一并明确 owner、audience、TTL、撤权、取消、清理失败、缓存复用以及发送时再次校验；`PRIVATE` 展示标签本身不是授权。
 
 固定 AstrBot 源码已核实 [`Image.fromBytes`](https://github.com/AstrBotDevs/AstrBot/blob/3c7adafa1397e182d60b1016bf88759265113c8a/astrbot/core/message/components.py#L528) 同步持有编码后的图片内容，可优先评估以减少源文件路径存活期依赖；仍须先授权和验证 PNG，并计入 base64 约 4/3 的额外内存。`fromFileSystem` 仅保存路径，不提供本插件的资源授权或图片验证；不要把它当成全局读取入口。组件可构造与 `send_message` 的 await 返回均不能证明图片最终可见、用户收到或平台临时资源已回收。
+
+### 首轮 Host 目标：AstrBot WebChat
+
+首轮目标已选 WebChat；其他适配器不能据此推定支持。固定版本的 [WebChat adapter](https://github.com/AstrBotDevs/AstrBot/blob/3c7adafa1397e182d60b1016bf88759265113c8a/astrbot/core/platform/sources/webchat/webchat_adapter.py) 可按会话发送，但会向该会话的多个活跃 request IDs 投递。新图片出口须绑定可信的触发 event/request，不能仅凭会话名或全局可变的“当前事件”保证一次投递。
+
+[WebChat event](https://github.com/AstrBotDevs/AstrBot/blob/3c7adafa1397e182d60b1016bf88759265113c8a/astrbot/core/platform/sources/webchat/webchat_event.py) 先写 Host 附件，再尝试放入请求队列；队列关闭可能未接收，而该路径仍返回 `None`。因此 Core 内存资源不落文件，不等于 Host 没有附件副本；后续须证明附件归属、关闭或取消时回收、队列接受状态及受权文件读取。源码中的 SSE/WS 和 Dashboard 图片展示路径，仍需真实 Host 与浏览器验收，不能作为已经投递的证据。
 
 ### 降级和投递语义
 

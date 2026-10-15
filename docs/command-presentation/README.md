@@ -2,7 +2,7 @@
 
 本目录记录管理页紧凑间距、命令图片风格、LLM 事实输出及 FF14 Logs 聚合的设计与实施顺序，供后续本地 Codex 在同一 Draft PR 中继续。
 
-**PR 起始交付为设计文档和离线视觉原型；续作已接通 P1 帮助及普通命令标题路径，并补充最终工具 facts 回归。P3 通用 PNG 基础已通过离线独立验收；尚未接入生产入口或更新真实实例。SDK 保持 `0.1.0a6`。图片发送、FFLogs 聚合及真实平台投递仍未接通。**
+**PR 起始交付为设计文档和离线视觉原型；续作已接通 P1 帮助及普通命令标题路径，并补充最终工具 facts 回归。P3 通用 PNG 基础及内部授权资源服务已通过离线独立验收；尚未接入生产图片入口或更新真实实例。SDK 保持 `0.1.0a6`。图片发送、FFLogs 聚合及真实平台投递仍未接通。**
 
 ## 续作检查点（2026-10-15）
 
@@ -19,6 +19,10 @@
 - P3 已确定：图片与完整文本同时超限时，发送前选择明确的超限提示并请用户缩小查询范围；不自动分页或补发。
 - P3 纯绘图：通用文本和表格完整换行、三套配色预设、受信字体注入及有界 PNG。作者最终相关 18 项通过；独立验证者在 Python 3.12 / 3.13 下各运行 presentation 四模块 52 passed / 0 failed / 0 errors / 0 skipped。三张有限中文合成样图已目视，独立源码审查 0 Blocker / 0 Important；相关 Ruff、格式和候选核对通过。这不是 Host 图片链路或物品卡设计验收，也不覆盖 P1 未运行的 3.13 九模块组合。
 - P3 未安装候选 262 成员、1,374,380 bytes，SHA256 `8413bbdc47f603dd1262628618ca3388c2aa6ba79a5c316f110cb4dfaa99d289`。新增绘图文件、10 项发布投影和 17 项固定 SDK payload 字节及排除规则核对通过；测试依赖单独固定 Pillow，插件根运行依赖不变。有限凭据模式扫描 0 发现。首格式检查失败及修后通过、独验登记 helper 在测试前失败及补验分别保留。
+- P3 内部资源：有界内存 PNG 注册，绑定真实 issuer、admission、result、principal、owner/Grant 与 route；一次 pin/read，撤权、过期、取消和 close 后不晚注册，未释放的 pin 继续计量。严格生成 PNG 验证不依赖宿主允许截断图片的配置，不改 SDK、数据库或现有模块资源服务；未接运行时或发送。
+- 该片第 1 轮集中返修补严格 deflate 完整性；随后独审发现 1 Important：未接线的私有入口把继承 ContextVar 当作持门身份。第 2 轮（最后一轮）返修删除入口，公共操作继续自行取得真实门。作者新最小集 46 项通过；独验 Python 3.12 新 46 项、旧相关回归 58 项分批通过，Python 3.13 新 46 项通过，均 0 failed / errors / skipped；独立真实门与取消探针复审 0 Blocker / 0 Important。旧失败批次和补验分别保留，不拼成单次全量。
+- 最新内部资源候选 264 成员、1,381,307 bytes，SHA256 `1132a0db73795cecabe5d375f0c3a39c3353e3671e2eeb2fa696ac28ddb08968`；241 项源码、10 项发布投影、17 项固定 SDK payload 全部逐字节及 CRC 核对通过，排除规则通过，有限敏感模式扫描 0 发现。相关 Ruff、格式通过；独验审计脚本首轮导入路径失败及修后通过单独保留。候选未安装。
+- 首轮 Host 图片目标为 AstrBot WebChat。固定源码已揭示会话发送的多请求投递及先写附件再入队行为，事件绑定、附件回收和真实可见性仍须验收；不能用其他适配器或内部内存资源证据替代。
 
 基线打包脚本的静态检查表明，[SDK 构建脚本](https://github.com/yomihime/astrbot_plugin_yomihime_game_link/blob/8251a52580b8839964f8f232d45706a98c1fd02d/scripts/build_release.py)只收录既有 SDK 示例，[插件打包清单](https://github.com/yomihime/astrbot_plugin_yomihime_game_link/blob/8251a52580b8839964f8f232d45706a98c1fd02d/scripts/build_dashboard_zip.py)不包含本目录和 `examples/command_cards/`。这不是候选包构建验证，也不是工件字节一致性声明。
 
