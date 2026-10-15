@@ -24,6 +24,7 @@ from .features.market_handler import MarketQueryHandler
 
 CAPABILITY_STATUS = "status"
 CAPABILITY_ITEM_LOOKUP = "item.lookup"
+CAPABILITY_ITEM_SELECT = "ff14.item.select"
 CAPABILITY_MARKET_QUERY = "ff14.market.query"
 CAPABILITY_MARKET_SELECT = "ff14.market.select"
 CAPABILITY_FFLOGS_CHARACTER = "ff14.logs.character"
@@ -36,6 +37,7 @@ CAPABILITY_CALENDAR_SUBSCRIPTION_CANCEL = "ff14.calendar.subscription.cancel"
 CAPABILITY_IDS = (
     CAPABILITY_STATUS,
     CAPABILITY_ITEM_LOOKUP,
+    CAPABILITY_ITEM_SELECT,
     CAPABILITY_MARKET_QUERY,
     CAPABILITY_MARKET_SELECT,
     CAPABILITY_FFLOGS_CHARACTER,
@@ -66,13 +68,16 @@ class FF14Module:
     ) -> None:
         self._started = False
         self._market = MarketQueryHandler(services)
+        self._items = ItemLookup(services)
+        self._logs = FFLogsCharacterLookup(services)
         self._handlers = ModuleHandlers(
             capabilities={
                 CAPABILITY_STATUS: _StatusHandler(),
-                CAPABILITY_ITEM_LOOKUP: ItemLookup(services),
+                CAPABILITY_ITEM_LOOKUP: self._items,
+                CAPABILITY_ITEM_SELECT: self._items,
                 CAPABILITY_MARKET_QUERY: self._market,
                 CAPABILITY_MARKET_SELECT: self._market,
-                CAPABILITY_FFLOGS_CHARACTER: FFLogsCharacterLookup(services),
+                CAPABILITY_FFLOGS_CHARACTER: self._logs,
                 CAPABILITY_FFLOGS_OUTPUT: FFLogsOutputPercentiles(services),
                 CAPABILITY_CALENDAR_QUERY: CalendarQuery(services, config=config),
                 CAPABILITY_CALENDAR_SUBSCRIPTION_CREATE: CalendarSubscriptionHandler(
@@ -101,6 +106,8 @@ class FF14Module:
     async def stop(self) -> None:
         self._started = False
         self._market.close()
+        self._items.close()
+        self._logs.close()
 
     async def check_health(self) -> HealthReport:
         if not self._started:

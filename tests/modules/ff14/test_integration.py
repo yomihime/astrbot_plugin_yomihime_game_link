@@ -210,6 +210,9 @@ class FF14InstalledModuleTests(unittest.IsolatedAsyncioTestCase):
                             "region": "region",
                             "quality": "quality",
                             "intent": "intent",
+                            "action": "action",
+                            "request_language": "request_language",
+                            "context_language": "context_language",
                         },
                     ),
                     (
@@ -219,6 +222,45 @@ class FF14InstalledModuleTests(unittest.IsolatedAsyncioTestCase):
                             "batch_id": "batch_id",
                             "generation": "generation",
                             "item_id": "item_id",
+                            "action": "action",
+                            "scope_kind": "scope_kind",
+                            "world_id": "world_id",
+                            "dc_id": "dc_id",
+                        },
+                    ),
+                    (
+                        "ff14_item_lookup",
+                        "item.lookup",
+                        {"query": "query", "action": "action"},
+                    ),
+                    (
+                        "ff14_item_select",
+                        "ff14.item.select",
+                        {
+                            "batch_id": "batch_id",
+                            "generation": "generation",
+                            "item_id": "item_id",
+                            "action": "action",
+                        },
+                    ),
+                    (
+                        "ff14_logs_character",
+                        "ff14.logs.character",
+                        {
+                            "realm": "realm",
+                            "server": "server",
+                            "character": "character",
+                            "server_hint": "server_hint",
+                            "metric": "metric",
+                            "zone_id": "zone_id",
+                            "difficulty": "difficulty",
+                            "partition": "partition",
+                            "action": "action",
+                            "request_language": "request_language",
+                            "context_language": "context_language",
+                            "batch_id": "batch_id",
+                            "generation": "generation",
+                            "server_id": "server_id",
                         },
                     ),
                 ),
@@ -234,6 +276,20 @@ class FF14InstalledModuleTests(unittest.IsolatedAsyncioTestCase):
                 tuple(
                     origin.value
                     for origin in capabilities["ff14.market.select"].invocation_origins
+                ),
+                ("command", "llm_tool"),
+            )
+            self.assertEqual(
+                tuple(
+                    origin.value
+                    for origin in capabilities["item.lookup"].invocation_origins
+                ),
+                ("command", "web_public", "llm_tool"),
+            )
+            self.assertEqual(
+                tuple(
+                    origin.value
+                    for origin in capabilities["ff14.item.select"].invocation_origins
                 ),
                 ("command", "llm_tool"),
             )

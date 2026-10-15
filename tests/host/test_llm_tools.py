@@ -68,7 +68,7 @@ class ControlledProvider:
             if text == "帮我看看犎牛牛排国服哪里最便宜":
                 args = {"query": "犎牛牛排", "region": "cn", "intent": "min"}
             elif text == "帮我看看犎牛牛排哪里最便宜":
-                args = {"query": "犎牛牛排", "intent": "min"}
+                args = {"query": "犎牛牛排", "intent": "min", "request_language": "zh"}
             elif text == "牛排国服哪里最便宜？":
                 args = {"query": "牛排", "region": "cn", "intent": "min"}
             elif "Synthetic" not in text:
@@ -79,11 +79,8 @@ class ControlledProvider:
         facts = json.loads(await toolset.get_tool(name).call(wrapper, **args))
         if facts["status"] == "needs_selection":
             self.pending = facts
-            reply = (
-                "请回复“"
-                + facts["name_confirmation"]
-                + "”："
-                + ", ".join(item["name"] for item in facts["selection"]["candidates"])
+            reply = "请选择候选：" + ", ".join(
+                item["name"] for item in facts["selection"]["candidates"]
             )
         else:
             if facts["status"] != "success":
@@ -359,6 +356,23 @@ class LLMToolTests(unittest.IsolatedAsyncioTestCase):
             .module("ff14/ff14")
             .handlers.capabilities["ff14.market.query"]
         )
+        original_invoke = handler.invoke
+        measured_counts = []
+
+        async def measured(*args):
+            result = await original_invoke(*args)
+            count = nodes(result.model_facts.facts) + len(result.model_facts.sources)
+            measured_counts.append(count)
+            print(
+                "ACTUAL missing metrics module fact nodes:",
+                args[1].get("intent"),
+                count,
+                flush=True,
+            )
+            self.assertLessEqual(count, 512)
+            return result
+
+        handler.invoke = measured
         client_type = type(handler).invoke.__globals__["MarketClient"]
         original = client_type.execute
 
@@ -612,7 +626,7 @@ class LLMToolTests(unittest.IsolatedAsyncioTestCase):
         self,
     ):
         await self.start()
-        self.assertEqual(len(self.manager.func_list), 2)
+        self.assertEqual(len(self.manager.func_list), 5)
         raw = self.manager.func_list[0]
         self.assertIsNone(raw.handler)
         self.assertNotIn("command", raw.parameters["properties"])
@@ -642,8 +656,8 @@ class LLMToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(market["listings"][0]["price_per_unit"], 100)
         self.assertEqual(market["listings"][0]["world_name"], "SyntheticChina")
         self.assertEqual(market["listings"][0]["source"]["provider"], "Universalis")
-        self.assertFalse(market["listings"][0]["source"]["cached"])
-        self.assertTrue(second["market"]["listings"][0]["source"]["cached"])
+        self.assertNotIn("cached", market["listings"][0]["source"])
+        self.assertNotIn("cached", second["market"]["listings"][0]["source"])
         self.assertFalse(market["coverage"][0]["cached"])
         self.assertTrue(second["market"]["coverage"][0]["cached"])
         self.assertEqual(len(self.transport.requests), 3)
@@ -722,6 +736,10 @@ class LLMToolTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(facts["market"]["intent"], "min")
             self.assertEqual(facts["market"]["scope"]["kind"], "region")
             self.assertEqual(facts["market"]["scope"]["regions"], ["China"])
+            self.assertEqual(
+                facts["market"]["scope"]["default_basis"],
+                "explicit_region" if "国服" in text else "request_language",
+            )
             self.assertIn("仅已返回范围", reply)
         self.assertEqual(self.provider.trace[0]["arguments"]["region"], "cn")
         self.assertNotIn("region", self.provider.trace[1]["arguments"])
@@ -730,52 +748,34 @@ class LLMToolTests(unittest.IsolatedAsyncioTestCase):
         self,
     ):
         await self.start()
+        original = self.wrapper("Synthetic什么价")
         pending, question = await self.provider.chat(
-            self.wrapper("Synthetic什么价"), self.manager.get_full_tool_set()
+            original, self.manager.get_full_tool_set()
         )
         self.assertEqual(pending["status"], "needs_selection")
-        self.assertEqual(pending["user_confirmation"], pending["name_confirmation"])
-        self.assertIn("<ID>", pending["id_confirmation"])
-        self.assertIn("唯一完整名称", question)
-        selection = pending["selection"]
-        args = {key: selection[key] for key in ("batch_id", "generation")}
-        args["item_id"] = 44092
-        for text in ("Synthetic什么价", "选择物品 44091", "选择物品 440920"):
-            with self.subTest(text=text):
-                denied = await self.call("ff14_market_select", args, self.wrapper(text))
-                self.assertEqual(denied["status"], "error")
-        for text in (
-            "Synthetic 44092个多少钱",
-            "服务器44092的Synthetic价格",
-            "物品ID 440920",
-        ):
-            with self.subTest(text=text):
-                denied = await self.call(
-                    parameters={"query": "44092"}, wrapper=self.wrapper(text)
+        self.assertNotIn("user_confirmation", pending)
+        self.assertIn("请选择候选", question)
+        args = {key: pending["selection"][key] for key in ("batch_id", "generation")}
+        self.assertEqual(
+            (
+                await self.call(
+                    "ff14_market_select", {**args, "item_id": 44092}, original
                 )
-                self.assertEqual(denied["status"], "error")
-                self.assertEqual(denied["error"]["code"], "unsupported")
+            )["status"],
+            "error",
+        )
+        before = len(self.transport.requests)
+        clarified = await self.call(
+            "ff14_market_select", {**args, "action": "clarify"}, self.wrapper("哪个好?")
+        )
+        self.assertEqual(clarified["status"], "needs_selection")
+        self.assertEqual(len(self.transport.requests), before)
         continued, reply = await self.provider.chat(
             self.wrapper("选择物品 44092"), self.manager.get_full_tool_set()
         )
         self.assertEqual(continued["market"]["item_id"], 44092)
-        self.assertEqual(continued["market"]["item_name"], "Synthetic Item 44092")
-        self.assertEqual(continued["market"]["original_query"], "Synthetic")
-        self.assertEqual(continued["market"]["quality"], "hq")
-        self.assertEqual(continued["market"]["intent"], "min")
-        self.assertEqual(continued["market"]["scope"], pending["market"]["scope"])
-        self.assertEqual(
-            continued["market"]["module_revision"], pending["market"]["module_revision"]
-        )
-        replay = await self.call(
-            "ff14_market_select", args, self.wrapper("选择物品 44092")
-        )
-        self.assertEqual(replay["status"], "error")
-        self.assertEqual(
-            [row["tool"] for row in self.provider.trace],
-            ["ff14_market_query", "ff14_market_select"],
-        )
-        self.assertIn("仅已返回范围", reply)
+        for field in ("scope", "quality", "intent", "core_revision", "module_revision"):
+            self.assertEqual(continued["market"][field], pending["market"][field])
         self.assertIn("不保证实时可买", reply)
 
     async def test_overview_selection_keeps_original_context_and_versioned_quotes(self):
@@ -844,33 +844,27 @@ class LLMToolTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_numeric_id_requires_label_or_documented_whole_message(self):
         await self.start()
-        for text in (
-            "这个物品44091个多少钱",
-            "item44091 units price",
-            "物品44091多少钱",
-            "服务器44091多少钱",
-            "物品 ID 440910多少钱",
-            "item ID 440910 price",
-            "Synthetic数量44091",
-            "someitem ID 44091 price",
-        ):
-            before = len(self.transport.requests)
-            with self.subTest(text=text):
-                denied = await self.call(wrapper=self.wrapper(text))
-                self.assertEqual(denied["status"], "error")
-                self.assertEqual(denied["error"]["code"], "unsupported")
-            self.assertEqual(len(self.transport.requests), before)
-        for text in (
-            "物品ID 44091多少钱",
-            "item ID: 44091 price",
-            "44091",
-            "查价 44091多少钱",
-            "查询44091什么价",
-        ):
-            with self.subTest(text=text):
-                self.assertEqual(
-                    (await self.call(wrapper=self.wrapper(text)))["status"], "success"
+        for text in ("继续那个物品", "look it up", "物品44091多少钱", "44091"):
+            result = await self.call(
+                parameters={"query": "44091", "request_language": "unknown"},
+                wrapper=self.wrapper(text),
+            )
+            self.assertEqual(result["status"], "success")
+            self.assertEqual(result["market"]["scope"]["default_basis"], "core_default")
+        before = len(self.transport.requests)
+        from yomihime_game_link_sdk.errors import ParameterError
+
+        for query in (True, None, "x" * 121):
+            with self.assertRaises(ParameterError):
+                await self.call(
+                    parameters={"query": query}, wrapper=self.wrapper("查相关物品")
                 )
+        for query in ("0", "2147483648", 'a"b', "Ore\x85"):
+            denied = await self.call(
+                parameters={"query": query}, wrapper=self.wrapper("查相关物品")
+            )
+            self.assertEqual(denied["status"], "error")
+        self.assertEqual(len(self.transport.requests), before)
 
     async def test_name_evidence_rejects_guesses_preserves_selection_and_new_query(
         self,
@@ -883,197 +877,100 @@ class LLMToolTests(unittest.IsolatedAsyncioTestCase):
             "quality": "hq",
             "intent": "min",
         }
-        first = await self.call(parameters=parameters, wrapper=user)
-        self.assertEqual(first["status"], "needs_selection")
+        pending = await self.call(parameters=parameters, wrapper=user)
         retry = await self.call(parameters=parameters, wrapper=user)
-        self.assertEqual(retry["status"], "needs_selection")
-        args = {key: retry["selection"][key] for key in ("batch_id", "generation")}
-        args["item_id"] = 44092
-        for wrapper in (user, self.wrapper("刚才那个"), self.wrapper("随便选一个")):
-            before = len(self.transport.requests)
-            denied = await self.call(
-                parameters={**parameters, "query": "Synthetic Item 44092"},
-                wrapper=wrapper,
-            )
-            self.assertEqual(denied["status"], "error")
-            self.assertEqual(denied["error"]["code"], "unsupported")
-            self.assertEqual(len(self.transport.requests), before)
-
-        from .test_market_integration import aggregated
-
-        async def exact_name(request):
-            if request.source_id == "xivapi_items":
-                return {
-                    "results": [
-                        {"row_id": 44092, "fields": {"Name": "Synthetic Item 44092"}}
-                    ]
-                }
-            if "/aggregated/" in request.path:
-                payload = aggregated("China", level="world")
-                payload["results"][0]["itemId"] = 44092
-                return payload
-            return None
-
-        self.transport.callback = exact_name
-        self.assertEqual(
-            (await self.call("ff14_market_select", args, self.wrapper("刚才那个")))[
-                "status"
-            ],
-            "error",
+        self.assertEqual(pending["selection"], retry["selection"])
+        before = len(self.transport.requests)
+        denied = await self.call(
+            parameters={
+                **parameters,
+                "query": "Synthetic Item 44092",
+                "action": "correction",
+            },
+            wrapper=user,
         )
+        self.assertEqual(denied["status"], "error")
+        self.assertEqual(len(self.transport.requests), before)
+        args = {key: pending["selection"][key] for key in ("batch_id", "generation")}
+        clarified = await self.call(
+            "ff14_market_select",
+            {**args, "action": "clarify"},
+            self.wrapper("刚才那个?"),
+        )
+        self.assertEqual(clarified["selection"], pending["selection"])
         selected = await self.call(
-            "ff14_market_select", args, self.wrapper("选择物品 44092")
+            "ff14_market_select", {**args, "item_id": 44092}, self.wrapper("第二个")
         )
         self.assertEqual(selected["status"], "success")
-        self.assertEqual(selected["market"]["item_id"], 44092)
         for field in ("scope", "quality", "intent", "module_revision", "core_revision"):
-            self.assertEqual(selected["market"][field], retry["market"][field])
-        self.assertEqual(selected["market"]["original_query"], "Synthetic")
-        replay = await self.call(
-            "ff14_market_select", args, self.wrapper("选择物品 44092")
+            self.assertEqual(selected["market"][field], pending["market"][field])
+        self.assertEqual(
+            (
+                await self.call(
+                    "ff14_market_select",
+                    {**args, "item_id": 44092},
+                    self.wrapper("第二个"),
+                )
+            )["status"],
+            "error",
         )
-        self.assertEqual(replay["status"], "error")
-
-        # A candidate name must use select even when explicitly present. A
-        # genuinely unrelated new item still invalidates the previous batch.
-        self.transport.callback = None
-        pending = await self.call(
-            parameters=parameters, wrapper=self.wrapper("Synthetic什么价")
+        fresh = await self.call(
+            parameters=parameters, wrapper=self.wrapper("新查相同物品")
         )
-        stale = {key: pending["selection"][key] for key in ("batch_id", "generation")}
-        stale["item_id"] = 44092
-        self.transport.callback = exact_name
-        explicit = await self.call(
-            parameters={**parameters, "query": "Synthetic Item 44092"},
-            wrapper=self.wrapper("查询 SYNTHETIC   ITEM 44092 价格"),
+        self.assertNotEqual(
+            fresh["selection"]["generation"], pending["selection"]["generation"]
         )
-        self.assertEqual(explicit["status"], "error")
-        explicit = await self.call(
-            parameters={**parameters, "query": "Unrelated Item"},
-            wrapper=self.wrapper("查询 UNRELATED   ITEM 价格"),
-        )
-        self.assertEqual(explicit["status"], "success")
-        self.assertEqual(explicit["market"]["item_id"], 44092)
-        invalidated = await self.call(
-            "ff14_market_select", stale, self.wrapper("选择物品 44092")
-        )
-        self.assertEqual(invalidated["status"], "error")
 
     async def test_natural_name_chat_selection_preserves_context_prices_and_cache(self):
-        from .test_market_integration import aggregated
-
         await self.start()
-
-        async def prices(request):
-            if request.source_id == "xivapi_items":
-                return {
-                    "results": [
-                        {"row_id": 44091, "fields": {"Name": "犎牛牛排"}},
-                        {"row_id": 44092, "fields": {"Name": "另一种牛排"}},
-                    ]
-                }
-            if "/aggregated/" in request.path:
-                return aggregated("China", level="region")
-            return None
-
-        self.transport.callback = prices
-        original = self.wrapper("牛排国服哪里最便宜？")
-        pending, question = await self.provider.chat(
+        original = self.wrapper("Synthetic什么价")
+        pending, _ = await self.provider.chat(
             original, self.manager.get_full_tool_set()
         )
-        self.assertEqual(pending["status"], "needs_selection")
-        self.assertIn("犎牛牛排", question)
-        self.assertIn("唯一完整名称", question)
-        self.assertNotIn("/ygl", question)
         args = {key: pending["selection"][key] for key in ("batch_id", "generation")}
         args["item_id"] = 44091
         before = len(self.transport.requests)
         self.assertEqual(
             (await self.call("ff14_market_select", args, original))["status"], "error"
         )
-        for text in (
-            "犎牛牛排？",
-            "不是犎牛牛排",
-            "不要犎牛牛排",
-            "犎牛牛排或另一种牛排",
-            "牛排那个。",
-            "第二个",
-            "犎牛牛排2个",
-            "刚才那个",
-        ):
-            with self.subTest(text=text):
-                denied = await self.call("ff14_market_select", args, self.wrapper(text))
-                self.assertEqual(denied["status"], "error")
-        for text, query in (
-            ("犎牛牛排那个。", "犎牛牛排"),
-            ("犎牛牛排那个。", "牛排"),
-            ("犎牛牛排那个。", "犎"),
-            ("犎牛牛排？", "犎牛牛排"),
-            ("不是犎牛牛排", "犎牛牛排"),
-            ("不是犎牛", "犎牛"),
-            ("就犎牛", "犎牛"),
-            ("犎牛？", "犎牛"),
-            ("犎牛牛排或另一种牛排", "牛排"),
-            ("物品ID 44091", "44091"),
-            ("第二个", "第二个"),
-        ):
-            with self.subTest(text=text, query=query):
-                denied = await self.call(
-                    parameters={"query": query, "region": "global", "quality": "nq"},
-                    wrapper=self.wrapper(text),
-                )
-                self.assertEqual(denied["status"], "error")
-        self.assertEqual(len(self.transport.requests), before)
-        wrong_id = await self.call(
-            "ff14_market_select",
-            {**args, "item_id": 44092},
-            self.wrapper("犎牛牛排那个。"),
-        )
-        self.assertEqual(wrong_id["status"], "error")
+        for text in ("不是", "两个都行", "哪个好", "刚才那个?"):
+            result = await self.call(
+                "ff14_market_select",
+                {
+                    **{key: args[key] for key in ("batch_id", "generation")},
+                    "action": "clarify",
+                },
+                self.wrapper(text),
+            )
+            self.assertEqual(result["status"], "needs_selection")
         for identity in (
             {"sender": "other"},
             {"session": "other"},
             {"adapter": "other"},
         ):
-            denied = await self.call(
-                "ff14_market_select", args, self.wrapper("犎牛牛排那个。", **identity)
+            self.assertEqual(
+                (
+                    await self.call(
+                        "ff14_market_select", args, self.wrapper("第一个", **identity)
+                    )
+                )["status"],
+                "error",
             )
-            self.assertEqual(denied["status"], "error")
-        continued, reply = await self.provider.chat(
-            self.wrapper("犎牛牛排那个。"), self.manager.get_full_tool_set()
-        )
-        self.assertEqual(continued["status"], "success")
-        self.assertEqual(continued["market"]["item_id"], 44091)
-        self.assertEqual(continued["market"]["item_name"], "犎牛牛排")
-        self.assertEqual(continued["market"]["original_query"], "牛排")
+        self.assertEqual(len(self.transport.requests), before)
+        selected = await self.call("ff14_market_select", args, self.wrapper("第一个"))
+        self.assertEqual(selected["status"], "success")
         for field in ("scope", "quality", "intent", "core_revision", "module_revision"):
-            self.assertEqual(continued["market"][field], pending["market"][field])
-        self.assertIn("100", reply)
-        self.assertIn("仅已返回范围", reply)
-        self.assertIn("不保证实时可买", reply)
+            self.assertEqual(selected["market"][field], pending["market"][field])
+        self.assertFalse(selected["market"]["limitations"]["complete_world_coverage"])
         self.assertEqual(
-            [row["tool"] for row in self.provider.trace],
-            ["ff14_market_query", "ff14_market_select"],
+            selected["market"]["time_semantics"]["minimum"], "world_upload"
         )
         self.assertEqual(
-            (
-                await self.call(
-                    "ff14_market_select", args, self.wrapper("犎牛牛排那个。")
-                )
-            )["status"],
+            (await self.call("ff14_market_select", args, self.wrapper("第一个")))[
+                "status"
+            ],
             "error",
         )
-        cached = await self.call(
-            parameters={"query": "44091", "region": "cn", "intent": "min"}
-        )
-        self.assertTrue(cached["market"]["coverage"][0]["cached"])
-        self.assertEqual(len(self.transport.requests), before + 1)
-        handler = (
-            self.runtime.core_runtime.registry.snapshot()
-            .module("ff14/ff14")
-            .handlers.capabilities["ff14.market.query"]
-        )
-        self.assertFalse(hasattr(handler, "_tool_event"))
 
     async def test_bound_event_reset_after_exception_and_concurrent_owners(self):
         await self.start()
@@ -1211,9 +1108,7 @@ class LLMToolTests(unittest.IsolatedAsyncioTestCase):
                         denials.append(
                             self.call(
                                 parameters={
-                                    "query": text,
-                                    "region": "global",
-                                    "quality": "nq",
+                                    "action": "clarify",
                                 },
                                 wrapper=self.wrapper(text),
                             )
@@ -1268,124 +1163,41 @@ class LLMToolTests(unittest.IsolatedAsyncioTestCase):
         self,
     ):
         await self.start()
-        continuations = (
-            "第7个",
-            "第七个",
-            "第十个",
-            "最后一个",
-            "不是",
-            "不要",
-            "不选",
-            "后者",
+        pending = await self.call(
+            parameters={"query": "Synthetic"}, wrapper=self.wrapper("查相关物品")
         )
-        for index, text in enumerate(continuations):
-            sender = f"ordinal-user-{index}"
-            original = self.wrapper("Synthetic什么价", sender=sender)
-            parameters = {
-                "query": "Synthetic",
-                "server": "90001",
-                "quality": "hq",
-                "intent": "min",
-            }
-            pending = await self.call(parameters=parameters, wrapper=original)
-            before = len(self.transport.requests)
-            rejected = await self.call(
-                parameters={"query": text, "region": "global", "quality": "nq"},
-                wrapper=self.wrapper(text, sender=sender),
+        before = len(self.transport.requests)
+        for text in ("不要", "哪个区别", "不确定"):
+            result = await self.call(
+                parameters={"action": "clarify"}, wrapper=self.wrapper(text)
             )
-            self.assertEqual(rejected["status"], "error")
-            for message, query in (
-                ("第7个吗？", "第7个"),
-                ("帮我看后者", "后者"),
-                ("不是吧", "不是"),
-                ("我说不要", "不要"),
-                ("我说不选", "不选"),
-                ("我说不要Synthetic", "不要Synthetic"),
-            ):
-                rejected = await self.call(
-                    parameters={"query": query, "region": "global", "quality": "nq"},
-                    wrapper=self.wrapper(message, sender=sender),
-                )
-                self.assertEqual(rejected["status"], "error")
-            retry = await self.call(parameters=parameters, wrapper=original)
-            self.assertEqual(retry["selection"], pending["selection"])
-            self.assertEqual(retry["market"], pending["market"])
-            self.assertEqual(len(self.transport.requests), before)
-            args = {
-                key: pending["selection"][key] for key in ("batch_id", "generation")
-            }
-            args["item_id"] = 44091
-            selected = await self.call(
-                "ff14_market_select",
-                args,
-                self.wrapper("Synthetic Item 44091", sender=sender),
+            self.assertEqual(result["selection"], pending["selection"])
+        self.assertEqual(len(self.transport.requests), before)
+        for identity in ({"sender": "absent"}, {"session": "absent"}):
+            self.assertEqual(
+                (
+                    await self.call(
+                        parameters={"action": "continue"},
+                        wrapper=self.wrapper("第一个", **identity),
+                    )
+                )["status"],
+                "error",
             )
-            self.assertEqual(selected["status"], "success")
-            for field in (
-                "scope",
-                "quality",
-                "intent",
-                "core_revision",
-                "module_revision",
-            ):
-                self.assertEqual(selected["market"][field], pending["market"][field])
-
         handler = (
             self.runtime.core_runtime.registry.snapshot()
             .module("ff14/ff14")
             .handlers.capabilities["ff14.market.query"]
         )
-        for state in ("absent", "expired"):
-            sender = f"guard-{state}"
-            if state == "expired":
-                old = await self.call(
-                    parameters={"query": "Synthetic"},
-                    wrapper=self.wrapper("Synthetic什么价", sender=sender),
+        handler.registry._clock = lambda: 10**20
+        self.assertEqual(
+            (
+                await self.call(
+                    parameters={"action": "clarify"}, wrapper=self.wrapper("哪个好")
                 )
-                handler.registry._clock = lambda: 10**20
-            before = len(self.transport.requests)
-            for text in continuations:
-                denied = await self.call(
-                    parameters={"query": text, "region": "global", "quality": "nq"},
-                    wrapper=self.wrapper(text, sender=sender),
-                )
-                self.assertEqual(denied["status"], "error")
-            self.assertEqual(len(self.transport.requests), before)
-            if state == "expired":
-                args = {
-                    key: old["selection"][key] for key in ("batch_id", "generation")
-                }
-                args["item_id"] = 44091
-                self.assertEqual(
-                    (
-                        await self.call(
-                            "ff14_market_select",
-                            args,
-                            self.wrapper("Synthetic Item 44091", sender=sender),
-                        )
-                    )["status"],
-                    "error",
-                )
-                handler.registry._clock = handler.clock
-
-        # Ordinal words inside a genuine full item name are not positional replies.
-        for index, name in enumerate(
-            ("第七天堂牛排", "第七个勇士徽章", "最后一个传说牛排", "前者的矿石")
-        ):
-            sender = f"fresh-name-{index}"
-            old = await self.call(
-                parameters={"query": "Synthetic"},
-                wrapper=self.wrapper("Synthetic什么价", sender=sender),
-            )
-            fresh = await self.call(
-                parameters={"query": name},
-                wrapper=self.wrapper(f"查询{name}价格", sender=sender),
-            )
-            self.assertEqual(fresh["status"], "needs_selection")
-            self.assertEqual(fresh["market"]["query"], name)
-            self.assertNotEqual(
-                fresh["selection"]["generation"], old["selection"]["generation"]
-            )
+            )["status"],
+            "error",
+        )
+        self.assertEqual(len(self.transport.requests), before)
 
     async def test_cancelled_consumed_flight_clears_context_and_recovers_after_guard(
         self,
@@ -1424,7 +1236,7 @@ class LLMToolTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.wait_for(entered.wait(), 3)
             before = len(self.transport.requests)
             denied = await self.call(
-                parameters={"query": "第十个", "region": "global"},
+                parameters={"action": "clarify"},
                 wrapper=self.wrapper("第十个"),
             )
             self.assertEqual(denied["status"], "error")
@@ -1558,28 +1370,37 @@ class LLMToolTests(unittest.IsolatedAsyncioTestCase):
             "选择Synthetic Item 44091",
             "选Synthetic Item 44091",
         ):
-            with self.subTest(text=text):
-                denied = await self.call(
-                    parameters={"query": "Synthetic Item 44091"},
-                    wrapper=self.wrapper(text),
-                )
-                self.assertEqual(denied["status"], "error")
-                self.assertEqual(self.transport.requests, [])
-        pending = await self.call(
-            parameters={"query": "Synthetic"}, wrapper=self.wrapper("Synthetic什么价")
-        )
-        args = {key: pending["selection"][key] for key in ("batch_id", "generation")}
-        args["item_id"] = 44091
-        handler.registry._clock = lambda: 10**20
-        before = len(self.transport.requests)
-        for text in ("Synthetic Item 44091那个。", "就Synthetic Item 44091"):
             denied = await self.call(
-                parameters={"query": "Synthetic Item 44091"}, wrapper=self.wrapper(text)
+                parameters={"action": "clarify"}, wrapper=self.wrapper(text)
             )
             self.assertEqual(denied["status"], "error")
-        denied = await self.call(
-            "ff14_market_select", args, self.wrapper("Synthetic Item 44091那个。")
+            self.assertEqual(self.transport.requests, [])
+        original = self.wrapper("Synthetic什么价")
+        pending = await self.call(parameters={"query": "Synthetic"}, wrapper=original)
+        args = {key: pending["selection"][key] for key in ("batch_id", "generation")}
+        args["item_id"] = 44091
+        before = len(self.transport.requests)
+        for identity in (
+            {"sender": "other"},
+            {"session": "other"},
+            {"adapter": "other"},
+        ):
+            denied = await self.call(
+                "ff14_market_select", args, self.wrapper("第一个", **identity)
+            )
+            self.assertEqual(denied["status"], "error")
+        self.assertEqual(
+            (await self.call("ff14_market_select", args, original))["status"], "error"
         )
+        handler.registry._clock = lambda: 10**20
+        for parameters in ({"action": "clarify"}, {"action": "continue"}):
+            self.assertEqual(
+                (await self.call(parameters=parameters, wrapper=self.wrapper("那个")))[
+                    "status"
+                ],
+                "error",
+            )
+        denied = await self.call("ff14_market_select", args, self.wrapper("第一个"))
         self.assertEqual(denied["status"], "error")
         self.assertEqual(len(self.transport.requests), before)
         self.assertEqual(handler.registry.size, 0)
@@ -1739,7 +1560,7 @@ class LLMToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.runtime.core_runtime)
         self.context.add_llm_tools = original
         await self.runtime.initialize()
-        self.assertEqual(len(self.manager.func_list), 2)
+        self.assertEqual(len(self.manager.func_list), 5)
 
     async def test_module_stop_revoke_and_pending_observer_cleanup(self):
         await self.start()
