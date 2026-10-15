@@ -19,9 +19,14 @@ from yomihime_game_link_sdk.contexts import (
     InvocationSubscriptionScope,
     InvocationView,
 )
-from yomihime_game_link_sdk.declarations import CapabilityDescriptor, PrivacyFloor
+from yomihime_game_link_sdk.declarations import (
+    CapabilityDescriptor,
+    ModuleManifest,
+    PrivacyFloor,
+)
 from yomihime_game_link_sdk.display import (
     DisplayAudience,
+    DisplayDocument,
     DisplayLimits,
     DisplayRenderer,
     Privacy,
@@ -82,6 +87,9 @@ from .owner_authority import OwnerRouteProofAuthority
 OutputRequest: TypeAlias = (
     CommandOutput | CapabilityResult | ToolOutput | SubscriptionOutput
 )
+CommandHeadingProjector: TypeAlias = Callable[
+    [ModuleManifest, CapabilityDescriptor, DisplayDocument], tuple[str, str]
+]
 
 
 class ResourceVisibilityProbe(Protocol):
@@ -195,6 +203,7 @@ class OutputService:
         resource_visibility: ResourceVisibilityProbe,
         principal_resolver: InvocationPrincipalResolver,
         owner_authority: OwnerRouteProofAuthority | None = None,
+        command_heading_projector: CommandHeadingProjector | None = None,
         claim_lease: timedelta,
         send_timeout: float,
         now: Callable[[], datetime] | None = None,
@@ -206,6 +215,11 @@ class OutputService:
         self._send_scheduler = send_scheduler
         self._registry = registry
         self._renderer = renderer
+        if command_heading_projector is not None and not callable(
+            command_heading_projector
+        ):
+            raise TypeError("command heading projector must be callable")
+        self._command_heading_projector = command_heading_projector
         self._limits = limits
         self._conversations = conversations
         self._message_port = message_port
@@ -339,7 +353,7 @@ class OutputService:
                     raise _OutputFailure("invocation_unavailable")
                 await self._check_result_authority(invocation, capability, result)
                 target = await self._target(invocation, result.privacy)
-                rendered = await self._render(result)
+                rendered = await self._render(result, invocation=invocation)
                 self._admission.check(self._root_lease(invocation))
             except _OutputFailure as exc:
                 return await self._controlled(
@@ -759,7 +773,9 @@ class OutputService:
             authorized=authorized,
         )
 
-    async def _render(self, result: CapabilityResult) -> RenderedMessage:
+    async def _render(
+        self, result: CapabilityResult, *, invocation: InvocationView | None = None
+    ) -> RenderedMessage:
         validate_contract(result)
         if result.status is ResultStatus.ERROR:
             # Use stable core error text, never module or exception strings.
@@ -772,9 +788,38 @@ class OutputService:
             if result.privacy is Privacy.PRIVATE
             else DisplayAudience.PUBLIC
         )
+        document = result.document
+        projector = self._command_heading_projector
+        heading_context = None
+        if (
+            projector is not None
+            and invocation is not None
+            and invocation.origin is InvocationOrigin.COMMAND
+            and invocation.parent_id is None
+        ):
+            # Authority failures retain _command's existing safe classification;
+            # they are not failures of the injected presentation policy.
+            self._issuer.require(invocation)
+            capability = self._require_current_module(invocation)
+            if capability is None:
+                raise ValueError("command capability is unavailable")
+            module = self._registry.snapshot().module(invocation.module_id)
+            heading_context = (module.manifest, capability)
         try:
+            if projector is not None and heading_context is not None:
+                heading = projector(*heading_context, document)
+                if (
+                    type(heading) is not tuple
+                    or len(heading) != 2
+                    or any(type(value) is not str for value in heading)
+                ):
+                    raise ValueError("invalid command heading")
+                # The injected policy can change only display headings, never
+                # facts, blocks, privacy, sources or resource references.
+                document = replace(document, title=heading[0], subject=heading[1])
+                validate_contract(document)
             output = await self._renderer.render(
-                result.document, limits=self._limits, audience=audience
+                document, limits=self._limits, audience=audience
             )
             validate_contract(output)
         except Exception:

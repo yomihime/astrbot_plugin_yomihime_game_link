@@ -544,6 +544,158 @@ class OutputServiceTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("private", rendered.text)
             self.assertNotIn("FFLogs", rendered.text)
 
+    async def test_command_heading_hook_uses_registered_context_and_only_changes_headings(
+        self,
+    ):
+        calls = []
+
+        def project(manifest, capability, document):
+            calls.append((manifest, capability, document))
+            return "统一标题", f"{document.title} · {document.subject}"
+
+        service = self._service(command_heading_projector=project)
+        source = self._result()
+        outcome = await service.route(self._view(), source)
+        self.assertEqual(outcome.status, OutputStatus.SENT)
+        self.assertEqual(
+            calls,
+            [
+                (
+                    self.module.manifest,
+                    self.module.manifest.capabilities[0],
+                    source.document,
+                )
+            ],
+        )
+        projected = self.renderer.calls[0][0]
+        self.assertEqual(projected.title, "统一标题")
+        self.assertEqual(
+            projected.subject, f"{source.document.title} · {source.document.subject}"
+        )
+        self.assertEqual(
+            replace(
+                projected, title=source.document.title, subject=source.document.subject
+            ),
+            source.document,
+        )
+        self.assertIs(outcome.result.result, source)
+
+    async def test_invalid_or_raising_heading_hook_fails_safely_before_send(self):
+        def raises(*args):
+            raise ValueError("private exception text")
+
+        for callback in (
+            raises,
+            lambda *args: None,
+            lambda *args: ("only",),
+            lambda *args: ["a", "b"],
+            lambda *args: ("", "b"),
+            lambda *args: ("a", object()),
+        ):
+            with self.subTest(callback=callback):
+                outcome = await self._service(command_heading_projector=callback).route(
+                    self._view(), self._result()
+                )
+                self.assertEqual(outcome.error_code, "display_render_failed")
+                self.assertEqual(self.message_port.calls, [])
+                self.assertEqual(self.renderer.calls, [])
+
+    async def test_authority_disabled_during_target_lookup_keeps_legacy_classification_with_or_without_hook(
+        self,
+    ):
+        await self._assert_target_authority_failure_matches_legacy(release_issuer=False)
+
+    async def test_issuer_released_during_target_lookup_keeps_legacy_classification_with_or_without_hook(
+        self,
+    ):
+        await self._assert_target_authority_failure_matches_legacy(release_issuer=True)
+
+    async def _assert_target_authority_failure_matches_legacy(self, *, release_issuer):
+        outcomes = []
+        for enabled in (False, True):
+            with self.subTest(heading_hook=enabled):
+                fixture = OutputServiceTests()
+                await fixture.asyncSetUp()
+                try:
+                    view = fixture._view()
+                    resolve = fixture.conversations.resolve
+                    called = []
+
+                    async def disable_during_resolve(invocation):
+                        route = await resolve(invocation)
+                        if release_issuer:
+                            fixture.issuer.release(invocation)
+                        else:
+                            await fixture._disable()
+                        return route
+
+                    def project(*args):
+                        called.append(args)
+                        return "projected", "subject"
+
+                    fixture.conversations.resolve = disable_during_resolve
+                    service = fixture._service(
+                        command_heading_projector=project if enabled else None
+                    )
+                    outcome = await service.route(view, fixture._result())
+                    outcomes.append((outcome.status, outcome.error_code))
+                    self.assertEqual(outcome.error_code, "output_unavailable")
+                    self.assertEqual(fixture.message_port.calls, [])
+                    self.assertEqual(called, [])
+                finally:
+                    await fixture.asyncTearDown()
+        self.assertEqual(outcomes[0], outcomes[1])
+
+    async def test_tool_nested_and_safe_error_never_call_command_heading_hook(self):
+        def forbidden(*args):
+            self.fail("non-command-success must not project headings")
+
+        service = self._service(command_heading_projector=forbidden)
+        tool = await service.route(
+            self._view(InvocationOrigin.LLM_TOOL), self._result()
+        )
+        self.assertEqual(tool.status, OutputStatus.TOOL_RESULT)
+        parent = self._view()
+        child = self.issuer.derive(
+            parent,
+            module_id="sample/demo",
+            module_epoch=self.module.epoch,
+            capability_id="lookup",
+        )
+        nested = await service.route(child, self._result())
+        self.assertEqual(nested.status, OutputStatus.NESTED_RESULT)
+        error = CapabilityResult(
+            "safe-error",
+            ResultStatus.ERROR,
+            error=ErrorDetail(ErrorCode.AUTH_REQUIRED, "private exception"),
+        )
+        routed = await service.route(self._view(), error)
+        self.assertEqual(routed.status, OutputStatus.SENT)
+        self.assertTrue(
+            self.message_port.calls[-1][1].text.startswith("此来源需要授权。")
+        )
+        self.assertNotIn("private exception", self.message_port.calls[-1][1].text)
+
+    async def test_long_heading_fallback_still_sends_original_valid_document(self):
+        from functools import partial
+
+        from ygl_test_subject.presentation.command_text import project_command_heading
+
+        source = replace(
+            self._result(),
+            document=DisplayDocument(
+                "题" * 1600, "说" * 1600, tuple(TextBlock(str(i)) for i in range(32))
+            ),
+        )
+        service = self._service(
+            command_heading_projector=partial(
+                project_command_heading, max_heading_chars=3000
+            )
+        )
+        outcome = await service.route(self._view(), source)
+        self.assertEqual(outcome.status, OutputStatus.SENT)
+        self.assertEqual(self.renderer.calls[0][0], source.document)
+
     async def test_o01_command_sends_once_and_preserves_accepted_receipt(self):
         view = self._view()
         request = CommandOutput(self._result())
@@ -650,6 +802,10 @@ class OutputServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(unavailable.result)
 
     async def test_subscription_enqueue_uses_exact_issued_scope_and_replays(self):
+        def forbidden(*args):
+            self.fail("subscriptions must not project command headings")
+
+        self.output = self._service(command_heading_projector=forbidden)
         record = SubscriptionRecord(
             "subscription-one",
             1,

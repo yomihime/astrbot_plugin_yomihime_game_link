@@ -95,6 +95,7 @@ from ..services.module_services import (
 )
 from ..services.module_storage import ModuleStorageRouter
 from ..services.output import (
+    CommandHeadingProjector,
     LifecycleApprovedSendScheduler,
     OutputResult,
     OutputService,
@@ -437,6 +438,7 @@ class CoreRuntime:
         host_ingress_validator: HostIngressValidator,
         host_message_current_validator: Callable[[InvocationOrigin, HostIngress], bool]
         | None = None,
+        command_heading_projector: CommandHeadingProjector | None = None,
         config_principal_id: str,
         identity_namespace: str,
         trusted_bundled_defaults: Mapping[str, tuple[str, ...]] | None = None,
@@ -682,6 +684,7 @@ class CoreRuntime:
             send_scheduler=self.send_scheduler,
             registry=self.registry,
             renderer=renderer,
+            command_heading_projector=command_heading_projector,
             limits=display_limits,
             conversations=self._conversation_resolver,
             message_port=message_port,

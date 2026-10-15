@@ -416,6 +416,7 @@ class CoreRuntimeTests(unittest.IsolatedAsyncioTestCase):
         trusted_subscription_gates=None,
         public_web_validator=None,
         public_web_capabilities=frozenset(),
+        command_heading_projector=None,
     ) -> CoreRuntime:
         (self.root / "extensions").mkdir(exist_ok=True)
         return CoreRuntime(
@@ -442,6 +443,7 @@ class CoreRuntimeTests(unittest.IsolatedAsyncioTestCase):
             trusted_subscription_gates=trusted_subscription_gates,
             public_web_validator=public_web_validator,
             public_web_capabilities=public_web_capabilities,
+            command_heading_projector=command_heading_projector,
         )
 
     async def _public_web_runtime(self, *, detached=False, block_root=False):
@@ -1390,6 +1392,20 @@ class CoreRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await runtime.close(timeout=0.5))
         self.assertTrue(runtime.closed)
         self.assertEqual(source.capture_calls, 0)
+
+    async def test_command_heading_dependency_does_not_wrap_subscription_renderer(self):
+        def project(*args):
+            return "command", "subject"
+
+        renderer = _Renderer()
+        runtime = self._runtime(renderer=renderer, command_heading_projector=project)
+        try:
+            self.assertIs(runtime.output._command_heading_projector, project)
+            self.assertIs(runtime.output._renderer, renderer)
+            self.assertIs(runtime.delivery._renderer, renderer)
+            await runtime.start()
+        finally:
+            self.assertTrue(await runtime.close(timeout=0.5))
 
     async def test_source_credential_policies_are_passed_to_module_services(self):
         policies = (

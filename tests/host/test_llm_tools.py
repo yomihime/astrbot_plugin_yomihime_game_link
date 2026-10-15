@@ -171,6 +171,86 @@ class LLMToolTests(unittest.IsolatedAsyncioTestCase):
         )
         return json.loads(value) if value.startswith("{") else value
 
+    async def test_final_tool_json_keeps_raw_facts_and_does_not_apply_command_projection(
+        self,
+    ):
+        from yomihime_game_link_sdk.display import DisplayDocument, TextBlock
+        from yomihime_game_link_sdk.results import FactDocument
+
+        await self.start()
+        core = self.runtime.core_runtime
+
+        def forbidden(*args):
+            raise AssertionError("tool result must not project command headings")
+
+        core.output._command_heading_projector = forbidden
+        handler = (
+            core.registry.snapshot()
+            .module("ff14/ff14")
+            .handlers.capabilities["ff14.market.query"]
+        )
+        facts = {
+            "status": "success",
+            "value": 1234.5,
+            "unknown": None,
+            "unit": "Gil",
+            "coverage": {"complete": False, "region": "synthetic"},
+            "source": {"url": "https://example.invalid/public-source"},
+            # A legitimate business name is data, never a presentation field
+            # to strip merely because it contains the same brand characters.
+            "name": "如月怜的游戏连结",
+        }
+
+        async def success(*args):
+            return CapabilityResult(
+                "synthetic-serialization",
+                ResultStatus.SUCCESS,
+                document=DisplayDocument(
+                    "原始业务标题", "原始业务主体", (TextBlock("正文"),)
+                ),
+                model_facts=FactDocument(
+                    facts, sources=("sources-only-not-serialized",)
+                ),
+            )
+
+        handler.invoke = success
+        tool = self.manager.get_full_tool_set().get_tool("ff14_market_query")
+        first = await tool.call(self.wrapper(), query="44091", region="cn")
+        second = await tool.call(self.wrapper(), query="44091", region="cn")
+        self.assertEqual(json.loads(first), facts)
+        self.assertEqual(json.loads(second), facts)
+        self.assertNotIn("sources-only-not-serialized", first)
+        self.assertEqual(self.context.calls, [])
+
+        for supplement in (
+            None,
+            {"source": {"url": "https://example.invalid/error-source"}, "value": None},
+        ):
+            expected = {
+                "status": "error",
+                "error": {
+                    "code": "no_records",
+                    "message": "No public records in this scope.",
+                },
+            }
+            if supplement is not None:
+                expected["supplement"] = supplement
+
+            async def error(*args):
+                return CapabilityResult(
+                    "synthetic-serialization-error",
+                    ResultStatus.ERROR,
+                    error=ErrorDetail(
+                        ErrorCode.NO_RECORDS, expected["error"]["message"]
+                    ),
+                    model_facts=FactDocument(expected),
+                )
+
+            handler.invoke = error
+            serialized = await tool.call(self.wrapper(), query="44091", region="cn")
+            self.assertEqual(json.loads(serialized), expected)
+            self.assertEqual(self.context.calls, [])
+
     async def assert_core_closed(self, core, module):
         self.assertTrue(core.closed)
         self.assertFalse(core.registry.is_active(module))

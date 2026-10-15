@@ -1804,6 +1804,12 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(len(context.calls), 1)
         self.assertIn("Copper Ore", context.calls[0][1].chain[0].text)
+        self.assertTrue(
+            context.calls[0][1]
+            .chain[0]
+            .text.startswith("游戏连结 · 最终幻想 XIV · item\n")
+        )
+        self.assertIn("FF14 物品 100", context.calls[0][1].chain[0].text)
         await runtime.terminate()
         self.assertTrue(transport.closed)
 

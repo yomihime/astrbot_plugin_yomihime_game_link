@@ -7,6 +7,7 @@ import tempfile
 import weakref
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 from secrets import token_urlsafe
 from threading import RLock
@@ -41,6 +42,7 @@ from ...extensions.factory_resolver import (
 )
 from ...infrastructure.key_provider import EnvironmentKeyProvider
 from ...infrastructure.secret_codec import AESGCMSecretCodec
+from ...presentation.command_text import project_command_heading
 from ...presentation.rendering import GenericDisplayRenderer, RenderingBounds
 from ...scripts.prepare_ff14_config_migration import INPUT_FILENAME, load_prepared_input
 from ...services.admin_authorization import AdminAuthorizationService
@@ -842,6 +844,17 @@ class AstrBotRuntime:
                     raise TypeError("HTTP transport must implement request")
                 if not callable(getattr(self._http_transport, "close", None)):
                     raise TypeError("owned HTTP transport must implement async close")
+                rendering_bounds = RenderingBounds(
+                    max_chars_per_page=3000,
+                    max_lines_per_page=100,
+                    max_fields_per_block=32,
+                    max_rows_per_block=50,
+                    max_asset_read_bytes=1,
+                    max_image_dimension=1,
+                    max_asset_reads=1,
+                    max_blocks_per_document=32,
+                    max_members_per_batch=8,
+                )
                 core = self._core_factory(
                     database=self._data_dir / "runtime.sqlite3",
                     extension_root=extension_root,
@@ -851,18 +864,10 @@ class AstrBotRuntime:
                         EnvironmentKeyProvider("YGL_SECRET_KEY")
                     ),
                     http_transport=self._http_transport,
-                    renderer=GenericDisplayRenderer(
-                        RenderingBounds(
-                            max_chars_per_page=3000,
-                            max_lines_per_page=100,
-                            max_fields_per_block=32,
-                            max_rows_per_block=50,
-                            max_asset_read_bytes=1,
-                            max_image_dimension=1,
-                            max_asset_reads=1,
-                            max_blocks_per_document=32,
-                            max_members_per_batch=8,
-                        )
+                    renderer=GenericDisplayRenderer(rendering_bounds),
+                    command_heading_projector=partial(
+                        project_command_heading,
+                        max_heading_chars=rendering_bounds.max_chars_per_page,
                     ),
                     display_limits=validate_contract(DisplayLimits(2, 4096)),
                     message_port=message_port,
