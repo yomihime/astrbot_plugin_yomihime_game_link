@@ -1,16 +1,16 @@
 # 模块开发者展示样式 Spec
 
-更新日期：2026-10-15（文档日期，非查询或数据更新时间）
+更新日期：2026-10-16（文档日期，非查询或数据更新时间）
 
-适用：`astrbot_plugin_yomihime_game_link` 的模块开发者。本轮是展示蓝图与独立 Python 参考实现，不是生产图片接入。
+适用：`astrbot_plugin_yomihime_game_link` 的模块开发者。通用富文本已进入 production presentation 并通过限定离线独审，Python 参考复用同一内核；生产命令图片发送仍未接入。
 
 ## 1. 边界与状态
 
 三层交付必须分开：
 
 - **设计蓝图**：本文规定语义、职责、可读性及发送前降级约束；概念富文本结构不扩展公开 SDK
-- **离线参考**：`examples/command_cards/rich_text_reference.py` 和 `ff14_logs_reference.py` 示范样式与 FF14 模块映射，测试入口为同目录 `test_style_reference.py`；仅处理合成或调用方提供的数据
-- **生产状态**：已有通用 PNG、内部授权资源与固定字体基础，Host 图片读取、发送和 FFLogs 新目录聚合仍未接通；真实目录及 `totalKills` 字段仍待受管来源和本地真实 fixture 核验。SDK 保持 `0.1.0a6`
+- **离线参考**：`examples/command_cards/rich_text_reference.py` 薄适配共用的 `presentation/rich_text.py`，`ff14_logs_reference.py` 保留 FF14 分级、格式和合成布局；测试入口为同目录 `test_style_reference.py`。不取得真实数据或业务等级证据
+- **生产状态**：通用 PNG 已增加内部 `RichText` / `TextCell` 绘图入口，R2 限定离线独审通过，保留旧字符串路径及固定字体/授权资源基础。Host 图片读取、发送和 FFLogs 新目录聚合仍未接通；真实目录及 `totalKills` 字段仍待受管来源和真实 fixture 核验。SDK 保持 `0.1.0a6`
 
 本轮测试结果按实际执行记录单独报告，不把参考脚本通过等同全仓通过，也不改写[历史集成失败](README.md#p5-本轮集成结果)。
 
@@ -79,11 +79,11 @@
 
 ## 4. 参考接口与概念结构
 
-本轮离线接口定义在 `rich_text_reference.py`：`TextSpan(text, role, grade)` 只接收受限文字和语义角色；`draw_rich_line` 绘制同一基线的多个 span，`draw_metric` 按实际字形边界右对齐、垂直居中。B 对全部文字角色按真实底色和 `< 1.5` 条件触发，包括普通、次要、缺失及不可评价文字；背景从已有画布采样，不接受调用方自报背景来绕过条件。普通、缺失及不可评价值仍保留其主题字面色，不新增特殊等级或样式。
+`rich_text_reference.py` 复用共用内核并保留示例接口：`TextSpan(text, role, grade)` 只接收受限文字和语义角色；`draw_rich_line` 绘制同一基线的多个 span，`draw_metric` 按实际字形边界右对齐、垂直居中。B 对全部文字角色按真实底色和 `< 1.5` 条件触发，包括普通、次要、缺失及不可评价文字；背景从已有画布采样，不接受调用方自报背景来绕过条件。普通、缺失及不可评价值仍保留其主题字面色，不新增特殊等级或样式。
 
 `ff14_logs_reference.py` 的 `percentile`、`rdps`、`count` 将模块值转换为 span；`Unevaluable` 明确区分不可评价原文与无效数值，`None` 表示缺失。`percentile(100)` 的前置条件是模块已验证 FFLogs 来源、范围及满分含义；该 helper 自身不取得证据。可运行示例及 CLI 见 [参考说明](../../examples/command_cards/README.md#最新模块富文本与-logs-样式参考)。
 
-当前 helper 是有界单行参考，调用方负责换行或发送前降级；下方完整 card / paragraph / row 仅为蓝图，不暗示这些类型已在 SDK 或生产渲染器实现。
+共用内核提供有界字效会话，完整 `CardSpec` 的富文本换行和单元格对齐由 `card_bitmap.py` 内部新增类型负责；参考 Canvas 的多次调用共享累计计量。下方 YAML 仍是概念蓝图，不是这些 Python 类型或公开 SDK 的可执行输入。最终验证状态和工作位图/字体模型见[当前检查点](README.md#续作-b共用富文本内核2026-10-16)。
 
 以下是概念性本地结构；示例数值不代表任何真实角色，品牌资源仅使用预置白名单资源。
 

@@ -1,16 +1,18 @@
 # 游戏连结：离线命令卡片原型与样式参考
 
-这组可重复运行的 Python 样例用于评审版式与数据展示语义。初版默认采用「暖桃纸」配色并保留两个预设；这些脚本默认值不代表当前最终主题已确定。**不是插件功能实现**：没有更改 Host、API、模型、SDK、真实模块加载器或消息发送链路，也不查询实时市场或 FFLogs。
+这组可重复运行的 Python 样例用于评审版式与数据展示语义。物品卡保持已选「暖桃纸」方向，初版另外两个预设保留作离线对照；明暗样式以当前 Spec 与已提交样图为准。最新富文本 helper 已复用 production presentation 内核，**命令图片功能仍未接通**：没有更改 Host、API、模型、SDK、真实模块加载器或消息发送链路，也不查询实时市场或 FFLogs。
 
 ## 最新：模块富文本与 Logs 样式参考
 
-本轮新增三个独立文件；规范以 [模块开发者展示样式 Spec](../../docs/command-presentation/module-display-style-spec.md) 为准：
+规范以 [模块开发者展示样式 Spec](../../docs/command-presentation/module-display-style-spec.md) 为准。三个参考文件从独立实现演进为共用生产字效的适配层：
 
-- `rich_text_reference.py`：受限的 `TextSpan` / `TextRole` / `Grade`、行内富文本和右对齐数值绘制，不包含 FF14 评分映射
+- `rich_text_reference.py`：薄适配并重新导出 [共用字效内核](../../presentation/rich_text.py)，Canvas 多次调用共享累计预算，不维护另一套 A/B 算法；不包含 FF14 评分映射
 - `ff14_logs_reference.py`：FF14 百分位分级、rDPS / 击杀数字符格式及一张 Logs 长卡；角色 `ChatGPT@OpenAI` 与成绩全部为合成样例，不代表真实 FFLogs 结果或发布目录
 - `test_style_reference.py`：该参考实现的定向测试，不能代替生产查询、Host 或全仓验收
 
 新样张：[冷白长卡](samples/logs_style_cool_white.png)、[深靛长卡](samples/logs_style_deep_indigo.png)，均为 1040 × 2944；逐格颜色、实际背景、字效和边界记录见 [核验清单](samples/style_reference_checks.json)。7 行绝境战＋13 行零式是覆盖完整多层布局的合成 fixture，不是已核实的地区目录；当前两图分别为 666,994 / 710,164 bytes，与最终独立审阅输出逐字节一致。主图 M12S 本体使用 99.7；99.96 舍入仍为粉色的边界留在 Spec 与测试中。
+
+上述两张已提交样图保留 `1c2ded2` 的参考字节，没有在本次整合中覆盖。当前 B 无 SVG 明暗对照已按同字体、同尺寸渲染：数值及字效区域逐像素一致，普通 `@ OpenAI` 文字的浮点落点区域有已记录差异，不宣称整图相同。三个生产 `CardSpec` 验证图另验完整换行、实际字形居中、七色和细 Regular；不是物品卡设计确认。B 已完成 R2 限定离线独审，各次失败、修后测试和候选状态见[交接入口](../../docs/command-presentation/README.md#续作-b共用富文本内核2026-10-16)。
 
 字面始终使用标准 FFLogs 等级色，金色为 `#e5cc80`。已选 B「居中柔影」只在字面与实际背景对比度 `< 1.5` 时触发：原始蒙版、零偏移、无扩张或硬描边；保留反色背景中点配色和约 1 px / 35 px 字号、235/255 透明度的原型参数，最后绘制清晰字面。A「贴字柔光」是独立的真实金色满分装饰。对比度门槛是选定效果的触发规则，不是可访问性合规认证；不能把对比图强制灰字效果带入生产规则。
 
@@ -156,7 +158,7 @@ python -m unittest -v test_renderers.py
 python -m unittest discover -s examples/command_cards -p 'test_*.py' -v
 ```
 
-初版 Python 文件当时已按仓库基线 Ruff 0.12.0（Python 3.12、88 列、E4 / E7 / E9 / F / I）格式化并检查；这不覆盖本轮新增参考文件，本轮 lint / format 仍未验证。下列是可复验命令，请从仓库根目录运行，保持 import sorting 的项目发现上下文一致：
+初版 Python 文件当时已按仓库基线 Ruff 0.12.0（Python 3.12、88 列、E4 / E7 / E9 / F / I）格式化并检查。新增参考的历史检查缺口、后续 A 机械修正和 B 检查分批记录在交接入口，不能拿本段旧结果覆盖新字节。下列是可复验命令，请从仓库根目录运行，保持 import sorting 的项目发现上下文一致：
 
 ```sh
 ruff check examples/command_cards

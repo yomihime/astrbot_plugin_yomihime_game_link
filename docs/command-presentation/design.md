@@ -16,7 +16,7 @@ SDK `0.1.0a6`、现有结果契约、授权边界与生命周期不在此阶段�
 2. `main.ts:97` 的 `.module-dashboard` 内，模块区域与配置维护按钮
 3. `main.ts:97–98` 的 dashboard 与维护区域边界
 
-这些是源码审查线索，不是实际黏连截图的复现结论。[源码定位：模块管理][ui-module]、[主页面][ui-main]
+这些起初只是源码审查线索。续作已在真实管理首页测得第二处模块区域与配置维护按钮之间为 0px；第一处提示当前不存在，第三处维护区域未展开，仍未验。[源码定位：模块管理][ui-module]、[主页面][ui-main]
 
 设置页已有约 8–12px 的间距处理。实施前须结合实际宿主页面确认问题位置；不能把尚未看到的截图解释成全页都缺间距。
 
@@ -78,9 +78,11 @@ Core 的安全通用英文错误可以经过明确映射变成中文；不能以
 
 ### 模块富文本与语义色续作
 
-最新要求以 [模块开发者展示样式 Spec](module-display-style-spec.md) 为准：Core 统一渲染、主题与受限富文本样式，模块定义评价范围、映射及业务布局；独立 Python helper 是离线参考，不是 SDK 升级或生产调用入口。FFLogs 七级字面色在浅深主题保持一致，先按原始百分位分级再显示一位小数；非百分位值必须有模块可解释的比较依据，不能任意归一化 DPS 或价格。
+最新要求以 [模块开发者展示样式 Spec](module-display-style-spec.md) 为准：通用 presentation 统一渲染、主题与受限富文本样式，模块定义评价范围、映射及业务布局。Python helper 现复用生产绘图内核，仍是离线参考；不是 SDK 升级或 Host 发送入口。FFLogs 七级字面色在浅深主题保持一致，先按原始百分位分级再显示一位小数；非百分位值必须有模块可解释的比较依据，不能任意归一化 DPS 或价格。
 
-B「居中柔影」仅在字面与实际背景对比度小于 1.5 时启用，原始字形蒙版、零偏移、无扩张或硬描边；阴影配色保留已选原型的字面色与反色背景中点，最后合成清晰字面。A「贴字柔光」是独立的真实金色满分装饰，不应用到其他等级。主题选择仍待确认；该样式参考未接入 `presentation/card_bitmap.py` 或 Host。
+B「居中柔影」仅在字面与实际背景对比度小于 1.5 时启用，原始字形蒙版、零偏移、无扩张或硬描边；阴影配色保留已选原型的字面色与反色背景中点，最后合成清晰字面。A「贴字柔光」是独立的真实金色满分装饰，不应用到其他等级。`presentation/rich_text.py` 是唯一字效实现，`card_bitmap.py` 新富文本路径先完成全部背景和采样、再全部效果、最后全部字面；旧字符串路径保持。此切片 R2 限定离线独审通过，Host 仍未接通，物品沿已选暖桃纸方向，不另开整体设计。
+
+新富文本另设 128 MiB 受管位图工作模型和 64M 累计蒙版构造/扫描像素；原输出、输入和测量硬限不变，较大的富文本可更早明确拒绝。借入字体不能因 renderer 使用过就关闭；新建流显式关闭，固定四次加载/派生、每 face 字节至多 16 MiB，十四份存储模型上限 224 MiB。初始八份估计被缓存 provider 场景推翻，旧候选及试验保留；这些模型不是所有 Pillow/FreeType C 内存或 RSS 的承诺。细节与实际独验结果见交接入口，不拿模型代替内存沙箱。
 
 ### 总帮助
 
@@ -186,6 +188,8 @@ P3 需一并明确 owner、audience、TTL、撤权、取消、清理失败、缓
 首轮目标已选 WebChat；其他适配器不能据此推定支持。固定版本的 [WebChat adapter](https://github.com/AstrBotDevs/AstrBot/blob/3c7adafa1397e182d60b1016bf88759265113c8a/astrbot/core/platform/sources/webchat/webchat_adapter.py) 可按会话发送，但会向该会话的多个活跃 request IDs 投递。新图片出口须绑定可信的触发 event/request，不能仅凭会话名或全局可变的“当前事件”保证一次投递。
 
 [WebChat event](https://github.com/AstrBotDevs/AstrBot/blob/3c7adafa1397e182d60b1016bf88759265113c8a/astrbot/core/platform/sources/webchat/webchat_event.py) 先写 Host 附件，再尝试放入请求队列；队列关闭可能未接收，而该路径仍返回 `None`。因此 Core 内存资源不落文件，不等于 Host 没有附件副本；后续须证明附件归属、关闭或取消时回收、队列接受状态及受权文件读取。源码中的 SSE/WS 和 Dashboard 图片展示路径，仍需真实 Host 与浏览器验收，不能作为已经投递的证据。
+
+独立补查确认公开 `event.send` 可绑定该事件的 request，内部贯穿仍需本 PR 实现，不等于 Host 缺少精确路由。`None` 应保留 `UNKNOWN` 且零补发，本身不禁止所有单次发送。固定源码的附件 reader 未闭合 owner/audience；[文件 DELETE](https://github.com/AstrBotDevs/AstrBot/blob/3c7adafa1397e182d60b1016bf88759265113c8a/astrbot/dashboard/api/files.py#L105-L110)仅返回成功结构，没有物理删除或数据库删除，不能作为 TTL/撤销/卸载清理收据。Markdown 包装器的调用层未提供已验证的认证媒体读取和撤销合同，不能靠普通 URL 或 data URI 宣布替代链可用；其余第三方实现仍有未核范围，不断言 Host 绝对无法支持。以上固定源码证据不等同实际安装字节。
 
 ### 降级和投递语义
 

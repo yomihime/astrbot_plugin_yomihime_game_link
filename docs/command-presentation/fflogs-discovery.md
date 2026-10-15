@@ -77,6 +77,16 @@ FFCafe/XIVAPI 兼容中文源只能作为候选。它有中文游戏数据不等
 4. 拟采用的聚合与缓存边界，接口/配额/时间上的风险
 5. P4 可以开始，或必须先解决的具体决策缺口
 
-这里的 schema、目录和聚合检查项全部待执行。2026-10-15 续作只完成技术入口与宿主只读前置核验，未取得可用的正常受管 Host/source 上下文；没有执行 FFLogs 上游请求，也没有导出凭据或扩大权限。分类、区域发布、中文机制、排序、去重及两个最佳指标范围均未验证，P4 继续阻塞。
+这里的 schema、目录和聚合检查项全部待执行。2026-10-15 续作只完成技术入口与宿主只读前置核验，当时未取得可用的正常受管 Host/source 上下文，没有执行 FFLogs 上游请求。
+
+### 2026-10-16：正常管理入口与纯元数据合同仍分离
+
+正常 Dashboard 登录、插件元数据读取和默认 monitor 页面已取得证据。这不能证明 FFLogs source 调用权限或 OAuth 可用。当前管理操作的凭据状态仅返回配置 revision 和 configured / unset / unusable 元数据；`READ_CONFIG` 不能自动授权上游请求，本批未额外执行该状态读取。
+
+现有 `FFLogsCatalog.load_output_metadata` 经受管 SourceHttp 检查固定 schema 后取得目录，但只有输出百分位业务调用它。该业务还会抓取七组统计页，且健康状态标为不可用；不能通过刻意构造不匹配名称来借用业务错误路径探查目录。当前没有单独的纯元数据正式入口，也没有通用 SourceHttp / GraphQL 管理代理。[现有目录实现](https://github.com/yomihime/astrbot_plugin_yomihime_game_link/blob/4fc65beeef0c5b7adf23d24acb34a0a2edebb55d/modules/ff14/features/fflogs_catalog.py)，[业务调用者](https://github.com/yomihime/astrbot_plugin_yomihime_game_link/blob/4fc65beeef0c5b7adf23d24acb34a0a2edebb55d/modules/ff14/features/fflogs.py)，[管理操作](https://github.com/yomihime/astrbot_plugin_yomihime_game_link/blob/4fc65beeef0c5b7adf23d24acb34a0a2edebb55d/adapters/astrbot/admin_pages.py)。
+
+后续最小内部合同须先独立审定：由 FF14 拥有固定地区和 schema / catalog 阶段，不接受任意 URL、header 或 query；通过真实 module invocation 与既有 source 绑定执行，不能从管理处理器直接取得私有凭据服务。先使用已审固定 schema，证实字段后才增加固定投影；核清整体 deadline、内部 OAuth / 重授权请求预算、取消与关闭围栏。输出保留现有 facts 512 节点和 32 blocks 上限，超限如实处理，不默认引入无限分页。每个顶层元数据执行都计入获准的真实能力预算，不能藏作配置读取。此提案未实现，也未更改 SDK 公共合同。
+
+现有角色解析没有已验证的 `totalKills` 合同，`size` 不能解释为过本次数；JSON scalar 内部字段也不能仅靠 GraphQL 类型名证明。分类、区域发布、中文机制、排序、去重、过本次数及两个最佳指标范围仍未验证，P4 继续阻塞。本批没有 FFLogs 上游请求、真实角色查询、凭据导出或权限扩大。
 
 公开文档与原型不能替代认证元数据探查；不把私人认证响应原样提交到仓库。

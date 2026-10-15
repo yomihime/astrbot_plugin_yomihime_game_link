@@ -29,8 +29,9 @@ from rich_text_reference import (
     Grade,
     TextRole,
     TextSpan,
-    draw_metric,
     face_color,
+    flush_card_text,
+    queue_card_text,
     reference_fonts,
 )
 
@@ -341,10 +342,7 @@ def _group(
         canvas.rr(
             (816, yy + (height - 54) / 2, 968, yy + (height + 54) / 2), 11, p.tint
         )
-        info = draw_metric(
-            canvas, span, right=955, center=yy + height / 2, size=35, palette=p
-        )
-        canvas.metric_layout.append(info)
+        canvas.queued_metrics.append((span, 955, yy + height / 2, 35))
         yy += height
     canvas.rr((LEFT, top, RIGHT, end), 18, None, p.border)
     return end
@@ -366,6 +364,18 @@ def render_card(
     height = 720 + body_height
     canvas = Canvas(p.outside, WIDTH, height, fonts=fonts)
     canvas.metric_layout = []
+    canvas.queued_card_text = []
+    canvas.queued_metrics = []
+    # Capture ordinary text too: one production session samples the completed
+    # background, then paints every effect before every crisp face.
+    canvas.text = (
+        lambda xy,
+        text,
+        size=24,
+        fill="#333333",
+        bold=False,
+        anchor="lt": queue_card_text(canvas, xy, text, size, fill, bold, anchor)
+    )
     canvas.rr((22, 22, WIDTH - 22, height - 22), 26, p.paper)
     canvas.rr((35, 35, WIDTH - 35, height - 35), 21, None, p.border)
     linkmark(canvas, 57, 54, p.accent)
@@ -382,6 +392,7 @@ def render_card(
     canvas.text((57, y + 24), "数据源：" + source, 22, p.secondary)
     canvas.line((57, y + 68, 983, y + 68), p.rule)
     canvas.text((57, y + 90), FOOTER, 25, p.muted)
+    flush_card_text(canvas, p)
     return canvas
 
 

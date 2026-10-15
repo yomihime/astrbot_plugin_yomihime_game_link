@@ -411,6 +411,7 @@ class CardBitmapTests(unittest.TestCase):
         path = Path(bitmap.__file__)
         source = compile(path.read_text(encoding="utf-8"), str(path), "exec")
         module = types.ModuleType("bitmap_import_probe")
+        module.__package__ = "ygl_test_subject.presentation"
         actual = builtins.__import__
 
         def reject_pillow(name, *args, **kwargs):
