@@ -1707,6 +1707,7 @@ function _e(r, i, a, o, p, m = () => !0, _, v = () => "", y) {
 			class: "module-management"
 		}, { default: () => [
 			x.value ? n(c, {
+				class: "module-management-notice",
 				type: S.value === "error" ? "error" : S.value === "warning" ? "warning" : S.value === "success" ? "success" : "info",
 				showIcon: !1
 			}, { default: () => x.value }) : null,
