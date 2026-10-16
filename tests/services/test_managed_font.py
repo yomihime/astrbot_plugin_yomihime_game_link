@@ -421,6 +421,80 @@ class ManagedFontTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(path.read_bytes(), self.content)
         self.assertFalse(list(self.root.glob(".font-*")))
 
+    async def test_verified_download_fontparse_failure_is_not_write_or_network_failure(
+        self,
+    ):
+        retained_system_provider = object()
+        self.manager._provider = retained_system_provider
+        self.manager._source = "system"
+        self.manager._closed = False
+        for failure in (
+            BitmapUnavailable("dependency_missing"),
+            OSError("private path secret"),
+        ):
+            with self.subTest(failure=type(failure).__name__):
+                session = DownloadSession([DownloadResponse(self.content)])
+                with (
+                    patch("aiohttp.ClientSession", session),
+                    patch.object(
+                        fonts.BundledFontProvider, "load", side_effect=failure
+                    ),
+                ):
+                    await self.manager._download()
+                self.assertEqual(self.manager.status()["error"], "download_fontparse")
+                self.assertEqual(self.manager.status()["state"], "unavailable")
+                self.assertEqual(self.manager.status()["source"], "system")
+                self.assertIs(self.manager.provider(), retained_system_provider)
+                self.assertEqual(len(session.calls), 1)
+                self.assertFalse((self.root / FONT_FILENAME).exists())
+                self.assertNotIn("secret", repr(self.manager.status()))
+                self.assertFalse(self.root.exists())
+
+    async def test_fontparse_failure_without_system_provider_retains_text_fallback(
+        self,
+    ):
+        self.manager._closed = False
+        session = DownloadSession([DownloadResponse(self.content)])
+        with (
+            patch("aiohttp.ClientSession", session),
+            patch.object(
+                fonts.BundledFontProvider,
+                "load",
+                side_effect=BitmapUnavailable("font_unavailable"),
+            ),
+        ):
+            await self.manager._download()
+        self.assertEqual(self.manager.status()["error"], "download_fontparse")
+        self.assertEqual(self.manager.status()["source"], "none")
+        self.test_injected_unavailable_provider_uses_complete_text_not_source_fixture()
+        self.assertEqual(len(session.calls), 1)
+
+    async def test_startup_parser_service_failure_preserves_system_and_persistent_bytes(
+        self,
+    ):
+        self.root.mkdir(parents=True)
+        path = self.root / FONT_FILENAME
+        path.write_bytes(self.content)
+        system_provider = self.manager._canonical(self.content)
+        session = DownloadSession([DownloadResponse(self.content)])
+        with (
+            patch("aiohttp.ClientSession", session),
+            patch.object(fonts, "SystemFontProvider", return_value=system_provider),
+            patch.object(
+                fonts.BundledFontProvider,
+                "load",
+                side_effect=BitmapUnavailable("dependency_missing"),
+            ),
+        ):
+            self.manager.start()
+            await self.manager._task
+        self.assertEqual(self.manager.status()["error"], "download_fontparse")
+        self.assertEqual(self.manager.status()["source"], "system")
+        self.assertIs(self.manager.provider(), system_provider)
+        self.assertEqual(path.read_bytes(), self.content)
+        self.assertEqual(len(session.calls), 1)
+        self.assertFalse(list(self.root.glob(".font-*")))
+
     async def test_close_fences_upload_waiting_for_lock(self):
         self.manager._closed = False
         await self.manager._upload_lock.acquire()

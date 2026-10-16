@@ -38,6 +38,10 @@ class _DownloadFailure(ValueError):
     """Only fixed safe codes cross the downloader's error boundary."""
 
 
+class _FontParseFailure(RuntimeError):
+    """Validated bytes could not be loaded as a usable pinned font face."""
+
+
 class ManagedFont:
     def __init__(self, root: Path):
         self._root = Path(root)
@@ -126,9 +130,15 @@ class ManagedFont:
     @staticmethod
     def _canonical(content):
         ManagedFont._verify(content)
-        provider = object.__new__(BundledFontProvider)
-        provider._font_bytes = content
-        provider.load(16).getmask("字体 Ag")
+        try:
+            provider = object.__new__(BundledFontProvider)
+            provider._font_bytes = content
+            provider.load(16).getmask("字体 Ag")
+        except Exception:
+            # Missing drawing dependencies and face/glyph parsing happen before
+            # any directory or temporary file is created. Never call them write
+            # failures or expose the parser's paths/errors to status consumers.
+            raise _FontParseFailure("font_parse_failed") from None
         return provider
 
     def _install(self, content):
@@ -194,6 +204,9 @@ class ManagedFont:
                             return
                         try:
                             self._install(content)
+                        except _FontParseFailure:
+                            error = "download_fontparse"
+                            break
                         except Exception:
                             # The same validated bytes from another source will
                             # not fix a local publication failure.
