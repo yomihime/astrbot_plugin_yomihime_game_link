@@ -164,7 +164,9 @@ class _ItemReplyTransport(_IdleTransport):
 
 
 class _Event:
-    def __init__(self, message_type: str = "GroupMessage", *, context=None, message=None) -> None:
+    def __init__(
+        self, message_type: str = "GroupMessage", *, context=None, message=None
+    ) -> None:
         self._context = context
         self.message = message or "/ygl ff14 status"
         self.platform = "test-platform-1"
@@ -1072,7 +1074,9 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
         )
         await runtime.initialize()
         event = self._event("FriendMessage")
-        event = self._event(event.message_type, message="/ygl ff14 calendar subscribe cn")
+        event = self._event(
+            event.message_type, message="/ygl ff14 calendar subscribe cn"
+        )
         try:
             await runtime.handle_event(event)
             self.assertTrue(context.calls)
@@ -1107,7 +1111,9 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
             http_transport_factory=_IdleTransport,
         )
         await restored.initialize()
-        event = self._event(event.message_type, message="/ygl ff14 calendar subscriptions")
+        event = self._event(
+            event.message_type, message="/ygl ff14 calendar subscriptions"
+        )
         try:
             await restored.handle_event(event)
             text = context.calls[-1][1].chain[0].text
@@ -1694,7 +1700,9 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(context.calls, [])
 
         # The bundled module is active and has a genuine OWNER declaration.
-        event = self._event(event.message_type, message="/ygl ff14 calendar subscriptions")
+        event = self._event(
+            event.message_type, message="/ygl ff14 calendar subscriptions"
+        )
         response = await runtime.handle_event(event)
 
         self.assertEqual(response, "该本人管理命令仅支持私聊，请前往私聊继续。")
@@ -1796,11 +1804,16 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
         await runtime.initialize()
         try:
             from types import SimpleNamespace
+
             from ygl_test_subject.adapters.astrbot.command_bridge import CommandHelp
 
-            runtime._message_port._image_factory = lambda content: SimpleNamespace(png=content)
+            runtime._message_port._image_factory = lambda content: SimpleNamespace(
+                png=content
+            )
+
             async def forbidden_session_send(*_args):
                 raise AssertionError("command images must use the exact event")
+
             context.send_message = forbidden_session_send
             event = self._event(message="/ygl help")
             help_text = await runtime.handle_event(event)
@@ -1816,7 +1829,10 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
             core = runtime.core_runtime
             self.assertEqual(core._command_ingresses, {})
             self.assertEqual(core.output._generated_png._entries, {})
-            self.assertEqual([r.source_id for r in transport.requests], ["xivapi_items", "garland_items"])
+            self.assertEqual(
+                [r.source_id for r in transport.requests],
+                ["xivapi_items", "garland_items"],
+            )
         finally:
             await runtime.terminate()
 

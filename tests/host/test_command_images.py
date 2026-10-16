@@ -94,14 +94,14 @@ class ExactEventImageTests(unittest.IsolatedAsyncioTestCase):
             _Context(),
             plain_factory=lambda text: SimpleNamespace(text=text),
             image_factory=_Image.fromBytes,
-            command_current=lambda ingress: self.current and self.receiver.validate(
-                InvocationOrigin.COMMAND, ingress
-            ),
+            command_current=lambda ingress: self.current
+            and self.receiver.validate(InvocationOrigin.COMMAND, ingress),
         )
         self.event = _Event()
         self.ingress = self.receiver.make(self.event)
         self.target = MessageTarget(
-            "conversation", "adapter:user",
+            "conversation",
+            "adapter:user",
             ConversationRef(
                 "adapter", ConversationKind.DIRECT, "conversation", "adapter"
             ),
@@ -152,7 +152,9 @@ class ExactEventImageTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(receipt.status, MessageStatus.FAILED)
         self.event.message = "/ygl ff14 item 100"
         private_target = replace(self.target, authorized=True)
-        receipt = await self.port.send_command(self.ingress, private_target, self.payload)
+        receipt = await self.port.send_command(
+            self.ingress, private_target, self.payload
+        )
         self.assertIs(receipt.status, MessageStatus.FAILED)
         self.assertEqual(self.event.calls, [])
 
@@ -189,10 +191,13 @@ class HelpImageLifetimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_help_aggregate_budget_and_unload_cancel_live_sends(self):
         class Core:
             accepting = True
+
             def stop_accepting_host_ingress(self):
                 self.accepting = False
+
             async def close(self):
                 return True
+
         runtime = AstrBotRuntime(_Context(), plugin_root=".", data_dir=".")
         runtime._ready = True
         runtime._core = Core()
@@ -212,8 +217,12 @@ class HelpImageLifetimeTests(unittest.IsolatedAsyncioTestCase):
         for event in events:
             await asyncio.wait_for(event.entered.wait(), 10)
         self.assertEqual(runtime._help_image_count, 3)
-        self.assertTrue(all(hasattr(event.calls[0].chain[0], "file") for event in events[:3]))
-        self.assertTrue(all(hasattr(event.calls[0].chain[0], "text") for event in events[3:]))
+        self.assertTrue(
+            all(hasattr(event.calls[0].chain[0], "file") for event in events[:3])
+        )
+        self.assertTrue(
+            all(hasattr(event.calls[0].chain[0], "text") for event in events[3:])
+        )
         await runtime.terminate()
         await asyncio.gather(*tasks, return_exceptions=True)
         self.assertEqual(runtime._help_image_count, 0)
@@ -225,7 +234,8 @@ class CommandProjectionTests(unittest.TestCase):
     def setUp(self):
         self.renderer = CommandCardRenderer()
         self.document = DisplayDocument(
-            "物品", "Copper Ore",
+            "物品",
+            "Copper Ore",
             (
                 FieldsBlock({"等级": 1, "数量": 0}),
                 TableBlock(("名称", "值"), (("长名称", "完整内容"),)),
@@ -281,6 +291,7 @@ class CommandProjectionTests(unittest.TestCase):
 
     def test_required_assets_need_explicit_fallback(self):
         from ygl_test_subject.presentation.rendering import RenderingFailure
+
         for block in (
             ImageBlock("asset", "alt is not the image", required=True),
             ItemGridBlock((GridItem("label", 1, asset_id="asset"),)),
@@ -307,7 +318,9 @@ class CommandProjectionTests(unittest.TestCase):
         self.assertEqual(value.text, "帮助\n完整帮助内容")
 
     def test_help_uses_same_production_renderer(self):
-        value = self.renderer.help("夜美姬游戏互联\nFF14 /ygl ff14 help\n默认区域提示：cn")
+        value = self.renderer.help(
+            "夜美姬游戏互联\nFF14 /ygl ff14 help\n默认区域提示：cn"
+        )
         self.assertIsNotNone(value.bitmap)
         self.assertIn("默认区域提示：cn", value.text)
 
@@ -326,6 +339,7 @@ class AuthorizedCommandImageTests(unittest.IsolatedAsyncioTestCase):
                 image_current()
             self.sent.append(payload)
             from ygl_test_subject.core.ports import MessageReceipt
+
             return MessageReceipt(MessageStatus.UNKNOWN)
 
         self.h.output._command_sender = sender
@@ -451,7 +465,9 @@ class AuthorizedCommandImageTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await owner.stop()
 
-    async def test_core_exact_event_sender_rejects_granted_text_before_preparation(self):
+    async def test_core_exact_event_sender_rejects_granted_text_before_preparation(
+        self,
+    ):
         from ygl_test_subject.services.core_runtime import CoreRuntime
 
         grant = self.h.grant()
@@ -465,10 +481,13 @@ class AuthorizedCommandImageTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_registration_budget_failure_falls_back_before_dispatch(self):
         from ygl_test_subject.services.generated_png import (
-            GeneratedPngCoordinator, GeneratedPngError,
+            GeneratedPngCoordinator,
+            GeneratedPngError,
         )
+
         with patch.object(
-            GeneratedPngCoordinator, "register",
+            GeneratedPngCoordinator,
+            "register",
             side_effect=GeneratedPngError("image_budget"),
         ):
             outcome = await self.h.output.route(self.h.new_view(), self.h.new_result())
@@ -493,11 +512,14 @@ class AuthorizedCommandImageTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_cancel_preparing_image_releases_registered_context(self):
         from ygl_test_subject.services.generated_png import GeneratedPngCoordinator
+
         entered = asyncio.Event()
         gate = asyncio.Event()
+
         async def blocked_register(*_args):
             entered.set()
             await gate.wait()
+
         with patch.object(GeneratedPngCoordinator, "register", blocked_register):
             task = asyncio.create_task(
                 self.h.output.route(self.h.new_view(), self.h.new_result())
@@ -511,12 +533,14 @@ class AuthorizedCommandImageTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_expiry_after_preparation_is_fenced_before_dispatch(self):
         original = self.h.output._command_sender
+
         async def sender(view, result, target, payload, *, image_current=None):
             await asyncio.sleep(0)
             self.h.output._generated_png._clock = lambda: float("inf")
             return await original(
                 view, result, target, payload, image_current=image_current
             )
+
         self.h.output._command_sender = sender
         await self.h.output.route(self.h.new_view(), self.h.new_result())
         self.assertEqual(self.sent, [])

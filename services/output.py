@@ -901,7 +901,9 @@ class OutputService:
                         if context is not None:
                             self._generated_png.release(context)
                         if exc.reason not in (
-                            "image_invalid", "image_budget", "dependency_missing"
+                            "image_invalid",
+                            "image_budget",
+                            "dependency_missing",
                         ):
                             raise
                     except BaseException:

@@ -145,13 +145,12 @@ class CommandCardRenderer:
                     continue
                 if block.required and block.fallback_text is None:
                     raise RenderingFailure()
-                paragraphs = (
-                    block.fallback_text or f"图片不可用: {block.alt_text}",
-                )
+                paragraphs = (block.fallback_text or f"图片不可用: {block.alt_text}",)
                 section = Section(paragraphs=paragraphs)
             elif isinstance(block, ItemGridBlock):
                 items = tuple(
-                    item for item in block.items
+                    item
+                    for item in block.items
                     if not (
                         item.visibility is Privacy.PRIVATE
                         and audience is DisplayAudience.PUBLIC
@@ -164,7 +163,8 @@ class CommandCardRenderer:
                 else:
                     paragraphs = tuple(
                         self._text._render_grid_item(item, _MAX_CONTENT)
-                        for item in items if item.asset_id is None
+                        for item in items
+                        if item.asset_id is None
                     )
                     if not paragraphs:
                         if block.fallback_text is not None:
@@ -174,9 +174,12 @@ class CommandCardRenderer:
                 section = Section(paragraphs=paragraphs)
             elif isinstance(block, TableBlock):
                 rows = tuple(
-                    Row(tuple(
-                        self._text._format_value(value, _MAX_CONTENT) for value in row
-                    ))
+                    Row(
+                        tuple(
+                            self._text._format_value(value, _MAX_CONTENT)
+                            for value in row
+                        )
+                    )
                     for row in block.rows
                 )
                 section = Section(columns=block.columns, rows=rows)
@@ -202,6 +205,8 @@ class CommandCardRenderer:
         if len(text) > _MAX_CONTENT:
             raise BitmapUnavailable("layout_overflow")
         return (
-            CardSpec(document.title, tuple(sections), document.subject, sources=sources),
+            CardSpec(
+                document.title, tuple(sections), document.subject, sources=sources
+            ),
             text,
         )

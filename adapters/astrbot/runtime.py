@@ -1103,7 +1103,8 @@ class AstrBotRuntime:
         self._message_receipts.close()
         pending = []
         help_tasks = {
-            task for task in self._help_tasks
+            task
+            for task in self._help_tasks
             if task is not asyncio.current_task() and not task.done()
         }
         for task in help_tasks:
@@ -1111,7 +1112,9 @@ class AstrBotRuntime:
         if help_tasks:
             _done, unfinished = await asyncio.wait(help_tasks, timeout=5.0)
             if unfinished:
-                pending.append(("help_sends", RuntimeError("help send cleanup pending")))
+                pending.append(
+                    ("help_sends", RuntimeError("help send cleanup pending"))
+                )
         self._ready = False
         self._bridge = None
         if self._tool_publisher is not None:

@@ -499,8 +499,7 @@ class RichTextTests(unittest.TestCase):
                 ink = mask.getbbox()
             self.assertIsNotNone(ink)
             actual = tuple(
-                (origin + offset) / 2
-                for origin, offset in zip((x0, y0, x0, y0), ink)
+                (origin + offset) / 2 for origin, offset in zip((x0, y0, x0, y0), ink)
             )
             self.assertEqual(actual, plan.info.bounds)
             self.assertGreaterEqual(actual[0], 48)
