@@ -502,7 +502,7 @@ class _RichLayout:
             raise BitmapUnavailable("font_unavailable") from None
 
     def wrap(self, value, size, width, default_role=None):
-        from .rich_text import TextRole
+        from .rich_text import TextRole, _LineMetrics, _measure_run
 
         if width <= 0:
             raise BitmapUnavailable("layout_overflow")
@@ -512,52 +512,60 @@ class _RichLayout:
             else [(c, span.role, span.grade) for span in value.spans for c in span.text]
         )
         lines = []
-        current = []
+        runs = []
+        # One prefix per completed run. Extending the tail remeasures only that
+        # run, so wrapping remains two font calls per candidate, not per span.
+        prefixes = [_LineMetrics()]
+        chars = 0
         font = self.fonts[size]
 
         def emit():
             self.output_lines += 1
             if self.output_lines > self.bounds.max_output_lines:
                 raise BitmapUnavailable("layout_overflow")
-            runs = []
-            for char, role, grade in current:
-                if (
-                    runs
-                    and runs[-1].role is role
-                    and runs[-1].grade is grade
-                    and len(runs[-1].text) < 512
-                ):
-                    old = runs[-1]
-                    runs[-1] = TextSpan(old.text + char, role, grade)
-                else:
-                    runs.append(TextSpan(char, role, grade))
-            if len(runs) > 32 or len(current) > 1024:
-                raise BitmapUnavailable("layout_overflow")
-            box = self.measure(font, "getbbox", "".join(c for c, _, _ in current))
+            box = prefixes[-1].box
+            if box is None:
+                box = self.measure(font, "getbbox", "", anchor="ls")
             lines.append(
                 _RichLine(
                     tuple(runs), max(size + 8, (box[3] - box[1] + 1) // 2 + 8), box
                 )
             )
 
-        for token in tokens:
-            char = token[0]
+        def candidate(char, role, grade):
+            extend = (
+                runs
+                and runs[-1].role is role
+                and runs[-1].grade is grade
+                and len(runs[-1].text) < 512
+            )
+            span = TextSpan(runs[-1].text + char if extend else char, role, grade)
+            prefix = prefixes[-2] if extend else prefixes[-1]
+            metrics = prefix.append(_measure_run(font, span.text, self.measure))
+            return span, metrics, extend
+
+        for char, role, grade in tokens:
             if char == "\n":
                 emit()
-                current = []
+                runs, prefixes, chars = [], [_LineMetrics()], 0
                 continue
-            candidate = "".join(c for c, _, _ in current) + char
-            box = self.measure(font, "getbbox", candidate)
-            advance = self.measure(font, "getlength", candidate)
-            if max(box[2] - box[0], advance) > width * 2 or len(current) >= 1024:
-                if not current:
+            span, metrics, extend = candidate(char, role, grade)
+            if metrics.width > width * 2 or chars >= 1024:
+                if not runs:
                     raise BitmapUnavailable("layout_overflow")
                 emit()
-                current = []
-                box = self.measure(font, "getbbox", char)
-                if box[2] - box[0] > width * 2:
+                runs, prefixes, chars = [], [_LineMetrics()], 0
+                span, metrics, extend = candidate(char, role, grade)
+                if metrics.width > width * 2:
                     raise BitmapUnavailable("layout_overflow")
-            current.append(token)
+            if extend:
+                runs[-1], prefixes[-1] = span, metrics
+            else:
+                runs.append(span)
+                prefixes.append(metrics)
+                if len(runs) > 32:
+                    raise BitmapUnavailable("layout_overflow")
+            chars += 1
         emit()
         return tuple(lines)
 
@@ -663,31 +671,28 @@ def _render_rich(spec, provider, bounds, Image, ImageDraw):
                 for line in text.lines:
                     if line.spans:
                         if text.align == "right" and len(line.spans) == 1:
-                            session.add(
-                                line.spans[0],
-                                font=font,
-                                size=text.size,
-                                palette=palette,
-                                right=text.x + text.width,
-                                center=text.center
-                                if text.center is not None
-                                else y + (line.box[3] - line.box[1]) / 4,
+                            infos = (
+                                session.add(
+                                    line.spans[0],
+                                    font=font,
+                                    size=text.size,
+                                    palette=palette,
+                                    right=text.x + text.width,
+                                    center=text.center
+                                    if text.center is not None
+                                    else y + (line.box[3] - line.box[1]) / 4,
+                                ),
                             )
                         else:
                             x = text.x
-                            baseline_box = layout.measure(
-                                font,
-                                "getbbox",
-                                "".join(span.text for span in line.spans),
-                                anchor="ls",
-                            )
+                            baseline_box = line.box
                             baseline = y - baseline_box[1] / 2
                             if text.center is not None:
                                 baseline = (
                                     text.center
                                     - (baseline_box[1] + baseline_box[3]) / 4
                                 )
-                            session.add_line(
+                            infos = session.add_line(
                                 line.spans,
                                 xy=(x - baseline_box[0] / 2, baseline),
                                 font=font,
@@ -704,6 +709,24 @@ def _render_rich(spec, provider, bounds, Image, ImageDraw):
                                 if text.align == "right"
                                 else None,
                             )
+                        top = (
+                            text.center - line.height / 2
+                            if text.center is not None
+                            else y
+                        )
+                        # Validate actual glyph ink before any faces/effects are
+                        # painted. Never crop a run to conceal a layout mismatch.
+                        if any(
+                            info.mask_bounds is not None
+                            and (
+                                info.bounds[0] < text.x
+                                or info.bounds[2] > text.x + text.width
+                                or info.bounds[1] < top
+                                or info.bounds[3] > top + line.height
+                            )
+                            for info in infos
+                        ):
+                            raise BitmapUnavailable("layout_overflow")
                     y += line.height
             session.paint()
             with closing(

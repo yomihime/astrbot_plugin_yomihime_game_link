@@ -26,7 +26,7 @@ from yomihime_game_link_sdk.errors import (
     ServiceUnavailable,
 )
 from yomihime_game_link_sdk.services import CapabilityHealth, HealthStatus
-from yomihime_game_link_sdk.subscriptions import ConversationKind
+from yomihime_game_link_sdk.subscriptions import ConversationKind, ConversationRef
 
 from ...core.contracts.administration import (
     AdminAuthorizationDenied,
@@ -35,6 +35,7 @@ from ...core.contracts.administration import (
 )
 from ...core.contracts.validation_boundary import validate_contract
 from ...core.help_catalog import HelpCatalog
+from ...core.ports import MessageTarget, RenderedMessage
 from ...core.public_errors import public_boundary
 from ...extensions.factory_resolver import (
     ReviewedInventoryFactorySource,
@@ -42,6 +43,7 @@ from ...extensions.factory_resolver import (
 )
 from ...infrastructure.key_provider import EnvironmentKeyProvider
 from ...infrastructure.secret_codec import AESGCMSecretCodec
+from ...presentation.command_card import CommandCardRenderer
 from ...presentation.command_text import project_command_heading
 from ...presentation.rendering import GenericDisplayRenderer, RenderingBounds
 from ...scripts.prepare_ff14_config_migration import INPUT_FILENAME, load_prepared_input
@@ -56,7 +58,12 @@ from ...services.core_runtime import (
 from ...services.source_credentials import SourceCredentialPolicy
 from .bundled import BundledExtensionError, install_bundled_ff14
 from .command_bridge import AstrBotCommandBridge, CommandHelp, CommandInvocation
-from .message_port import AstrBotMessagePort, MessageChainFactory, PlainFactory
+from .message_port import (
+    AstrBotMessagePort,
+    ImageFactory,
+    MessageChainFactory,
+    PlainFactory,
+)
 from .trusted_assembly import LegacyAssemblySupport, assemble_reviewed
 from .web_public import (
     HostPublicWebValidator,
@@ -295,6 +302,7 @@ class _IngressEvidence:
     origin: InvocationOrigin = InvocationOrigin.COMMAND
     receipt: _MessageReceipt | None = field(default=None, repr=False)
     tool_handle: object | None = field(default=None, repr=False)
+    command_text: str | None = field(default=None, repr=False)
 
 
 class _AstrBotMessageIngress:
@@ -341,6 +349,9 @@ class _AstrBotMessageIngress:
             origin,
             receipt,
             tool_handle,
+            self._message_receipts._text(event)
+            if origin is InvocationOrigin.COMMAND
+            else None,
         )
         return HostIngress(
             adapter_id=adapter,
@@ -371,6 +382,8 @@ class _AstrBotMessageIngress:
             return False
         try:
             facts = self._read_event_facts(evidence.event)
+            if self._message_receipts._text(evidence.event) != evidence.command_text:
+                return False
         except Exception:
             return False
         return self._identity_current(ingress, evidence, facts)
@@ -488,6 +501,7 @@ class AstrBotRuntime:
         raw_legacy_config: Mapping[str, object] | None = None,
         plain_factory: PlainFactory | None = None,
         chain_factory: MessageChainFactory | None = None,
+        image_factory: ImageFactory | None = None,
         core_factory: Callable[..., CoreRuntime] = CoreRuntime,
         http_transport_factory: Callable[[], object] | None = None,
     ) -> None:
@@ -507,6 +521,11 @@ class AstrBotRuntime:
         self._data_dir = Path(data_dir)
         self._plain_factory = plain_factory
         self._chain_factory = chain_factory
+        self._image_factory = image_factory
+        self._command_cards = CommandCardRenderer()
+        self._message_port = None
+        self._help_image_count = 0
+        self._help_tasks = set()
         self._core_factory = core_factory
         if http_transport_factory is not None and not callable(http_transport_factory):
             raise TypeError("http_transport_factory must be callable")
@@ -831,7 +850,10 @@ class AstrBotRuntime:
                 self._context,
                 plain_factory=self._plain_factory,
                 chain_factory=self._chain_factory,
+                image_factory=self._image_factory,
+                command_current=self._command_current,
             )
+            self._message_port = message_port
             try:
                 validator = HostPublicWebValidator(
                     self._generation,
@@ -865,6 +887,7 @@ class AstrBotRuntime:
                     ),
                     http_transport=self._http_transport,
                     renderer=GenericDisplayRenderer(rendering_bounds),
+                    command_card_renderer=self._command_cards,
                     command_heading_projector=partial(
                         project_command_heading,
                         max_heading_chars=rendering_bounds.max_chars_per_page,
@@ -1079,6 +1102,16 @@ class AstrBotRuntime:
     async def _close_owned_runtime(self) -> None:
         self._message_receipts.close()
         pending = []
+        help_tasks = {
+            task for task in self._help_tasks
+            if task is not asyncio.current_task() and not task.done()
+        }
+        for task in help_tasks:
+            task.cancel()
+        if help_tasks:
+            _done, unfinished = await asyncio.wait(help_tasks, timeout=5.0)
+            if unfinished:
+                pending.append(("help_sends", RuntimeError("help send cleanup pending")))
         self._ready = False
         self._bridge = None
         if self._tool_publisher is not None:
@@ -1300,7 +1333,7 @@ class AstrBotRuntime:
                     )
                 except Exception:
                     return "命令暂时不可用。"
-                return (
+                return CommandHelp(
                     action + f"\n默认区域提示：{region}；"
                     "缺省区域与显式参数的具体规则见模块帮助。"
                 )
@@ -1331,6 +1364,58 @@ class AstrBotRuntime:
             # Never create a second reply that could duplicate an UNKNOWN send.
             return None
         return None
+
+    async def send_help(self, event, text):
+        """Send public help with at most three live PNG/base64 reservations.
+
+        A slot reserves 1 MiB PNG plus 4,194,312 conversion bytes,
+        held through event.send. Excess help requests choose text before send.
+        """
+        task = asyncio.current_task()
+        reserved = False
+        if task is not None:
+            self._help_tasks.add(task)
+        try:
+            ingress = self._make_ingress(event)
+            if not self._command_current(ingress):
+                return
+            reserved = self._help_image_count < 3
+            if reserved:
+                self._help_image_count += 1
+            presentation = self._command_cards.help(str(text), image=reserved)
+            route = ConversationRef(
+                ingress.adapter_id,
+                ingress.conversation_kind,
+                ingress.conversation_id,
+                ingress.delivery_route,
+            )
+            target = MessageTarget(
+                ingress.conversation_id,
+                recipient_id=(
+                    ingress.actor_id if route.kind is ConversationKind.DIRECT else None
+                ),
+                conversation=route,
+            )
+            await self._message_port.send_command(
+                ingress,
+                target,
+                RenderedMessage(
+                    presentation.text,
+                    png_bytes=(
+                        presentation.bitmap.content
+                        if presentation.bitmap is not None
+                        else None
+                    ),
+                ),
+            )
+        except Exception:
+            # The exact-event adapter may already have begun dispatch.
+            return
+        finally:
+            if reserved:
+                self._help_image_count -= 1
+            if task is not None:
+                self._help_tasks.discard(task)
 
     def _is_owner_command(self, invocation: CommandInvocation) -> bool:
         core = self._core
@@ -1396,6 +1481,15 @@ class AstrBotRuntime:
             and publisher is not None
             and any(item is handle for item in publisher.handles)
             and publisher._current(handle)
+        )
+
+    def _command_current(self, ingress):
+        return (
+            self._ready
+            and not self._closing
+            and self._core is not None
+            and self._core.accepting
+            and self._validate_ingress(InvocationOrigin.COMMAND, ingress)
         )
 
     def _make_ingress(

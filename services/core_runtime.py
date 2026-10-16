@@ -439,6 +439,7 @@ class CoreRuntime:
         host_message_current_validator: Callable[[InvocationOrigin, HostIngress], bool]
         | None = None,
         command_heading_projector: CommandHeadingProjector | None = None,
+        command_card_renderer=None,
         config_principal_id: str,
         identity_namespace: str,
         trusted_bundled_defaults: Mapping[str, tuple[str, ...]] | None = None,
@@ -678,6 +679,8 @@ class CoreRuntime:
         self.send_scheduler = LifecycleApprovedSendScheduler(self.lifecycle)
         self.root_output_repository = SQLiteRootOutputRepository(database)
         self.resource_visibility = SQLiteResourceVisibilityProbe(database)
+        self._command_ingresses = {}
+        self._command_message_port = message_port
         self.output = OutputService(
             issuer=self.issuer,
             admission=self.lifecycle.admission,
@@ -685,6 +688,12 @@ class CoreRuntime:
             registry=self.registry,
             renderer=renderer,
             command_heading_projector=command_heading_projector,
+            command_card_renderer=command_card_renderer,
+            command_sender=(
+                self._send_command
+                if callable(getattr(message_port, "send_command", None))
+                else None
+            ),
             limits=display_limits,
             conversations=self._conversation_resolver,
             message_port=message_port,
@@ -1421,6 +1430,9 @@ class CoreRuntime:
                         self.issuer, view, accepted_ingress
                     )
                 if origin is InvocationOrigin.COMMAND:
+                    if len(self._command_ingresses) >= 128:
+                        raise PermissionError("command ingress capacity exceeded")
+                    self._command_ingresses[view.invocation_id] = (view, ingress)
                     result = await self.gateway.invoke_command(view, target, parameters)
                 else:
                     result = await self.gateway.invoke_tool(view, target, parameters)
@@ -1447,10 +1459,46 @@ class CoreRuntime:
                     )
                 return CoreInvocationOutcome(exposed_result, routed)
             finally:
+                self._command_ingresses.pop(view.invocation_id, None)
                 self.owner_authority.release(view)
                 self.issuer.release(view)
         finally:
             self._host_flights.discard(task)
+
+    async def _send_command(
+        self, invocation, result, target, payload, *, image_current=None
+    ):
+        """Resolve only an exact, still-owned invocation to its accepted ingress."""
+        from ..core.ports import MessageReceipt, MessageStatus
+
+        if (
+            target.authorized
+            or result.privacy is not Privacy.PUBLIC
+            or invocation.grant_id is not None
+            or invocation.grant_revision is not None
+        ):
+            # Private authority keeps the existing gate-approved sender;
+            # this preparation path is only for ordinary public commands.
+            return MessageReceipt(MessageStatus.FAILED)
+        owned = self._command_ingresses.get(invocation.invocation_id)
+        if owned is None or owned[0] is not invocation:
+            return MessageReceipt(MessageStatus.FAILED)
+        self._require_accepting_ingress()
+        self.issuer.require(invocation)
+        self.lifecycle.admission.check(self.output._root_lease(invocation))
+        # Revalidate Host identity after every preparation await. The adapter
+        # checks again synchronously immediately before event.send.
+        await self._host_ingress(InvocationOrigin.COMMAND, owned[1])
+        await self.output._validate_command_current(invocation, result, target)
+        self._require_accepting_ingress()
+        self.issuer.require(invocation)
+        self.lifecycle.admission.check(self.output._root_lease(invocation))
+        if image_current is not None:
+            # Last synchronous resource fence, after every preparation await.
+            image_current()
+        return await self._command_message_port.send_command(
+            owned[1], target, payload, image_current=image_current
+        )
 
     async def close(self, *, timeout: float | None = None) -> bool:
         bound = self._cleanup_timeout if timeout is None else timeout
@@ -1474,6 +1522,8 @@ class CoreRuntime:
             return True
         self._closing = True
         self._accepting = False
+        if self.output._generated_png is not None:
+            self.output._generated_png.close()
         # Fence pending durable activation before close can suspend on the
         # shared Admission mutation gate.
         self.extension_runtime.stop_accepting()

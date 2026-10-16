@@ -214,6 +214,53 @@ class _Geometry:
     dimensions: tuple[int, int]
 
 
+@dataclass(frozen=True)
+class _RunMetrics:
+    box: tuple[int, int, int, int]
+    advance: float
+
+
+def _measure_run(font, text, measure):
+    """Match the independently shaped run used by the painter, at 2x scale."""
+    box = measure(font, "getbbox", text, anchor="ls")
+    advance = measure(font, "getlength", text)
+    if (
+        len(box) != 4
+        or any(type(v) is not int or abs(v) > 1_000_000 for v in box)
+        or box[2] < box[0]
+        or box[3] < box[1]
+        or type(advance) not in (int, float)
+        or not math.isfinite(advance)
+        or not 0 <= advance <= 1_000_000
+    ):
+        _fail("font_unavailable")
+    return _RunMetrics(tuple(box), advance)
+
+
+@dataclass(frozen=True)
+class _LineMetrics:
+    box: tuple[int, int, int, int] | None = None
+    advance: float = 0
+
+    def append(self, run):
+        # The mask painter rounds each run's origin, not the joined string's
+        # advance. Keep the same raster extents, including negative bearings.
+        x = round(self.advance)
+        box = (x + run.box[0], run.box[1], x + run.box[2], run.box[3])
+        if self.box is not None:
+            box = (
+                min(self.box[0], box[0]),
+                min(self.box[1], box[1]),
+                max(self.box[2], box[2]),
+                max(self.box[3], box[3]),
+            )
+        return _LineMetrics(box, self.advance + run.advance)
+
+    @property
+    def width(self):
+        return max(self.box[2], math.ceil(self.advance)) - min(0, self.box[0])
+
+
 _UNMEASURED = object()
 
 
@@ -539,27 +586,25 @@ class RichSession:
         if center is not None:
             self._coordinates((center,))
         pixels = 0
+        advance = 0
         placements = []
         try:
             # The entire line's finite geometry and aggregate admission precede
             # even its first glyph mask. A lowered cap cannot permit work first.
             for span in spans:
                 geometry = self._geometry(span, font, size)
-                box = self._measure(font, "getbbox", span.text, anchor="ls")
+                run = _measure_run(font, span.text, self._measure)
                 placements.append(
-                    (geometry, x + box[0] / SCALE, baseline + box[1] / SCALE)
+                    (
+                        geometry,
+                        x + (round(advance) + run.box[0]) / SCALE,
+                        baseline + run.box[1] / SCALE,
+                    )
                 )
                 pixels += geometry.dimensions[0] * geometry.dimensions[1]
                 if pixels > max_line_mask_pixels:
                     _fail()
-                advance = self._measure(font, "getlength", span.text)
-                if (
-                    type(advance) not in (int, float)
-                    or not math.isfinite(advance)
-                    or advance < 0
-                ):
-                    _fail("font_unavailable")
-                x += advance / SCALE
+                advance += run.advance
             ink_bounds = [_UNMEASURED] * len(placements)
             shift_x = shift_y = 0
             if right is not None or center is not None:
@@ -595,7 +640,7 @@ class RichSession:
                 else:
                     # No glyphs: retain the full line's measured advances.
                     if right is not None:
-                        shift_x = round((right - x) * SCALE)
+                        shift_x = round((right - x) * SCALE - advance)
                     if center is not None:
                         shift_y = round((center - baseline) * SCALE)
             for (geometry, left, top), ink in zip(placements, ink_bounds):

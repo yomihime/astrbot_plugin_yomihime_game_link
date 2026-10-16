@@ -92,7 +92,7 @@ class FixtureTransport(runtime_fixture._IdleTransport):
 class MarketHostIntegrationTests(unittest.IsolatedAsyncioTestCase):
     async def test_command_reply_uses_natural_renderer_and_verified_price_context(self):
         await self.start()
-        event = runtime_fixture._Event()
+        event = runtime_fixture._Event(context=self.context)
         event.message = "/ygl ff14 market 44091 region=cn quality=hq intent=min"
         self.assertIsNone(await self.runtime.handle_event(event))
         reply = self.context.calls[-1][1].chain[0].text
@@ -315,14 +315,15 @@ class MarketHostIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_command_tail_quotes_natural_and_choose_use_same_handler(self):
         await self.start()
-        event = runtime_fixture._Event()
+        event = runtime_fixture._Event(context=self.context)
         event.message = (
             '/ygl ff14 market 44091 server="SyntheticChina" quality=hq intent=listings'
         )
         await self.runtime.handle_event(event)
         self.assertIn("hq", self.context.calls[-1][1].chain[0].text)
-        event.message = (
-            '/ygl ff14 market 查一下"SyntheticChina"的"Synthetic Item"多少钱'
+        event = runtime_fixture._Event(
+            context=self.context,
+            message='/ygl ff14 market 查一下"SyntheticChina"的"Synthetic Item"多少钱',
         )
         await self.runtime.handle_event(event)
         text = self.context.calls[-1][1].chain[0].text
@@ -330,7 +331,10 @@ class MarketHostIntegrationTests(unittest.IsolatedAsyncioTestCase):
         command = next(
             line for line in text.splitlines() if "/ygl ff14 market choose" in line
         )
-        event.message = command.replace("<物品ID>", "44091").strip()
+        event = runtime_fixture._Event(
+            context=self.context,
+            message=command.replace("<物品ID>", "44091").strip(),
+        )
         await self.runtime.handle_event(event)
         self.assertIn("44091", self.context.calls[-1][1].chain[0].text)
 

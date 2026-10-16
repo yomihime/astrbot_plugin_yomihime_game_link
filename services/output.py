@@ -204,6 +204,8 @@ class OutputService:
         principal_resolver: InvocationPrincipalResolver,
         owner_authority: OwnerRouteProofAuthority | None = None,
         command_heading_projector: CommandHeadingProjector | None = None,
+        command_card_renderer=None,
+        command_sender=None,
         claim_lease: timedelta,
         send_timeout: float,
         now: Callable[[], datetime] | None = None,
@@ -220,6 +222,12 @@ class OutputService:
         ):
             raise TypeError("command heading projector must be callable")
         self._command_heading_projector = command_heading_projector
+        self._command_card_renderer = command_card_renderer
+        self._command_sender = command_sender
+        self._generated_png = None
+        if command_card_renderer is not None:
+            if not callable(command_card_renderer) or not callable(command_sender):
+                raise TypeError("command images require a trusted command sender")
         self._limits = limits
         self._conversations = conversations
         self._message_port = message_port
@@ -344,6 +352,15 @@ class OutputService:
     async def _command(
         self, invocation: InvocationView, request: CommandOutput
     ) -> OutputResult:
+        image = {}
+        try:
+            return await self._command_output(invocation, request, image)
+        finally:
+            context = image.get("context")
+            if context is not None:
+                self._generated_png.release(context)
+
+    async def _command_output(self, invocation, request, image) -> OutputResult:
         validate_contract(invocation)
         async with self._serialized_invocation(invocation.invocation_id):
             result = request.result
@@ -351,9 +368,18 @@ class OutputService:
                 capability = self._require_current_module(invocation)
                 if capability is None:
                     raise _OutputFailure("invocation_unavailable")
+                public_command = (
+                    result.privacy is Privacy.PUBLIC
+                    and invocation.grant_id is None
+                    and capability.privacy_floor is not PrivacyFloor.OWNER
+                )
                 await self._check_result_authority(invocation, capability, result)
                 target = await self._target(invocation, result.privacy)
-                rendered = await self._render(result, invocation=invocation)
+                rendered = await self._render(
+                    result,
+                    invocation=invocation,
+                    image=image if public_command else None,
+                )
                 self._admission.check(self._root_lease(invocation))
             except _OutputFailure as exc:
                 return await self._controlled(
@@ -375,6 +401,7 @@ class OutputService:
                     "result_id": result.result_id,
                     "route": target,
                     "payload": rendered,
+                    "image_digest": image["reference"].digest if image else None,
                     "privacy": result.privacy,
                     "module_id": invocation.module_id,
                     "capability_id": invocation.capability_id,
@@ -500,7 +527,37 @@ class OutputService:
                 if not isinstance(sending, RootOutputClaim):
                     raise RuntimeError("root send has no persisted SENDING claim")
                 try:
-                    receipt = await self._message_port.send(target, rendered)
+                    if image:
+                        audience = (
+                            DisplayAudience.PRIVATE
+                            if result.privacy is Privacy.PRIVATE
+                            else DisplayAudience.PUBLIC
+                        )
+                        async with self._generated_png.pin(
+                            image["context"],
+                            image["reference"],
+                            invocation=invocation,
+                            result=result,
+                            expected_target=target,
+                            audience=audience,
+                        ) as png:
+                            content = await png.read_once()
+                            receipt = await self._command_sender(
+                                invocation,
+                                result,
+                                target,
+                                RenderedMessage(rendered.text, png_bytes=content),
+                                image_current=lambda: self._generated_png._lease(png),
+                            )
+                    elif public_command and self._command_sender is not None:
+                        receipt = await self._command_sender(
+                            invocation, result, target, rendered
+                        )
+                    else:
+                        # Keep private/granted/OWNER text on the original
+                        # approved path. Exact-event preparation adds awaits
+                        # after Admission's protected authorization handoff.
+                        receipt = await self._message_port.send(target, rendered)
                     if not isinstance(receipt, MessageReceipt):
                         receipt = MessageReceipt(MessageStatus.UNKNOWN)
                 except asyncio.CancelledError:
@@ -774,7 +831,11 @@ class OutputService:
         )
 
     async def _render(
-        self, result: CapabilityResult, *, invocation: InvocationView | None = None
+        self,
+        result: CapabilityResult,
+        *,
+        invocation: InvocationView | None = None,
+        image: dict | None = None,
     ) -> RenderedMessage:
         validate_contract(result)
         if result.status is ResultStatus.ERROR:
@@ -818,6 +879,38 @@ class OutputService:
                 # facts, blocks, privacy, sources or resource references.
                 document = replace(document, title=heading[0], subject=heading[1])
                 validate_contract(document)
+            if image is not None and self._command_card_renderer is not None:
+                from ..presentation.command_card import CommandPresentation
+                from .generated_png import GeneratedPngCoordinator, GeneratedPngError
+
+                presentation = self._command_card_renderer(document, audience=audience)
+                if type(presentation) is not CommandPresentation:
+                    raise ValueError("invalid command presentation")
+                if presentation.bitmap is not None:
+                    if self._generated_png is None:
+                        self._generated_png = GeneratedPngCoordinator(
+                            output_authority=self
+                        )
+                    context = None
+                    try:
+                        context = await self._generated_png.bind(invocation, result)
+                        reference = await self._generated_png.register(
+                            context, presentation.bitmap
+                        )
+                    except GeneratedPngError as exc:
+                        if context is not None:
+                            self._generated_png.release(context)
+                        if exc.reason not in (
+                            "image_invalid", "image_budget", "dependency_missing"
+                        ):
+                            raise
+                    except BaseException:
+                        if context is not None:
+                            self._generated_png.release(context)
+                        raise
+                    else:
+                        image.update(context=context, reference=reference)
+                return RenderedMessage(presentation.text)
             output = await self._renderer.render(
                 document, limits=self._limits, audience=audience
             )

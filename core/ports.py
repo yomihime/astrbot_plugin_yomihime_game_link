@@ -562,12 +562,20 @@ class MessageTarget:
 
 @dataclass(frozen=True, slots=True)
 class RenderedMessage:
+    """Internal payload; PNG bytes never enter the public SDK or Tool facts."""
+
     text: str
     resource_ids: tuple[str, ...] = ()
+    png_bytes: bytes | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.text, str) or not self.text.strip():
             raise ValueError("rendered text must be non-empty text")
+        if self.png_bytes is not None and (
+            type(self.png_bytes) is not bytes
+            or not 1 <= len(self.png_bytes) <= 1_048_576
+        ):
+            raise ValueError("PNG payload exceeds its internal byte budget")
         resource_ids = tuple(self.resource_ids)
         for resource_id in resource_ids:
             _asset(resource_id)

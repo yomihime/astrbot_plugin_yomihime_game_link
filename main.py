@@ -257,4 +257,9 @@ class YomihimeGameLink(Star):
         event.should_call_llm(True)
         text = await self._runtime.handle_event(event)
         if text is not None:
-            yield event.plain_result(text)
+            from .adapters.astrbot.command_bridge import CommandHelp
+
+            if isinstance(text, CommandHelp):
+                await self._runtime.send_help(event, text)
+            else:
+                yield event.plain_result(text)

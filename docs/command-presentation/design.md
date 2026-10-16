@@ -183,11 +183,25 @@ P3 需一并明确 owner、audience、TTL、撤权、取消、清理失败、缓
 
 固定 AstrBot 源码已核实 [`Image.fromBytes`](https://github.com/AstrBotDevs/AstrBot/blob/3c7adafa1397e182d60b1016bf88759265113c8a/astrbot/core/message/components.py#L528) 同步持有编码后的图片内容，可优先评估以减少源文件路径存活期依赖；仍须先授权和验证 PNG，并计入 base64 约 4/3 的额外内存。`fromFileSystem` 仅保存路径，不提供本插件的资源授权或图片验证；不要把它当成全局读取入口。组件可构造与 `send_message` 的 await 返回均不能证明图片最终可见、用户收到或平台临时资源已回收。
 
+### 2026-10-16 确认的普通附件边界
+
+本轮采用 AstrBot 标准图片消息：生成有界 PNG bytes，经过本插件既有请求、资源及发送许可检查，再由适配层构造 `Image.fromBytes` 并交给触发命令的可信 event。模块不获得 AstrBot event、文件路径或宿主令牌；SDK 不增加平台接口。
+
+此前将 Host 附件 owner/TTL、撤销和物理删除收据作为首次发图前置条件的要求，由以下范围替代：
+
+- Core 生成资源在交给 Host 前继续遵守自身授权、TTL、取消和卸载规则；只释放本插件拥有的内存或临时资源。
+- 交给 Host 后，附件存储、历史保留和读取使用 AstrBot 原有语义；不承诺插件可撤回、清零或自动删除已交出的副本，不自行读取或删除 Host 附件目录。
+- 不新增公开图片下载 API、静态 URL 或秘密资源访问旁路。普通附件也不能用于传送配置密钥、令牌等敏感管理数据。
+- 只对可信触发 event 进行一次发送；`None` 或发送后不确定结果保持 `UNKNOWN`，不自动补发图片或文字。
+- 图片构造或渲染在发送前失败时，可选择同一结果的文字降级；真实可见性仍需独立验收。
+
+参考 [Better Help 的 PNG bytes 发送](https://github.com/tinkerbellqwq/astrbot_plugin_help/blob/3529dc897adc0bd5c80304db141be44c329d8995/main.py#L28-L36) 和 [AstrBot 官方消息接口](https://docs.astrbot.app/dev/star/guides/send-message.html)。第三方插件的使用和固定 Host 源码只能证明接入模式，不能替代当前 WebChat 实测，也不证明其他平台都已通过。
+
 ### 首轮 Host 目标：AstrBot WebChat
 
 首轮目标已选 WebChat；其他适配器不能据此推定支持。固定版本的 [WebChat adapter](https://github.com/AstrBotDevs/AstrBot/blob/3c7adafa1397e182d60b1016bf88759265113c8a/astrbot/core/platform/sources/webchat/webchat_adapter.py) 可按会话发送，但会向该会话的多个活跃 request IDs 投递。新图片出口须绑定可信的触发 event/request，不能仅凭会话名或全局可变的“当前事件”保证一次投递。
 
-[WebChat event](https://github.com/AstrBotDevs/AstrBot/blob/3c7adafa1397e182d60b1016bf88759265113c8a/astrbot/core/platform/sources/webchat/webchat_event.py) 先写 Host 附件，再尝试放入请求队列；队列关闭可能未接收，而该路径仍返回 `None`。因此 Core 内存资源不落文件，不等于 Host 没有附件副本；后续须证明附件归属、关闭或取消时回收、队列接受状态及受权文件读取。源码中的 SSE/WS 和 Dashboard 图片展示路径，仍需真实 Host 与浏览器验收，不能作为已经投递的证据。
+[WebChat event](https://github.com/AstrBotDevs/AstrBot/blob/3c7adafa1397e182d60b1016bf88759265113c8a/astrbot/core/platform/sources/webchat/webchat_event.py) 先写 Host 附件，再尝试放入请求队列；队列关闭可能未接收，而该路径仍返回 `None`。因此 Core 内存资源不落文件，不等于 Host 没有附件副本；这些副本遵循上方已确认的普通 Host 附件边界，不把插件内存 TTL 当作 Host 文件 TTL，也不声称持有队列接受或物理清理收据。源码中的 SSE/WS 和 Dashboard 图片展示路径，仍需真实 Host 与浏览器验收，不能作为已经投递的证据。
 
 独立补查确认公开 `event.send` 可绑定该事件的 request，内部贯穿仍需本 PR 实现，不等于 Host 缺少精确路由。`None` 应保留 `UNKNOWN` 且零补发，本身不禁止所有单次发送。固定源码的附件 reader 未闭合 owner/audience；[文件 DELETE](https://github.com/AstrBotDevs/AstrBot/blob/3c7adafa1397e182d60b1016bf88759265113c8a/astrbot/dashboard/api/files.py#L105-L110)仅返回成功结构，没有物理删除或数据库删除，不能作为 TTL/撤销/卸载清理收据。Markdown 包装器的调用层未提供已验证的认证媒体读取和撤销合同，不能靠普通 URL 或 data URI 宣布替代链可用；其余第三方实现仍有未核范围，不断言 Host 绝对无法支持。以上固定源码证据不等同实际安装字节。
 

@@ -2,10 +2,12 @@
 
 This intentionally couples to OutputService's existing private authority policy
 at the same service layer. It is not an SDK resource reader or a send permit.
-No production composition or sender is supplied. Managed route/Grant mutation
+Production command output pins and reads bytes before the exact-event send.
+Managed route/Grant mutation
 must share Admission's gate; identity mappings retain their append-only contract.
 Budgets meter payload and conversion reservations, not Python heap/RSS. Bytes
-already handed to a caller cannot be recalled or promised to be zeroed.
+already handed to AstrBot follow normal Host attachment storage and retention.
+These local TTLs and releases do not revoke or physically delete Host copies.
 """
 
 from __future__ import annotations

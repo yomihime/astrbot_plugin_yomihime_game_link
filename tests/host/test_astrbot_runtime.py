@@ -164,8 +164,9 @@ class _ItemReplyTransport(_IdleTransport):
 
 
 class _Event:
-    def __init__(self, message_type: str = "GroupMessage") -> None:
-        self.message = "/ygl ff14 status"
+    def __init__(self, message_type: str = "GroupMessage", *, context=None, message=None) -> None:
+        self._context = context
+        self.message = message or "/ygl ff14 status"
         self.platform = "test-platform-1"
         self.sender = "user-17"
         self.conversation = "group-42"
@@ -186,6 +187,18 @@ class _Event:
 
     def get_message_type(self) -> str:
         return self.message_type
+
+    def chain_result(self, components):
+        return _MessageChain(list(components))
+
+    async def send(self, chain):
+        # Exact event API, retaining the existing assertion log format. This
+        # deliberately does not call Context.send_message/session fan-out.
+        session = f"{self.platform}:{self.message_type}:{self.conversation}"
+        self._context.calls.append((session, chain))
+        if self._context.error is not None:
+            raise self._context.error
+        return True
 
 
 class _OwnerHandler:
@@ -254,6 +267,9 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
             encoding="utf-8",
         )
 
+    def _event(self, *args, message=None):
+        return _Event(*args, context=self._event_context, message=message)
+
     def _runtime(
         self,
         context: _Context,
@@ -262,6 +278,7 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
         config=None,
         core_factory=CoreRuntime,
     ) -> AstrBotRuntime:
+        self._event_context = context
         return AstrBotRuntime(
             context,
             plugin_root=self.plugin_root,
@@ -604,8 +621,7 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(runtime.core_runtime.configuration_blocked)
             self.assertFalse(runtime.core_runtime.started)
             self.assertIsNone(runtime.core_runtime._pump_task)
-            event = _Event()
-            event.message = "/ygl help"
+            event = self._event(message="/ygl help")
             text = await runtime.handle_event(event)
             self.assertIn("Core 配置管理", text)
             self.assertIn("尚未启动", text)
@@ -645,8 +661,7 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(stored.values["ff14_calendar_default_days"], 3)
             self.assertNotIn("ff14_default_region", stored.values)
             self.assertTrue(await core.ordinary_config_migration.complete())
-            event = _Event()
-            event.message = "/ygl ff14 calendar help"
+            event = self._event(message="/ygl ff14 calendar help")
             help_text = await runtime.handle_event(event)
             self.assertIn("默认区域提示：global", help_text)
             self.assertIn("具体规则见模块帮助", help_text)
@@ -664,7 +679,7 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
         )
         await runtime.initialize()
         try:
-            event = _Event()
+            event = self._event()
             for text in (
                 "/ygl",
                 "/ygl help",
@@ -675,13 +690,13 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 "/ygl ff14 calendar subscribe help",
             ):
                 with self.subTest(text=text):
-                    event.message = text
+                    event = self._event(event.message_type, message=text)
                     response = await runtime.handle_event(event)
                     self.assertIn("默认区域提示：global", response)
                     self.assertIn("帮助", response)
             for text in ('/ygl ff14 calendar "unclosed', '/ygl "invalid route" help'):
                 with self.subTest(text=text):
-                    event.message = text
+                    event = self._event(event.message_type, message=text)
                     response = await runtime.handle_event(event)
                     self.assertIn("用法", response)
                     self.assertNotIn("默认区域提示", response)
@@ -691,24 +706,24 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 "/ygl ff14 calendar",
                 "/ygl ff14 calendar cn days=bad",
             ):
-                event.message = text
+                event = self._event(event.message_type, message=text)
                 response = await runtime.handle_event(event)
                 self.assertIn("help", response)
                 self.assertNotIn("默认区域提示", response)
                 self.assertNotIn("/ygl ff14 market", response)
-            event.message = "/ygl help"
+            event = self._event(event.message_type, message="/ygl help")
             root_help = await runtime.handle_event(event)
             self.assertIn("/ygl ff14 help", root_help)
             self.assertNotIn("/ygl ff14 market", root_help)
             self.assertNotIn("ygo", root_help)
-            event.message = "/ygl ff14 help"
+            event = self._event(event.message_type, message="/ygl ff14 help")
             module_help = await runtime.handle_event(event)
             self.assertIn("market help", module_help)
             self.assertIn("logs help", module_help)
             self.assertIn("需对应区域凭据", module_help)
             self.assertIn("当前不可用", module_help)
             self.assertNotIn("server_hint=", module_help)
-            event.message = "/ygl ff14 logs help"
+            event = self._event(event.message_type, message="/ygl ff14 logs help")
             details = await runtime.handle_event(event)
             self.assertIn("server_hint=", details)
             self.assertEqual(context.calls, [])
@@ -899,13 +914,12 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(ConfigurationValueError):
                 await core.core_defaults.current()
             self.assertTrue(runtime.ready)
-            event = _Event()
-            event.message = "/ygl ff14 calendar help"
+            event = self._event(message="/ygl ff14 calendar help")
             rejected = await runtime.handle_event(event)
             self.assertIn("普通配置无效", rejected)
             self.assertEqual(context.calls, [])
             # Invalid defaults refuse a price query; public catalog IO precedes config.
-            event.message = "/ygl ff14 market 44091"
+            event = self._event(event.message_type, message="/ygl ff14 market 44091")
             self.assertIsNone(await runtime.handle_event(event))
             self.assertEqual(
                 [request.path for request in transport.requests],
@@ -930,15 +944,15 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 authorization=admin,
             )
             # No page read or restart between authorized repair and the command.
-            event.message = "/ygl ff14 calendar help"
+            event = self._event(event.message_type, message="/ygl ff14 calendar help")
             help_text = await runtime.handle_event(event)
             self.assertIn(f"默认区域提示：{region}", help_text)
             self.assertTrue(runtime.ready)
-            event.message = "/ygl ff14 status"
+            event = self._event(event.message_type, message="/ygl ff14 status")
             self.assertIsNone(await runtime.handle_event(event))
             self.assertTrue(context.calls)
             # Read the repaired Core default in the registered market handler.
-            event.message = "/ygl ff14 market 44091"
+            event = self._event(event.message_type, message="/ygl ff14 market 44091")
             self.assertIsNone(await runtime.handle_event(event))
             queried_regions = {
                 request.path.split("/")[-2]
@@ -1057,8 +1071,8 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
             context, config=config, http_transport_factory=_IdleTransport
         )
         await runtime.initialize()
-        event = _Event("FriendMessage")
-        event.message = "/ygl ff14 calendar subscribe cn"
+        event = self._event("FriendMessage")
+        event = self._event(event.message_type, message="/ygl ff14 calendar subscribe cn")
         try:
             await runtime.handle_event(event)
             self.assertTrue(context.calls)
@@ -1093,7 +1107,7 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
             http_transport_factory=_IdleTransport,
         )
         await restored.initialize()
-        event.message = "/ygl ff14 calendar subscriptions"
+        event = self._event(event.message_type, message="/ygl ff14 calendar subscriptions")
         try:
             await restored.handle_event(event)
             text = context.calls[-1][1].chain[0].text
@@ -1357,7 +1371,7 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(module.manifest, expected_packages[0].manifest.modules[0])
         self.assertNotEqual(core.extension_root, self.data_dir / "extensions")
 
-        self.assertIsNone(await runtime.handle_event(_Event()))
+        self.assertIsNone(await runtime.handle_event(self._event()))
         self.assertEqual(len(context.calls), 1)
         session, chain = context.calls[0]
         self.assertEqual(
@@ -1481,8 +1495,7 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(manifest_path.read_bytes(), changed_manifest)
         self.assertEqual(runtime.bundle_failure_reason, "existing_manifest_mismatch")
         for message in ("/ygl help", "/ygl ff14 status"):
-            event = _Event()
-            event.message = message
+            event = self._event(message=message)
             diagnostic = await runtime.handle_event(event)
             self.assertIn("FF14 内置模块未能安全加载", diagnostic)
             self.assertIn("[existing_manifest_mismatch]", diagnostic)
@@ -1515,7 +1528,7 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 ):
                     await runtime.initialize()
                 try:
-                    reply = await runtime.handle_event(_Event())
+                    reply = await runtime.handle_event(self._event())
                     self.assertIn(category, reply)
                     self.assertIn(action, reply)
                     self.assertNotIn("当前没有已注册模块", reply)
@@ -1539,8 +1552,7 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(str(self.plugin_root), str(raised.exception))
         self.assertFalse(runtime.ready)
         self.assertIsNone(runtime.core_runtime)
-        event = _Event()
-        event.message = "/ygl help"
+        event = self._event(message="/ygl help")
         self.assertEqual(await runtime.handle_event(event), str(raised.exception))
         await runtime.terminate()
 
@@ -1552,9 +1564,9 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(core)
 
         self.assertIn(
-            "无法确认消息来源", await runtime.handle_event(_Event("OtherMessage"))
+            "无法确认消息来源", await runtime.handle_event(self._event("OtherMessage"))
         )
-        event = _Event()
+        event = self._event()
         ingress = runtime._make_ingress(event)
         self.assertIsInstance(ingress, HostIngress)
         self.assertIsNone(
@@ -1582,7 +1594,7 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
         events = []
         for adapter in ("adapter-a", "adapter-b"):
             for _ in range(4):
-                event = _Event()
+                event = self._event()
                 event.platform = adapter
                 event.sender = "same-user"
                 event.conversation = "same-chat"
@@ -1675,15 +1687,14 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 )
             },
         )
-        event = _Event()
-        event.message = "/ygl owner manage"
+        event = self._event(message="/ygl owner manage")
         response = await runtime.handle_event(event)
         self.assertIn("模块当前不可用", response)
         self.assertEqual(handler.calls, 0)
         self.assertEqual(context.calls, [])
 
         # The bundled module is active and has a genuine OWNER declaration.
-        event.message = "/ygl ff14 calendar subscriptions"
+        event = self._event(event.message_type, message="/ygl ff14 calendar subscriptions")
         response = await runtime.handle_event(event)
 
         self.assertEqual(response, "该本人管理命令仅支持私聊，请前往私聊继续。")
@@ -1769,13 +1780,43 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
         runtime = self._runtime(_Context(), http_transport_factory=_IdleTransport)
         await runtime.initialize()
         try:
-            event = _Event()
-            event.message = "/ygl ff14 item 44091"
+            event = self._event(message="/ygl ff14 item 44091")
             action = AstrBotCommandBridge(runtime.core_runtime.registry).parse(event)
             self.assertIsInstance(action, CommandInvocation)
             self.assertEqual(action.module_id, "ff14/ff14")
             self.assertEqual(action.operation_path, "item")
             self.assertEqual(dict(action.parameters), {"query": "44091"})
+        finally:
+            await runtime.terminate()
+
+    async def test_help_and_item_png_use_exact_event_and_release_owned_ingress(self):
+        context = _Context()
+        transport = _ItemReplyTransport()
+        runtime = self._runtime(context, http_transport_factory=lambda: transport)
+        await runtime.initialize()
+        try:
+            from types import SimpleNamespace
+            from ygl_test_subject.adapters.astrbot.command_bridge import CommandHelp
+
+            runtime._message_port._image_factory = lambda content: SimpleNamespace(png=content)
+            async def forbidden_session_send(*_args):
+                raise AssertionError("command images must use the exact event")
+            context.send_message = forbidden_session_send
+            event = self._event(message="/ygl help")
+            help_text = await runtime.handle_event(event)
+            self.assertIsInstance(help_text, CommandHelp)
+            await runtime.send_help(event, help_text)
+            await runtime.send_help(event, help_text)
+            self.assertEqual(len(context.calls), 1)
+            self.assertTrue(context.calls[0][1].chain[0].png.startswith(b"\x89PNG"))
+            event = self._event(message="/ygl ff14 item 100")
+            self.assertIsNone(await runtime.handle_event(event))
+            self.assertEqual(len(context.calls), 2)
+            self.assertTrue(context.calls[1][1].chain[0].png.startswith(b"\x89PNG"))
+            core = runtime.core_runtime
+            self.assertEqual(core._command_ingresses, {})
+            self.assertEqual(core.output._generated_png._entries, {})
+            self.assertEqual([r.source_id for r in transport.requests], ["xivapi_items", "garland_items"])
         finally:
             await runtime.terminate()
 
@@ -1790,8 +1831,7 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
         item_health, _ = core.health_resolver.current("ff14/ff14", "item.lookup")
         self.assertIs(item_health.status, HealthStatus.AVAILABLE)
 
-        event = _Event()
-        event.message = "/ygl ff14 item 100"
+        event = self._event(message="/ygl ff14 item 100")
         self.assertIsNone(await runtime.handle_event(event))
 
         self.assertEqual(
@@ -1912,8 +1952,7 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
         runtime = self._runtime(context, http_transport_factory=lambda: transport)
         await runtime.initialize()
 
-        event = _Event()
-        event.message = "/ygl ff14 logs global Aether Rada"
+        event = self._event(message="/ygl ff14 logs global Aether Rada")
         self.assertIsNone(await runtime.handle_event(event))
 
         self.assertEqual(transport.requests, [])

@@ -10,7 +10,7 @@ import weakref
 from pathlib import Path
 from unittest.mock import patch
 
-from PIL import Image, ImageChops, ImageDraw, ImageFont
+from PIL import Image, ImageChops, ImageDraw, ImageFont, features
 from ygl_test_subject.presentation import card_bitmap as bitmap
 from ygl_test_subject.presentation import rich_text as rich
 from ygl_test_subject.presentation.bundled_font import BundledFontProvider
@@ -448,6 +448,145 @@ class RichTextTests(unittest.TestCase):
                     bounds=dataclasses.replace(bitmap.BitmapBounds(), **{field: limit}),
                 ),
             )
+
+    def _alternating_table(self, width, align="left"):
+        content = rich.RichText(
+            tuple(
+                rich.TextSpan(
+                    char, rich.TextRole.EMPHASIS if i % 2 else rich.TextRole.NORMAL
+                )
+                for i, char in enumerate("AV" * 16)
+            )
+        )
+        return bitmap.CardSpec(
+            "T",
+            (
+                bitmap.Section(
+                    columns=("First", "Second"),
+                    rows=(bitmap.Row((rich.TextCell(content, align, "center"), "Z")),),
+                ),
+            ),
+            width=width,
+        )
+
+    def _assert_styled_columns_contained(self, provider, width, align):
+        spec = self._alternating_table(width, align)
+        captured = []
+        original = rich.RichSession.paint
+
+        def capture(session):
+            captured.extend(session.plans)
+            return original(session)
+
+        with patch.object(rich.RichSession, "paint", capture):
+            result = bitmap.render_card(spec, font_provider=provider)
+        plans = [plan for plan in captured if plan.info.text in ("A", "V")]
+        self.assertEqual("".join(plan.info.text for plan in plans), "AV" * 16)
+        self.assertEqual(len({plan.info.bounds[1] for plan in plans}), 2)
+        edge = 40 + (width - 80) // 2 - 8
+        actual_bounds = []
+        for plan in plans:
+            x0, y0, x1, y1 = plan.info.patch_bounds
+            # Independently rasterize the final placement, rather than trust
+            # either the wrapping metrics or its reported DrawInfo bounds.
+            with Image.new("L", (x1 - x0, y1 - y0)) as mask:
+                ImageDraw.Draw(mask).text(
+                    (plan.pad - plan.box[0], plan.pad - plan.box[1]),
+                    plan.info.text,
+                    font=plan.font,
+                    fill=255,
+                )
+                ink = mask.getbbox()
+            self.assertIsNotNone(ink)
+            actual = tuple(
+                (origin + offset) / 2
+                for origin, offset in zip((x0, y0, x0, y0), ink)
+            )
+            self.assertEqual(actual, plan.info.bounds)
+            self.assertGreaterEqual(actual[0], 48)
+            self.assertLessEqual(actual[2], edge)
+            self.assertGreaterEqual(actual[1], 0)
+            self.assertLessEqual(actual[3], result.height)
+            actual_bounds.append(actual)
+            self.assertEqual(
+                plan.info.face,
+                "#84573e" if plan.info.text == "V" else "#5b4033",
+            )
+        neighbor = next(plan.info for plan in captured if plan.info.text == "Z")
+        self.assertLess(max(box[2] for box in actual_bounds), neighbor.bounds[0])
+        with Image.open(io.BytesIO(result.content)) as image:
+            image.load()
+            self.assertEqual(image.size, (width, result.height))
+
+    def test_fixed_noto_styled_runs_wrap_inside_both_aligned_cells(self):
+        for align in ("left", "right"):
+            with self.subTest(align=align):
+                self._assert_styled_columns_contained(self.provider, 860, align)
+
+    @unittest.skipUnless(features.check_feature("raqm"), "Pillow RAQM unavailable")
+    def test_packaged_kerning_font_styled_runs_do_not_overlap_next_column(self):
+        # The pinned Pillow package supplies this exact ASCII face. Loading its
+        # bytes with RAQM enables AV kerning without discovering a system font.
+        content = ImageFont.load_default().font_bytes
+
+        class KerningFont:
+            def supports(self, codepoint):
+                return 32 <= codepoint <= 126
+
+            def load(self, size):
+                return ImageFont.truetype(
+                    io.BytesIO(content), size, layout_engine=ImageFont.Layout.RAQM
+                )
+
+        provider = KerningFont()
+        font = provider.load(20)
+        self.assertLess(font.getlength("AV"), sum(font.getlength(c) for c in "AV"))
+        for align in ("left", "right"):
+            with self.subTest(align=align):
+                self._assert_styled_columns_contained(provider, 900, align)
+
+    def test_actual_glyph_overflow_rejected_before_paint_without_clipping(self):
+        # Simulate a future layout regression: even admitted text must not leak
+        # into its neighbor or be cropped to conceal the incorrect measurement.
+        with (
+            patch.object(rich._LineMetrics, "width", property(lambda metrics: 0)),
+            patch.object(rich.RichSession, "paint") as paint,
+        ):
+            self.assert_reason(
+                "layout_overflow",
+                lambda: bitmap.render_card(
+                    self._alternating_table(860), font_provider=self.provider
+                ),
+            )
+        paint.assert_not_called()
+
+    def test_run_wrapping_preserves_budgets_and_rejects_nonfitting_glyphs(self):
+        content = self._alternating_table(860).sections[0].rows[0].cells[0].content
+        layout = bitmap._RichLayout(self.provider, bitmap.BitmapBounds())
+        lines = layout.wrap(content, 20, 374)
+        self.assertEqual(len(lines), 2)
+        exact = dataclasses.replace(
+            bitmap.BitmapBounds(),
+            max_measurements=layout.measurements,
+            max_output_lines=layout.output_lines,
+        )
+        self.assertEqual(
+            bitmap._RichLayout(self.provider, exact).wrap(content, 20, 374), lines
+        )
+        for field in ("max_measurements", "max_output_lines"):
+            bounds = dataclasses.replace(exact, **{field: getattr(exact, field) - 1})
+            self.assert_reason(
+                "layout_overflow",
+                lambda: bitmap._RichLayout(self.provider, bounds).wrap(
+                    content, 20, 374
+                ),
+            )
+        with patch.object(Image, "new", side_effect=AssertionError("early raster")):
+            for value in ("W", " W"):
+                self.assert_reason(
+                    "layout_overflow",
+                    lambda: layout.wrap(rich.RichText((rich.TextSpan(value),)), 20, 5),
+                )
 
     def test_font_variants_are_finite_exact_bytes_and_streams_closed(self):
         original = ImageFont.FreeTypeFont.font_variant

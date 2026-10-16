@@ -170,7 +170,7 @@ class ItemToolHostTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_direct_command_keeps_display_and_does_not_call_model(self):
         await self.start_items()
-        event = runtime_fixture._Event()
+        event = runtime_fixture._Event(context=self.context)
         event.message = "/ygl ff14 item 44091"
         self.assertIsNone(await self.runtime.handle_event(event))
         reply = self.context.calls[-1][1].chain[0].text
