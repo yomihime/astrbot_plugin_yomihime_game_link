@@ -146,17 +146,13 @@ ALLOWED_SUFFIXES = {".py", ".sql"}
 # Exact reviewed binary/legal inputs. Never broaden the runtime suffix set or
 # recursively admit presentation/assets (including Python files placed there).
 FONT_ASSETS = {
-    "presentation/assets/fonts/NotoSansCJKsc-Regular.otf": (
-        16_437_364,
-        "2c76254f6fc379fddfce0a7e84fb5385bb135d3e399294f6eeb6680d0365b74b",
-    ),
     "presentation/assets/fonts/OFL.txt": (
         4301,
         "6a73f9541c2de74158c0e7cf6b0a58ef774f5a780bf191f2d7ec9cc53efe2bf2",
     ),
     "presentation/assets/fonts/NOTICE.md": (
-        1052,
-        "4005fbea2177c102014756ea4f838a6cf71290c4094524200e0a517ffc258e37",
+        1541,
+        "7d66c7534dc768d89055cba8b8bd906bbef3ab33d5dc6675b08a71ea9ab2a3a6",
     ),
 }
 EXCLUDED_RUNTIME_DIRS = {

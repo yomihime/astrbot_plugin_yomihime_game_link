@@ -20,9 +20,12 @@ from ...core.contracts.validation_boundary import validate_contract
 from ...core.ports import RevisionConflict
 from ...infrastructure.secret_store import SecretStoreUnavailable
 from .runtime import PLUGIN_NAME
-from .web_admin import bounded_body, verified_dashboard_request
+from .web_admin import bounded_body, bounded_font_upload, verified_dashboard_request
 
 _OPERATIONS = {
+    "font-status": AdminOperation.READ_CONFIG,
+    "font-retry": AdminOperation.UPDATE_CONFIG,
+    "font-upload": AdminOperation.UPDATE_CONFIG,
     "read": AdminOperation.READ_CONFIG,
     "catalog": AdminOperation.READ_CONFIG,
     "update": AdminOperation.UPDATE_CONFIG,
@@ -129,7 +132,10 @@ class AdminPages:
                 )
                 self.requests[id(context)] = (source, context)
                 data = await asyncio.wait_for(
-                    bounded_body(concrete), timeout=max(0.001, expiry - time())
+                    bounded_font_upload(concrete)
+                    if endpoint == "font-upload"
+                    else bounded_body(concrete),
+                    timeout=max(0.001, expiry - time()),
                 )
                 source.check(
                     context,
@@ -196,6 +202,27 @@ class AdminPages:
 
     async def _invoke(self, endpoint, core, data, context):
         ops = core.admin_operations
+        if endpoint.startswith("font-"):
+            current, source = self.runtime.management_entry()
+            if current is not core:
+                raise AdminAuthorizationDenied
+
+            def check():
+                source.check(context, _OPERATIONS[endpoint], ops.ordinary_resources())
+
+            check()
+            manager = self.runtime._managed_font
+            if endpoint == "font-status":
+                if data:
+                    raise ValueError("invalid font status parameters")
+                return manager.status()
+            if endpoint == "font-retry":
+                if data:
+                    raise ValueError("invalid font retry parameters")
+                return manager.retry()
+            if set(data) != {"content"}:
+                raise ValueError("invalid font upload parameters")
+            return await manager.upload(data["content"], check)
         if endpoint in ("modules", "module-enabled", "module-unload"):
             from dataclasses import asdict
 

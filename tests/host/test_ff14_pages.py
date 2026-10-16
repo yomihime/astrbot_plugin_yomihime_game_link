@@ -20,6 +20,7 @@ from ygl_test_subject.core.contracts.validation_boundary import validate_contrac
 from ygl_test_subject.core.ports import PublicWebBinding
 from ygl_test_subject.modules.ff14.assembly import query_parameters
 
+from tests.fixtures.managed_font import OfflineManagedFont
 from tests.host.assembly_contract import selected_assembly
 from tests.host.astrbot_contract import host_contracts as _host_contracts
 from yomihime_game_link_sdk.display import (
@@ -126,6 +127,7 @@ class PublicWebPagesTests(unittest.IsolatedAsyncioTestCase):
         web, _ = _host_contracts()
         runtime = AstrBotRuntime(
             _Context(),
+            font_manager_factory=OfflineManagedFont,
             plugin_root="unused",
             data_dir="unused",
             config=config

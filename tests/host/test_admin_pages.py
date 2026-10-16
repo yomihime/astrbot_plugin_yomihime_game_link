@@ -16,6 +16,7 @@ from ygl_test_subject.adapters.astrbot.runtime import PLUGIN_NAME, AstrBotRuntim
 from ygl_test_subject.adapters.astrbot.web_admin import verified_dashboard_request
 from ygl_test_subject.core.contracts.administration import AdminAuthorizationDenied
 
+from tests.fixtures.managed_font import OfflineManagedFont
 from tests.host.astrbot_contract import host_contracts
 from tests.host.test_astrbot_runtime import _IdleTransport, _MessageChain, _Plain
 from tests.host.test_ff14_pages import _Context, _token
@@ -35,6 +36,7 @@ class AdminPagesTests(unittest.IsolatedAsyncioTestCase):
         (Path(self.temp.name) / "data").mkdir()
         self.runtime = AstrBotRuntime(
             self.context,
+            font_manager_factory=OfflineManagedFont,
             plugin_root=plugin_root,
             data_dir=Path(self.temp.name) / "data",
             config={},
@@ -438,3 +440,57 @@ class AdminPagesTests(unittest.IsolatedAsyncioTestCase):
         with self.web.bind_request_context(SimpleNamespace(path=path, method="POST")):
             response = await old()
         self.assertEqual(response.status_code, 403)
+
+    async def test_font_status_retry_and_authenticated_bounded_upload(self):
+        from ygl_test_subject.presentation.bundled_font import (
+            FONT_FILENAME,
+            FONT_SHA256,
+            FONT_SIZE,
+        )
+
+        content = (
+            Path(__file__).resolve().parents[2]
+            / "presentation/assets/fonts"
+            / FONT_FILENAME
+        ).read_bytes()
+        response = await self.call("font-status", {})
+        self.assertEqual(response.status_code, 200, response.text)
+        status = response.json()["data"]
+        self.assertEqual(status["sha256"], FONT_SHA256)
+        self.assertEqual(status["size"], FONT_SIZE)
+        self.assertNotIn(str(self.temp.name), response.text)
+        self.assertEqual((await self.call("font-retry", {})).status_code, 200)
+        self.assertEqual(
+            (await self.call("font-retry", {"url": "https://evil.test"})).status_code,
+            400,
+        )
+        path = f"/api/v1/plugins/extensions/{PLUGIN_NAME}/admin/font-upload"
+        response = await self.client.post(
+            path,
+            headers=self.headers,
+            files={"file": (FONT_FILENAME, content, "application/octet-stream")},
+            follow_redirects=True,
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["data"]["source"], "canonical")
+        for files in (
+            {"file": (FONT_FILENAME, b"invalid", "application/octet-stream")},
+            {"file": (FONT_FILENAME, b"x" * FONT_SIZE, "application/octet-stream")},
+            [
+                ("file", (FONT_FILENAME, content, "application/octet-stream")),
+                ("extra", ("x", b"x")),
+            ],
+        ):
+            response = await self.client.post(
+                path, headers=self.headers, files=files, follow_redirects=True
+            )
+            self.assertEqual(response.status_code, 400, response.text)
+        response = await self.client.post(
+            path,
+            headers={},
+            files={"file": (FONT_FILENAME, content)},
+            follow_redirects=True,
+        )
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(self.pages.requests, {})
+        self.assertEqual(self.runtime._admin_source._proofs, {})

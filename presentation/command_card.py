@@ -134,10 +134,13 @@ def build_help_card(source: HelpCardSource, *, logos=None) -> cards.Document:
 class CommandCardRenderer:
     """Trusted, command-only presentation policy. Optional Pillow fails to text."""
 
-    def __init__(self, *, max_text_chars=6000, max_text_lines=200):
+    def __init__(
+        self, *, max_text_chars=6000, max_text_lines=200, font_provider_factory=None
+    ):
         self._max_text_chars = max_text_chars
         self._max_text_lines = max_text_lines
         self._text = TextPresenter()
+        self._font_provider_factory = font_provider_factory or BundledFontProvider
 
     def __call__(
         self,
@@ -172,10 +175,10 @@ class CommandCardRenderer:
             if document.card is not None:
                 bitmap = render_document(
                     apply_theme_selection(document.card, core_theme, module_theme),
-                    font_provider=BundledFontProvider(),
+                    font_provider=self._font_provider_factory(),
                 )
             else:
-                bitmap = render_card(spec, font_provider=BundledFontProvider())
+                bitmap = render_card(spec, font_provider=self._font_provider_factory())
         except Exception:
             bitmap = None
         return CommandPresentation(fallback, bitmap)
@@ -194,12 +197,12 @@ class CommandCardRenderer:
             if card is not None:
                 bitmap = render_document(
                     apply_theme_selection(card, core_theme),
-                    font_provider=BundledFontProvider(),
+                    font_provider=self._font_provider_factory(),
                 )
             else:
                 bitmap = render_card(
                     CardSpec(title, (Section(paragraphs=tuple(body.splitlines())),)),
-                    font_provider=BundledFontProvider(),
+                    font_provider=self._font_provider_factory(),
                 )
             # Help has no module result resource; validate its actual PNG bytes
             # here before handing it to the exact-event Host adapter.

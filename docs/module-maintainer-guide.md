@@ -85,3 +85,14 @@ SDK a7 可在 `DisplayDocument.card` 附带纯 `cards.Document`，文本块仍�
 这个绑定仅用于命令图片，不是新公共资源下载接口。模块不能用 `__file__` 拼接并读取自身静态资源目录：隔离的源码捕获不包含静态资源。应声明 `ModuleDisplay.logo_resource` 与对应 `ModuleManifest.resources`，交给 Core 绑定。
 
 模块内容采用普通字符串、`cards.Inline` / `cards.Span`，或者显式 `cards.TaggedText`。外部名称优先作为普通字符串或 Span，避免无意将外部内容解析成标签。只有 TaggedText 请求 Core 解析约定的有界标签语法；普通字符串保持字面量。
+
+
+### Core 受管字体资源
+
+命令图片字体由 Core 管理，不是模块设置、SDK 字体选择器或模块来源权限。模块继续提交同一 `cards.Document`；不得指定系统路径、下载 URL、摘要或任意上传字体。标准资源固定为原版 Noto Sans CJK SC Regular 2.004，准确文件与预算见[展示契约 §5.1](command-presentation/declarative-rendering-spec.md#51-core-受管字体与轻量发布)。
+
+正式 Host 在启动后台核验 `data_dir/resources/fonts` 下固定文件，缺失/不匹配时从固定上游下载，验证同一 bytes 后原子发布。当前渲染使用不可变 provider 快照，不逐命令读盘/联网。标准字体未就绪时只尝试有界系统候选，并按实际 cmap 检查覆盖；系统字体不复制进持久目录或重新分发，排版可与标准字体不同；没有可用字形就沿用完整文本回退。模块不能因此省略事实或假定图片一定生成成功。
+
+Core 全局「回复样式 → 图片字体」的状态、重试、上传复用正式管理身份/来源/资源/生命周期检查；只接受准确大小和 SHA 的同一固定字体，客户端文件名不决定目标路径。它不是主题配置草稿，不使用配置 CAS；状态 revision 也不授权写入。切页只忽略迟到回执，不保证取消已提交上传。
+
+轻量插件只分发字体 OFL 与 NOTICE，原版 OTF 仍在源码作为离线基准；不能因包内有 NOTICE 就声称运行时已有字体。后台网络不等待启动完成，但文件/哈希/Pillow 检查有同步开销。该片不改变 SDK a7 wheel 或已确认样图，不把系统回退字体渲染声明为与标准字体完全同图。新包与真实部署的验证状态见[当前交接](command-presentation/README.md)。

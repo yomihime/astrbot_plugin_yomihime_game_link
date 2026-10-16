@@ -2,7 +2,7 @@
 
 ## 当前入口：SDK 声明与共用 Core renderer（2026-10-16）
 
-当前候选已将帮助、物品、市场和 Logs 命令接入同一 Core 声明式渲染器。模块使用 `yomihime_game_link_sdk.cards` 纯数据定义，经 `DisplayDocument.card` 提交；Core 负责排版、素材、主题、A/B 字效，Host 负责正式命令发送。设置页和两级主题存储也已接线。当前证据为离线测试，新候选尚未安装到真实 Local Test。
+当前候选已将帮助、物品、市场和 Logs 命令接入同一 Core 声明式渲染器。模块使用 `yomihime_game_link_sdk.cards` 纯数据定义，经 `DisplayDocument.card` 提交；Core 负责排版、素材、主题、A/B 字效，Host 负责正式命令发送。设置页和两级主题存储也已接线。这些视觉基准属于前一阶段声明式卡片交付；当前 Host 字体管理另见 Spec，不以样例通过证明真实 Local Test 安装成功。
 
 - [运行样例](declarative_samples.py)只组合 SDK 声明并调用 `presentation.layout_renderer.render_document`，没有独立 Pillow 布局或旧 renderer 导入
 - [当前 Spec 与完整函数调用](../../docs/command-presentation/declarative-rendering-spec.md)说明 SDK、TaggedText、Cell、素材/预算/错误、Core 默认主题与模块跟随/覆盖
@@ -16,6 +16,8 @@ python -m pip install -r examples/command_cards/requirements-declarative.txt
 python -m examples.command_cards.declarative_samples
 python -m unittest examples.command_cards.test_declarative_samples -v
 ```
+
+源码 CLI 使用仓库保留的原版 Noto OTF，继续提供确定性的离线样图。当前轻量插件 ZIP 只保留字体 OFL/NOTICE；正式 Host 从 Core 持久资源获取同一固定字体，未就绪时有限系统回退或完整文本。CLI 不触发该后台下载，也不把系统字体输出覆盖到五张已确认的样图。字体身份、资源策略和页面操作见 [Spec §5.1](../../docs/command-presentation/declarative-rendering-spec.md#51-core-受管字体与轻量发布)。
 
 新路径固定 Pillow `12.3.0`、resvg_py `0.5.0`，与 Core 根运行依赖一致，不需要手动 Cairo DLL。SDK wheel 无运行依赖；Windows 已有官方 wheel，但未在本轮实机验证。CLI 只向仓库外的新目录输出，并记录 PNG 摘要；不覆盖历史样图。
 

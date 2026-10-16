@@ -1,3 +1,4 @@
+import {createFontSettings} from './font-settings';
 import {createManagementView} from "./management-view";
 import {nextTick} from "vue";
 import {isCoreThemeField, followsCoreTheme, settingValues} from "./setting-choices";
@@ -112,10 +113,12 @@ function contextBoundary(context,expectedPage){
   const representable=v=>{if(typeof v==='number'&&Object.is(v,-0))fail('invalid_context');if(v&&typeof v==='object')for(const child of Object.values(v))representable(child);};representable(boundary);
   const stable=v=>Array.isArray(v)?v.map(stable):record(v)?Object.fromEntries(Object.keys(v).sort().map(name=>[name,stable(v[name])])):v;return JSON.stringify(stable(boundary));
 }
-export function createManagementPage(document,bridge,window,{expectedPage='management',container=document.getElementById('management-root'),scope='settings',beforeMaintenance=async _operation=>false,onDraftMutation=()=>{},onConfigurationSaved=()=>{},onCapabilities=(/** @type {string[]|null} */ _owners, _complete=false)=>{}}={}){
+export function createManagementPage(document,bridge,window,{expectedPage='management',container=document.getElementById('management-root'),scope='settings',initiallySuspended=false,beforeMaintenance=async _operation=>false,onDraftMutation=()=>{},onConfigurationSaved=()=>{},onCapabilities=(/** @type {string[]|null} */ _owners, _complete=false)=>{}}={}){
   if(!container)fail('invalid_container'); const element=id=>Array.from(container.querySelectorAll('[id]')).find(node=>node.id===id)||null;
   let catalog=null,snapshot=null,credentialCatalog=null,credentialSnapshot=null,ready=false,closed=false,stale=true,generation=0,boundary=null,contextSeen=false,off=null,active=null;
   const view=createManagementView(document,container,scope),cards=new Map(),controls=new Map(),status=element('status');
+  let suspended=initiallySuspended;
+  const fonts=createFontSettings(bridge,window,panel=>view.font(panel),()=>{stale=true;buttons();});
   const credentialControls=new Map();let encryptionReady=false;let savedFocus=null,selectedOwner=null;
   const emptyDraft=scope==='maintenance'?'[[],[],false]':'[[],[]]';let draftState=emptyDraft;
   const statusNotice=createNotice(window,(message,tone)=>{status.textContent=message;status.dataset.tone=tone;});
@@ -133,6 +136,8 @@ export function createManagementPage(document,bridge,window,{expectedPage='manag
   const blocked=button=>!button||button.disabled||button.getAttribute('aria-disabled')==='true';
   function setButton(button,denied){if(!button)return;button.setAttribute('aria-disabled',String(denied));button.disabled=denied&&(closed||!ready||document.activeElement!==button);}
   function buttons(){
+    const fontVisible=scope==='settings'&&(selectedOwner===null||selectedOwner==='game_link/core')&&Boolean(catalog?.fields.some(f=>f.module_id==='game_link/core'&&f.group==='reply_style'&&f.readable));
+    fonts.sync(fontVisible,!closed&&ready&&!suspended&&!stale);
     setButton(element('refresh'),closed||!ready||active!==null);
     const usable=!closed&&ready&&!stale&&snapshot!==null&&Object.keys(snapshot).length>0&&active===null;
     setButton(element('rollback'),!usable);setButton(element('recover'),!usable||catalog.fields.some(f=>f.readable&&!f.editable));
@@ -249,8 +254,8 @@ export function createManagementPage(document,bridge,window,{expectedPage='manag
   }));
   function accept(context){
     if(closed)return;view.context(context);document.documentElement.dataset.theme=context?.isDark===true||context?.theme==='dark'?'dark':'light';document.documentElement.lang=typeof context?.locale==='string'?context.locale:'zh-CN';let next;
-    try{next=contextBoundary(context,expectedPage);}catch{onCapabilities(null);clearSecrets();contextSeen=true;generation++;ready=false;stale=true;active=null;boundary=null;catalog=null;snapshot=null;credentialCatalog=null;credentialSnapshot=null;view.fields([],draftChanged);view.credentials([],draftChanged);cards.clear();controls.clear();credentialControls.clear();draftState=emptyDraft;buttons();notice('宿主管理上下文无效，请重新打开页面。');return;}
-    contextSeen=true;if(ready&&next===boundary)return;statusNotice.clear();onCapabilities(null);clearSecrets();generation++;boundary=next;ready=true;stale=true;active=null;catalog=null;snapshot=null;credentialCatalog=null;credentialSnapshot=null;view.fields([],draftChanged);view.credentials([],draftChanged);cards.clear();controls.clear();credentialControls.clear();draftState=emptyDraft;buttons();
+    try{next=contextBoundary(context,expectedPage);}catch{fonts.invalidate();onCapabilities(null);clearSecrets();contextSeen=true;generation++;ready=false;stale=true;active=null;boundary=null;catalog=null;snapshot=null;credentialCatalog=null;credentialSnapshot=null;view.fields([],draftChanged);view.credentials([],draftChanged);cards.clear();controls.clear();credentialControls.clear();draftState=emptyDraft;buttons();notice('宿主管理上下文无效，请重新打开页面。');return;}
+    contextSeen=true;if(ready&&next===boundary)return;fonts.invalidate();statusNotice.clear();onCapabilities(null);clearSecrets();generation++;boundary=next;ready=true;stale=true;active=null;catalog=null;snapshot=null;credentialCatalog=null;credentialSnapshot=null;view.fields([],draftChanged);view.credentials([],draftChanged);cards.clear();controls.clear();credentialControls.clear();draftState=emptyDraft;buttons();
     run(async attempt=>{await refresh(attempt);});
   }
   const dirty=()=>[...controls.values()].some(c=>c.mode?.value!=='keep')||[...credentialControls.values()].some(c=>c.mode?.value!=='keep'||c.clientId?.value||c.clientSecret?.value);
@@ -261,9 +266,9 @@ export function createManagementPage(document,bridge,window,{expectedPage='manag
     const credentialOwners=[...new Set([...credentialControls.values()].filter(c=>c.mode&&c.mode.value!=='keep'||c.clientId?.value||c.clientSecret?.value||c.confirm?.checked).map(c=>c.field.module_id))];
     return {ordinaryOwners,credentialOwners,requiresConfirmation:ordinaryOwners.length>0||credentialOwners.length>0};
   }
-  function suspend(){if(status.dataset.tone==='success')statusNotice.clear();else statusNotice.cancel();const node=document.activeElement;savedFocus=container.contains(node)&&node?.id?{id:node.id,start:node.selectionStart,end:node.selectionEnd}:null;clearSecrets();generation++;active=null;stale=true;buttons();}
-  function resume(){if(closed||!ready)return;run(async attempt=>{await refresh(attempt);if(savedFocus){const node=element(savedFocus.id);node?.focus({preventScroll:true});if(node&&savedFocus.start!==null&&node.setSelectionRange)try{node.setSelectionRange(savedFocus.start,savedFocus.end);}catch{}savedFocus=null;}});}
-  function close(){if(closed)return;statusNotice.cancel();onCapabilities(null);clearSecrets();closed=true;generation++;ready=false;active=null;catalog=null;snapshot=null;credentialCatalog=null;credentialSnapshot=null;off?.();buttons();}
+  function suspend(){suspended=true;fonts.invalidate();if(status.dataset.tone==='success')statusNotice.clear();else statusNotice.cancel();const node=document.activeElement;savedFocus=container.contains(node)&&node?.id?{id:node.id,start:node.selectionStart,end:node.selectionEnd}:null;clearSecrets();generation++;active=null;stale=true;buttons();}
+  function resume(){if(closed||!ready)return;suspended=false;run(async attempt=>{await refresh(attempt);if(savedFocus){const node=element(savedFocus.id);node?.focus({preventScroll:true});if(node&&savedFocus.start!==null&&node.setSelectionRange)try{node.setSelectionRange(savedFocus.start,savedFocus.end);}catch{}savedFocus=null;}});}
+  function close(){if(closed)return;fonts.dispose();statusNotice.cancel();onCapabilities(null);clearSecrets();closed=true;generation++;ready=false;active=null;catalog=null;snapshot=null;credentialCatalog=null;credentialSnapshot=null;off?.();buttons();}
   return {start(){
     if(!bridge||typeof bridge.apiPost!=='function'||typeof bridge.ready!=='function'||typeof bridge.onContext!=='function'){notice('请从宿主插件管理页面打开此页。');return;}
     off=bridge.onContext(accept);Promise.resolve(bridge.ready()).then(context=>{if(!contextSeen)accept(context);}).catch(()=>{if(!contextSeen&&!closed){ready=false;notice('宿主管理会话不可用。');buttons();}});window?.addEventListener('pagehide',close,{once:true});

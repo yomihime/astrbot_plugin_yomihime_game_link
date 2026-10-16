@@ -3,6 +3,7 @@ import {NConfigProvider, darkTheme, zhCN, enUS, dateZhCN, dateEnUS} from 'naive-
 import {ActionBar, SettingsGroup, SettingsRow, StatusHint} from './ui/components';
 import {credentialLabel, fieldPresentation, groupTitle, ownerPresentation} from './ui/presentation';
 import './ui/tokens.css';
+import {fontStatusText, fontDownloadUrl, type FontPanel} from './font-settings';
 import {followsCoreTheme, settingValues, type SettingChoice} from './setting-choices';
 type Field={module_id:string;name:string;description:string;group?:string|null;editable?:boolean;default?:unknown;choices?:SettingChoice[];value_schema:null|{type:string;enum?:unknown[];minimum?:number;maximum?:number;maxLength?:number}};
 type Control={field:Field;signature:string;problem?:string;inheritBaseline?:boolean;draftVersion:number;mode:HTMLInputElement|HTMLSelectElement|null;input:HTMLInputElement|HTMLSelectElement|null;reset?:HTMLButtonElement|null};
@@ -10,6 +11,7 @@ type Card={target:string;controls:Control[];save:HTMLButtonElement|null;discard?
 type Credential={field:{module_id:string;name:string;description:string;group?:string};signature:string;detail:string;draftVersion:number;mode:HTMLSelectElement|null;clientId:HTMLInputElement|null;clientSecret:HTMLInputElement|null;confirm:HTMLInputElement|null;save:HTMLButtonElement|null;onSave():void};
 function groups(controls:Control[]){const map=new Map<string,Control[]>();for(const c of controls){const key=c.field.group||'';if(!map.has(key))map.set(key,[]);map.get(key)!.push(c);}return [...map].map(([group,items])=>({group,items:items.sort((a,b)=>(fieldPresentation(a.field).order||0)-(fieldPresentation(b.field).order||0))}));}
 export function createManagementView(document:Document,container:HTMLElement=document.getElementById('management-root')!,scope:'settings'|'maintenance'='settings'){
+ const font=shallowRef<FontPanel|null>(null);
  const cards=shallowRef<Card[]>([]),context=shallowRef<Record<string,unknown>>({}),credentials=shallowRef<Credential[]>([]),credentialNotice=shallowRef(''),owner=shallowRef<string|null>(null),draftRevision=shallowRef(0),regions=shallowRef<Record<string,string>>({}),revealed=shallowRef<Record<string,boolean>>({});let changed=()=>{};
  const mutate=()=>{draftRevision.value++;changed();},button=(id:string,text:string)=>h('button',{id,type:'button',disabled:true},text);
  const dirty=(c:Control)=>Boolean(c.mode&&c.mode.value!=='keep'),credentialDirty=(c:Credential)=>Boolean(c.mode&&c.mode.value!=='keep'||c.clientId?.value||c.clientSecret?.value);
@@ -32,11 +34,22 @@ export function createManagementView(document:Document,container:HTMLElement=doc
    h(ActionBar,{}, {default:()=>[h('button',{type:'button','data-action':'credential-save',disabled:true,ref:(node:unknown)=>{c.save=node as HTMLButtonElement;},onClick:c.onSave},'保存'+label+'凭据'),credentialDirty(c)?h('span',{class:'dirty-indicator',role:'status'},label+'有未保存修改'):null]}),
   ]);
  }
+ function fontControls(){const f=font.value;if(!f?.visible)return null;const disabled=!f.enabled||f.busy||f.status?.state==='downloading'||f.status?.state==='checking';return h('section',{'data-font-settings':'','aria-label':'图片字体','aria-busy':String(f.busy)},[
+  h(StatusHint,{id:'font-status'},{default:()=>f.progress||f.message||fontStatusText(f.status)}),
+  h('p',{class:'field-hint',id:'font-help'},'启动时自动获取标准字体；下载失败时优先使用系统字体；缺字时回复文字。上传仅接受指定版本并校验文件。'),
+  h(ActionBar,{}, {default:()=>[
+   h('button',{type:'button','data-action':'font-refresh',disabled:!f.enabled||f.busy,onClick:f.refresh},'刷新字体状态'),
+   h('button',{type:'button','data-action':'font-retry',disabled:disabled||!f.status,onClick:f.retry},'重试下载'),
+   h('label',{for:'font-upload'},'上传标准字体'),
+   h('input',{id:'font-upload',type:'file',accept:'.otf',disabled:disabled||!f.status||!f.uploadAvailable,'aria-describedby':'font-help font-status',onChange:(event:Event)=>{const input=event.target as HTMLInputElement;const file=input.files?.[0]||null;input.value='';f.upload(file);}}),
+  ]}),
+  f.status?h('p',{class:'field-hint'},['指定文件：'+f.status.filename+' ',fontDownloadUrl(f.status)?h('a',{href:fontDownloadUrl(f.status)!,target:'_blank',rel:'noopener noreferrer'},'下载指定字体'):null]):null,
+ ]);}
  const App=defineComponent({setup(){return()=>{draftRevision.value;const dark=context.value.isDark===true||context.value.theme==='dark',english=String(context.value.locale||'').startsWith('en'),credentialGroups=new Map<string,Credential[]>();for(const c of credentials.value){const key=JSON.stringify([c.field.module_id,c.field.group||'']);if(!credentialGroups.has(key))credentialGroups.set(key,[]);credentialGroups.get(key)!.push(c);}
   return h(NConfigProvider,{preflightStyleDisabled:true,theme:dark?darkTheme:null,locale:english?enUS:zhCN,dateLocale:english?dateEnUS:dateZhCN,inlineThemeDisabled:true},{default:()=>h('section',{class:'management'},[
    container.id==='management-root'?h('h1',scope==='maintenance'?'配置维护':'设置'):null,h('div',{class:'management-toolbar'},[h(StatusHint,{id:'status'}),button('refresh','刷新配置与版本')]),
    scope==='settings'?h('section',{id:'fields','aria-label':'普通配置'},cards.value.map(card=>{const advanced=card.controls.filter(c=>fieldPresentation(c.field).advanced||c.field.editable===false),normal=card.controls.filter(c=>!advanced.includes(c));return h('section',{class:'card',key:card.target,'data-owner':card.target,hidden:owner.value!==null&&owner.value!==card.target},[
-    ...groups(normal).map(group=>h(SettingsGroup,{title:groupTitle(card.target,group.group),fieldset:true,class:'config-group','data-group':group.group||'general',key:group.group},{default:()=>group.items.map(field)})),
+    ...groups(normal).map(group=>h(SettingsGroup,{title:groupTitle(card.target,group.group),fieldset:true,class:'config-group','data-group':group.group||'general',key:group.group},{default:()=>[...group.items.map(field),card.target==='game_link/core'&&group.group==='reply_style'?fontControls():null]})),
     advanced.length?h('details',{class:'advanced-config'},[h('summary','只读与高级设置'),...groups(advanced).map(group=>h(SettingsGroup,{title:groupTitle(card.target,group.group),key:group.group},{default:()=>group.items.map(field)}))]):null,
     h(ActionBar,{class:'ordinary-actions'}, {default:()=>[h('button',{type:'button','data-action':'save',disabled:true,ref:(node:unknown)=>{card.save=node as HTMLButtonElement;},onClick:card.onSave},ownerPresentation(card.target)?.saveLabel||'保存普通设置'),h('button',{type:'button','data-action':'discard',ref:(node:unknown)=>{card.discard=node as HTMLButtonElement;},onClick:()=>card.onDiscard?.()},'放弃本模块修改'),card.controls.some(dirty)?h('span',{class:'dirty-indicator',role:'status'},'普通设置有未保存修改'):null]}),
    ]);})) : null,
@@ -48,5 +61,5 @@ export function createManagementView(document:Document,container:HTMLElement=doc
    ]}):null,
   ])});
  };}});const app=createApp(App);app.mount(container);
- return {owner(value:string|null){owner.value=value;},drafts(){draftRevision.value++;},maskSecrets(){revealed.value={};},fields(value:Card[],onChange:()=>void){changed=onChange;cards.value=value;},credentials(value:Credential[],onChange:()=>void,notice=''){changed=onChange;credentials.value=value;credentialNotice.value=notice;},context(value:Record<string,unknown>){context.value=value||{};},dispose(){app.unmount();}};
+ return {font(value:FontPanel){font.value={...value};},owner(value:string|null){owner.value=value;},drafts(){draftRevision.value++;},maskSecrets(){revealed.value={};},fields(value:Card[],onChange:()=>void){changed=onChange;cards.value=value;},credentials(value:Credential[],onChange:()=>void,notice=''){changed=onChange;credentials.value=value;credentialNotice.value=notice;},context(value:Record<string,unknown>){context.value=value||{};},dispose(){app.unmount();}};
 }

@@ -55,6 +55,7 @@ from ...services.core_runtime import (
     CoreRuntimeCleanupPending,
     HostIngress,
 )
+from ...services.managed_font import ManagedFont
 from ...services.source_credentials import SourceCredentialPolicy
 from .bundled import BundledExtensionError, install_bundled_ff14
 from .command_bridge import AstrBotCommandBridge, CommandHelp, CommandInvocation
@@ -504,6 +505,7 @@ class AstrBotRuntime:
         image_factory: ImageFactory | None = None,
         core_factory: Callable[..., CoreRuntime] = CoreRuntime,
         http_transport_factory: Callable[[], object] | None = None,
+        font_manager_factory=ManagedFont,
     ) -> None:
         if context is None:
             raise TypeError("AstrBot Context is required")
@@ -522,7 +524,12 @@ class AstrBotRuntime:
         self._plain_factory = plain_factory
         self._chain_factory = chain_factory
         self._image_factory = image_factory
-        self._command_cards = CommandCardRenderer()
+        self._managed_font = font_manager_factory(
+            self._data_dir / "resources" / "fonts"
+        )
+        self._command_cards = CommandCardRenderer(
+            font_provider_factory=self._managed_font.provider
+        )
         self._message_port = None
         self._help_image_count = 0
         self._help_tasks = set()
@@ -1005,6 +1012,7 @@ class AstrBotRuntime:
                     )
                 )
             self._web_validator = validator
+            self._managed_font.start()
             try:
                 await core.start()
             except BaseException as exc:
@@ -1020,6 +1028,7 @@ class AstrBotRuntime:
                     if self._config_error is None:
                         self._config_error = "ordinary_configuration"
                     return
+                await self._managed_font.close()
                 try:
                     closed = await core.close()
                 except BaseException:
@@ -1100,6 +1109,7 @@ class AstrBotRuntime:
             self._closing = False
 
     async def _close_owned_runtime(self) -> None:
+        await self._managed_font.close()
         self._message_receipts.close()
         pending = []
         help_tasks = {

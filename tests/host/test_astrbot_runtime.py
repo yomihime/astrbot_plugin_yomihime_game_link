@@ -53,6 +53,7 @@ from ygl_test_subject.services.core_runtime import (
     TrustedSubscriptionGate,
 )
 
+from tests.fixtures.managed_font import OfflineManagedFont
 from yomihime_game_link_sdk.declarations import (
     CapabilityDescriptor,
     CapabilityEffect,
@@ -283,6 +284,7 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self._event_context = context
         return AstrBotRuntime(
             context,
+            font_manager_factory=OfflineManagedFont,
             plugin_root=self.plugin_root,
             data_dir=self.data_dir,
             plain_factory=_Plain,
@@ -1745,6 +1747,7 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
         runtime = AstrBotRuntime(
             _Context(),
+            font_manager_factory=OfflineManagedFont,
             plugin_root=self.plugin_root,
             data_dir=self.data_dir,
             core_factory=core_factory,

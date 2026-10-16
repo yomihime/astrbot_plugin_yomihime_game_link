@@ -7,4 +7,4 @@ export interface ResourceScope {readonly signal: AbortSignal; isCurrent(): boole
 export interface PageOptions {routeId: string; context: Readonly<PageContext>; services: {invoke(capabilityId: string, parameters: unknown): Promise<unknown>}; scope: ResourceScope}
 export interface MountedPage {update(context: Readonly<PageContext>): void; dispose(): void}
 export interface PageModule {mount(container: HTMLElement, options: PageOptions): MountedPage}
-export interface Bridge {ready(): Promise<Record<string, unknown>>; onContext(callback: (context: Record<string, unknown>) => void): (() => void) | undefined; apiGet(path: string, body: unknown): Promise<unknown>; apiPost(path: string, body: unknown): Promise<unknown>}
+export interface Bridge {upload?(path:string,file:File):Promise<unknown>; ready(): Promise<Record<string, unknown>>; onContext(callback: (context: Record<string, unknown>) => void): (() => void) | undefined; apiGet(path: string, body: unknown): Promise<unknown>; apiPost(path: string, body: unknown): Promise<unknown>}

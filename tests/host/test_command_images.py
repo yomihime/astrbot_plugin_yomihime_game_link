@@ -24,6 +24,7 @@ from ygl_test_subject.presentation.command_card import (
 from ygl_test_subject.services.output import OutputStatus
 
 from tests.fixtures.generated_png import GeneratedPngFixture
+from tests.fixtures.managed_font import OfflineManagedFont
 from yomihime_game_link_sdk import cards
 from yomihime_game_link_sdk.contexts import InvocationOrigin
 from yomihime_game_link_sdk.display import (
@@ -205,7 +206,12 @@ class HelpImageLifetimeTests(unittest.IsolatedAsyncioTestCase):
             async def prepare_help_card(self, _source):
                 raise AssertionError("text fallback must not load logo resources")
 
-        runtime = AstrBotRuntime(_Context(), plugin_root=".", data_dir=".")
+        runtime = AstrBotRuntime(
+            _Context(),
+            plugin_root=".",
+            data_dir=".",
+            font_manager_factory=OfflineManagedFont,
+        )
         runtime._ready = True
         runtime._core = Core()
         runtime._help_image_count = 3
@@ -235,7 +241,12 @@ class HelpImageLifetimeTests(unittest.IsolatedAsyncioTestCase):
             async def close(self):
                 return True
 
-        runtime = AstrBotRuntime(_Context(), plugin_root=".", data_dir=".")
+        runtime = AstrBotRuntime(
+            _Context(),
+            plugin_root=".",
+            data_dir=".",
+            font_manager_factory=OfflineManagedFont,
+        )
         runtime._ready = True
         runtime._core = Core()
         runtime._message_port = AstrBotMessagePort(
