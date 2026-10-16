@@ -113,6 +113,7 @@ def _fixture_manifest():
     for module in manifest["modules"]:
         module.pop("pages", None)
         module.pop("resources", None)
+        module.get("display", {}).pop("logo_resource", None)
     return json.dumps(manifest).encode()
 
 
@@ -422,7 +423,7 @@ class ReleaseBuildTests(unittest.TestCase):
     def test_reused_sdk_wheel_still_requires_the_independent_pin(self) -> None:
         with tempfile.TemporaryDirectory(prefix="yomihime-release-wheel-") as work:
             root = Path(work)
-            wheel = root / "yomihime_game_link_sdk-0.1.0a6-py3-none-any.whl"
+            wheel = root / "yomihime_game_link_sdk-0.1.0a7-py3-none-any.whl"
             wheel.write_bytes(b"not the reviewed wheel")
             output = root / "artifacts"
 

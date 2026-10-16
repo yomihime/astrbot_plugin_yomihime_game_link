@@ -112,7 +112,7 @@ class AdminPagesTests(unittest.IsolatedAsyncioTestCase):
         data = response.json()["data"]
         self.assertEqual(set(data), {"schema_version", "fields"})
         self.assertEqual(
-            len([field for field in data["fields"] if field["readable"]]), 5
+            len([field for field in data["fields"] if field["readable"]]), 7
         )
         self.assertNotIn("PRIVATE-INVALID-LEGACY", response.text)
         self.assertEqual(
@@ -134,6 +134,74 @@ class AdminPagesTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.pages.requests, {})
         self.assertEqual(self.runtime._admin_source._proofs, {})
 
+    async def test_theme_settings_use_existing_host_auth_read_write_and_cas(self):
+        from ygl_test_subject.presentation.layout_renderer import list_themes
+
+        catalog = (await self.call("catalog", {})).json()["data"]["fields"]
+        expected = [
+            {"value": option.id, "label": option.label} for option in list_themes()
+        ]
+        themes = {
+            (field["module_id"], field["name"]): field
+            for field in catalog
+            if field["group"] == "reply_style"
+        }
+        self.assertEqual(themes[("game_link/core", "image_theme")]["choices"], expected)
+        self.assertEqual(
+            themes[("ff14/ff14", "reply_theme")]["choices"],
+            [{"value": None, "label": "跟随核心"}, *expected],
+        )
+        before = (await self.call("read", {})).json()["data"]
+        self.assertIsNone(before["ff14/ff14"]["fields"]["reply_theme"]["value"])
+
+        async def save(owner, field, value, *, clear=False):
+            current = (await self.call("read", {})).json()["data"][owner]
+            body = {
+                "module_id": owner,
+                "expected_revision": current["revision"],
+                "updates": [
+                    {"field": field, "mode": "clear"}
+                    if clear
+                    else {"field": field, "mode": "replace", "value": value}
+                ],
+            }
+            response = await self.call("update", body)
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual((await self.call("update", body)).status_code, 409)
+
+        await save("game_link/core", "image_theme", "deep_indigo")
+        await save("ff14/ff14", "reply_theme", "cool_white")
+        selected = await self.runtime.core_runtime.theme_settings.current("ff14/ff14")
+        self.assertEqual(
+            (selected.core_theme, selected.module_theme), ("deep_indigo", "cool_white")
+        )
+        help_selected = await self.runtime.core_runtime.theme_settings.current()
+        self.assertEqual(
+            (help_selected.core_theme, help_selected.module_theme),
+            ("deep_indigo", None),
+        )
+        await save("ff14/ff14", "reply_theme", None, clear=True)
+        selected = await self.runtime.core_runtime.theme_settings.current("ff14/ff14")
+        self.assertEqual(
+            (selected.core_theme, selected.module_theme), ("deep_indigo", None)
+        )
+        rows = (await self.call("read", {})).json()["data"]
+        for owner, field, value in (
+            ("game_link/core", "image_theme", "unknown"),
+            ("ff14/ff14", "reply_theme", None),
+        ):
+            response = await self.call(
+                "update",
+                {
+                    "module_id": owner,
+                    "expected_revision": rows[owner]["revision"],
+                    "updates": [{"field": field, "mode": "replace", "value": value}],
+                },
+            )
+            self.assertEqual(response.status_code, 400, response.text)
+        self.assertEqual(self.pages.requests, {})
+        self.assertEqual(self.runtime._admin_source._proofs, {})
+
     async def test_reviewed_subscription_gate_bool_grant_and_exact_cas_boundaries(self):
         """Real reviewed composition, isolated storage; never starts delivery."""
         from ygl_test_subject.modules.ff14.config import ORDINARY_FIELDS
@@ -150,6 +218,7 @@ class AdminPagesTests(unittest.IsolatedAsyncioTestCase):
             visible,
             {
                 gate,
+                "reply_theme",
                 "ff14_calendar_default_days",
                 "ff14_calendar_default_timezone",
                 "ff14_calendar_default_delivery_time",

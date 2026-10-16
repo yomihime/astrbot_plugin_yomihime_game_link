@@ -8,6 +8,8 @@ from enum import Enum
 from types import MappingProxyType
 from typing import Any, Protocol
 
+from . import cards
+
 
 class Privacy(str, Enum):
     PUBLIC = "public"
@@ -192,6 +194,7 @@ class DisplayDocument:
     timestamps: tuple[TimeValue, ...] = ()
     privacy: Privacy = Privacy.PUBLIC
     schema_version: str = "1.8.0"
+    card: cards.Document | None = None
 
     def __post_init__(self) -> None:
         if self.ordered_blocks is not None:

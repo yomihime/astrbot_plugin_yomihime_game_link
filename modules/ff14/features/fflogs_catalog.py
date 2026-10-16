@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from decimal import Decimal
 from typing import Any
 
 from yomihime_game_link_sdk.services import HttpRequest, SourceHttp
@@ -83,11 +84,29 @@ OUTPUT_METADATA_INTROSPECTION = """query FF14OutputMetadataShape {
       args { name defaultValue type { kind name ofType { kind name ofType { kind name } } } }
     }
   }
+  expansionType: __type(name: "Expansion") {
+    name fields { name type { kind name ofType { kind name ofType { kind name } } }
+      args { name defaultValue type { kind name ofType { kind name ofType { kind name } } } }
+    }
+  }
 }"""
 
 OUTPUT_METADATA_QUERY = """query FF14OutputMetadata {
   worldData {
     zones { id name difficulties { id name } encounters { id name } }
+  }
+  gameData { classes { specs { id name slug } } }
+}"""
+
+# Sent only after every added relationship has been proved by the fixed schema
+# request. These are provider-directory semantics, not proof of game releases.
+CHARACTER_METADATA_QUERY = """query FF14CharacterMetadata {
+  worldData {
+    expansions { id name zones { id } }
+    zones {
+      id name difficulties { id name }
+      encounters { id name zone { id } }
+    }
   }
   gameData { classes { specs { id name slug } } }
 }"""
@@ -100,9 +119,10 @@ class FFLogsGraphQLError(ValueError):
 class FFLogsCatalog:
     """Resolve readable labels only against bounded, schema-checked lists."""
 
-    def __init__(self, http: SourceHttp, source_id: str) -> None:
+    def __init__(self, http: SourceHttp, source_id: str, *, check_active=None) -> None:
         self._http = http
         self._source_id = source_id
+        self._check_active = check_active
 
     async def resolve_server(self, realm: str, server_label: str) -> ServerResolution:
         regions = parse_regions(await self._request(REGIONS_QUERY, {}))
@@ -176,9 +196,20 @@ class FFLogsCatalog:
         )
         return parse_output_metadata(await self._request(OUTPUT_METADATA_QUERY, {}))
 
+    async def load_character_metadata(self) -> OutputMetadata:
+        schema = await self._request(OUTPUT_METADATA_INTROSPECTION, {})
+        parse_output_metadata_projection(schema)
+        if not character_metadata_supported(schema):
+            return parse_output_metadata(await self._request(OUTPUT_METADATA_QUERY, {}))
+        return parse_character_metadata(
+            await self._request(CHARACTER_METADATA_QUERY, {})
+        )
+
     async def _request(
         self, query: str, variables: dict[str, object]
     ) -> dict[str, Any]:
+        if self._check_active is not None:
+            self._check_active()
         body = json.dumps(
             {"query": query, "variables": variables},
             ensure_ascii=False,
@@ -193,14 +224,20 @@ class FFLogsCatalog:
                 headers={"Content-Type": "application/json"},
             )
         )
+        if self._check_active is not None:
+            self._check_active()
         return parse_graphql_envelope(response.body)
 
 
-def parse_graphql_envelope(body: bytes) -> dict[str, Any]:
+def parse_graphql_envelope(
+    body: bytes, *, exact_numbers: bool = False, allow_partial_errors: bool = False
+) -> dict[str, Any]:
     if not isinstance(body, bytes) or len(body) > 1_000_000:
         raise FFLogsPayloadError("GraphQL response exceeds its parser budget")
     try:
-        value = json.loads(body.decode("utf-8"))
+        value = json.loads(
+            body.decode("utf-8"), parse_float=Decimal if exact_numbers else float
+        )
     except (UnicodeDecodeError, ValueError, RecursionError):
         raise FFLogsPayloadError("GraphQL response is not bounded JSON") from None
     if not isinstance(value, dict):
@@ -209,7 +246,7 @@ def parse_graphql_envelope(body: bytes) -> dict[str, Any]:
     if errors is not None:
         if not isinstance(errors, list) or len(errors) > 32:
             raise FFLogsPayloadError("GraphQL error envelope is malformed")
-        if errors:
+        if errors and not allow_partial_errors:
             raise FFLogsGraphQLError("FFLogs GraphQL query failed")
     data = value.get("data")
     if not isinstance(data, dict):
@@ -421,6 +458,143 @@ def parse_output_metadata(payload: dict[str, Any]) -> OutputMetadata:
     if item_count > MAX_METADATA_ITEMS:
         raise FFLogsPayloadError("output metadata exceeded its item budget")
     return OutputMetadata(tuple(zones), tuple(specs))
+
+
+def character_metadata_supported(payload: dict[str, Any]) -> bool:
+    """Prove fixed extra fields before issuing the richer candidate query."""
+    try:
+        if any(
+            not isinstance(payload.get(f"{_camel(name)}Type"), dict)
+            or payload[f"{_camel(name)}Type"].get("name") != name
+            for name in ("WorldData", "Expansion", "Encounter")
+        ):
+            return False
+        types = {
+            name: _field_map(payload[f"{_camel(name)}Type"], name)
+            for name in ("WorldData", "Expansion", "Encounter")
+        }
+        for owner, field_name, target, is_list in (
+            ("WorldData", "expansions", "Expansion", True),
+            ("Expansion", "zones", "Zone", True),
+            ("Encounter", "zone", "Zone", False),
+        ):
+            field = types[owner].get(field_name)
+            checker = _is_list_of if is_list else _is_object
+            if (
+                field is None
+                or not _args_are_optional(field.get("args"))
+                or not checker(field.get("type"), target)
+            ):
+                return False
+        return all(
+            name in types["Expansion"]
+            and _args_are_optional(types["Expansion"][name].get("args"))
+            and _is_scalar(types["Expansion"][name].get("type"), scalar)
+            for name, scalar in (("id", "Int"), ("name", "String"))
+        )
+    except (KeyError, TypeError, AttributeError, FFLogsPayloadError):
+        return False
+
+
+def parse_character_metadata(payload: dict[str, Any]) -> OutputMetadata:
+    """Join provider's explicit expansion membership and canonical ownership."""
+    base = parse_output_metadata(payload)
+    world = payload["worldData"]
+    expansions = world.get("expansions")
+    if not isinstance(expansions, list) or len(expansions) > 64:
+        raise FFLogsPayloadError("expansion metadata is malformed")
+    memberships: dict[int, tuple[int, str]] = {}
+    expansion_ids = set()
+    for row in expansions:
+        if not isinstance(row, dict):
+            raise FFLogsPayloadError("expansion entry is malformed")
+        expansion_id = row.get("id")
+        if type(expansion_id) is not int or not 0 <= expansion_id <= 2_147_483_647:
+            raise FFLogsPayloadError("expansion id is invalid")
+        if expansion_id in expansion_ids:
+            raise FFLogsPayloadError("expansion metadata repeats an id")
+        expansion_ids.add(expansion_id)
+        name = _short_text(row.get("name"), 160)
+        zones = row.get("zones")
+        if not isinstance(zones, list) or len(zones) > MAX_ZONES:
+            raise FFLogsPayloadError("expansion zones are malformed")
+        for zone in zones:
+            zone_id = _positive_int(zone.get("id") if isinstance(zone, dict) else None)
+            if zone_id in memberships or len(memberships) >= MAX_ZONES:
+                raise FFLogsPayloadError(
+                    "expansion membership is ambiguous or over budget"
+                )
+            memberships[zone_id] = (expansion_id, name)
+    raw_zones = {row["id"]: row for row in world["zones"]}
+    known_zone_ids = {zone.zone_id for zone in base.zones}
+    result = []
+    for zone in base.zones:
+        membership = memberships.get(zone.zone_id)
+        if membership is None:
+            raise FFLogsPayloadError("zone expansion membership is missing")
+        raw_encounters = {
+            row["id"]: row for row in raw_zones[zone.zone_id]["encounters"]
+        }
+        encounters = []
+        for encounter in zone.encounters:
+            owner = raw_encounters[encounter.encounter_id].get("zone")
+            owner_id = _positive_int(
+                owner.get("id") if isinstance(owner, dict) else None
+            )
+            if owner_id not in known_zone_ids:
+                raise FFLogsPayloadError("canonical encounter zone is outside catalog")
+            encounters.append(replace(encounter, zone_id=owner_id))
+        result.append(
+            replace(
+                zone,
+                encounters=tuple(encounters),
+                expansion_id=membership[0],
+                expansion_name=membership[1],
+            )
+        )
+    return OutputMetadata(tuple(result), base.specs, character_catalog_verified=True)
+
+
+def select_character_zones(metadata: OutputMetadata, default_zone_id: int):
+    """Select by explicit provider relationships and exact difficulty labels.
+
+    The actual default ranking zone anchors the expansion. Never pick max ID,
+    last list entry, a translated abbreviation or an older expansion because a
+    character has no ranks. Only exact canonical encounter identities dedupe.
+    """
+    if not metadata.character_catalog_verified:
+        return ()
+    anchor = next(
+        (zone for zone in metadata.zones if zone.zone_id == default_zone_id), None
+    )
+    if anchor is None or anchor.expansion_id is None:
+        return ()
+    result = []
+    seen_encounters: set[tuple[str, int, int]] = set()
+    for zone in metadata.zones:
+        for difficulty in zone.difficulties:
+            label = _normalized_label(difficulty.name)
+            category = (
+                "ultimate"
+                if label in {"ultimate", "绝境战"}
+                else "savage"
+                if label in {"savage", "零式"}
+                and zone.expansion_id == anchor.expansion_id
+                else None
+            )
+            if category is None:
+                continue
+            encounters = []
+            for item in zone.encounters:
+                key = (category, difficulty.difficulty_id, item.encounter_id)
+                if item.zone_id == zone.zone_id and key not in seen_encounters:
+                    seen_encounters.add(key)
+                    encounters.append(item)
+            if encounters:
+                result.append(
+                    (replace(zone, encounters=tuple(encounters)), difficulty, category)
+                )
+    return tuple(result)
 
 
 def resolve_output_metadata(

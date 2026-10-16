@@ -1,0 +1,4 @@
+# Pinned declarative renderer dependencies, shared with the plugin runtime.
+# resvg_py supplies prebuilt wheels; no separate Cairo installation is required.
+Pillow==12.3.0
+resvg_py==0.5.0

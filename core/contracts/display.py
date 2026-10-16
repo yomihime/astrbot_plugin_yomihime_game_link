@@ -273,6 +273,10 @@ def check_UnknownBlock(self) -> None:
 
 
 def check_DisplayDocument(self) -> None:
+    if self.card is not None:
+        from .cards import validate_card
+
+        validate_card(self.card)
     _text(self.title, "title")
     _text(self.subject, "subject")
     if self.schema_version != "1.8.0":

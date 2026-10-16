@@ -1,5 +1,6 @@
 """Host-independent declarations for Game Link modules."""
 
+from . import cards as cards
 from .contexts import InvocationConversationKind as InvocationConversationKind
 from .contexts import InvocationOrigin as InvocationOrigin
 from .contexts import InvocationSubscriptionScope as InvocationSubscriptionScope
@@ -133,6 +134,7 @@ from .version import MODULE_ABI_VERSION as MODULE_ABI_VERSION
 from .version import __version__ as __version__
 
 __all__ = [
+    "cards",
     "InvocationConversationKind",
     "InvocationOrigin",
     "InvocationSubscriptionScope",

@@ -1,14 +1,14 @@
 # Game Link module SDK
 
-The independently installable distribution is `yomihime-game-link-sdk==0.1.0a6`. Import its public declarations with `import yomihime_game_link_sdk as ygl`. It requires Python 3.11 or newer and has no third-party runtime dependencies.
+The independently installable distribution is `yomihime-game-link-sdk==0.1.0a7`. Import its public declarations with `import yomihime_game_link_sdk as ygl`. It requires Python 3.11 or newer and has no third-party runtime dependencies.
 
 ## Install and import
 
 Install the reviewed wheel into your module development environment:
 
 ```powershell
-python -m pip install --no-deps ./yomihime_game_link_sdk-0.1.0a6-py3-none-any.whl
-python -I -c "import yomihime_game_link_sdk as ygl; assert ygl.__version__ == '0.1.0a6'; assert ygl.MODULE_ABI_VERSION == '2.0'"
+python -m pip install --no-deps ./yomihime_game_link_sdk-0.1.0a7-py3-none-any.whl
+python -I -c "import yomihime_game_link_sdk as ygl; assert ygl.__version__ == '0.1.0a7'; assert ygl.MODULE_ABI_VERSION == '2.0'"
 ```
 
 The plugin release contains the exact content-pinned SDK from that wheel. Its bootstrap rejects changed contents, foreign package origins, partial preload graphs, and any preloaded retired `yomihime_sdk` graph. The retired root `api` and `yomihime_sdk.api` modules have no compatibility redirects. Historical stored-data readers are separate from module import compatibility.
@@ -18,6 +18,44 @@ The plugin release contains the exact content-pinned SDK from that wheel. Its bo
 Package manifests use `contract_version: "2.0"` as the current module ABI selector. Disk manifest schema remains 1 and factory ABI remains 1. Old or unknown module ABI versions are rejected before factory resolution or registration. SDK release, module ABI and output formats are distinct: current display, facts and persisted B04 documents remain at output version 1.8.0. An output version of 2.0 is not admitted.
 
 SDK constructors describe data and freeze supported containers; they do not establish permissions or perform Core receiving validation. Core checks the current canonical types and nested invariants at registration, invocation, service, renderer and storage boundaries. Constructing or copying an InvocationView, OwnerScope or grant reference grants no authority. Only the exact issued invocation with its current lifetime and admission proof can bind services.
+
+## Declarative cards
+
+`from yomihime_game_link_sdk import cards` exposes immutable, dependency-free
+presentation declarations. A `DisplayDocument` may supply a trailing optional
+`card=cards.Document(...)` beside its existing ordered text blocks. The text
+blocks remain the fallback; model facts are separate and unchanged. Cards never
+populate facts automatically. The entire card inherits its enclosing document's
+privacy, so modules must omit any fields that audience cannot see.
+
+Use `Text`, `Section`, `Row`, `PropertyGrid`, `Table` and `Image` with ordinary
+strings or explicit `Inline((Span(...), ...))`. `Span` accepts an explicit
+`#rrggbb` color or a semantic emphasis including `gold`; Core does not infer game
+scores or grades. `Cell` optionally overrides table alignment. `Asset` accepts
+only in-memory SVG text/bytes or PNG/JPEG bytes, never a URL or filesystem path.
+Core validates bounded shapes and content, then owns decoding, fonts and layout.
+No Pillow, renderer, Core or game-specific types are imported by the SDK.
+
+`TaggedText("[purple]label[/purple] [gold glow]100.0%[/gold]")` explicitly
+asks Core to parse bounded inline tags. Ordinary strings always stay literal.
+Supported tags include `[color=#rrggbb]`, `[strong]`/`[b]`, `[secondary]`,
+`[emphasis]`, the named color aliases and `[gold glow]`; closing tags must nest
+exactly. `[gold]` chooses the gold color alone, whereas `[gold glow]` adds the
+fixed glow style. Unknown/malformed tags fail card admission. For upstream names
+and other external text, prefer `Inline`/`Span` rather than building tagged
+source. If composing tagged source deliberately, escape each backslash as `\\`
+and square brackets as `\[` / `\]`. No markup parser is imported into the SDK.
+
+For generic help, `ModuleDisplay.logo_resource` may name a declared, hash-pinned
+SVG/PNG/JPEG `ModuleManifest.resources` entry. Core binds that resource; the
+module cannot use a logo declaration to fetch an arbitrary path or URL.
+
+These are additive optional declarations in SDK a7; module ABI stays `2.0` and
+DisplayDocument stays `1.8.0`. Old persisted documents with no `card` still read
+as `None`. New cards persist losslessly in a namespaced, versioned representation
+(including bounded base64 image bytes); unknown card storage versions or types
+are rejected. This does not migrate or overwrite existing records. Downgrading
+to a6 cannot read new card-bearing records and is not a supported rollback path.
 
 ## Injected services and public failures
 

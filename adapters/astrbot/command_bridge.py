@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import random
 import re
 import secrets
 from collections.abc import Callable, Mapping
@@ -20,6 +21,7 @@ from ...core.registry import (
     Registry,
     RegistryError,
 )
+from ...presentation.command_card import HelpCardSource, HelpModule
 from ...presentation.command_text import FULL_BRAND, command_title, render_total_help
 from ...presentation.text import TextPresenter
 
@@ -43,7 +45,12 @@ class CommandInvocation:
 
 
 class CommandHelp(str):
-    """Catalog-rendered help, retaining the bridge's text-only contract."""
+    """Text-compatible help retaining one coherent declarative catalog."""
+
+    def __new__(cls, text: str, *, source: HelpCardSource | None = None):
+        value = super().__new__(cls, text)
+        value.source = source
+        return value
 
 
 class AstrBotCommandBridge:
@@ -120,6 +127,8 @@ class AstrBotCommandBridge:
                                 self._catalog.display_name(module),
                                 f"{command.operation_path} 帮助",
                             ),
+                            snapshot=snapshot,
+                            module=module,
                         )
                     if command.parameter_mode == "raw_tail":
                         raw = message[end:].lstrip()
@@ -160,7 +169,21 @@ class AstrBotCommandBridge:
                     seed=self._help_salt ^ id(event),
                     presenter=self._presenter,
                     max_chars=self._max_chars,
-                )
+                ),
+                source=HelpCardSource(
+                    replace(document, title=FULL_BRAND),
+                    snapshot.revision,
+                    tuple(
+                        self._help_module(snapshot.module_for_route(route))
+                        for _name, route in modules
+                    ),
+                    recommendation=(
+                        random.Random(self._help_salt ^ id(event)).choice(modules)[1]
+                        if modules
+                        else None
+                    ),
+                    directory=True,
+                ),
             )
         if _ROUTE.fullmatch(tokens[0]) is None:
             return _USAGE
@@ -175,6 +198,8 @@ class AstrBotCommandBridge:
             return self._render(
                 self._catalog.module(snapshot, module.manifest.route),
                 title=command_title(self._catalog.display_name(module), "模块帮助"),
+                snapshot=snapshot,
+                module=module,
             )
         invocation = self._parse_module_command(module, tail)
         if invocation is None:
@@ -199,11 +224,27 @@ class AstrBotCommandBridge:
         validate_contract(command)
         return f"参数无效。请使用 /ygl {module.manifest.route} {command.operation_path} help 查看参数帮助。"
 
-    def _render(self, document, *, title: str = FULL_BRAND) -> CommandHelp:
+    def _help_module(self, module):
+        return HelpModule(
+            module.module_id,
+            module.epoch,
+            module.manifest,
+            self._catalog._module_summary(module),
+        )
+
+    def _render(
+        self, document, *, title: str = FULL_BRAND, snapshot=None, module=None
+    ) -> CommandHelp:
+        document = replace(document, title=title)
         return CommandHelp(
-            self._presenter.render(
-                replace(document, title=title), max_chars=self._max_chars
+            self._presenter.render(document, max_chars=self._max_chars),
+            source=HelpCardSource(
+                document,
+                snapshot.revision,
+                (self._help_module(module),),
             )
+            if snapshot is not None and module is not None
+            else None,
         )
 
     @staticmethod

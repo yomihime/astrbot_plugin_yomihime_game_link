@@ -9,6 +9,7 @@ from yomihime_game_link_sdk.declarations import ConfigField
 from yomihime_game_link_sdk.services import ConfigTarget
 
 from ..core.contracts.validation_boundary import validate_contract
+from .core_configuration import presentation_choices
 
 MAX_FIELDS = 128
 MAX_BYTES = 262144
@@ -70,6 +71,9 @@ def project_configuration_catalog(
                     "blocked_reason": blocked_reason,
                 }
             )
+            choices = presentation_choices(module_id, field)
+            if choices is not None:
+                fields[-1]["choices"] = choices
             if len(fields) > MAX_FIELDS:
                 raise ValueError("configuration catalog field budget exceeded")
     result = {"schema_version": 1, "fields": fields}

@@ -19,7 +19,7 @@ from scripts.build_release import build_release
 
 ROOT = Path(__file__).resolve().parents[2]
 EXPECTED_WHEEL_SHA256 = (
-    "54d5a0766ae5b626e575ff0d1936b49ce14a7d7f57b6db1f62882653eea9c81e"
+    "b6eaefee0045b91a4cc4ab71acd6b3f86824dcfcf5ea6fad574087106b937cb1"
 )
 EXPECTED_RESOURCES = {
     f"yomihime_game_link_sdk/_examples/{example}/{filename}"
@@ -61,7 +61,7 @@ installed_payload = {
     for path in installed_sdk_root.rglob("*")
     if path.is_file() and "__pycache__" not in path.parts
 }
-assert len(sdk_manifest) == 17
+assert len(sdk_manifest) == 18
 assert installed_payload == set(sdk_manifest)
 for relative, expected_digest in sdk_manifest.items():
     assert hashlib.sha256(
@@ -138,7 +138,7 @@ assert sdk.SourceHttpError is CanonicalSourceHttpError
 assert GatewayResultType is sdk.CapabilityResult
 assert OutputResultType is sdk.CapabilityResult
 
-assert sdk.__version__ == "0.1.0a6"
+assert sdk.__version__ == "0.1.0a7"
 assert sdk.MODULE_ABI_VERSION == "2.0"
 assert sdk.PrivacyFloor.OWNER.value == "owner"
 assert sdk.InvocationOrigin("web_public") is sdk.InvocationOrigin.WEB_PUBLIC
@@ -366,7 +366,7 @@ class InstalledArtifactTests(unittest.TestCase):
             wheel_digest = hashlib.sha256(wheel.read_bytes()).hexdigest()
             self.assertEqual(wheel_digest, EXPECTED_WHEEL_SHA256)
             self.assertEqual(
-                wheel.name, "yomihime_game_link_sdk-0.1.0a6-py3-none-any.whl"
+                wheel.name, "yomihime_game_link_sdk-0.1.0a7-py3-none-any.whl"
             )
             with zipfile.ZipFile(wheel) as archive:
                 entries = set(archive.namelist())

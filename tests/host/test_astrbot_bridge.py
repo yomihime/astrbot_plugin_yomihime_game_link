@@ -12,6 +12,7 @@ from ygl_test_subject.adapters.astrbot.command_bridge import (
 )
 from ygl_test_subject.core.contracts.validation_boundary import validate_contract
 from ygl_test_subject.core.registry import Registry as CoreRegistry
+from ygl_test_subject.presentation.command_card import build_help_card
 from ygl_test_subject.tests.fixtures.minimal_module import build_package
 
 from yomihime_game_link_sdk.declarations import (
@@ -92,6 +93,33 @@ class AstrBotCommandBridgeTests(unittest.TestCase):
         self.assertTrue(
             command_help.startswith(f"游戏连结 · {long_name} · 查询 帮助\n")
         )
+
+    def test_declarative_directory_retains_exact_filtered_catalog_and_choice(self):
+        self._register_display_modules()
+        event = _FakeEvent("/ygl help")
+        response = self.bridge.parse(event)
+        again = self.bridge.parse(event)
+        self.assertEqual(response.source, again.source)
+        self.assertEqual(
+            [item.manifest.route for item in response.source.modules], ["alpha", "beta"]
+        )
+        self.assertIn(response.source.recommendation, ("alpha", "beta"))
+        card = build_help_card(response.source)
+        self.assertEqual(card.title, "游戏，从这里连结")
+        self.assertEqual(card.brand, "如月怜的游戏连结")
+        self.assertEqual(len(card.blocks), 2)
+        self.assertEqual(
+            [block.blocks[0].subtitle for block in card.blocks], ["alpha", "beta"]
+        )
+        self.registry.is_active = lambda _module: False
+        self.bridge = AstrBotCommandBridge(self.registry)
+        empty = self.bridge.parse(event)
+        self.assertEqual(empty.source.modules, ())
+        self.assertIsNone(empty.source.recommendation)
+        empty_card = build_help_card(empty.source)
+        self.assertEqual(empty_card.blocks[0].title, "暂无可用模块")
+        self.assertNotIn("alpha", repr(empty_card))
+        self.assertNotIn("beta", repr(empty_card))
 
     def test_same_event_rechecks_disabled_detached_and_inactive_modules(self):
         self._register_display_modules()

@@ -266,6 +266,14 @@ def _character_responses(
     return [_regions(), *pages, character or _character(metric=metric)]
 
 
+def _character_request(http):
+    return next(
+        request
+        for request in reversed(http.requests)
+        if "FF14PublicCharacter" in json.loads(request.body)["query"]
+    )
+
+
 def _output_schema() -> dict:
     def scalar(name: str) -> dict:
         return _type("SCALAR", name)
@@ -609,8 +617,10 @@ class FFLogsHandlerTests(unittest.IsolatedAsyncioTestCase):
             },
         )
         self.assertIs(result.status, ResultStatus.PARTIAL_SUCCESS)
-        self.assertEqual(len(http.requests), 6)
-        request = http.requests[-1]
+        # The extra fixed metadata schema request may fail independently of
+        # usable rankings; this legacy fixture deliberately supplies none.
+        self.assertEqual(len(http.requests), 7)
+        request = _character_request(http)
         self.assertEqual(
             (request.source_id, request.method, request.path),
             (FFLOGS_GLOBAL_SOURCE, "POST", "/api/v2/client"),
@@ -670,7 +680,7 @@ class FFLogsHandlerTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIs(result.status, ResultStatus.PARTIAL_SUCCESS)
         self.assertEqual(
-            json.loads(selected.requests[-1].body)["variables"]["serverSlug"],
+            json.loads(_character_request(selected).body)["variables"]["serverSlug"],
             "cerberus-2",
         )
 
@@ -698,7 +708,7 @@ class FFLogsHandlerTests(unittest.IsolatedAsyncioTestCase):
             },
         )
         self.assertIs(result.status, ResultStatus.SUCCESS)
-        request = http.requests[-1]
+        request = _character_request(http)
         self.assertEqual(request.source_id, FFLOGS_CN_SOURCE)
         body = json.loads(request.body)
         self.assertEqual(

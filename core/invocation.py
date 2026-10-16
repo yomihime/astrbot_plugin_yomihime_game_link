@@ -979,6 +979,8 @@ class Gateway:
             raise TypeError("display document sequences must be tuples")
         if not isinstance(value.privacy, Privacy):
             raise TypeError("document privacy must be Privacy")
+        from .contracts.cards import rebuild_card
+
         blocks = tuple(Gateway._rebuild_block(item) for item in value.ordered_blocks)
         timestamps = tuple(Gateway._rebuild_time(item) for item in value.timestamps)
         return validate_contract(
@@ -990,6 +992,7 @@ class Gateway:
                 timestamps,
                 value.privacy,
                 value.schema_version,
+                rebuild_card(value.card),
             )
         )
 

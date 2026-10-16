@@ -775,6 +775,67 @@ class LLMToolTests(unittest.IsolatedAsyncioTestCase):
         event._has_send_oper, event.is_at_or_wake_command = False, True
         event._extras = {"activated_handlers": ["production game_link"]}
 
+        # The tool-only Event fixture intentionally omits delivery methods.
+        # Execute the pinned Host methods here, observing its exact-event send
+        # separately from Context fan-out and retaining the Host sent flag.
+        import hashlib
+        import uuid
+        from io import BytesIO
+
+        from PIL import Image
+
+        from .astrbot_contract import validate_host_source
+
+        _, sources = validate_host_source()
+        host_tree = ast.parse(sources["astrbot/core/platform/astr_message_event.py"])
+        host_event = next(
+            node
+            for node in host_tree.body
+            if isinstance(node, ast.ClassDef) and node.name == "AstrMessageEvent"
+        )
+        delivery_methods = [
+            node
+            for node in host_event.body
+            if getattr(node, "name", None) in {"chain_result", "send"}
+        ]
+
+        async def upload_metric(**kwargs):
+            pass
+
+        delivery_namespace = {
+            "asyncio": asyncio,
+            "hashlib": hashlib,
+            "uuid": uuid,
+            "Metric": SimpleNamespace(upload=upload_metric),
+            "MessageEventResult": SimpleNamespace,
+        }
+        future = ast.ImportFrom(
+            module="__future__", names=[ast.alias(name="annotations")], level=0
+        )
+        exec(
+            compile(
+                ast.fix_missing_locations(
+                    ast.Module(body=[future, *delivery_methods], type_ignores=[])
+                ),
+                "pinned_host_command_delivery",
+                "exec",
+            ),
+            delivery_namespace,
+        )
+        event.chain_result = delivery_namespace["chain_result"].__get__(event)
+        host_send = delivery_namespace["send"].__get__(event)
+        event.platform_meta.name = "test-platform"
+        exact_sends = []
+
+        async def record_send(chain):
+            exact_sends.append(chain)
+            return await host_send(chain)
+
+        event.send = record_send
+        self.runtime._message_port._image_factory = lambda content: SimpleNamespace(
+            png=content
+        )
+
         async def star_process(event):
             async for value in namespace["game_link"](
                 SimpleNamespace(_runtime=self.runtime), event
@@ -794,7 +855,15 @@ class LLMToolTests(unittest.IsolatedAsyncioTestCase):
         async for _ in stage.process(event):
             pass
         self.assertEqual(self.provider.trace, [])
-        self.assertEqual(len(self.context.calls), 1)
+        self.assertTrue(event._has_send_oper)
+        self.assertEqual(len(exact_sends), 1)
+        self.assertEqual(self.context.calls, [])
+        self.assertEqual(len(exact_sends[0].chain), 1)
+        with Image.open(BytesIO(exact_sends[0].chain[0].png)) as png:
+            self.assertEqual(png.format, "PNG")
+            self.assertGreater(png.width, 100)
+            self.assertGreater(png.height, 100)
+            png.verify()
 
     async def test_requested_chinese_name_and_omitted_scope_use_core_cn(self):
         await self.start()

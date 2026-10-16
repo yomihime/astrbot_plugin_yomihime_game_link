@@ -6,8 +6,10 @@ text, or an explicit size hint when the complete text exceeds the send budget.
 """
 
 from collections.abc import Mapping
-from dataclasses import dataclass, fields, is_dataclass
+from dataclasses import dataclass, fields, is_dataclass, replace
 
+from yomihime_game_link_sdk import cards
+from yomihime_game_link_sdk.declarations import ModuleManifest
 from yomihime_game_link_sdk.display import (
     DisplayAudience,
     DisplayDocument,
@@ -28,6 +30,8 @@ from .card_bitmap import (
     Section,
     render_card,
 )
+from .command_text import FULL_BRAND
+from .layout_renderer import apply_theme_selection, render_document
 from .png_validation import validate_png
 from .rendering import RenderingFailure
 from .text import TextPresenter
@@ -42,6 +46,91 @@ class CommandPresentation:
     bitmap: RenderedBitmap | None = None
 
 
+@dataclass(frozen=True)
+class HelpModule:
+    """One module from the exact availability-filtered help snapshot."""
+
+    module_id: str
+    epoch: int
+    manifest: ModuleManifest
+    summary: str
+
+
+@dataclass(frozen=True)
+class HelpCardSource:
+    """Catalog facts retained alongside the bounded legacy text projection."""
+
+    document: DisplayDocument
+    registry_revision: int
+    modules: tuple[HelpModule, ...] = ()
+    recommendation: str | None = None
+    directory: bool = False
+    hints: tuple[str, ...] = ()
+
+
+def build_help_card(source: HelpCardSource, *, logos=None) -> cards.Document:
+    """Generic catalog-to-card projection; logos are already trusted bytes."""
+    logos = logos or {}
+    if not source.directory:
+        blocks = tuple(
+            cards.Text(line)
+            for block in source.document.ordered_blocks
+            for line in TextPresenter()._render_block(block, _MAX_CONTENT)
+        )
+        return cards.Document(
+            source.document.title,
+            (*blocks, *(cards.Text(hint, style="caption") for hint in source.hints)),
+            subtitle=source.document.subject,
+            brand=FULL_BRAND,
+            logo=logos.get(source.modules[0].module_id) if source.modules else None,
+        )
+    blocks = []
+    recommended = None
+    for module in source.modules:
+        manifest = module.manifest
+        display = manifest.display
+        name = display.default_name if display else manifest.route
+        short_name = display.short_name if display else None
+        section = cards.Section(
+            name,
+            (
+                cards.Text("查看模块命令与用法"),
+                cards.Text(f"/ygl {manifest.route} help", style="heading"),
+            ),
+            subtitle=short_name or manifest.route,
+            panel=False,
+        )
+        logo = logos.get(module.module_id)
+        contents = (
+            (
+                cards.Row(
+                    (cards.Image(logo, width=128, height=128), section), weights=(1, 5)
+                ),
+            )
+            if logo is not None
+            else (section,)
+        )
+        blocks.append(cards.Section("", contents))
+        if manifest.route == source.recommendation:
+            recommended = name
+    if not blocks:
+        blocks.append(
+            cards.Section("暂无可用模块", (cards.Text("模块就绪后会在这里出现"),))
+        )
+    blocks.extend(cards.Text(hint, style="caption") for hint in source.hints)
+    return cards.Document(
+        "游戏，从这里连结",
+        tuple(blocks),
+        subtitle=(
+            f"从{recommended}开始吧"
+            if recommended
+            else "输入 /ygl help，查看当前可用模块"
+        ),
+        brand=FULL_BRAND,
+        layout="directory",
+    )
+
+
 class CommandCardRenderer:
     """Trusted, command-only presentation policy. Optional Pillow fails to text."""
 
@@ -50,7 +139,15 @@ class CommandCardRenderer:
         self._max_text_lines = max_text_lines
         self._text = TextPresenter()
 
-    def __call__(self, document, *, audience):
+    def __call__(
+        self,
+        document,
+        *,
+        audience,
+        core_theme="warm_paper",
+        module_theme=None,
+        image=True,
+    ):
         validate_contract(document)
         validate_contract(audience)
         if type(document) is not DisplayDocument or (
@@ -61,19 +158,32 @@ class CommandCardRenderer:
         if document.schema_version != CONTRACT_VERSION:
             return CommandPresentation("不支持的显示版本")
         try:
-            self._budget(document)
+            # The legacy facts and declarative card each have their own input
+            # bounds. A large optional card must not consume the complete
+            # fallback's budget or turn usable text into a size-only hint.
+            self._budget(replace(document, card=None))
             spec, text = self._project(document, audience)
         except BitmapUnavailable:
             return CommandPresentation(TOO_LARGE)
         fallback = text if self._fits_text(text) else TOO_LARGE
+        if not image:
+            return CommandPresentation(fallback)
         try:
-            bitmap = render_card(spec, font_provider=BundledFontProvider())
+            if document.card is not None:
+                bitmap = render_document(
+                    apply_theme_selection(document.card, core_theme, module_theme),
+                    font_provider=BundledFontProvider(),
+                )
+            else:
+                bitmap = render_card(spec, font_provider=BundledFontProvider())
         except Exception:
             bitmap = None
         return CommandPresentation(fallback, bitmap)
 
-    def help(self, text: str, *, image: bool = True) -> CommandPresentation:
-        """The Host owns help text and its event-local recommendation."""
+    def help(
+        self, text: str, *, image: bool = True, card=None, core_theme="warm_paper"
+    ) -> CommandPresentation:
+        """Render the same coherent help facts supplied by the Core catalog."""
         if type(text) is not str or not text.strip():
             raise ValueError("invalid help text")
         fallback = text if self._fits_text(text) else TOO_LARGE
@@ -81,10 +191,16 @@ class CommandCardRenderer:
         if not image or len(text) > _MAX_CONTENT:
             return CommandPresentation(fallback)
         try:
-            bitmap = render_card(
-                CardSpec(title, (Section(paragraphs=tuple(body.splitlines())),)),
-                font_provider=BundledFontProvider(),
-            )
+            if card is not None:
+                bitmap = render_document(
+                    apply_theme_selection(card, core_theme),
+                    font_provider=BundledFontProvider(),
+                )
+            else:
+                bitmap = render_card(
+                    CardSpec(title, (Section(paragraphs=tuple(body.splitlines())),)),
+                    font_provider=BundledFontProvider(),
+                )
             # Help has no module result resource; validate its actual PNG bytes
             # here before handing it to the exact-event Host adapter.
             validate_png(bitmap)

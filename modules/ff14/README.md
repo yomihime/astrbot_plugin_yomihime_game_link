@@ -45,3 +45,28 @@ python -m astrbot_plugin_yomihime_game_link.scripts.admin_credentials --help
 `/ygl ff14 logs <国服|国际服> <服务器名> <角色名> [server_hint=...] [metric=rdps|ndps|cdps]` 只查询公开角色数据，不访问私密战斗报告。可按区域单独配置 FFLogs OAuth 客户端凭据；管理员须使用宿主提供的加密凭据配置入口。未配置的区域会失败关闭，不会降级成匿名请求。目前国服角色查询已用实际公开 API 验证；国际服结果会标为待核对的参考结果。
 
 `/ygl ff14 output <国服|国际服> <副本名称> <难度> <职业> [metric=rdps] [period=latest]` 目前暂不可用：FFLogs 统计页面返回 HTTP 403，且数据格式未通过验证，不显示分位数据。
+
+
+## 模块徽标来源与权利说明
+
+FFXIV METEOR MODULE EMBLEM
+
+File: ff14-meteor.svg
+Trusted, bundled, hand-authored monochrome SVG reference rendering.
+Copied unchanged from the five user-approved declarative card samples. It is
+not an official vector or exact logo file. The hollow ring and asymmetric
+flames were recreated with reference to Square Enix's product photography:
+https://na.store.square-enix-games.com/final-fantasy-xiv-messenger-bag
+
+FINAL FANTASY XIV and its marks belong to Square Enix. This note makes no claim
+of ownership or permission to redistribute the underlying mark and does not
+apply a new license to it. Review suitability for each distribution. No official
+photograph or font is included.
+
+The manifest declares this bundled asset as display.logo_resource and pins its
+SHA-256 in resources. The module emits card.logo=None; Core resolves that
+registered default to captured immutable bytes through the public SDK Asset
+contract. Module code performs no filesystem or remote reads for presentation.
+Core owns SVG validation, theme color substitution and rasterization. Explicit
+SDK Asset values can override a registered logo without adding any game logic
+in Core. The original fallback document and full source links are preserved.

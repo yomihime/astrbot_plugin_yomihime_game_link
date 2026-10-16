@@ -1,4 +1,27 @@
-# 游戏连结：离线命令卡片原型与样式参考
+# 游戏连结：声明式卡片与历史原型
+
+## 当前入口：SDK 声明与共用 Core renderer（2026-10-16）
+
+当前候选已将帮助、物品、市场和 Logs 命令接入同一 Core 声明式渲染器。模块使用 `yomihime_game_link_sdk.cards` 纯数据定义，经 `DisplayDocument.card` 提交；Core 负责排版、素材、主题、A/B 字效，Host 负责正式命令发送。设置页和两级主题存储也已接线。当前证据为离线测试，新候选尚未安装到真实 Local Test。
+
+- [运行样例](declarative_samples.py)只组合 SDK 声明并调用 `presentation.layout_renderer.render_document`，没有独立 Pillow 布局或旧 renderer 导入
+- [当前 Spec 与完整函数调用](../../docs/command-presentation/declarative-rendering-spec.md)说明 SDK、TaggedText、Cell、素材/预算/错误、Core 默认主题与模块跟随/覆盖
+- [五张用户已确认的样图和 provenance](samples/declarative/)为 Help、Item、Market、Logs 浅/深。物品是已提供截图的事实 fixture，市场是历史示意，Logs 是合成数据；不代表本轮实时查询。纯 SDK 迁移后五图字节不变
+- [当前交接与待验项](../../docs/command-presentation/README.md)记录 SDK a7、实际模块映射、有限 Logs 目录证据、分批测试和待授权的本地安装/四命令验收
+
+在仓库根运行：
+
+```sh
+python -m pip install -r examples/command_cards/requirements-declarative.txt
+python -m examples.command_cards.declarative_samples
+python -m unittest examples.command_cards.test_declarative_samples -v
+```
+
+新路径固定 Pillow `12.3.0`、resvg_py `0.5.0`，与 Core 根运行依赖一致，不需要手动 Cairo DLL。SDK wheel 无运行依赖；Windows 已有官方 wheel，但未在本轮实机验证。CLI 只向仓库外的新目录输出，并记录 PNG 摘要；不覆盖历史样图。
+
+## 历史离线原型说明（保留原记录）
+
+下文的“最新”“未接通”、Cairo/Inkscape、旧字体参数和测试结果均指各自历史阶段，不是当前实现或安装指引。旧 renderer、原始图与失败记录继续保留，不用新路径通过结果改写它们。需要运行当前实现时使用上方入口。
 
 这组可重复运行的 Python 样例用于评审版式与数据展示语义。物品卡保持已选「暖桃纸」方向，初版另外两个预设保留作离线对照；明暗样式以当前 Spec 与已提交样图为准。最新富文本 helper 已复用 production presentation 内核，**命令图片功能仍未接通**：没有更改 Host、API、模型、SDK、真实模块加载器或消息发送链路，也不查询实时市场或 FFLogs。
 

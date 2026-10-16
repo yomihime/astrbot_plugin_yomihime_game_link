@@ -6,7 +6,7 @@ import asyncio
 import tempfile
 import weakref
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path
 from secrets import token_urlsafe
@@ -1336,9 +1336,16 @@ class AstrBotRuntime:
                     )
                 except Exception:
                     return "命令暂时不可用。"
+                hint = (
+                    f"默认区域提示：{region}；缺省区域与显式参数的具体规则见模块帮助。"
+                )
                 return CommandHelp(
-                    action + f"\n默认区域提示：{region}；"
-                    "缺省区域与显式参数的具体规则见模块帮助。"
+                    action + "\n" + hint,
+                    source=(
+                        replace(action.source, hints=(*action.source.hints, hint))
+                        if action.source is not None
+                        else None
+                    ),
                 )
             return action
         if not isinstance(action, CommandInvocation):
@@ -1385,7 +1392,24 @@ class AstrBotRuntime:
             reserved = self._help_image_count < 3
             if reserved:
                 self._help_image_count += 1
-            presentation = self._command_cards.help(str(text), image=reserved)
+            source = text.source if isinstance(text, CommandHelp) else None
+            card = None
+            theme = "warm_paper"
+            if source is not None:
+                if reserved:
+                    card, theme = await self._core.prepare_help_card(source)
+                else:
+                    # Text-only overflow has no asset or raster reservation.
+                    # Fence retained catalog facts without loading logo bytes.
+                    self._core.require_help_source_current(source)
+            presentation = self._command_cards.help(
+                str(text),
+                image=reserved and (source is None or card is not None),
+                card=card,
+                core_theme=theme,
+            )
+            if source is not None:
+                self._core.require_help_source_current(source)
             route = ConversationRef(
                 ingress.adapter_id,
                 ingress.conversation_kind,

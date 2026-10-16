@@ -14,7 +14,12 @@ from yomihime_game_link_sdk.services import ConfigTarget
 from ..core.contracts.validation_boundary import validate_contract
 from ..extensions.disk_manifest import parse_manifest
 from .configuration_migration import OrdinaryMigrationField
-from .core_configuration import CORE_CONFIG_FIELDS, core_config_target
+from .core_configuration import (
+    CORE_CONFIG_FIELDS,
+    MODULE_REPLY_THEME,
+    core_config_target,
+    module_configuration_fields,
+)
 from .core_runtime import TrustedSubscriptionGate
 from .managed_source_credentials import ManagedSourceCredentialPolicy
 from .source_credentials import (
@@ -60,8 +65,6 @@ class ReviewedAssembly:
     def ordinary_resources(self, principal_id):
         """Reviewed executable policy, separate from migration/declaration metadata."""
         names = frozenset(getattr(self.support, "ordinary_config_fields", ()))
-        if not names:
-            return {}
         declared = {
             f.name
             for f in self.manifests[self.module_id].config_fields
@@ -69,7 +72,13 @@ class ReviewedAssembly:
         }
         if not names <= declared:
             raise ValueError("reviewed ordinary policy mismatches declaration")
-        return {validate_contract(ConfigTarget(principal_id, self.module_id)): names}
+        resources = {}
+        for module_id, manifest in self.manifests.items():
+            module_configuration_fields(manifest.config_fields)
+            resources[validate_contract(ConfigTarget(principal_id, module_id))] = (
+                names if module_id == self.module_id else frozenset()
+            ) | {MODULE_REPLY_THEME.name}
+        return resources
 
 
 @dataclass(frozen=True, slots=True)

@@ -7,6 +7,7 @@ from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from ygl_test_subject.adapters.astrbot.command_bridge import CommandHelp
 from ygl_test_subject.adapters.astrbot.message_port import AstrBotMessagePort
 from ygl_test_subject.adapters.astrbot.runtime import (
     AstrBotRuntime,
@@ -15,10 +16,15 @@ from ygl_test_subject.adapters.astrbot.runtime import (
 )
 from ygl_test_subject.core.ports import MessageStatus, MessageTarget, RenderedMessage
 from ygl_test_subject.presentation.card_bitmap import BitmapUnavailable, RenderedBitmap
-from ygl_test_subject.presentation.command_card import TOO_LARGE, CommandCardRenderer
+from ygl_test_subject.presentation.command_card import (
+    TOO_LARGE,
+    CommandCardRenderer,
+    HelpCardSource,
+)
 from ygl_test_subject.services.output import OutputStatus
 
 from tests.fixtures.generated_png import GeneratedPngFixture
+from yomihime_game_link_sdk import cards
 from yomihime_game_link_sdk.contexts import InvocationOrigin
 from yomihime_game_link_sdk.display import (
     DisplayAudience,
@@ -188,6 +194,37 @@ class ExactEventImageTests(unittest.IsolatedAsyncioTestCase):
 
 
 class HelpImageLifetimeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_full_help_image_quota_does_not_load_catalog_assets(self):
+        class Core:
+            accepting = True
+            checks = 0
+
+            def require_help_source_current(self, _source):
+                self.checks += 1
+
+            async def prepare_help_card(self, _source):
+                raise AssertionError("text fallback must not load logo resources")
+
+        runtime = AstrBotRuntime(_Context(), plugin_root=".", data_dir=".")
+        runtime._ready = True
+        runtime._core = Core()
+        runtime._help_image_count = 3
+        runtime._message_port = AstrBotMessagePort(
+            _Context(),
+            plain_factory=lambda text: SimpleNamespace(text=text),
+            image_factory=_Image.fromBytes,
+            command_current=runtime._command_current,
+        )
+        source = HelpCardSource(
+            DisplayDocument("help", "catalog", (TextBlock("complete"),)), 1
+        )
+        event = _Event()
+        await runtime.send_help(event, CommandHelp("complete help", source=source))
+        self.assertEqual(event.calls[0].chain[0].text, "complete help")
+        self.assertEqual(runtime._core.checks, 2)
+        self.assertEqual(runtime._help_image_count, 3)
+        self.assertEqual(runtime._help_tasks, set())
+
     async def test_help_aggregate_budget_and_unload_cancel_live_sends(self):
         class Core:
             accepting = True
@@ -324,6 +361,29 @@ class CommandProjectionTests(unittest.TestCase):
         self.assertIsNotNone(value.bitmap)
         self.assertIn("默认区域提示：cn", value.text)
 
+    def test_optional_card_budget_cannot_consume_fallback_text_budget(self):
+        declaration = cards.Document(
+            "Oversized visual",
+            tuple(cards.Text("v" * 3980) for _ in range(6)),
+        )
+        document = replace(
+            self.document,
+            card=declaration,
+            ordered_blocks=(
+                *self.document.ordered_blocks,
+                TextBlock("complete fallback " * 50),
+            ),
+        )
+        with patch(
+            "ygl_test_subject.presentation.command_card.render_document",
+            side_effect=BitmapUnavailable("layout_overflow"),
+        ):
+            actual = self.renderer(document, audience=DisplayAudience.PUBLIC)
+        self.assertIsNone(actual.bitmap)
+        self.assertIn("Copper Ore", actual.text)
+        self.assertIn("完整内容", actual.text)
+        self.assertNotEqual(actual.text, TOO_LARGE)
+
 
 class AuthorizedCommandImageTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
@@ -363,6 +423,31 @@ class AuthorizedCommandImageTests(unittest.IsolatedAsyncioTestCase):
             (coordinator._raw_bytes, coordinator._conversion_bytes), (0, 0)
         )
         self.assertEqual(coordinator._entries, {})
+
+    async def test_sdk_tagged_content_reaches_actual_authorized_png_pipeline(self):
+        from ygl_test_subject.presentation.layout_markup import parse_inline_markup
+        from ygl_test_subject.presentation.layout_renderer import render_document
+
+        tagged = cards.TaggedText("[blue]ordinary blue[/blue] [gold glow]gold[/gold]")
+        declared = cards.Document("SDK card", (cards.Text(tagged),))
+        result = self.h.new_result()
+        result = replace(result, document=replace(result.document, card=declared))
+        with patch(
+            "ygl_test_subject.presentation.command_card.render_card",
+            side_effect=AssertionError("declarative card must not use legacy painter"),
+        ):
+            outcome = await self.h.output.route(self.h.new_view(), result)
+        self.assertIs(outcome.status, OutputStatus.UNKNOWN)
+        self.assertEqual(len(self.sent), 1)
+        expected = render_document(
+            replace(declared, blocks=(cards.Text(parse_inline_markup(tagged.source)),))
+        )
+        self.assertEqual(self.sent[0].png_bytes, expected.content)
+        self.assertIn("body-SENSITIVE", self.sent[0].text)
+        literal = render_document(
+            replace(declared, blocks=(cards.Text(tagged.source),))
+        )
+        self.assertNotEqual(literal.content, expected.content)
 
     async def test_render_failure_sends_one_complete_text(self):
         with patch(

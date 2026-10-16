@@ -205,6 +205,8 @@ class OutputService:
         owner_authority: OwnerRouteProofAuthority | None = None,
         command_heading_projector: CommandHeadingProjector | None = None,
         command_card_renderer=None,
+        command_theme_settings=None,
+        command_card_logo=None,
         command_sender=None,
         claim_lease: timedelta,
         send_timeout: float,
@@ -223,6 +225,12 @@ class OutputService:
             raise TypeError("command heading projector must be callable")
         self._command_heading_projector = command_heading_projector
         self._command_card_renderer = command_card_renderer
+        self._command_theme_settings = command_theme_settings
+        self._command_card_logo = command_card_logo
+        if command_card_logo is not None and not callable(command_card_logo):
+            raise TypeError("command card logo must be a trusted reader")
+        if command_theme_settings is not None and not callable(command_theme_settings):
+            raise TypeError("command theme settings must be a trusted reader")
         self._command_sender = command_sender
         self._generated_png = None
         if command_card_renderer is not None:
@@ -883,7 +891,30 @@ class OutputService:
                 from ..presentation.command_card import CommandPresentation
                 from .generated_png import GeneratedPngCoordinator, GeneratedPngError
 
-                presentation = self._command_card_renderer(document, audience=audience)
+                theme = {}
+                if document.card is not None and self._command_card_logo is not None:
+                    try:
+                        if document.card.logo is None:
+                            logo = await self._command_card_logo(invocation.module_id)
+                            document = replace(
+                                document, card=replace(document.card, logo=logo)
+                            )
+                    except Exception:
+                        theme["image"] = False
+                if (
+                    document.card is not None
+                    and self._command_theme_settings is not None
+                ):
+                    settings = await self._command_theme_settings(invocation.module_id)
+                    theme.update(
+                        {
+                            "core_theme": settings.core_theme,
+                            "module_theme": settings.module_theme,
+                        }
+                    )
+                presentation = self._command_card_renderer(
+                    document, audience=audience, **theme
+                )
                 if type(presentation) is not CommandPresentation:
                     raise ValueError("invalid command presentation")
                 if presentation.bitmap is not None:

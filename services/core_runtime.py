@@ -113,7 +113,12 @@ from ..services.source_credentials import SourceCredentialPolicy
 from ..services.subscriptions import SubscriptionOperationsService
 from .configuration import ConfigurationCoordinator
 from .configuration_migration import OrdinaryConfigurationMigration
-from .core_configuration import CORE_CONFIG_FIELDS, CoreDefaultsView, core_config_target
+from .core_configuration import (
+    CORE_CONFIG_FIELDS,
+    CoreDefaultsView,
+    ThemeSettingsView,
+    core_config_target,
+)
 
 DEFAULT_CADENCE_CONFIGURATION = CadenceConfiguration((60.0, 300.0, 900.0, 3600.0))
 DEFAULT_CADENCE_REVISION = 1
@@ -657,6 +662,11 @@ class CoreRuntime:
                 else None
             ),
         )
+        self.theme_settings = ThemeSettingsView(
+            self.config_repository,
+            self.lifecycle.admission,
+            principal_id=config_principal_id,
+        )
         self.module_services = ModuleServicesFactory(
             self.registry,
             self.issuer,
@@ -689,6 +699,8 @@ class CoreRuntime:
             renderer=renderer,
             command_heading_projector=command_heading_projector,
             command_card_renderer=command_card_renderer,
+            command_theme_settings=self.theme_settings.current,
+            command_card_logo=self._command_card_logo,
             command_sender=(
                 self._send_command
                 if callable(getattr(message_port, "send_command", None))
@@ -902,6 +914,87 @@ class CoreRuntime:
         return project_module_catalog(
             snapshot, states, identities, runtime_state=runtime_state
         )
+
+    def require_help_source_current(self, source) -> None:
+        """Fence retained help facts against live, coherent module availability."""
+        from ..presentation.command_card import HelpCardSource
+
+        if type(source) is not HelpCardSource:
+            raise InvalidInvocation()
+        self._require_accepting_ingress()
+        snapshot = self.registry.snapshot()
+        if snapshot.revision != source.registry_revision:
+            raise InvalidInvocation()
+        for item in source.modules:
+            module = snapshot.modules.get(item.module_id)
+            if (
+                module is None
+                or module.epoch != item.epoch
+                or module.manifest != item.manifest
+                or not self.registry.is_active(module)
+            ):
+                raise InvalidInvocation()
+
+    async def prepare_help_card(self, source):
+        """Bind declared local logo resources and Core theme without new authority.
+
+        Resources are read only through the same bounded, hash-pinned package
+        capture used for installed static assets. No route, module identifier,
+        arbitrary file path, network fetch or public download API is introduced.
+        An unavailable optional presentation dependency chooses complete text.
+        """
+        from ..presentation.command_card import build_help_card
+
+        self.require_help_source_current(source)
+        settings = await self.theme_settings.current()
+        logos = {}
+        card = None
+        try:
+            for item in source.modules:
+                logo = await self._command_card_logo(item.module_id)
+                if logo is not None:
+                    logos[item.module_id] = logo
+            card = build_help_card(source, logos=logos)
+        except Exception:
+            # A missing/corrupt image must not suppress usable catalog text.
+            card = None
+        self.require_help_source_current(source)
+        return card, settings.core_theme
+
+    async def _command_card_logo(self, module_id):
+        """Bind only the current manifest's declared, hash-verified static logo."""
+        from yomihime_game_link_sdk.cards import Asset
+
+        from ..extensions.page_resources import capture_page_resources
+
+        module = self.registry.snapshot().module(module_id)
+        display = module.manifest.display
+        path = display.logo_resource if display is not None else None
+        if path is None:
+            return None
+        package_id, local_id = module_id.split("/", 1)
+        candidate = self.extension_runtime.candidate(package_id)
+        package = candidate.package if candidate is not None else None
+        if (
+            package is None
+            or package._provenance is None
+            or package.manifest is None
+            or next(
+                (m for m in package.manifest.modules if m.module_id == local_id), None
+            )
+            != module.manifest
+            or not self.registry.is_active(module)
+        ):
+            raise ValueError("command logo package is unavailable")
+        resources = await asyncio.to_thread(
+            capture_page_resources, package._provenance, package.manifest
+        )
+        if not self.registry.is_active(module):
+            raise InvalidInvocation()
+        kind = {".svg": "svg", ".png": "png", ".jpg": "jpeg", ".jpeg": "jpeg"}[
+            Path(path).suffix.lower()
+        ]
+        return Asset(kind, resources[path], alt=display.default_name)
 
     async def subscription_gate_state(self, module_id: str) -> SubscriptionGateState:
         """Read exact persistent eligibility and live state under the original gate."""

@@ -84,7 +84,13 @@ class CatalogRuntimeTests(unittest.IsolatedAsyncioTestCase):
             "editable",
             "blocked_reason",
         }
-        self.assertTrue(all(set(field) == keys for field in result["fields"]))
+        for field in result["fields"]:
+            expected = keys | (
+                {"choices"}
+                if field["name"] in {"image_theme", "reply_theme"}
+                else set()
+            )
+            self.assertEqual(set(field), expected)
         second = next(
             field for field in result["fields"] if field["module_id"] == "admin/mod"
         )

@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import math
 import re
+from dataclasses import replace
 from html.parser import HTMLParser
+from time import monotonic
 from urllib.parse import quote
 
 from yomihime_game_link_sdk.contexts import InvocationOrigin, InvocationView
@@ -26,6 +29,12 @@ from yomihime_game_link_sdk.results import (
 from yomihime_game_link_sdk.services import ConfigSnapshot, HttpRequest, ModuleServices
 from yomihime_game_link_sdk.storage import JsonObject, SecretMetadataState
 
+from .fflogs_cards import (
+    CATALOG_LIMITATION,
+    DETAIL_LIMITATION,
+    PROVIDER_CATALOG_SCOPE,
+    character_card,
+)
 from .fflogs_catalog import (
     FFLOGS_CN_SOURCE,
     FFLOGS_GLOBAL_SOURCE,
@@ -34,11 +43,16 @@ from .fflogs_catalog import (
     FFLogsGraphQLError,
     parse_graphql_envelope,
     resolve_output_metadata,
+    select_character_zones,
 )
 from .fflogs_models import (
+    CharacterRanking,
+    CharacterRankingGroup,
     FFLogsPayloadError,
+    OutputMetadata,
     PublicCharacter,
     parse_public_character,
+    parse_rankings,
 )
 
 SUPPORTED_METRICS = ("rdps", "ndps", "cdps")
@@ -49,6 +63,12 @@ LIVE_STATISTICS_MARKUP_VERIFIED = False
 MAX_HTML_BYTES = 1_000_000
 MAX_STAT_POINTS = 512
 MAX_HTML_TAGS = 20_000
+METADATA_DEADLINE_SECONDS = 5
+METADATA_CACHE_SECONDS = 900
+METADATA_FAILURE_CACHE_SECONDS = 60
+MAX_CHARACTER_ZONES = 12
+MAX_CHARACTER_ROWS = 40
+CATALOG_RANKING_DEADLINE_SECONDS = 15
 _INTEGER = re.compile(r"[0-9]+\Z", re.ASCII)
 _NUMBER = re.compile(r"(?:[0-9]{1,3}(?:,[0-9]{3})+|[0-9]+)(?:\.[0-9]+)?\Z", re.ASCII)
 
@@ -94,13 +114,225 @@ class FFLogsCharacterLookup:
     def __init__(self, services: ModuleServices) -> None:
         self._services = services
         self._lifecycle = object()
+        self._metadata_cache: dict[str, tuple[float, OutputMetadata | None]] = {}
         from .chat_context import PendingTargets
 
         self._chat_pending = PendingTargets()
 
     def close(self) -> None:
         self._lifecycle = object()
+        self._metadata_cache.clear()
         self._chat_pending.close()
+
+    async def _character_metadata(self, scope, source_id, lifecycle):
+        """Enrich actual rows using the existing fixed schema/catalog contract.
+
+        Cache is per realm/source and module lifetime. A failed enrichment must
+        not discard valid public rankings or select a guessed old expansion.
+        """
+        cached = self._metadata_cache.get(source_id)
+        if cached is not None and cached[0] > monotonic():
+            return cached[1]
+
+        def check_active():
+            if self._lifecycle is not lifecycle:
+                raise ServiceUnavailable()
+
+        metadata = None
+        try:
+            async with asyncio.timeout(METADATA_DEADLINE_SECONDS):
+                metadata = await FFLogsCatalog(
+                    scope.http, source_id, check_active=check_active
+                ).load_character_metadata()
+        except (
+            SourceHttpError,
+            FFLogsGraphQLError,
+            FFLogsPayloadError,
+            ServiceUnavailable,
+            PermissionError,
+            TimeoutError,
+        ):
+            pass
+        except Exception:
+            # Source error strings/response bodies are never public metadata.
+            pass
+        check_active()
+        ttl = (
+            METADATA_CACHE_SECONDS
+            if metadata is not None
+            else METADATA_FAILURE_CACHE_SECONDS
+        )
+        self._metadata_cache[source_id] = (monotonic() + ttl, metadata)
+        return metadata
+
+    async def _catalog_rankings(
+        self, scope, source_id, character, metadata, identity_variables, lifecycle
+    ):
+        targets = select_character_zones(metadata, character.zone_id)
+        if not targets:
+            return character
+        warnings = []
+        if len(targets) > MAX_CHARACTER_ZONES:
+            warnings.append(f"目录范围超过本次 {MAX_CHARACTER_ZONES} 个副本查询上限。")
+        targets = targets[:MAX_CHARACTER_ZONES]
+        variables = {
+            key: identity_variables[key]
+            for key in ("name", "serverSlug", "serverRegion", "metric")
+        }
+        arguments = []
+        aliases = []
+        for index, (zone, difficulty, _) in enumerate(targets):
+            variables[f"z{index}"] = zone.zone_id
+            variables[f"d{index}"] = difficulty.difficulty_id
+            arguments.extend((f"$z{index}: Int!", f"$d{index}: Int!"))
+            aliases.append(
+                f"z{index}: zoneRankings(zoneID: $z{index}, difficulty: $d{index}, metric: $metric)"
+            )
+        query = (
+            "query FF14CatalogCharacter($name: String!, $serverSlug: String!, "
+            "$serverRegion: String!, $metric: CharacterPageRankingMetricType!, "
+            + ", ".join(arguments)
+            + ") { characterData { character(name: $name, serverSlug: $serverSlug, "
+            "serverRegion: $serverRegion) { id name hidden server { name } "
+            + " ".join(aliases)
+            + " } } }"
+        )
+        try:
+            if self._lifecycle is not lifecycle:
+                raise ServiceUnavailable()
+            async with asyncio.timeout(CATALOG_RANKING_DEADLINE_SECONDS):
+                response = await scope.http.fetch(
+                    HttpRequest(
+                        source_id,
+                        GRAPHQL_PATH,
+                        method="POST",
+                        body=_graphql_body(query, variables),
+                        headers={"Content-Type": "application/json"},
+                    )
+                )
+            if self._lifecycle is not lifecycle:
+                raise ServiceUnavailable()
+            data = parse_graphql_envelope(
+                response.body, exact_numbers=True, allow_partial_errors=True
+            )
+            container = data.get("characterData")
+            value = container.get("character") if isinstance(container, dict) else None
+            if isinstance(value, dict) and value.get("hidden") is True:
+                return replace(character, hidden=True, rankings=(), groups=())
+            if (
+                not isinstance(value, dict)
+                or value.get("id") != character.character_id
+                or value.get("name") != character.name
+                or value.get("hidden") is not False
+                or not isinstance(value.get("server"), dict)
+                or value["server"].get("name") != character.server_name
+            ):
+                raise FFLogsPayloadError("catalog character identity changed")
+        except (SourceHttpError, FFLogsGraphQLError, FFLogsPayloadError, TimeoutError):
+            return replace(
+                character, catalog_warnings=("部分副本查询失败，保留已取得的记录。",)
+            )
+        groups = []
+        known_encounter_ids = {
+            item.encounter_id
+            for catalog_zone in metadata.zones
+            for item in catalog_zone.encounters
+        }
+        for index, (zone, difficulty, category) in enumerate(targets):
+            try:
+                selection = parse_rankings(value.get(f"z{index}"))
+                if (
+                    selection.zone_id != zone.zone_id
+                    or selection.difficulty_id != difficulty.difficulty_id
+                    or selection.metric != character.metric
+                ):
+                    raise FFLogsPayloadError("catalog ranking selection changed")
+                if len({row.encounter_id for row in selection.rows}) != len(
+                    selection.rows
+                ):
+                    raise FFLogsPayloadError("catalog encounter identity is duplicated")
+                expected = {item.encounter_id for item in zone.encounters}
+                unknown_count = sum(
+                    row.encounter_id not in known_encounter_ids
+                    for row in selection.rows
+                )
+                if unknown_count:
+                    warnings.append(
+                        f"{zone.name}：返回 {unknown_count} 项目录未知记录，本次结果可能不完整。"
+                    )
+                rankings = {
+                    row.encounter_id: row
+                    for row in selection.rows
+                    if row.encounter_id in expected
+                }
+                rows = tuple(
+                    rankings.get(item.encounter_id)
+                    or CharacterRanking(item.encounter_id, item.name, None, None, None)
+                    for item in zone.encounters
+                )
+                groups.append(
+                    CharacterRankingGroup(
+                        zone.zone_id,
+                        zone.name,
+                        difficulty.difficulty_id,
+                        selection.partition,
+                        category,
+                        zone.expansion_name or "—",
+                        rows,
+                    )
+                )
+            except FFLogsPayloadError:
+                warnings.append(f"{zone.name}：本次未取得可用记录。")
+                if (zone.zone_id, difficulty.difficulty_id) == (
+                    character.zone_id,
+                    character.difficulty_id,
+                ):
+                    groups.append(
+                        CharacterRankingGroup(
+                            zone.zone_id,
+                            zone.name,
+                            difficulty.difficulty_id,
+                            character.partition,
+                            category,
+                            zone.expansion_name or "—",
+                            character.rankings,
+                        )
+                    )
+                else:
+                    groups.append(
+                        CharacterRankingGroup(
+                            zone.zone_id,
+                            zone.name,
+                            difficulty.difficulty_id,
+                            -1,
+                            category,
+                            zone.expansion_name or "—",
+                            tuple(
+                                CharacterRanking(
+                                    item.encounter_id,
+                                    item.name,
+                                    None,
+                                    None,
+                                    None,
+                                    source_error=True,
+                                )
+                                for item in zone.encounters
+                            ),
+                        )
+                    )
+        if not groups:
+            return replace(character, catalog_warnings=tuple(warnings))
+        if not any(group.category == "savage" for group in groups):
+            warnings.append(
+                "默认副本所属资料片未取得零式目录记录，未自动改选旧资料片。"
+            )
+        groups.sort(key=lambda group: group.category != "ultimate")
+        return replace(
+            character,
+            groups=tuple(groups),
+            rankings=tuple(row for group in groups for row in group.rankings),
+            catalog_warnings=tuple(warnings),
+        )
 
     async def invoke(
         self, context: InvocationView, parameters: JsonObject
@@ -109,7 +341,11 @@ class FFLogsCharacterLookup:
             from .fflogs_chat import invoke_character_tool
 
             return await invoke_character_tool(self, context, parameters)
-        return await self._execute(context, parameters)
+        try:
+            async with asyncio.timeout(30):
+                return await self._execute(context, parameters)
+        except TimeoutError:
+            return _error(ErrorCode.UPSTREAM_ERROR, "FFLogs 查询超时，请稍后重试。")
 
     async def _execute(
         self,
@@ -122,6 +358,7 @@ class FFLogsCharacterLookup:
         resolved_server=None,
         server_candidates=None,
     ) -> CapabilityResult:
+        lifecycle = self._lifecycle
         inputs = _character_inputs(parameters)
         if isinstance(inputs, CapabilityResult):
             return inputs
@@ -226,7 +463,7 @@ class FFLogsCharacterLookup:
                     headers={"Content-Type": "application/json"},
                 )
             )
-            data = parse_graphql_envelope(response.body)
+            data = parse_graphql_envelope(response.body, exact_numbers=True)
             character_data = data.get("characterData")
             raw_character = (
                 character_data.get("character")
@@ -289,6 +526,25 @@ class FFLogsCharacterLookup:
             return _error(ErrorCode.MODULE_UNAVAILABLE, "FFLogs 来源服务暂不可用。")
         except Exception:
             return _error(ErrorCode.MODULE_UNAVAILABLE, "FFLogs 来源服务暂不可用。")
+        if guard is not None:
+            await guard()
+        try:
+            metadata = (
+                await self._character_metadata(scope, source_id, lifecycle)
+                if not tool and zone_tuple is None
+                else None
+            )
+        except ServiceUnavailable:
+            return _error(ErrorCode.MODULE_UNAVAILABLE, "FFLogs 来源服务暂不可用。")
+        if guard is not None:
+            await guard()
+        if metadata is not None and metadata.character_catalog_verified:
+            try:
+                character = await self._catalog_rankings(
+                    scope, source_id, character, metadata, variables, lifecycle
+                )
+            except (ServiceUnavailable, PermissionError):
+                return _error(ErrorCode.MODULE_UNAVAILABLE, "FFLogs 来源服务暂不可用。")
         result = _character_result(
             character,
             host,
@@ -296,8 +552,10 @@ class FFLogsCharacterLookup:
             metric,
             zone_tuple,
             realm,
-            limit=20 if tool else 40,
+            limit=20 if tool else MAX_CHARACTER_ROWS,
             partial_on_truncation=tool,
+            metadata=metadata,
+            catalog_requested=not tool and zone_tuple is None,
         )
         if tool and result.error is None:
             from .fflogs_chat import character_facts, fetched_at, tool_result
@@ -598,6 +856,8 @@ def _character_result(
     *,
     limit: int = 40,
     partial_on_truncation: bool = False,
+    metadata: OutputMetadata | None = None,
+    catalog_requested: bool = True,
 ) -> CapabilityResult:
     if character.hidden:
         return _error(
@@ -620,22 +880,49 @@ def _character_result(
             else "查询条件：已应用指定的副本、难度和分区。"
         ),
     ]
-    if character.partition == -1:
+    if character.groups:
+        blocks.append(TextBlock("分区范围：各副本 FFLogs 默认分区。"))
+    elif character.partition == -1:
         blocks.append(TextBlock("分区范围：全部分区。"))
 
     visible = character.rankings[:limit]
+    row_lines = []
     for ranking in visible:
         parts = [ranking.encounter_name]
+        if ranking.source_error:
+            parts.append("数据暂不可用（ERR）")
         if ranking.best_amount is not None:
             parts.append(f"最佳 {metric_label} {ranking.best_amount:,.1f}")
         if ranking.rank_percent is not None:
             parts.append(f"排名百分位 {ranking.rank_percent:.1f}%")
-        blocks.append(TextBlock(" · ".join(parts)))
+        if ranking.total_kills is not None:
+            parts.append(f"本次统计过本次数 {ranking.total_kills}")
+        row_lines.append(" · ".join(parts))
+    # Preserve the existing 40-row command bound without violating the generic
+    # 32-block document budget. Every displayed row remains in text fallback.
+    blocks.extend(
+        TextBlock("\n".join(row_lines[index : index + 8]))
+        for index in range(0, len(row_lines), 8)
+    )
 
     warnings: list[str] = []
     verified = realm in VERIFIED_CHARACTER_REALMS
     if not verified:
         warnings.append("国际服角色数据尚未完成核验，当前结果仅供参考。")
+    if catalog_requested:
+        warnings.append(
+            PROVIDER_CATALOG_SCOPE if character.groups else CATALOG_LIMITATION
+        )
+    warnings.extend(character.catalog_warnings)
+    if catalog_requested:
+        blocks.append(
+            TextBlock(
+                "范围：FFLogs 目录绝境战与默认副本所属资料片零式；目录不代表游戏开放状态。"
+                if character.groups
+                else CATALOG_LIMITATION
+            )
+        )
+    blocks.append(TextBlock(DETAIL_LIMITATION))
     if len(character.rankings) > len(visible):
         warnings.append(f"战绩较多，结果仅显示前 {limit} 项。")
     url = (
@@ -649,11 +936,20 @@ def _character_result(
         ordered_blocks=tuple(blocks),
         sources=("FFLogs 公开角色记录",),
         privacy=Privacy.PUBLIC,
+        card=character_card(
+            character,
+            realm=realm,
+            host=host,
+            limit=limit,
+            explicit_selection=zone is not None,
+            metadata=metadata,
+        ),
     )
     return CapabilityResult(
         result_id=f"ff14-fflogs-character-{character.character_id}",
         status=ResultStatus.SUCCESS
         if verified
+        and not catalog_requested
         and (not partial_on_truncation or len(visible) == len(character.rankings))
         else ResultStatus.PARTIAL_SUCCESS,
         document=document,

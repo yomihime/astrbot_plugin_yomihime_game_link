@@ -167,9 +167,10 @@ def character_facts(character, server, realm, metric, zone, host, retrieved_at):
             "spec": row.spec,
             "rank_percent": row.rank_percent,
             "best_amount": row.best_amount,
+            "total_kills": row.total_kills,
             "missing": [
                 field
-                for field in ("spec", "rank_percent", "best_amount")
+                for field in ("spec", "rank_percent", "best_amount", "total_kills")
                 if getattr(row, field) is None
             ],
         }
@@ -221,6 +222,11 @@ def character_facts(character, server, realm, metric, zone, host, retrieved_at):
             "finite_returned_rankings": True,
             "battle_analysis": False,
             "global_output_percentiles": False,
+            "catalog_scope": "single_returned_zone",
+            "complete_ultimate_current_expansion_catalog": False,
+            "total_kills_source": "zoneRankings.rankings.totalKills",
+            "total_kills_scope": "returned_selection_not_lifetime",
+            "record_version_verified": False,
         },
     }
 
