@@ -13,7 +13,12 @@ from ygl_test_subject.core.contracts.cards import validate_card
 from ygl_test_subject.core.contracts.validation_boundary import validate_contract
 from ygl_test_subject.core.public_result import public_fact_strings
 
-from modules.ff14.features.fflogs import FFLogsCharacterLookup
+from modules.ff14.features.fflogs import (
+    CATALOG_DIAGNOSTIC_BYTES,
+    FFLogsCharacterLookup,
+    _bounded_catalog_targets,
+    _catalog_diagnostic,
+)
 from modules.ff14.features.fflogs_cards import (
     CATALOG_LIMITATION,
     amount,
@@ -130,9 +135,17 @@ def expanded_metadata(*, ultimate_count=7):
     return value
 
 
-def catalog_rankings(payload, *, failed_zone=None, empty_zone=None):
+def catalog_rankings(
+    payload, *, failed_zone=None, empty_zone=None, target_zone_ids=None
+):
     catalog = parse_character_metadata(payload["data"])
-    targets = select_character_zones(catalog, 73)[:12]
+    targets = select_character_zones(catalog, 73)
+    if target_zone_ids is not None:
+        targets = tuple(
+            target for target in targets if target[0].zone_id in target_zone_ids
+        )
+    else:
+        targets = targets[:12]
     value = {
         "id": 42,
         "name": "Synthetic Hero",
@@ -323,6 +336,221 @@ class FFLogsCardTests(unittest.TestCase):
 
 
 class FFLogsCardSourceTests(unittest.IsolatedAsyncioTestCase):
+    def test_bounded_target_selection_keeps_single_category_and_small_order(self):
+        targets = select_character_zones(
+            parse_character_metadata(expanded_metadata()["data"]), 73
+        )
+        self.assertEqual(_bounded_catalog_targets(targets), targets)
+        many = targets * 3
+        savage_first = tuple(
+            target for target in many if target[2] == "savage"
+        ) + tuple(target for target in many if target[2] == "ultimate")
+        selected = _bounded_catalog_targets(savage_first)
+        self.assertEqual(len(selected), 12)
+        self.assertEqual({target[2] for target in selected}, {"ultimate", "savage"})
+        single = tuple(target for target in many if target[2] == "ultimate")
+        self.assertEqual(_bounded_catalog_targets(single), single[:12])
+
+    def test_diagnostic_is_bounded_and_excludes_character_and_rankings(self):
+        catalog = parse_character_metadata(expanded_metadata()["data"])
+        template = catalog.zones[0]
+        large = replace(
+            catalog,
+            zones=tuple(
+                replace(
+                    template,
+                    zone_id=index + 1,
+                    name="长" * 160,
+                    difficulties=template.difficulties * 10,
+                )
+                for index in range(512)
+            ),
+        )
+        private = replace(
+            character(), name="private-character", server_name="private-server"
+        )
+        encoded = _catalog_diagnostic(large, "verified_catalog", private)
+        self.assertLessEqual(len(encoded.encode("utf-8")), CATALOG_DIAGNOSTIC_BYTES)
+        data = json.loads(encoded)
+        self.assertEqual(data["zone_count"], 512)
+        self.assertEqual(len(data["zones"]) + data["zones_omitted"], 512)
+        self.assertTrue(
+            all(zone["difficulties_omitted"] == 6 for zone in data["zones"])
+        )
+        for forbidden in (
+            "private-character",
+            "private-server",
+            "best_amount",
+            "rank_percent",
+            "character_id",
+            "rankings",
+        ):
+            self.assertNotIn(forbidden, encoded)
+        unavailable = json.loads(
+            _catalog_diagnostic(None, "unavailable_payload", private)
+        )
+        self.assertIsNone(unavailable["default_expansion_id"])
+        self.assertEqual(unavailable["zones"], [])
+        self.assertEqual(unavailable["targets_before"], {"ultimate": 0, "savage": 0})
+
+    async def test_diagnostic_logs_once_with_safe_failure_category(self):
+        http = fixture._FakeHttp(
+            [
+                *fixture._character_responses(realm="cn"),
+                {"errors": [{"message": "private-secret-key private-error"}]},
+            ]
+        )
+        with self.assertLogs("modules.ff14.features.fflogs", level="INFO") as logged:
+            result = await FFLogsCharacterLookup(fixture._services(http)).invoke(
+                None, TARGET
+            )
+        self.assertIsNone(result.error)
+        self.assertEqual(len(logged.records), 1)
+        message = logged.records[0].getMessage()
+        self.assertTrue(message.startswith("FF14_LOGS_CATALOG "))
+        data = json.loads(message.removeprefix("FF14_LOGS_CATALOG "))
+        self.assertEqual(data["metadata_state"], "unavailable_graphql")
+        for forbidden in (
+            "private-secret-key",
+            "private-error",
+            "Synthetic Hero",
+            "Cerberus",
+            "bestAmount",
+            "rankPercent",
+        ):
+            self.assertNotIn(forbidden, message)
+
+    async def test_query_budget_preserves_both_catalog_categories(self):
+        catalog = expanded_metadata(ultimate_count=13)
+        http = fixture._FakeHttp(
+            [
+                *fixture._character_responses(realm="cn"),
+                expanded_schema(),
+                catalog,
+                catalog_rankings(catalog, target_zone_ids=[*range(100, 111), 73]),
+            ]
+        )
+        result = await FFLogsCharacterLookup(fixture._services(http)).invoke(
+            None, TARGET
+        )
+        variables = json.loads(http.requests[-1].body)["variables"]
+        queried = {value for key, value in variables.items() if key.startswith("z")}
+        self.assertEqual(len(queried), 12)
+        self.assertTrue(queried.intersection({73, 74, 75}))
+        self.assertTrue(queried.intersection(range(100, 113)))
+        self.assertFalse(queried.intersection({72, 9999, 43}))
+        self.assertEqual(
+            [
+                block.title
+                for block in result.document.card.blocks
+                if isinstance(block, cards.Section)
+            ],
+            ["绝境战", "零式"],
+        )
+
+    async def test_missing_ultimate_catalog_is_explicit_on_card(self):
+        catalog = expanded_metadata(ultimate_count=1)
+        for zone in catalog["data"]["worldData"]["zones"]:
+            if zone["difficulties"][0]["name"] == "Ultimate":
+                zone["difficulties"][0]["name"] = "Unverified difficulty"
+        http = fixture._FakeHttp(
+            [
+                *fixture._character_responses(realm="cn"),
+                expanded_schema(),
+                catalog,
+                catalog_rankings(catalog),
+            ]
+        )
+        result = await FFLogsCharacterLookup(fixture._services(http)).invoke(
+            None, TARGET
+        )
+        self.assertTrue(any("绝境战目录" in warning for warning in result.warnings))
+        captions = [
+            block.content
+            for block in result.document.card.blocks
+            if isinstance(block, cards.Text)
+        ]
+        self.assertTrue(any("绝境战目录" in caption for caption in captions))
+        self.assertEqual(result.document.card.blocks[0].title, "零式")
+
+    async def test_missing_group_warning_survives_alias_failure(self):
+        catalog = expanded_metadata(ultimate_count=1)
+        for zone in catalog["data"]["worldData"]["zones"]:
+            if zone["difficulties"][0]["name"] == "Ultimate":
+                zone["difficulties"][0]["name"] = "Unverified difficulty"
+        http = fixture._FakeHttp(
+            [
+                *fixture._character_responses(realm="cn"),
+                expanded_schema(),
+                catalog,
+                {"errors": [{"message": "private-alias-error"}]},
+            ]
+        )
+        result = await FFLogsCharacterLookup(fixture._services(http)).invoke(
+            None, TARGET
+        )
+        self.assertIsNone(result.error)
+        self.assertTrue(any("绝境战目录" in warning for warning in result.warnings))
+        self.assertTrue(any("保留" in warning for warning in result.warnings))
+        self.assertFalse(
+            any("private-alias-error" in warning for warning in result.warnings)
+        )
+
+    async def test_unknown_difficulties_warn_without_guess_or_extra_query(self):
+        catalog = expanded_metadata()
+        for zone in catalog["data"]["worldData"]["zones"]:
+            zone["difficulties"][0]["name"] = "Unknown difficulty"
+        http = fixture._FakeHttp(
+            [*fixture._character_responses(realm="cn"), expanded_schema(), catalog]
+        )
+        with self.assertLogs("modules.ff14.features.fflogs", level="INFO") as logged:
+            result = await FFLogsCharacterLookup(fixture._services(http)).invoke(
+                None, TARGET
+            )
+        self.assertIsNone(result.error)
+        self.assertEqual(len(http.requests), 5)
+        self.assertEqual(result.document.card.blocks[0].title, "Synthetic zone 73")
+        self.assertTrue(any("绝境战目录" in warning for warning in result.warnings))
+        self.assertTrue(
+            any("未自动改选旧资料片" in warning for warning in result.warnings)
+        )
+        snapshot = json.loads(
+            logged.records[0].getMessage().removeprefix("FF14_LOGS_CATALOG ")
+        )
+        self.assertEqual(snapshot["targets_before"], {"ultimate": 0, "savage": 0})
+        self.assertEqual(snapshot["final_groups"], {"ultimate": 0, "savage": 0})
+        self.assertEqual(snapshot["metadata_state"], "verified_catalog")
+
+    async def test_base_catalog_and_cached_failure_have_distinct_safe_states(self):
+        for schema, directory, expected in (
+            (fixture._output_schema(), metadata(), "base_catalog"),
+            ({"data": {}}, None, "unavailable_payload"),
+        ):
+            with self.subTest(state=expected):
+                responses = [*fixture._character_responses(realm="cn"), schema]
+                if directory is not None:
+                    responses.append(directory)
+                responses.extend(fixture._character_responses(realm="cn"))
+                http = fixture._FakeHttp(responses)
+                handler = FFLogsCharacterLookup(fixture._services(http))
+                with self.assertLogs(
+                    "modules.ff14.features.fflogs", level="INFO"
+                ) as logged:
+                    await handler.invoke(None, TARGET)
+                    await handler.invoke(None, TARGET)
+                self.assertEqual(len(http.requests), 8 if directory else 7)
+                self.assertEqual(len(logged.records), 2)
+                for record in logged.records:
+                    snapshot = json.loads(
+                        record.getMessage().removeprefix("FF14_LOGS_CATALOG ")
+                    )
+                    self.assertEqual(snapshot["metadata_state"], expected)
+                    self.assertIsNone(snapshot["default_expansion_id"])
+                    self.assertEqual(
+                        snapshot["targets_after"], {"ultimate": 0, "savage": 0}
+                    )
+                handler.close()
+
     async def test_close_and_cancel_fence_the_aliased_catalog_request(self):
         for action in ("close", "cancel"):
             with self.subTest(action=action):
@@ -402,7 +630,7 @@ class FFLogsCardSourceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_alias_budget_and_duplicate_rows_are_explicit(self):
         catalog = expanded_metadata(ultimate_count=13)
-        batch = catalog_rankings(catalog)
+        batch = catalog_rankings(catalog, target_zone_ids=[*range(100, 111), 73])
         alias = batch["data"]["characterData"]["character"]["z1"]
         alias["rankings"].append(dict(alias["rankings"][0]))
         http = fixture._FakeHttp(

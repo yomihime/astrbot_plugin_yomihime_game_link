@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import math
 import re
 from dataclasses import replace
@@ -69,6 +70,8 @@ METADATA_FAILURE_CACHE_SECONDS = 60
 MAX_CHARACTER_ZONES = 12
 MAX_CHARACTER_ROWS = 40
 CATALOG_RANKING_DEADLINE_SECONDS = 15
+CATALOG_DIAGNOSTIC_BYTES = 16_384
+_LOGGER = logging.getLogger(__name__)
 _INTEGER = re.compile(r"[0-9]+\Z", re.ASCII)
 _NUMBER = re.compile(r"(?:[0-9]{1,3}(?:,[0-9]{3})+|[0-9]+)(?:\.[0-9]+)?\Z", re.ASCII)
 
@@ -114,7 +117,7 @@ class FFLogsCharacterLookup:
     def __init__(self, services: ModuleServices) -> None:
         self._services = services
         self._lifecycle = object()
-        self._metadata_cache: dict[str, tuple[float, OutputMetadata | None]] = {}
+        self._metadata_cache: dict[str, tuple[float, OutputMetadata | None, str]] = {}
         from .chat_context import PendingTargets
 
         self._chat_pending = PendingTargets()
@@ -139,20 +142,29 @@ class FFLogsCharacterLookup:
                 raise ServiceUnavailable()
 
         metadata = None
+        state = "unavailable_internal"
         try:
             async with asyncio.timeout(METADATA_DEADLINE_SECONDS):
                 metadata = await FFLogsCatalog(
                     scope.http, source_id, check_active=check_active
                 ).load_character_metadata()
-        except (
-            SourceHttpError,
-            FFLogsGraphQLError,
-            FFLogsPayloadError,
-            ServiceUnavailable,
-            PermissionError,
-            TimeoutError,
-        ):
-            pass
+            state = (
+                "verified_catalog"
+                if metadata.character_catalog_verified
+                else "base_catalog"
+            )
+        except SourceHttpError:
+            state = "unavailable_source"
+        except FFLogsGraphQLError:
+            state = "unavailable_graphql"
+        except FFLogsPayloadError:
+            state = "unavailable_payload"
+        except ServiceUnavailable:
+            state = "unavailable_service"
+        except PermissionError:
+            state = "unavailable_permission"
+        except TimeoutError:
+            state = "unavailable_timeout"
         except Exception:
             # Source error strings/response bodies are never public metadata.
             pass
@@ -162,19 +174,25 @@ class FFLogsCharacterLookup:
             if metadata is not None
             else METADATA_FAILURE_CACHE_SECONDS
         )
-        self._metadata_cache[source_id] = (monotonic() + ttl, metadata)
+        self._metadata_cache[source_id] = (monotonic() + ttl, metadata, state)
         return metadata
 
     async def _catalog_rankings(
         self, scope, source_id, character, metadata, identity_variables, lifecycle
     ):
         targets = select_character_zones(metadata, character.zone_id)
-        if not targets:
-            return character
         warnings = []
+        if not any(category == "ultimate" for _, _, category in targets):
+            warnings.append("未取得可核验的绝境战目录，本次结果不包含完整绝境战范围。")
+        if not any(category == "savage" for _, _, category in targets):
+            warnings.append(
+                "默认副本所属资料片未取得零式目录记录，未自动改选旧资料片。"
+            )
+        if not targets:
+            return replace(character, catalog_warnings=tuple(warnings))
         if len(targets) > MAX_CHARACTER_ZONES:
             warnings.append(f"目录范围超过本次 {MAX_CHARACTER_ZONES} 个副本查询上限。")
-        targets = targets[:MAX_CHARACTER_ZONES]
+        targets = _bounded_catalog_targets(targets)
         variables = {
             key: identity_variables[key]
             for key in ("name", "serverSlug", "serverRegion", "metric")
@@ -230,7 +248,9 @@ class FFLogsCharacterLookup:
                 raise FFLogsPayloadError("catalog character identity changed")
         except (SourceHttpError, FFLogsGraphQLError, FFLogsPayloadError, TimeoutError):
             return replace(
-                character, catalog_warnings=("部分副本查询失败，保留已取得的记录。",)
+                character,
+                catalog_warnings=tuple(warnings)
+                + ("部分副本查询失败，保留已取得的记录。",),
             )
         groups = []
         known_encounter_ids = {
@@ -322,10 +342,6 @@ class FFLogsCharacterLookup:
                     )
         if not groups:
             return replace(character, catalog_warnings=tuple(warnings))
-        if not any(group.category == "savage" for group in groups):
-            warnings.append(
-                "默认副本所属资料片未取得零式目录记录，未自动改选旧资料片。"
-            )
         groups.sort(key=lambda group: group.category != "ultimate")
         return replace(
             character,
@@ -545,6 +561,14 @@ class FFLogsCharacterLookup:
                 )
             except (ServiceUnavailable, PermissionError):
                 return _error(ErrorCode.MODULE_UNAVAILABLE, "FFLogs 来源服务暂不可用。")
+        if not tool and zone_tuple is None:
+            cached = self._metadata_cache.get(source_id)
+            _LOGGER.info(
+                "FF14_LOGS_CATALOG %s",
+                _catalog_diagnostic(
+                    metadata, cached[2] if cached else "unavailable_internal", character
+                ),
+            )
         result = _character_result(
             character,
             host,
@@ -569,6 +593,75 @@ class FFLogsCharacterLookup:
             )
             return tool_result(result, {"fflogs": facts})
         return result
+
+
+def _bounded_catalog_targets(targets):
+    """Keep both verified categories represented without increasing the budget."""
+    if len(targets) <= MAX_CHARACTER_ZONES:
+        return targets
+    reserved = {
+        next(index for index, target in enumerate(targets) if target[2] == category)
+        for category in ("ultimate", "savage")
+        if any(target[2] == category for target in targets)
+    }
+    for index in range(len(targets)):
+        if len(reserved) >= MAX_CHARACTER_ZONES:
+            break
+        reserved.add(index)
+    return tuple(target for index, target in enumerate(targets) if index in reserved)
+
+
+def _catalog_diagnostic(metadata, state, character):
+    """Serialize only bounded directory facts, never identity, ranks or errors."""
+    zones = metadata.zones if metadata is not None else ()
+    anchor = next((zone for zone in zones if zone.zone_id == character.zone_id), None)
+    targets = select_character_zones(metadata, character.zone_id) if metadata else ()
+    bounded = _bounded_catalog_targets(targets)
+
+    def counts(values):
+        return {
+            category: sum(value[2] == category for value in values)
+            for category in ("ultimate", "savage")
+        }
+
+    priority = {zone.zone_id for zone, _, _ in bounded} | {character.zone_id}
+    ordered = sorted(zones, key=lambda zone: zone.zone_id not in priority)
+    listed = [
+        {
+            "zone_id": zone.zone_id,
+            "name": zone.name[:80],
+            "expansion_id": zone.expansion_id,
+            "canonical_encounters": sum(
+                item.zone_id == zone.zone_id for item in zone.encounters
+            ),
+            "difficulties": [
+                {"id": item.difficulty_id, "name": item.name[:80]}
+                for item in zone.difficulties[:4]
+            ],
+            "difficulties_omitted": max(0, len(zone.difficulties) - 4),
+        }
+        for zone in ordered[:32]
+    ]
+    snapshot = {
+        "metadata_state": state,
+        "default_zone_id": character.zone_id,
+        "default_expansion_id": anchor.expansion_id if anchor else None,
+        "zone_count": len(zones),
+        "zones": listed,
+        "zones_omitted": len(zones) - len(listed),
+        "targets_before": counts(targets),
+        "targets_after": counts(bounded),
+        "final_groups": {
+            category: sum(group.category == category for group in character.groups)
+            for category in ("ultimate", "savage")
+        },
+    }
+    while True:
+        encoded = json.dumps(snapshot, ensure_ascii=False, separators=(",", ":"))
+        if len(encoded.encode("utf-8")) <= CATALOG_DIAGNOSTIC_BYTES:
+            return encoded
+        listed.pop()
+        snapshot["zones_omitted"] += 1
 
 
 class FFLogsOutputPercentiles:
