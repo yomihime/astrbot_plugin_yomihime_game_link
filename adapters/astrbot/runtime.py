@@ -546,6 +546,9 @@ class AstrBotRuntime:
         self._core: CoreRuntime | None = None
         self._bridge: AstrBotCommandBridge | None = None
         self._tool_publisher = None
+        from .fflogs_diagnostics import FFLogsDiagnostics
+
+        self._fflogs_diagnostics = FFLogsDiagnostics()
         self._http_transport: object | None = None
         self._transport_closed = False
         self._trusted_bundle = False
@@ -617,6 +620,7 @@ class AstrBotRuntime:
                 ),
             )
             self._ready = True
+            self._fflogs_diagnostics.start()
             await self._publish_tools_or_close(core)
             return result
 
@@ -1060,6 +1064,7 @@ class AstrBotRuntime:
                 ),
             )
             self._ready = True
+            self._fflogs_diagnostics.start()
             await self._publish_tools_or_close(core)
 
     async def _publish_tools_or_close(self, core) -> None:
@@ -1085,6 +1090,7 @@ class AstrBotRuntime:
 
     async def terminate(self) -> None:
         """Stop ingress and close the owned pump/modules/database once."""
+        self._fflogs_diagnostics.close()
         self._generation += 1
         self._message_receipts.close()
         if self._tool_publisher is not None:
@@ -1109,6 +1115,7 @@ class AstrBotRuntime:
             self._closing = False
 
     async def _close_owned_runtime(self) -> None:
+        self._fflogs_diagnostics.close()
         await self._managed_font.close()
         self._message_receipts.close()
         pending = []

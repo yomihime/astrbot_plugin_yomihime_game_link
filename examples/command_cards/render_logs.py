@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import ROUND_DOWN, ROUND_HALF_UP, Decimal
 from pathlib import Path
 from typing import Sequence
 
@@ -124,13 +124,13 @@ def decimal_value(value: Decimal | str | int) -> Decimal:
 
 
 def format_percentile(value: Decimal | str | int | None) -> str:
-    """One decimal using explicit half-up rounding; absent is not zero."""
+    """Truncate to one decimal without rounding; absent is not zero."""
     if value is None:
         return "—"
     number = decimal_value(value)
     if not Decimal(0) <= number <= Decimal(100):
         raise ValueError("Percentile must be between zero and 100")
-    return f"{number.quantize(Decimal('0.1'), rounding=ROUND_HALF_UP):.1f}%"
+    return f"{number.quantize(Decimal('0.1'), rounding=ROUND_DOWN):.1f}%"
 
 
 def format_rdps(value: Decimal | str | int | None) -> str:

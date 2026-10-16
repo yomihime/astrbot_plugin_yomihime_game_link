@@ -617,9 +617,14 @@ class FFLogsHandlerTests(unittest.IsolatedAsyncioTestCase):
             },
         )
         self.assertIs(result.status, ResultStatus.PARTIAL_SUCCESS)
-        # The extra fixed metadata schema request may fail independently of
-        # usable rankings; this legacy fixture deliberately supplies none.
-        self.assertEqual(len(http.requests), 7)
+        # Single returned-zone scope does not request an unverified catalog.
+        self.assertEqual(len(http.requests), 6)
+        self.assertFalse(
+            any(
+                "FF14OutputMetadataShape" in json.loads(request.body)["query"]
+                for request in http.requests
+            )
+        )
         request = _character_request(http)
         self.assertEqual(
             (request.source_id, request.method, request.path),

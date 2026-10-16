@@ -18,6 +18,8 @@ from modules.ff14.features.fflogs import (
     FFLogsCharacterLookup,
     _bounded_catalog_targets,
     _catalog_diagnostic,
+    _character_result,
+    _error,
 )
 from modules.ff14.features.fflogs_cards import (
     CATALOG_LIMITATION,
@@ -37,10 +39,12 @@ from modules.ff14.features.fflogs_catalog import (
 )
 from modules.ff14.features.fflogs_chat import character_facts
 from modules.ff14.features.fflogs_models import (
+    CharacterRankingGroup,
     FFLogsPayloadError,
     parse_public_character,
 )
 from yomihime_game_link_sdk import cards
+from yomihime_game_link_sdk.errors import ServiceUnavailable
 from yomihime_game_link_sdk.results import ErrorCode, FactDocument, ResultStatus
 
 from . import test_fflogs as fixture
@@ -51,6 +55,59 @@ TARGET = {"realm": "cn", "server": "Cerberus", "character": "Synthetic Hero"}
 def character():
     return parse_public_character(
         fixture._character()["data"]["characterData"]["character"]
+    )
+
+
+def section_rows(section):
+    return tuple(
+        row
+        for block in section.blocks
+        if isinstance(block, cards.Table)
+        for row in block.rows
+    )
+
+
+async def offline_catalog_reference(handler, invocation=None, parameters=None):
+    """Exercise retained private helper mechanics, never the production route.
+
+    These synthetic fixtures intentionally call the old metadata/alias helpers
+    after a real single-zone invoke. Their output is not verified classification
+    and this test-only composition must never be patched into product dispatch.
+    """
+    scope = handler._services.scopes._scope
+    initial = list(scope.http.responses)[2]
+    lifecycle = handler._lifecycle
+    result = await handler.invoke(invocation, parameters or TARGET)
+    if result.document is None:
+        return result
+    record = parse_public_character(initial["data"]["characterData"]["character"])
+    try:
+        source = await handler._character_metadata(scope, "fflogs_public_cn", lifecycle)
+        if source is not None and source.character_catalog_verified:
+            record = await handler._catalog_rankings(
+                scope,
+                "fflogs_public_cn",
+                record,
+                source,
+                {
+                    "name": record.name,
+                    "serverSlug": "cerberus",
+                    "serverRegion": "CN",
+                    "metric": record.metric,
+                },
+                lifecycle,
+            )
+    except ServiceUnavailable:
+        return _error(ErrorCode.MODULE_UNAVAILABLE, "FFLogs 来源服务暂不可用。")
+    return _character_result(
+        record,
+        "https://cn.fflogs.com",
+        "CN",
+        record.metric,
+        None,
+        "cn",
+        metadata=source,
+        catalog_requested=True,
     )
 
 
@@ -183,6 +240,70 @@ def catalog_rankings(
 
 
 class FFLogsCardTests(unittest.TestCase):
+    def test_plain_percentile_and_card_share_exact_truncation_and_sentinels(self):
+        from modules.ff14.features.fflogs_cards import percentile_text
+
+        for value, text in (
+            (Decimal("99.9762"), "99.9%"),
+            ("98.9971", "98.9%"),
+            (100, "100.0%"),
+            (0, "0.0%"),
+            (None, "—"),
+            ("NaN", "ERR"),
+            (True, "ERR"),
+            (-1, "ERR"),
+            (101, "ERR"),
+        ):
+            with self.subTest(value=value):
+                self.assertEqual(percentile_text(value), text)
+                self.assertEqual(percentile(value).spans[0].text, text)
+
+    def test_unclassified_actual_rows_use_neutral_title_and_clear_scope_limitation(
+        self,
+    ):
+        card = character_card(
+            character(),
+            realm="cn",
+            host="https://cn.fflogs.com",
+            limit=40,
+            explicit_selection=False,
+        )
+        self.assertEqual(card.blocks[0].title, "本次返回副本范围")
+        self.assertEqual(len(section_rows(card.blocks[0])), len(character().rankings))
+        self.assertEqual(
+            section_rows(card.blocks[0])[0][0], character().rankings[0].encounter_name
+        )
+        self.assertIn("未覆盖完整绝境战与当前资料片零式", CATALOG_LIMITATION)
+        self.assertNotIn(card.blocks[0].title, ("绝境战", "零式"))
+
+    def test_logs_source_footer_uses_region_domain_without_rewriting_facts_url(self):
+        from types import SimpleNamespace
+
+        for realm, domain, region in (
+            ("cn", "cn.fflogs.com", "CN"),
+            ("global", "www.fflogs.com", "EU"),
+        ):
+            with self.subTest(realm=realm):
+                host = f"https://{domain}"
+                card = character_card(
+                    character(),
+                    realm=realm,
+                    host=host,
+                    limit=24,
+                    explicit_selection=False,
+                )
+                self.assertEqual(card.sources, (f"数据源：{domain}",))
+                server = SimpleNamespace(
+                    region=region,
+                    name="Cerberus",
+                    region_name="Synthetic",
+                    subregion="Synthetic",
+                )
+                facts = character_facts(
+                    character(), server, realm, "rdps", None, host, "2026-10-16"
+                )
+                self.assertTrue(facts["source"]["url"].startswith(f"{host}/character/"))
+
     def test_raw_grades_rounding_missing_and_abnormal_are_distinct(self):
         for raw, color in (
             (0, "#666666"),
@@ -197,7 +318,7 @@ class FFLogsCardTests(unittest.TestCase):
                 self.assertEqual(span.color, color)
                 self.assertEqual(span.text, f"{raw:.1f}%")
         rounded = percentile(Decimal("99.999999999999999999999")).spans[0]
-        self.assertEqual(rounded.text, "100.0%")
+        self.assertEqual(rounded.text, "99.9%")
         self.assertEqual(rounded.color, "#e268a8")
         self.assertNotEqual(rounded.emphasis, "gold")
         self.assertEqual(percentile(100).spans[0].emphasis, "gold")
@@ -224,7 +345,7 @@ class FFLogsCardTests(unittest.TestCase):
             explicit_selection=False,
         )
         span = card.blocks[0].blocks[0].rows[0][4].spans[0]
-        self.assertEqual(span.text, "100.0%")
+        self.assertEqual(span.text, "99.9%")
         self.assertEqual(span.color, "#e268a8")
         self.assertNotEqual(span.emphasis, "gold")
 
@@ -253,7 +374,7 @@ class FFLogsCardTests(unittest.TestCase):
         )
         self.assertEqual(selection_title(record, changed), "A future provider zone")
         self.assertEqual(
-            selection_title(replace(record, zone_id=999), source), "本次查询范围"
+            selection_title(replace(record, zone_id=999), source), "本次返回副本范围"
         )
         card = character_card(
             record,
@@ -312,7 +433,7 @@ class FFLogsCardTests(unittest.TestCase):
         captions = [
             block.content for block in card.blocks if isinstance(block, cards.Text)
         ]
-        self.assertIn("共 41 项，本图仅显示前 40 项。", captions)
+        self.assertIn("本图显示 40/41 项；展示上限 40，部分记录未展示。", captions)
         self.assertTrue(any("另有 2 项" in text for text in captions))
 
     def test_extended_facts_remain_bounded_json_and_keep_source_scope(self):
@@ -334,8 +455,251 @@ class FFLogsCardTests(unittest.TestCase):
             facts["limitations"]["total_kills_scope"], "returned_selection_not_lifetime"
         )
 
+    def test_decimal_truncation_and_raw_grade_at_all_boundaries(self):
+        for threshold, before_color, after_color in (
+            (25, "#666666", "#1eff00"),
+            (50, "#1eff00", "#0070ff"),
+            (75, "#0070ff", "#a335ee"),
+            (95, "#a335ee", "#ff8000"),
+            (99, "#ff8000", "#e268a8"),
+        ):
+            for raw, color in (
+                (Decimal(threshold) - Decimal("0.001"), before_color),
+                (Decimal(threshold), after_color),
+                (Decimal(threshold) + Decimal("0.001"), after_color),
+            ):
+                for source in (raw, str(raw)):
+                    with self.subTest(source=source):
+                        span = percentile(source).spans[0]
+                        self.assertEqual(span.color, color)
+                        self.assertNotEqual(span.emphasis, "gold")
+        for source, label in (
+            (0, "0.0%"),
+            ("0.099", "0.0%"),
+            (43, "43.0%"),
+            ("95.29", "95.2%"),
+            (99.95, "99.9%"),
+            ("99.99", "99.9%"),
+            (Decimal("99.999"), "99.9%"),
+            (Decimal("100.000"), "100.0%"),
+        ):
+            with self.subTest(source=source):
+                span = percentile(source).spans[0]
+                self.assertEqual(span.text, label)
+                self.assertEqual(span.emphasis == "gold", Decimal(str(source)) == 100)
+        for invalid in (True, False, -0.01, "100.001", "NaN", "Infinity", {}, [], ""):
+            with self.subTest(invalid=invalid):
+                span = percentile(invalid).spans[0]
+                self.assertEqual((span.text, span.color), ("ERR", "#d34b4b"))
 
-class FFLogsCardSourceTests(unittest.IsolatedAsyncioTestCase):
+    def test_tiers_preserve_source_names_order_and_job_without_version_placeholder(
+        self,
+    ):
+        base = character()
+        row = replace(base.rankings[0], spec="Astrologian")
+        groups = tuple(
+            CharacterRankingGroup(index, name, 3, -1, kind, "来源资料片", (row,))
+            for index, name, kind in (
+                (300, "来源绝境战", "ultimate"),
+                (200, "真实团本分区甲", "savage"),
+                (100, "真实团本分区乙", "savage"),
+            )
+        )
+        record = replace(base, groups=groups, rankings=(row,) * 3)
+        card = character_card(
+            record, realm="cn", host="cn.fflogs.com", limit=40, explicit_selection=False
+        )
+        validate_card(card)
+        sections = [block for block in card.blocks if isinstance(block, cards.Section)]
+        self.assertEqual([section.title for section in sections], ["绝境战", "零式"])
+        self.assertEqual(
+            [
+                block.content
+                for block in sections[1].blocks
+                if isinstance(block, cards.Text)
+            ],
+            ["真实团本分区甲", "真实团本分区乙"],
+        )
+        for section in sections:
+            for table in section.blocks:
+                if isinstance(table, cards.Table):
+                    self.assertEqual(
+                        table.rows[0][:2], (row.encounter_name, "占星术士")
+                    )
+                    self.assertEqual(table.columns[0].title, "副本")
+        self.assertEqual(record.rankings[0].spec, "Astrologian")
+
+    def test_display_budget_keeps_categories_and_reports_omitted_rows(self):
+        base = character()
+        row = base.rankings[0]
+        groups = (
+            CharacterRankingGroup(
+                1, "Ultimate source", 3, -1, "ultimate", "E", (row,) * 40
+            ),
+            CharacterRankingGroup(2, "Savage source", 3, -1, "savage", "E", (row,) * 4),
+        )
+        record = replace(base, groups=groups, rankings=(row,) * 44)
+        card = character_card(
+            record, realm="cn", host="cn.fflogs.com", limit=40, explicit_selection=False
+        )
+        sections = [block for block in card.blocks if isinstance(block, cards.Section)]
+        counts = [
+            sum(
+                len(block.rows)
+                for block in section.blocks
+                if isinstance(block, cards.Table)
+            )
+            for section in sections
+        ]
+        self.assertEqual(counts, [39, 1])
+        self.assertTrue(
+            any(
+                "部分记录未展示" in block.content
+                for block in card.blocks
+                if isinstance(block, cards.Text)
+            )
+        )
+        one = character_card(
+            record, realm="cn", host="cn.fflogs.com", limit=1, explicit_selection=False
+        )
+        self.assertIn("未展示", one.blocks[1].blocks[0].content)
+
+    def test_display_format_and_localized_job_never_replace_source_facts(self):
+        from types import SimpleNamespace
+
+        row = replace(
+            character().rankings[0],
+            rank_percent=99.99,
+            rank_percent_exact=Decimal("99.99"),
+            spec="Scholar",
+        )
+        record = replace(character(), rankings=(row,))
+        server = SimpleNamespace(
+            region="CN", name="Cerberus", region_name="China", subregion="Synthetic"
+        )
+        before = character_facts(
+            record, server, "cn", "rdps", None, "https://cn.fflogs.com", "2026-10-16"
+        )
+        card = character_card(
+            record, realm="cn", host="cn.fflogs.com", limit=40, explicit_selection=False
+        )
+        after = character_facts(
+            record, server, "cn", "rdps", None, "https://cn.fflogs.com", "2026-10-16"
+        )
+        self.assertEqual(before, after)
+        self.assertEqual(after["rankings"][0]["rank_percent"], 99.99)
+        self.assertEqual(after["rankings"][0]["spec"], "Scholar")
+        displayed = card.blocks[0].blocks[0].rows[0]
+        self.assertEqual(displayed[1], "学者")
+        self.assertEqual(displayed[4].spans[0].text, "99.9%")
+
+
+class FFLogsProductionSafeScopeTests(unittest.IsolatedAsyncioTestCase):
+    """Real invoke guard: single returned zone, no speculative discovery calls."""
+
+    def assert_single_scope(self, result, http, expected_title="本次返回副本范围"):
+        validate_contract(result)
+        self.assertIsNone(result.error)
+        sections = [
+            block
+            for block in result.document.card.blocks
+            if isinstance(block, cards.Section)
+        ]
+        self.assertEqual([section.title for section in sections], [expected_title])
+        rows = section_rows(sections[0])
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0][0], "Synthetic Trial")
+        self.assertNotIn(sections[0].title, ("绝境战", "零式"))
+        self.assertEqual(result.document.card.sources, ("数据源：cn.fflogs.com",))
+        self.assertEqual(len(http.requests), 3)
+        queries = [json.loads(request.body)["query"] for request in http.requests]
+        self.assertEqual(sum("FF14PublicCharacter" in query for query in queries), 1)
+        for forbidden in (
+            "__type",
+            "FF14OutputMetadata",
+            "FF14CharacterMetadata",
+            "FF14CatalogCharacter",
+        ):
+            self.assertFalse(any(forbidden in query for query in queries), forbidden)
+        captions = [
+            block.content
+            for block in result.document.card.blocks
+            if isinstance(block, cards.Text)
+        ]
+        self.assertIn(CATALOG_LIMITATION, captions)
+
+    async def test_default_does_not_discover_or_emit_unverified_categories_and_blank_rows(
+        self,
+    ):
+        catalog = expanded_metadata()
+        http = fixture._FakeHttp(
+            [
+                *fixture._character_responses(realm="cn"),
+                expanded_schema(),
+                catalog,
+                catalog_rankings(catalog),
+            ]
+        )
+        handler = FFLogsCharacterLookup(fixture._services(http))
+        with self.assertNoLogs("modules.ff14.features.fflogs", level="INFO"):
+            result = await handler.invoke(None, TARGET)
+        self.assert_single_scope(result, http)
+        self.assertIs(result.status, ResultStatus.PARTIAL_SUCCESS)
+        self.assertIn(CATALOG_LIMITATION, result.warnings)
+        self.assertEqual(handler._metadata_cache, {})
+        self.assertEqual(len(http.responses), 3)
+        handler.close()
+
+    async def test_existing_catalog_cache_only_supplies_exact_zone_name(self):
+        from time import monotonic
+
+        http = fixture._FakeHttp(fixture._character_responses(realm="cn"))
+        handler = FFLogsCharacterLookup(fixture._services(http))
+        handler._metadata_cache["fflogs_public_cn"] = (
+            monotonic() + 60,
+            parse_character_metadata(expanded_metadata()["data"]),
+            "verified_catalog",
+        )
+        result = await handler.invoke(None, TARGET)
+        self.assert_single_scope(result, http, "Synthetic zone 73")
+        self.assertIs(result.status, ResultStatus.PARTIAL_SUCCESS)
+        self.assertIn(CATALOG_LIMITATION, result.warnings)
+        handler.close()
+
+    async def test_explicit_filters_keep_actual_single_scope_without_discovery(self):
+        http = fixture._FakeHttp(
+            fixture._character_responses(
+                realm="cn", character=fixture._character(difficulty=3, partition=2)
+            )
+        )
+        handler = FFLogsCharacterLookup(fixture._services(http))
+        result = await handler.invoke(
+            None, {**TARGET, "zone_id": 73, "difficulty": 3, "partition": 2}
+        )
+        self.assert_single_scope(result, http)
+        handler.close()
+
+    async def test_no_result_keeps_no_records_error_without_catalog_discovery(self):
+        body = fixture._character()
+        body["data"]["characterData"]["character"]["rankings"]["rankings"] = []
+        http = fixture._FakeHttp(
+            fixture._character_responses(realm="cn", character=body)
+        )
+        handler = FFLogsCharacterLookup(fixture._services(http))
+        result = await handler.invoke(None, TARGET)
+        self.assertIs(result.error.code, ErrorCode.NO_RECORDS)
+        self.assertIsNone(result.document)
+        self.assertEqual(len(http.requests), 3)
+        for request in http.requests:
+            query = json.loads(request.body)["query"]
+            self.assertNotIn("__type", query)
+            self.assertNotIn("FF14CatalogCharacter", query)
+        handler.close()
+
+
+class FFLogsOfflineCatalogReferenceTests(unittest.IsolatedAsyncioTestCase):
+    """Synthetic private-helper coverage; automatic product grouping is disabled."""
+
     def test_bounded_target_selection_keeps_single_category_and_small_order(self):
         targets = select_character_zones(
             parse_character_metadata(expanded_metadata()["data"]), 73
@@ -393,22 +757,19 @@ class FFLogsCardSourceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(unavailable["zones"], [])
         self.assertEqual(unavailable["targets_before"], {"ultimate": 0, "savage": 0})
 
-    async def test_diagnostic_logs_once_with_safe_failure_category(self):
+    async def test_private_metadata_failure_has_safe_category_without_raw_errors(self):
         http = fixture._FakeHttp(
             [
                 *fixture._character_responses(realm="cn"),
                 {"errors": [{"message": "private-secret-key private-error"}]},
             ]
         )
-        with self.assertLogs("modules.ff14.features.fflogs", level="INFO") as logged:
-            result = await FFLogsCharacterLookup(fixture._services(http)).invoke(
-                None, TARGET
-            )
+        handler = FFLogsCharacterLookup(fixture._services(http))
+        result = await offline_catalog_reference(handler, None, TARGET)
         self.assertIsNone(result.error)
-        self.assertEqual(len(logged.records), 1)
-        message = logged.records[0].getMessage()
-        self.assertTrue(message.startswith("FF14_LOGS_CATALOG "))
-        data = json.loads(message.removeprefix("FF14_LOGS_CATALOG "))
+        cached = handler._metadata_cache["fflogs_public_cn"]
+        message = _catalog_diagnostic(cached[1], cached[2], character())
+        data = json.loads(message)
         self.assertEqual(data["metadata_state"], "unavailable_graphql")
         for forbidden in (
             "private-secret-key",
@@ -430,8 +791,8 @@ class FFLogsCardSourceTests(unittest.IsolatedAsyncioTestCase):
                 catalog_rankings(catalog, target_zone_ids=[*range(100, 111), 73]),
             ]
         )
-        result = await FFLogsCharacterLookup(fixture._services(http)).invoke(
-            None, TARGET
+        result = await offline_catalog_reference(
+            FFLogsCharacterLookup(fixture._services(http)), None, TARGET
         )
         variables = json.loads(http.requests[-1].body)["variables"]
         queried = {value for key, value in variables.items() if key.startswith("z")}
@@ -461,8 +822,8 @@ class FFLogsCardSourceTests(unittest.IsolatedAsyncioTestCase):
                 catalog_rankings(catalog),
             ]
         )
-        result = await FFLogsCharacterLookup(fixture._services(http)).invoke(
-            None, TARGET
+        result = await offline_catalog_reference(
+            FFLogsCharacterLookup(fixture._services(http)), None, TARGET
         )
         self.assertTrue(any("绝境战目录" in warning for warning in result.warnings))
         captions = [
@@ -486,8 +847,8 @@ class FFLogsCardSourceTests(unittest.IsolatedAsyncioTestCase):
                 {"errors": [{"message": "private-alias-error"}]},
             ]
         )
-        result = await FFLogsCharacterLookup(fixture._services(http)).invoke(
-            None, TARGET
+        result = await offline_catalog_reference(
+            FFLogsCharacterLookup(fixture._services(http)), None, TARGET
         )
         self.assertIsNone(result.error)
         self.assertTrue(any("绝境战目录" in warning for warning in result.warnings))
@@ -503,10 +864,8 @@ class FFLogsCardSourceTests(unittest.IsolatedAsyncioTestCase):
         http = fixture._FakeHttp(
             [*fixture._character_responses(realm="cn"), expanded_schema(), catalog]
         )
-        with self.assertLogs("modules.ff14.features.fflogs", level="INFO") as logged:
-            result = await FFLogsCharacterLookup(fixture._services(http)).invoke(
-                None, TARGET
-            )
+        handler = FFLogsCharacterLookup(fixture._services(http))
+        result = await offline_catalog_reference(handler, None, TARGET)
         self.assertIsNone(result.error)
         self.assertEqual(len(http.requests), 5)
         self.assertEqual(result.document.card.blocks[0].title, "Synthetic zone 73")
@@ -514,9 +873,8 @@ class FFLogsCardSourceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(
             any("未自动改选旧资料片" in warning for warning in result.warnings)
         )
-        snapshot = json.loads(
-            logged.records[0].getMessage().removeprefix("FF14_LOGS_CATALOG ")
-        )
+        cached = handler._metadata_cache["fflogs_public_cn"]
+        snapshot = json.loads(_catalog_diagnostic(cached[1], cached[2], character()))
         self.assertEqual(snapshot["targets_before"], {"ultimate": 0, "savage": 0})
         self.assertEqual(snapshot["final_groups"], {"ultimate": 0, "savage": 0})
         self.assertEqual(snapshot["metadata_state"], "verified_catalog")
@@ -533,22 +891,18 @@ class FFLogsCardSourceTests(unittest.IsolatedAsyncioTestCase):
                 responses.extend(fixture._character_responses(realm="cn"))
                 http = fixture._FakeHttp(responses)
                 handler = FFLogsCharacterLookup(fixture._services(http))
-                with self.assertLogs(
-                    "modules.ff14.features.fflogs", level="INFO"
-                ) as logged:
-                    await handler.invoke(None, TARGET)
-                    await handler.invoke(None, TARGET)
+                await offline_catalog_reference(handler, None, TARGET)
+                await offline_catalog_reference(handler, None, TARGET)
                 self.assertEqual(len(http.requests), 8 if directory else 7)
-                self.assertEqual(len(logged.records), 2)
-                for record in logged.records:
-                    snapshot = json.loads(
-                        record.getMessage().removeprefix("FF14_LOGS_CATALOG ")
-                    )
-                    self.assertEqual(snapshot["metadata_state"], expected)
-                    self.assertIsNone(snapshot["default_expansion_id"])
-                    self.assertEqual(
-                        snapshot["targets_after"], {"ultimate": 0, "savage": 0}
-                    )
+                cached = handler._metadata_cache["fflogs_public_cn"]
+                snapshot = json.loads(
+                    _catalog_diagnostic(cached[1], cached[2], character())
+                )
+                self.assertEqual(snapshot["metadata_state"], expected)
+                self.assertIsNone(snapshot["default_expansion_id"])
+                self.assertEqual(
+                    snapshot["targets_after"], {"ultimate": 0, "savage": 0}
+                )
                 handler.close()
 
     async def test_close_and_cancel_fence_the_aliased_catalog_request(self):
@@ -581,7 +935,9 @@ class FFLogsCardSourceTests(unittest.IsolatedAsyncioTestCase):
 
                 http.fetch = fetch
                 handler = FFLogsCharacterLookup(fixture._services(http))
-                task = asyncio.create_task(handler.invoke(None, TARGET))
+                task = asyncio.create_task(
+                    offline_catalog_reference(handler, None, TARGET)
+                )
                 await entered.wait()
                 if action == "close":
                     handler.close()
@@ -620,8 +976,8 @@ class FFLogsCardSourceTests(unittest.IsolatedAsyncioTestCase):
         with patch(
             "modules.ff14.features.fflogs.CATALOG_RANKING_DEADLINE_SECONDS", 0.01
         ):
-            result = await FFLogsCharacterLookup(fixture._services(http)).invoke(
-                None, TARGET
+            result = await offline_catalog_reference(
+                FFLogsCharacterLookup(fixture._services(http)), None, TARGET
             )
         self.assertTrue(cancelled.is_set())
         self.assertIsNone(result.error)
@@ -643,8 +999,8 @@ class FFLogsCardSourceTests(unittest.IsolatedAsyncioTestCase):
                 batch,
             ]
         )
-        result = await FFLogsCharacterLookup(fixture._services(http)).invoke(
-            None, TARGET
+        result = await offline_catalog_reference(
+            FFLogsCharacterLookup(fixture._services(http)), None, TARGET
         )
         variables = json.loads(http.requests[-1].body)["variables"]
         self.assertEqual(len([key for key in variables if key.startswith("z")]), 12)
@@ -652,7 +1008,7 @@ class FFLogsCardSourceTests(unittest.IsolatedAsyncioTestCase):
         rows = result.document.card.blocks[0].blocks[0].rows
         self.assertEqual(rows[1][-1].spans[0].text, "ERR")
 
-    async def test_conditional_live_path_selects_all_provider_ultimates_and_default_expansion_tiers(
+    async def test_offline_reference_selection_preserves_synthetic_groups_and_tiers(
         self,
     ):
         catalog = expanded_metadata()
@@ -668,8 +1024,8 @@ class FFLogsCardSourceTests(unittest.IsolatedAsyncioTestCase):
                 batch,
             ]
         )
-        result = await FFLogsCharacterLookup(fixture._services(http)).invoke(
-            None, TARGET
+        result = await offline_catalog_reference(
+            FFLogsCharacterLookup(fixture._services(http)), None, TARGET
         )
         validate_contract(result)
         self.assertIsNone(result.error)
@@ -680,7 +1036,15 @@ class FFLogsCardSourceTests(unittest.IsolatedAsyncioTestCase):
             if isinstance(block, cards.Section)
         ]
         self.assertEqual([section.title for section in sections], ["绝境战", "零式"])
-        self.assertEqual([len(section.blocks[0].rows) for section in sections], [7, 13])
+        self.assertEqual([len(section_rows(section)) for section in sections], [7, 13])
+        self.assertEqual(
+            [
+                block.content
+                for block in sections[1].blocks
+                if isinstance(block, cards.Text)
+            ],
+            ["Synthetic zone 73", "Synthetic zone 74", "Synthetic zone 75"],
+        )
         self.assertEqual(sections[1].subtitle, "Synthetic expansion 20")
         text = "\n".join(
             block.text
@@ -727,8 +1091,8 @@ class FFLogsCardSourceTests(unittest.IsolatedAsyncioTestCase):
                         batch,
                     ]
                 )
-                result = await FFLogsCharacterLookup(fixture._services(http)).invoke(
-                    None, TARGET
+                result = await offline_catalog_reference(
+                    FFLogsCharacterLookup(fixture._services(http)), None, TARGET
                 )
                 validate_contract(result)
                 self.assertIsNone(result.error)
@@ -748,7 +1112,7 @@ class FFLogsCardSourceTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertEqual(
                     [
-                        len(section.blocks[0].rows)
+                        len(section_rows(section))
                         for section in result.document.card.blocks[:2]
                     ],
                     [7, 13],
@@ -768,17 +1132,17 @@ class FFLogsCardSourceTests(unittest.IsolatedAsyncioTestCase):
                 catalog_rankings(catalog, failed_zone=74, empty_zone=75),
             ]
         )
-        result = await FFLogsCharacterLookup(fixture._services(http)).invoke(
-            None, TARGET
+        result = await offline_catalog_reference(
+            FFLogsCharacterLookup(fixture._services(http)), None, TARGET
         )
         sections = [
             block
             for block in result.document.card.blocks
             if isinstance(block, cards.Section)
         ]
-        ultimate, savage = [section.blocks[0].rows for section in sections]
+        ultimate, savage = [section_rows(section) for section in sections]
         self.assertEqual(ultimate[0][-1].spans[0].emphasis, "gold")
-        self.assertEqual(savage[0][-1].spans[0].text, "100.0%")
+        self.assertEqual(savage[0][-1].spans[0].text, "99.9%")
         self.assertNotEqual(savage[0][-1].spans[0].emphasis, "gold")
         self.assertEqual(savage[4][-1].spans[0].text, "ERR")
         self.assertEqual(savage[8][-1].spans[0].text, "—")
@@ -807,7 +1171,7 @@ class FFLogsCardSourceTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(any(kind == "savage" for _, _, kind in selected))
         self.assertFalse(any(zone.zone_id in (72, 9999) for zone, _, _ in selected))
 
-    async def test_actual_handler_enriches_real_rows_with_fixed_catalog_and_caches(
+    async def test_private_helper_enriches_synthetic_rows_and_caches(
         self,
     ):
         http = fixture._FakeHttp(
@@ -819,11 +1183,11 @@ class FFLogsCardSourceTests(unittest.IsolatedAsyncioTestCase):
             ]
         )
         handler = FFLogsCharacterLookup(fixture._services(http))
-        first = await handler.invoke(None, TARGET)
+        first = await offline_catalog_reference(handler, None, TARGET)
         validate_contract(first)
         self.assertEqual(first.document.card.blocks[0].title, "合成高难副本")
         self.assertIs(first.status, ResultStatus.PARTIAL_SUCCESS)
-        second = await handler.invoke(None, TARGET)
+        second = await offline_catalog_reference(handler, None, TARGET)
         self.assertEqual(second.document.card.blocks[0].title, "合成高难副本")
         self.assertEqual(len(http.requests), 8)
         self.assertEqual(
@@ -846,26 +1210,13 @@ class FFLogsCardSourceTests(unittest.IsolatedAsyncioTestCase):
         http = fixture._FakeHttp(
             [*fixture._character_responses(realm="cn"), {"data": {}}]
         )
-        result = await FFLogsCharacterLookup(fixture._services(http)).invoke(
-            None, TARGET
+        result = await offline_catalog_reference(
+            FFLogsCharacterLookup(fixture._services(http)), None, TARGET
         )
         self.assertIsNone(result.error)
         self.assertIs(result.status, ResultStatus.PARTIAL_SUCCESS)
-        self.assertEqual(result.document.card.blocks[0].title, "本次查询范围")
+        self.assertEqual(result.document.card.blocks[0].title, "本次返回副本范围")
         self.assertEqual(len(result.document.card.blocks[0].blocks[0].rows), 1)
-        self.assertEqual(len(http.requests), 4)
-
-    async def test_no_result_keeps_no_records_error_when_catalog_is_unavailable(self):
-        body = fixture._character()
-        body["data"]["characterData"]["character"]["rankings"]["rankings"] = []
-        http = fixture._FakeHttp(
-            fixture._character_responses(realm="cn", character=body)
-        )
-        result = await FFLogsCharacterLookup(fixture._services(http)).invoke(
-            None, TARGET
-        )
-        self.assertIs(result.error.code, ErrorCode.NO_RECORDS)
-        self.assertIsNone(result.document)
         self.assertEqual(len(http.requests), 4)
 
     async def test_close_during_metadata_prevents_second_request_or_stale_card(self):
@@ -887,7 +1238,7 @@ class FFLogsCardSourceTests(unittest.IsolatedAsyncioTestCase):
 
         http.fetch = fetch
         handler = FFLogsCharacterLookup(fixture._services(http))
-        task = asyncio.create_task(handler.invoke(None, TARGET))
+        task = asyncio.create_task(offline_catalog_reference(handler, None, TARGET))
         await entered.wait()
         handler.close()
         release.set()
@@ -911,8 +1262,8 @@ class FFLogsCardSourceTests(unittest.IsolatedAsyncioTestCase):
 
         http.fetch = fetch
         with patch("modules.ff14.features.fflogs.METADATA_DEADLINE_SECONDS", 0.01):
-            result = await FFLogsCharacterLookup(fixture._services(http)).invoke(
-                None, TARGET
+            result = await offline_catalog_reference(
+                FFLogsCharacterLookup(fixture._services(http)), None, TARGET
             )
         self.assertTrue(cancelled.is_set())
         self.assertIsNone(result.error)

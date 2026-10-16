@@ -265,8 +265,18 @@ class FFLogsToolHostTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_direct_command_keeps_no_model_and_stop_revokes_role_tool(self):
         await self.start_logs()
+        original = self.transport.callback
+
+        async def upstream(request):
+            if request.source_id == "universalis_market":
+                if request.path.endswith("worlds"):
+                    return [{"id": 71001, "name": "Cerberus"}]
+                return [{"name": "SyntheticDC", "region": "China", "worlds": [71001]}]
+            return await original(request)
+
+        self.transport.callback = upstream
         event = runtime_fixture._Event(context=self.context)
-        event.message = '/ygl ff14 logs 国服 Cerberus "Synthetic Hero"'
+        event.message = '/ygl ff14 logs Cerberus "Synthetic Hero"'
         self.assertIsNone(await self.runtime.handle_event(event))
         reply = self.context.calls[-1][1].chain[0].text
         self.assertIn("Synthetic Hero", reply)

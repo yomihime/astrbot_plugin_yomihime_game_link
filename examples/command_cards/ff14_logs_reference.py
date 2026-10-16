@@ -13,7 +13,7 @@ from __future__ import annotations
 import argparse
 import json
 from dataclasses import asdict, dataclass
-from decimal import ROUND_HALF_UP, Decimal, InvalidOperation, localcontext
+from decimal import ROUND_DOWN, ROUND_HALF_UP, Decimal, InvalidOperation, localcontext
 from pathlib import Path
 
 from renderer import (
@@ -208,7 +208,7 @@ def percentile(raw: object) -> TextSpan:
         )
         with localcontext() as context:
             context.prec = MAX_NUMERIC_CHARS + MAX_INTEGER_DIGITS
-            displayed = value.quantize(Decimal(".1"), rounding=ROUND_HALF_UP)
+            displayed = value.quantize(Decimal(".1"), rounding=ROUND_DOWN)
         return TextSpan(f"{displayed:.1f}%", TextRole.GRADED, grade)
     except (ValueError, InvalidOperation):
         return TextSpan("ERR", TextRole.ERROR)

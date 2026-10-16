@@ -20,7 +20,7 @@ import json
 import random
 import tempfile
 from dataclasses import dataclass
-from decimal import ROUND_HALF_UP, Decimal, InvalidOperation, localcontext
+from decimal import ROUND_DOWN, ROUND_HALF_UP, Decimal, InvalidOperation, localcontext
 from pathlib import Path
 from unicodedata import category
 
@@ -375,7 +375,7 @@ def percentile(raw: object) -> Span:
         grade = next(g for threshold, g in PERCENTILE_GRADES if value >= threshold)
         with localcontext() as context:
             context.prec = MAX_NUMERIC_CHARS + MAX_INTEGER_DIGITS
-            displayed = value.quantize(Decimal(".1"), rounding=ROUND_HALF_UP)
+            displayed = value.quantize(Decimal(".1"), rounding=ROUND_DOWN)
         return (
             Span(f"{displayed:.1f}%", emphasis="gold")
             if grade == "gold"
@@ -520,7 +520,7 @@ def render_samples(output_dir: Path) -> dict[str, object]:
             "boundaries": "Raw 99.96 stays pink; main fixture retains original 99.7",
             "scope": "Seven Ultimate and thirteen Savage rows are not a live catalog",
             "identity": "ChatGPT @ OpenAI is synthetic, not an actual query",
-            "rounding": "ROUND_HALF_UP is this fixture's explicit display policy",
+            "rounding": "Percentile ROUND_DOWN; rDPS ROUND_HALF_UP; raw values retained",
         },
         "market": {
             "source": "Historical examples/command_cards/samples/01_market_warm_paper.png",

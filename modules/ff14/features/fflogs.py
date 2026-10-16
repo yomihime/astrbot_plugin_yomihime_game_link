@@ -35,6 +35,7 @@ from .fflogs_cards import (
     DETAIL_LIMITATION,
     PROVIDER_CATALOG_SCOPE,
     character_card,
+    percentile_text,
 )
 from .fflogs_catalog import (
     FFLOGS_CN_SOURCE,
@@ -127,7 +128,7 @@ class FFLogsCharacterLookup:
         self._metadata_cache.clear()
         self._chat_pending.close()
 
-    async def _character_metadata(self, scope, source_id, lifecycle):
+    async def _character_metadata(self, scope, source_id, lifecycle, evidence=None):
         """Enrich actual rows using the existing fixed schema/catalog contract.
 
         Cache is per realm/source and module lifetime. A failed enrichment must
@@ -135,6 +136,19 @@ class FFLogsCharacterLookup:
         """
         cached = self._metadata_cache.get(source_id)
         if cached is not None and cached[0] > monotonic():
+            if evidence is not None:
+                evidence.observe(
+                    "FF14MetadataState", {"state": cached[2]}, cached=True, status=None
+                )
+            if evidence is not None and cached[1] is not None:
+                from .fflogs_evidence import metadata_payload
+
+                evidence.observe(
+                    "FF14CharacterMetadata",
+                    metadata_payload(cached[1]),
+                    cached=True,
+                    status=None,
+                )
             return cached[1]
 
         def check_active():
@@ -146,7 +160,10 @@ class FFLogsCharacterLookup:
         try:
             async with asyncio.timeout(METADATA_DEADLINE_SECONDS):
                 metadata = await FFLogsCatalog(
-                    scope.http, source_id, check_active=check_active
+                    scope.http,
+                    source_id,
+                    check_active=check_active,
+                    observer=evidence.observe if evidence is not None else None,
                 ).load_character_metadata()
             state = (
                 "verified_catalog"
@@ -175,10 +192,19 @@ class FFLogsCharacterLookup:
             else METADATA_FAILURE_CACHE_SECONDS
         )
         self._metadata_cache[source_id] = (monotonic() + ttl, metadata, state)
+        if evidence is not None:
+            evidence.observe("FF14MetadataState", {"state": state}, status=None)
         return metadata
 
     async def _catalog_rankings(
-        self, scope, source_id, character, metadata, identity_variables, lifecycle
+        self,
+        scope,
+        source_id,
+        character,
+        metadata,
+        identity_variables,
+        lifecycle,
+        evidence=None,
     ):
         targets = select_character_zones(metadata, character.zone_id)
         warnings = []
@@ -246,6 +272,13 @@ class FFLogsCharacterLookup:
                 or value["server"].get("name") != character.server_name
             ):
                 raise FFLogsPayloadError("catalog character identity changed")
+            if evidence is not None:
+                evidence.observe(
+                    "FF14CatalogCharacter",
+                    data,
+                    status=response.status_code,
+                    filters=variables,
+                )
         except (SourceHttpError, FFLogsGraphQLError, FFLogsPayloadError, TimeoutError):
             return replace(
                 character,
@@ -353,13 +386,27 @@ class FFLogsCharacterLookup:
     async def invoke(
         self, context: InvocationView, parameters: JsonObject
     ) -> CapabilityResult:
+        explicit_command = "command" in parameters
+        if explicit_command:
+            from .fflogs_server import LOGS_USAGE, command_parameters
+
+            if set(parameters) != {"command"} or (
+                context is not None and context.origin is not InvocationOrigin.COMMAND
+            ):
+                return _error(ErrorCode.PARAMETER_ERROR, LOGS_USAGE)
+            try:
+                parameters = command_parameters(parameters["command"])
+            except ValueError:
+                return _selection("请使用新的 Logs 命令格式", (), LOGS_USAGE)
         if context is not None and context.origin is InvocationOrigin.LLM_TOOL:
             from .fflogs_chat import invoke_character_tool
 
             return await invoke_character_tool(self, context, parameters)
         try:
             async with asyncio.timeout(30):
-                return await self._execute(context, parameters)
+                return await self._execute(
+                    context, parameters, capture_evidence=explicit_command
+                )
         except TimeoutError:
             return _error(ErrorCode.UPSTREAM_ERROR, "FFLogs 查询超时，请稍后重试。")
 
@@ -373,13 +420,40 @@ class FFLogsCharacterLookup:
         guard=None,
         resolved_server=None,
         server_candidates=None,
+        capture_evidence=False,
     ) -> CapabilityResult:
         lifecycle = self._lifecycle
         inputs = _character_inputs(parameters)
         if isinstance(inputs, CapabilityResult):
             return inputs
         realm, server_label, name, server_hint, metric, zone_tuple = inputs
+        if realm is None:
+            from ..query_resolution import QueryResolutionError
+            from .fflogs_server import resolve_realm
+            from .market_sources import MarketPayloadError
+
+            try:
+                if scope is None:
+                    scope = await self._services.scopes.bind(context)
+                realm = await resolve_realm(
+                    scope.http,
+                    getattr(scope, "cache", None),
+                    server_label,
+                    deadline=monotonic() + 30,
+                )
+                if self._lifecycle is not lifecycle:
+                    raise ServiceUnavailable()
+            except QueryResolutionError as exc:
+                return _error(exc.code, str(exc))
+            except (SourceHttpError, MarketPayloadError, ServiceUnavailable):
+                return _error(
+                    ErrorCode.UPSTREAM_ERROR,
+                    "服务器目录暂不可用，无法判断 FFLogs 区域，请稍后重试。",
+                )
         source_id, host = _realm_source(realm)
+        from .fflogs_evidence import Evidence
+
+        evidence = Evidence(source_id) if capture_evidence else None
         credential_state = await _credential_state(self._services, realm)
 
         def source_error(error):
@@ -399,7 +473,11 @@ class FFLogsCharacterLookup:
                 scope = await self._services.scopes.bind(context)
             if resolved_server is None:
                 catalog = FFLogsCatalog(scope.http, source_id)
-                resolution = await catalog.resolve_server(realm, server_label)
+                resolution = await catalog.resolve_server(
+                    realm,
+                    server_label,
+                    **({"page_budget": 4} if capture_evidence else {}),
+                )
             else:
                 from types import SimpleNamespace
 
@@ -499,7 +577,7 @@ class FFLogsCharacterLookup:
                     "该角色的 FFLogs 记录已隐藏；本模块不会查询私密数据。",
                 )
             character = parse_public_character(raw_character)
-            if tool and (
+            if (tool or capture_evidence) and (
                 " ".join(character.name.casefold().split())
                 != " ".join(name.casefold().split())
                 or " ".join(character.server_name.casefold().split())
@@ -527,6 +605,13 @@ class FFLogsCharacterLookup:
                     ErrorCode.UNPARSED,
                     "FFLogs返回的副本、难度或分区与请求不一致。未展示战绩。",
                 )
+            if evidence is not None:
+                evidence.observe(
+                    "FF14PublicCharacterZone" if zone_tuple else "FF14PublicCharacter",
+                    data,
+                    status=response.status_code,
+                    filters=variables,
+                )
         except SourceHttpError as exc:
             return source_error(exc)
         except FFLogsGraphQLError:
@@ -544,31 +629,16 @@ class FFLogsCharacterLookup:
             return _error(ErrorCode.MODULE_UNAVAILABLE, "FFLogs 来源服务暂不可用。")
         if guard is not None:
             await guard()
-        try:
-            metadata = (
-                await self._character_metadata(scope, source_id, lifecycle)
-                if not tool and zone_tuple is None
-                else None
-            )
-        except ServiceUnavailable:
-            return _error(ErrorCode.MODULE_UNAVAILABLE, "FFLogs 来源服务暂不可用。")
-        if guard is not None:
-            await guard()
-        if metadata is not None and metadata.character_catalog_verified:
-            try:
-                character = await self._catalog_rankings(
-                    scope, source_id, character, metadata, variables, lifecycle
-                )
-            except (ServiceUnavailable, PermissionError):
-                return _error(ErrorCode.MODULE_UNAVAILABLE, "FFLogs 来源服务暂不可用。")
+        metadata = None
         if not tool and zone_tuple is None:
+            # The real provider schema proves expansion/encounter ownership,
+            # not content type, regional releases or canonical raid ordering.
+            # Do not query or label speculative targets or add catalog blanks.
+            # Existing cached metadata may supply an exact zone name only.
             cached = self._metadata_cache.get(source_id)
-            _LOGGER.info(
-                "FF14_LOGS_CATALOG %s",
-                _catalog_diagnostic(
-                    metadata, cached[2] if cached else "unavailable_internal", character
-                ),
-            )
+            if cached is not None and cached[0] > monotonic():
+                metadata = cached[1]
+            character = replace(character, groups=())
         result = _character_result(
             character,
             host,
@@ -879,7 +949,7 @@ def _character_inputs(parameters: JsonObject):
         hint = _bounded_text(hint, 64)
         if hint is None:
             return _error(ErrorCode.PARAMETER_ERROR, "server_hint 格式无效。")
-    if realm is None:
+    if realm is None and "realm" in parameters:
         return _error(
             ErrorCode.PARAMETER_ERROR,
             "realm 请输入国服或国际服（也接受 cn/global）。",
@@ -987,7 +1057,12 @@ def _character_result(
         if ranking.best_amount is not None:
             parts.append(f"最佳 {metric_label} {ranking.best_amount:,.1f}")
         if ranking.rank_percent is not None:
-            parts.append(f"排名百分位 {ranking.rank_percent:.1f}%")
+            value = (
+                ranking.rank_percent_exact
+                if ranking.rank_percent_exact is not None
+                else ranking.rank_percent
+            )
+            parts.append(f"排名百分位 {percentile_text(value)}")
         if ranking.total_kills is not None:
             parts.append(f"本次统计过本次数 {ranking.total_kills}")
         row_lines.append(" · ".join(parts))

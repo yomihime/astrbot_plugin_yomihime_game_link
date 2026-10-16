@@ -35,7 +35,7 @@ python -m unittest examples.command_cards.test_declarative_samples -v
 - `ff14_logs_reference.py`：FF14 百分位分级、rDPS / 击杀数字符格式及一张 Logs 长卡；角色 `ChatGPT@OpenAI` 与成绩全部为合成样例，不代表真实 FFLogs 结果或发布目录
 - `test_style_reference.py`：该参考实现的定向测试，不能代替生产查询、Host 或全仓验收
 
-新样张：[冷白长卡](samples/logs_style_cool_white.png)、[深靛长卡](samples/logs_style_deep_indigo.png)，均为 1040 × 2944；逐格颜色、实际背景、字效和边界记录见 [核验清单](samples/style_reference_checks.json)。7 行绝境战＋13 行零式是覆盖完整多层布局的合成 fixture，不是已核实的地区目录；当前两图分别为 666,994 / 710,164 bytes，与最终独立审阅输出逐字节一致。主图 M12S 本体使用 99.7；99.96 舍入仍为粉色的边界留在 Spec 与测试中。
+历史样张：[冷白长卡](samples/logs_style_cool_white.png)、[深靛长卡](samples/logs_style_deep_indigo.png)，均为 1040 × 2944；逐格颜色、实际背景、字效和边界记录见 [核验清单](samples/style_reference_checks.json)。7 行绝境战＋13 行零式是覆盖完整多层布局的合成 fixture，不是已核实的地区目录；两图分别为 666,994 / 710,164 bytes，与当时独立审阅输出逐字节一致。主图 M12S 本体使用 99.7，历史 PNG 不覆盖。当前百分位规则已改为十进制一位只舍不入：99.96 显示 99.9%，仍为粉色；历史运行结果不代表新字节验证。
 
 上述两张已提交样图保留 `1c2ded2` 的参考字节，没有在本次整合中覆盖。当前 B 无 SVG 明暗对照已按同字体、同尺寸渲染：数值及字效区域逐像素一致，普通 `@ OpenAI` 文字的浮点落点区域有已记录差异，不宣称整图相同。三个生产 `CardSpec` 验证图另验完整换行、实际字形居中、七色和细 Regular；不是物品卡设计确认。B 已完成 R2 限定离线独审，各次失败、修后测试和候选状态见[交接入口](../../docs/command-presentation/README.md#续作-b共用富文本内核2026-10-16)。
 
@@ -61,7 +61,7 @@ from ff14_logs_reference import count, percentile, rdps
 from rich_text_reference import Grade, TextSpan
 
 shown = percentile(Decimal("99.96"))
-assert shown.grade is Grade.PINK  # 一位小数会显示 100.0，原始等级不变
+assert shown.grade is Grade.PINK  # 只舍不入显示 99.9%，原始等级不变
 spans = (TextSpan("击杀数 "), count(0), TextSpan("  rDPS "), rdps("41234.5"))
 ```
 
@@ -160,7 +160,7 @@ python render_logs.py --output-dir ./preview
 副本名称和「7.0 · 零式阿卡狄亚登天斗技场」标题仅是固定排版 fixture，包含阶段分行；它们不声明当前版本、地区开放状态或实时完整副本目录，不能当作生产目录或人工名称映射表。生产目录发现、地区可用性与命名来源由外部适配层另行实现。
 
 - `highest_rdps`：保留原始高精度 `Decimal`，仅显示时 `ROUND_HALF_UP` 舍入成整数并加千位逗号，例如 `41234.567890123 → 41,235`
-- `best_percentile`：原始值保留，显示时用 `ROUND_HALF_UP` 固定一位小数，例如 `44.65 → 44.7%`
+- `best_percentile`：原始值保留，当前显示规则用 `ROUND_DOWN` 固定一位小数，例如 `44.65 → 44.6%`；只改变百分位，不改变 rDPS 的整数处理
 - 最高 rDPS 与最佳百分位独立取值，可能来自不同场次；不能把后者对应场次的 rDPS 冒充最高 rDPS
 - 本例 `job` 与 `version` 属于最佳百分位记录；最高 rDPS 的来源职业 / 场次未在卡片逐行展开
 - 缺失指标显示破折号，不变成 0；空分组显示「未提供该组记录」，不推断「未通关」

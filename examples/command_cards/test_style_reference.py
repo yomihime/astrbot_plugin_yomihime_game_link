@@ -49,9 +49,9 @@ class MetricContractTests(unittest.TestCase):
     def test_rounding_never_promotes_to_max(self):
         self.assertEqual(
             logs.percentile(Decimal("99.96")),
-            rich.TextSpan("100.0%", rich.TextRole.GRADED, rich.Grade.PINK),
+            rich.TextSpan("99.9%", rich.TextRole.GRADED, rich.Grade.PINK),
         )
-        self.assertEqual(logs.percentile("44.65").text, "44.7%")
+        self.assertEqual(logs.percentile("44.65").text, "44.6%")
         self.assertIs(logs.percentile("100.000").grade, rich.Grade.GOLD)
         self.assertEqual(logs.rdps("12345.5").text, "12,346")
         self.assertEqual(logs.rdps("12345.499999").text, "12,345")
@@ -229,7 +229,7 @@ class EffectTests(unittest.TestCase):
             palette=p,
         )
         self.assertEqual(len(infos), 4)
-        self.assertEqual(c.drawn_text, ["结果 ", "100.0%", " / ", "异常"])
+        self.assertEqual(c.drawn_text, ["结果 ", "99.9%", " / ", "异常"])
         self.assertFalse(infos[1].gold_glow)
 
     def test_actual_ink_alignment_including_missing_dash(self):

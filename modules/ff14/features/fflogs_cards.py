@@ -8,18 +8,22 @@ module nor the painter substitutes a synthetic expansion/Ultimate catalog.
 
 from __future__ import annotations
 
-from decimal import ROUND_HALF_UP, Decimal, InvalidOperation, localcontext
+from decimal import ROUND_DOWN, ROUND_HALF_UP, Decimal, InvalidOperation, localcontext
 
 from yomihime_game_link_sdk import cards
 
 from ..presentation import ff14_card
+from .fflogs_jobs import JobLanguage, job_display
 from .fflogs_models import OutputMetadata, PublicCharacter
 
-CATALOG_LIMITATION = "仅展示本次返回记录；完整绝境战与资料片零式目录暂不可用。"
+CATALOG_LIMITATION = (
+    "FFLogs 目录不足以核验完整范围；本次仅展示来源返回的副本成绩，"
+    "未覆盖完整绝境战与当前资料片零式。"
+)
 PROVIDER_CATALOG_SCOPE = (
     "范围以 FFLogs 目录及默认副本所属资料片为准，不代表地区开放状态。"
 )
-DETAIL_LIMITATION = "次数仅为当前筛选范围；缺失数据与记录版本显示为 —。"
+DETAIL_LIMITATION = "次数仅为当前筛选范围；最高数值与最佳百分位可能来自不同记录。"
 
 # FFLogs grade colors are game policy, never inferred by Core or altered by theme.
 PERCENTILE_COLORS = (
@@ -50,24 +54,34 @@ def _number(value: object) -> Decimal:
     return number.copy_abs() if number == 0 else number
 
 
-def percentile(value: object) -> cards.Inline:
-    """Classify exact raw percentile; display rounding never awards gold."""
+def percentile_text(value: object) -> str:
+    """Pure shared text policy: exact decimal truncation, no drawing or IO."""
     if value is None:
-        return cards.Inline((cards.Span("—"),))
+        return "—"
     try:
         number = _number(value)
         if number > 100:
             raise ValueError("out-of-range percentile")
         with localcontext() as context:
             context.prec = 150
-            displayed = number.quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
-        label = f"{displayed:.1f}%"
-        if number == Decimal("100"):
-            return cards.Inline((cards.Span(label, emphasis="gold"),))
-        color = next(color for floor, color in PERCENTILE_COLORS if number >= floor)
-        return cards.Inline((cards.Span(label, color=color, emphasis="strong"),))
+            displayed = number.quantize(Decimal("0.1"), rounding=ROUND_DOWN)
+        return f"{displayed:.1f}%"
     except (InvalidOperation, ValueError):
-        return cards.Inline((cards.Span("ERR", color="#d34b4b"),))
+        return "ERR"
+
+
+def percentile(value: object) -> cards.Inline:
+    """Classify exact raw value; both card and text use percentile_text labels."""
+    label = percentile_text(value)
+    if label == "—":
+        return cards.Inline((cards.Span(label),))
+    if label == "ERR":
+        return cards.Inline((cards.Span(label, color="#d34b4b"),))
+    number = _number(value)
+    if number == Decimal("100"):
+        return cards.Inline((cards.Span(label, emphasis="gold"),))
+    color = next(color for floor, color in PERCENTILE_COLORS if number >= floor)
+    return cards.Inline((cards.Span(label, color=color, emphasis="strong"),))
 
 
 def amount(value: object) -> cards.Inline:
@@ -102,7 +116,7 @@ def selection_title(
         )
         if len(matches) == 1:
             return matches[0].name
-    return "本次查询范围"
+    return "本次返回副本范围"
 
 
 def character_card(
@@ -113,6 +127,7 @@ def character_card(
     limit: int,
     explicit_selection: bool,
     metadata: OutputMetadata | None = None,
+    job_language: JobLanguage = "zh",
 ) -> cards.Document:
     """Map real returned rows without manufacturing missing catalog entries."""
     metric = {"rdps": "rDPS", "ndps": "nDPS", "cdps": "cDPS"}[character.metric]
@@ -122,35 +137,60 @@ def character_card(
         else "FFLogs 默认副本、难度和分区"
     )
     sections = []
-    remaining = limit
+    displayed_count = 0
     if character.groups:
+        present = tuple(
+            category
+            for category in ("ultimate", "savage")
+            if any(
+                group.category == category and group.rankings
+                for group in character.groups
+            )
+        )
+        remaining = limit
         for category, title in (("ultimate", "绝境战"), ("savage", "零式")):
             groups = tuple(
                 group for group in character.groups if group.category == category
             )
             if not groups:
                 continue
-            group_rows = tuple(row for group in groups for row in group.rankings)[
-                :remaining
-            ]
-            remaining -= len(group_rows)
-            if not group_rows:
-                continue
+            # Reserve one row for each later category when the budget permits.
+            reserve = int(category == "ultimate" and "savage" in present)
+            available = max(0, remaining - reserve) if remaining > 1 else remaining
+            blocks = []
+            ultimate_rows = []
+            for group in groups:
+                rows = group.rankings[:available]
+                available -= len(rows)
+                remaining -= len(rows)
+                displayed_count += len(rows)
+                if not rows:
+                    continue
+                if category == "savage":
+                    blocks.append(cards.Text(group.zone_name, style="heading"))
+                    blocks.append(_ranking_table(rows, metric, job_language))
+                else:
+                    ultimate_rows.extend(rows)
+            if ultimate_rows:
+                blocks.append(_ranking_table(ultimate_rows, metric, job_language))
+            if not blocks:
+                blocks.append(cards.Text("受本图展示上限限制，此类别记录未展示。"))
             subtitle = (
                 "FFLogs 目录" if category == "ultimate" else groups[0].expansion_name
             )
             sections.append(
                 cards.Section(
                     title,
-                    (_ranking_table(group_rows, metric),),
+                    tuple(blocks),
                     subtitle=subtitle,
                     panel=False,
                 )
             )
     else:
         rows = character.rankings[:limit]
+        displayed_count = len(rows)
         content = (
-            (_ranking_table(rows, metric),)
+            (_ranking_table(rows, metric, job_language),)
             if rows
             else (cards.Text("当前筛选条件下没有公开战绩记录。"),)
         )
@@ -177,7 +217,7 @@ def character_card(
             *(
                 (
                     cards.Text(
-                        f"共 {len(character.rankings)} 项，本图仅显示前 {limit} 项。",
+                        f"本图显示 {displayed_count}/{len(character.rankings)} 项；展示上限 {limit}，部分记录未展示。",
                         style="caption",
                     ),
                 )
@@ -199,7 +239,7 @@ def character_card(
                 else ()
             ),
         ),
-        sources=(f"数据源：{host}",),
+        sources=(f"数据源：{'cn.fflogs.com' if realm == 'cn' else 'www.fflogs.com'}",),
     )
 
 
@@ -211,15 +251,16 @@ __all__ = [
     "character_card",
     "kill_count",
     "percentile",
+    "percentile_text",
     "selection_title",
 ]
 
 
-def _ranking_table(rankings, metric):
+def _ranking_table(rankings, metric, job_language="zh"):
     rows = tuple(
         (
-            f"{row.encounter_name}\n记录版本 —",
-            row.spec or "—",
+            row.encounter_name,
+            job_display(row.spec, job_language),
             amount("invalid") if row.source_error else amount(row.best_amount),
             kill_count("invalid") if row.source_error else kill_count(row.total_kills),
             percentile("invalid")
@@ -234,8 +275,8 @@ def _ranking_table(rankings, metric):
     )
     return cards.Table(
         columns=(
-            cards.Column("副本 / 记录版本", weight=3.7),
-            cards.Column("职业", weight=1.6),
+            cards.Column("副本", weight=2.7 if job_language == "ja" else 3.7),
+            cards.Column("职业", weight=2.6 if job_language == "ja" else 1.6),
             cards.Column(f"最高 {metric}", weight=1.8, align="right", wrap="nowrap"),
             cards.Column("过本次数", weight=1.4, align="right", wrap="nowrap"),
             cards.Column(

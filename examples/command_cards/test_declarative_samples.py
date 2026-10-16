@@ -241,7 +241,7 @@ class MetricTests(unittest.TestCase):
             self.assertEqual(span.color, None if grade == "gold" else grade)
         self.assertEqual(
             samples.percentile(Decimal("99.96")),
-            Span("100.0%", color="#e268a8"),
+            Span("99.9%", color="#e268a8"),
         )
         self.assertEqual(samples.percentile("100"), Span("100.0%", emphasis="gold"))
         docs = samples.build_logs_document()
@@ -272,7 +272,7 @@ class MetricTests(unittest.TestCase):
                 self.assertEqual(function(raw), Span("ERR", color="#c83e4d"))
         self.assertEqual(samples.rdps("41234.567890123"), Span("41,235"))
         self.assertEqual(samples.rdps("12345.499999"), Span("12,345"))
-        self.assertEqual(samples.percentile("44.65").text, "44.7%")
+        self.assertEqual(samples.percentile("44.65").text, "44.6%")
         self.assertEqual(samples.count(0), Span("0"))
         self.assertEqual(samples.count("1.1").color, "#c83e4d")
         self.assertEqual(samples.percentile("100.1").color, "#c83e4d")

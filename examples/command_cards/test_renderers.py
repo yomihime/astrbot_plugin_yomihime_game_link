@@ -32,9 +32,9 @@ class FormatterTests(unittest.TestCase):
     def test_percentiles_have_exactly_one_decimal(self):
         for raw, expected in (
             (43, "43.0%"),
-            ("95.25", "95.3%"),
+            ("95.25", "95.2%"),
             ("95.24", "95.2%"),
-            ("99.95", "100.0%"),
+            ("99.95", "99.9%"),
             (100, "100.0%"),
             (0, "0.0%"),
         ):

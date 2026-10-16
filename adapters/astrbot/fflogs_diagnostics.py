@@ -1,0 +1,447 @@
+"""Narrow private FF14 evidence forwarding; no request or credential access."""
+
+from __future__ import annotations
+
+import json
+import logging
+import re
+
+LOGGER_NAME = "yomihime_game_link.ff14.evidence"
+MARKER = "FF14_LOGS_EVIDENCE"
+MAX_BYTES, MAX_CHUNKS = 512 * 1024, 64
+OPERATIONS = frozenset(
+    {
+        "FF14OutputMetadataShape",
+        "FF14CharacterMetadata",
+        "FF14OutputMetadata",
+        "FF14PublicCharacter",
+        "FF14PublicCharacterZone",
+        "FF14CatalogCharacter",
+        "FF14MetadataState",
+    }
+)
+
+
+def _text(value, limit=160):
+    return (
+        value is None
+        or isinstance(value, str)
+        and len(value) <= limit
+        and not any(ord(char) < 32 for char in value)
+        and re.search(
+            r"https?://|bearer\s|authorization|client_secret|access_token", value, re.I
+        )
+        is None
+    )
+
+
+def _number(value):
+    return (
+        value is None
+        or type(value) is int
+        and abs(value) <= 2**53
+        or isinstance(value, str)
+        and len(value) <= 160
+        and re.fullmatch(r"[+-]?[0-9]+(?:\.[0-9]+)?(?:[Ee][+-]?[0-9]+)?", value)
+        is not None
+    )
+
+
+def _object(value, required, optional=None):
+    return (
+        isinstance(value, dict)
+        and set(required) <= set(value) <= set(required) | set(optional or {})
+        and all((required | (optional or {}))[key](item) for key, item in value.items())
+    )
+
+
+def _list(value, predicate, limit):
+    return (
+        isinstance(value, list)
+        and len(value) <= limit
+        and all(predicate(item) for item in value)
+    )
+
+
+def _named(value):
+    return _object(value, {"id": _number, "name": _text})
+
+
+def _type(value, depth=0):
+    return (
+        value is None
+        or depth <= 5
+        and _object(
+            value,
+            {
+                "kind": lambda item: _text(item, 32),
+                "name": lambda item: _text(item, 128),
+            },
+            {"ofType": lambda item: _type(item, depth + 1)},
+        )
+    )
+
+
+def _safe_payload(operation, body):
+    """Validate a closed diagnostic wire format without importing game code."""
+    if operation == "FF14MetadataState":
+        return _object(
+            body,
+            {
+                "state": lambda value: value
+                in {
+                    "verified_catalog",
+                    "base_catalog",
+                    "unavailable_source",
+                    "unavailable_graphql",
+                    "unavailable_payload",
+                    "unavailable_service",
+                    "unavailable_permission",
+                    "unavailable_timeout",
+                    "unavailable_internal",
+                }
+            },
+        )
+    if operation == "FF14OutputMetadataShape":
+
+        def token(value):
+            return (
+                isinstance(value, str)
+                and re.fullmatch(r"[_A-Za-z][_0-9A-Za-z]{0,127}", value) is not None
+            )
+
+        def argument(value):
+            return _object(
+                value,
+                {
+                    "name": token,
+                    "type": _type,
+                    "defaultValue": lambda item: _text(item, 256),
+                },
+            )
+
+        def field(value):
+            return _object(
+                value,
+                {
+                    "name": token,
+                    "type": _type,
+                    "args": lambda item: _list(item, argument, 64),
+                },
+            )
+
+        def definition(value):
+            return value is None or _object(
+                value,
+                {
+                    "name": lambda item: _text(item, 128),
+                    "fields": lambda item: _list(item, field, 256),
+                },
+            )
+
+        return _object(
+            body,
+            dict.fromkeys(
+                (
+                    "queryType",
+                    "worldDataType",
+                    "zoneType",
+                    "difficultyType",
+                    "encounterType",
+                    "gameDataType",
+                    "gameClassType",
+                    "gameSpecType",
+                    "expansionType",
+                    "partitionType",
+                ),
+                definition,
+            ),
+        )
+    if operation in {"FF14CharacterMetadata", "FF14OutputMetadata"}:
+
+        def owner(value):
+            return _object(value, {"id": _number})
+
+        def encounter(value):
+            return _object(value, {"id": _number, "name": _text}, {"zone": owner})
+
+        def zone(value):
+            return _object(
+                value,
+                {
+                    "id": _number,
+                    "name": _text,
+                    "difficulties": lambda item: _list(item, _named, 32),
+                    "encounters": lambda item: _list(item, encounter, 10000),
+                },
+            )
+
+        def expansion(value):
+            return _object(
+                value,
+                {
+                    "id": _number,
+                    "name": _text,
+                    "zones": lambda item: _list(item, owner, 512),
+                },
+            )
+
+        def world(value):
+            return _object(
+                value,
+                {"zones": lambda item: _list(item, zone, 512)},
+                {"expansions": lambda item: _list(item, expansion, 64)},
+            )
+
+        return _object(body, {"worldData": world})
+
+    def row(value):
+        return _object(
+            value,
+            {
+                "raw_field_names": lambda item: _list(
+                    item,
+                    lambda name: isinstance(name, str)
+                    and re.fullmatch(r"[_A-Za-z][_0-9A-Za-z]{0,127}", name) is not None,
+                    64,
+                ),
+                "raw_field_names_truncated": lambda item: type(item) is bool,
+                "encounter": _named,
+                "rankPercent": _number,
+                "bestAmount": _number,
+                "totalKills": _number,
+                "bestSpec": lambda item: _text(item, 80),
+                "spec": lambda item: _text(item, 80),
+            },
+        )
+
+    def selection(value):
+        return value is None or _object(
+            value,
+            {
+                "zone": _number,
+                "difficulty": _number,
+                "partition": _number,
+                "size": _number,
+                "metric": lambda item: _text(item, 32),
+                "rankings": lambda item: _list(item, row, 500),
+            },
+        )
+
+    def character(value):
+        return (
+            value is None
+            or isinstance(value, dict)
+            and len(value) <= 13
+            and all(
+                (key == "rankings" or re.fullmatch(r"z[0-9]{1,2}", key))
+                and selection(item)
+                for key, item in value.items()
+            )
+        )
+
+    return _object(
+        body, {"characterData": lambda value: _object(value, {"character": character})}
+    )
+
+
+_FIELDS = frozenset(
+    {
+        "v",
+        "correlation",
+        "source",
+        "operation",
+        "time",
+        "status",
+        "cached",
+        "filters",
+        "chunk",
+        "chunks",
+        "truncated",
+        "payload",
+    }
+)
+
+
+class FFLogsDiagnostics(logging.Handler):
+    """At most two explicit command correlations per runtime lifetime."""
+
+    def __init__(self, send=None):
+        super().__init__(logging.INFO)
+        self.fflogs_evidence_sink = True
+        self._send = send
+        self._installed = False
+        self._pending = {}
+        self._correlations = set()
+        self._seen = set()
+        self._bytes = 0
+        self._chunks = 0
+        self._limited = False
+
+    def start(self):
+        if self._installed:
+            return
+        logger = logging.getLogger(LOGGER_NAME)
+        if any(isinstance(handler, FFLogsDiagnostics) for handler in logger.handlers):
+            return
+        self._logger = logger
+        self._old_level, self._old_propagate = logger.level, logger.propagate
+        logger.addHandler(self)
+        logger.setLevel(logging.INFO)
+        logger.propagate = False
+        self._installed = True
+
+    def close(self):
+        if self._installed:
+            self._logger.removeHandler(self)
+            if self._logger.level == logging.INFO:
+                self._logger.setLevel(self._old_level)
+            if self._logger.propagate is False:
+                self._logger.propagate = self._old_propagate
+            self._installed = False
+        self._pending.clear()
+        self._correlations.clear()
+        self._seen.clear()
+        self._bytes = self._chunks = 0
+        self._limited = False
+        super().close()
+
+    def emit(self, record):
+        if (
+            not self._installed
+            or self._limited
+            or record.name != LOGGER_NAME
+            or record.levelno != logging.INFO
+            or record.exc_info
+            or record.stack_info
+        ):
+            return
+        if (
+            record.msg != MARKER + " %s"
+            or not isinstance(record.args, tuple)
+            or len(record.args) != 1
+        ):
+            return
+        try:
+            self._accept(record.args[0])
+        except Exception:
+            # Never send original malformed records or exception text to Host.
+            return
+
+    def _accept(self, raw):
+        if not isinstance(raw, str) or len(raw.encode("utf-8")) > 8192:
+            return
+        event = json.loads(raw)
+        if (
+            not isinstance(event, dict)
+            or set(event) != _FIELDS
+            or type(event["v"]) is not int
+            or event["v"] != 1
+        ):
+            return
+        correlation, operation = event["correlation"], event["operation"]
+        if (
+            not isinstance(correlation, str)
+            or not re.fullmatch(r"[0-9a-f]{24}", correlation)
+            or operation not in OPERATIONS
+        ):
+            return
+        if event["source"] not in {"fflogs_public_cn", "fflogs_public_global"}:
+            return
+        if (
+            type(event["cached"]) is not bool
+            or type(event["truncated"]) is not bool
+            or not (
+                (event["cached"] or operation == "FF14MetadataState")
+                and event["status"] is None
+                or type(event["status"]) is int
+                and 100 <= event["status"] <= 599
+            )
+        ):
+            return
+        filters = event["filters"]
+        if (
+            not isinstance(filters, dict)
+            or len(filters) > 28
+            or any(
+                not isinstance(key, str)
+                or not (
+                    key in {"metric", "zoneId", "difficulty", "partition"}
+                    or re.fullmatch(r"[zd][0-9]{1,2}", key)
+                )
+                or not (
+                    type(value) is int
+                    and -1 <= value <= 2_147_483_647
+                    or isinstance(value, str)
+                    and key == "metric"
+                    and value in {"rdps", "ndps", "cdps"}
+                )
+                for key, value in filters.items()
+            )
+        ):
+            return
+        if not isinstance(event["time"], str) or not re.fullmatch(
+            r"\d{4}-\d{2}-\d{2}T[0-9:.]+\+00:00", event["time"]
+        ):
+            return
+        index, count, piece = event["chunk"], event["chunks"], event["payload"]
+        if (
+            type(index) is not int
+            or type(count) is not int
+            or not 0 <= index < count <= MAX_CHUNKS
+            or not isinstance(piece, str)
+            or len(piece) > 6000
+            or not piece.isascii()
+        ):
+            return
+        if correlation not in self._correlations and len(self._correlations) >= 2:
+            return
+        key = (correlation, operation, event["cached"])
+        if key in self._seen:
+            return
+        if self._bytes + len(piece) > MAX_BYTES or self._chunks >= MAX_CHUNKS - 1:
+            self._limited = True
+            self._pending.clear()
+            self._forward(
+                [{**event, "chunk": 0, "chunks": 1, "truncated": True, "payload": "{}"}]
+            )
+            return
+        header = {
+            key: value
+            for key, value in event.items()
+            if key not in {"chunk", "payload", "time"}
+        }
+        entry = self._pending.setdefault(key, (header, {}, []))
+        if entry[0] != header or index in entry[1]:
+            return
+        self._correlations.add(correlation)
+        self._bytes += len(piece)
+        self._chunks += 1
+        entry[1][index] = piece
+        entry[2].append(event)
+        if len(entry[1]) != count:
+            return
+        body = json.loads("".join(entry[1][i] for i in range(count)))
+        self._pending.pop(key, None)
+        self._seen.add(key)
+        if event["truncated"]:
+            if body != {}:
+                return
+        elif not _safe_payload(operation, body):
+            return
+        self._forward(sorted(entry[2], key=lambda value: value["chunk"]))
+
+    def _forward(self, events):
+        if self._send is None:
+            from astrbot.api import logger
+
+            def send(message):
+                logger.info(message)
+        else:
+            send = self._send
+        for accepted in events:
+            send(
+                MARKER
+                + " "
+                + json.dumps(accepted, separators=(",", ":"), ensure_ascii=True)
+            )

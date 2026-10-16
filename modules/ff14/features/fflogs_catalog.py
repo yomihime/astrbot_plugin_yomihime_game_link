@@ -89,6 +89,11 @@ OUTPUT_METADATA_INTROSPECTION = """query FF14OutputMetadataShape {
       args { name defaultValue type { kind name ofType { kind name ofType { kind name } } } }
     }
   }
+  partitionType: __type(name: "Partition") {
+    name fields { name type { kind name ofType { kind name ofType { kind name } } }
+      args { name defaultValue type { kind name ofType { kind name ofType { kind name } } } }
+    }
+  }
 }"""
 
 OUTPUT_METADATA_QUERY = """query FF14OutputMetadata {
@@ -119,12 +124,19 @@ class FFLogsGraphQLError(ValueError):
 class FFLogsCatalog:
     """Resolve readable labels only against bounded, schema-checked lists."""
 
-    def __init__(self, http: SourceHttp, source_id: str, *, check_active=None) -> None:
+    def __init__(
+        self, http: SourceHttp, source_id: str, *, check_active=None, observer=None
+    ) -> None:
         self._http = http
         self._source_id = source_id
         self._check_active = check_active
+        self._observer = observer
 
-    async def resolve_server(self, realm: str, server_label: str) -> ServerResolution:
+    async def resolve_server(
+        self, realm: str, server_label: str, *, page_budget: int = MAX_SERVER_PAGES
+    ) -> ServerResolution:
+        if type(page_budget) is not int or not 1 <= page_budget <= MAX_SERVER_PAGES:
+            raise ValueError("invalid server page budget")
         regions = parse_regions(await self._request(REGIONS_QUERY, {}))
         selected_regions = tuple(
             region for region in regions if _region_belongs_to_realm(region, realm)
@@ -137,7 +149,7 @@ class FFLogsCatalog:
         for directory_region in selected_regions:
             seen_pages: set[tuple[int, ...]] = set()
             for page_number in range(1, MAX_SERVER_PAGES + 1):
-                if pages_used >= MAX_SERVER_PAGES:
+                if pages_used >= page_budget:
                     return ServerResolution(
                         False, (), "server directory exceeded its total page budget"
                     )
@@ -226,7 +238,14 @@ class FFLogsCatalog:
         )
         if self._check_active is not None:
             self._check_active()
-        return parse_graphql_envelope(response.body)
+        data = parse_graphql_envelope(response.body)
+        if self._observer is not None:
+            operation = re.match(r"query\s+(\w+)", query)
+            if operation is not None:
+                self._observer(
+                    operation[1], data, status=response.status_code, filters=variables
+                )
+        return data
 
 
 def parse_graphql_envelope(
