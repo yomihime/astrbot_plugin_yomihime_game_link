@@ -151,8 +151,8 @@ FONT_ASSETS = {
         "6a73f9541c2de74158c0e7cf6b0a58ef774f5a780bf191f2d7ec9cc53efe2bf2",
     ),
     "presentation/assets/fonts/NOTICE.md": (
-        1541,
-        "7d66c7534dc768d89055cba8b8bd906bbef3ab33d5dc6675b08a71ea9ab2a3a6",
+        3131,
+        "9c4def9efd3007da62abc3f4be270e644b9afc66f749c20b6ed091147fec615b",
     ),
 }
 EXCLUDED_RUNTIME_DIRS = {

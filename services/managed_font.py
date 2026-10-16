@@ -22,6 +22,20 @@ FONT_URL = (
     "523d033d6cb47f4a80c58a35753646f5c3608a78/"
     "Sans/OTF/SimplifiedChinese/NotoSansCJKsc-Regular.otf"
 )
+FONT_URLS = (
+    "https://mirrors.tuna.tsinghua.edu.cn/CTAN/fonts/notocjksc/"
+    "NotoSansCJKsc-Regular.otf",
+    "https://cdn.jsdelivr.net/gh/notofonts/noto-cjk@"
+    "523d033d6cb47f4a80c58a35753646f5c3608a78/"
+    "Sans/OTF/SimplifiedChinese/NotoSansCJKsc-Regular.otf",
+    FONT_URL,
+)
+DOWNLOAD_TOTAL_SECONDS = 45
+DOWNLOAD_SOURCE_SECONDS = 15
+
+
+class _DownloadFailure(ValueError):
+    """Only fixed safe codes cross the downloader's error boundary."""
 
 
 class ManagedFont:
@@ -138,35 +152,83 @@ class ManagedFont:
 
     async def _download(self):
         self._change("downloading")
+        error = "download_connection"
         try:
             import aiohttp
 
-            # One immutable HTTPS origin; redirects and proxy credentials disabled.
-            timeout = aiohttp.ClientTimeout(total=45, connect=10, sock_read=10)
-            async with aiohttp.ClientSession(
-                timeout=timeout, trust_env=False, auto_decompress=False
-            ) as session:
-                async with session.get(FONT_URL, allow_redirects=False) as response:
-                    if (
-                        response.status != 200
-                        or response.headers.get("Content-Encoding", "identity")
-                        != "identity"
-                    ):
-                        raise ValueError
-                    if response.content_length not in (None, FONT_SIZE):
-                        raise ValueError
-                    content = bytearray()
-                    async for chunk in response.content.iter_chunked(65536):
-                        if len(content) + len(chunk) > FONT_SIZE:
-                            raise ValueError
-                        content.extend(chunk)
-                    if not self._closed:
-                        self._install(bytes(content))
+            deadline = asyncio.get_running_loop().time() + DOWNLOAD_TOTAL_SECONDS
+            # Fixed HTTPS allowlist only; no redirects, proxies or decompression.
+            # Each source gets at most one third of the round, leaving time for
+            # both backups even when the primary consumes its entire budget.
+            async with asyncio.timeout_at(deadline):
+                async with aiohttp.ClientSession(
+                    trust_env=False, auto_decompress=False
+                ) as session:
+                    for url in FONT_URLS:
+                        remaining = deadline - asyncio.get_running_loop().time()
+                        if remaining <= 0:
+                            raise TimeoutError
+                        budget = min(DOWNLOAD_SOURCE_SECONDS, remaining)
+                        timeout = aiohttp.ClientTimeout(
+                            total=budget,
+                            connect=min(5, budget),
+                            sock_read=min(5, budget),
+                        )
+                        try:
+                            # The explicit timeout also bounds non-aiohttp test
+                            # transports and response context teardown.
+                            async with asyncio.timeout(budget):
+                                content = await self._download_source(
+                                    session, url, timeout
+                                )
+                        except TimeoutError:
+                            error = "download_timeout"
+                            continue
+                        except _DownloadFailure as exc:
+                            error = str(exc)
+                            continue
+                        except (aiohttp.ClientError, OSError):
+                            error = "download_connection"
+                            continue
+                        if self._closed:
+                            return
+                        try:
+                            self._install(content)
+                        except Exception:
+                            # The same validated bytes from another source will
+                            # not fix a local publication failure.
+                            error = "download_write"
+                            break
+                        return
         except asyncio.CancelledError:
             raise
+        except TimeoutError:
+            error = "download_timeout"
         except Exception:
-            if not self._closed:
-                self._change("unavailable", "download_failed")
+            error = "download_connection"
+        if not self._closed:
+            self._change("unavailable", error)
+
+    @staticmethod
+    async def _download_source(session, url, timeout):
+        async with session.get(url, timeout=timeout, allow_redirects=False) as response:
+            if (
+                response.status != 200
+                or response.headers.get("Content-Encoding", "identity") != "identity"
+            ):
+                raise _DownloadFailure("download_http")
+            if response.content_length not in (None, FONT_SIZE):
+                raise _DownloadFailure("download_length")
+            content = bytearray()
+            async for chunk in response.content.iter_chunked(65536):
+                if len(content) + len(chunk) > FONT_SIZE:
+                    raise _DownloadFailure("download_length")
+                content.extend(chunk)
+            if len(content) != FONT_SIZE:
+                raise _DownloadFailure("download_length")
+            if sha256(content).hexdigest() != FONT_SHA256:
+                raise _DownloadFailure("download_digest")
+            return bytes(content)
 
     def retry(self):
         if self._closed:

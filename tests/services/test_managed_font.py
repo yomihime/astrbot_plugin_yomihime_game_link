@@ -7,6 +7,7 @@ from hashlib import sha256
 from pathlib import Path
 from unittest.mock import patch
 
+import aiohttp
 from ygl_test_subject.presentation.bundled_font import (
     FONT_FILENAME,
     FONT_SHA256,
@@ -21,6 +22,48 @@ REFERENCE = (
 )
 
 
+class DownloadSession:
+    """Synthetic source outcomes; never opens a socket."""
+
+    def __init__(self, outcomes):
+        self.outcomes = iter(outcomes)
+        self.calls = []
+        self.options = None
+
+    def __call__(self, **kwargs):
+        self.options = kwargs
+        return self
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        pass
+
+    def get(self, url, **kwargs):
+        self.calls.append((url, kwargs))
+        outcome = next(self.outcomes)
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+
+class DownloadResponse:
+    def __init__(self, payload=b"", *, status=200, length=None, headers=None):
+        self.payload, self.status, self.content_length = payload, status, length
+        self.headers, self.content = headers or {}, self
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        pass
+
+    async def iter_chunked(self, size):
+        for offset in range(0, len(self.payload), size):
+            yield self.payload[offset : offset + size]
+
+
 class ManagedFontTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -31,6 +74,20 @@ class ManagedFontTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         await self.manager.close()
         self.temp.cleanup()
+
+    async def test_primary_connection_failure_uses_next_fixed_source(self):
+        session = DownloadSession(
+            [
+                aiohttp.ClientConnectionError("secret must not escape"),
+                DownloadResponse(self.content, length=FONT_SIZE),
+            ]
+        )
+        self.manager._closed = False
+        with patch("aiohttp.ClientSession", session):
+            await self.manager._download()
+        self.assertEqual(self.manager.status()["state"], "ready")
+        self.assertEqual(len(session.calls), 2)
+        self.assertEqual((self.root / FONT_FILENAME).read_bytes(), self.content)
 
     async def test_valid_persistent_snapshot_no_network_and_no_path_reopen(self):
         self.root.mkdir(parents=True)
@@ -130,43 +187,31 @@ class ManagedFontTests(unittest.IsolatedAsyncioTestCase):
             self.manager.provider()
 
     async def test_download_network_policy_and_size_validation(self):
-        class Content:
-            async def iter_chunked(inner, size):
-                self.assertEqual(size, 65536)
-                yield self.content
-
-        class Response:
-            status = 200
-            headers = {}
-            content_length = FONT_SIZE
-            content = Content()
-
-            async def __aenter__(inner):
-                return inner
-
-            async def __aexit__(inner, *args):
-                pass
-
-        class Session:
-            def __init__(inner, **kwargs):
-                self.assertFalse(kwargs["trust_env"])
-                self.assertFalse(kwargs["auto_decompress"])
-                self.assertEqual(kwargs["timeout"].total, 45)
-
-            async def __aenter__(inner):
-                return inner
-
-            async def __aexit__(inner, *args):
-                pass
-
-            def get(inner, url, **kwargs):
-                self.assertEqual(url, fonts.FONT_URL)
-                self.assertFalse(kwargs["allow_redirects"])
-                return Response()
-
-        with patch("aiohttp.ClientSession", Session):
+        session = DownloadSession([DownloadResponse(self.content, length=FONT_SIZE)])
+        with patch("aiohttp.ClientSession", session):
             self.manager.start()
             await self.manager._task
+        self.assertFalse(session.options["trust_env"])
+        self.assertFalse(session.options["auto_decompress"])
+        self.assertEqual(len(session.calls), 1)
+        self.assertEqual(
+            fonts.FONT_URLS,
+            (
+                "https://mirrors.tuna.tsinghua.edu.cn/CTAN/fonts/notocjksc/"
+                "NotoSansCJKsc-Regular.otf",
+                "https://cdn.jsdelivr.net/gh/notofonts/noto-cjk@"
+                "523d033d6cb47f4a80c58a35753646f5c3608a78/"
+                "Sans/OTF/SimplifiedChinese/NotoSansCJKsc-Regular.otf",
+                fonts.FONT_URL,
+            ),
+        )
+        self.assertEqual(session.calls[0][0], fonts.FONT_URLS[0])
+        options = session.calls[0][1]
+        self.assertFalse(options["allow_redirects"])
+        self.assertLessEqual(options["timeout"].total, 15)
+        self.assertEqual(options["timeout"].connect, 5)
+        self.assertEqual(options["timeout"].sock_read, 5)
+        self.assertEqual(fonts.DOWNLOAD_TOTAL_SECONDS, 45)
         self.assertEqual(self.manager.status()["source"], "canonical")
         self.assertEqual(self.manager.status()["state"], "ready")
 
@@ -197,49 +242,184 @@ class ManagedFontTests(unittest.IsolatedAsyncioTestCase):
         path.write_bytes(self.content)
         self.manager._closed = False
         cases = (
-            (302, FONT_SIZE, self.content, {}),
-            (404, FONT_SIZE, self.content, {}),
-            (200, 7, b"invalid", {}),
-            (200, None, self.content + b"x", {}),
-            (200, None, b"x" * FONT_SIZE, {}),
-            (200, FONT_SIZE, self.content, {"Content-Encoding": "gzip"}),
+            (302, FONT_SIZE, self.content, {}, "download_http"),
+            (404, FONT_SIZE, self.content, {}, "download_http"),
+            (200, 7, b"invalid", {}, "download_length"),
+            (200, None, self.content + b"x", {}, "download_length"),
+            (200, None, b"x" * FONT_SIZE, {}, "download_digest"),
+            (200, None, self.content[:-1], {}, "download_length"),
+            (
+                200,
+                FONT_SIZE,
+                self.content,
+                {"Content-Encoding": "gzip"},
+                "download_http",
+            ),
         )
-        for status, length, payload, headers in cases:
-
-            class Content:
-                async def iter_chunked(inner, size):
-                    for offset in range(0, len(payload), size):
-                        yield payload[offset : offset + size]
-
-            class Response:
-                async def __aenter__(inner):
-                    return inner
-
-                async def __aexit__(inner, *args):
-                    pass
-
-            response = Response()
-            response.status, response.content_length = status, length
-            response.headers, response.content = headers, Content()
-
-            class Session:
-                def __init__(inner, **kwargs):
-                    pass
-
-                async def __aenter__(inner):
-                    return inner
-
-                async def __aexit__(inner, *args):
-                    pass
-
-                def get(inner, *args, **kwargs):
-                    return response
-
-            with patch("aiohttp.ClientSession", Session):
+        for status, length, payload, headers, error in cases:
+            response = DownloadResponse(
+                payload, status=status, length=length, headers=headers
+            )
+            session = DownloadSession([response] * 3)
+            with patch("aiohttp.ClientSession", session):
                 await self.manager._download()
-            self.assertEqual(self.manager.status()["error"], "download_failed")
+            self.assertEqual(self.manager.status()["error"], error)
+            self.assertEqual([call[0] for call in session.calls], list(fonts.FONT_URLS))
             self.assertEqual(path.read_bytes(), self.content)
             self.assertFalse(list(self.root.glob(".font-*")))
+
+    async def test_digest_mismatch_then_http_failure_uses_last_source(self):
+        session = DownloadSession(
+            [
+                DownloadResponse(b"x" * FONT_SIZE),
+                DownloadResponse(status=503),
+                DownloadResponse(self.content),
+            ]
+        )
+        self.manager._closed = False
+        with patch("aiohttp.ClientSession", session):
+            await self.manager._download()
+        self.assertEqual([call[0] for call in session.calls], list(fonts.FONT_URLS))
+        self.assertEqual(self.manager.status()["state"], "ready")
+        self.assertEqual((self.root / FONT_FILENAME).read_bytes(), self.content)
+
+    async def test_all_connections_fail_and_repeated_retry_is_deduplicated(self):
+        session = DownloadSession(
+            [aiohttp.ClientConnectionError("private proxy secret")] * 6
+        )
+        self.manager._closed = False
+        with patch("aiohttp.ClientSession", session):
+            self.manager.retry()
+            first = self.manager._task
+            self.manager.retry()
+            self.assertIs(self.manager._task, first)
+            await first
+            self.assertEqual(self.manager.status()["error"], "download_connection")
+            self.manager.retry()
+            second = self.manager._task
+            self.manager.retry()
+            self.assertIs(self.manager._task, second)
+            self.assertIsNot(first, second)
+            await second
+        self.assertEqual([call[0] for call in session.calls], list(fonts.FONT_URLS) * 2)
+        self.assertNotIn("secret", repr(self.manager.status()))
+        self.assertFalse((self.root / FONT_FILENAME).exists())
+
+    async def test_source_timeout_leaves_next_source_opportunity(self):
+        class Blocked(DownloadResponse):
+            async def __aenter__(self):
+                await asyncio.Event().wait()
+
+        session = DownloadSession([Blocked(), DownloadResponse(self.content)])
+        self.manager._closed = False
+        with (
+            patch("aiohttp.ClientSession", session),
+            patch.object(fonts, "DOWNLOAD_SOURCE_SECONDS", 0.01),
+        ):
+            await self.manager._download()
+        self.assertEqual(len(session.calls), 2)
+        self.assertEqual(self.manager.status()["state"], "ready")
+
+    async def test_each_slow_source_gets_one_bounded_opportunity(self):
+        class Blocked(DownloadResponse):
+            async def __aenter__(self):
+                await asyncio.Event().wait()
+
+        session = DownloadSession([Blocked()] * 3)
+        self.manager._closed = False
+        loop = asyncio.get_running_loop()
+        before = loop.time()
+        with (
+            patch("aiohttp.ClientSession", session),
+            patch.object(fonts, "DOWNLOAD_SOURCE_SECONDS", 0.05),
+            patch.object(fonts, "DOWNLOAD_TOTAL_SECONDS", 0.3),
+        ):
+            await self.manager._download()
+        self.assertLess(loop.time() - before, 0.5)
+        self.assertEqual([call[0] for call in session.calls], list(fonts.FONT_URLS))
+        self.assertEqual(self.manager.status()["error"], "download_timeout")
+        self.assertFalse((self.root / FONT_FILENAME).exists())
+
+    async def test_total_deadline_stops_round_even_with_long_source_timeout(self):
+        class Blocked(DownloadResponse):
+            async def __aenter__(self):
+                await asyncio.Event().wait()
+
+        session = DownloadSession([Blocked()] * 3)
+        self.manager._closed = False
+        loop = asyncio.get_running_loop()
+        before = loop.time()
+        with (
+            patch("aiohttp.ClientSession", session),
+            patch.object(fonts, "DOWNLOAD_SOURCE_SECONDS", 1),
+            patch.object(fonts, "DOWNLOAD_TOTAL_SECONDS", 0.05),
+        ):
+            await self.manager._download()
+        self.assertLess(loop.time() - before, 0.5)
+        self.assertEqual([call[0] for call in session.calls], [fonts.FONT_URLS[0]])
+        self.assertEqual(self.manager.status()["error"], "download_timeout")
+
+    async def test_cancel_download_does_not_attempt_backups_or_publish(self):
+        entered = asyncio.Event()
+
+        class Blocked(DownloadResponse):
+            async def iter_chunked(self, size):
+                yield b"partial"
+                entered.set()
+                await asyncio.Event().wait()
+
+        session = DownloadSession([Blocked()])
+        with patch("aiohttp.ClientSession", session):
+            self.manager.start()
+            await entered.wait()
+            task = self.manager._task
+            await self.manager.close()
+        self.assertTrue(task.cancelled())
+        self.assertEqual(len(session.calls), 1)
+        self.assertEqual(self.manager.status()["state"], "stopped")
+        self.assertFalse((self.root / FONT_FILENAME).exists())
+
+    async def test_upload_joins_actual_downloader_before_atomic_publication(self):
+        entered, released = asyncio.Event(), asyncio.Event()
+
+        class Blocked(DownloadResponse):
+            async def __aenter__(self):
+                entered.set()
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    released.set()
+
+        session = DownloadSession([Blocked()])
+        with patch("aiohttp.ClientSession", session):
+            self.manager.start()
+            await entered.wait()
+            status = await self.manager.upload(
+                self.content, lambda: self.assertTrue(released.is_set())
+            )
+            self.manager.retry()
+        self.assertEqual(status["state"], "ready")
+        self.assertEqual(len(session.calls), 1)
+        self.assertEqual((self.root / FONT_FILENAME).read_bytes(), self.content)
+        self.assertFalse(list(self.root.glob(".font-*")))
+
+    async def test_atomic_write_failure_preserves_resource_and_does_not_redownload(
+        self,
+    ):
+        self.root.mkdir(parents=True)
+        path = self.root / FONT_FILENAME
+        path.write_bytes(self.content)
+        session = DownloadSession([DownloadResponse(self.content)])
+        self.manager._closed = False
+        with (
+            patch("aiohttp.ClientSession", session),
+            patch.object(fonts.os, "replace", side_effect=OSError("private path")),
+        ):
+            await self.manager._download()
+        self.assertEqual(self.manager.status()["error"], "download_write")
+        self.assertEqual(len(session.calls), 1)
+        self.assertEqual(path.read_bytes(), self.content)
+        self.assertFalse(list(self.root.glob(".font-*")))
 
     async def test_close_fences_upload_waiting_for_lock(self):
         self.manager._closed = False
