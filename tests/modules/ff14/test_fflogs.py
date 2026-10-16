@@ -617,9 +617,9 @@ class FFLogsHandlerTests(unittest.IsolatedAsyncioTestCase):
             },
         )
         self.assertIs(result.status, ResultStatus.PARTIAL_SUCCESS)
-        # Single returned-zone scope does not request an unverified catalog.
-        self.assertEqual(len(http.requests), 6)
-        self.assertFalse(
+        # Restored automatic metadata may fail independently of usable rows.
+        self.assertEqual(len(http.requests), 7)
+        self.assertTrue(
             any(
                 "FF14OutputMetadataShape" in json.loads(request.body)["query"]
                 for request in http.requests

@@ -18,6 +18,7 @@ OPERATIONS = frozenset(
         "FF14PublicCharacterZone",
         "FF14CatalogCharacter",
         "FF14MetadataState",
+        "FF14RequestSummary",
     }
 )
 
@@ -84,6 +85,49 @@ def _type(value, depth=0):
 
 def _safe_payload(operation, body):
     """Validate a closed diagnostic wire format without importing game code."""
+    if operation == "FF14RequestSummary":
+        operations = {
+            "UniversalisWorlds",
+            "UniversalisDataCenters",
+            "OtherBusinessRead",
+            "FF14WorldRegions",
+            "FF14WorldServers",
+            "FF14PublicCharacter",
+            "FF14PublicCharacterZone",
+            "FF14OutputMetadataShape",
+            "FF14CharacterMetadata",
+            "FF14OutputMetadata",
+            "FF14CatalogCharacter",
+        }
+
+        def count(value):
+            return type(value) is int and 0 <= value <= 2147483647
+
+        def entry(value):
+            return _object(
+                value,
+                {
+                    "operation": lambda item: item in operations,
+                    **dict.fromkeys(
+                        ("attempts", "returned", "failed", "cancelled", "elapsed_ms"),
+                        count,
+                    ),
+                    "cache": lambda item: item
+                    in {"module_hit", "module_miss", "unknown"},
+                },
+            )
+
+        return _object(
+            body,
+            {
+                "kind": lambda item: item == "module_source_http_fetch",
+                "operations": lambda item: _list(item, entry, 11),
+                "elapsed_ms": count,
+                "underlying_http_cache": lambda item: item == "unknown",
+                "host_oauth": lambda item: item == "unobserved",
+                "network_attempts": lambda item: item == "unknown",
+            },
+        )
     if operation == "FF14MetadataState":
         return _object(
             body,
@@ -165,14 +209,42 @@ def _safe_payload(operation, body):
         def encounter(value):
             return _object(value, {"id": _number, "name": _text}, {"zone": owner})
 
+        def difficulty(value):
+            return _object(
+                value,
+                {"id": _number, "name": _text},
+                {
+                    "sizes": lambda item: item is None
+                    or _list(
+                        item,
+                        lambda size: type(size) is int and 0 <= size <= 2147483647,
+                        32,
+                    )
+                },
+            )
+
+        def partition(value):
+            return _object(
+                value,
+                {
+                    "id": _number,
+                    "name": _text,
+                    "default": lambda item: type(item) is bool,
+                },
+            )
+
         def zone(value):
             return _object(
                 value,
                 {
                     "id": _number,
                     "name": _text,
-                    "difficulties": lambda item: _list(item, _named, 32),
+                    "difficulties": lambda item: _list(item, difficulty, 32),
                     "encounters": lambda item: _list(item, encounter, 10000),
+                },
+                {
+                    "frozen": lambda item: item is None or type(item) is bool,
+                    "partitions": lambda item: _list(item, partition, 64),
                 },
             )
 
@@ -264,7 +336,7 @@ _FIELDS = frozenset(
 
 
 class FFLogsDiagnostics(logging.Handler):
-    """At most two explicit command correlations per runtime lifetime."""
+    """At most three explicit command correlations per runtime lifetime."""
 
     def __init__(self, send=None):
         super().__init__(logging.INFO)
@@ -352,7 +424,10 @@ class FFLogsDiagnostics(logging.Handler):
             type(event["cached"]) is not bool
             or type(event["truncated"]) is not bool
             or not (
-                (event["cached"] or operation == "FF14MetadataState")
+                (
+                    event["cached"]
+                    or operation in {"FF14MetadataState", "FF14RequestSummary"}
+                )
                 and event["status"] is None
                 or type(event["status"]) is int
                 and 100 <= event["status"] <= 599
@@ -362,12 +437,12 @@ class FFLogsDiagnostics(logging.Handler):
         filters = event["filters"]
         if (
             not isinstance(filters, dict)
-            or len(filters) > 28
+            or len(filters) > 40
             or any(
                 not isinstance(key, str)
                 or not (
                     key in {"metric", "zoneId", "difficulty", "partition"}
-                    or re.fullmatch(r"[zd][0-9]{1,2}", key)
+                    or re.fullmatch(r"[zdp](?:[0-9]|1[01])", key)
                 )
                 or not (
                     type(value) is int
@@ -394,9 +469,11 @@ class FFLogsDiagnostics(logging.Handler):
             or not piece.isascii()
         ):
             return
-        if correlation not in self._correlations and len(self._correlations) >= 2:
+        if correlation not in self._correlations and len(self._correlations) >= 3:
             return
-        key = (correlation, operation, event["cached"])
+        # Fixed closed numeric alias filters identify batches; response order
+        # and timestamps do not. Replay of the same batch remains suppressed.
+        key = (correlation, operation, event["cached"], tuple(sorted(filters.items())))
         if key in self._seen:
             return
         if self._bytes + len(piece) > MAX_BYTES or self._chunks >= MAX_CHUNKS - 1:

@@ -64,9 +64,18 @@ def realm_from_catalog(catalog, server_label: str) -> str:
     raise QueryResolutionError("该服务器所属区域尚未支持。", ErrorCode.UNSUPPORTED)
 
 
-async def resolve_realm(http, cache, server_label: str, *, deadline: float) -> str:
+async def resolve_realm(
+    http, cache, server_label: str, *, deadline: float, metrics=None
+) -> str:
     from .market_sources import MarketSourceClient
 
     session = MarketSourceClient(None).start_bound(http, cache, deadline=deadline)
     public = await session.catalog()
+    if metrics is not None and len(public.provenance) == 2:
+        for operation, provenance in zip(
+            ("UniversalisWorlds", "UniversalisDataCenters"),
+            public.provenance,
+            strict=True,
+        ):
+            metrics.cache(operation, provenance.cached)
     return realm_from_catalog(public.catalog, server_label)

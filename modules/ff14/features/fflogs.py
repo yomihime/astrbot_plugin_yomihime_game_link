@@ -8,6 +8,7 @@ import logging
 import math
 import re
 from dataclasses import replace
+from decimal import Decimal
 from html.parser import HTMLParser
 from time import monotonic
 from urllib.parse import quote
@@ -36,6 +37,7 @@ from .fflogs_cards import (
     PROVIDER_CATALOG_SCOPE,
     character_card,
     percentile_text,
+    ranking_period,
 )
 from .fflogs_catalog import (
     FFLOGS_CN_SOURCE,
@@ -43,9 +45,13 @@ from .fflogs_catalog import (
     GRAPHQL_PATH,
     FFLogsCatalog,
     FFLogsGraphQLError,
+    normalized_encounter_name,
     parse_graphql_envelope,
     resolve_output_metadata,
+    savage_expansion,
     select_character_zones,
+    ultimate_group_key,
+    ultimate_group_name,
 )
 from .fflogs_models import (
     CharacterRanking,
@@ -53,6 +59,8 @@ from .fflogs_models import (
     FFLogsPayloadError,
     OutputMetadata,
     PublicCharacter,
+    RankingOrigin,
+    RankingSelection,
     parse_public_character,
     parse_rankings,
 )
@@ -68,7 +76,8 @@ MAX_HTML_TAGS = 20_000
 METADATA_DEADLINE_SECONDS = 5
 METADATA_CACHE_SECONDS = 900
 METADATA_FAILURE_CACHE_SECONDS = 60
-MAX_CHARACTER_ZONES = 12
+MAX_CHARACTER_ZONES = 48
+CATALOG_BATCH_SIZE = 12
 MAX_CHARACTER_ROWS = 40
 CATALOG_RANKING_DEADLINE_SECONDS = 15
 CATALOG_DIAGNOSTIC_BYTES = 16_384
@@ -128,7 +137,9 @@ class FFLogsCharacterLookup:
         self._metadata_cache.clear()
         self._chat_pending.close()
 
-    async def _character_metadata(self, scope, source_id, lifecycle, evidence=None):
+    async def _character_metadata(
+        self, scope, source_id, lifecycle, evidence=None, *, deadline=None, metrics=None
+    ):
         """Enrich actual rows using the existing fixed schema/catalog contract.
 
         Cache is per realm/source and module lifetime. A failed enrichment must
@@ -136,6 +147,8 @@ class FFLogsCharacterLookup:
         """
         cached = self._metadata_cache.get(source_id)
         if cached is not None and cached[0] > monotonic():
+            if metrics is not None:
+                metrics.cache("FF14CharacterMetadata", True)
             if evidence is not None:
                 evidence.observe(
                     "FF14MetadataState", {"state": cached[2]}, cached=True, status=None
@@ -157,8 +170,18 @@ class FFLogsCharacterLookup:
 
         metadata = None
         state = "unavailable_internal"
+        if metrics is not None:
+            metrics.cache("FF14CharacterMetadata", False)
         try:
-            async with asyncio.timeout(METADATA_DEADLINE_SECONDS):
+            remaining = min(
+                METADATA_DEADLINE_SECONDS,
+                max(0, deadline - monotonic())
+                if deadline is not None
+                else METADATA_DEADLINE_SECONDS,
+            )
+            if remaining <= 0:
+                raise TimeoutError
+            async with asyncio.timeout(remaining):
                 metadata = await FFLogsCatalog(
                     scope.http,
                     source_id,
@@ -205,183 +228,161 @@ class FFLogsCharacterLookup:
         identity_variables,
         lifecycle,
         evidence=None,
+        *,
+        deadline=None,
     ):
-        targets = select_character_zones(metadata, character.zone_id)
-        warnings = []
-        if not any(category == "ultimate" for _, _, category in targets):
-            warnings.append("未取得可核验的绝境战目录，本次结果不包含完整绝境战范围。")
-        if not any(category == "savage" for _, _, category in targets):
-            warnings.append(
-                "默认副本所属资料片未取得零式目录记录，未自动改选旧资料片。"
-            )
-        if not targets:
-            return replace(character, catalog_warnings=tuple(warnings))
-        if len(targets) > MAX_CHARACTER_ZONES:
-            warnings.append(f"目录范围超过本次 {MAX_CHARACTER_ZONES} 个副本查询上限。")
-        targets = _bounded_catalog_targets(targets)
-        variables = {
-            key: identity_variables[key]
-            for key in ("name", "serverSlug", "serverRegion", "metric")
-        }
-        arguments = []
-        aliases = []
-        for index, (zone, difficulty, _) in enumerate(targets):
-            variables[f"z{index}"] = zone.zone_id
-            variables[f"d{index}"] = difficulty.difficulty_id
-            arguments.extend((f"$z{index}: Int!", f"$d{index}: Int!"))
-            aliases.append(
-                f"z{index}: zoneRankings(zoneID: $z{index}, difficulty: $d{index}, metric: $metric)"
-            )
-        query = (
-            "query FF14CatalogCharacter($name: String!, $serverSlug: String!, "
-            "$serverRegion: String!, $metric: CharacterPageRankingMetricType!, "
-            + ", ".join(arguments)
-            + ") { characterData { character(name: $name, serverSlug: $serverSlug, "
-            "serverRegion: $serverRegion) { id name hidden server { name } "
-            + " ".join(aliases)
-            + " } } }"
+        """Query bounded batches; every catalog target retains an outcome."""
+        targets = _catalog_query_targets(
+            select_character_zones(metadata, character.zone_id)
         )
-        try:
-            if self._lifecycle is not lifecycle:
-                raise ServiceUnavailable()
-            async with asyncio.timeout(CATALOG_RANKING_DEADLINE_SECONDS):
-                response = await scope.http.fetch(
-                    HttpRequest(
-                        source_id,
-                        GRAPHQL_PATH,
-                        method="POST",
-                        body=_graphql_body(query, variables),
-                        headers={"Content-Type": "application/json"},
-                    )
-                )
-            if self._lifecycle is not lifecycle:
-                raise ServiceUnavailable()
-            data = parse_graphql_envelope(
-                response.body, exact_numbers=True, allow_partial_errors=True
-            )
-            container = data.get("characterData")
-            value = container.get("character") if isinstance(container, dict) else None
-            if isinstance(value, dict) and value.get("hidden") is True:
-                return replace(character, hidden=True, rankings=(), groups=())
-            if (
-                not isinstance(value, dict)
-                or value.get("id") != character.character_id
-                or value.get("name") != character.name
-                or value.get("hidden") is not False
-                or not isinstance(value.get("server"), dict)
-                or value["server"].get("name") != character.server_name
-            ):
-                raise FFLogsPayloadError("catalog character identity changed")
-            if evidence is not None:
-                evidence.observe(
-                    "FF14CatalogCharacter",
-                    data,
-                    status=response.status_code,
-                    filters=variables,
-                )
-        except (SourceHttpError, FFLogsGraphQLError, FFLogsPayloadError, TimeoutError):
-            return replace(
-                character,
-                catalog_warnings=tuple(warnings)
-                + ("部分副本查询失败，保留已取得的记录。",),
-            )
-        groups = []
-        known_encounter_ids = {
-            item.encounter_id
-            for catalog_zone in metadata.zones
-            for item in catalog_zone.encounters
-        }
-        for index, (zone, difficulty, category) in enumerate(targets):
-            try:
-                selection = parse_rankings(value.get(f"z{index}"))
-                if (
-                    selection.zone_id != zone.zone_id
-                    or selection.difficulty_id != difficulty.difficulty_id
-                    or selection.metric != character.metric
-                ):
-                    raise FFLogsPayloadError("catalog ranking selection changed")
-                if len({row.encounter_id for row in selection.rows}) != len(
-                    selection.rows
-                ):
-                    raise FFLogsPayloadError("catalog encounter identity is duplicated")
-                expected = {item.encounter_id for item in zone.encounters}
-                unknown_count = sum(
-                    row.encounter_id not in known_encounter_ids
-                    for row in selection.rows
-                )
-                if unknown_count:
-                    warnings.append(
-                        f"{zone.name}：返回 {unknown_count} 项目录未知记录，本次结果可能不完整。"
-                    )
-                rankings = {
-                    row.encounter_id: row
-                    for row in selection.rows
-                    if row.encounter_id in expected
+        planned = _bounded_catalog_targets(targets)
+        pairs = tuple(dict.fromkeys(_target_key(target) for target in planned))
+        outcomes = {}
+        stop_at = min(
+            monotonic() + CATALOG_RANKING_DEADLINE_SECONDS,
+            deadline if deadline is not None else float("inf"),
+        )
+        semaphore = asyncio.Semaphore(2)
+
+        async def batch(keys):
+            async with semaphore:
+                if self._lifecycle is not lifecycle:
+                    raise ServiceUnavailable()
+                if monotonic() >= stop_at:
+                    return {key: "not_queried" for key in keys}
+                variables = {
+                    key: identity_variables[key]
+                    for key in ("name", "serverSlug", "serverRegion", "metric")
                 }
-                rows = tuple(
-                    rankings.get(item.encounter_id)
-                    or CharacterRanking(item.encounter_id, item.name, None, None, None)
-                    for item in zone.encounters
-                )
-                groups.append(
-                    CharacterRankingGroup(
-                        zone.zone_id,
-                        zone.name,
-                        difficulty.difficulty_id,
-                        selection.partition,
-                        category,
-                        zone.expansion_name or "—",
-                        rows,
+                arguments, aliases = [], []
+                for index, (zone_id, difficulty_id, partition_id) in enumerate(keys):
+                    variables[f"z{index}"] = zone_id
+                    variables[f"d{index}"] = difficulty_id
+                    arguments.extend((f"$z{index}: Int!", f"$d{index}: Int!"))
+                    if partition_id is not None:
+                        variables[f"p{index}"] = partition_id
+                        arguments.append(f"$p{index}: Int!")
+                    partition_argument = (
+                        f", partition: $p{index}" if partition_id is not None else ""
                     )
+                    aliases.append(
+                        f"z{index}: zoneRankings(zoneID: $z{index}, difficulty: $d{index}, metric: $metric{partition_argument})"
+                    )
+                query = (
+                    "query FF14CatalogCharacter($name: String!, $serverSlug: String!, "
+                    "$serverRegion: String!, $metric: CharacterPageRankingMetricType!, "
+                    + ", ".join(arguments)
+                    + ") { characterData { character(name: $name, serverSlug: $serverSlug, "
+                    "serverRegion: $serverRegion) { id name hidden server { name } "
+                    + " ".join(aliases)
+                    + " } } }"
                 )
-            except FFLogsPayloadError:
-                warnings.append(f"{zone.name}：本次未取得可用记录。")
-                if (zone.zone_id, difficulty.difficulty_id) == (
-                    character.zone_id,
-                    character.difficulty_id,
+                try:
+                    async with asyncio.timeout(max(0, stop_at - monotonic())):
+                        response = await scope.http.fetch(
+                            HttpRequest(
+                                source_id,
+                                GRAPHQL_PATH,
+                                method="POST",
+                                body=_graphql_body(query, variables),
+                                headers={"Content-Type": "application/json"},
+                            )
+                        )
+                    if self._lifecycle is not lifecycle:
+                        raise ServiceUnavailable()
+                    data = parse_graphql_envelope(
+                        response.body, exact_numbers=True, allow_partial_errors=True
+                    )
+                    container = data.get("characterData")
+                    value = (
+                        container.get("character")
+                        if isinstance(container, dict)
+                        else None
+                    )
+                    if isinstance(value, dict) and value.get("hidden") is True:
+                        return {key: "hidden" for key in keys}
+                    if (
+                        not isinstance(value, dict)
+                        or value.get("id") != character.character_id
+                        or value.get("name") != character.name
+                        or value.get("hidden") is not False
+                        or not isinstance(value.get("server"), dict)
+                        or value["server"].get("name") != character.server_name
+                    ):
+                        raise FFLogsPayloadError("catalog character identity changed")
+                    if evidence is not None:
+                        evidence.observe(
+                            "FF14CatalogCharacter",
+                            data,
+                            status=response.status_code,
+                            filters=variables,
+                        )
+                except (
+                    SourceHttpError,
+                    FFLogsGraphQLError,
+                    FFLogsPayloadError,
+                    TimeoutError,
                 ):
-                    groups.append(
-                        CharacterRankingGroup(
-                            zone.zone_id,
-                            zone.name,
-                            difficulty.difficulty_id,
-                            character.partition,
-                            category,
-                            zone.expansion_name or "—",
-                            character.rankings,
-                        )
-                    )
-                else:
-                    groups.append(
-                        CharacterRankingGroup(
-                            zone.zone_id,
-                            zone.name,
-                            difficulty.difficulty_id,
-                            -1,
-                            category,
-                            zone.expansion_name or "—",
-                            tuple(
-                                CharacterRanking(
-                                    item.encounter_id,
-                                    item.name,
-                                    None,
-                                    None,
-                                    None,
-                                    source_error=True,
-                                )
-                                for item in zone.encounters
-                            ),
-                        )
-                    )
-        if not groups:
-            return replace(character, catalog_warnings=tuple(warnings))
-        groups.sort(key=lambda group: group.category != "ultimate")
-        return replace(
-            character,
-            groups=tuple(groups),
-            rankings=tuple(row for group in groups for row in group.rankings),
-            catalog_warnings=tuple(warnings),
-        )
+                    return {key: "failed" for key in keys}
+                except (ServiceUnavailable, PermissionError):
+                    raise
+                except Exception:
+                    return {key: "failed" for key in keys}
+                result = {}
+                for index, key in enumerate(keys):
+                    try:
+                        selection = parse_rankings(value.get(f"z{index}"))
+                        categories = {
+                            category
+                            for zone, difficulty, category, partition_id in targets
+                            if (zone.zone_id, difficulty.difficulty_id, partition_id)
+                            == key
+                        }
+                        if "savage" in categories and (
+                            selection.size != 8 or selection.difficulty_id != key[1]
+                        ):
+                            result[key] = (
+                                "excluded_size"
+                                if selection.size != 8
+                                else "excluded_difficulty"
+                            )
+                            continue
+                        if (
+                            selection.zone_id != key[0]
+                            or selection.difficulty_id != key[1]
+                            or (key[2] is not None and selection.partition != key[2])
+                            or selection.metric != character.metric
+                            or len({r.encounter_id for r in selection.rows})
+                            != len(selection.rows)
+                        ):
+                            raise FFLogsPayloadError("catalog selection changed")
+                        if not _selection_membership_matches(
+                            metadata, key[0], selection
+                        ):
+                            result[key] = "failed_membership"
+                            continue
+                        result[key] = selection
+                    except FFLogsPayloadError:
+                        result[key] = "failed"
+                return result
+
+        tasks = [
+            asyncio.create_task(batch(pairs[i : i + CATALOG_BATCH_SIZE]))
+            for i in range(0, len(pairs), CATALOG_BATCH_SIZE)
+        ]
+        try:
+            # gather preserves the requested target order despite completion order.
+            for outcome in await asyncio.gather(*tasks):
+                outcomes.update(outcome)
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+        if any(value == "hidden" for value in outcomes.values()):
+            return replace(character, hidden=True, rankings=(), groups=())
+        return _assemble_catalog_rankings(character, metadata, targets, outcomes)
 
     async def invoke(
         self, context: InvocationView, parameters: JsonObject
@@ -402,13 +403,23 @@ class FFLogsCharacterLookup:
             from .fflogs_chat import invoke_character_tool
 
             return await invoke_character_tool(self, context, parameters)
+        from .fflogs_evidence import RequestMetrics
+
+        metrics = RequestMetrics() if explicit_command else None
         try:
             async with asyncio.timeout(30):
                 return await self._execute(
-                    context, parameters, capture_evidence=explicit_command
+                    context,
+                    parameters,
+                    capture_evidence=explicit_command,
+                    deadline=monotonic() + 29.5,
+                    metrics=metrics,
                 )
         except TimeoutError:
             return _error(ErrorCode.UPSTREAM_ERROR, "FFLogs 查询超时，请稍后重试。")
+        finally:
+            if metrics is not None:
+                metrics.finish()
 
     async def _execute(
         self,
@@ -421,12 +432,22 @@ class FFLogsCharacterLookup:
         resolved_server=None,
         server_candidates=None,
         capture_evidence=False,
+        deadline=None,
+        metrics=None,
     ) -> CapabilityResult:
         lifecycle = self._lifecycle
         inputs = _character_inputs(parameters)
         if isinstance(inputs, CapabilityResult):
             return inputs
         realm, server_label, name, server_hint, metric, zone_tuple = inputs
+        if metrics is not None:
+            from types import SimpleNamespace
+
+            if scope is None:
+                scope = await self._services.scopes.bind(context)
+            scope = SimpleNamespace(
+                http=metrics.wrap(scope.http), cache=getattr(scope, "cache", None)
+            )
         if realm is None:
             from ..query_resolution import QueryResolutionError
             from .fflogs_server import resolve_realm
@@ -439,7 +460,8 @@ class FFLogsCharacterLookup:
                     scope.http,
                     getattr(scope, "cache", None),
                     server_label,
-                    deadline=monotonic() + 30,
+                    deadline=deadline if deadline is not None else monotonic() + 30,
+                    metrics=metrics,
                 )
                 if self._lifecycle is not lifecycle:
                     raise ServiceUnavailable()
@@ -454,6 +476,8 @@ class FFLogsCharacterLookup:
         from .fflogs_evidence import Evidence
 
         evidence = Evidence(source_id) if capture_evidence else None
+        if metrics is not None:
+            metrics.evidence = evidence
         credential_state = await _credential_state(self._services, realm)
 
         def source_error(error):
@@ -631,14 +655,28 @@ class FFLogsCharacterLookup:
             await guard()
         metadata = None
         if not tool and zone_tuple is None:
-            # The real provider schema proves expansion/encounter ownership,
-            # not content type, regional releases or canonical raid ordering.
-            # Do not query or label speculative targets or add catalog blanks.
-            # Existing cached metadata may supply an exact zone name only.
-            cached = self._metadata_cache.get(source_id)
-            if cached is not None and cached[0] > monotonic():
-                metadata = cached[1]
-            character = replace(character, groups=())
+            try:
+                metadata = await self._character_metadata(
+                    scope,
+                    source_id,
+                    lifecycle,
+                    evidence,
+                    deadline=deadline,
+                    metrics=metrics,
+                )
+                if metadata is not None and metadata.character_catalog_verified:
+                    character = await self._catalog_rankings(
+                        scope,
+                        source_id,
+                        character,
+                        metadata,
+                        variables,
+                        lifecycle,
+                        evidence,
+                        deadline=deadline,
+                    )
+            except (ServiceUnavailable, PermissionError):
+                return _error(ErrorCode.MODULE_UNAVAILABLE, "FFLogs 来源服务暂不可用。")
         result = _character_result(
             character,
             host,
@@ -665,20 +703,292 @@ class FFLogsCharacterLookup:
         return result
 
 
+def _catalog_query_targets(targets):
+    return tuple(
+        (zone, difficulty, category, partition)
+        for zone, difficulty, category in targets
+        for partition in (
+            tuple(item.partition_id for item in zone.partitions)
+            if category == "ultimate" and zone.partitions
+            else (None,)
+        )
+    )
+
+
+def _target_key(target):
+    return (
+        target[0].zone_id,
+        target[1].difficulty_id,
+        target[3] if len(target) > 3 else None,
+    )
+
+
 def _bounded_catalog_targets(targets):
-    """Keep both verified categories represented without increasing the budget."""
-    if len(targets) <= MAX_CHARACTER_ZONES:
-        return targets
-    reserved = {
-        next(index for index, target in enumerate(targets) if target[2] == category)
-        for category in ("ultimate", "savage")
-        if any(target[2] == category for target in targets)
+    """Cover distinct names/tiers before spending the budget on historical IDs."""
+    buckets = {}
+    for index, target in enumerate(targets):
+        zone, _, category = target[:3]
+        keys = (
+            tuple(
+                (category, ultimate_group_key(zone.name, item.name))
+                for item in zone.encounters
+            )
+            if category == "ultimate"
+            else ((category, zone.zone_id),)
+        )
+        for key in keys:
+            buckets.setdefault(key, []).append(index)
+    selected = {}
+    categories = {
+        kind: [
+            indexes for (category, _), indexes in buckets.items() if category == kind
+        ]
+        for kind in ("ultimate", "savage")
     }
-    for index in range(len(targets)):
-        if len(reserved) >= MAX_CHARACTER_ZONES:
-            break
-        reserved.add(index)
-    return tuple(target for index, target in enumerate(targets) if index in reserved)
+    fair_buckets = [
+        categories[kind][index]
+        for index in range(max(map(len, categories.values()), default=0))
+        for kind in ("ultimate", "savage")
+        if index < len(categories[kind])
+    ]
+    for depth in range(max((len(items) for items in fair_buckets), default=0)):
+        for indexes in fair_buckets:
+            if depth < len(indexes) and len(selected) < MAX_CHARACTER_ZONES:
+                selected.setdefault(_target_key(targets[indexes[depth]]), None)
+    # Query order must retain this fair round-robin, not the original catalog
+    # order. Assembly separately iterates `targets` for source display order.
+    return tuple(
+        target for key in selected for target in targets if _target_key(target) == key
+    )
+
+
+def _selection_membership_matches(metadata, zone_id, selection):
+    owners = {
+        item.encounter_id
+        for zone in metadata.zones
+        if zone.zone_id == zone_id
+        for item in zone.encounters
+        if item.zone_id == zone_id
+    }
+    return all(row.encounter_id in owners for row in selection.rows)
+
+
+def _assemble_catalog_rankings(character, metadata, targets, outcomes):
+    """Select entire rows using raw percentiles; never combine source periods."""
+    warnings = []
+    groups = []
+    ultimate = {}
+    selected_expansion, expansion_known = savage_expansion(metadata, character.zone_id)
+    if not expansion_known:
+        warnings.append("部分零式目录人数或目标资料片未知，未据此猜测或回退。")
+    if any(
+        category == "ultimate" and not zone.partitions
+        for zone, _, category, _ in targets
+    ):
+        warnings.append(
+            "部分绝境战未提供分区时期目录，仅查询来源默认范围，历史范围可能不完整。"
+        )
+    anchor = next(
+        (zone for zone in metadata.zones if zone.zone_id == character.zone_id), None
+    )
+    if (
+        anchor is not None
+        and selected_expansion is not None
+        and selected_expansion != anchor.expansion_id
+    ):
+        warnings.append(
+            "默认副本所属资料片目录无合格八人零式，已按来源资料片列表顺序回退。"
+        )
+    membership_names = []
+    failed_names = []
+    states = {"failed": 0, "not_queried": 0}
+    excluded = []
+    for zone, difficulty, category, requested_partition in targets:
+        selection = outcomes.get(
+            (zone.zone_id, difficulty.difficulty_id, requested_partition), "not_queried"
+        )
+        state = selection if isinstance(selection, str) else "record"
+        membership_failed = state == "failed_membership" or (
+            not isinstance(selection, str)
+            and not _selection_membership_matches(metadata, zone.zone_id, selection)
+        )
+        if membership_failed:
+            selection, state = "failed", "failed"
+            membership_names.append(zone.name)
+        if state in {"excluded_size", "excluded_difficulty"}:
+            excluded.append((zone.name, state))
+            continue
+        if state in states:
+            states[state] += 1
+            if state == "failed":
+                failed_names.append(zone.name)
+            if (
+                not membership_failed
+                and zone.zone_id == character.zone_id
+                and difficulty.difficulty_id == character.difficulty_id
+                and (
+                    requested_partition is None
+                    or requested_partition == character.partition
+                )
+                and (category != "savage" or character.size == 8)
+            ):
+                selection = RankingSelection(
+                    character.metric,
+                    character.zone_id,
+                    character.difficulty_id,
+                    character.partition,
+                    character.size,
+                    character.rankings,
+                )
+                state = "record"
+        rows = (
+            {}
+            if isinstance(selection, str)
+            else {row.encounter_id: row for row in selection.rows}
+        )
+        partition = (
+            (requested_partition if requested_partition is not None else -1)
+            if isinstance(selection, str)
+            else selection.partition
+        )
+        partition_name = next(
+            (item.name for item in zone.partitions if item.partition_id == partition),
+            None,
+        )
+        origin = RankingOrigin(
+            zone.zone_id,
+            difficulty.difficulty_id,
+            partition,
+            zone.expansion_name,
+            partition_name,
+        )
+        values = []
+        for encounter in zone.encounters:
+            row = rows.get(encounter.encounter_id)
+            if row is not None and normalized_encounter_name(
+                row.encounter_name
+            ) != normalized_encounter_name(encounter.name):
+                row = None
+                row_state = "failed"
+                states["failed"] += 1
+            else:
+                row_state = (
+                    state
+                    if state != "record"
+                    else "record"
+                    if row is not None
+                    else "no_records"
+                )
+            if row is None:
+                row = CharacterRanking(
+                    encounter.encounter_id,
+                    encounter.name,
+                    None,
+                    None,
+                    None,
+                    source_error=row_state == "failed",
+                    query_state=row_state,
+                )
+            row = replace(
+                row,
+                encounter_name=encounter.name,
+                origin=origin if row_state == "record" else None,
+                query_state=row_state,
+            )
+            values.append(row)
+            if category == "ultimate":
+                key = ultimate_group_key(zone.name, encounter.name)
+                ultimate.setdefault(key, []).append((zone, difficulty, row))
+        if category == "savage":
+            groups.append(
+                CharacterRankingGroup(
+                    zone.zone_id,
+                    zone.name,
+                    difficulty.difficulty_id,
+                    partition,
+                    category,
+                    zone.expansion_name or "—",
+                    tuple(values),
+                )
+            )
+    ultimate_groups = []
+    for entries in ultimate.values():
+        records = [entry for entry in entries if entry[2].query_state == "record"]
+        complete = all(
+            entry[2].query_state in {"record", "no_records"} for entry in entries
+        )
+
+        def order(entry):
+            zone, difficulty, row = entry
+            raw = (
+                row.rank_percent_exact
+                if row.rank_percent_exact is not None
+                else Decimal(str(row.rank_percent))
+                if row.rank_percent is not None
+                else Decimal(-1)
+            )
+            return (
+                -raw,
+                zone.zone_id,
+                row.encounter_id,
+                difficulty.difficulty_id,
+                row.origin.partition if row.origin is not None else -1,
+            )
+
+        if records:
+            chosen = min(records, key=order)
+        else:
+            # A failed/unqueried historical ID prevents a no-records claim.
+            priority = {"failed": 0, "not_queried": 1, "no_records": 2}
+            chosen = min(
+                entries,
+                key=lambda entry: (priority.get(entry[2].query_state, 3), order(entry)),
+            )
+        zone, difficulty, row = chosen
+        row = replace(
+            row,
+            encounter_name=ultimate_group_name(zone.name, row.encounter_name),
+            history_complete=complete,
+        )
+        ultimate_groups.append(
+            CharacterRankingGroup(
+                zone.zone_id,
+                zone.name,
+                difficulty.difficulty_id,
+                row.origin.partition if row.origin is not None else -1,
+                "ultimate",
+                zone.expansion_name or "—",
+                (row,),
+            )
+        )
+    if not ultimate_groups:
+        warnings.append("未取得符合来源完整命名约定及归属校验的绝境战目录。")
+    if not groups:
+        warnings.append("未取得可核验的八人零式目录；未以角色成绩决定回退。")
+    if states["failed"]:
+        labels = "、".join(dict.fromkeys(failed_names))[:160]
+        warnings.append(
+            f"{labels}：{states['failed']} 个副本范围查询失败；保留已取得记录，历史最佳可能不完整。"
+        )
+    if states["not_queried"]:
+        warnings.append(
+            f"{states['not_queried']} 个副本范围受目标或时间上限限制未查询；结果不完整。"
+        )
+    if membership_names:
+        labels = "、".join(dict.fromkeys(membership_names))[:160]
+        warnings.append(f"{labels}：来源记录的副本归属不一致，该范围未展示成绩。")
+    if excluded:
+        labels = "、".join(dict.fromkeys(name for name, _ in excluded))[:160]
+        warnings.append(f"{labels}：返回人数或难度不符合八人零式范围，已排除该副本。")
+    all_groups = tuple(ultimate_groups + groups)
+    return replace(
+        character,
+        groups=all_groups,
+        rankings=tuple(row for group in all_groups for row in group.rankings),
+        catalog_warnings=tuple(warnings),
+        catalog_complete=not warnings and bool(all_groups),
+        catalog_evaluated=True,
+    )
 
 
 def _catalog_diagnostic(metadata, state, character):
@@ -1027,7 +1337,7 @@ def _character_result(
             ErrorCode.NOT_PUBLIC,
             "该角色的 FFLogs 记录已隐藏；本模块不会查询私密数据。",
         )
-    if not character.rankings:
+    if not character.rankings and not character.catalog_evaluated:
         return _error(
             ErrorCode.NO_RECORDS,
             "该角色当前筛选条件下没有公开战绩记录。",
@@ -1044,7 +1354,11 @@ def _character_result(
         ),
     ]
     if character.groups:
-        blocks.append(TextBlock("分区范围：各副本 FFLogs 默认分区。"))
+        blocks.append(
+            TextBlock(
+                "分区范围：绝境战按所选历史来源分区；零式使用各副本的 FFLogs 默认分区。"
+            )
+        )
     elif character.partition == -1:
         blocks.append(TextBlock("分区范围：全部分区。"))
 
@@ -1052,8 +1366,14 @@ def _character_result(
     row_lines = []
     for ranking in visible:
         parts = [ranking.encounter_name]
-        if ranking.source_error:
+        if ranking.query_state == "not_queried":
+            parts.append("未查询")
+        elif ranking.query_state == "no_records":
+            parts.append("该范围查询成功，无公开记录")
+        elif ranking.source_error:
             parts.append("数据暂不可用（ERR）")
+        if ranking.origin is not None:
+            parts.append(ranking_period(ranking))
         if ranking.best_amount is not None:
             parts.append(f"最佳 {metric_label} {ranking.best_amount:,.1f}")
         if ranking.rank_percent is not None:
@@ -1079,14 +1399,16 @@ def _character_result(
         warnings.append("国际服角色数据尚未完成核验，当前结果仅供参考。")
     if catalog_requested:
         warnings.append(
-            PROVIDER_CATALOG_SCOPE if character.groups else CATALOG_LIMITATION
+            PROVIDER_CATALOG_SCOPE
+            if character.catalog_evaluated or character.groups
+            else CATALOG_LIMITATION
         )
     warnings.extend(character.catalog_warnings)
     if catalog_requested:
         blocks.append(
             TextBlock(
-                "范围：FFLogs 目录绝境战与默认副本所属资料片零式；目录不代表游戏开放状态。"
-                if character.groups
+                "范围：来源完整名称识别的绝境战历史最佳与默认副本所属资料片八人零式；不代表独立地区开放状态。"
+                if character.catalog_evaluated or character.groups
                 else CATALOG_LIMITATION
             )
         )
@@ -1117,7 +1439,7 @@ def _character_result(
         result_id=f"ff14-fflogs-character-{character.character_id}",
         status=ResultStatus.SUCCESS
         if verified
-        and not catalog_requested
+        and (not catalog_requested or character.catalog_complete)
         and (not partial_on_truncation or len(visible) == len(character.rankings))
         else ResultStatus.PARTIAL_SUCCESS,
         document=document,

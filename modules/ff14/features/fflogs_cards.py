@@ -1,9 +1,7 @@
 """FF14-owned Logs facts, grading and declarative five-column presentation.
 
-This adapter never discovers content from display names. The current source
-contract returns a single ranking selection, so its truthful group is that
-selection. A future verified catalog can supply zone labels, but neither this
-module nor the painter substitutes a synthetic expansion/Ultimate catalog.
+Catalog selection and historical winners are supplied by FF14's source
+adapter. The painter never infers content or combines different selections.
 """
 
 from __future__ import annotations
@@ -21,7 +19,8 @@ CATALOG_LIMITATION = (
     "未覆盖完整绝境战与当前资料片零式。"
 )
 PROVIDER_CATALOG_SCOPE = (
-    "范围以 FFLogs 目录及默认副本所属资料片为准，不代表地区开放状态。"
+    "绝境战为已查询范围内的历史最佳；零式按来源默认副本所属资料片及八人目录，"
+    "不代表独立地区开放状态。"
 )
 DETAIL_LIMITATION = "次数仅为当前筛选范围；最高数值与最佳百分位可能来自不同记录。"
 
@@ -119,6 +118,19 @@ def selection_title(
     return "本次返回副本范围"
 
 
+def ranking_period(row) -> str:
+    """Names are provider periods; numeric IDs never become patch versions."""
+    origin = row.origin
+    if origin is None:
+        return "时期信息未提供"
+    values = []
+    if origin.expansion_name:
+        values.append(f"资料片：{origin.expansion_name}")
+    if origin.partition_name:
+        values.append(f"分区：{origin.partition_name}")
+    return " · ".join(values) if values else "时期信息未提供"
+
+
 def character_card(
     character: PublicCharacter,
     *,
@@ -138,7 +150,7 @@ def character_card(
     )
     sections = []
     displayed_count = 0
-    if character.groups:
+    if character.groups or character.catalog_evaluated:
         present = tuple(
             category
             for category in ("ultimate", "savage")
@@ -153,6 +165,13 @@ def character_card(
                 group for group in character.groups if group.category == category
             )
             if not groups:
+                sections.append(
+                    cards.Section(
+                        title,
+                        (cards.Text("该类别未取得可用目录，结果范围不完整。"),),
+                        panel=False,
+                    )
+                )
                 continue
             # Reserve one row for each later category when the budget permits.
             reserve = int(category == "ultimate" and "savage" in present)
@@ -167,16 +186,40 @@ def character_card(
                 if not rows:
                     continue
                 if category == "savage":
-                    blocks.append(cards.Text(group.zone_name, style="heading"))
+                    period_name = (
+                        rows[0].origin.partition_name
+                        if rows[0].origin is not None
+                        else None
+                    )
+                    blocks.append(
+                        cards.Text(
+                            group.zone_name
+                            + (f" · {period_name}" if period_name else ""),
+                            style="heading",
+                        )
+                    )
                     blocks.append(_ranking_table(rows, metric, job_language))
                 else:
                     ultimate_rows.extend(rows)
             if ultimate_rows:
                 blocks.append(_ranking_table(ultimate_rows, metric, job_language))
+                # Keep long full names and period names intact without making
+                # every metric row as tall as two wrapped source descriptions.
+                periods = [
+                    f"{row.encounter_name} · {ranking_period(row)}"
+                    for row in ultimate_rows
+                    if row.origin is not None and row.query_state == "record"
+                ]
+                blocks.extend(
+                    cards.Text("\n".join(periods[index : index + 6]), style="caption")
+                    for index in range(0, len(periods), 6)
+                )
             if not blocks:
                 blocks.append(cards.Text("受本图展示上限限制，此类别记录未展示。"))
             subtitle = (
-                "FFLogs 目录" if category == "ultimate" else groups[0].expansion_name
+                "已查询范围内的历史最佳"
+                if category == "ultimate"
+                else groups[0].expansion_name
             )
             sections.append(
                 cards.Section(
@@ -210,7 +253,9 @@ def character_card(
         blocks=(
             *sections,
             cards.Text(
-                PROVIDER_CATALOG_SCOPE if character.groups else CATALOG_LIMITATION,
+                PROVIDER_CATALOG_SCOPE
+                if character.groups or character.catalog_evaluated
+                else CATALOG_LIMITATION,
                 style="caption",
             ),
             cards.Text(DETAIL_LIMITATION, style="caption"),
@@ -253,13 +298,34 @@ __all__ = [
     "percentile",
     "percentile_text",
     "selection_title",
+    "ranking_period",
 ]
 
 
 def _ranking_table(rankings, metric, job_language="zh"):
     rows = tuple(
         (
-            row.encounter_name,
+            "\n".join(
+                (
+                    row.encounter_name,
+                    *(
+                        (
+                            {
+                                "no_records": "查询成功，无公开记录",
+                                "failed": "查询失败",
+                                "not_queried": "未查询",
+                            }[row.query_state],
+                        )
+                        if row.query_state != "record"
+                        else ()
+                    ),
+                    *(
+                        ("部分历史范围未取得",)
+                        if not row.history_complete and row.query_state == "record"
+                        else ()
+                    ),
+                )
+            ),
             job_display(row.spec, job_language),
             amount("invalid") if row.source_error else amount(row.best_amount),
             kill_count("invalid") if row.source_error else kill_count(row.total_kills),

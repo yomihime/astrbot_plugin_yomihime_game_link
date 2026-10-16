@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
 from datetime import datetime, timezone
 from decimal import Decimal
 from secrets import token_hex
+from time import monotonic
 
 LOGGER_NAME = "yomihime_game_link.ff14.evidence"
 MARKER = "FF14_LOGS_EVIDENCE"
@@ -23,10 +25,107 @@ OPERATIONS = frozenset(
         "FF14PublicCharacterZone",
         "FF14CatalogCharacter",
         "FF14MetadataState",
+        "FF14RequestSummary",
     }
 )
 _NAME = re.compile(r"[_A-Za-z][_0-9A-Za-z]{0,127}\Z")
 _LOGGER = logging.getLogger(LOGGER_NAME)
+REQUEST_OPERATIONS = frozenset(
+    {
+        "UniversalisWorlds",
+        "UniversalisDataCenters",
+        "OtherBusinessRead",
+        "FF14WorldRegions",
+        "FF14WorldServers",
+        "FF14PublicCharacter",
+        "FF14PublicCharacterZone",
+        "FF14OutputMetadataShape",
+        "FF14CharacterMetadata",
+        "FF14OutputMetadata",
+        "FF14CatalogCharacter",
+    }
+)
+
+
+class RequestMetrics:
+    """Invocation-local business fetch counts, never socket/OAuth telemetry."""
+
+    def __init__(self):
+        self.started = monotonic()
+        self.operations = {}
+        self.evidence = None
+
+    def _entry(self, operation):
+        return self.operations.setdefault(
+            operation,
+            {
+                "operation": operation,
+                "attempts": 0,
+                "returned": 0,
+                "failed": 0,
+                "cancelled": 0,
+                "elapsed_ms": 0,
+                "cache": "unknown",
+            },
+        )
+
+    def cache(self, operation, cached):
+        if operation in REQUEST_OPERATIONS and type(cached) is bool:
+            self._entry(operation)["cache"] = "module_hit" if cached else "module_miss"
+
+    def wrap(self, http):
+        metrics = self
+
+        class ObservedHttp:
+            async def fetch(self, request):
+                operation = "OtherBusinessRead"
+                if request.source_id == "universalis_market":
+                    if request.path.endswith("/worlds"):
+                        operation = "UniversalisWorlds"
+                    elif request.path.endswith("/data-centers"):
+                        operation = "UniversalisDataCenters"
+                elif request.source_id in {"fflogs_public_cn", "fflogs_public_global"}:
+                    try:
+                        query = json.loads(request.body).get("query", "")
+                        match = re.match(r"\s*query\s+([_A-Za-z][_0-9A-Za-z]*)", query)
+                        if match and match[1] in REQUEST_OPERATIONS:
+                            operation = match[1]
+                    except (TypeError, ValueError, AttributeError):
+                        pass
+                entry = metrics._entry(operation)
+                entry["attempts"] += 1
+                started = monotonic()
+                try:
+                    response = await http.fetch(request)
+                    entry["returned"] += 1
+                    if response.status_code >= 400:
+                        entry["failed"] += 1
+                    return response
+                except asyncio.CancelledError:
+                    entry["cancelled"] += 1
+                    raise
+                except Exception:
+                    entry["failed"] += 1
+                    raise
+                finally:
+                    entry["elapsed_ms"] += max(0, int((monotonic() - started) * 1000))
+
+        return ObservedHttp()
+
+    def finish(self):
+        if self.evidence is not None:
+            self.evidence.observe(
+                "FF14RequestSummary",
+                {
+                    "kind": "module_source_http_fetch",
+                    "operations": list(self.operations.values()),
+                    "elapsed_ms": max(0, int((monotonic() - self.started) * 1000)),
+                    "underlying_http_cache": "unknown",
+                    "host_oauth": "unobserved",
+                    "network_attempts": "unknown",
+                },
+                status=None,
+            )
 
 
 def _text(value, limit=160):
@@ -78,6 +177,38 @@ def project(operation, payload):
     """Closed projection; never retains identity, URLs, errors or auth fields."""
     if operation not in OPERATIONS or not isinstance(payload, dict):
         return {}
+    if operation == "FF14RequestSummary":
+
+        def count(value):
+            return value if type(value) is int and 0 <= value <= 2147483647 else 0
+
+        return {
+            "kind": "module_source_http_fetch",
+            "operations": [
+                {
+                    "operation": row["operation"],
+                    **{
+                        key: count(row.get(key))
+                        for key in (
+                            "attempts",
+                            "returned",
+                            "failed",
+                            "cancelled",
+                            "elapsed_ms",
+                        )
+                    },
+                    "cache": row.get("cache")
+                    if row.get("cache") in {"module_hit", "module_miss", "unknown"}
+                    else "unknown",
+                }
+                for row in (payload.get("operations") or ())[: len(REQUEST_OPERATIONS)]
+                if isinstance(row, dict) and row.get("operation") in REQUEST_OPERATIONS
+            ],
+            "elapsed_ms": count(payload.get("elapsed_ms")),
+            "underlying_http_cache": "unknown",
+            "host_oauth": "unobserved",
+            "network_attempts": "unknown",
+        }
     if operation == "FF14MetadataState":
         states = {
             "verified_catalog",
@@ -149,8 +280,37 @@ def project(operation, payload):
                 continue
             value = _named(zone)
             value["difficulties"] = [
-                _named(row) for row in zone.get("difficulties", ())[:32]
+                {
+                    **_named(row),
+                    **(
+                        {
+                            "sizes": None
+                            if row["sizes"] is None
+                            else [_number(item) for item in row["sizes"][:32]]
+                        }
+                        if isinstance(row, dict)
+                        and "sizes" in row
+                        and (row["sizes"] is None or isinstance(row["sizes"], list))
+                        else {}
+                    ),
+                }
+                for row in zone.get("difficulties", ())[:32]
             ]
+            if "frozen" in zone and (
+                zone["frozen"] is None or type(zone["frozen"]) is bool
+            ):
+                value["frozen"] = zone["frozen"]
+            if isinstance(zone.get("partitions"), list):
+                value["partitions"] = [
+                    {
+                        **_named(row),
+                        "default": row.get("default")
+                        if type(row.get("default")) is bool
+                        else None,
+                    }
+                    for row in zone["partitions"][:64]
+                    if isinstance(row, dict)
+                ]
             value["encounters"] = []
             for encounter in zone.get("encounters", ())[:10000]:
                 entry = _named(encounter)
@@ -225,7 +385,11 @@ def metadata_payload(metadata):
                 "id": zone.zone_id,
                 "name": zone.name,
                 "difficulties": [
-                    {"id": row.difficulty_id, "name": row.name}
+                    {
+                        "id": row.difficulty_id,
+                        "name": row.name,
+                        "sizes": None if row.sizes is None else list(row.sizes),
+                    }
                     for row in zone.difficulties
                 ],
                 "encounters": [
@@ -236,6 +400,11 @@ def metadata_payload(metadata):
                     }
                     for row in zone.encounters
                 ],
+                "frozen": zone.frozen,
+                "partitions": [
+                    {"id": row.partition_id, "name": row.name, "default": row.default}
+                    for row in zone.partitions
+                ],
             }
         )
         if zone.expansion_id is not None:
@@ -244,11 +413,19 @@ def metadata_payload(metadata):
                 {"id": zone.expansion_id, "name": zone.expansion_name, "zones": []},
             )
             expansion["zones"].append({"id": zone.zone_id})
-    return {"worldData": {"zones": zones, "expansions": list(expansions.values())}}
+    order = {item: index for index, item in enumerate(metadata.expansion_order)}
+    return {
+        "worldData": {
+            "zones": zones,
+            "expansions": sorted(
+                expansions.values(), key=lambda item: order.get(item["id"], len(order))
+            ),
+        }
+    }
 
 
 def _exceeds_projection_limits(operation, payload):
-    if operation == "FF14MetadataState":
+    if operation in {"FF14MetadataState", "FF14RequestSummary"}:
         return False
     if operation == "FF14OutputMetadataShape":
         for row in payload.values():
@@ -281,6 +458,16 @@ def _exceeds_projection_limits(operation, payload):
             or any(
                 len(row.get("zones") or ()) > 512
                 for row in expansions
+                if isinstance(row, dict)
+            )
+            or any(
+                len(row.get("partitions") or ()) > 64
+                or any(
+                    len(item.get("sizes") or ()) > 32
+                    for item in row.get("difficulties", ())
+                    if isinstance(item, dict)
+                )
+                for row in zones
                 if isinstance(row, dict)
             )
         )
@@ -352,7 +539,7 @@ class Evidence:
             for key, value in (filters or {}).items()
             if (
                 key in {"metric", "zoneId", "difficulty", "partition"}
-                or re.fullmatch(r"[zd][0-9]{1,2}", key)
+                or re.fullmatch(r"[zdp](?:[0-9]|1[01])", key)
             )
             and (type(value) is int or value in {"rdps", "ndps", "cdps"})
         }

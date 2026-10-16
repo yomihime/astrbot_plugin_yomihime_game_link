@@ -47,6 +47,14 @@ class ServerResolution:
 class DifficultyRecord:
     difficulty_id: int
     name: str
+    sizes: tuple[int, ...] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PartitionRecord:
+    partition_id: int
+    name: str
+    default: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,6 +72,8 @@ class ZoneRecord:
     encounters: tuple[EncounterRecord, ...]
     expansion_id: int | None = None
     expansion_name: str | None = None
+    frozen: bool | None = None
+    partitions: tuple[PartitionRecord, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,6 +88,8 @@ class OutputMetadata:
     zones: tuple[ZoneRecord, ...]
     specs: tuple[GameSpecRecord, ...]
     character_catalog_verified: bool = False
+    # Provider order is not an independently verified chronological order.
+    expansion_order: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,6 +125,18 @@ class CharacterRanking:
     rank_percent_exact: Decimal | None = None
     total_kills: int | None = None
     source_error: bool = False
+    query_state: str = "record"
+    origin: RankingOrigin | None = None
+    history_complete: bool = True
+
+
+@dataclass(frozen=True, slots=True)
+class RankingOrigin:
+    zone_id: int
+    difficulty_id: int
+    partition: int
+    expansion_name: str | None
+    partition_name: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -151,6 +175,8 @@ class PublicCharacter:
     rankings: tuple[CharacterRanking, ...]
     groups: tuple[CharacterRankingGroup, ...] = ()
     catalog_warnings: tuple[str, ...] = ()
+    catalog_complete: bool = False
+    catalog_evaluated: bool = False
 
 
 def parse_rankings(value: object) -> RankingSelection:
@@ -297,8 +323,10 @@ __all__ = [
     "MetadataCandidate",
     "MetadataResolution",
     "OutputMetadata",
+    "PartitionRecord",
     "PublicCharacter",
     "RankingSelection",
+    "RankingOrigin",
     "RegionRecord",
     "ServerRecord",
     "ServerResolution",

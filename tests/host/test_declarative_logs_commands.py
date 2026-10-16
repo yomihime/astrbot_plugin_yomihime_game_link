@@ -85,7 +85,7 @@ class DeclarativeLogsCommandTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(sent.png, content)
                 with Image.open(BytesIO(content)) as image:
                     self.assertEqual((image.format, image.width), ("PNG", 1040))
-                    self.assertGreater(image.height, 400)
+                    self.assertGreater(image.height, 1500)
                     image.verify()
                 self.assertEqual(card.layout, "table")
                 self.assertIsNotNone(card.logo)
@@ -99,11 +99,11 @@ class DeclarativeLogsCommandTests(unittest.IsolatedAsyncioTestCase):
                         for section in card.blocks
                         if hasattr(section, "blocks")
                     ],
-                    [1],
+                    [7, 13],
                 )
                 self.assertEqual(
                     [block.title for block in card.blocks if hasattr(block, "blocks")],
-                    ["本次返回副本范围"],
+                    ["绝境战", "零式"],
                 )
                 self.assertIn(
                     "cn.fflogs.com" if realm == "国服" else "www.fflogs.com",
@@ -115,7 +115,7 @@ class DeclarativeLogsCommandTests(unittest.IsolatedAsyncioTestCase):
             {"fflogs_public_cn" if region == "China" else "fflogs_public_global"},
         )
         self.assertEqual(self.provider.trace, [])
-        self.assertFalse(
+        self.assertTrue(
             any(
                 "FF14CatalogCharacter" in query
                 or "FF14CharacterMetadata" in query
@@ -170,12 +170,13 @@ class DeclarativeLogsCommandTests(unittest.IsolatedAsyncioTestCase):
             await self.runtime.handle_event(event)
         self.assertEqual(len(self.context.calls), 1)
         text = self.context.calls[0][1].chain[0].text
-        self.assertIn("Synthetic Trial 0", text)
-        self.assertNotIn("Synthetic 100-0", text)
-        self.assertNotIn("Synthetic 75-4", text)
-        self.assertIn("最佳 rDPS 0.0", text)
-        self.assertNotIn("各副本 FFLogs 默认分区", text)
-        self.assertIn("仅展示", text)
+        self.assertNotIn("Synthetic Trial 0", text)
+        self.assertIn("Synthetic Ultimate 100-0", text)
+        self.assertIn("Synthetic 75-4", text)
+        self.assertIn("12,345.5", text)
+        self.assertIn("绝境战按所选历史来源分区", text)
+        self.assertIn("零式使用各副本的 FFLogs 默认分区", text)
+        self.assertIn("来源完整名称识别", text)
         self.assertNotIn(fixture.SENTINEL, text)
 
 

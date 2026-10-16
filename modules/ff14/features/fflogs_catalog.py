@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import unicodedata
 from dataclasses import dataclass, replace
 from decimal import Decimal
 from typing import Any
@@ -18,6 +19,7 @@ from .fflogs_models import (
     MetadataCandidate,
     MetadataResolution,
     OutputMetadata,
+    PartitionRecord,
     RegionRecord,
     ServerRecord,
     ServerResolution,
@@ -109,7 +111,8 @@ CHARACTER_METADATA_QUERY = """query FF14CharacterMetadata {
   worldData {
     expansions { id name zones { id } }
     zones {
-      id name difficulties { id name }
+      id name frozen partitions { id name default }
+      difficulties { id name sizes }
       encounters { id name zone { id } }
     }
   }
@@ -459,7 +462,45 @@ def parse_output_metadata(payload: dict[str, Any]) -> OutputMetadata:
         item_count += len(difficulties) + len(encounters)
         if item_count > MAX_METADATA_ITEMS:
             raise FFLogsPayloadError("output metadata exceeded its item budget")
-        zones.append(ZoneRecord(zone_id, name, difficulties, encounters))
+        frozen = row.get("frozen")
+        if frozen is not None and type(frozen) is not bool:
+            raise FFLogsPayloadError("zone frozen flag is malformed")
+        raw_partitions = row.get("partitions", [])
+        if raw_partitions is None:
+            raw_partitions = []
+        if not isinstance(raw_partitions, list) or len(raw_partitions) > 64:
+            raise FFLogsPayloadError("zone partitions are malformed")
+        partitions = []
+        seen_partitions = set()
+        for partition in raw_partitions:
+            if (
+                not isinstance(partition, dict)
+                or type(partition.get("default")) is not bool
+            ):
+                raise FFLogsPayloadError("zone partition is malformed")
+            partition_id = partition.get("id")
+            if type(partition_id) is not int or not -1 <= partition_id <= 2147483647:
+                raise FFLogsPayloadError("zone partition id is malformed")
+            if partition_id in seen_partitions:
+                raise FFLogsPayloadError("zone partition repeats an id")
+            seen_partitions.add(partition_id)
+            partitions.append(
+                PartitionRecord(
+                    partition_id,
+                    _short_text(partition.get("name"), 160),
+                    partition["default"],
+                )
+            )
+        zones.append(
+            ZoneRecord(
+                zone_id,
+                name,
+                difficulties,
+                encounters,
+                frozen=frozen,
+                partitions=tuple(partitions),
+            )
+        )
 
     specs: list[GameSpecRecord] = []
     seen_spec_ids: set[int] = set()
@@ -485,17 +526,32 @@ def character_metadata_supported(payload: dict[str, Any]) -> bool:
         if any(
             not isinstance(payload.get(f"{_camel(name)}Type"), dict)
             or payload[f"{_camel(name)}Type"].get("name") != name
-            for name in ("WorldData", "Expansion", "Encounter")
+            for name in (
+                "WorldData",
+                "Expansion",
+                "Encounter",
+                "Zone",
+                "Difficulty",
+                "Partition",
+            )
         ):
             return False
         types = {
             name: _field_map(payload[f"{_camel(name)}Type"], name)
-            for name in ("WorldData", "Expansion", "Encounter")
+            for name in (
+                "WorldData",
+                "Expansion",
+                "Encounter",
+                "Zone",
+                "Difficulty",
+                "Partition",
+            )
         }
         for owner, field_name, target, is_list in (
             ("WorldData", "expansions", "Expansion", True),
             ("Expansion", "zones", "Zone", True),
             ("Encounter", "zone", "Zone", False),
+            ("Zone", "partitions", "Partition", True),
         ):
             field = types[owner].get(field_name)
             checker = _is_list_of if is_list else _is_object
@@ -505,11 +561,31 @@ def character_metadata_supported(payload: dict[str, Any]) -> bool:
                 or not checker(field.get("type"), target)
             ):
                 return False
-        return all(
+        if not all(
             name in types["Expansion"]
             and _args_are_optional(types["Expansion"][name].get("args"))
             and _is_scalar(types["Expansion"][name].get("type"), scalar)
             for name, scalar in (("id", "Int"), ("name", "String"))
+        ):
+            return False
+        for owner, field_name, scalar in (
+            ("Zone", "frozen", "Boolean"),
+            ("Partition", "id", "Int"),
+            ("Partition", "name", "String"),
+            ("Partition", "default", "Boolean"),
+        ):
+            field = types[owner].get(field_name)
+            if (
+                field is None
+                or not _args_are_optional(field.get("args"))
+                or not _is_scalar(field.get("type"), scalar)
+            ):
+                return False
+        sizes = types["Difficulty"].get("sizes")
+        return (
+            sizes is not None
+            and _args_are_optional(sizes.get("args"))
+            and _is_list_of(sizes.get("type"), "Int")
         )
     except (KeyError, TypeError, AttributeError, FFLogsPayloadError):
         return False
@@ -524,6 +600,7 @@ def parse_character_metadata(payload: dict[str, Any]) -> OutputMetadata:
         raise FFLogsPayloadError("expansion metadata is malformed")
     memberships: dict[int, tuple[int, str]] = {}
     expansion_ids = set()
+    expansion_order = []
     for row in expansions:
         if not isinstance(row, dict):
             raise FFLogsPayloadError("expansion entry is malformed")
@@ -533,6 +610,7 @@ def parse_character_metadata(payload: dict[str, Any]) -> OutputMetadata:
         if expansion_id in expansion_ids:
             raise FFLogsPayloadError("expansion metadata repeats an id")
         expansion_ids.add(expansion_id)
+        expansion_order.append(expansion_id)
         name = _short_text(row.get("name"), 160)
         zones = row.get("zones")
         if not isinstance(zones, list) or len(zones) > MAX_ZONES:
@@ -571,48 +649,107 @@ def parse_character_metadata(payload: dict[str, Any]) -> OutputMetadata:
                 expansion_name=membership[1],
             )
         )
-    return OutputMetadata(tuple(result), base.specs, character_catalog_verified=True)
+    return OutputMetadata(
+        tuple(result),
+        base.specs,
+        character_catalog_verified=True,
+        expansion_order=tuple(expansion_order),
+    )
+
+
+def normalized_encounter_name(value: str) -> str:
+    """Only Unicode normalization and whitespace; never strip source suffixes."""
+    return " ".join(unicodedata.normalize("NFKC", value).split())
+
+
+def _ultimate_name(value: str) -> bool:
+    value = normalized_encounter_name(value)
+    return "绝境" in value or "ultimate" in value.casefold()
+
+
+def ultimate_group_key(zone_name: str, encounter_name: str):
+    encounter = normalized_encounter_name(encounter_name).casefold()
+    # Generic boss names do not prove identity across differently named duties.
+    return (
+        ("encounter", encounter)
+        if _ultimate_name(encounter_name)
+        else (
+            "zone_encounter",
+            normalized_encounter_name(zone_name).casefold(),
+            encounter,
+        )
+    )
+
+
+def ultimate_group_name(zone_name: str, encounter_name: str):
+    return (
+        normalized_encounter_name(encounter_name)
+        if _ultimate_name(encounter_name)
+        else f"{normalized_encounter_name(zone_name)} / {normalized_encounter_name(encounter_name)}"
+    )
+
+
+def savage_expansion(metadata: OutputMetadata, default_zone_id: int):
+    """Anchor then follow provider expansion order, never character kill counts."""
+    anchor = next((z for z in metadata.zones if z.zone_id == default_zone_id), None)
+    if anchor is None or anchor.expansion_id is None:
+        return None, False
+    order = metadata.expansion_order
+    candidates = (anchor.expansion_id,)
+    if anchor.expansion_id in order:
+        candidates = order[order.index(anchor.expansion_id) :]
+    for expansion in candidates:
+        difficulties = tuple(
+            difficulty
+            for zone in metadata.zones
+            if zone.expansion_id == expansion
+            for difficulty in zone.difficulties
+            if _normalized_label(difficulty.name) in {"savage", "零式"}
+        )
+        unknown = any(item.sizes is None for item in difficulties)
+        if any(item.sizes is not None and 8 in item.sizes for item in difficulties):
+            return expansion, not unknown
+        if unknown:
+            return expansion, False
+    return None, True
 
 
 def select_character_zones(metadata: OutputMetadata, default_zone_id: int):
-    """Select by explicit provider relationships and exact difficulty labels.
-
-    The actual default ranking zone anchors the expansion. Never pick max ID,
-    last list entry, a translated abbreviation or an older expansion because a
-    character has no ranks. Only exact canonical encounter identities dedupe.
-    """
+    """Apply the product's source-name Ultimate and eight-player Savage policy."""
     if not metadata.character_catalog_verified:
         return ()
-    anchor = next(
-        (zone for zone in metadata.zones if zone.zone_id == default_zone_id), None
-    )
-    if anchor is None or anchor.expansion_id is None:
-        return ()
+    target_expansion, _ = savage_expansion(metadata, default_zone_id)
     result = []
     seen_encounters: set[tuple[str, int, int]] = set()
     for zone in metadata.zones:
         for difficulty in zone.difficulties:
             label = _normalized_label(difficulty.name)
-            category = (
-                "ultimate"
-                if label in {"ultimate", "绝境战"}
-                else "savage"
-                if label in {"savage", "零式"}
-                and zone.expansion_id == anchor.expansion_id
-                else None
-            )
-            if category is None:
-                continue
+            ultimate = _ultimate_name(zone.name)
             encounters = []
             for item in zone.encounters:
+                category = (
+                    "ultimate"
+                    if ultimate or _ultimate_name(item.name)
+                    else "savage"
+                    if label in {"savage", "零式"}
+                    and (difficulty.sizes is None or 8 in difficulty.sizes)
+                    and zone.expansion_id == target_expansion
+                    else None
+                )
+                if category is None:
+                    continue
                 key = (category, difficulty.difficulty_id, item.encounter_id)
+                # Independent historical IDs survive; non-owning directory
+                # aliases do not create another query target.
                 if item.zone_id == zone.zone_id and key not in seen_encounters:
                     seen_encounters.add(key)
-                    encounters.append(item)
-            if encounters:
-                result.append(
-                    (replace(zone, encounters=tuple(encounters)), difficulty, category)
-                )
+                    encounters.append((category, item))
+            for category in ("ultimate", "savage"):
+                members = tuple(item for kind, item in encounters if kind == category)
+                if members:
+                    result.append(
+                        (replace(zone, encounters=members), difficulty, category)
+                    )
     return tuple(result)
 
 
@@ -683,7 +820,20 @@ def _parse_named_id_list(rows: list[Any], model: type, label: str) -> tuple:
         seen_ids.add(item_id)
         name = _short_text(row.get("name"), 160)
         if model is DifficultyRecord:
-            result.append(DifficultyRecord(item_id, name))
+            sizes = row.get("sizes")
+            if sizes is not None and (
+                not isinstance(sizes, list)
+                or len(sizes) > 32
+                or any(
+                    type(size) is not int or not 0 <= size <= 2147483647
+                    for size in sizes
+                )
+                or len(set(sizes)) != len(sizes)
+            ):
+                raise FFLogsPayloadError("difficulty sizes are invalid")
+            result.append(
+                DifficultyRecord(item_id, name, None if sizes is None else tuple(sizes))
+            )
         elif model is EncounterRecord:
             result.append(EncounterRecord(item_id, name))
         elif model is GameSpecRecord:
