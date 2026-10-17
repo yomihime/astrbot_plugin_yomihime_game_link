@@ -56,6 +56,7 @@ from .fflogs_catalog import (
     resolve_output_metadata,
     savage_expansion,
     select_character_zones,
+    ultimate_catalog_order,
     ultimate_group_key,
     ultimate_group_name,
 )
@@ -133,6 +134,9 @@ class FFLogsCharacterLookup:
         self._lifecycle = object()
         self._metadata_cache: dict[str, tuple[float, OutputMetadata | None, str]] = {}
         self._ranking_contract_cache = {}
+        from .duty_order import DutyOrderCatalog
+
+        self._duty_order = DutyOrderCatalog()
         from .chat_context import PendingTargets
 
         self._chat_pending = PendingTargets()
@@ -141,6 +145,7 @@ class FFLogsCharacterLookup:
         self._lifecycle = object()
         self._metadata_cache.clear()
         self._ranking_contract_cache.clear()
+        self._duty_order.close()
         self._chat_pending.close()
 
     async def _character_metadata(
@@ -456,6 +461,12 @@ class FFLogsCharacterLookup:
         if evidence is not None:
             evidence.observe("FF14HistorySummary", summary, status=None)
         result = _assemble_catalog_rankings(character, metadata, targets, outcomes)
+        if any(group.category == "ultimate" for group in result.groups):
+            from .duty_order import apply_duty_order
+
+            catalog = await self._duty_order.load(scope.http, deadline=stop_at)
+            active()
+            result = apply_duty_order(result, catalog)
         warnings = []
         if unsaved:
             warnings.append("部分已验证结果未能保存到缓存；后续调用可能需要重新查询。")
@@ -1478,7 +1489,9 @@ def _assemble_catalog_rankings(character, metadata, targets, outcomes):
                 )
             )
     ultimate_groups = []
-    for entries in ultimate.values():
+    catalog_order = ultimate_catalog_order(metadata, character.zone_id)
+    for key in sorted(ultimate, key=lambda key: catalog_order.get(key, (1, 0, 0))):
+        entries = ultimate[key]
         records = [entry for entry in entries if entry[2].query_state == "record"]
         complete = all(
             entry[2].query_state in {"record", "no_records"} for entry in entries

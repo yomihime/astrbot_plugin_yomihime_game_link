@@ -239,7 +239,7 @@ class CatalogPolicyTests(unittest.TestCase):
             winner, raw="99.99999999999999999", amount=22222, kills=9, job="Astrologian"
         )
         result = _assemble_catalog_rankings(record(), source, candidates, outcomes)
-        row = result.groups[0].rankings[0]
+        row = next(group.rankings[0] for group in result.groups if group.zone_id == 102)
         self.assertEqual(
             (row.encounter_id, row.best_amount, row.total_kills, row.spec),
             (1002, 22222, 9, "Astrologian"),
@@ -252,7 +252,7 @@ class CatalogPolicyTests(unittest.TestCase):
         equal = {key(target): selection(target) for target in candidates}
         result = _assemble_catalog_rankings(record(), source, candidates, equal)
         self.assertEqual(
-            (result.groups[0].zone_id, result.groups[0].partition), (101, 3)
+            (result.groups[1].zone_id, result.groups[1].partition), (101, 3)
         )
         # Provider expansion list is not a chronology contract, so stable IDs win ties.
 
@@ -263,8 +263,8 @@ class CatalogPolicyTests(unittest.TestCase):
         outcomes[(101, 1, 3, "rdps", "Historical", None)] = "failed"
         outcomes.pop((103, 1, 3, "rdps", "Historical", None))
         result = _assemble_catalog_rankings(record(), source, candidates, outcomes)
-        self.assertEqual(result.groups[0].rankings[0].query_state, "failed")
-        self.assertEqual(result.groups[1].rankings[0].query_state, "not_queried")
+        self.assertEqual(result.groups[1].rankings[0].query_state, "failed")
+        self.assertEqual(result.groups[0].rankings[0].query_state, "not_queried")
         self.assertEqual(result.groups[-1].rankings[0].query_state, "no_records")
         self.assertFalse(result.catalog_complete)
         self.assertTrue(any("未查询" in warning for warning in result.catalog_warnings))
@@ -290,7 +290,7 @@ class CatalogPolicyTests(unittest.TestCase):
             limit=40,
             explicit_selection=False,
         )
-        self.assertIn("时期信息未提供", str(card))
+        self.assertEqual(card.blocks[0].blocks[0].rows[1][2], "—")
         self.assertTrue(
             result.catalog_complete
         )  # missing period name is not a missed query
@@ -781,7 +781,7 @@ class BatchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             sum(item["attempts"] for item in summary["operations"]), len(http.requests)
         )
-        self.assertEqual(len(http.requests), 8)
+        self.assertEqual(len(http.requests), 9)
         self.assertEqual(summary["network_attempts"], "unknown")
         self.assertEqual(summary["host_oauth"], "unobserved")
         self.assertEqual(

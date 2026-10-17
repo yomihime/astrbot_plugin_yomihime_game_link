@@ -858,7 +858,7 @@ class _Layout:
                 self.shapes.append(
                     _Shape(
                         (x, row_top, x + width, y),
-                        p.panel_alt if row_index == 0 else p.panel,
+                        p.panel_alt if row_index % 2 == 0 else p.panel,
                     )
                 )
                 self.shapes.append(_Shape((x, y - 0.5, x + width, y), p.border))

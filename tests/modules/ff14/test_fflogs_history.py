@@ -195,8 +195,14 @@ class HistoryBatchTests(unittest.IsolatedAsyncioTestCase):
                 result = await handler.invoke(None, card_fixture.TARGET)
                 self.assertIs(result.status, ResultStatus.SUCCESS)
                 self.assertIsNone(result.error)
-                self.assertEqual(len(http.requests), 6)
-                wire = json.loads(http.requests[-1].body)
+                self.assertEqual(len(http.requests), 7)
+                wire = json.loads(
+                    next(
+                        request.body
+                        for request in reversed(http.requests)
+                        if request.body is not None
+                    )
+                )
                 self.assertIn("FF14CatalogCharacter", wire["query"])
                 self.assertEqual(wire["variables"]["p0"], 3)
                 self.assertEqual(wire["variables"]["historicalTimeframe"], "Historical")
@@ -209,8 +215,8 @@ class HistoryBatchTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("合成旧资料片绝境战", row[0])
                 self.assertEqual(row[1], "赤魔法师")
                 self.assertEqual(row[-1].spans[0].text, "93.4%")
-                self.assertEqual(row[2].spans[0].text, "7,654")
-                self.assertEqual(row[3].spans[0].text, "6")
+                self.assertEqual(row[3].spans[0].text, "7,654")
+                self.assertEqual(row[4].spans[0].text, "6")
                 self.assertNotIn(HISTORY_INCOMPLETE, str(result.document.card))
                 self.assertNotIn(HISTORY_INCOMPLETE, result.warnings)
 

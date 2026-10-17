@@ -753,6 +753,43 @@ def select_character_zones(metadata: OutputMetadata, default_zone_id: int):
     return tuple(result)
 
 
+def ultimate_catalog_order(metadata: OutputMetadata, default_zone_id: int):
+    """Anchor identities to their earliest canonical provider appearance.
+
+    Expansion and same-expansion directory order are provider conventions,
+    not verified release dates. Neither numeric IDs nor winner periods rank
+    encounters. Read the full catalog so query budgets cannot move an anchor.
+    """
+    expansion_positions = {
+        expansion: index for index, expansion in enumerate(metadata.expansion_order)
+    }
+    entries = {}
+    for position, (zone, _, category) in enumerate(
+        select_character_zones(metadata, default_zone_id)
+    ):
+        if category != "ultimate":
+            continue
+        for encounter in zone.encounters:
+            key = ultimate_group_key(zone.name, encounter.name)
+            entries.setdefault(key, []).append(
+                (expansion_positions.get(zone.expansion_id), position)
+            )
+    result = {}
+    for key, appearances in entries.items():
+        known = [index for index, _ in appearances if index is not None]
+        if known and len(known) == len(appearances):
+            oldest = max(known)
+            result[key] = (
+                0,
+                oldest,
+                min(position for index, position in appearances if index == oldest),
+            )
+        else:
+            # Missing chronological evidence: stable catalog fallback last.
+            result[key] = (1, 0, appearances[0][1])
+    return result
+
+
 def resolve_output_metadata(
     metadata: OutputMetadata,
     encounter_label: str,

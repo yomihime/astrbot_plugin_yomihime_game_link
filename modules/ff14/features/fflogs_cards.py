@@ -1,4 +1,4 @@
-"""FF14-owned Logs facts, grading and declarative five-column presentation.
+"""FF14-owned Logs facts, grading and declarative Logs presentation.
 
 Catalog selection and historical winners are supplied by FF14's source
 adapter. The painter never infers content or combines different selections.
@@ -6,6 +6,7 @@ adapter. The painter never infers content or combines different selections.
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
 from decimal import ROUND_DOWN, ROUND_HALF_UP, Decimal, InvalidOperation, localcontext
 
@@ -133,6 +134,59 @@ def ranking_period(row) -> str:
     return " · ".join(values) if values else "时期信息未提供"
 
 
+# Names are source metadata, not numeric expansion or partition IDs.
+_EXPANSION_VERSIONS = {
+    "a realm reborn": "2.x",
+    "重生之境": "2.x",
+    "新生エオルゼア": "2.x",
+    "heavensward": "3.x",
+    "苍穹之禁城": "3.x",
+    "蒼天のイシュガルド": "3.x",
+    "stormblood": "4.x",
+    "红莲之狂潮": "4.x",
+    "紅蓮のリベレーター": "4.x",
+    "shadowbringers": "5.x",
+    "暗影之逆焰": "5.x",
+    "漆黒のヴィランズ": "5.x",
+    "endwalker": "6.x",
+    "晓月之终途": "6.x",
+    "暁月のフィナーレ": "6.x",
+    "dawntrail": "7.x",
+    "金曦之遗辉": "7.x",
+    "黄金のレガシー": "7.x",
+}
+
+
+def partition_version(name: str | None) -> str | None:
+    """Accept an explicit version label, never a numeric partition ID."""
+    if not name:
+        return None
+    # Composition labels alone carry no patch evidence. Multiple version
+    # labels/ranges are ambiguous and deliberately fall back to expansion.
+    versions = re.findall(r"(?<![\d.])([1-9]\d*\.\d{1,2})(?![\d.])", name)
+    if len(versions) != 1:
+        return None
+    version = versions[0]
+    if re.fullmatch(r"\s*" + re.escape(version) + r"\s*", name):
+        return version
+    if re.search(
+        r"(?:patch|version|版本|补丁|パッチ)\s*" + re.escape(version), name, re.I
+    ):
+        return version
+    if re.search(re.escape(version) + r"\s*(?:版本|补丁)", name):
+        return version
+    return None
+
+
+def record_version(row) -> str:
+    """The winning record's source period, not the encounter release patch."""
+    if row.query_state != "record" or row.source_error or row.origin is None:
+        return "—"
+    return partition_version(row.origin.partition_name) or _EXPANSION_VERSIONS.get(
+        (row.origin.expansion_name or "").strip().casefold(), "—"
+    )
+
+
 def character_card(
     character: PublicCharacter,
     *,
@@ -204,17 +258,10 @@ def character_card(
                 else:
                     ultimate_rows.extend(rows)
             if ultimate_rows:
-                blocks.append(_ranking_table(ultimate_rows, metric, job_language))
-                # Keep long full names and period names intact without making
-                # every metric row as tall as two wrapped source descriptions.
-                periods = [
-                    f"{row.encounter_name} · {ranking_period(row)}"
-                    for row in ultimate_rows
-                    if row.origin is not None and row.query_state == "record"
-                ]
-                blocks.extend(
-                    cards.Text("\n".join(periods[index : index + 6]), style="caption")
-                    for index in range(0, len(periods), 6)
+                blocks.append(
+                    _ranking_table(
+                        ultimate_rows, metric, job_language, include_record_version=True
+                    )
                 )
             if not blocks:
                 blocks.append(cards.Text("受本图展示上限限制，此类别记录未展示。"))
@@ -314,7 +361,9 @@ __all__ = [
 ]
 
 
-def _ranking_table(rankings, metric, job_language="zh"):
+def _ranking_table(
+    rankings, metric, job_language="zh", *, include_record_version=False
+):
     rows = tuple(
         (
             "\n".join(
@@ -339,6 +388,7 @@ def _ranking_table(rankings, metric, job_language="zh"):
                 )
             ),
             job_display(row.spec, job_language),
+            *((record_version(row),) if include_record_version else ()),
             amount("invalid") if row.source_error else amount(row.best_amount),
             kill_count("invalid") if row.source_error else kill_count(row.total_kills),
             percentile("invalid")
@@ -353,12 +403,41 @@ def _ranking_table(rankings, metric, job_language="zh"):
     )
     return cards.Table(
         columns=(
-            cards.Column("副本", weight=2.7 if job_language == "ja" else 3.7),
-            cards.Column("职业", weight=2.6 if job_language == "ja" else 1.6),
-            cards.Column(f"最高 {metric}", weight=1.8, align="right", wrap="nowrap"),
-            cards.Column("过本次数", weight=1.4, align="right", wrap="nowrap"),
             cards.Column(
-                "最佳百分位", weight=1.8, align="right", valign="center", wrap="nowrap"
+                "副本",
+                weight=(3.1 if job_language == "ja" else 2.9)
+                if include_record_version
+                else (2.7 if job_language == "ja" else 3.7),
+            ),
+            cards.Column(
+                "职业",
+                weight=2.6
+                if job_language == "ja"
+                else (1.8 if include_record_version else 1.6),
+            ),
+            *(
+                (cards.Column("记录版本", weight=1.6, wrap="nowrap"),)
+                if include_record_version
+                else ()
+            ),
+            cards.Column(
+                f"最高 {metric}",
+                weight=1.9 if include_record_version else 1.8,
+                align="right",
+                wrap="nowrap",
+            ),
+            cards.Column(
+                "过本次数",
+                weight=1.6 if include_record_version else 1.4,
+                align="right",
+                wrap="nowrap",
+            ),
+            cards.Column(
+                "最佳百分位",
+                weight=1.9 if include_record_version else 1.8,
+                align="right",
+                valign="center",
+                wrap="nowrap",
             ),
         ),
         rows=rows,

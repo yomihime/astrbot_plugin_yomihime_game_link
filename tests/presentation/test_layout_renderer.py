@@ -64,6 +64,30 @@ class LayoutRendererTests(unittest.TestCase):
             callback()
         self.assertEqual(raised.exception.reason, reason)
 
+    def test_generic_table_zebra_uses_palette_across_entire_rows(self):
+        for theme, palette in renderer.THEMES.items():
+            with self.subTest(theme=theme):
+                document = self.document(
+                    Table(
+                        (Column("Left"), Column("Right")),
+                        (("One", "1"), ("Two\nlines", "2"), ("Three", "3")),
+                    ),
+                    theme=theme,
+                )
+                measured = self.measure(document)
+                rows = [box for box in measured.boxes if box.kind == "table_row"]
+                bitmap = self.render(document)
+                with PillowImage.open(io.BytesIO(bitmap.content)) as image:
+                    for index, box in enumerate(rows):
+                        x0, y0, x1, _ = box.bounds
+                        expected = renderer.rgb(
+                            palette.panel_alt if index % 2 == 0 else palette.panel
+                        )
+                        # Both edges, including beyond the last metric, have
+                        # the same row fill. Text/badges do not own striping.
+                        for x in (int(x0 + 8), int(x1 - 8)):
+                            self.assertEqual(image.getpixel((x, int(y0 + 8))), expected)
+
     def test_real_png_all_blocks_and_no_external_effects(self):
         image = PillowImage.new("RGB", (20, 40), "red")
         with io.BytesIO() as buffer:

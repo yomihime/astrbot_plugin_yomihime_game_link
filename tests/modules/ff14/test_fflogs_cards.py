@@ -662,7 +662,7 @@ class FFLogsProductionSafeScopeTests(unittest.IsolatedAsyncioTestCase):
             "verified_catalog",
         )
         result = await handler.invoke(None, TARGET)
-        self.assertEqual(len(http.requests), 4)
+        self.assertEqual(len(http.requests), 5)
         self.assertEqual(
             [
                 item.title
@@ -674,7 +674,8 @@ class FFLogsProductionSafeScopeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(result.status, ResultStatus.SUCCESS)
         self.assertFalse(
             any(
-                "__type" in json.loads(request.body)["query"]
+                request.body is not None
+                and "__type" in json.loads(request.body)["query"]
                 for request in http.requests
             )
         )
@@ -816,7 +817,8 @@ class FFLogsOfflineCatalogReferenceTests(unittest.IsolatedAsyncioTestCase):
         batches = [
             json.loads(request.body)["variables"]
             for request in http.requests
-            if "FF14CatalogCharacter" in json.loads(request.body)["query"]
+            if request.body is not None
+            and "FF14CatalogCharacter" in json.loads(request.body)["query"]
         ]
         queried = {
             value
@@ -976,7 +978,10 @@ class FFLogsOfflineCatalogReferenceTests(unittest.IsolatedAsyncioTestCase):
                 original = http.fetch
 
                 async def fetch(request):
-                    if "FF14CatalogCharacter" in json.loads(request.body)["query"]:
+                    if (
+                        request.body is not None
+                        and "FF14CatalogCharacter" in json.loads(request.body)["query"]
+                    ):
                         entered.set()
                         try:
                             await release.wait()
@@ -1035,7 +1040,10 @@ class FFLogsOfflineCatalogReferenceTests(unittest.IsolatedAsyncioTestCase):
                     return context
 
                 async def fetch(request):
-                    if "FF14CatalogCharacter" in json.loads(request.body)["query"]:
+                    if (
+                        request.body is not None
+                        and "FF14CatalogCharacter" in json.loads(request.body)["query"]
+                    ):
                         in_flight.append(active_timeouts[asyncio.current_task()])
                         entered.set()
                         try:
@@ -1134,7 +1142,8 @@ class FFLogsOfflineCatalogReferenceTests(unittest.IsolatedAsyncioTestCase):
         variables = next(
             json.loads(request.body)["variables"]
             for request in http.requests
-            if "FF14CatalogCharacter" in json.loads(request.body)["query"]
+            if request.body is not None
+            and "FF14CatalogCharacter" in json.loads(request.body)["query"]
         )
         self.assertEqual(len([key for key in variables if key.startswith("z")]), 12)
         self.assertTrue(any("查询失败" in warning for warning in result.warnings))
@@ -1188,11 +1197,11 @@ class FFLogsOfflineCatalogReferenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("零式使用各副本的 FFLogs 默认分区", text)
         self.assertNotIn("全部分区", text)
         self.assertNotIn("历史成绩未查全", text)
-        self.assertEqual(len(http.requests), 6)
+        self.assertEqual(len(http.requests), 7)
         self.assertEqual(
-            json.loads(http.requests[-2].body)["query"], CHARACTER_METADATA_QUERY
+            json.loads(http.requests[-3].body)["query"], CHARACTER_METADATA_QUERY
         )
-        query = json.loads(http.requests[-1].body)
+        query = json.loads(http.requests[-2].body)
         self.assertIn("FF14CatalogCharacter", query["query"])
         self.assertEqual(
             len([key for key in query["variables"] if key.startswith("z")]), 10

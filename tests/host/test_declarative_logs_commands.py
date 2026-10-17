@@ -28,12 +28,16 @@ class DeclarativeLogsCommandTests(unittest.IsolatedAsyncioTestCase):
         await self.start_logs()
         self.command_region = "China"
         self.logs_sources = []
+        self.duty_requests = []
         self.logs_operations = []
         self.directory_requests = []
         original = self.transport.callback
         catalog = card_fixture.expanded_metadata()
 
         async def upstream(request):
+            if request.source_id == "xivapi_items":
+                self.duty_requests.append(request)
+                return {"results": [], "next": None}
             if request.source_id == "universalis_market":
                 self.directory_requests.append(request.path)
                 if request.path.endswith("worlds"):
@@ -115,6 +119,9 @@ class DeclarativeLogsCommandTests(unittest.IsolatedAsyncioTestCase):
             {"fflogs_public_cn" if region == "China" else "fflogs_public_global"},
         )
         self.assertEqual(self.provider.trace, [])
+        self.assertEqual(len(self.duty_requests), 1)
+        self.assertEqual(self.duty_requests[0].path, "/api/search")
+        self.assertEqual(dict(self.duty_requests[0].query)["query"], "ContentType=28")
         self.assertTrue(
             any(
                 "FF14CatalogCharacter" in query
@@ -174,9 +181,9 @@ class DeclarativeLogsCommandTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Synthetic Ultimate 100-0", text)
         self.assertIn("Synthetic 75-4", text)
         self.assertIn("12,345.5", text)
-        self.assertIn("绝境战按所选历史来源分区", text)
+        self.assertIn("绝境战逐项查询来源目录中的标准阵容历史分区", text)
         self.assertIn("零式使用各副本的 FFLogs 默认分区", text)
-        self.assertIn("来源完整名称识别", text)
+        self.assertIn("绝境战取已查询来源返回的最高百分位", text)
         self.assertNotIn(fixture.SENTINEL, text)
 
 
