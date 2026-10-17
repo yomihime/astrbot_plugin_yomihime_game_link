@@ -136,7 +136,11 @@ def expanded_metadata(*, ultimate_count=7):
                 + (" Ultimate" if category == "Ultimate" else ""),
                 "difficulties": [{"id": 3, "name": category, "sizes": [8]}],
                 "frozen": False,
-                "partitions": [],
+                "partitions": [
+                    {"id": 3, "name": "标准阵容构成 (Synthetic)", "default": True}
+                ]
+                if category == "Ultimate"
+                else [],
                 "encounters": [
                     {
                         "id": zone_id * 10 + index,
@@ -203,7 +207,7 @@ def catalog_rankings(
                 "metric": "rdps",
                 "zone": zone.zone_id,
                 "difficulty": difficulty.difficulty_id,
-                "partition": -1,
+                "partition": 3 if "Ultimate" in zone.name else -1,
                 "size": 8,
                 "rankings": []
                 if zone.zone_id == empty_zone
@@ -636,8 +640,10 @@ class FFLogsProductionSafeScopeTests(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertEqual([item.title for item in sections], ["绝境战", "零式"])
         self.assertEqual([len(section_rows(item)) for item in sections], [7, 13])
-        self.assertIs(result.status, ResultStatus.PARTIAL_SUCCESS)
-        self.assertTrue(any("分区时期" in warning for warning in result.warnings))
+        self.assertIs(result.status, ResultStatus.SUCCESS)
+        self.assertFalse(
+            any("历史成绩未查全" in warning for warning in result.warnings)
+        )
         self.assertIn("fflogs_public_cn", handler._metadata_cache)
         self.assertEqual(len(http.responses), 0)
 
@@ -665,7 +671,7 @@ class FFLogsProductionSafeScopeTests(unittest.IsolatedAsyncioTestCase):
             ],
             ["绝境战", "零式"],
         )
-        self.assertIs(result.status, ResultStatus.PARTIAL_SUCCESS)
+        self.assertIs(result.status, ResultStatus.SUCCESS)
         self.assertFalse(
             any(
                 "__type" in json.loads(request.body)["query"]
@@ -998,42 +1004,111 @@ class FFLogsOfflineCatalogReferenceTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(exited.is_set())
 
     async def test_aliased_timeout_preserves_initial_rows(self):
-        catalog = expanded_metadata()
-        http = fixture._FakeHttp(
-            [
-                *fixture._character_responses(realm="cn"),
-                expanded_schema(),
-                catalog,
-            ]
-        )
-        original = http.fetch
-        cancelled = asyncio.Event()
+        for phase in ("before_dispatch", "inflight"):
+            with self.subTest(phase=phase):
+                catalog = expanded_metadata()
+                initial = fixture._character(difficulty=3)
+                base = initial["data"]["characterData"]["character"]["rankings"]
+                zone = next(
+                    zone
+                    for zone in catalog["data"]["worldData"]["zones"]
+                    if zone["id"] == 73
+                )
+                base["rankings"][0]["encounter"] = {
+                    key: zone["encounters"][0][key] for key in ("id", "name")
+                }
+                http = fixture._FakeHttp(
+                    [
+                        *fixture._character_responses(realm="cn", character=initial),
+                        expanded_schema(),
+                        catalog,
+                    ]
+                )
+                original_fetch = http.fetch
+                original_timeout = asyncio.timeout
+                entered, cancelled = asyncio.Event(), asyncio.Event()
+                active_timeouts, in_flight = {}, []
 
-        async def fetch(request):
-            if "FF14CatalogCharacter" in json.loads(request.body)["query"]:
+                def controlled_timeout(delay):
+                    context = original_timeout(delay)
+                    active_timeouts[asyncio.current_task()] = context
+                    return context
+
+                async def fetch(request):
+                    if "FF14CatalogCharacter" in json.loads(request.body)["query"]:
+                        in_flight.append(active_timeouts[asyncio.current_task()])
+                        entered.set()
+                        try:
+                            await asyncio.Event().wait()
+                        finally:
+                            cancelled.set()
+                    return await original_fetch(request)
+
+                http.fetch = fetch
+                handler = FFLogsCharacterLookup(fixture._services(http))
+                task = None
                 try:
-                    await asyncio.Event().wait()
+                    with (
+                        patch(
+                            "modules.ff14.features.fflogs.CATALOG_RANKING_DEADLINE_SECONDS",
+                            0 if phase == "before_dispatch" else 15,
+                        ),
+                        patch(
+                            "modules.ff14.features.fflogs.asyncio.timeout",
+                            controlled_timeout,
+                        ),
+                    ):
+                        task = asyncio.create_task(
+                            offline_catalog_reference(handler, None, TARGET)
+                        )
+                        if phase == "inflight":
+                            await asyncio.wait_for(entered.wait(), timeout=2)
+                            self.assertEqual(len(in_flight), 1)
+                            # Expire the production HTTP timeout only after fetch entered.
+                            in_flight[0].reschedule(asyncio.get_running_loop().time())
+                        result = await asyncio.wait_for(task, timeout=2)
+                    if phase == "before_dispatch":
+                        self.assertFalse(entered.is_set())
+                        self.assertFalse(cancelled.is_set())
+                        self.assertEqual(in_flight, [])
+                        state = next(iter(handler._history_rotation.entries.values()))
+                        self.assertEqual(state.cursor, 0)
+                        self.assertTrue(
+                            any("未查询" in warning for warning in result.warnings)
+                        )
+                    else:
+                        self.assertTrue(entered.is_set())
+                        self.assertTrue(cancelled.is_set())
+                        self.assertTrue(
+                            any("保留" in warning for warning in result.warnings)
+                        )
+                    self.assertIsNone(result.error)
+                    ultimate_rows = section_rows(result.document.card.blocks[0])
+                    self.assertEqual(len(ultimate_rows), 7)
+                    self.assertTrue(
+                        all(
+                            row[-1].spans[0].text
+                            == ("—" if phase == "before_dispatch" else "ERR")
+                            for row in ultimate_rows
+                        )
+                    )
+                    savage_rows = section_rows(result.document.card.blocks[1])
+                    self.assertTrue(
+                        any(row[-1].spans[0].text == "93.5%" for row in savage_rows)
+                    )
+                    self.assertTrue(
+                        any(
+                            row[2].spans[0].text == "12,346"
+                            and row[3].spans[0].text == "80"
+                            for row in savage_rows
+                        )
+                    )
                 finally:
-                    cancelled.set()
-            return await original(request)
-
-        http.fetch = fetch
-        with patch(
-            "modules.ff14.features.fflogs.CATALOG_RANKING_DEADLINE_SECONDS", 0.01
-        ):
-            result = await offline_catalog_reference(
-                FFLogsCharacterLookup(fixture._services(http)), None, TARGET
-            )
-        self.assertTrue(cancelled.is_set())
-        self.assertIsNone(result.error)
-        self.assertEqual(len(section_rows(result.document.card.blocks[0])), 7)
-        self.assertTrue(
-            all(
-                row[-1].spans[0].text == "ERR"
-                for row in section_rows(result.document.card.blocks[0])
-            )
-        )
-        self.assertTrue(any("保留" in warning for warning in result.warnings))
+                    if task is not None and not task.done():
+                        task.cancel()
+                    if task is not None:
+                        await asyncio.gather(task, return_exceptions=True)
+                    handler.close()
 
     async def test_alias_budget_and_duplicate_rows_are_explicit(self):
         catalog = expanded_metadata(ultimate_count=13)
@@ -1069,7 +1144,7 @@ class FFLogsOfflineCatalogReferenceTests(unittest.IsolatedAsyncioTestCase):
     ):
         catalog = expanded_metadata()
         batch = catalog_rankings(catalog)
-        batch["data"]["characterData"]["character"]["z0"]["partition"] = 2
+        batch["data"]["characterData"]["character"]["z0"]["partition"] = 3
         http = fixture._FakeHttp(
             [
                 *fixture._character_responses(
@@ -1085,7 +1160,7 @@ class FFLogsOfflineCatalogReferenceTests(unittest.IsolatedAsyncioTestCase):
         )
         validate_contract(result)
         self.assertIsNone(result.error)
-        self.assertIs(result.status, ResultStatus.PARTIAL_SUCCESS)
+        self.assertIs(result.status, ResultStatus.SUCCESS)
         sections = [
             block
             for block in result.document.card.blocks
@@ -1107,9 +1182,10 @@ class FFLogsOfflineCatalogReferenceTests(unittest.IsolatedAsyncioTestCase):
             for block in result.document.ordered_blocks
             if hasattr(block, "text")
         )
-        self.assertIn("绝境战按所选历史来源分区", text)
+        self.assertIn("绝境战逐项查询来源目录中的标准阵容历史分区", text)
         self.assertIn("零式使用各副本的 FFLogs 默认分区", text)
         self.assertNotIn("全部分区", text)
+        self.assertNotIn("历史成绩未查全", text)
         self.assertEqual(len(http.requests), 6)
         self.assertEqual(
             json.loads(http.requests[-2].body)["query"], CHARACTER_METADATA_QUERY
@@ -1122,6 +1198,27 @@ class FFLogsOfflineCatalogReferenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(9999, query["variables"].values())
         self.assertNotIn(72, query["variables"].values())
         self.assertNotIn(43, query["variables"].values())
+        self.assertEqual(query["variables"]["p0"], 3)
+
+        # The same explicit request must reject an actual partition 2 response.
+        batch["data"]["characterData"]["character"]["z0"]["partition"] = 2
+        mismatched = fixture._FakeHttp(
+            [
+                *fixture._character_responses(
+                    realm="cn", character=fixture._character(difficulty=3)
+                ),
+                expanded_schema(),
+                catalog,
+                batch,
+            ]
+        )
+        rejected = await offline_catalog_reference(
+            FFLogsCharacterLookup(fixture._services(mismatched)), None, TARGET
+        )
+        self.assertIs(rejected.status, ResultStatus.PARTIAL_SUCCESS)
+        self.assertEqual(
+            section_rows(rejected.document.card.blocks[0])[0][-1].spans[0].text, "ERR"
+        )
 
     async def test_out_of_zone_encounter_fails_selection_for_known_and_unknown_ids(
         self,

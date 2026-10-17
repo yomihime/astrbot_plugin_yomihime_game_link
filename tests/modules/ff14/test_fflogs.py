@@ -680,7 +680,7 @@ class FFLogsHandlerTests(unittest.IsolatedAsyncioTestCase):
                 "realm": "global",
                 "server": "Cerberus",
                 "server_hint": "Chaos",
-                "character": "Hero",
+                "character": "Synthetic Hero",
             },
         )
         self.assertIs(result.status, ResultStatus.PARTIAL_SUCCESS)

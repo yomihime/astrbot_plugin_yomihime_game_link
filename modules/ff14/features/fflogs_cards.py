@@ -6,6 +6,7 @@ adapter. The painter never infers content or combines different selections.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from decimal import ROUND_DOWN, ROUND_HALF_UP, Decimal, InvalidOperation, localcontext
 
 from yomihime_game_link_sdk import cards
@@ -19,9 +20,10 @@ CATALOG_LIMITATION = (
     "未覆盖完整绝境战与当前资料片零式。"
 )
 PROVIDER_CATALOG_SCOPE = (
-    "绝境战为已查询范围内的历史最佳；零式按来源默认副本所属资料片及八人目录，"
+    "绝境战为已查询来源返回的最高百分位；零式按来源默认副本所属资料片及八人目录，"
     "不代表独立地区开放状态。"
 )
+HISTORY_INCOMPLETE = "历史成绩未查全，可能遗漏旧版本记录"
 DETAIL_LIMITATION = "次数仅为当前筛选范围；最高数值与最佳百分位可能来自不同记录。"
 
 # FFLogs grade colors are game policy, never inferred by Core or altered by theme.
@@ -39,7 +41,7 @@ def _number(value: object) -> Decimal:
     if type(value) not in {int, float, Decimal, str}:
         raise ValueError("unsupported numeric type")
     text = str(value)
-    if len(text) > 128:
+    if not isinstance(value, Decimal) and len(text) > 128:
         raise ValueError("numeric budget exceeded")
     number = Decimal(text)
     if (
@@ -217,7 +219,7 @@ def character_card(
             if not blocks:
                 blocks.append(cards.Text("受本图展示上限限制，此类别记录未展示。"))
             subtitle = (
-                "已查询范围内的历史最佳"
+                "已查询来源返回的最高百分位"
                 if category == "ultimate"
                 else groups[0].expansion_name
             )
@@ -259,6 +261,16 @@ def character_card(
                 style="caption",
             ),
             cards.Text(DETAIL_LIMITATION, style="caption"),
+            *(
+                (
+                    cards.Text(
+                        f"历史缓存命中 {character.history_cache_hits} 个范围；最早获取：{datetime.fromtimestamp(character.history_fetched_at, UTC):%Y-%m-%d %H:%M:%S UTC}；有效期900秒。",
+                        style="caption",
+                    ),
+                )
+                if character.history_fetched_at is not None
+                else ()
+            ),
             *(
                 (
                     cards.Text(
@@ -320,7 +332,7 @@ def _ranking_table(rankings, metric, job_language="zh"):
                         else ()
                     ),
                     *(
-                        ("部分历史范围未取得",)
+                        (HISTORY_INCOMPLETE,)
                         if not row.history_complete and row.query_state == "record"
                         else ()
                     ),

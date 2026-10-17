@@ -53,7 +53,7 @@ class SafeScopeTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(73, queried)
         self.assertNotIn(74, queried)
         self.assertIn(75, queried)
-        self.assertIs(result.status, ResultStatus.PARTIAL_SUCCESS)
+        self.assertIs(result.status, ResultStatus.SUCCESS)
         sections = [
             block for block in result.document.card.blocks if hasattr(block, "blocks")
         ]
@@ -69,7 +69,9 @@ class SafeScopeTests(unittest.IsolatedAsyncioTestCase):
             ],
             [7, 5],
         )
-        self.assertTrue(any("历史范围" in warning for warning in result.warnings))
+        self.assertFalse(
+            any("历史成绩未查全" in warning for warning in result.warnings)
+        )
 
     async def test_cached_catalog_reuses_verified_policy_without_new_metadata(self):
         metadata = card_fixture.expanded_metadata()
@@ -88,7 +90,7 @@ class SafeScopeTests(unittest.IsolatedAsyncioTestCase):
         )
         result = await handler.invoke(None, TARGET)
         self.assertEqual(len(http.requests), 4)
-        self.assertIs(result.status, ResultStatus.PARTIAL_SUCCESS)
+        self.assertIs(result.status, ResultStatus.SUCCESS)
         self.assertEqual(len(result.document.card.blocks[0].blocks[0].rows), 7)
         self.assertFalse(
             any(

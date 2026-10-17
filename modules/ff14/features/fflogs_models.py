@@ -137,6 +137,10 @@ class RankingOrigin:
     partition: int
     expansion_name: str | None
     partition_name: str | None
+    # Requested scope is provenance, never reconstructed from actual selection.
+    requested_partition: int | None = None
+    requested_timeframe: str | None = None
+    requested_spec_name: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -177,6 +181,9 @@ class PublicCharacter:
     catalog_warnings: tuple[str, ...] = ()
     catalog_complete: bool = False
     catalog_evaluated: bool = False
+    history_cache_hits: int = 0
+    history_fetched_at: float | None = None
+    history_cache_ttl: int | None = None
 
 
 def parse_rankings(value: object) -> RankingSelection:

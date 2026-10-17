@@ -15,6 +15,7 @@ from modules.ff14.features.fflogs import (
     _assemble_catalog_rankings,
     _bounded_catalog_targets,
     _catalog_query_targets,
+    _target_key,
 )
 from modules.ff14.features.fflogs_cards import character_card, percentile_text
 from modules.ff14.features.fflogs_catalog import (
@@ -43,7 +44,7 @@ def zone(
     difficulty="Savage",
     expansion=20,
     encounters=None,
-    partitions=(),
+    partitions=(PartitionRecord(3, "标准阵容构成 (Synthetic)", True),),
 ):
     return ZoneRecord(
         ident,
@@ -67,10 +68,7 @@ def zone(
 
 
 def catalog():
-    periods = (
-        PartitionRecord(1, "Synthetic first period", False),
-        PartitionRecord(2, "Synthetic second period", True),
-    )
+    periods = (PartitionRecord(3, "标准阵容构成 (Synthetic)", True),)
     return OutputMetadata(
         (
             zone(73, "Synthetic current tier"),
@@ -151,14 +149,14 @@ def selection(
         "rdps",
         source.zone_id,
         difficulty.difficulty_id,
-        period if period is not None else -1,
+        3 if period == -1 else period if period is not None else -1,
         size,
         ranks,
     )
 
 
 def key(target):
-    return target[0].zone_id, target[1].difficulty_id, target[3]
+    return _target_key(target)
 
 
 class CatalogPolicyTests(unittest.TestCase):
@@ -174,7 +172,9 @@ class CatalogPolicyTests(unittest.TestCase):
         self.assertTrue(
             all(item[1].name == "普通" for item in selected if item[2] == "ultimate")
         )
-        self.assertEqual(len(targets()), 7)  # three source IDs, two periods, one tier
+        self.assertEqual(
+            len(targets()), 4
+        )  # all three independent historical sources, one tier
 
     def test_fallback_is_catalog_only_and_unknown_sizes_cannot_trigger_it(self):
         source = catalog()
@@ -234,7 +234,7 @@ class CatalogPolicyTests(unittest.TestCase):
         source = catalog()
         candidates = targets(source)
         outcomes = {key(target): selection(target) for target in candidates}
-        winner = next(target for target in candidates if key(target) == (102, 1, 2))
+        winner = next(target for target in candidates if key(target)[:3] == (102, 1, 3))
         outcomes[key(winner)] = selection(
             winner, raw="99.99999999999999999", amount=22222, kills=9, job="Astrologian"
         )
@@ -244,13 +244,15 @@ class CatalogPolicyTests(unittest.TestCase):
             (row.encounter_id, row.best_amount, row.total_kills, row.spec),
             (1002, 22222, 9, "Astrologian"),
         )
-        self.assertEqual(row.origin.partition_name, "Synthetic second period")
+        self.assertIsNone(row.origin.partition_name)
+        self.assertEqual(row.origin.requested_partition, 3)
+        self.assertEqual(row.origin.requested_timeframe, "Historical")
         self.assertEqual(percentile_text(row.rank_percent_exact), "99.9%")
         self.assertEqual(percentile_text(Decimal("99.9762")), "99.9%")
         equal = {key(target): selection(target) for target in candidates}
         result = _assemble_catalog_rankings(record(), source, candidates, equal)
         self.assertEqual(
-            (result.groups[0].zone_id, result.groups[0].partition), (101, 1)
+            (result.groups[0].zone_id, result.groups[0].partition), (101, 3)
         )
         # Provider expansion list is not a chronology contract, so stable IDs win ties.
 
@@ -258,8 +260,8 @@ class CatalogPolicyTests(unittest.TestCase):
         source = catalog()
         candidates = targets(source)
         outcomes = {key(target): selection(target, rows=False) for target in candidates}
-        outcomes[(101, 1, 1)] = "failed"
-        outcomes.pop((103, 1, 2))
+        outcomes[(101, 1, 3, "rdps", "Historical", None)] = "failed"
+        outcomes.pop((103, 1, 3, "rdps", "Historical", None))
         result = _assemble_catalog_rankings(record(), source, candidates, outcomes)
         self.assertEqual(result.groups[0].rankings[0].query_state, "failed")
         self.assertEqual(result.groups[1].rankings[0].query_state, "not_queried")
@@ -269,9 +271,7 @@ class CatalogPolicyTests(unittest.TestCase):
         missing = replace(
             source,
             zones=tuple(
-                replace(item, expansion_name=None, partitions=())
-                if item.zone_id == 101
-                else item
+                replace(item, expansion_name=None) if item.zone_id == 101 else item
                 for item in source.zones
             ),
         )
@@ -291,7 +291,9 @@ class CatalogPolicyTests(unittest.TestCase):
             explicit_selection=False,
         )
         self.assertIn("时期信息未提供", str(card))
-        self.assertFalse(result.catalog_complete)
+        self.assertTrue(
+            result.catalog_complete
+        )  # missing period name is not a missed query
 
     def test_budget_counts_partition_targets_and_covers_distinct_groups(self):
         source = catalog()
@@ -305,11 +307,11 @@ class CatalogPolicyTests(unittest.TestCase):
                         f"Synthetic Ultimate {i}",
                         difficulty="普通",
                         partitions=tuple(
-                            PartitionRecord(j, f"Synthetic period {j}", j == 1)
+                            PartitionRecord(j, f"标准阵容构成 (Synthetic {j})", j == 1)
                             for j in range(1, 21)
                         ),
                     )
-                    for i in range(4)
+                    for i in range(55)
                 ),
             ),
         )
@@ -323,16 +325,11 @@ class CatalogPolicyTests(unittest.TestCase):
         )
         self.assertEqual(
             {target[0].zone_id for target in selected if target[2] == "ultimate"},
-            {200, 201, 202, 203},
+            set(range(200, 245)),
         )
         outcomes = {key(target): selection(target) for target in selected}
         result = _assemble_catalog_rankings(record(), expanded, candidates, outcomes)
-        self.assertTrue(
-            any(
-                row.query_state == "record" and not row.history_complete
-                for row in result.rankings
-            )
-        )
+        self.assertTrue(any(not row.history_complete for row in result.rankings))
         self.assertTrue(any("未查询" in warning for warning in result.catalog_warnings))
 
     def test_schema_gates_new_values_and_missing_sizes_remains_unknown(self):
@@ -397,14 +394,16 @@ class BatchTests(unittest.IsolatedAsyncioTestCase):
 
         source = OutputMetadata(
             (
-                zone(
-                    200,
-                    "Synthetic Ultimate A",
-                    difficulty="普通",
-                    partitions=tuple(
-                        PartitionRecord(i, f"Synthetic period {i}", i == 1)
-                        for i in range(1, 41)
-                    ),
+                *(
+                    zone(
+                        200 + i,
+                        f"Synthetic Ultimate {i}",
+                        difficulty="普通",
+                        partitions=(
+                            PartitionRecord(1, "标准阵容构成 (Synthetic)", True),
+                        ),
+                    )
+                    for i in range(40)
                 ),
                 *(zone(i, f"Synthetic tier {i}") for i in (73, 74, 75)),
             ),
@@ -476,21 +475,27 @@ class BatchTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(any("未查询" in warning for warning in result.catalog_warnings))
         self.assertFalse(result.catalog_complete)
-        self.assertEqual([group.zone_id for group in result.groups], [200, 73, 74, 75])
+        self.assertEqual(
+            [group.zone_id for group in result.groups if group.category == "savage"],
+            [73, 74, 75],
+        )
+        self.assertEqual(len(result.groups), 43)
 
     async def test_cancel_stops_two_inflight_batches_and_never_starts_queued_targets(
         self,
     ):
         source = OutputMetadata(
             (
-                zone(
-                    200,
-                    "Synthetic Ultimate A",
-                    difficulty="普通",
-                    partitions=tuple(
-                        PartitionRecord(i, f"Synthetic period {i}", i == 1)
-                        for i in range(1, 41)
-                    ),
+                *(
+                    zone(
+                        200 + i,
+                        f"Synthetic Ultimate {i}",
+                        difficulty="普通",
+                        partitions=(
+                            PartitionRecord(1, "标准阵容构成 (Synthetic)", True),
+                        ),
+                    )
+                    for i in range(40)
                 ),
                 *(zone(i, f"Synthetic tier {i}") for i in (73, 74, 75)),
             ),
@@ -557,7 +562,9 @@ class BatchTests(unittest.IsolatedAsyncioTestCase):
                         200 + i,
                         f"Synthetic Ultimate {i}",
                         difficulty="普通",
-                        partitions=(PartitionRecord(1, "Synthetic period", True),),
+                        partitions=(
+                            PartitionRecord(1, "标准阵容构成 (Synthetic)", True),
+                        ),
                     )
                     for i in range(13)
                 ),
@@ -797,11 +804,11 @@ class BatchTests(unittest.IsolatedAsyncioTestCase):
                         f"Synthetic Ultimate {i}",
                         difficulty="普通",
                         partitions=tuple(
-                            PartitionRecord(j, f"Synthetic period {j}", j == 1)
+                            PartitionRecord(j, f"标准阵容构成 (Synthetic {j})", j == 1)
                             for j in range(1, 11)
                         ),
                     )
-                    for i in range(5)
+                    for i in range(55)
                 ),
             ),
         )
@@ -827,7 +834,7 @@ class BatchTests(unittest.IsolatedAsyncioTestCase):
                     target = next(
                         item
                         for item in candidates
-                        if key(item)
+                        if key(item)[:3]
                         == (
                             zone_id,
                             data["variables"][f"d{i}"],

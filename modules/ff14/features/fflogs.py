@@ -10,7 +10,7 @@ import re
 from dataclasses import replace
 from decimal import Decimal
 from html.parser import HTMLParser
-from time import monotonic
+from time import monotonic, time
 from urllib.parse import quote
 
 from yomihime_game_link_sdk.contexts import InvocationOrigin, InvocationView
@@ -29,11 +29,17 @@ from yomihime_game_link_sdk.results import (
     ResultStatus,
 )
 from yomihime_game_link_sdk.services import ConfigSnapshot, HttpRequest, ModuleServices
-from yomihime_game_link_sdk.storage import JsonObject, SecretMetadataState
+from yomihime_game_link_sdk.storage import (
+    CacheLookupStatus,
+    CacheQuery,
+    JsonObject,
+    SecretMetadataState,
+)
 
 from .fflogs_cards import (
     CATALOG_LIMITATION,
     DETAIL_LIMITATION,
+    HISTORY_INCOMPLETE,
     PROVIDER_CATALOG_SCOPE,
     character_card,
     percentile_text,
@@ -129,6 +135,9 @@ class FFLogsCharacterLookup:
         self._lifecycle = object()
         self._metadata_cache: dict[str, tuple[float, OutputMetadata | None, str]] = {}
         self._ranking_contract_cache = {}
+        from .fflogs_history_cache import HistoryRotation
+
+        self._history_rotation = HistoryRotation()
         from .chat_context import PendingTargets
 
         self._chat_pending = PendingTargets()
@@ -137,6 +146,7 @@ class FFLogsCharacterLookup:
         self._lifecycle = object()
         self._metadata_cache.clear()
         self._ranking_contract_cache.clear()
+        self._history_rotation.clear()
         self._chat_pending.close()
 
     async def _character_metadata(
@@ -232,14 +242,248 @@ class FFLogsCharacterLookup:
         evidence=None,
         *,
         deadline=None,
+        cache_owner=None,
     ):
-        """Query bounded batches; every catalog target retains an outcome."""
+        from .fflogs_history_cache import (
+            HISTORY_CACHE_TTL,
+            cache_pack_key,
+            cache_packs,
+            history_identity,
+            pack_payload,
+            restore_pack,
+            snapshot_payload,
+        )
+
         targets = _catalog_query_targets(
             select_character_zones(metadata, character.zone_id)
         )
-        planned = _bounded_catalog_targets(targets)
-        pairs = tuple(dict.fromkeys(_target_key(target) for target in planned))
-        outcomes = {}
+        # The legacy fair ordering is retained for the first pass, then rotated.
+        all_ordered = _bounded_catalog_targets(targets, limit=None)
+        keys = tuple(
+            dict.fromkeys(
+                _target_key(target, character.metric) for target in all_ordered
+            )
+        )
+        eligible = {
+            _target_key(target, character.metric)
+            for target in targets
+            if target[2] != "ultimate" or target[3] is not None
+        }
+        identity = history_identity(
+            source_id, character, identity_variables, metadata, cache_owner
+        )
+        state = self._history_rotation.acquire(identity)
+        if state is None:
+            return _assemble_catalog_rankings(character, metadata, targets, {})
+        stop_at = min(
+            monotonic() + CATALOG_RANKING_DEADLINE_SECONDS,
+            deadline if deadline is not None else float("inf"),
+        )
+        try:
+            async with asyncio.timeout(max(0, stop_at - monotonic())):
+                await state.lock.acquire()
+        except TimeoutError:
+            self._history_rotation.release(state)
+            return _assemble_catalog_rankings(character, metadata, targets, {})
+        except BaseException:
+            self._history_rotation.release(state)
+            raise
+        cache_task = None
+        try:
+            if self._lifecycle is not lifecycle:
+                raise ServiceUnavailable()
+            cache = getattr(scope, "cache", None)
+            packs = cache_packs(metadata, tuple(key for key in keys if key in eligible))
+            cached, dates, loaded = {}, {}, {}
+            available = max(0, stop_at - monotonic())
+            # Persistence cannot occupy an HTTP slot or prevent fresh dispatch.
+            write_reserve = min(2, available * 0.15) if cache is not None else 0
+            fetch_stop = stop_at - write_reserve
+
+            async def read_packs():
+                if cache is None:
+                    return
+                order = tuple(range(len(packs)))
+                order = order[state.read_cursor :] + order[: state.read_cursor]
+                for index in order:
+                    if monotonic() >= fetch_stop:
+                        break
+                    group = packs[index]
+                    state.read_cursor = (index + 1) % len(packs)
+                    try:
+                        async with asyncio.timeout(max(0, fetch_stop - monotonic())):
+                            lookup = await cache.lookup(
+                                CacheQuery(cache_pack_key(identity, group))
+                            )
+                        snapshots, selections, times = {}, {}, {}
+                        if (
+                            lookup.status is CacheLookupStatus.HIT
+                            and lookup.entry.expires_at.timestamp() > time()
+                        ):
+                            snapshots, selections, times = restore_pack(
+                                lookup.entry.payload, identity, group
+                            )
+                            for key, selection in selections.items():
+                                if (
+                                    not _selection_scope_matches(selection, key)
+                                    or not _selection_membership_matches(
+                                        metadata, key[0], selection
+                                    )
+                                    or len({row.encounter_id for row in selection.rows})
+                                    != len(selection.rows)
+                                    or any(
+                                        target[2] == "savage" and selection.size != 8
+                                        for target in targets
+                                        if _target_key(target, character.metric) == key
+                                    )
+                                ):
+                                    raise FFLogsPayloadError("history pack selection")
+                        loaded[index] = snapshots
+                        cached.update(selections)
+                        dates.update(times)
+                    except (FFLogsPayloadError, ValueError, TypeError):
+                        loaded[index] = {}
+                    except TimeoutError:
+                        break
+                    except (PermissionError, ServiceUnavailable):
+                        raise
+                    except Exception:
+                        raise ServiceUnavailable() from None
+                    if self._lifecycle is not lifecycle:
+                        raise ServiceUnavailable()
+
+            cache_task = asyncio.create_task(read_packs())
+            await asyncio.wait({cache_task}, timeout=min(2, available * 0.2))
+            if cache_task.done():
+                cache_task.result()  # Authorization failures are never misses.
+            rotated = keys[state.cursor :] + keys[: state.cursor]
+            pairs = tuple(
+                key for key in rotated if key in eligible and key not in cached
+            )[:MAX_CHARACTER_ZONES]
+
+            def attempted(batch_keys):
+                state.cursor = (keys.index(batch_keys[-1]) + 1) % len(keys)
+
+            fresh, acquired = {}, {}
+            await self._fetch_catalog_rankings(
+                scope,
+                source_id,
+                character,
+                metadata,
+                identity_variables,
+                lifecycle,
+                evidence,
+                deadline=fetch_stop,
+                targets=targets,
+                pairs=pairs,
+                outcomes=fresh,
+                fetched=acquired,
+                on_attempt=attempted,
+            )
+            # The reader belongs to this invocation; never detach it on return.
+            await cache_task
+            if self._lifecycle is not lifecycle:
+                raise ServiceUnavailable()
+            if any(value == "hidden" for value in fresh.values()):
+                return replace(character, hidden=True, rankings=(), groups=())
+            good = {
+                key: value for key, value in fresh.items() if not isinstance(value, str)
+            }
+            outcomes = {**cached, **good}
+            for key, value in fresh.items():
+                outcomes.setdefault(key, value)
+            used_dates = {key: dates[key] for key in cached if key not in good}
+            used_dates.update(acquired)
+            unsaved = False
+            prepared = {}
+            for key, selection in good.items():
+                try:
+                    prepared[key] = snapshot_payload(
+                        selection, fetched_at=acquired[key]
+                    )
+                except (FFLogsPayloadError, ValueError, TypeError):
+                    unsaved = True
+            write_order = tuple(range(len(packs)))
+            write_order = (
+                write_order[state.write_cursor :] + write_order[: state.write_cursor]
+            )
+            for index in write_order:
+                group = packs[index]
+                updates = {key: prepared[key] for key in group if key in prepared}
+                if not updates or cache is None:
+                    continue
+                if index not in loaded or monotonic() >= stop_at:
+                    unsaved = True
+                    continue
+                try:
+                    combined = {**loaded[index], **updates}
+                    payload = pack_payload(identity, combined, group)
+                    async with asyncio.timeout(max(0, stop_at - monotonic())):
+                        state.write_cursor = (index + 1) % len(packs)
+                        await cache.put(
+                            cache_pack_key(identity, group),
+                            payload,
+                            ttl_seconds=HISTORY_CACHE_TTL,
+                        )
+                except (PermissionError, ServiceUnavailable):
+                    raise
+                except TimeoutError:
+                    unsaved = True
+                    break
+                except Exception:
+                    unsaved = True
+            if self._lifecycle is not lifecycle:
+                raise ServiceUnavailable()
+            result = _assemble_catalog_rankings(character, metadata, targets, outcomes)
+            warnings = []
+            if unsaved:
+                warnings.append(
+                    "部分已验证结果未能保存到缓存；后续调用可能需要重新查询。"
+                )
+            if any(
+                isinstance(value, str) and value not in {"not_queried"}
+                for value in fresh.values()
+            ):
+                warnings.append(
+                    "部分本次范围查询未成功；已取得的有效缓存仍按获取时间保留。"
+                )
+            if warnings:
+                result = replace(
+                    result,
+                    catalog_warnings=(*result.catalog_warnings, *warnings),
+                )
+            return replace(
+                result,
+                history_cache_hits=len(cached.keys() - good.keys()),
+                history_fetched_at=min(used_dates.values()) if used_dates else None,
+                history_cache_ttl=HISTORY_CACHE_TTL if used_dates else None,
+            )
+        finally:
+            if cache_task is not None:
+                if not cache_task.done():
+                    cache_task.cancel()
+                await asyncio.gather(cache_task, return_exceptions=True)
+            state.lock.release()
+            self._history_rotation.release(state)
+
+    async def _fetch_catalog_rankings(
+        self,
+        scope,
+        source_id,
+        character,
+        metadata,
+        identity_variables,
+        lifecycle,
+        evidence=None,
+        *,
+        deadline=None,
+        targets=None,
+        pairs=None,
+        outcomes=None,
+        fetched=None,
+        on_attempt=None,
+    ):
+        """Query bounded batches; every catalog target retains an outcome."""
         stop_at = min(
             monotonic() + CATALOG_RANKING_DEADLINE_SECONDS,
             deadline if deadline is not None else float("inf"),
@@ -256,8 +500,20 @@ class FFLogsCharacterLookup:
                     key: identity_variables[key]
                     for key in ("name", "serverSlug", "serverRegion", "metric")
                 }
+                # Source and character/server identity are fixed by this invocation.
+                # Every alias retains its full requested scope, not its actual echo.
                 arguments, aliases = [], []
-                for index, (zone_id, difficulty_id, partition_id) in enumerate(keys):
+                if any(key[4] == "Historical" for key in keys):
+                    variables["historicalTimeframe"] = "Historical"
+                    arguments.append("$historicalTimeframe: RankingTimeframeType!")
+                for index, (
+                    zone_id,
+                    difficulty_id,
+                    partition_id,
+                    _,
+                    timeframe,
+                    spec_name,
+                ) in enumerate(keys):
                     variables[f"z{index}"] = zone_id
                     variables[f"d{index}"] = difficulty_id
                     arguments.extend((f"$z{index}: Int!", f"$d{index}: Int!"))
@@ -267,8 +523,15 @@ class FFLogsCharacterLookup:
                     partition_argument = (
                         f", partition: $p{index}" if partition_id is not None else ""
                     )
+                    timeframe_argument = (
+                        ", timeframe: $historicalTimeframe"
+                        if timeframe == "Historical"
+                        else ""
+                    )
+                    # None means the job argument is omitted, not guessed from rows.
+                    assert spec_name is None
                     aliases.append(
-                        f"z{index}: zoneRankings(zoneID: $z{index}, difficulty: $d{index}, metric: $metric{partition_argument})"
+                        f"z{index}: zoneRankings(zoneID: $z{index}, difficulty: $d{index}, metric: $metric{partition_argument}{timeframe_argument})"
                     )
                 query = (
                     "query FF14CatalogCharacter($name: String!, $serverSlug: String!, "
@@ -281,6 +544,8 @@ class FFLogsCharacterLookup:
                 )
                 try:
                     async with asyncio.timeout(max(0, stop_at - monotonic())):
+                        if on_attempt is not None:
+                            on_attempt(keys)
                         response = await scope.http.fetch(
                             HttpRequest(
                                 source_id,
@@ -336,9 +601,9 @@ class FFLogsCharacterLookup:
                         selection = parse_rankings(value.get(f"z{index}"))
                         categories = {
                             category
-                            for zone, difficulty, category, partition_id in targets
-                            if (zone.zone_id, difficulty.difficulty_id, partition_id)
-                            == key
+                            for target in targets
+                            for category in (target[2],)
+                            if _target_key(target, character.metric) == key
                         }
                         if "savage" in categories and (
                             selection.size != 8 or selection.difficulty_id != key[1]
@@ -349,14 +614,9 @@ class FFLogsCharacterLookup:
                                 else "excluded_difficulty"
                             )
                             continue
-                        if (
-                            selection.zone_id != key[0]
-                            or selection.difficulty_id != key[1]
-                            or (key[2] is not None and selection.partition != key[2])
-                            or selection.metric != character.metric
-                            or len({r.encounter_id for r in selection.rows})
-                            != len(selection.rows)
-                        ):
+                        if not _selection_scope_matches(selection, key) or len(
+                            {r.encounter_id for r in selection.rows}
+                        ) != len(selection.rows):
                             raise FFLogsPayloadError("catalog selection changed")
                         if not _selection_membership_matches(
                             metadata, key[0], selection
@@ -364,6 +624,7 @@ class FFLogsCharacterLookup:
                             result[key] = "failed_membership"
                             continue
                         result[key] = selection
+                        fetched[key] = time()
                     except FFLogsPayloadError:
                         result[key] = "failed"
                 return result
@@ -382,9 +643,7 @@ class FFLogsCharacterLookup:
                     task.cancel()
             if tasks:
                 await asyncio.gather(*tasks, return_exceptions=True)
-        if any(value == "hidden" for value in outcomes.values()):
-            return replace(character, hidden=True, rankings=(), groups=())
-        return _assemble_catalog_rankings(character, metadata, targets, outcomes)
+        return outcomes
 
     async def invoke(
         self, context: InvocationView, parameters: JsonObject
@@ -722,7 +981,9 @@ class FFLogsCharacterLookup:
                 raise
             if observation is not None:
                 observation.stage = "identity"
-            if (tool or capture_evidence or advanced_filters) and (
+            if (
+                tool or capture_evidence or advanced_filters or zone_tuple is None
+            ) and (
                 " ".join(character.name.casefold().split())
                 != " ".join(name.casefold().split())
                 or " ".join(character.server_name.casefold().split())
@@ -851,6 +1112,7 @@ class FFLogsCharacterLookup:
                         lifecycle,
                         evidence,
                         deadline=deadline,
+                        cache_owner=context,
                     )
             except (ServiceUnavailable, PermissionError):
                 return _error(ErrorCode.MODULE_UNAVAILABLE, "FFLogs 来源服务暂不可用。")
@@ -913,26 +1175,64 @@ class FFLogsCharacterLookup:
 
 
 def _catalog_query_targets(targets):
-    return tuple(
-        (zone, difficulty, category, partition)
-        for zone, difficulty, category in targets
-        for partition in (
-            tuple(item.partition_id for item in zone.partitions)
-            if category == "ultimate" and zone.partitions
-            else (None,)
-        )
-    )
+    """Keep each explicit standard partition; unknown labels remain incomplete."""
+    result = []
+    for zone, difficulty, category in targets:
+        if category != "ultimate":
+            result.append((zone, difficulty, category, None))
+            continue
+        unknown = not zone.partitions
+        for period in zone.partitions:
+            name = period.name.casefold().strip()
+            if name.startswith(
+                (
+                    "非标准阵容构成",
+                    "non-standard composition",
+                    "non standard composition",
+                )
+            ):
+                continue
+            if period.partition_id > 0 and name.startswith(
+                ("标准阵容构成", "standard composition")
+            ):
+                result.append((zone, difficulty, category, period.partition_id))
+            else:
+                unknown = True
+        if unknown or not any(
+            target[:3] == (zone, difficulty, category) for target in result
+        ):
+            result.append((zone, difficulty, category, None))
+    return tuple(result)
 
 
-def _target_key(target):
+def _target_key(target, metric="rdps"):
+    # These keys never leave one source/character/server invocation. None, -1
+    # and positive partition requests are distinct regardless of response echo.
     return (
         target[0].zone_id,
         target[1].difficulty_id,
         target[3] if len(target) > 3 else None,
+        metric,
+        "Historical" if target[2] == "ultimate" else None,
+        None,  # specName is deliberately omitted for all jobs.
     )
 
 
-def _bounded_catalog_targets(targets):
+def _selection_scope_matches(selection, requested):
+    partition = requested[2]
+    return (
+        selection.zone_id == requested[0]
+        and selection.difficulty_id == requested[1]
+        and selection.metric == requested[3]
+        and (
+            partition is None
+            or selection.partition == partition
+            or (partition == -1 and selection.partition > 0)
+        )
+    )
+
+
+def _bounded_catalog_targets(targets, *, limit=MAX_CHARACTER_ZONES):
     """Cover distinct names/tiers before spending the budget on historical IDs."""
     buckets = {}
     for index, target in enumerate(targets):
@@ -962,7 +1262,7 @@ def _bounded_catalog_targets(targets):
     ]
     for depth in range(max((len(items) for items in fair_buckets), default=0)):
         for indexes in fair_buckets:
-            if depth < len(indexes) and len(selected) < MAX_CHARACTER_ZONES:
+            if depth < len(indexes) and (limit is None or len(selected) < limit):
                 selected.setdefault(_target_key(targets[indexes[depth]]), None)
     # Query order must retain this fair round-robin, not the original catalog
     # order. Assembly separately iterates `targets` for source display order.
@@ -990,13 +1290,6 @@ def _assemble_catalog_rankings(character, metadata, targets, outcomes):
     selected_expansion, expansion_known = savage_expansion(metadata, character.zone_id)
     if not expansion_known:
         warnings.append("部分零式目录人数或目标资料片未知，未据此猜测或回退。")
-    if any(
-        category == "ultimate" and not zone.partitions
-        for zone, _, category, _ in targets
-    ):
-        warnings.append(
-            "部分绝境战未提供分区时期目录，仅查询来源默认范围，历史范围可能不完整。"
-        )
     anchor = next(
         (zone for zone in metadata.zones if zone.zone_id == character.zone_id), None
     )
@@ -1013,9 +1306,17 @@ def _assemble_catalog_rankings(character, metadata, targets, outcomes):
     states = {"failed": 0, "not_queried": 0}
     excluded = []
     for zone, difficulty, category, requested_partition in targets:
-        selection = outcomes.get(
-            (zone.zone_id, difficulty.difficulty_id, requested_partition), "not_queried"
+        requested = _target_key(
+            (zone, difficulty, category, requested_partition), character.metric
         )
+        selection = outcomes.get(requested, "not_queried")
+        if category == "ultimate" and requested_partition is None:
+            selection = "not_queried"
+        scope_failed = not isinstance(selection, str) and not _selection_scope_matches(
+            selection, requested
+        )
+        if scope_failed:
+            selection = "failed"
         state = selection if isinstance(selection, str) else "record"
         membership_failed = state == "failed_membership" or (
             not isinstance(selection, str)
@@ -1033,6 +1334,9 @@ def _assemble_catalog_rankings(character, metadata, targets, outcomes):
                 failed_names.append(zone.name)
             if (
                 not membership_failed
+                and not scope_failed
+                and category == "savage"
+                and requested_partition is None
                 and zone.zone_id == character.zone_id
                 and difficulty.difficulty_id == character.difficulty_id
                 and (
@@ -1069,7 +1373,10 @@ def _assemble_catalog_rankings(character, metadata, targets, outcomes):
             difficulty.difficulty_id,
             partition,
             zone.expansion_name,
-            partition_name,
+            partition_name if category != "ultimate" else None,
+            requested_partition=requested_partition,
+            requested_timeframe=requested[4],
+            requested_spec_name=requested[5],
         )
         values = []
         for encounter in zone.encounters:
@@ -1137,7 +1444,7 @@ def _assemble_catalog_rankings(character, metadata, targets, outcomes):
                 else Decimal(-1)
             )
             return (
-                -raw,
+                raw.copy_negate(),
                 zone.zone_id,
                 row.encounter_id,
                 difficulty.difficulty_id,
@@ -1172,6 +1479,10 @@ def _assemble_catalog_rankings(character, metadata, targets, outcomes):
         )
     if not ultimate_groups:
         warnings.append("未取得符合来源完整命名约定及归属校验的绝境战目录。")
+    if not ultimate_groups or any(
+        not row.history_complete for group in ultimate_groups for row in group.rankings
+    ):
+        warnings.append(HISTORY_INCOMPLETE)
     if not groups:
         warnings.append("未取得可核验的八人零式目录；未以角色成绩决定回退。")
     if states["failed"]:
@@ -1587,13 +1898,24 @@ def _character_result(
     if character.groups:
         blocks.append(
             TextBlock(
-                "分区范围：绝境战按所选历史来源分区；零式使用各副本的 FFLogs 默认分区。"
+                "分区范围：绝境战逐项查询来源目录中的标准阵容历史分区；零式使用各副本的 FFLogs 默认分区。"
             )
         )
     elif character.partition == -1:
         blocks.append(TextBlock("分区范围：全部分区。"))
 
     visible = character.rankings[:limit]
+    if character.history_fetched_at is not None:
+        from datetime import UTC, datetime
+
+        fetched_label = datetime.fromtimestamp(
+            character.history_fetched_at, UTC
+        ).strftime("%Y-%m-%d %H:%M:%S UTC")
+        blocks.append(
+            TextBlock(
+                f"历史缓存命中 {character.history_cache_hits} 个范围；最早获取：{fetched_label}；有效期900秒。"
+            )
+        )
     row_lines = []
     for ranking in visible:
         parts = [ranking.encounter_name]
@@ -1638,7 +1960,7 @@ def _character_result(
     if catalog_requested:
         blocks.append(
             TextBlock(
-                "范围：来源完整名称识别的绝境战历史最佳与默认副本所属资料片八人零式；不代表独立地区开放状态。"
+                "范围：绝境战取已查询来源返回的最高百分位；零式按默认副本所属资料片八人目录；不代表独立地区开放状态。"
                 if character.catalog_evaluated or character.groups
                 else CATALOG_LIMITATION
             )
