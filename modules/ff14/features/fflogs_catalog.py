@@ -39,6 +39,53 @@ CN_REGION_SLUG = "cn"
 GLOBAL_REGION_SLUGS = frozenset({"na", "eu", "jp", "oc"})
 _GRAPHQL_NAME = re.compile(r"[_A-Za-z][_0-9A-Za-z]*\Z", re.ASCII)
 
+# Only these complete provider wrappers prove composition. Never substring
+# match "standard" inside "non-standard", or infer rules from numeric IDs.
+_COMPOSITION = re.compile(
+    r"(?P<kind>standard composition|non-standard composition|non standard composition|标准阵容构成|非标准阵容构成)\s*[（(](?P<label>.*)[)）]",
+    re.I,
+)
+_VERSION = r"[1-9]\d*\.\d{1,2}[a-z]?"
+_VERSION_EXPRESSION = re.compile(
+    rf"(?:{_VERSION}\+?|(?:>=|<=|>|<|≥|≤)\s*{_VERSION}|"
+    rf"{_VERSION}\s*(?:-|–|—|至|to)\s*{_VERSION}|"
+    rf"[\[(]\s*{_VERSION}\s*,\s*{_VERSION}\s*[\])]|"
+    rf"{_VERSION}\s+(?:and later|or earlier)|{_VERSION}(?:\s*版本)?\s*(?:之前|以后))",
+    re.I,
+)
+
+
+def partition_version(name: str | None) -> str | None:
+    """Extract a whole unambiguous version expression, preserving its bytes."""
+    if not name:
+        return None
+    label = name.strip()
+    composition = _COMPOSITION.fullmatch(label)
+    if composition:
+        label = composition["label"].strip()
+    label = re.sub(r"^(?:patch|version|版本|补丁|パッチ)\s*", "", label, flags=re.I)
+    label = re.sub(r"\s*(?:版本|补丁)$", "", label)
+    return label if _VERSION_EXPRESSION.fullmatch(label) else None
+
+
+def partition_composition(name: str | None) -> str | None:
+    match = _COMPOSITION.fullmatch((name or "").strip())
+    if match is None:
+        return None
+    kind = match["kind"].casefold()
+    return "nonstandard" if kind.startswith(("non", "非")) else "standard"
+
+
+def savage_partition_qualification(partition: PartitionRecord) -> str:
+    """Explicit non-Echo rule evidence only; default is not a rule."""
+    if re.search(r"超越之力|(?<![a-z])echo(?![a-z])", partition.name, re.I):
+        return "echo"
+    composition = partition_composition(partition.name)
+    if partition.partition_id > 0 and composition and partition_version(partition.name):
+        return composition
+    return "unknown"
+
+
 REGIONS_QUERY = """query FF14WorldRegions {
   worldData { regions { id name compactName slug } }
 }"""

@@ -67,7 +67,6 @@ from .fflogs_models import (
     OutputMetadata,
     PublicCharacter,
     RankingOrigin,
-    RankingSelection,
     parse_public_character,
     parse_rankings,
 )
@@ -269,7 +268,7 @@ class FFLogsCharacterLookup:
         eligible = {
             _target_key(target, character.metric)
             for target in targets
-            if target[2] != "ultimate" or target[3] is not None
+            if target[3] is not None
         }
         identity = history_identity(
             source_id, character, identity_variables, metadata, cache_owner
@@ -479,13 +478,19 @@ class FFLogsCharacterLookup:
             write_ms=max(0, int((monotonic() - write_started) * 1000)),
             total_ms=max(0, int((monotonic() - started) * 1000)),
         )
-        if evidence is not None:
-            evidence.observe("FF14HistorySummary", summary, status=None)
         result = _assemble_catalog_rankings(character, metadata, targets, outcomes)
         if duty_order is not None:
             from .duty_order import apply_duty_order
 
             result = apply_duty_order(result, duty_order)
+        if evidence is not None:
+            from .fflogs_evidence import winner_summary
+
+            evidence.observe(
+                "FF14HistorySummary",
+                {**summary, **winner_summary(result, metadata, MAX_CHARACTER_ROWS)},
+                status=None,
+            )
         warnings = []
         if unsaved:
             warnings.append("部分已验证结果未能保存到缓存；后续调用可能需要重新查询。")
@@ -1252,14 +1257,20 @@ class FFLogsCharacterLookup:
 
 
 def _catalog_query_targets(targets):
-    """Keep each explicit standard partition; unknown labels remain incomplete."""
+    """Plan explicit non-Echo Savage and unchanged standard Ultimate ranges."""
+    from .fflogs_catalog import savage_partition_qualification
+
     result = []
     for zone, difficulty, category in targets:
-        if category != "ultimate":
-            result.append((zone, difficulty, category, None))
-            continue
         unknown = not zone.partitions
         for period in zone.partitions:
+            if category == "savage":
+                qualification = savage_partition_qualification(period)
+                if qualification in {"standard", "nonstandard"}:
+                    result.append((zone, difficulty, category, period.partition_id))
+                elif qualification == "unknown":
+                    unknown = True
+                continue
             name = period.name.casefold().strip()
             if name.startswith(
                 (
@@ -1364,6 +1375,7 @@ def _assemble_catalog_rankings(character, metadata, targets, outcomes):
     """Select entire rows using raw percentiles; never combine source periods."""
     warnings = []
     groups = []
+    savage = {}
     ultimate = {}
     selected_expansion, expansion_known = savage_expansion(metadata, character.zone_id)
     if not expansion_known:
@@ -1388,8 +1400,16 @@ def _assemble_catalog_rankings(character, metadata, targets, outcomes):
             (zone, difficulty, category, requested_partition), character.metric
         )
         selection = outcomes.get(requested, "not_queried")
-        if category == "ultimate" and requested_partition is None:
+        if requested_partition is None:
             selection = "not_queried"
+            if category == "savage" and zone.partitions:
+                from .fflogs_catalog import savage_partition_qualification
+
+                if all(
+                    savage_partition_qualification(period) == "echo"
+                    for period in zone.partitions
+                ):
+                    selection = "excluded_echo"
         scope_failed = not isinstance(selection, str) and not _selection_scope_matches(
             selection, requested
         )
@@ -1412,28 +1432,6 @@ def _assemble_catalog_rankings(character, metadata, targets, outcomes):
             states[state] += 1
             if state == "failed":
                 failed_names.append(zone.name)
-            if (
-                not membership_failed
-                and not scope_failed
-                and category == "savage"
-                and requested_partition is None
-                and zone.zone_id == character.zone_id
-                and difficulty.difficulty_id == character.difficulty_id
-                and (
-                    requested_partition is None
-                    or requested_partition == character.partition
-                )
-                and (category != "savage" or character.size == 8)
-            ):
-                selection = RankingSelection(
-                    character.metric,
-                    character.zone_id,
-                    character.difficulty_id,
-                    character.partition,
-                    character.size,
-                    character.rankings,
-                )
-                state = "record"
         rows = (
             {}
             if isinstance(selection, str)
@@ -1453,10 +1451,13 @@ def _assemble_catalog_rankings(character, metadata, targets, outcomes):
             difficulty.difficulty_id,
             partition,
             zone.expansion_name,
-            partition_name if category != "ultimate" else None,
+            partition_name,
             requested_partition=requested_partition,
             requested_timeframe=requested[4],
             requested_spec_name=requested[5],
+            composition=(
+                _savage_composition(zone, partition) if category == "savage" else None
+            ),
         )
         values = []
         for encounter in zone.encounters:
@@ -1496,17 +1497,10 @@ def _assemble_catalog_rankings(character, metadata, targets, outcomes):
                 key = ultimate_group_key(zone.name, encounter.name)
                 ultimate.setdefault(key, []).append((zone, difficulty, row))
         if category == "savage":
-            groups.append(
-                CharacterRankingGroup(
-                    zone.zone_id,
-                    zone.name,
-                    difficulty.difficulty_id,
-                    partition,
-                    category,
-                    zone.expansion_name or "—",
-                    tuple(values),
-                )
-            )
+            for row in values:
+                savage.setdefault(
+                    (zone.zone_id, difficulty.difficulty_id, row.encounter_id), []
+                ).append((zone, difficulty, row))
     ultimate_groups = []
     catalog_order = ultimate_catalog_order(metadata, character.zone_id)
     for key in sorted(ultimate, key=lambda key: catalog_order.get(key, (1, 0, 0))):
@@ -1516,31 +1510,17 @@ def _assemble_catalog_rankings(character, metadata, targets, outcomes):
             entry[2].query_state in {"record", "no_records"} for entry in entries
         )
 
-        def order(entry):
-            zone, difficulty, row = entry
-            raw = (
-                row.rank_percent_exact
-                if row.rank_percent_exact is not None
-                else Decimal(str(row.rank_percent))
-                if row.rank_percent is not None
-                else Decimal(-1)
-            )
-            return (
-                raw.copy_negate(),
-                zone.zone_id,
-                row.encounter_id,
-                difficulty.difficulty_id,
-                row.origin.partition if row.origin is not None else -1,
-            )
-
         if records:
-            chosen = min(records, key=order)
+            chosen = min(records, key=_ranking_order)
         else:
             # A failed/unqueried historical ID prevents a no-records claim.
             priority = {"failed": 0, "not_queried": 1, "no_records": 2}
             chosen = min(
                 entries,
-                key=lambda entry: (priority.get(entry[2].query_state, 3), order(entry)),
+                key=lambda entry: (
+                    priority.get(entry[2].query_state, 3),
+                    _ranking_order(entry),
+                ),
             )
         zone, difficulty, row = chosen
         row = replace(
@@ -1557,6 +1537,42 @@ def _assemble_catalog_rankings(character, metadata, targets, outcomes):
                 "ultimate",
                 zone.expansion_name or "—",
                 (row,),
+            )
+        )
+    # Same encounter IDs within the same explicit zone/difficulty only. Names
+    # never merge unrelated targets; every displayed field stays on one row.
+    grouped = {}
+    for entries in savage.values():
+        records = [entry for entry in entries if entry[2].query_state == "record"]
+        complete = all(
+            entry[2].query_state in {"record", "no_records", "excluded_echo"}
+            for entry in entries
+        )
+        priority = {"failed": 0, "not_queried": 1, "no_records": 2}
+        zone, difficulty, row = (
+            min(records, key=_ranking_order)
+            if records
+            else min(
+                entries,
+                key=lambda entry: (
+                    priority.get(entry[2].query_state, 3),
+                    _ranking_order(entry),
+                ),
+            )
+        )
+        grouped.setdefault(
+            (zone.zone_id, difficulty.difficulty_id), (zone, difficulty, [])
+        )[2].append(replace(row, history_complete=complete))
+    for zone, difficulty, rows in grouped.values():
+        groups.append(
+            CharacterRankingGroup(
+                zone.zone_id,
+                zone.name,
+                difficulty.difficulty_id,
+                -1,
+                "savage",
+                zone.expansion_name or "—",
+                tuple(rows),
             )
         )
     if not ultimate_groups:
@@ -1590,6 +1606,34 @@ def _assemble_catalog_rankings(character, metadata, targets, outcomes):
         catalog_warnings=tuple(warnings),
         catalog_complete=not warnings and bool(all_groups),
         catalog_evaluated=True,
+    )
+
+
+def _savage_composition(zone, partition):
+    from .fflogs_catalog import savage_partition_qualification
+
+    period = next(
+        (item for item in zone.partitions if item.partition_id == partition), None
+    )
+    return savage_partition_qualification(period) if period is not None else None
+
+
+def _ranking_order(entry):
+    """Exact raw descending, then the existing stable numeric identity order."""
+    zone, difficulty, row = entry
+    raw = (
+        row.rank_percent_exact
+        if row.rank_percent_exact is not None
+        else Decimal(str(row.rank_percent))
+        if row.rank_percent is not None
+        else Decimal(-1)
+    )
+    return (
+        raw.copy_negate(),
+        zone.zone_id,
+        row.encounter_id,
+        difficulty.difficulty_id,
+        row.origin.partition if row.origin is not None else -1,
     )
 
 

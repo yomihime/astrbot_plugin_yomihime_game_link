@@ -111,8 +111,9 @@ class DeclarativeLogsCommandTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertIn(
                     "cn.fflogs.com" if realm == "国服" else "www.fflogs.com",
-                    card.sources[0],
+                    card.blocks[-1].content,
                 )
+                self.assertEqual(card.sources, ())
         self.assertEqual(len(self.context.calls), 1)
         self.assertEqual(
             set(self.logs_sources),

@@ -20,16 +20,16 @@ from yomihime_game_link_sdk import cards
 
 
 class LogsTablePolishTests(unittest.TestCase):
-    def test_open_ranges_are_not_single_record_versions(self):
+    def test_open_ranges_preserve_statistical_partition_expression(self):
         base = fixture.record().rankings[0]
-        for expansion, expected in (("Endwalker", "6.x"), ("Unknown", "—")):
-            for label in (
-                "Patch 6.4+",
-                "Patch 6.4 and later",
-                "版本 6.4 之前",
-                "Patch 6.4 or earlier",
-                "6.4版本以后",
-                "Patch >=6.4",
+        for expansion in ("Endwalker", "Unknown"):
+            for label, expected in (
+                ("Patch 6.4+", "6.4+"),
+                ("Patch 6.4 and later", "6.4 and later"),
+                ("版本 6.4 之前", "6.4 之前"),
+                ("Patch 6.4 or earlier", "6.4 or earlier"),
+                ("6.4版本以后", "6.4版本以后"),
+                ("Patch >=6.4", ">=6.4"),
             ):
                 with self.subTest(label=label, expansion=expansion):
                     self.assertEqual(
@@ -51,7 +51,7 @@ class LogsTablePolishTests(unittest.TestCase):
             ("Future", "Patch 10.1", "10.1"),
             ("Unknown expansion", "Standard Composition 3", "—"),
             (None, None, "—"),
-            ("Endwalker", "Patch 6.4 - 6.5", "6.x"),
+            ("Endwalker", "Patch 6.4 - 6.5", "6.4 - 6.5"),
         ):
             with self.subTest(expansion=expansion, partition=partition):
                 candidate = replace(
@@ -272,14 +272,16 @@ class LogsTablePolishTests(unittest.TestCase):
         )
         table, *notes = document.blocks[0].blocks
         self.assertTrue(all("\n" not in row[0] for row in table.rows))
-        self.assertEqual(len(notes), 4)
-        for row, note, message in zip(
-            rows,
-            notes,
-            ("历史成绩未查全", "查询成功，无公开记录", "查询失败", "未查询"),
-        ):
-            self.assertIn(row.encounter_name, note.content)
-            self.assertIn(message, note.content)
+        self.assertEqual(notes, [])
+        self.assertIn("部分记录未取得", document.blocks[-1].content)
+        self.assertTrue(
+            all(
+                row.query_state == state
+                for row, state in zip(
+                    rows, ("record", "no_records", "failed", "not_queried")
+                )
+            )
+        )
 
     def test_overlong_single_line_keeps_full_value_and_uses_existing_fallback(self):
         from ygl_test_subject.presentation.card_bitmap import BitmapUnavailable

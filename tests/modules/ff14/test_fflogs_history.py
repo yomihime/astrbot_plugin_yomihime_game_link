@@ -67,7 +67,7 @@ class HistoryPlanTests(unittest.TestCase):
             {(3, "rdps", "Historical", None)},
         )
         self.assertEqual(
-            {_target_key(target)[2:] for target in savage}, {(None, "rdps", None, None)}
+            {_target_key(target)[2:] for target in savage}, {(3, "rdps", None, None)}
         )
         target = ultimate[0]
         keys = {_target_key((*target[:3], partition)) for partition in (None, -1, 3)}
@@ -98,8 +98,11 @@ class HistoryPlanTests(unittest.TestCase):
         self.assertEqual(row.origin.requested_partition, 3)
         self.assertEqual(row.origin.requested_timeframe, "Historical")
         self.assertIsNone(row.origin.requested_spec_name)
-        self.assertIsNone(row.origin.partition_name)
-        self.assertEqual(ranking_period(row), "资料片：Synthetic expansion 10")
+        self.assertEqual(row.origin.partition_name, "标准阵容构成 (Patch 7.4)")
+        self.assertEqual(
+            ranking_period(row),
+            "资料片：Synthetic expansion 10 · 分区：标准阵容构成 (Patch 7.4)",
+        )
         self.assertTrue(row.history_complete)
         self.assertTrue(result.catalog_complete)
         self.assertNotIn(HISTORY_INCOMPLETE, result.catalog_warnings)
@@ -248,7 +251,6 @@ class HistoryBatchTests(unittest.IsolatedAsyncioTestCase):
                 if not alias.startswith("z"):
                     continue
                 index = alias[1:]
-                requested = variables.get("p" + index)
                 members = (
                     mixed.encounters if zone_id == 950 else metadata.zones[1].encounters
                 )
@@ -261,8 +263,18 @@ class HistoryBatchTests(unittest.IsolatedAsyncioTestCase):
                     rankings=[
                         dict(
                             encounter={"id": item.encounter_id, "name": item.name},
-                            rankPercent=17 if requested == 3 else 99,
-                            bestAmount=1700 if requested == 3 else 9900,
+                            rankPercent=17
+                            if "timeframe: $historicalTimeframe"
+                            in data["query"]
+                            .split(alias + ": zoneRankings(")[1]
+                            .split(")")[0]
+                            else 99,
+                            bestAmount=1700
+                            if "timeframe: $historicalTimeframe"
+                            in data["query"]
+                            .split(alias + ": zoneRankings(")[1]
+                            .split(")")[0]
+                            else 9900,
                             totalKills=1,
                             bestSpec="Scholar",
                         )
@@ -302,11 +314,11 @@ class HistoryBatchTests(unittest.IsolatedAsyncioTestCase):
                 continue
             index = alias[1:]
             arguments = wire["query"].split(alias + ": zoneRankings(")[1].split(")")[0]
-            if "p" + index in wire["variables"]:
-                self.assertEqual(wire["variables"]["p" + index], 3)
+            self.assertEqual(wire["variables"]["p" + index], 3)
+            self.assertIn("partition:", arguments)
+            if "timeframe:" in arguments:
                 self.assertIn("timeframe: $historicalTimeframe", arguments)
             else:
-                self.assertNotIn("partition:", arguments)
                 self.assertNotIn("timeframe:", arguments)
         ultimate = result.groups[0].rankings[0]
         savage = next(
@@ -317,7 +329,7 @@ class HistoryBatchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((ultimate.rank_percent, ultimate.best_amount), (17, 1700))
         self.assertEqual((savage.rank_percent, savage.best_amount), (99, 9900))
         self.assertEqual(ultimate.origin.requested_partition, 3)
-        self.assertIsNone(savage.origin.requested_partition)
+        self.assertEqual(savage.origin.requested_partition, 3)
         self.assertEqual(ultimate.origin.partition, savage.origin.partition)
         self.assertTrue(result.catalog_complete)
         actual_partition[0] = 0

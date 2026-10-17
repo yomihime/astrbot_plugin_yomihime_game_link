@@ -5,10 +5,12 @@ from __future__ import annotations
 import json
 import logging
 import re
+from decimal import Decimal, InvalidOperation
 
 LOGGER_NAME = "yomihime_game_link.ff14.evidence"
 MARKER = "FF14_LOGS_EVIDENCE"
 MAX_BYTES, MAX_CHUNKS = 512 * 1024, 64
+LOW_CHUNKS, SUMMARY_CHUNKS = 47, 8
 OPERATIONS = frozenset(
     {
         "FF14OutputMetadataShape",
@@ -85,6 +87,54 @@ def _type(value, depth=0):
     )
 
 
+def _winner(value):
+    def identifier(item, low=1, nullable=False):
+        return (
+            nullable and item is None or type(item) is int and low <= item <= 2147483647
+        )
+
+    def exact(item):
+        if item is None:
+            return True
+        if (
+            not isinstance(item, str)
+            or len(item) > 160
+            or re.fullmatch(r"[+-]?[0-9]+(?:\.[0-9]+)?(?:[Ee][+-]?[0-9]+)?", item)
+            is None
+        ):
+            return False
+        try:
+            number = Decimal(item)
+            return number.is_finite() and 0 <= number <= 100
+        except InvalidOperation:
+            return False
+
+    return _object(
+        value,
+        {
+            "category": lambda item: item in {"ultimate", "savage"},
+            "zone": identifier,
+            "difficulty": identifier,
+            "requested_partition": lambda item: identifier(item, -1, True),
+            "partition": lambda item: identifier(item, -1, True),
+            "encounter": identifier,
+            "composition": lambda item: item in {"standard", "nonstandard", "unknown"},
+            "echo": lambda item: item in {"excluded", "not_echo", "unknown"},
+            "rankPercent_exact": exact,
+            "bestAmount_model": lambda item: item is None
+            or type(item) in {int, float}
+            and 0 <= item <= 1000000000,
+            "spec": lambda item: _text(item, 80),
+            "totalKills": lambda item: item is None
+            or type(item) is int
+            and 0 <= item <= 2147483647,
+            "state": lambda item: item
+            in {"record", "no_records", "failed", "not_queried", "excluded_echo"},
+            "history_complete": lambda item: type(item) is bool,
+        },
+    )
+
+
 def _safe_payload(operation, body):
     """Validate a closed diagnostic wire format without importing game code."""
     if operation == "FF14DutyOrderState":
@@ -129,7 +179,31 @@ def _safe_payload(operation, body):
         def count(value):
             return type(value) is int and 0 <= value <= 2147483647
 
-        return _object(body, dict.fromkeys(fields, count))
+        optional = {
+            "metadata_sha256": lambda item: isinstance(item, str)
+            and re.fullmatch(r"[0-9a-f]{64}", item) is not None,
+            "winners": lambda item: _list(item, _winner, 40),
+            "displayed": lambda item: type(item) is int and 0 <= item <= 40,
+            "total": lambda item: type(item) is int and 0 <= item <= 10000,
+            "complete": lambda item: type(item) is bool,
+        }
+        bundle = set(optional)
+        optional.update(
+            {
+                key: lambda item: type(item) is int and 0 <= item <= 10000
+                for key in (
+                    "partition_eligible",
+                    "partition_echo_excluded",
+                    "partition_unknown",
+                )
+            }
+        )
+        optional["diagnostic_low_omitted"] = lambda item: type(item) is bool
+        return _object(body, dict.fromkeys(fields, count), optional) and (
+            not (set(body) & set(optional))
+            or bundle <= set(body)
+            and body["displayed"] == len(body["winners"]) <= body["total"]
+        )
     if operation == "FF14RequestSummary":
         operations = {
             "UniversalisWorlds",
@@ -394,6 +468,11 @@ class FFLogsDiagnostics(logging.Handler):
         self._bytes = 0
         self._chunks = 0
         self._limited = False
+        self._low_chunks = 0
+        self._high_chunks = 0
+        self._low_limited = False
+        self._summaries = set()
+        self._sentinel = False
 
     def start(self):
         if self._installed:
@@ -421,6 +500,9 @@ class FFLogsDiagnostics(logging.Handler):
         self._seen.clear()
         self._bytes = self._chunks = 0
         self._limited = False
+        self._low_chunks = self._high_chunks = 0
+        self._low_limited = self._sentinel = False
+        self._summaries.clear()
         super().close()
 
     def emit(self, record):
@@ -529,12 +611,70 @@ class FFLogsDiagnostics(logging.Handler):
         key = (correlation, operation, event["cached"], tuple(sorted(filters.items())))
         if key in self._seen:
             return
-        if self._bytes + len(piece) > MAX_BYTES or self._chunks >= MAX_CHUNKS - 1:
+        high = operation == "FF14HistorySummary"
+        if high and (
+            count > SUMMARY_CHUNKS
+            or key not in self._pending
+            and (
+                len(self._summaries) >= 2
+                or self._high_chunks + count > 2 * SUMMARY_CHUNKS
+            )
+        ):
+            return
+        if self._bytes + len(piece) > MAX_BYTES or self._chunks >= MAX_CHUNKS - int(
+            not self._sentinel
+        ):
             self._limited = True
             self._pending.clear()
-            self._forward(
-                [{**event, "chunk": 0, "chunks": 1, "truncated": True, "payload": "{}"}]
-            )
+            if (
+                not self._sentinel
+                and self._chunks < MAX_CHUNKS
+                and self._bytes + 2 <= MAX_BYTES
+            ):
+                self._sentinel = True
+                self._chunks += 1
+                self._bytes += 2
+                self._forward(
+                    [
+                        {
+                            **event,
+                            "chunk": 0,
+                            "chunks": 1,
+                            "truncated": True,
+                            "payload": "{}",
+                        }
+                    ]
+                )
+            return
+        if not high and (
+            self._low_limited
+            or key not in self._pending
+            and self._low_chunks + count > LOW_CHUNKS
+        ):
+            self._low_limited = True
+            self._pending = {
+                key: value
+                for key, value in self._pending.items()
+                if key[1] == "FF14HistorySummary"
+            }
+            if not self._sentinel:
+                self._sentinel = True
+                if self._bytes + 2 > MAX_BYTES:
+                    self._limited = True
+                    return
+                self._chunks += 1
+                self._bytes += 2
+                self._forward(
+                    [
+                        {
+                            **event,
+                            "chunk": 0,
+                            "chunks": 1,
+                            "truncated": True,
+                            "payload": "{}",
+                        }
+                    ]
+                )
             return
         header = {
             key: value
@@ -547,6 +687,11 @@ class FFLogsDiagnostics(logging.Handler):
         self._correlations.add(correlation)
         self._bytes += len(piece)
         self._chunks += 1
+        if high:
+            self._high_chunks += 1
+            self._summaries.add(key)
+        else:
+            self._low_chunks += 1
         entry[1][index] = piece
         entry[2].append(event)
         if len(entry[1]) != count:
@@ -559,7 +704,28 @@ class FFLogsDiagnostics(logging.Handler):
                 return
         elif not _safe_payload(operation, body):
             return
-        self._forward(sorted(entry[2], key=lambda value: value["chunk"]))
+        accepted = sorted(entry[2], key=lambda value: value["chunk"])
+        if high and self._low_limited and body.get("diagnostic_low_omitted") is False:
+            # The module knows only its request budget; this sink also owns a
+            # lifetime budget. Change the validated field, never text inside a
+            # value. Canonical module false->true shrinks by one ASCII byte.
+            body["diagnostic_low_omitted"] = True
+            rewritten = json.dumps(
+                body, ensure_ascii=True, separators=(",", ":"), allow_nan=False
+            )
+            if len(rewritten) > sum(len(item["payload"]) for item in accepted):
+                # A noncanonical wire must not enlarge the admitted budget.
+                return
+            offset, rewritten_events = 0, []
+            for item in accepted:
+                length = len(item["payload"])
+                rewritten_events.append(
+                    {**item, "payload": rewritten[offset : offset + length]}
+                )
+                offset += length
+            accepted = rewritten_events
+            # Original input accounting stays conservative; no extra chunks.
+        self._forward(accepted)
 
     def _forward(self, events):
         if self._send is None:

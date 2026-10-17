@@ -6,15 +6,14 @@ adapter. The painter never infers content or combines different selections.
 
 from __future__ import annotations
 
-import re
 import unicodedata
 from dataclasses import replace
-from datetime import UTC, datetime
 from decimal import ROUND_DOWN, ROUND_HALF_UP, Decimal, InvalidOperation, localcontext
 
 from yomihime_game_link_sdk import cards
 
 from ..presentation import ff14_card
+from .fflogs_catalog import partition_version
 from .fflogs_jobs import JobLanguage, job_display
 from .fflogs_models import OutputMetadata, PublicCharacter
 
@@ -159,43 +158,14 @@ _EXPANSION_VERSIONS = {
 }
 
 
-def partition_version(name: str | None) -> str | None:
-    """Accept an explicit version label, never a numeric partition ID."""
-    if not name:
-        return None
-    # Composition labels alone carry no patch evidence. Multiple version
-    # labels/ranges are ambiguous and deliberately fall back to expansion.
-    versions = re.findall(r"(?<![\d.])([1-9]\d*\.\d{1,2})(?![\d.])", name)
-    if len(versions) != 1:
-        return None
-    version = versions[0]
-    label = name.strip()
-    # Accept a whole single-version label, optionally inside the existing
-    # composition label. A lone number within an open range is not a patch.
-    composition = re.fullmatch(
-        r"(?:standard composition|标准阵容构成)\s*[（(]\s*(.*?)\s*[)）]",
-        label,
-        re.I,
-    )
-    if composition:
-        label = composition[1]
-    escaped = re.escape(version)
-    if re.fullmatch(
-        rf"(?:{escaped}|(?:patch|version|版本|补丁|パッチ)\s*{escaped}|{escaped}\s*(?:版本|补丁))",
-        label,
-        re.I,
-    ):
-        return version
-    return None
-
-
 def record_version(row) -> str:
     """The winning record's source period, not the encounter release patch."""
     if row.query_state != "record" or row.source_error or row.origin is None:
         return "—"
-    return partition_version(row.origin.partition_name) or _EXPANSION_VERSIONS.get(
+    version = partition_version(row.origin.partition_name) or _EXPANSION_VERSIONS.get(
         (row.origin.expansion_name or "").strip().casefold(), "—"
     )
+    return ("*" if row.origin.composition == "nonstandard" else "") + version
 
 
 def character_card(
@@ -253,15 +223,9 @@ def character_card(
                 if not rows:
                     continue
                 if category == "savage":
-                    period_name = (
-                        rows[0].origin.partition_name
-                        if rows[0].origin is not None
-                        else None
-                    )
                     blocks.append(
                         cards.Text(
-                            group.zone_name
-                            + (f" · {period_name}" if period_name else ""),
+                            group.zone_name,
                             style="heading",
                         )
                     )
@@ -270,7 +234,6 @@ def character_card(
                             rows, metric, job_language, include_record_version=True
                         )
                     )
-                    blocks.extend(_ranking_notes(rows))
                 else:
                     ultimate_rows.extend(rows)
             if ultimate_rows:
@@ -279,7 +242,6 @@ def character_card(
                         ultimate_rows, metric, job_language, include_record_version=True
                     )
                 )
-                blocks.extend(_ranking_notes(ultimate_rows))
             if not blocks:
                 blocks.append(cards.Text("受本图展示上限限制，此类别记录未展示。"))
             subtitle = (
@@ -299,7 +261,7 @@ def character_card(
         rows = character.rankings[:limit]
         displayed_count = len(rows)
         content = (
-            (_ranking_table(rows, metric, job_language), *_ranking_notes(rows))
+            (_ranking_table(rows, metric, job_language),)
             if rows
             else (cards.Text("当前筛选条件下没有公开战绩记录。"),)
         )
@@ -319,52 +281,77 @@ def character_card(
         blocks=(
             *sections,
             cards.Text(
-                PROVIDER_CATALOG_SCOPE
-                if character.groups or character.catalog_evaluated
-                else CATALOG_LIMITATION,
+                _card_notes(character, realm, limit, displayed_count, metric),
                 style="caption",
             ),
-            cards.Text(DETAIL_LIMITATION, style="caption"),
-            *(
-                (
-                    cards.Text(
-                        f"历史缓存命中 {character.history_cache_hits} 个范围；最早获取：{datetime.fromtimestamp(character.history_fetched_at, UTC):%Y-%m-%d %H:%M:%S UTC}；有效期900秒。",
-                        style="caption",
-                    ),
-                )
-                if character.history_fetched_at is not None
-                else ()
-            ),
-            *(
-                (
-                    cards.Text(
-                        f"本图显示 {displayed_count}/{len(character.rankings)} 项；展示上限 {limit}，部分记录未展示。",
-                        style="caption",
-                    ),
-                )
-                if len(character.rankings) > limit
-                else ()
-            ),
-            *(
-                cards.Text(message, style="caption")
-                for message in character.catalog_warnings[:3]
-            ),
-            *(
-                (
-                    cards.Text(
-                        f"另有 {len(character.catalog_warnings) - 3} 项来源提示，当前结果可能不完整。",
-                        style="caption",
-                    ),
-                )
-                if len(character.catalog_warnings) > 3
-                else ()
-            ),
         ),
-        sources=(f"数据源：{'cn.fflogs.com' if realm == 'cn' else 'www.fflogs.com'}",),
+        sources=(),
     )
 
     catalog_layout = bool(character.groups or character.catalog_evaluated)
     return _single_line_layout(document, catalog_layout=catalog_layout)
+
+
+def _card_notes(character, realm, limit, displayed_count, metric):
+    notes = [
+        f"数据源：{'cn.fflogs.com' if realm == 'cn' else 'www.fflogs.com'}",
+        "版本为统计分区；次数为该分区过本次数",
+        f"最高 {metric} 与最佳百分位可能来自不同场次",
+    ]
+    # Inspect the actual displayed table strings; plain text keeps '*' literal.
+    displayed = displayed_rankings(character, limit)
+    if any(record_version(row).startswith("*") for row in displayed):
+        notes.append("* 非标准阵容")
+    if any(row.query_state == "excluded_echo" for row in displayed):
+        notes.append("超越之力分区已排除")
+    if any(
+        row.query_state in {"failed", "not_queried"} or not row.history_complete
+        for row in displayed
+    ) or any(
+        any(
+            marker in warning
+            for marker in (
+                "未知",
+                "未取得",
+                "未查询",
+                "查询失败",
+                "归属不一致",
+                "已排除该副本",
+                HISTORY_INCOMPLETE,
+            )
+        )
+        for warning in character.catalog_warnings
+    ):
+        notes.append("部分记录未取得")
+    if not character.catalog_evaluated and not character.groups:
+        notes.append(CATALOG_LIMITATION)
+    if len(character.rankings) > displayed_count:
+        notes.append("部分记录未展示")
+    return "\n".join(notes)
+
+
+def displayed_rankings(character, limit):
+    """Same category reservation and order as the actual card tables."""
+    if not (character.groups or character.catalog_evaluated):
+        return character.rankings[:limit]
+    remaining, rows = limit, []
+    savage_present = any(
+        group.category == "savage" and group.rankings for group in character.groups
+    )
+    for category in ("ultimate", "savage"):
+        available = (
+            max(0, remaining - int(category == "ultimate" and savage_present))
+            if remaining > 1
+            else remaining
+        )
+        for group in character.groups:
+            if group.category != category:
+                continue
+            values = group.rankings[:available]
+            rows.extend(values)
+            available -= len(values)
+            remaining -= len(values)
+    return tuple(rows)
 
 
 def _single_line_layout(document, *, catalog_layout):

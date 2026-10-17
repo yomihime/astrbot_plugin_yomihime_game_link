@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import re
@@ -16,6 +17,11 @@ MARKER = "FF14_LOGS_EVIDENCE"
 MAX_BYTES = 512 * 1024
 MAX_CHUNKS = 64
 CHUNK_BYTES = 6000
+LOW_CHUNKS = 47
+SUMMARY_CHUNKS = 8
+WINNER_STATES = frozenset(
+    {"record", "no_records", "failed", "not_queried", "excluded_echo"}
+)
 OPERATIONS = frozenset(
     {
         "FF14OutputMetadataShape",
@@ -175,6 +181,79 @@ def _type(row, depth=0):
     return result
 
 
+def _winner(row):
+    if not isinstance(row, dict):
+        return None
+
+    def identifier(value, low=1, nullable=False):
+        return (
+            nullable
+            and value is None
+            or type(value) is int
+            and low <= value <= 2147483647
+        )
+
+    def numeric(value, high):
+        if value is None:
+            return True
+        if type(value) not in {int, float, str} or len(str(value)) > 160:
+            return False
+        try:
+            number = Decimal(str(value))
+            return number.is_finite() and 0 <= number <= high
+        except ArithmeticError:
+            return False
+
+    required = {
+        "category",
+        "zone",
+        "difficulty",
+        "requested_partition",
+        "partition",
+        "encounter",
+        "composition",
+        "echo",
+        "rankPercent_exact",
+        "bestAmount_model",
+        "spec",
+        "totalKills",
+        "state",
+        "history_complete",
+    }
+    if set(row) != required or not (
+        row["category"] in {"ultimate", "savage"}
+        and identifier(row["zone"])
+        and identifier(row["difficulty"])
+        and identifier(row["requested_partition"], -1, True)
+        and identifier(row["partition"], -1, True)
+        and identifier(row["encounter"])
+        and row["composition"] in {"standard", "nonstandard", "unknown"}
+        and row["echo"] in {"excluded", "not_echo", "unknown"}
+        and (row["rankPercent_exact"] is None or type(row["rankPercent_exact"]) is str)
+        and (
+            row["rankPercent_exact"] is None
+            or re.fullmatch(
+                r"[+-]?[0-9]+(?:\.[0-9]+)?(?:[Ee][+-]?[0-9]+)?",
+                row["rankPercent_exact"],
+            )
+            is not None
+        )
+        and numeric(row["rankPercent_exact"], 100)
+        and type(row["bestAmount_model"]) in {int, float, type(None)}
+        and numeric(row["bestAmount_model"], 1000000000)
+        and (row["spec"] is None or _text(row["spec"], 80) == row["spec"])
+        and (
+            row["totalKills"] is None
+            or type(row["totalKills"]) is int
+            and 0 <= row["totalKills"] <= 2147483647
+        )
+        and row["state"] in WINNER_STATES
+        and type(row["history_complete"]) is bool
+    ):
+        return None
+    return dict(row)
+
+
 def project(operation, payload):
     """Closed projection; never retains identity, URLs, errors or auth fields."""
     if operation not in OPERATIONS or not isinstance(payload, dict):
@@ -224,12 +303,43 @@ def project(operation, payload):
             "invocation_budget_ms",
             "output_reserve_ms",
         )
-        return {
+        result = {
             key: payload[key]
             if type(payload.get(key)) is int and 0 <= payload[key] <= 2147483647
             else 0
             for key in fields
         }
+        winners = payload.get("winners")
+        digest = payload.get("metadata_sha256")
+        if (
+            isinstance(digest, str)
+            and re.fullmatch(r"[0-9a-f]{64}", digest)
+            and isinstance(winners, list)
+            and len(winners) <= 40
+            and all(_winner(row) is not None for row in winners)
+            and type(payload.get("displayed")) is int
+            and payload["displayed"] == len(winners)
+            and type(payload.get("total")) is int
+            and len(winners) <= payload["total"] <= 10000
+            and type(payload.get("complete")) is bool
+        ):
+            result.update(
+                metadata_sha256=digest,
+                winners=winners,
+                displayed=len(winners),
+                total=payload["total"],
+                complete=payload["complete"],
+            )
+            for key in (
+                "partition_eligible",
+                "partition_echo_excluded",
+                "partition_unknown",
+            ):
+                if type(payload.get(key)) is int and 0 <= payload[key] <= 10000:
+                    result[key] = payload[key]
+            if type(payload.get("diagnostic_low_omitted")) is bool:
+                result["diagnostic_low_omitted"] = payload["diagnostic_low_omitted"]
+        return result
     if operation == "FF14RequestSummary":
 
         def count(value):
@@ -477,6 +587,109 @@ def metadata_payload(metadata):
     }
 
 
+def metadata_digest(metadata):
+    """Reconstructible from the safe catalog: no job specs or private fields."""
+    return hashlib.sha256(
+        json.dumps(
+            project("FF14CharacterMetadata", metadata_payload(metadata)),
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("ascii")
+    ).hexdigest()
+
+
+def winner_summary(character, metadata, limit=40):
+    """Final selected/displayed rows, including when fetched from history cache."""
+    from .fflogs_cards import displayed_rankings
+    from .fflogs_catalog import (
+        partition_composition,
+        savage_partition_qualification,
+        select_character_zones,
+    )
+
+    displayed = displayed_rankings(character, limit)
+    owners = {id(row): group for group in character.groups for row in group.rankings}
+    zones = {zone.zone_id: zone for zone in metadata.zones}
+    winners = []
+    for row in displayed:
+        group, origin = owners[id(row)], row.origin
+        zone = zones[group.zone_id]
+        period = next(
+            (
+                item
+                for item in zone.partitions
+                if origin is not None and item.partition_id == origin.partition
+            ),
+            None,
+        )
+        rule = (
+            savage_partition_qualification(period)
+            if group.category == "savage" and period is not None
+            else "unknown"
+        )
+        winners.append(
+            {
+                "category": group.category,
+                "zone": origin.zone_id if origin else group.zone_id,
+                "difficulty": origin.difficulty_id if origin else group.difficulty_id,
+                "requested_partition": origin.requested_partition if origin else None,
+                "partition": origin.partition if origin else None,
+                "encounter": row.encounter_id,
+                "composition": (
+                    origin.composition
+                    or partition_composition(origin.partition_name)
+                    or "unknown"
+                )
+                if origin
+                else "unknown",
+                "echo": "excluded"
+                if row.query_state == "excluded_echo"
+                else "not_echo"
+                if rule in {"standard", "nonstandard"}
+                else "unknown",
+                "rankPercent_exact": str(row.rank_percent_exact)
+                if row.rank_percent_exact is not None
+                else str(row.rank_percent)
+                if row.rank_percent is not None
+                else None,
+                "bestAmount_model": row.best_amount,
+                "spec": row.spec,
+                "totalKills": row.total_kills,
+                "state": row.query_state,
+                "history_complete": row.history_complete,
+            }
+        )
+    counts = {
+        "partition_eligible": 0,
+        "partition_echo_excluded": 0,
+        "partition_unknown": 0,
+    }
+    for zone, _, category in select_character_zones(metadata, character.zone_id):
+        if category != "savage":
+            continue
+        if not zone.partitions:
+            counts["partition_unknown"] += 1
+        for period in zone.partitions:
+            qualification = savage_partition_qualification(period)
+            counts[
+                "partition_eligible"
+                if qualification in {"standard", "nonstandard"}
+                else "partition_echo_excluded"
+                if qualification == "echo"
+                else "partition_unknown"
+            ] += 1
+    return {
+        "metadata_sha256": metadata_digest(metadata),
+        "winners": winners,
+        "displayed": len(winners),
+        "total": len(character.rankings),
+        "complete": character.catalog_complete,
+        **counts,
+    }
+
+
 def _exceeds_projection_limits(operation, payload):
     if operation in {"FF14MetadataState", "FF14RequestSummary", "FF14DutyOrderState"}:
         return False
@@ -541,6 +754,11 @@ class Evidence:
         self.bytes = 0
         self.chunks = 0
         self.limited = False
+        self.low_chunks = 0
+        self.high_chunks = 0
+        self.summary_count = 0
+        self.low_limited = False
+        self.sentinel = False
 
     def observe(self, operation, payload, *, status=200, cached=False, filters=None):
         try:
@@ -566,6 +784,12 @@ class Evidence:
             "fflogs_public_global",
         }:
             return
+        if (
+            operation == "FF14HistorySummary"
+            and isinstance(payload, dict)
+            and "winners" in payload
+        ):
+            payload = {**payload, "diagnostic_low_omitted": self.low_limited}
         projection_limited = _exceeds_projection_limits(operation, payload)
         safe = {} if projection_limited else project(operation, payload)
         body = json.dumps(
@@ -575,18 +799,40 @@ class Evidence:
             body[index : index + CHUNK_BYTES]
             for index in range(0, len(body), CHUNK_BYTES)
         ]
+        high = operation == "FF14HistorySummary"
+        if high and (len(pieces) > SUMMARY_CHUNKS or self.summary_count >= 2):
+            return
+        low_limited = not high and (
+            self.low_limited or self.low_chunks + len(pieces) > LOW_CHUNKS
+        )
         truncated = (
             projection_limited
             or self.bytes + len(body) > MAX_BYTES
-            or self.chunks + len(pieces) >= MAX_CHUNKS
+            or self.chunks + len(pieces) > MAX_CHUNKS - int(not self.sentinel)
+            or low_limited
         )
         if truncated:
+            if low_limited:
+                self.low_limited = True
+                if self.sentinel:
+                    return
             pieces = ["{}"]
-            self.limited = True
+            self.sentinel = True
+            if not low_limited:
+                self.limited = True
         if self.chunks >= MAX_CHUNKS:
+            return
+        if self.bytes + sum(len(piece) for piece in pieces) > MAX_BYTES:
+            self.limited = True
             return
         self.bytes += sum(len(piece) for piece in pieces)
         self.chunks += len(pieces)
+        if not truncated:
+            if high:
+                self.high_chunks += len(pieces)
+                self.summary_count += 1
+            else:
+                self.low_chunks += len(pieces)
         safe_filters = {
             key: value
             for key, value in (filters or {}).items()

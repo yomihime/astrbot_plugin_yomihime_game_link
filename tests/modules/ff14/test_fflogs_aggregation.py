@@ -44,7 +44,7 @@ def zone(
     difficulty="Savage",
     expansion=20,
     encounters=None,
-    partitions=(PartitionRecord(3, "标准阵容构成 (Synthetic)", True),),
+    partitions=(PartitionRecord(3, "标准阵容构成 (Patch 7.4)", True),),
 ):
     return ZoneRecord(
         ident,
@@ -244,7 +244,7 @@ class CatalogPolicyTests(unittest.TestCase):
             (row.encounter_id, row.best_amount, row.total_kills, row.spec),
             (1002, 22222, 9, "Astrologian"),
         )
-        self.assertIsNone(row.origin.partition_name)
+        self.assertEqual(row.origin.partition_name, "标准阵容构成 (Synthetic)")
         self.assertEqual(row.origin.requested_partition, 3)
         self.assertEqual(row.origin.requested_timeframe, "Historical")
         self.assertEqual(percentile_text(row.rank_percent_exact), "99.9%")

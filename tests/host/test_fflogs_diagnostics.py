@@ -7,17 +7,301 @@ import logging
 import unittest
 
 from ygl_test_subject.adapters.astrbot.fflogs_diagnostics import FFLogsDiagnostics
+from ygl_test_subject.modules.ff14.features.fflogs import _assemble_catalog_rankings
+from ygl_test_subject.modules.ff14.features.fflogs_catalog import (
+    parse_character_metadata,
+)
 from ygl_test_subject.modules.ff14.features.fflogs_evidence import (
     LOGGER_NAME,
     MARKER,
     Evidence,
+    metadata_digest,
+    metadata_payload,
     project,
+    winner_summary,
 )
 
 from tests.modules.ff14 import test_fflogs as fixture
+from tests.modules.ff14 import test_fflogs_aggregation as ranking_fixture
 
 
 class DiagnosticBridgeTests(unittest.TestCase):
+    def test_host_only_low_omission_updates_second_multichunk_winner_summary(self):
+        payload, _ = self.winners()
+        row = {
+            **payload["winners"][0],
+            "spec": 'diagnostic_low_omitted":false ' + "合" * 50,
+            "rankPercent_exact": "99." + "0" * 125,
+        }
+        payload.update(winners=[row] * 40, displayed=40, total=40)
+        first = Evidence("fflogs_public_cn")
+        for index in range(47):
+            first.observe(
+                "FF14PublicCharacter",
+                fixture._character()["data"],
+                filters={"zoneId": index},
+            )
+        self.assertFalse(first.low_limited)
+        first.observe("FF14HistorySummary", payload, status=None)
+        second = Evidence("fflogs_public_cn")
+        second.observe("FF14PublicCharacter", fixture._character()["data"])
+        self.assertFalse(second.low_limited)
+        self.assertTrue(self.bridge._low_limited)
+        second.observe("FF14HistorySummary", payload, status=None, cached=True)
+        events = [json.loads(message.split(" ", 1)[1]) for message in self.sent]
+        summaries = [
+            [
+                event
+                for event in events
+                if event["operation"] == "FF14HistorySummary"
+                and event["correlation"] == source.correlation
+            ]
+            for source in (first, second)
+        ]
+        self.assertGreater(len(summaries[1]), 1)
+        bodies = [
+            json.loads("".join(event["payload"] for event in chunks))
+            for chunks in summaries
+        ]
+        self.assertFalse(bodies[0]["diagnostic_low_omitted"])
+        self.assertTrue(bodies[1]["diagnostic_low_omitted"])
+        self.assertEqual(
+            {
+                key: value
+                for key, value in bodies[0].items()
+                if key != "diagnostic_low_omitted"
+            },
+            {
+                key: value
+                for key, value in bodies[1].items()
+                if key != "diagnostic_low_omitted"
+            },
+        )
+        self.assertEqual(
+            sum(len(event["payload"]) for event in summaries[1]),
+            sum(len(event["payload"]) for event in summaries[0]) - 1,
+        )
+        for chunks in summaries:
+            self.assertEqual(
+                [event["chunk"] for event in chunks], list(range(len(chunks)))
+            )
+            self.assertTrue(
+                all(
+                    event["chunks"] == len(chunks) and not event["truncated"]
+                    for event in chunks
+                )
+            )
+        self.assertLessEqual(self.bridge._chunks, 64)
+        self.assertLessEqual(self.bridge._bytes, 512 * 1024)
+
+    def test_host_omission_rewrite_preserves_true_and_rejects_invalid_wire(self):
+        payload, _ = self.winners()
+        payload["diagnostic_low_omitted"] = True
+        self.bridge.emit(
+            self.record(
+                self.event(
+                    operation="FF14HistorySummary",
+                    status=None,
+                    payload=json.dumps(payload),
+                )
+            )
+        )
+        self.assertTrue(
+            json.loads(json.loads(self.sent[0].split(" ", 1)[1])["payload"])[
+                "diagnostic_low_omitted"
+            ]
+        )
+        self.bridge.close()
+        self.bridge.start()
+        self.sent.clear()
+        self.bridge._low_limited = True
+        for changes in ({"diagnostic_low_omitted": 0}, {"actor": "PRIVATE"}):
+            self.bridge.emit(
+                self.record(
+                    self.event(
+                        operation="FF14HistorySummary",
+                        status=None,
+                        payload=json.dumps({**payload, **changes}),
+                    )
+                )
+            )
+            self.assertEqual(self.sent, [])
+            self.bridge.close()
+            self.bridge.start()
+            self.bridge._low_limited = True
+
+    def test_host_omission_rewrite_drops_noncanonical_wire_that_would_grow(self):
+        payload, _ = self.winners()
+        payload.update(diagnostic_low_omitted=False)
+        payload["winners"][0]["bestAmount_model"] = 1000000000.0
+        wire = json.dumps(payload, ensure_ascii=True, separators=(",", ":")).replace(
+            "1000000000.0", "1e9"
+        )
+        self.bridge._low_limited = True
+        self.bridge.emit(
+            self.record(
+                self.event(operation="FF14HistorySummary", status=None, payload=wire)
+            )
+        )
+        self.assertEqual(self.sent, [])
+
+    def winners(self):
+        metadata = ranking_fixture.catalog()
+        targets = ranking_fixture.targets(metadata)
+        role = _assemble_catalog_rankings(
+            ranking_fixture.record(),
+            metadata,
+            targets,
+            {ranking_fixture.key(t): ranking_fixture.selection(t) for t in targets},
+        )
+        return {**self.history_summary(), **winner_summary(role, metadata)}, metadata
+
+    def test_winner_digest_reconstructs_from_safe_catalog_and_no_private_specs(self):
+        payload, metadata = self.winners()
+        safe = project("FF14CharacterMetadata", metadata_payload(metadata))
+        reconstructed = parse_character_metadata({**safe, "gameData": {"classes": []}})
+        self.assertEqual(metadata_digest(metadata), metadata_digest(reconstructed))
+        Evidence("fflogs_public_cn").observe("FF14HistorySummary", payload, status=None)
+        body = json.loads(json.loads(self.sent[0].split(" ", 1)[1])["payload"])
+        self.assertEqual(body["winners"], payload["winners"])
+        self.assertEqual(body["displayed"], len(body["winners"]))
+
+    def test_winner_wire_rejects_every_untrusted_field_and_type(self):
+        payload, _ = self.winners()
+        row = payload["winners"][0]
+        bad = {
+            "category": "PRIVATE",
+            "zone": True,
+            "difficulty": 0,
+            "requested_partition": "3",
+            "partition": -2,
+            "encounter": 2147483648,
+            "composition": "PRIVATE",
+            "echo": False,
+            "rankPercent_exact": "NaN",
+            "bestAmount_model": float("inf"),
+            "spec": "https://private.invalid",
+            "totalKills": True,
+            "state": "PRIVATE",
+            "history_complete": 1,
+            "extra": "PRIVATE",
+        }
+        for key, value in bad.items():
+            with self.subTest(key=key):
+                self.bridge.close()
+                self.bridge.start()
+                body = {**payload, "winners": [{**row, key: value}], "displayed": 1}
+                self.bridge.emit(
+                    self.record(
+                        self.event(
+                            operation="FF14HistorySummary",
+                            status=None,
+                            payload=json.dumps(body),
+                        )
+                    )
+                )
+                self.assertEqual(self.sent, [])
+        for changes in (
+            {"winners": [row] * 41, "displayed": 41},
+            {"metadata_sha256": "x" * 64},
+            {"displayed": True},
+            {"total": -1},
+            {"complete": 1},
+            {"winners": [{**row, "spec": "x" * 81}]},
+            {"winners": [{**row, "rankPercent_exact": "1" * 161}]},
+            {"winners": [{**row, "rankPercent_exact": "100.1"}]},
+            {"winners": [{**row, "bestAmount_model": "3"}]},
+        ):
+            self.bridge.close()
+            self.bridge.start()
+            self.bridge.emit(
+                self.record(
+                    self.event(
+                        operation="FF14HistorySummary",
+                        status=None,
+                        payload=json.dumps({**payload, **changes}),
+                    )
+                )
+            )
+            self.assertEqual(self.sent, [])
+
+    def test_forty_winners_and_global_bytes_remain_bounded(self):
+        payload, _ = self.winners()
+        row = {
+            **payload["winners"][0],
+            "spec": "合" * 80,
+            "rankPercent_exact": "99." + "0" * 125,
+        }
+        payload.update(winners=[row] * 40, displayed=40, total=40)
+        evidence = Evidence("fflogs_public_cn")
+        evidence.observe("FF14HistorySummary", payload, status=None)
+        events = [json.loads(value.split(" ", 1)[1]) for value in self.sent]
+        self.assertGreater(len(events), 1)
+        self.assertLessEqual(len(events), 8)
+        self.assertEqual(
+            json.loads("".join(event["payload"] for event in events))["winners"],
+            [row] * 40,
+        )
+        self.bridge._bytes = 512 * 1024 - 1
+        evidence.observe("FF14HistorySummary", payload, status=None, cached=True)
+        self.assertTrue(self.bridge._limited)
+
+    def test_low_budget_preserves_two_final_summaries_and_close_clears_all(self):
+        payload, _ = self.winners()
+        first = Evidence("fflogs_public_cn")
+        second = Evidence("fflogs_public_cn")
+        for index in range(60):
+            first.observe(
+                "FF14PublicCharacter",
+                fixture._character()["data"],
+                filters={"zoneId": index},
+            )
+        self.assertTrue(first.low_limited)
+        first.observe("FF14HistorySummary", payload, status=None)
+        for index in range(60):
+            second.observe(
+                "FF14PublicCharacter",
+                fixture._character()["data"],
+                filters={"zoneId": index},
+            )
+        second.observe("FF14HistorySummary", payload, status=None, cached=True)
+        summaries = [
+            json.loads(value.split(" ", 1)[1])
+            for value in self.sent
+            if json.loads(value.split(" ", 1)[1])["operation"] == "FF14HistorySummary"
+        ]
+        self.assertEqual(len(summaries), 2)
+        self.assertFalse(any(event["truncated"] for event in summaries))
+        self.assertTrue(
+            all(
+                json.loads(event["payload"])["diagnostic_low_omitted"]
+                for event in summaries
+            )
+        )
+        self.assertLessEqual(self.bridge._chunks, 64)
+        self.assertLessEqual(self.bridge._bytes, 512 * 1024)
+        third = Evidence("fflogs_public_cn")
+        third.observe("FF14HistorySummary", payload, status=None)
+        self.assertEqual(
+            len(
+                [
+                    value
+                    for value in self.sent
+                    if '"operation":"FF14HistorySummary"' in value
+                ]
+            ),
+            2,
+        )
+        count = len(self.sent)
+        self.bridge.close()
+        first.observe("FF14HistorySummary", payload, status=None)
+        self.assertEqual(len(self.sent), count)
+        self.assertEqual(
+            (self.bridge._chunks, self.bridge._high_chunks, self.bridge._low_chunks),
+            (0, 0, 0),
+        )
+        self.assertEqual(self.bridge._summaries, set())
+
     def test_duty_state_emitter_forwards_cache_status_without_private_data(self):
         evidence = Evidence("fflogs_public_cn")
         payload = {

@@ -137,10 +137,8 @@ def expanded_metadata(*, ultimate_count=7):
                 "difficulties": [{"id": 3, "name": category, "sizes": [8]}],
                 "frozen": False,
                 "partitions": [
-                    {"id": 3, "name": "标准阵容构成 (Synthetic)", "default": True}
-                ]
-                if category == "Ultimate"
-                else [],
+                    {"id": 3, "name": "标准阵容构成 (Patch 7.4)", "default": True}
+                ],
                 "encounters": [
                     {
                         "id": zone_id * 10 + index,
@@ -207,7 +205,7 @@ def catalog_rankings(
                 "metric": "rdps",
                 "zone": zone.zone_id,
                 "difficulty": difficulty.difficulty_id,
-                "partition": 3 if "Ultimate" in zone.name else -1,
+                "partition": 3,
                 "size": 8,
                 "rankings": []
                 if zone.zone_id == empty_zone
@@ -282,7 +280,8 @@ class FFLogsCardTests(unittest.TestCase):
                     limit=24,
                     explicit_selection=False,
                 )
-                self.assertEqual(card.sources, (f"数据源：{domain}",))
+                self.assertEqual(card.sources, ())
+                self.assertIn(f"数据源：{domain}", card.blocks[-1].content)
                 server = SimpleNamespace(
                     region=region,
                     name="Cerberus",
@@ -382,10 +381,7 @@ class FFLogsCardTests(unittest.TestCase):
             (table.columns[-1].align, table.columns[-1].valign), ("right", "center")
         )
         self.assertEqual(len(table.rows), 1)
-        self.assertIn(
-            CATALOG_LIMITATION,
-            [block.content for block in card.blocks if isinstance(block, cards.Text)],
-        )
+        self.assertIn(CATALOG_LIMITATION, card.blocks[-1].content)
 
     def test_empty_card_and_many_rows_are_not_fabricated(self):
         empty = replace(character(), rankings=())
@@ -423,8 +419,9 @@ class FFLogsCardTests(unittest.TestCase):
         captions = [
             block.content for block in card.blocks if isinstance(block, cards.Text)
         ]
-        self.assertIn("本图显示 40/41 项；展示上限 40，部分记录未展示。", captions)
-        self.assertTrue(any("另有 2 项" in text for text in captions))
+        self.assertEqual(len(captions), 1)
+        self.assertIn("部分记录未展示", captions[0])
+        self.assertNotIn("另有 2 项", captions[0])
 
     def test_extended_facts_remain_bounded_json_and_keep_source_scope(self):
         from types import SimpleNamespace
@@ -600,7 +597,8 @@ class FFLogsProductionSafeScopeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0][0], "Synthetic Trial")
         self.assertNotIn(sections[0].title, ("绝境战", "零式"))
-        self.assertEqual(result.document.card.sources, ("数据源：cn.fflogs.com",))
+        self.assertEqual(result.document.card.sources, ())
+        self.assertIn("数据源：cn.fflogs.com", result.document.card.blocks[-1].content)
         self.assertEqual(len(http.requests), 3)
         queries = [json.loads(request.body)["query"] for request in http.requests]
         self.assertEqual(sum("FF14PublicCharacter" in query for query in queries), 1)
@@ -616,7 +614,7 @@ class FFLogsProductionSafeScopeTests(unittest.IsolatedAsyncioTestCase):
             for block in result.document.card.blocks
             if isinstance(block, cards.Text)
         ]
-        self.assertIn(CATALOG_LIMITATION, captions)
+        self.assertTrue(any(CATALOG_LIMITATION in caption for caption in captions))
 
     async def test_default_discovers_source_policy_categories_without_other_expansions(
         self,
@@ -872,7 +870,7 @@ class FFLogsOfflineCatalogReferenceTests(unittest.IsolatedAsyncioTestCase):
             for block in result.document.card.blocks
             if isinstance(block, cards.Text)
         ]
-        self.assertTrue(any("绝境战目录" in caption for caption in captions))
+        self.assertTrue(any("部分记录未取得" in caption for caption in captions))
         self.assertEqual(result.document.card.blocks[0].title, "绝境战")
         self.assertEqual(section_rows(result.document.card.blocks[0]), ())
 
@@ -1104,14 +1102,15 @@ class FFLogsOfflineCatalogReferenceTests(unittest.IsolatedAsyncioTestCase):
                     )
                     savage_rows = section_rows(result.document.card.blocks[1])
                     self.assertTrue(
+                        all(
+                            row[-1].spans[0].text in {"—", "ERR"} for row in savage_rows
+                        )
+                    )
+                    self.assertFalse(
                         any(row[-1].spans[0].text == "93.5%" for row in savage_rows)
                     )
-                    self.assertTrue(
-                        any(
-                            row[3].spans[0].text == "12,346"
-                            and row[4].spans[0].text == "80"
-                            for row in savage_rows
-                        )
+                    self.assertFalse(
+                        any(row[4].spans[0].text == "80" for row in savage_rows)
                     )
                 finally:
                     if task is not None and not task.done():
@@ -1274,7 +1273,7 @@ class FFLogsOfflineCatalogReferenceTests(unittest.IsolatedAsyncioTestCase):
                     if isinstance(block, cards.Text)
                 ]
                 self.assertEqual(
-                    any("副本归属不一致" in caption for caption in captions),
+                    any("部分记录未取得" in caption for caption in captions),
                     True,
                 )
                 self.assertEqual(

@@ -464,7 +464,7 @@ class ExplicitHistoryTests(unittest.IsolatedAsyncioTestCase):
         cached = await self.run_history()
         self.assertEqual(len(self.calls), calls)
         self.assertIn((950, 3), self.requested(self.calls))
-        self.assertIn((950, None), self.requested(self.calls))
+        self.assertEqual(self.requested(self.calls).count((950, 3)), 2)
         for result in (first, cached):
             ultimate = next(
                 group for group in result.groups if group.category == "ultimate"
@@ -479,7 +479,7 @@ class ExplicitHistoryTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(savage.rankings[0].encounter_id, 9502)
             self.assertEqual(ultimate.rankings[0].origin.requested_partition, 3)
             self.assertTrue(
-                all(row.origin.requested_partition is None for row in savage.rankings)
+                all(row.origin.requested_partition == 3 for row in savage.rankings)
             )
         identity = history_identity(
             self.source, self.role, VARIABLES, self.metadata, self.owner

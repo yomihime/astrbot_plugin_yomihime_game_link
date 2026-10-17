@@ -14,7 +14,7 @@ from .fflogs_models import FFLogsPayloadError, parse_rankings
 HISTORY_CACHE_TTL = 900
 MAX_CACHE_BYTES = 65_536
 MAX_CACHE_NODES = 512
-POLICY = "explicit-standard-history-pack-v2"
+POLICY = "explicit-non-echo-partition-pack-v3"
 
 
 def _digest(value):

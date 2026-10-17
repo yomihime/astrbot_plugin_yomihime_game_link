@@ -141,6 +141,8 @@ class RankingOrigin:
     requested_partition: int | None = None
     requested_timeframe: str | None = None
     requested_spec_name: str | None = None
+    # Only set by the explicit Savage directory policy; Ultimate is unchanged.
+    composition: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
