@@ -728,14 +728,19 @@ class FFLogsDiagnostics(logging.Handler):
         self._forward(accepted)
 
     def _forward(self, events):
-        if self._send is None:
-            from astrbot.api import logger
-
-            def send(message):
-                logger.info(message)
-        else:
-            send = self._send
         for accepted in events:
+            if self._send is None:
+                from astrbot.api import logger
+
+                # Internal INFO is a closed wire, not the final Host level.
+                # Only complete safe summaries remain visible at INFO.
+                summary = not accepted["truncated"] and accepted["operation"] in {
+                    "FF14RequestSummary",
+                    "FF14HistorySummary",
+                }
+                send = logger.info if summary else logger.debug
+            else:
+                send = self._send
             send(
                 MARKER
                 + " "
