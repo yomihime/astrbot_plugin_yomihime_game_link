@@ -15,6 +15,7 @@ from ygl_test_subject.core.contracts.validation_boundary import validate_contrac
 from ygl_test_subject.infrastructure.secret_codec import AESGCMSecretCodec
 from ygl_test_subject.infrastructure.secret_store import SQLiteSecretStore
 
+from tests.fixtures.managed_font import OfflineManagedFont
 from tests.host import test_admin_pages as admin_fixture
 
 
@@ -337,6 +338,7 @@ class NeutralPublicHostTests(unittest.IsolatedAsyncioTestCase):
         )
         self.runtime = AstrBotRuntime(
             _Context(),
+            font_manager_factory=OfflineManagedFont,
             plugin_root=self.root,
             data_dir=self.root,
             config={"web_public_origin": "https://ui.test"},

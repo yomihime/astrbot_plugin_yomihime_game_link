@@ -8,6 +8,7 @@ import shlex
 from collections.abc import Mapping
 from dataclasses import replace
 from datetime import datetime, timezone
+from decimal import Decimal
 from time import monotonic
 from types import SimpleNamespace
 from urllib.parse import quote
@@ -81,9 +82,17 @@ def message_parameters(text: str) -> dict:
         if key not in allowed or key in values or not value:
             raise ValueError(CLARIFICATION)
         if key in FILTER_FIELDS:
-            if not value.isascii() or not value.isdigit() or len(value) > 10:
+            if not (
+                key == "partition"
+                and value == "-1"
+                or value.isascii()
+                and value.isdigit()
+                and len(value) <= 10
+            ):
                 raise ValueError(CLARIFICATION)
             value = int(value)
+            if value == 0:
+                raise ValueError(CLARIFICATION)
         values[key] = value
     if not ROLE_FIELDS.issubset(values):
         raise ValueError(CLARIFICATION)
@@ -166,10 +175,18 @@ def character_facts(character, server, realm, metric, zone, host, retrieved_at):
             "encounter_name": row.encounter_name,
             "spec": row.spec,
             "rank_percent": row.rank_percent,
+            **(
+                {"rank_percent_exact": str(row.rank_percent_exact)}
+                if row.rank_percent_exact is not None
+                and row.rank_percent is not None
+                and Decimal(str(row.rank_percent)) != row.rank_percent_exact
+                else {}
+            ),
             "best_amount": row.best_amount,
+            "total_kills": row.total_kills,
             "missing": [
                 field
-                for field in ("spec", "rank_percent", "best_amount")
+                for field in ("spec", "rank_percent", "best_amount", "total_kills")
                 if getattr(row, field) is None
             ],
         }
@@ -221,6 +238,11 @@ def character_facts(character, server, realm, metric, zone, host, retrieved_at):
             "finite_returned_rankings": True,
             "battle_analysis": False,
             "global_output_percentiles": False,
+            "catalog_scope": "single_returned_zone",
+            "complete_ultimate_current_expansion_catalog": False,
+            "total_kills_source": "zoneRankings.rankings.totalKills",
+            "total_kills_scope": "returned_selection_not_lifetime",
+            "record_version_verified": False,
         },
     }
 
@@ -247,6 +269,7 @@ def server_facts(matches, realm, server_label, name):
 
 async def invoke_character_tool(handler, context, parameters):
     from .fflogs import _error
+    from .fflogs_server import realm_from_catalog
     from .market_sources import MarketPayloadError, MarketSourceClient
 
     state = None
@@ -490,16 +513,13 @@ async def invoke_character_tool(handler, context, parameters):
                 )
                 try:
                     public = await session.catalog()
-                    try:
-                        world = public.catalog.find("world", actual["server"])
-                    except QueryResolutionError as exc:
-                        regions = {entry.region for entry in exc.choices}
-                        world = None
-                        if len(regions) == 1:
-                            server_region = "cn" if regions == {"China"} else "global"
-                    if world is not None:
-                        server_region = "cn" if world.region == "China" else "global"
-                except (SourceHttpError, MarketPayloadError, ServiceUnavailable):
+                    server_region = realm_from_catalog(public.catalog, actual["server"])
+                except (
+                    SourceHttpError,
+                    MarketPayloadError,
+                    ServiceUnavailable,
+                    QueryResolutionError,
+                ):
                     # An unavailable or missing public directory never proves a
                     # Logs server absent. Its authenticated directory remains authoritative.
                     pass
@@ -521,15 +541,12 @@ async def invoke_character_tool(handler, context, parameters):
                 elif server_region is not None:
                     actual["realm"], basis = server_region, "server_region"
                 else:
-                    snapshot = await handler._services.config.current()
-                    await guard()
-                    core = snapshot.values.get("core_defaults", {})
-                    default = core.get("default_region")
-                    # A complete scope must be known, not guessed from a name.
-                    region, basis = language_region(parameters, default)
-                    if region not in ("cn", "global"):
-                        return await clarification(state, missing=("realm",))
-                    actual["realm"] = region
+                    return tool_result(
+                        _error(
+                            ErrorCode.UPSTREAM_ERROR,
+                            "服务器目录未能确定区域，请核对服务器或稍后重试。",
+                        )
+                    )
                 state.values = dict(actual)
                 state.default_basis = basis
 

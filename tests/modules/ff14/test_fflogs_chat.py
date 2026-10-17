@@ -246,7 +246,9 @@ class FFLogsChatTests(unittest.IsolatedAsyncioTestCase):
                 "Synthetic Hero",
             )
             self.assertEqual(
-                json.loads(self.http.requests[-1].body)["variables"]["serverSlug"],
+                json.loads(fixture._character_request(self.http).body)["variables"][
+                    "serverSlug"
+                ],
                 "cerberus",
             )
         values = message_parameters(
@@ -284,7 +286,9 @@ class FFLogsChatTests(unittest.IsolatedAsyncioTestCase):
                     {"zone_id": 2, "difficulty": 3, "partition": 4},
                 )
                 self.assertEqual(
-                    json.loads(self.http.requests[-1].body)["variables"]["metric"],
+                    json.loads(fixture._character_request(self.http).body)["variables"][
+                        "metric"
+                    ],
                     metric,
                 )
         self.setup_handler([])
@@ -343,7 +347,9 @@ class FFLogsChatTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIs(result.status, ResultStatus.PARTIAL_SUCCESS)
         self.assertEqual(
-            json.loads(self.http.requests[-1].body)["variables"]["serverSlug"],
+            json.loads(fixture._character_request(self.http).body)["variables"][
+                "serverSlug"
+            ],
             "cerberus-2",
         )
         self.assertEqual(len(self.http.requests), before + 1)

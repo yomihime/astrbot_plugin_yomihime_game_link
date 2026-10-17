@@ -51,7 +51,7 @@ const App = defineComponent({setup() {
     modulesView?.presentationLabels(moduleLabels(shell?.state.catalog?.modules||[],shell?.state.locale||'zh-CN'));
     modulesView?.setHomeVisible(Boolean(shell?.state.home||shell?.state.moduleSection==='home'));
     modulesView?.selectOwner(shell?.state.moduleOwner||null);
-    if(shell?.state.catalog&&(settings||shell.state.moduleOwner)&&!management&&settingsRoot.value&&modulesRoot.value){management=createManagementPage(document,window.AstrBotPluginPage,window,{expectedPage:pageName,container:settingsRoot.value,onDraftMutation:draftEdited,onConfigurationSaved:()=>modulesView?.invalidateConfiguration(),onCapabilities:(owners:string[]|null,complete=false)=>{configurationOwners.value=owners;configurationComplete.value=complete;}});management.start();}
+    if(shell?.state.catalog&&(settings||shell.state.moduleOwner)&&!management&&settingsRoot.value&&modulesRoot.value){management=createManagementPage(document,window.AstrBotPluginPage,window,{expectedPage:pageName,container:settingsRoot.value,initiallySuspended:!settings,onDraftMutation:draftEdited,onConfigurationSaved:()=>modulesView?.invalidateConfiguration(),onCapabilities:(owners:string[]|null,complete=false)=>{configurationOwners.value=owners;configurationComplete.value=complete;}});management.start();}
     else if(settings&&!wasSettings){management?.resume();}
     else if(settings&&wasSettings&&lastSettingsOwner!==shell?.state.settingsOwner){management?.suspend();management?.resume();}
     else if(!settings&&wasSettings)management?.suspend();lastSettingsOwner=shell?.state.settingsOwner||null;if(settings)management?.selectOwner(shell?.state.settingsOwner||'game_link/core');wasSettings=settings;

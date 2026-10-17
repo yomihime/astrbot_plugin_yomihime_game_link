@@ -27,6 +27,8 @@ from ..query_resolution import (
     QueryResolutionError,
     request_plan,
 )
+from .market_cards import build_market_card
+from .market_cards import world_name as _world_name
 from .market_models import Listing, MarketExecution, Quote, ScopeData, ScopeOutcome
 from .market_sources import (
     CatalogSnapshot,
@@ -68,23 +70,6 @@ def _world(
     ):
         raise MarketPayloadError("world_scope_mismatch")
     return world_id
-
-
-def _world_name(catalog: CatalogSnapshot | None, query: MarketQuery, world_id, region):
-    """Resolve only an exact World in the execution's validated query scope."""
-    scope = query.scope
-    if catalog is None or not catalog.catalog.available or type(world_id) is not int:
-        return None
-    if region not in scope.regions:
-        return None
-    for entry in catalog.catalog.entries:
-        if entry.kind == "world" and entry.id == world_id and entry.region == region:
-            if scope.kind == "world" and entry.id != scope.target:
-                return None
-            if scope.kind == "dc" and entry.dc_id != scope.target:
-                return None
-            return entry.name
-    return None
 
 
 def _layer(metrics: Mapping, field: str, level: str) -> Mapping | None:
@@ -531,6 +516,9 @@ def _result(
     )
     document = DisplayDocument(
         title="FF14 市场查询",
+        card=build_market_card(
+            query, outcomes, listings, minimums, truncated, observed_at, catalog
+        ),
         subject=f"FF14 市场 {query.item_id}",
         ordered_blocks=tuple(blocks),
         sources=("Universalis",),

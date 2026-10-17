@@ -9,31 +9,33 @@ import sys
 from pathlib import Path
 from types import ModuleType
 
-SDK_VERSION = "0.1.0a6"
+SDK_VERSION = "0.1.0a7"
 SDK_MODULE_ABI_VERSION = "2.0"
 
 
 SDK_PACKAGE_MANIFEST = {
-    "__init__.py": "ceeebeea05dd8476ac530518686349fe41aba401cb7f2a27242ecbc8f87309e9",
-    "contexts.py": "d9b44695677c47a0133dade501a0ca1cfc9847593062f5e5ff0337372bc34723",
-    "declarations.py": "5496c80ead2ad530830fa7f57bc0600b609bae22990293a43ea43c1d68cb40ae",
-    "display.py": "a43b38a8ad8bbe4e1a1c47be8aa8d9381ee28a349debe6365ebbcaed15acb51d",
-    "errors.py": "bc1c83fe00f00251481fa22b76b77f50c886bb9b742e8bf32801d59e48e84e87",
-    "py.typed": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
-    "results.py": "0265846e191f0bcffa1e1948cd2832919de9566b88829d74862ce81cf4267f71",
-    "services.py": "567a9342af5c5e52c90dc7ac8c9727d08f4f22775b255f400adc2e9e5be54c5a",
-    "storage.py": "6311b4754da6e37616debd68003d6993cf89c0b060845387288e2de575313260",
-    "subscriptions.py": "7513701bfabcef306bef2eed593163c357346da92a0ad9daa3ef56c2e7779d91",
-    "version.py": "f242edbff8d178ed46d8e510b8cfec032347ae58a448fa38c670e53438600dd2",
+    "__init__.py": "b3bb043df8bd2d643a8225587eeea6155004abd1425687610de89e642cb7bdd2",
     "_examples/empty_module/README.md": "c1150018aa2eb2bfb9f9129ba753f6f26d132a0a245d245eb8a62f3c6debc1d7",
     "_examples/empty_module/manifest.json": "9de2d0e3cbb7e32acf029677e59381d1bb8893c6cae84a45f9a606b6e3a7e965",
     "_examples/empty_module/module.py": "21fdb6428bd422804ad00e98038b032c25b1d2488b3df5f17e3be855e0c8198f",
     "_examples/offline_sample/README.md": "948ab435100048e6e2503c413a7e3e4387514729ffd62ec4c1cd53a9c504d5b2",
     "_examples/offline_sample/manifest.json": "2f0583a18c43501625ca47d94af7f9173c1b706413ae810b768edf309518c34d",
     "_examples/offline_sample/module.py": "6a3971d633d947671fdbcb9b6b0025a871ab21e615c0d0f57edc2b0e2be30f32",
+    "cards.py": "1a3176dcd7ddab7ccb3e7a84f6d555ed164265297793f387b70ccdb9f109e915",
+    "contexts.py": "d9b44695677c47a0133dade501a0ca1cfc9847593062f5e5ff0337372bc34723",
+    "declarations.py": "ac72a22e614cd5add99b5681afd01cccad856e8b7cad52f4b65696dc5ac97b50",
+    "display.py": "21df4ef036ae54962fb2f37de3b55c812f635722796dacecdd278a7d811e68ff",
+    "errors.py": "bc1c83fe00f00251481fa22b76b77f50c886bb9b742e8bf32801d59e48e84e87",
+    "py.typed": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+    "results.py": "0265846e191f0bcffa1e1948cd2832919de9566b88829d74862ce81cf4267f71",
+    "services.py": "567a9342af5c5e52c90dc7ac8c9727d08f4f22775b255f400adc2e9e5be54c5a",
+    "storage.py": "6311b4754da6e37616debd68003d6993cf89c0b060845387288e2de575313260",
+    "subscriptions.py": "7513701bfabcef306bef2eed593163c357346da92a0ad9daa3ef56c2e7779d91",
+    "version.py": "3c6f8845b216c2e7a04c4a0a64f5320269284a969db4e54ba448cc6ef33dfc22",
 }
 
 SDK_MODULES = {
+    "yomihime_game_link_sdk.cards",
     "yomihime_game_link_sdk.results",
     "yomihime_game_link_sdk.storage",
     "yomihime_game_link_sdk.errors",
@@ -257,4 +259,12 @@ class YomihimeGameLink(Star):
         event.should_call_llm(True)
         text = await self._runtime.handle_event(event)
         if text is not None:
-            yield event.plain_result(text)
+            if type(text) is str:
+                yield event.plain_result(text)
+                return
+            from .adapters.astrbot.command_bridge import CommandHelp
+
+            if isinstance(text, CommandHelp):
+                await self._runtime.send_help(event, text)
+            else:
+                yield event.plain_result(text)

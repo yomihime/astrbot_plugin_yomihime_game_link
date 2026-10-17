@@ -21,6 +21,7 @@ from yomihime_game_link_sdk.services import ModuleServices
 from yomihime_game_link_sdk.storage import JsonObject
 
 from ..models import ItemCandidate, ItemRecord
+from .item_cards import build_item_card
 from .item_resolution import (
     item_id_from_query,
     search_item_candidates,
@@ -128,6 +129,7 @@ def _item_result(record: ItemRecord, *, partial: bool) -> CapabilityResult:
     document = DisplayDocument(
         title=record.name,
         subject=f"FF14 物品 {record.item_id}",
+        card=build_item_card(record),
         ordered_blocks=tuple(blocks),
         sources=("XIVAPI-compatible (xivcdn)", "Garland Tools CN"),
         privacy=Privacy.PUBLIC,

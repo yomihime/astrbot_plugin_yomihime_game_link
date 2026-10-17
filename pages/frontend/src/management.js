@@ -1,5 +1,7 @@
+import {createFontSettings} from './font-settings';
 import {createManagementView} from "./management-view";
 import {nextTick} from "vue";
+import {isCoreThemeField, followsCoreTheme, settingValues} from "./setting-choices";
 import {createNotice} from './ui/notice';
 const record=v=>v!==null&&typeof v==='object'&&!Array.isArray(v)&&[Object.prototype,null].includes(Object.getPrototypeOf(v));
 const exact=(v,keys)=>record(v)&&Object.keys(v).sort().join('\0')===[...keys].sort().join('\0');
@@ -52,10 +54,16 @@ export function validateCatalog(input){
   jsonBudget(input);if(!exact(input,['schema_version','fields'])||input.schema_version!==1||!Array.isArray(input.fields)||input.fields.length>128)fail();
   const keys=['module_id','name','description','group','value_schema','default','required','readable','editable','blocked_reason'],seen=new Set();
   for(const f of input.fields){
-    if(!exact(f,keys)||typeof f.module_id!=='string'||f.module_id.split('/').length!==2||!f.module_id.split('/').every(p=>identifier.test(p))||typeof f.name!=='string'||!f.name||textLength(f.name)>128||/[\s\x00-\x1f]/u.test(f.name)||typeof f.description!=='string'||!(f.group===null||typeof f.group==='string'&&identifier.test(f.group))||![f.required,f.readable,f.editable].every(v=>typeof v==='boolean'))fail();
+    if(!record(f)||!exact(f,Object.hasOwn(f,'choices')?[...keys,'choices']:keys)||typeof f.module_id!=='string'||f.module_id.split('/').length!==2||!f.module_id.split('/').every(p=>identifier.test(p))||typeof f.name!=='string'||!f.name||textLength(f.name)>128||/[\s\x00-\x1f]/u.test(f.name)||typeof f.description!=='string'||!(f.group===null||typeof f.group==='string'&&identifier.test(f.group))||![f.required,f.readable,f.editable].every(v=>typeof v==='boolean'))fail();
     if(f.blocked_reason===null?!f.readable||!f.editable:f.blocked_reason==='not_granted'?f.readable||f.editable:f.blocked_reason==='semantic_validator_unavailable'?!f.readable||f.editable:true)fail();
     if(seen.has(key(f)))fail();seen.add(key(f));
     if(f.value_schema!==null){jsonBudget(f.value_schema,16,2048);schemaValid(f.value_schema);if(f.default!==null&&!valueValid(f.value_schema,f.default))fail();}
+    if(Object.hasOwn(f,'choices')){
+      if(!isCoreThemeField(f)||f.value_schema?.type!=='string'||!Array.isArray(f.value_schema.enum)||!Array.isArray(f.choices))fail();
+      const inherited=f.module_id!=='game_link/core',values=inherited?[null,...f.value_schema.enum]:f.value_schema.enum;
+      if(inherited?f.default!==null:!valueValid(f.value_schema,f.default))fail();
+      if(f.choices.length!==values.length||!f.choices.every((choice,index)=>exact(choice,['value','label'])&&choice.value===values[index]&&typeof choice.label==='string'&&choice.label.trim().length>0&&textLength(choice.label)<=128&&!/[\p{Cc}\p{Cf}\p{Cs}]/u.test(choice.label)))fail();
+    }
   }
   const owned=JSON.parse(JSON.stringify(input));const freeze=v=>{if(v&&typeof v==='object'){for(const child of Object.values(v))freeze(child);Object.freeze(v);}return v;};return freeze(owned);
 }
@@ -63,21 +71,21 @@ export function validateSnapshot(data,catalog){
   if(!catalog)fail();jsonBudget(data);const targets=[...new Set(catalog.fields.filter(f=>f.readable).map(f=>f.module_id))];if(!exact(data,targets))fail();
   for(const target of targets){const row=data[target],declared=ownedFields(catalog,target).filter(f=>f.readable);
     if(!exact(row,['revision','fields'])||!Number.isSafeInteger(row.revision)||row.revision<1||!exact(row.fields,declared.map(f=>f.name)))fail();
-    for(const f of declared){const value=row.fields[f.name];if(!exact(value,['value','state','present','source'])||!['valid','invalid'].includes(value.state)||typeof value.present!=='boolean'||!['sqlite','default'].includes(value.source)||(value.state==='invalid'?value.value!==null:!valueValid(f.value_schema,value.value)))fail();}
+    for(const f of declared){const value=row.fields[f.name];if(!exact(value,['value','state','present','source'])||!['valid','invalid'].includes(value.state)||typeof value.present!=='boolean'||!['sqlite','default'].includes(value.source)||(value.state==='invalid'?value.value!==null:!(value.value===null&&followsCoreTheme(f)&&value.present===false&&value.source==='default')&&!valueValid(f.value_schema,value.value)))fail();}
   }return data;
 }
 const supported=f=>f.value_schema!==null&&['string','integer','number','boolean'].includes(f.value_schema.type);
 function convert(f,raw){
   const schema=f.value_schema;let value=raw;
-  if(schema.enum||schema.type==='boolean'){const choices=schema.enum||[false,true];if(!/^\d+$/.test(raw)||!Object.hasOwn(choices,Number(raw)))fail();value=choices[Number(raw)];}
+  if(schema.enum||schema.type==='boolean'){const choices=settingValues(f);if(!/^\d+$/.test(raw)||!Object.hasOwn(choices,Number(raw)))fail();value=choices[Number(raw)];}
   else if(['integer','number'].includes(schema.type)){if(typeof raw!=='string'||!raw.trim()||! /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i.test(raw.trim()))fail();value=Number(raw);}
-  if(!valueValid(schema,value))fail();return value;
+  if(!(value===null&&followsCoreTheme(f))&&!valueValid(schema,value))fail();return value;
 }
 export function updateBody(target,revision,controls,catalog){
   if(!catalog||!record(controls)||!Number.isSafeInteger(revision)||revision<1)fail();const declared=ownedFields(catalog,target),updates=[];
   if(!declared.length||Object.keys(controls).some(name=>!declared.some(f=>f.name===name)))fail();
   for(const [name,control] of Object.entries(controls)){const f=declared.find(item=>item.name===name);if(!record(control)||!['keep','replace','clear'].includes(control.mode))fail();if(control.mode==='keep')continue;
-    if(!f.readable||!f.editable||!supported(f))fail('admin_authorization_denied');updates.push(control.mode==='clear'?{field:name,mode:'clear'}:{field:name,mode:'replace',value:convert(f,control.value)});
+    if(!f.readable||!f.editable||!supported(f))fail('admin_authorization_denied');const value=control.mode==='clear'?null:convert(f,control.value);updates.push(control.mode==='clear'||value===null&&followsCoreTheme(f)?{field:name,mode:'clear'}:{field:name,mode:'replace',value});
   }if(!updates.length)fail('select_changes');return {module_id:target,expected_revision:revision,updates};
 }
 export function validateCredentialCatalog(input){
@@ -105,10 +113,12 @@ function contextBoundary(context,expectedPage){
   const representable=v=>{if(typeof v==='number'&&Object.is(v,-0))fail('invalid_context');if(v&&typeof v==='object')for(const child of Object.values(v))representable(child);};representable(boundary);
   const stable=v=>Array.isArray(v)?v.map(stable):record(v)?Object.fromEntries(Object.keys(v).sort().map(name=>[name,stable(v[name])])):v;return JSON.stringify(stable(boundary));
 }
-export function createManagementPage(document,bridge,window,{expectedPage='management',container=document.getElementById('management-root'),scope='settings',beforeMaintenance=async _operation=>false,onDraftMutation=()=>{},onConfigurationSaved=()=>{},onCapabilities=(/** @type {string[]|null} */ _owners, _complete=false)=>{}}={}){
+export function createManagementPage(document,bridge,window,{expectedPage='management',container=document.getElementById('management-root'),scope='settings',initiallySuspended=false,beforeMaintenance=async _operation=>false,onDraftMutation=()=>{},onConfigurationSaved=()=>{},onCapabilities=(/** @type {string[]|null} */ _owners, _complete=false)=>{}}={}){
   if(!container)fail('invalid_container'); const element=id=>Array.from(container.querySelectorAll('[id]')).find(node=>node.id===id)||null;
   let catalog=null,snapshot=null,credentialCatalog=null,credentialSnapshot=null,ready=false,closed=false,stale=true,generation=0,boundary=null,contextSeen=false,off=null,active=null;
   const view=createManagementView(document,container,scope),cards=new Map(),controls=new Map(),status=element('status');
+  let suspended=initiallySuspended;
+  const fonts=createFontSettings(bridge,window,panel=>view.font(panel),()=>loseAccess());
   const credentialControls=new Map();let encryptionReady=false;let savedFocus=null,selectedOwner=null;
   const emptyDraft=scope==='maintenance'?'[[],[],false]':'[[],[]]';let draftState=emptyDraft;
   const statusNotice=createNotice(window,(message,tone)=>{status.textContent=message;status.dataset.tone=tone;});
@@ -126,6 +136,8 @@ export function createManagementPage(document,bridge,window,{expectedPage='manag
   const blocked=button=>!button||button.disabled||button.getAttribute('aria-disabled')==='true';
   function setButton(button,denied){if(!button)return;button.setAttribute('aria-disabled',String(denied));button.disabled=denied&&(closed||!ready||document.activeElement!==button);}
   function buttons(){
+    const fontVisible=scope==='settings'&&(selectedOwner===null||selectedOwner==='game_link/core')&&Boolean(catalog?.fields.some(f=>f.module_id==='game_link/core'&&f.group==='reply_style'&&f.readable));
+    fonts.sync(fontVisible,!closed&&ready&&!suspended&&!stale);
     setButton(element('refresh'),closed||!ready||active!==null);
     const usable=!closed&&ready&&!stale&&snapshot!==null&&Object.keys(snapshot).length>0&&active===null;
     setButton(element('rollback'),!usable);setButton(element('recover'),!usable||catalog.fields.some(f=>f.readable&&!f.editable));
@@ -153,7 +165,7 @@ export function createManagementPage(document,bridge,window,{expectedPage='manag
     if(endpoint==='rollback'&&(!exact(response,['rolled_back'])||response.rolled_back!==true))fail('operation_unavailable');
     if(endpoint==='recover'&&(!exact(response,['recovered'])||response.recovered!==true))fail('operation_unavailable');return response;
   }
-  function inputValue(f,value){if(value===null)return '';const choices=f.value_schema?.enum||(f.value_schema?.type==='boolean'?[false,true]:null);return choices?String(choices.findIndex(v=>v===value)):String(value);}
+  function inputValue(f,value){const choices=settingValues(f);if(value===null&&!followsCoreTheme(f))return '';return choices?String(choices.findIndex(v=>v===value)):String(value);}
   function makeControl(f){
     return {field:f,signature:JSON.stringify(f),draftVersion:0,mode:null,input:null};
   }
@@ -161,19 +173,31 @@ export function createManagementPage(document,bridge,window,{expectedPage='manag
     const button=cards.get(target).save;if(blocked(button))return;
     run(async attempt=>{
       const selected=Object.fromEntries(ownedFields(catalog,target).map(f=>{const c=controls.get(key(f));return [f.name,{mode:c.mode.value,value:c.input.value,draftVersion:c.draftVersion}];}));
-      await post('update',updateBody(target,snapshot[target].revision,selected,catalog),attempt);onConfigurationSaved();
+      const body=updateBody(target,snapshot[target].revision,selected,catalog),submitted=body.updates.map(update=>controls.get(JSON.stringify([target,update.field])));
+      // An inherited selection made after submission is a new clear intent,
+      // even while the last verified baseline still says inherited absence.
+      for(const c of submitted)c.writePending=true;
+      try{
+      await post('update',body,attempt);onConfigurationSaved();
       try{await refresh(attempt);}catch(error){if(!current(attempt))throw error;stale=true;fail(managementAccessLost(error)?'write_ack_authorization_denied':'write_ack_readback_unverified');}
-      for(const [name,sent]of Object.entries(selected)){if(sent.mode==='keep')continue;const c=controls.get(JSON.stringify([target,name])),row=snapshot[target]?.fields[name];if(c&&row&&c.draftVersion===sent.draftVersion&&c.mode.value===sent.mode&&c.input.value===sent.value){c.mode.value='keep';c.input.value=inputValue(c.field,row.value);}}
+      for(const [name,sent]of Object.entries(selected)){if(sent.mode==='keep')continue;const c=controls.get(JSON.stringify([target,name])),row=snapshot[target]?.fields[name];if(c&&row&&c.draftVersion===sent.draftVersion&&c.mode.value===sent.mode&&c.input.value===sent.value){c.mode.value='keep';c.input.value=row.state==='valid'?inputValue(c.field,row.value):'';}}
       draftChanged();notice('已保存。','success');
+      }finally{for(const c of submitted)c.writePending=false;}
     });
   }
   function discardTarget(target){
     if(closed||!ready||active!==null||!snapshot?.[target])return;
-    for(const f of ownedFields(catalog,target)){const c=controls.get(key(f)),row=snapshot[target].fields[f.name];if(!c||!c.mode||!c.input||!row)continue;c.draftVersion++;c.mode.value='keep';c.input.value=inputValue(f,row.value);}
+    for(const f of ownedFields(catalog,target)){const c=controls.get(key(f)),row=snapshot[target].fields[f.name];if(!c||!c.mode||!c.input||!row)continue;c.draftVersion++;c.mode.value='keep';c.input.value=row.state==='valid'?inputValue(f,row.value):'';}
     for(const c of credentialControls.values())if(c.field.module_id===target){for(const node of [c.clientId,c.clientSecret])if(node)node.value='';if(c.confirm)c.confirm.checked=false;if(c.mode)c.mode.value='keep';c.draftVersion++;}
     view.maskSecrets();draftChanged();notice('已放弃本模块修改，含本模块凭据草稿。','success');
   }
   function clearSecrets(){view.maskSecrets();for(const c of credentialControls.values()){for(const node of [c.clientId,c.clientSecret])if(node)node.value='';if(c.confirm)c.confirm.checked=false;if(c.mode)c.mode.value='keep';c.draftVersion++;}draftChanged();}
+  function loseAccess(message='管理授权不可用或页面已失效，请重新打开宿主管理页面后手动刷新。',tone='error'){
+    // Revoke every sensitive owner draft and fence concurrent responses while
+    // retaining ordinary local edits for an explicit authorized refresh.
+    generation++;active=null;stale=true;encryptionReady=false;credentialCatalog=null;credentialSnapshot=null;
+    fonts.invalidate();clearSecrets();onCapabilities(null);buttons();notice(message,tone);
+  }
   function saveCredential(c){
     if(blocked(c.save)||c.mode.value==='replace'&&!encryptionReady)return;
     run(async attempt=>{
@@ -203,8 +227,8 @@ export function createManagementPage(document,bridge,window,{expectedPage='manag
       card.controls=[];
       for(const f of ownedFields(catalog,target)){
         const k=key(f),signature=JSON.stringify(f);let c=controls.get(k);if(!c||c.signature!==signature){c=makeControl(f);controls.set(k,c);}
-        const row=f.readable?snapshot[target].fields[f.name]:null;c.problem=!f.readable?'无读取或修改权限。':!f.editable?'当前只读，请核对模块状态。':!supported(f)?'此类型暂不支持编辑。':row?.state==='invalid'?'当前值无效，请修改或恢复默认。':'';
-        if(!supported(f))reset.push([c,row?.state==='valid'?JSON.stringify(row.value):'',c.mode?.value,c.input?.value,c.draftVersion]);else if(!c.mode||c.mode.value==='keep')reset.push([c,row?inputValue(f,row.value):'',c.mode?.value,c.input?.value,c.draftVersion]);
+        const row=f.readable?snapshot[target].fields[f.name]:null;c.inheritBaseline=Boolean(followsCoreTheme(f)&&row?.state==='valid'&&row.value===null&&row.present===false&&row.source==='default');c.problem=!f.readable?'无读取或修改权限。':!f.editable?'当前只读，请核对模块状态。':!supported(f)?'此类型暂不支持编辑。':row?.state==='invalid'?'当前值无效，请修改或恢复默认。':'';
+        if(!supported(f))reset.push([c,row?.state==='valid'?JSON.stringify(row.value):'',c.mode?.value,c.input?.value,c.draftVersion]);else if(!c.mode||c.mode.value==='keep')reset.push([c,row?.state==='valid'?inputValue(f,row.value):'',c.mode?.value,c.input?.value,c.draftVersion]);
         card.controls.push(c);
       }
     }
@@ -225,10 +249,10 @@ export function createManagementPage(document,bridge,window,{expectedPage='manag
       else if(error?.message==='select_changes')notice('请选择需要修改的字段。');
       else if(error?.message==='confirm_clear')notice('请勾选清除确认后再提交；保持选项不会写入。');
       else if(error?.message==='write_ack_readback_unverified')notice('已提交，状态暂未核实，请刷新确认。','warning');
-      else if(error?.message==='write_ack_authorization_denied'){clearSecrets();credentialCatalog=null;credentialSnapshot=null;stale=true;notice('已提交，但管理授权不可用，状态暂未核实。请重新打开宿主管理页面确认。','warning');}
+      else if(error?.message==='write_ack_authorization_denied')loseAccess('已提交，但管理授权不可用，状态暂未核实。请重新打开宿主管理页面确认。','warning');
       else if(error?.message==='secret_encryption_unavailable')notice('未保存。'+cryptoAdvice);
       else if(error?.message==='invalid_config')notice('配置或输入未通过校验，请核对字段要求后刷新重试。');
-      else if(managementAccessLost(error)){clearSecrets();credentialCatalog=null;credentialSnapshot=null;stale=true;notice('管理授权不可用或页面已失效，请重新打开宿主管理页面后手动刷新。');}
+      else if(managementAccessLost(error))loseAccess();
       else {stale=true;notice('未取得成功确认，请刷新核对配置与版本后重试。');}
     }finally{if(active===operation){active=null;buttons();}}
   }
@@ -242,8 +266,8 @@ export function createManagementPage(document,bridge,window,{expectedPage='manag
   }));
   function accept(context){
     if(closed)return;view.context(context);document.documentElement.dataset.theme=context?.isDark===true||context?.theme==='dark'?'dark':'light';document.documentElement.lang=typeof context?.locale==='string'?context.locale:'zh-CN';let next;
-    try{next=contextBoundary(context,expectedPage);}catch{onCapabilities(null);clearSecrets();contextSeen=true;generation++;ready=false;stale=true;active=null;boundary=null;catalog=null;snapshot=null;credentialCatalog=null;credentialSnapshot=null;view.fields([],draftChanged);view.credentials([],draftChanged);cards.clear();controls.clear();credentialControls.clear();draftState=emptyDraft;buttons();notice('宿主管理上下文无效，请重新打开页面。');return;}
-    contextSeen=true;if(ready&&next===boundary)return;statusNotice.clear();onCapabilities(null);clearSecrets();generation++;boundary=next;ready=true;stale=true;active=null;catalog=null;snapshot=null;credentialCatalog=null;credentialSnapshot=null;view.fields([],draftChanged);view.credentials([],draftChanged);cards.clear();controls.clear();credentialControls.clear();draftState=emptyDraft;buttons();
+    try{next=contextBoundary(context,expectedPage);}catch{fonts.invalidate();onCapabilities(null);clearSecrets();contextSeen=true;generation++;ready=false;stale=true;active=null;boundary=null;catalog=null;snapshot=null;credentialCatalog=null;credentialSnapshot=null;view.fields([],draftChanged);view.credentials([],draftChanged);cards.clear();controls.clear();credentialControls.clear();draftState=emptyDraft;buttons();notice('宿主管理上下文无效，请重新打开页面。');return;}
+    contextSeen=true;if(ready&&next===boundary)return;fonts.invalidate();statusNotice.clear();onCapabilities(null);clearSecrets();generation++;boundary=next;ready=true;stale=true;active=null;catalog=null;snapshot=null;credentialCatalog=null;credentialSnapshot=null;view.fields([],draftChanged);view.credentials([],draftChanged);cards.clear();controls.clear();credentialControls.clear();draftState=emptyDraft;buttons();
     run(async attempt=>{await refresh(attempt);});
   }
   const dirty=()=>[...controls.values()].some(c=>c.mode?.value!=='keep')||[...credentialControls.values()].some(c=>c.mode?.value!=='keep'||c.clientId?.value||c.clientSecret?.value);
@@ -254,9 +278,9 @@ export function createManagementPage(document,bridge,window,{expectedPage='manag
     const credentialOwners=[...new Set([...credentialControls.values()].filter(c=>c.mode&&c.mode.value!=='keep'||c.clientId?.value||c.clientSecret?.value||c.confirm?.checked).map(c=>c.field.module_id))];
     return {ordinaryOwners,credentialOwners,requiresConfirmation:ordinaryOwners.length>0||credentialOwners.length>0};
   }
-  function suspend(){if(status.dataset.tone==='success')statusNotice.clear();else statusNotice.cancel();const node=document.activeElement;savedFocus=container.contains(node)&&node?.id?{id:node.id,start:node.selectionStart,end:node.selectionEnd}:null;clearSecrets();generation++;active=null;stale=true;buttons();}
-  function resume(){if(closed||!ready)return;run(async attempt=>{await refresh(attempt);if(savedFocus){const node=element(savedFocus.id);node?.focus({preventScroll:true});if(node&&savedFocus.start!==null&&node.setSelectionRange)try{node.setSelectionRange(savedFocus.start,savedFocus.end);}catch{}savedFocus=null;}});}
-  function close(){if(closed)return;statusNotice.cancel();onCapabilities(null);clearSecrets();closed=true;generation++;ready=false;active=null;catalog=null;snapshot=null;credentialCatalog=null;credentialSnapshot=null;off?.();buttons();}
+  function suspend(){suspended=true;fonts.invalidate();if(status.dataset.tone==='success')statusNotice.clear();else statusNotice.cancel();const node=document.activeElement;savedFocus=container.contains(node)&&node?.id?{id:node.id,start:node.selectionStart,end:node.selectionEnd}:null;clearSecrets();generation++;active=null;stale=true;buttons();}
+  function resume(){if(closed||!ready)return;suspended=false;run(async attempt=>{await refresh(attempt);if(savedFocus){const node=element(savedFocus.id);node?.focus({preventScroll:true});if(node&&savedFocus.start!==null&&node.setSelectionRange)try{node.setSelectionRange(savedFocus.start,savedFocus.end);}catch{}savedFocus=null;}});}
+  function close(){if(closed)return;fonts.dispose();statusNotice.cancel();onCapabilities(null);clearSecrets();closed=true;generation++;ready=false;active=null;catalog=null;snapshot=null;credentialCatalog=null;credentialSnapshot=null;off?.();buttons();}
   return {start(){
     if(!bridge||typeof bridge.apiPost!=='function'||typeof bridge.ready!=='function'||typeof bridge.onContext!=='function'){notice('请从宿主插件管理页面打开此页。');return;}
     off=bridge.onContext(accept);Promise.resolve(bridge.ready()).then(context=>{if(!contextSeen)accept(context);}).catch(()=>{if(!contextSeen&&!closed){ready=false;notice('宿主管理会话不可用。');buttons();}});window?.addEventListener('pagehide',close,{once:true});

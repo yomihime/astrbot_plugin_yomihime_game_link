@@ -157,6 +157,7 @@ class ModuleDisplay:
     default_name: str
     localized_names: Mapping[str, str] = _dataclass_field(default_factory=dict)
     short_name: str | None = None
+    logo_resource: str | None = None
 
     def __post_init__(self) -> None:
         if isinstance(self.localized_names, Mapping):

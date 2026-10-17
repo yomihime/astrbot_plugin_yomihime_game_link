@@ -12,6 +12,7 @@ from ygl_test_subject.adapters.astrbot.command_bridge import (
 )
 from ygl_test_subject.core.contracts.validation_boundary import validate_contract
 from ygl_test_subject.core.registry import Registry as CoreRegistry
+from ygl_test_subject.presentation.command_card import build_help_card
 from ygl_test_subject.tests.fixtures.minimal_module import build_package
 
 from yomihime_game_link_sdk.declarations import (
@@ -19,6 +20,7 @@ from yomihime_game_link_sdk.declarations import (
     CapabilityEffect,
     CommandDescriptor,
     InvocationPolicy,
+    ModuleDisplay,
 )
 
 
@@ -50,6 +52,107 @@ class _FakeEvent:
 
 
 class AstrBotCommandBridgeTests(unittest.TestCase):
+    def _register_display_modules(self):
+        package, handlers = build_package()
+        original = package.modules[0]
+        long_name = "很长的中英文模块展示名称" * 6 + " ENGLISH"
+        modules = tuple(
+            replace(
+                original,
+                module_id=route,
+                route=route,
+                tools=(),
+                display=ModuleDisplay(name),
+            )
+            for route, name in (("alpha", "甲模块"), ("beta", long_name))
+        )
+        self.registry.register_package(
+            replace(package, modules=modules),
+            {"alpha": handlers, "beta": handlers},
+        )
+        return long_name
+
+    def test_full_directory_uses_declared_names_before_stable_recommendation(self):
+        long_name = self._register_display_modules()
+        event = _FakeEvent("/ygl help")
+        result = self.bridge.parse(event)
+        self.assertEqual(result, self.bridge.parse(event))
+        self.assertIn("甲模块（alpha）", result)
+        self.assertIn(f"{long_name}（beta）", result)
+        self.assertLess(result.index("/ygl beta help"), result.index("从 "))
+        self.assertIn(
+            result.splitlines()[-1],
+            (
+                "从 甲模块 开始吧：/ygl alpha help",
+                f"从 {long_name} 开始吧：/ygl beta help",
+            ),
+        )
+        module_help = self.bridge.parse(_FakeEvent("/ygl beta help"))
+        self.assertTrue(module_help.startswith(f"游戏连结 · {long_name} · 模块帮助\n"))
+        command_help = self.bridge.parse(_FakeEvent("/ygl beta 查询 help"))
+        self.assertTrue(
+            command_help.startswith(f"游戏连结 · {long_name} · 查询 帮助\n")
+        )
+
+    def test_declarative_directory_retains_exact_filtered_catalog_and_choice(self):
+        self._register_display_modules()
+        event = _FakeEvent("/ygl help")
+        response = self.bridge.parse(event)
+        again = self.bridge.parse(event)
+        self.assertEqual(response.source, again.source)
+        self.assertEqual(
+            [item.manifest.route for item in response.source.modules], ["alpha", "beta"]
+        )
+        self.assertIn(response.source.recommendation, ("alpha", "beta"))
+        card = build_help_card(response.source)
+        self.assertEqual(card.title, "游戏，从这里连结")
+        self.assertEqual(card.brand, "如月怜的游戏连结")
+        self.assertEqual(len(card.blocks), 2)
+        self.assertEqual(
+            [block.blocks[0].subtitle for block in card.blocks], ["alpha", "beta"]
+        )
+        self.registry.is_active = lambda _module: False
+        self.bridge = AstrBotCommandBridge(self.registry)
+        empty = self.bridge.parse(event)
+        self.assertEqual(empty.source.modules, ())
+        self.assertIsNone(empty.source.recommendation)
+        empty_card = build_help_card(empty.source)
+        self.assertEqual(empty_card.blocks[0].title, "暂无可用模块")
+        self.assertNotIn("alpha", repr(empty_card))
+        self.assertNotIn("beta", repr(empty_card))
+
+    def test_same_event_rechecks_disabled_detached_and_inactive_modules(self):
+        self._register_display_modules()
+        event = _FakeEvent("/ygl help")
+        self.bridge.parse(event)
+        self.registry.set_enabled("sample/alpha", False)
+        result = self.bridge.parse(event)
+        self.assertNotIn("甲模块", result)
+        self.assertIn("从 ", result)
+        # Quiescent lifecycle-owner detach is exercised here solely as an
+        # offline registry projection; no Host or real module is operated.
+        owner = object()
+        self.registry._lifecycle_owner = owner
+        self.registry._detach_lifecycle_module(owner, "sample/alpha")
+        self.assertNotIn("甲模块", self.bridge.parse(event))
+        self.registry.is_active = lambda module: False
+        self.bridge = AstrBotCommandBridge(self.registry)
+        empty = self.bridge.parse(event)
+        self.assertIn("没有活跃可用模块", empty)
+        self.assertNotIn("开始吧", empty)
+
+    def test_event_needs_neither_hashability_nor_weakrefs(self):
+        class Event:
+            __slots__ = ()
+            __hash__ = None
+
+            def get_message_str(self):
+                return "/ygl help"
+
+        self._register_display_modules()
+        event = Event()
+        self.assertEqual(self.bridge.parse(event), self.bridge.parse(event))
+
     def test_raw_tail_and_multiword_help_never_dispatch(self):
         package, handlers = build_package()
         module = package.modules[0]
@@ -101,7 +204,9 @@ class AstrBotCommandBridgeTests(unittest.TestCase):
         root = self.bridge.handle(_FakeEvent("/ygl"))
         explicit = self.bridge.handle(_FakeEvent("  /ygl    help  "))
 
-        self.assertIn("当前没有已注册模块", root)
+        self.assertIn("当前没有活跃可用模块", root)
+        self.assertTrue(root.startswith("如月怜的游戏连结\n"))
+        self.assertNotIn("开始吧", root)
         self.assertIn("暂无可用模块命令", root)
         self.assertEqual(root, explicit)
 
@@ -112,7 +217,7 @@ class AstrBotCommandBridgeTests(unittest.TestCase):
         known = self.bridge.handle(_FakeEvent("/ygl demo help"))
         unknown = self.bridge.handle(_FakeEvent("/ygl missing help"))
 
-        self.assertIn("demo 模块帮助", known)
+        self.assertIn("游戏连结 · demo · 模块帮助", known)
         self.assertIn("/ygl demo 查询", known)
         self.assertIn("/ygl help", unknown)
 

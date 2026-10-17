@@ -6,3 +6,6 @@ cryptography>=46.0.3,<=50.0.2
 icalendar==7.3.0
 python-dateutil==2.9.0.post0
 tzdata==2026.4
+# Core image rendering. The SDK remains definition-only with no dependencies.
+Pillow==12.3.0
+resvg_py==0.5.0

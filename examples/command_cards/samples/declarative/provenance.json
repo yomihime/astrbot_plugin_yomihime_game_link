@@ -1,0 +1,77 @@
+{
+  "status": "Visual designs approved by user on 2026-10-16; offline rendering fixtures, not live results",
+  "rendering": "All five PNGs use presentation.layout_renderer.render_document",
+  "help": {
+    "catalog": "Bundled modules/ff14/yomihime.manifest.json",
+    "availability": "Explicit offline loaded/enabled/available fixture only"
+  },
+  "item": {
+    "source": "User-supplied screenshot QQ_1792126562977.png",
+    "source_urls": [
+      "https://xivapi-v2.xivcdn.com/api/sheet/Item/44091",
+      "https://garlandtools.cn/db/#item/44091"
+    ],
+    "limitations": "Preserves unresolved material IDs 8/13 and class ID 15",
+    "design": "User-approved item-detail visual fixture on 2026-10-16; not a live query"
+  },
+  "logs": {
+    "source": "Synthetic ff14_logs_reference.py layout fixture",
+    "boundaries": "Raw 99.96 stays pink; main fixture retains original 99.7",
+    "scope": "Seven Ultimate and thirteen Savage rows are not a live catalog",
+    "identity": "ChatGPT @ OpenAI is synthetic, not an actual query",
+    "rounding": "ROUND_HALF_UP is this fixture's explicit display policy"
+  },
+  "images": {
+    "01_help_warm_paper": {
+      "file": "01_help_warm_paper.png",
+      "width": 1040,
+      "height": 576,
+      "bytes": 91462,
+      "sha256": "6219980a85546c0817385e596a33630ab477e6d57f12ac857ce6ca28b4ec10a4"
+    },
+    "02_item_warm_paper": {
+      "file": "02_item_warm_paper.png",
+      "width": 1040,
+      "height": 1068,
+      "bytes": 177060,
+      "sha256": "3725f30beeaeb95b87d8fa7198a22ef439d2cfa608056a950efdb53d8ff9278f"
+    },
+    "03_logs_cool_white": {
+      "file": "03_logs_cool_white.png",
+      "width": 1040,
+      "height": 2815,
+      "bytes": 542336,
+      "sha256": "3a72361d26902905aff400d0a179adcb88f09a22cb497c9e127bfc6ef312c24a"
+    },
+    "04_logs_deep_indigo": {
+      "file": "04_logs_deep_indigo.png",
+      "width": 1040,
+      "height": 2815,
+      "bytes": 597384,
+      "sha256": "7ee6ee4d1ce737ed754dd7e8b26e47f34faa8bd69a3b17574993521efd17b538"
+    },
+    "05_market_warm_paper": {
+      "width": 1040,
+      "height": 770,
+      "bytes": 137219,
+      "sha256": "68b91d3db78c8484445d156af86ae7a38c4a4c5f5cf5878cafad5fd916a971a2",
+      "file": "05_market_warm_paper.png"
+    }
+  },
+  "market": {
+    "status": "Synthetic historical market illustration, not a live quote",
+    "source": "examples/command_cards/samples/01_market_warm_paper.png",
+    "rendering": "presentation.layout_renderer.render_document",
+    "filename": "05_market_warm_paper.png",
+    "width": 1040,
+    "height": 770,
+    "bytes": 137219,
+    "sha256": "68b91d3db78c8484445d156af86ae7a38c4a4c5f5cf5878cafad5fd916a971a2",
+    "timestamps": "World upload ages, not individual listing times"
+  },
+  "dependencies": {
+    "Pillow": "12.3.0",
+    "resvg_py": "0.5.0",
+    "tested_runtime": "Linux Python 3.12; Windows wheels available but Windows execution unverified"
+  }
+}

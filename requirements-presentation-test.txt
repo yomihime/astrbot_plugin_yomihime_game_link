@@ -1,0 +1,3 @@
+# Optional pure PNG presentation tests; not plugin runtime dependencies.
+Pillow==12.3.0
+fontTools==4.67.0

@@ -280,7 +280,9 @@ class AdminOperationsRuntimeTests(unittest.IsolatedAsyncioTestCase):
             authorization=context,
         )
         self.assertEqual(updated.revision, 2)
-        self.assertEqual(dict(updated.fields), {"mode": "configured"})
+        self.assertEqual(
+            dict(updated.fields), {"mode": "configured", "reply_theme": "unset"}
+        )
         persisted = await runtime.config_repository.current(
             validate_contract(ConfigTarget("host-config", "admin/mod"))
         )

@@ -98,3 +98,52 @@ async def bounded_body(request):
     if type(data) is not dict:
         raise ValueError("management body requires an object")
     return data
+
+
+async def bounded_font_upload(request):
+    """Strict browser FormData single-file envelope with bounded allocation.
+
+    The filename is ignored and is never interpreted as a filesystem path.
+    Authentication must be established before calling this reader.
+    """
+    from ...presentation.bundled_font import FONT_SIZE
+
+    types = request.headers.getlist("content-type")
+    if len(types) != 1:
+        raise ValueError("invalid upload")
+    match = re.fullmatch(
+        r"multipart/form-data; boundary=([A-Za-z0-9_-]{1,70})", types[0]
+    )
+    if match is None:
+        raise ValueError("invalid upload")
+    boundary = match[1].encode("ascii")
+    limit = FONT_SIZE + 8192
+    lengths = request.headers.getlist("content-length")
+    if lengths and (
+        len(lengths) != 1 or not lengths[0].isdigit() or int(lengths[0]) > limit
+    ):
+        raise ValueError("invalid upload")
+    body = bytearray()
+    async for chunk in request._request.stream():
+        if len(body) + len(chunk) > limit:
+            raise ValueError("invalid upload")
+        body.extend(chunk)
+    prefix, suffix = b"--" + boundary + b"\r\n", b"\r\n--" + boundary + b"--\r\n"
+    if not body.startswith(prefix) or not body.endswith(suffix):
+        raise ValueError("invalid upload")
+    header_end = body.find(b"\r\n\r\n", len(prefix), len(prefix) + 4096)
+    if header_end < 0:
+        raise ValueError("invalid upload")
+    headers = bytes(body[len(prefix) : header_end]).decode("ascii")
+    header_match = re.fullmatch(
+        r'Content-Disposition: form-data; name="file"; filename="[^"\r\n]{1,255}"'
+        r"\r\nContent-Type: (?:application/octet-stream|font/otf|application/vnd.ms-opentype|application/x-font-opentype)",
+        headers,
+        re.IGNORECASE,
+    )
+    if header_match is None:
+        raise ValueError("invalid upload")
+    content = bytes(body[header_end + 4 : -len(suffix)])
+    if len(content) != FONT_SIZE:
+        raise ValueError("invalid upload")
+    return {"content": content}

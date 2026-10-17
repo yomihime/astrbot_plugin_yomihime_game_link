@@ -35,6 +35,7 @@ class BundledExtensionTests(unittest.IsolatedAsyncioTestCase):
     EXPECTED_CAPABILITIES = {
         "status",
         "item.lookup",
+        "ff14.item.select",
         "ff14.market.query",
         "ff14.market.select",
         "ff14.logs.character",
@@ -81,7 +82,19 @@ class BundledExtensionTests(unittest.IsolatedAsyncioTestCase):
         for capability in old_module["capabilities"]:
             capability.pop("invocation_origins", None)
             if capability["capability_id"] == "ff14.market.query":
-                for field in ("query", "server", "dc", "region", "quality", "intent"):
+                # Preserve this fixture's input/command-only historical shape,
+                # including removal of the later semantic dialogue fields.
+                for field in (
+                    "query",
+                    "server",
+                    "dc",
+                    "region",
+                    "quality",
+                    "intent",
+                    "action",
+                    "request_language",
+                    "context_language",
+                ):
                     capability["input_schema"]["properties"].pop(field)
         old["contract_version"] = "2.0"
         old["modules"][0]["pages"] = []

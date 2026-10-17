@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+import unicodedata
+from dataclasses import dataclass, replace
+from decimal import Decimal
 from typing import Any
 
 from yomihime_game_link_sdk.services import HttpRequest, SourceHttp
@@ -17,6 +19,7 @@ from .fflogs_models import (
     MetadataCandidate,
     MetadataResolution,
     OutputMetadata,
+    PartitionRecord,
     RegionRecord,
     ServerRecord,
     ServerResolution,
@@ -35,6 +38,53 @@ MAX_METADATA_MATCHES = 200
 CN_REGION_SLUG = "cn"
 GLOBAL_REGION_SLUGS = frozenset({"na", "eu", "jp", "oc"})
 _GRAPHQL_NAME = re.compile(r"[_A-Za-z][_0-9A-Za-z]*\Z", re.ASCII)
+
+# Only these complete provider wrappers prove composition. Never substring
+# match "standard" inside "non-standard", or infer rules from numeric IDs.
+_COMPOSITION = re.compile(
+    r"(?P<kind>standard composition|non-standard composition|non standard composition|标准阵容构成|非标准阵容构成)\s*[（(](?P<label>.*)[)）]",
+    re.I,
+)
+_VERSION = r"[1-9]\d*\.\d{1,2}[a-z]?"
+_VERSION_EXPRESSION = re.compile(
+    rf"(?:{_VERSION}\+?|(?:>=|<=|>|<|≥|≤)\s*{_VERSION}|"
+    rf"{_VERSION}\s*(?:-|–|—|至|to)\s*{_VERSION}|"
+    rf"[\[(]\s*{_VERSION}\s*,\s*{_VERSION}\s*[\])]|"
+    rf"{_VERSION}\s+(?:and later|or earlier)|{_VERSION}(?:\s*版本)?\s*(?:之前|以后))",
+    re.I,
+)
+
+
+def partition_version(name: str | None) -> str | None:
+    """Extract a whole unambiguous version expression, preserving its bytes."""
+    if not name:
+        return None
+    label = name.strip()
+    composition = _COMPOSITION.fullmatch(label)
+    if composition:
+        label = composition["label"].strip()
+    label = re.sub(r"^(?:patch|version|版本|补丁|パッチ)\s*", "", label, flags=re.I)
+    label = re.sub(r"\s*(?:版本|补丁)$", "", label)
+    return label if _VERSION_EXPRESSION.fullmatch(label) else None
+
+
+def partition_composition(name: str | None) -> str | None:
+    match = _COMPOSITION.fullmatch((name or "").strip())
+    if match is None:
+        return None
+    kind = match["kind"].casefold()
+    return "nonstandard" if kind.startswith(("non", "非")) else "standard"
+
+
+def savage_partition_qualification(partition: PartitionRecord) -> str:
+    """Explicit non-Echo rule evidence only; default is not a rule."""
+    if re.search(r"超越之力|(?<![a-z])echo(?![a-z])", partition.name, re.I):
+        return "echo"
+    composition = partition_composition(partition.name)
+    if partition.partition_id > 0 and composition and partition_version(partition.name):
+        return composition
+    return "unknown"
+
 
 REGIONS_QUERY = """query FF14WorldRegions {
   worldData { regions { id name compactName slug } }
@@ -83,11 +133,35 @@ OUTPUT_METADATA_INTROSPECTION = """query FF14OutputMetadataShape {
       args { name defaultValue type { kind name ofType { kind name ofType { kind name } } } }
     }
   }
+  expansionType: __type(name: "Expansion") {
+    name fields { name type { kind name ofType { kind name ofType { kind name } } }
+      args { name defaultValue type { kind name ofType { kind name ofType { kind name } } } }
+    }
+  }
+  partitionType: __type(name: "Partition") {
+    name fields { name type { kind name ofType { kind name ofType { kind name } } }
+      args { name defaultValue type { kind name ofType { kind name ofType { kind name } } } }
+    }
+  }
 }"""
 
 OUTPUT_METADATA_QUERY = """query FF14OutputMetadata {
   worldData {
     zones { id name difficulties { id name } encounters { id name } }
+  }
+  gameData { classes { specs { id name slug } } }
+}"""
+
+# Sent only after every added relationship has been proved by the fixed schema
+# request. These are provider-directory semantics, not proof of game releases.
+CHARACTER_METADATA_QUERY = """query FF14CharacterMetadata {
+  worldData {
+    expansions { id name zones { id } }
+    zones {
+      id name frozen partitions { id name default }
+      difficulties { id name sizes }
+      encounters { id name zone { id } }
+    }
   }
   gameData { classes { specs { id name slug } } }
 }"""
@@ -100,11 +174,19 @@ class FFLogsGraphQLError(ValueError):
 class FFLogsCatalog:
     """Resolve readable labels only against bounded, schema-checked lists."""
 
-    def __init__(self, http: SourceHttp, source_id: str) -> None:
+    def __init__(
+        self, http: SourceHttp, source_id: str, *, check_active=None, observer=None
+    ) -> None:
         self._http = http
         self._source_id = source_id
+        self._check_active = check_active
+        self._observer = observer
 
-    async def resolve_server(self, realm: str, server_label: str) -> ServerResolution:
+    async def resolve_server(
+        self, realm: str, server_label: str, *, page_budget: int = MAX_SERVER_PAGES
+    ) -> ServerResolution:
+        if type(page_budget) is not int or not 1 <= page_budget <= MAX_SERVER_PAGES:
+            raise ValueError("invalid server page budget")
         regions = parse_regions(await self._request(REGIONS_QUERY, {}))
         selected_regions = tuple(
             region for region in regions if _region_belongs_to_realm(region, realm)
@@ -117,7 +199,7 @@ class FFLogsCatalog:
         for directory_region in selected_regions:
             seen_pages: set[tuple[int, ...]] = set()
             for page_number in range(1, MAX_SERVER_PAGES + 1):
-                if pages_used >= MAX_SERVER_PAGES:
+                if pages_used >= page_budget:
                     return ServerResolution(
                         False, (), "server directory exceeded its total page budget"
                     )
@@ -176,9 +258,20 @@ class FFLogsCatalog:
         )
         return parse_output_metadata(await self._request(OUTPUT_METADATA_QUERY, {}))
 
+    async def load_character_metadata(self) -> OutputMetadata:
+        schema = await self._request(OUTPUT_METADATA_INTROSPECTION, {})
+        parse_output_metadata_projection(schema)
+        if not character_metadata_supported(schema):
+            return parse_output_metadata(await self._request(OUTPUT_METADATA_QUERY, {}))
+        return parse_character_metadata(
+            await self._request(CHARACTER_METADATA_QUERY, {})
+        )
+
     async def _request(
         self, query: str, variables: dict[str, object]
     ) -> dict[str, Any]:
+        if self._check_active is not None:
+            self._check_active()
         body = json.dumps(
             {"query": query, "variables": variables},
             ensure_ascii=False,
@@ -193,14 +286,27 @@ class FFLogsCatalog:
                 headers={"Content-Type": "application/json"},
             )
         )
-        return parse_graphql_envelope(response.body)
+        if self._check_active is not None:
+            self._check_active()
+        data = parse_graphql_envelope(response.body)
+        if self._observer is not None:
+            operation = re.match(r"query\s+(\w+)", query)
+            if operation is not None:
+                self._observer(
+                    operation[1], data, status=response.status_code, filters=variables
+                )
+        return data
 
 
-def parse_graphql_envelope(body: bytes) -> dict[str, Any]:
+def parse_graphql_envelope(
+    body: bytes, *, exact_numbers: bool = False, allow_partial_errors: bool = False
+) -> dict[str, Any]:
     if not isinstance(body, bytes) or len(body) > 1_000_000:
         raise FFLogsPayloadError("GraphQL response exceeds its parser budget")
     try:
-        value = json.loads(body.decode("utf-8"))
+        value = json.loads(
+            body.decode("utf-8"), parse_float=Decimal if exact_numbers else float
+        )
     except (UnicodeDecodeError, ValueError, RecursionError):
         raise FFLogsPayloadError("GraphQL response is not bounded JSON") from None
     if not isinstance(value, dict):
@@ -209,7 +315,7 @@ def parse_graphql_envelope(body: bytes) -> dict[str, Any]:
     if errors is not None:
         if not isinstance(errors, list) or len(errors) > 32:
             raise FFLogsPayloadError("GraphQL error envelope is malformed")
-        if errors:
+        if errors and not allow_partial_errors:
             raise FFLogsGraphQLError("FFLogs GraphQL query failed")
     data = value.get("data")
     if not isinstance(data, dict):
@@ -403,7 +509,45 @@ def parse_output_metadata(payload: dict[str, Any]) -> OutputMetadata:
         item_count += len(difficulties) + len(encounters)
         if item_count > MAX_METADATA_ITEMS:
             raise FFLogsPayloadError("output metadata exceeded its item budget")
-        zones.append(ZoneRecord(zone_id, name, difficulties, encounters))
+        frozen = row.get("frozen")
+        if frozen is not None and type(frozen) is not bool:
+            raise FFLogsPayloadError("zone frozen flag is malformed")
+        raw_partitions = row.get("partitions", [])
+        if raw_partitions is None:
+            raw_partitions = []
+        if not isinstance(raw_partitions, list) or len(raw_partitions) > 64:
+            raise FFLogsPayloadError("zone partitions are malformed")
+        partitions = []
+        seen_partitions = set()
+        for partition in raw_partitions:
+            if (
+                not isinstance(partition, dict)
+                or type(partition.get("default")) is not bool
+            ):
+                raise FFLogsPayloadError("zone partition is malformed")
+            partition_id = partition.get("id")
+            if type(partition_id) is not int or not -1 <= partition_id <= 2147483647:
+                raise FFLogsPayloadError("zone partition id is malformed")
+            if partition_id in seen_partitions:
+                raise FFLogsPayloadError("zone partition repeats an id")
+            seen_partitions.add(partition_id)
+            partitions.append(
+                PartitionRecord(
+                    partition_id,
+                    _short_text(partition.get("name"), 160),
+                    partition["default"],
+                )
+            )
+        zones.append(
+            ZoneRecord(
+                zone_id,
+                name,
+                difficulties,
+                encounters,
+                frozen=frozen,
+                partitions=tuple(partitions),
+            )
+        )
 
     specs: list[GameSpecRecord] = []
     seen_spec_ids: set[int] = set()
@@ -421,6 +565,276 @@ def parse_output_metadata(payload: dict[str, Any]) -> OutputMetadata:
     if item_count > MAX_METADATA_ITEMS:
         raise FFLogsPayloadError("output metadata exceeded its item budget")
     return OutputMetadata(tuple(zones), tuple(specs))
+
+
+def character_metadata_supported(payload: dict[str, Any]) -> bool:
+    """Prove fixed extra fields before issuing the richer candidate query."""
+    try:
+        if any(
+            not isinstance(payload.get(f"{_camel(name)}Type"), dict)
+            or payload[f"{_camel(name)}Type"].get("name") != name
+            for name in (
+                "WorldData",
+                "Expansion",
+                "Encounter",
+                "Zone",
+                "Difficulty",
+                "Partition",
+            )
+        ):
+            return False
+        types = {
+            name: _field_map(payload[f"{_camel(name)}Type"], name)
+            for name in (
+                "WorldData",
+                "Expansion",
+                "Encounter",
+                "Zone",
+                "Difficulty",
+                "Partition",
+            )
+        }
+        for owner, field_name, target, is_list in (
+            ("WorldData", "expansions", "Expansion", True),
+            ("Expansion", "zones", "Zone", True),
+            ("Encounter", "zone", "Zone", False),
+            ("Zone", "partitions", "Partition", True),
+        ):
+            field = types[owner].get(field_name)
+            checker = _is_list_of if is_list else _is_object
+            if (
+                field is None
+                or not _args_are_optional(field.get("args"))
+                or not checker(field.get("type"), target)
+            ):
+                return False
+        if not all(
+            name in types["Expansion"]
+            and _args_are_optional(types["Expansion"][name].get("args"))
+            and _is_scalar(types["Expansion"][name].get("type"), scalar)
+            for name, scalar in (("id", "Int"), ("name", "String"))
+        ):
+            return False
+        for owner, field_name, scalar in (
+            ("Zone", "frozen", "Boolean"),
+            ("Partition", "id", "Int"),
+            ("Partition", "name", "String"),
+            ("Partition", "default", "Boolean"),
+        ):
+            field = types[owner].get(field_name)
+            if (
+                field is None
+                or not _args_are_optional(field.get("args"))
+                or not _is_scalar(field.get("type"), scalar)
+            ):
+                return False
+        sizes = types["Difficulty"].get("sizes")
+        return (
+            sizes is not None
+            and _args_are_optional(sizes.get("args"))
+            and _is_list_of(sizes.get("type"), "Int")
+        )
+    except (KeyError, TypeError, AttributeError, FFLogsPayloadError):
+        return False
+
+
+def parse_character_metadata(payload: dict[str, Any]) -> OutputMetadata:
+    """Join provider's explicit expansion membership and canonical ownership."""
+    base = parse_output_metadata(payload)
+    world = payload["worldData"]
+    expansions = world.get("expansions")
+    if not isinstance(expansions, list) or len(expansions) > 64:
+        raise FFLogsPayloadError("expansion metadata is malformed")
+    memberships: dict[int, tuple[int, str]] = {}
+    expansion_ids = set()
+    expansion_order = []
+    for row in expansions:
+        if not isinstance(row, dict):
+            raise FFLogsPayloadError("expansion entry is malformed")
+        expansion_id = row.get("id")
+        if type(expansion_id) is not int or not 0 <= expansion_id <= 2_147_483_647:
+            raise FFLogsPayloadError("expansion id is invalid")
+        if expansion_id in expansion_ids:
+            raise FFLogsPayloadError("expansion metadata repeats an id")
+        expansion_ids.add(expansion_id)
+        expansion_order.append(expansion_id)
+        name = _short_text(row.get("name"), 160)
+        zones = row.get("zones")
+        if not isinstance(zones, list) or len(zones) > MAX_ZONES:
+            raise FFLogsPayloadError("expansion zones are malformed")
+        for zone in zones:
+            zone_id = _positive_int(zone.get("id") if isinstance(zone, dict) else None)
+            if zone_id in memberships or len(memberships) >= MAX_ZONES:
+                raise FFLogsPayloadError(
+                    "expansion membership is ambiguous or over budget"
+                )
+            memberships[zone_id] = (expansion_id, name)
+    raw_zones = {row["id"]: row for row in world["zones"]}
+    known_zone_ids = {zone.zone_id for zone in base.zones}
+    result = []
+    for zone in base.zones:
+        membership = memberships.get(zone.zone_id)
+        if membership is None:
+            raise FFLogsPayloadError("zone expansion membership is missing")
+        raw_encounters = {
+            row["id"]: row for row in raw_zones[zone.zone_id]["encounters"]
+        }
+        encounters = []
+        for encounter in zone.encounters:
+            owner = raw_encounters[encounter.encounter_id].get("zone")
+            owner_id = _positive_int(
+                owner.get("id") if isinstance(owner, dict) else None
+            )
+            if owner_id not in known_zone_ids:
+                raise FFLogsPayloadError("canonical encounter zone is outside catalog")
+            encounters.append(replace(encounter, zone_id=owner_id))
+        result.append(
+            replace(
+                zone,
+                encounters=tuple(encounters),
+                expansion_id=membership[0],
+                expansion_name=membership[1],
+            )
+        )
+    return OutputMetadata(
+        tuple(result),
+        base.specs,
+        character_catalog_verified=True,
+        expansion_order=tuple(expansion_order),
+    )
+
+
+def normalized_encounter_name(value: str) -> str:
+    """Only Unicode normalization and whitespace; never strip source suffixes."""
+    return " ".join(unicodedata.normalize("NFKC", value).split())
+
+
+def _ultimate_name(value: str) -> bool:
+    value = normalized_encounter_name(value)
+    return "绝境" in value or "ultimate" in value.casefold()
+
+
+def ultimate_group_key(zone_name: str, encounter_name: str):
+    encounter = normalized_encounter_name(encounter_name).casefold()
+    # Generic boss names do not prove identity across differently named duties.
+    return (
+        ("encounter", encounter)
+        if _ultimate_name(encounter_name)
+        else (
+            "zone_encounter",
+            normalized_encounter_name(zone_name).casefold(),
+            encounter,
+        )
+    )
+
+
+def ultimate_group_name(zone_name: str, encounter_name: str):
+    return (
+        normalized_encounter_name(encounter_name)
+        if _ultimate_name(encounter_name)
+        else f"{normalized_encounter_name(zone_name)} / {normalized_encounter_name(encounter_name)}"
+    )
+
+
+def savage_expansion(metadata: OutputMetadata, default_zone_id: int):
+    """Anchor then follow provider expansion order, never character kill counts."""
+    anchor = next((z for z in metadata.zones if z.zone_id == default_zone_id), None)
+    if anchor is None or anchor.expansion_id is None:
+        return None, False
+    order = metadata.expansion_order
+    candidates = (anchor.expansion_id,)
+    if anchor.expansion_id in order:
+        candidates = order[order.index(anchor.expansion_id) :]
+    for expansion in candidates:
+        difficulties = tuple(
+            difficulty
+            for zone in metadata.zones
+            if zone.expansion_id == expansion
+            for difficulty in zone.difficulties
+            if _normalized_label(difficulty.name) in {"savage", "零式"}
+        )
+        unknown = any(item.sizes is None for item in difficulties)
+        if any(item.sizes is not None and 8 in item.sizes for item in difficulties):
+            return expansion, not unknown
+        if unknown:
+            return expansion, False
+    return None, True
+
+
+def select_character_zones(metadata: OutputMetadata, default_zone_id: int):
+    """Apply the product's source-name Ultimate and eight-player Savage policy."""
+    if not metadata.character_catalog_verified:
+        return ()
+    target_expansion, _ = savage_expansion(metadata, default_zone_id)
+    result = []
+    seen_encounters: set[tuple[str, int, int]] = set()
+    for zone in metadata.zones:
+        for difficulty in zone.difficulties:
+            label = _normalized_label(difficulty.name)
+            ultimate = _ultimate_name(zone.name)
+            encounters = []
+            for item in zone.encounters:
+                category = (
+                    "ultimate"
+                    if ultimate or _ultimate_name(item.name)
+                    else "savage"
+                    if label in {"savage", "零式"}
+                    and (difficulty.sizes is None or 8 in difficulty.sizes)
+                    and zone.expansion_id == target_expansion
+                    else None
+                )
+                if category is None:
+                    continue
+                key = (category, difficulty.difficulty_id, item.encounter_id)
+                # Independent historical IDs survive; non-owning directory
+                # aliases do not create another query target.
+                if item.zone_id == zone.zone_id and key not in seen_encounters:
+                    seen_encounters.add(key)
+                    encounters.append((category, item))
+            for category in ("ultimate", "savage"):
+                members = tuple(item for kind, item in encounters if kind == category)
+                if members:
+                    result.append(
+                        (replace(zone, encounters=members), difficulty, category)
+                    )
+    return tuple(result)
+
+
+def ultimate_catalog_order(metadata: OutputMetadata, default_zone_id: int):
+    """Anchor identities to their earliest canonical provider appearance.
+
+    Expansion and same-expansion directory order are provider conventions,
+    not verified release dates. Neither numeric IDs nor winner periods rank
+    encounters. Read the full catalog so query budgets cannot move an anchor.
+    """
+    expansion_positions = {
+        expansion: index for index, expansion in enumerate(metadata.expansion_order)
+    }
+    entries = {}
+    for position, (zone, _, category) in enumerate(
+        select_character_zones(metadata, default_zone_id)
+    ):
+        if category != "ultimate":
+            continue
+        for encounter in zone.encounters:
+            key = ultimate_group_key(zone.name, encounter.name)
+            entries.setdefault(key, []).append(
+                (expansion_positions.get(zone.expansion_id), position)
+            )
+    result = {}
+    for key, appearances in entries.items():
+        known = [index for index, _ in appearances if index is not None]
+        if known and len(known) == len(appearances):
+            oldest = max(known)
+            result[key] = (
+                0,
+                oldest,
+                min(position for index, position in appearances if index == oldest),
+            )
+        else:
+            # Missing chronological evidence: stable catalog fallback last.
+            result[key] = (1, 0, appearances[0][1])
+    return result
 
 
 def resolve_output_metadata(
@@ -490,7 +904,20 @@ def _parse_named_id_list(rows: list[Any], model: type, label: str) -> tuple:
         seen_ids.add(item_id)
         name = _short_text(row.get("name"), 160)
         if model is DifficultyRecord:
-            result.append(DifficultyRecord(item_id, name))
+            sizes = row.get("sizes")
+            if sizes is not None and (
+                not isinstance(sizes, list)
+                or len(sizes) > 32
+                or any(
+                    type(size) is not int or not 0 <= size <= 2147483647
+                    for size in sizes
+                )
+                or len(set(sizes)) != len(sizes)
+            ):
+                raise FFLogsPayloadError("difficulty sizes are invalid")
+            result.append(
+                DifficultyRecord(item_id, name, None if sizes is None else tuple(sizes))
+            )
         elif model is EncounterRecord:
             result.append(EncounterRecord(item_id, name))
         elif model is GameSpecRecord:

@@ -1,0 +1,4 @@
+# Only this offline example; do not add these to the plugin's runtime dependencies.
+Pillow>=10.4,<13
+# SVG conversion: use an existing Inkscape install, or install optional CairoSVG
+# separately. Nothing is automatically installed or downloaded by the scripts.

@@ -92,7 +92,9 @@ EXTENSION_DESCRIPTOR_FIELDS: Mapping[str, frozenset[str]] = MappingProxyType(
                 "display",
             }
         ),
-        "module_display": frozenset({"default_name", "localized_names", "short_name"}),
+        "module_display": frozenset(
+            {"default_name", "localized_names", "short_name", "logo_resource"}
+        ),
         "capability": frozenset(
             {
                 "capability_id",
@@ -474,6 +476,10 @@ def _display_name(value: object, label: str, limit: int) -> None:
 
 
 def check_ModuleDisplay(self) -> None:
+    if self.logo_resource is not None:
+        validate_page_resource_path(self.logo_resource)
+        if self.logo_resource.rsplit(".", 1)[-1] not in {"svg", "png", "jpg", "jpeg"}:
+            raise ValueError("module logo must be a static SVG, PNG or JPEG resource")
     _display_name(self.default_name, "default_name", 128)
     if self.short_name is not None:
         _display_name(self.short_name, "short_name", 32)
@@ -520,6 +526,12 @@ def check_ModuleManifest(self) -> None:
     _unique(tuple((item.route_id for item in self.pages)), "page routes")
     _unique(tuple((item.path.casefold() for item in self.resources)), "page resources")
     resources = {item.path for item in self.resources}
+    if (
+        self.display is not None
+        and self.display.logo_resource is not None
+        and self.display.logo_resource not in resources
+    ):
+        raise ValueError("module logo references an undeclared resource")
     for page in self.pages:
         if not {page.entry, *page.styles} <= resources:
             raise ValueError("page references an undeclared resource")

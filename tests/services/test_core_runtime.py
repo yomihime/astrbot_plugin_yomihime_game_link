@@ -8,6 +8,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from secrets import token_urlsafe
+from time import monotonic
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -416,6 +417,9 @@ class CoreRuntimeTests(unittest.IsolatedAsyncioTestCase):
         trusted_subscription_gates=None,
         public_web_validator=None,
         public_web_capabilities=frozenset(),
+        command_heading_projector=None,
+        monotonic_clock=None,
+        command_timeout=90,
     ) -> CoreRuntime:
         (self.root / "extensions").mkdir(exist_ok=True)
         return CoreRuntime(
@@ -442,6 +446,9 @@ class CoreRuntimeTests(unittest.IsolatedAsyncioTestCase):
             trusted_subscription_gates=trusted_subscription_gates,
             public_web_validator=public_web_validator,
             public_web_capabilities=public_web_capabilities,
+            command_heading_projector=command_heading_projector,
+            monotonic_clock=monotonic_clock or monotonic,
+            command_timeout=command_timeout,
         )
 
     async def _public_web_runtime(self, *, detached=False, block_root=False):
@@ -1391,6 +1398,20 @@ class CoreRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(runtime.closed)
         self.assertEqual(source.capture_calls, 0)
 
+    async def test_command_heading_dependency_does_not_wrap_subscription_renderer(self):
+        def project(*args):
+            return "command", "subject"
+
+        renderer = _Renderer()
+        runtime = self._runtime(renderer=renderer, command_heading_projector=project)
+        try:
+            self.assertIs(runtime.output._command_heading_projector, project)
+            self.assertIs(runtime.output._renderer, renderer)
+            self.assertIs(runtime.delivery._renderer, renderer)
+            await runtime.start()
+        finally:
+            self.assertTrue(await runtime.close(timeout=0.5))
+
     async def test_source_credential_policies_are_passed_to_module_services(self):
         policies = (
             SourceCredentialPolicy(
@@ -1512,6 +1533,49 @@ class CoreRuntimeTests(unittest.IsolatedAsyncioTestCase):
             release.set()
             if not runtime.closed:
                 await runtime.close(timeout=1)
+
+    async def test_origin_budget_issues_ninety_for_ordinary_command_and_fences_output(
+        self,
+    ):
+        clock = [monotonic()]
+        advance = [31]
+        views = []
+
+        class BudgetHandler(_Handler):
+            async def invoke(self, context, parameters):
+                views.append(context)
+                clock[0] += advance[0]
+                return await super().invoke(context, parameters)
+
+        handler = BudgetHandler()
+        runtime = self._runtime(
+            source=_FactorySource(_Factory(handler)), monotonic_clock=lambda: clock[0]
+        )
+        await self._activate_private(runtime)
+        await self._install_private_grant(runtime)
+        ingress = HostIngress(
+            "adapter-one",
+            "alice",
+            "conversation-one",
+            "route-one",
+            ConversationKind.DIRECT,
+            object(),
+            validate_contract(GrantReference("grant-one", 1)),
+        )
+        try:
+            self.assertIs(runtime._budget_policy, runtime.gateway._budget_policy)
+            before = clock[0]
+            outcome = await runtime.invoke_command(
+                "private/mod", "read", {}, ingress=ingress
+            )
+            self.assertEqual(views[-1].deadline, before + 90)
+            self.assertIs(outcome.result.status, ResultStatus.SUCCESS)
+            self.assertEqual(len(runtime.output._message_port.calls), 1)
+            advance[0] = 91
+            await runtime.invoke_command("private/mod", "read", {}, ingress=ingress)
+            self.assertEqual(len(runtime.output._message_port.calls), 1)
+        finally:
+            self.assertTrue(await runtime.close(timeout=0.5))
 
     async def test_private_command_uses_real_grant_reference_and_authorization(self):
         handler = _Handler()

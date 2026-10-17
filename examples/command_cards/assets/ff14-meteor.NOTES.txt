@@ -1,0 +1,21 @@
+FFXIV METEOR MODULE EMBLEM
+
+File: ff14-meteor.svg
+Transparent SVG, viewBox="0 0 100 100", fill="currentColor".
+The hollow center is an evenodd transparent cutout. Each palette supplies its
+own accent color when rendering the same local asset.
+
+This is a hand-authored reference rendering, not an official vector or exact
+logo file. Its familiar hollow ring and asymmetric flames were recreated with
+reference to Square Enix's official product photography:
+https://na.store.square-enix-games.com/final-fantasy-xiv-messenger-bag
+
+FINAL FANTASY XIV and its marks belong to Square Enix. This note makes no claim
+of ownership or permission to redistribute the underlying mark and does not
+apply a new license to it. Review suitability before use beyond this prototype.
+No official photograph is included. Fonts are not bundled.
+
+Only this trusted, static, monochrome local asset is intended for the example
+SVG converter. Its format guard is not an untrusted SVG security sandbox.
+An external SVG <img> does not inherit surrounding CSS color; inline it, use a
+mask, or substitute currentColor before rasterizing, as the prototype does.

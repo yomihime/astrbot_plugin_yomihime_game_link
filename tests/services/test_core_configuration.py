@@ -159,7 +159,8 @@ class CoreSelectionTests(unittest.TestCase):
                         )
                     self.assertEqual(legacy, {field.name: field.default})
         self.assertEqual(
-            {field.name for field in CORE_CONFIG_FIELDS}, {"default_region"}
+            {field.name for field in CORE_CONFIG_FIELDS},
+            {"default_region", "image_theme"},
         )
         self.assertEqual(
             {field.name for field in CALENDAR_CONFIG_FIELDS},

@@ -60,8 +60,14 @@ class _FakeHttp:
     ) -> None:
         self.responses = deque(responses)
         self.requests: list[HttpRequest] = []
+        self.duty_requests: list[HttpRequest] = []
 
     async def fetch(self, request: HttpRequest) -> HttpResponse:
+        if request.source_id == "xivapi_items":
+            self.duty_requests.append(request)
+            return HttpResponse(
+                200, {"Content-Type": "application/json"}, b'{"results":[],"next":null}'
+            )
         self.requests.append(request)
         response = self.responses.popleft()
         if isinstance(response, SourceHttpError):
@@ -264,6 +270,14 @@ def _character_responses(
         for index, code in enumerate(region_codes)
     ]
     return [_regions(), *pages, character or _character(metric=metric)]
+
+
+def _character_request(http):
+    return next(
+        request
+        for request in reversed(http.requests)
+        if "FF14PublicCharacter" in json.loads(request.body)["query"]
+    )
 
 
 def _output_schema() -> dict:
@@ -609,8 +623,15 @@ class FFLogsHandlerTests(unittest.IsolatedAsyncioTestCase):
             },
         )
         self.assertIs(result.status, ResultStatus.PARTIAL_SUCCESS)
-        self.assertEqual(len(http.requests), 6)
-        request = http.requests[-1]
+        # Restored automatic metadata may fail independently of usable rows.
+        self.assertEqual(len(http.requests), 7)
+        self.assertTrue(
+            any(
+                "FF14OutputMetadataShape" in json.loads(request.body)["query"]
+                for request in http.requests
+            )
+        )
+        request = _character_request(http)
         self.assertEqual(
             (request.source_id, request.method, request.path),
             (FFLOGS_GLOBAL_SOURCE, "POST", "/api/v2/client"),
@@ -665,12 +686,12 @@ class FFLogsHandlerTests(unittest.IsolatedAsyncioTestCase):
                 "realm": "global",
                 "server": "Cerberus",
                 "server_hint": "Chaos",
-                "character": "Hero",
+                "character": "Synthetic Hero",
             },
         )
         self.assertIs(result.status, ResultStatus.PARTIAL_SUCCESS)
         self.assertEqual(
-            json.loads(selected.requests[-1].body)["variables"]["serverSlug"],
+            json.loads(_character_request(selected).body)["variables"]["serverSlug"],
             "cerberus-2",
         )
 
@@ -698,7 +719,7 @@ class FFLogsHandlerTests(unittest.IsolatedAsyncioTestCase):
             },
         )
         self.assertIs(result.status, ResultStatus.SUCCESS)
-        request = http.requests[-1]
+        request = _character_request(http)
         self.assertEqual(request.source_id, FFLOGS_CN_SOURCE)
         body = json.loads(request.body)
         self.assertEqual(
