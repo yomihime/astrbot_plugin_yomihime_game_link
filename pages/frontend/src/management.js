@@ -118,7 +118,7 @@ export function createManagementPage(document,bridge,window,{expectedPage='manag
   let catalog=null,snapshot=null,credentialCatalog=null,credentialSnapshot=null,ready=false,closed=false,stale=true,generation=0,boundary=null,contextSeen=false,off=null,active=null;
   const view=createManagementView(document,container,scope),cards=new Map(),controls=new Map(),status=element('status');
   let suspended=initiallySuspended;
-  const fonts=createFontSettings(bridge,window,panel=>view.font(panel),()=>{stale=true;buttons();});
+  const fonts=createFontSettings(bridge,window,panel=>view.font(panel),()=>loseAccess());
   const credentialControls=new Map();let encryptionReady=false;let savedFocus=null,selectedOwner=null;
   const emptyDraft=scope==='maintenance'?'[[],[],false]':'[[],[]]';let draftState=emptyDraft;
   const statusNotice=createNotice(window,(message,tone)=>{status.textContent=message;status.dataset.tone=tone;});
@@ -173,10 +173,16 @@ export function createManagementPage(document,bridge,window,{expectedPage='manag
     const button=cards.get(target).save;if(blocked(button))return;
     run(async attempt=>{
       const selected=Object.fromEntries(ownedFields(catalog,target).map(f=>{const c=controls.get(key(f));return [f.name,{mode:c.mode.value,value:c.input.value,draftVersion:c.draftVersion}];}));
-      await post('update',updateBody(target,snapshot[target].revision,selected,catalog),attempt);onConfigurationSaved();
+      const body=updateBody(target,snapshot[target].revision,selected,catalog),submitted=body.updates.map(update=>controls.get(JSON.stringify([target,update.field])));
+      // An inherited selection made after submission is a new clear intent,
+      // even while the last verified baseline still says inherited absence.
+      for(const c of submitted)c.writePending=true;
+      try{
+      await post('update',body,attempt);onConfigurationSaved();
       try{await refresh(attempt);}catch(error){if(!current(attempt))throw error;stale=true;fail(managementAccessLost(error)?'write_ack_authorization_denied':'write_ack_readback_unverified');}
       for(const [name,sent]of Object.entries(selected)){if(sent.mode==='keep')continue;const c=controls.get(JSON.stringify([target,name])),row=snapshot[target]?.fields[name];if(c&&row&&c.draftVersion===sent.draftVersion&&c.mode.value===sent.mode&&c.input.value===sent.value){c.mode.value='keep';c.input.value=row.state==='valid'?inputValue(c.field,row.value):'';}}
       draftChanged();notice('已保存。','success');
+      }finally{for(const c of submitted)c.writePending=false;}
     });
   }
   function discardTarget(target){
@@ -186,6 +192,12 @@ export function createManagementPage(document,bridge,window,{expectedPage='manag
     view.maskSecrets();draftChanged();notice('已放弃本模块修改，含本模块凭据草稿。','success');
   }
   function clearSecrets(){view.maskSecrets();for(const c of credentialControls.values()){for(const node of [c.clientId,c.clientSecret])if(node)node.value='';if(c.confirm)c.confirm.checked=false;if(c.mode)c.mode.value='keep';c.draftVersion++;}draftChanged();}
+  function loseAccess(message='管理授权不可用或页面已失效，请重新打开宿主管理页面后手动刷新。',tone='error'){
+    // Revoke every sensitive owner draft and fence concurrent responses while
+    // retaining ordinary local edits for an explicit authorized refresh.
+    generation++;active=null;stale=true;encryptionReady=false;credentialCatalog=null;credentialSnapshot=null;
+    fonts.invalidate();clearSecrets();onCapabilities(null);buttons();notice(message,tone);
+  }
   function saveCredential(c){
     if(blocked(c.save)||c.mode.value==='replace'&&!encryptionReady)return;
     run(async attempt=>{
@@ -237,10 +249,10 @@ export function createManagementPage(document,bridge,window,{expectedPage='manag
       else if(error?.message==='select_changes')notice('请选择需要修改的字段。');
       else if(error?.message==='confirm_clear')notice('请勾选清除确认后再提交；保持选项不会写入。');
       else if(error?.message==='write_ack_readback_unverified')notice('已提交，状态暂未核实，请刷新确认。','warning');
-      else if(error?.message==='write_ack_authorization_denied'){clearSecrets();credentialCatalog=null;credentialSnapshot=null;stale=true;notice('已提交，但管理授权不可用，状态暂未核实。请重新打开宿主管理页面确认。','warning');}
+      else if(error?.message==='write_ack_authorization_denied')loseAccess('已提交，但管理授权不可用，状态暂未核实。请重新打开宿主管理页面确认。','warning');
       else if(error?.message==='secret_encryption_unavailable')notice('未保存。'+cryptoAdvice);
       else if(error?.message==='invalid_config')notice('配置或输入未通过校验，请核对字段要求后刷新重试。');
-      else if(managementAccessLost(error)){clearSecrets();credentialCatalog=null;credentialSnapshot=null;stale=true;notice('管理授权不可用或页面已失效，请重新打开宿主管理页面后手动刷新。');}
+      else if(managementAccessLost(error))loseAccess();
       else {stale=true;notice('未取得成功确认，请刷新核对配置与版本后重试。');}
     }finally{if(active===operation){active=null;buttons();}}
   }
