@@ -662,7 +662,7 @@ class FFLogsProductionSafeScopeTests(unittest.IsolatedAsyncioTestCase):
             "verified_catalog",
         )
         result = await handler.invoke(None, TARGET)
-        self.assertEqual(len(http.requests), 5)
+        self.assertEqual((len(http.requests), len(http.duty_requests)), (4, 1))
         self.assertEqual(
             [
                 item.title
@@ -1197,11 +1197,11 @@ class FFLogsOfflineCatalogReferenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("零式使用各副本的 FFLogs 默认分区", text)
         self.assertNotIn("全部分区", text)
         self.assertNotIn("历史成绩未查全", text)
-        self.assertEqual(len(http.requests), 7)
+        self.assertEqual((len(http.requests), len(http.duty_requests)), (6, 1))
         self.assertEqual(
-            json.loads(http.requests[-3].body)["query"], CHARACTER_METADATA_QUERY
+            json.loads(http.requests[-2].body)["query"], CHARACTER_METADATA_QUERY
         )
-        query = json.loads(http.requests[-2].body)
+        query = json.loads(http.requests[-1].body)
         self.assertIn("FF14CatalogCharacter", query["query"])
         self.assertEqual(
             len([key for key in query["variables"] if key.startswith("z")]), 10

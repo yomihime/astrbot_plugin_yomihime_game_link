@@ -25,6 +25,43 @@ from yomihime_game_link_sdk.results import FactDocument
 
 
 class EvidenceTests(unittest.TestCase):
+    def test_duty_state_projection_is_closed_bounded_and_identity_free(self):
+        safe = project(
+            "FF14DutyOrderState",
+            {
+                "state": "complete",
+                "complete": True,
+                "pages": 2,
+                "rows": 200,
+                "actor": "PRIVATE",
+                "url": "https://private.invalid",
+            },
+        )
+        self.assertEqual(
+            safe,
+            {
+                "state": "complete",
+                "complete": True,
+                "pages": 2,
+                "rows": 200,
+                "matched": 0,
+                "unmatched": 0,
+            },
+        )
+        self.assertEqual(
+            project(
+                "FF14DutyOrderState", {"state": "PRIVATE", "pages": True, "rows": 201}
+            ),
+            {
+                "state": "unavailable",
+                "complete": False,
+                "pages": 0,
+                "rows": 0,
+                "matched": 0,
+                "unmatched": 0,
+            },
+        )
+
     def test_character_identity_auth_and_report_links_never_survive_projection(self):
         raw = fixture._character()["data"]
         character = raw["characterData"]["character"]

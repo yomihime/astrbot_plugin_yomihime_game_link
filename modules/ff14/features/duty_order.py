@@ -8,10 +8,15 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections import Counter
 from dataclasses import dataclass, replace
 from time import monotonic
 
-from yomihime_game_link_sdk.errors import ServiceUnavailable, SourceHttpError
+from yomihime_game_link_sdk.errors import (
+    OperationTimeout,
+    ServiceUnavailable,
+    SourceHttpError,
+)
 from yomihime_game_link_sdk.services import HttpRequest
 
 from .fflogs_catalog import normalized_encounter_name
@@ -85,13 +90,18 @@ class DutyOrderCatalog:
         self._epoch = object()
         self._cached = None
 
-    async def load(self, http, *, deadline=None):
+    async def load(self, http, *, deadline=None, evidence=None, names=()):
         if self._cached is not None and self._cached[0] > monotonic():
+            self._observe(evidence, *self._cached[1:], cached=True, names=names)
             return self._cached[1]
         remaining = 3 if deadline is None else min(3, max(0, deadline - monotonic()))
         if remaining <= 0:
+            self._observe(
+                evidence, DutyOrder(), 0, "deadline", cached=False, names=names
+            )
             return DutyOrder()
         epoch = self._epoch
+        pages = 0
         try:
             async with asyncio.timeout(remaining):
                 rows, seen, cursor, complete = [], set(), None, False
@@ -110,9 +120,12 @@ class DutyOrderCatalog:
                         )
                     )
                     response = await http.fetch(HttpRequest(SOURCE, PATH, query=query))
+                    if response.status_code in (401, 403):
+                        raise PermissionError()
                     if response.status_code != 200:
                         raise ValueError("duty catalog status")
                     page, cursor = parse_page(response.body)
+                    pages += 1
                     rows.extend(page)
                     if cursor is None:
                         complete = True
@@ -122,42 +135,80 @@ class DutyOrderCatalog:
                     seen.add(cursor)
                 result = DutyOrder(tuple(rows), complete)
             ttl = CACHE_SECONDS if result.complete else FAILURE_SECONDS
+            state = "complete" if result.complete else "incomplete"
         except SourceHttpError as error:
-            if error.code in {"source_not_declared", "request_rejected"}:
+            if error.code in {
+                "source_not_declared",
+                "request_rejected",
+            } or error.status_code in (401, 403):
                 raise PermissionError() from None
             if error.code == "cancelled":
                 raise ServiceUnavailable() from None
             result, ttl = DutyOrder(), FAILURE_SECONDS
-        except (ServiceUnavailable, PermissionError):
+            state = "unavailable"
+        except (ServiceUnavailable, PermissionError, OperationTimeout):
             raise
         except Exception:
             result, ttl = DutyOrder(), FAILURE_SECONDS
+            state = "unavailable"
         if self._epoch is not epoch:
             raise ServiceUnavailable()
-        self._cached = (monotonic() + ttl, result)
+        self._cached = (monotonic() + ttl, result, pages, state)
+        self._observe(evidence, result, pages, state, cached=False, names=names)
         return result
+
+    @staticmethod
+    def _observe(evidence, result, pages, state, *, cached, names):
+        if evidence is not None:
+            matched = len(duty_name_matches(result, names))
+            evidence.observe(
+                "FF14DutyOrderState",
+                {
+                    "state": state,
+                    "complete": result.complete,
+                    "pages": pages,
+                    "rows": len(result.names),
+                    "matched": matched,
+                    "unmatched": len(names) - matched,
+                },
+                status=None,
+                cached=cached,
+            )
+
+
+def duty_name_matches(catalog, group_names):
+    """The same unique full-name policy for menu ordering and safe counts."""
+    if not catalog.complete:
+        return {}
+    candidates = {}
+    for name, rank in catalog.names:
+        candidates.setdefault(name, []).append(rank)
+    names = {name: values[0] for name, values in candidates.items() if len(values) == 1}
+    group_names = [normalized_encounter_name(name).casefold() for name in group_names]
+    unique = {name for name, count in Counter(group_names).items() if count == 1}
+    return {
+        index: names[name]
+        for index, name in enumerate(group_names)
+        if name in names and name in unique
+    }
 
 
 def apply_duty_order(character, catalog):
     """Unique exact names only; unresolved groups retain their existing order."""
     if not catalog.complete:
         return character
-    candidates = {}
-    for name, rank in catalog.names:
-        candidates.setdefault(name, []).append(rank)
-    names = {name: values[0] for name, values in candidates.items() if len(values) == 1}
     ultimate = [group for group in character.groups if group.category == "ultimate"]
-    group_names = [
-        normalized_encounter_name(group.rankings[0].encounter_name).casefold()
-        if group.rankings
-        else ""
-        for group in ultimate
-    ]
-    unique = {name for name in group_names if group_names.count(name) == 1}
+    matches = duty_name_matches(
+        catalog,
+        [
+            group.rankings[0].encounter_name if group.rankings else ""
+            for group in ultimate
+        ],
+    )
     ordered = sorted(
         enumerate(ultimate),
-        key=lambda item: (0, -names[group_names[item[0]]], item[0])
-        if group_names[item[0]] in names and group_names[item[0]] in unique
+        key=lambda item: (0, -matches[item[0]], item[0])
+        if item[0] in matches
         else (1, 0, item[0]),
     )
     groups = tuple(group for _, group in ordered) + tuple(

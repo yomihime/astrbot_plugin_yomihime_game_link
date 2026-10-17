@@ -18,6 +18,58 @@ from tests.modules.ff14 import test_fflogs as fixture
 
 
 class DiagnosticBridgeTests(unittest.TestCase):
+    def test_duty_state_emitter_forwards_cache_status_without_private_data(self):
+        evidence = Evidence("fflogs_public_cn")
+        payload = {
+            "state": "complete",
+            "complete": True,
+            "pages": 1,
+            "rows": 7,
+            "actor": "PRIVATE",
+        }
+        evidence.observe("FF14DutyOrderState", payload, status=None)
+        evidence.observe("FF14DutyOrderState", payload, status=None, cached=True)
+        self.assertEqual(len(self.sent), 2)
+        events = [json.loads(value.split(" ", 1)[1]) for value in self.sent]
+        self.assertEqual([event["cached"] for event in events], [False, True])
+        self.assertEqual(
+            [json.loads(event["payload"])["state"] for event in events],
+            ["complete", "complete"],
+        )
+        self.assertNotIn("PRIVATE", str(self.sent))
+
+    def test_duty_state_wire_rejects_bad_status_extra_and_unbounded_values(self):
+        payload = {
+            "state": "complete",
+            "complete": True,
+            "pages": 1,
+            "rows": 7,
+            "matched": 7,
+            "unmatched": 0,
+        }
+        bodies = [
+            {**payload, "actor": "PRIVATE"},
+            {**payload, "pages": 3},
+            {**payload, "pages": True},
+            {**payload, "rows": 201},
+            {**payload, "state": "PRIVATE"},
+            {**payload, "complete": 1},
+            {**payload, "matched": 10001},
+            {**payload, "unmatched": -1},
+        ]
+        for body in bodies:
+            self.bridge.emit(
+                self.record(
+                    self.event(
+                        operation="FF14DutyOrderState",
+                        status=None,
+                        payload=json.dumps(body),
+                    )
+                )
+            )
+        Evidence("fflogs_public_cn").observe("FF14DutyOrderState", payload, status=200)
+        self.assertEqual(self.sent, [])
+
     def history_summary(self):
         return project(
             "FF14HistorySummary",

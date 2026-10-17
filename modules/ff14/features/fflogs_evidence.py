@@ -27,6 +27,7 @@ OPERATIONS = frozenset(
         "FF14MetadataState",
         "FF14RequestSummary",
         "FF14HistorySummary",
+        "FF14DutyOrderState",
     }
 )
 _NAME = re.compile(r"[_A-Za-z][_0-9A-Za-z]{0,127}\Z")
@@ -178,6 +179,25 @@ def project(operation, payload):
     """Closed projection; never retains identity, URLs, errors or auth fields."""
     if operation not in OPERATIONS or not isinstance(payload, dict):
         return {}
+    if operation == "FF14DutyOrderState":
+        return {
+            "state": payload.get("state")
+            if payload.get("state")
+            in {"complete", "incomplete", "unavailable", "deadline"}
+            else "unavailable",
+            "complete": payload.get("complete") is True,
+            **{
+                key: payload[key]
+                if type(payload.get(key)) is int and 0 <= payload[key] <= limit
+                else 0
+                for key, limit in (
+                    ("pages", 2),
+                    ("rows", 200),
+                    ("matched", 10000),
+                    ("unmatched", 10000),
+                )
+            },
+        }
     if operation == "FF14HistorySummary":
         # Closed, identity-free counts. Never put one entry per target in facts.
         fields = (
@@ -458,7 +478,7 @@ def metadata_payload(metadata):
 
 
 def _exceeds_projection_limits(operation, payload):
-    if operation in {"FF14MetadataState", "FF14RequestSummary"}:
+    if operation in {"FF14MetadataState", "FF14RequestSummary", "FF14DutyOrderState"}:
         return False
     if operation == "FF14OutputMetadataShape":
         for row in payload.values():

@@ -60,8 +60,14 @@ class _FakeHttp:
     ) -> None:
         self.responses = deque(responses)
         self.requests: list[HttpRequest] = []
+        self.duty_requests: list[HttpRequest] = []
 
     async def fetch(self, request: HttpRequest) -> HttpResponse:
+        if request.source_id == "xivapi_items":
+            self.duty_requests.append(request)
+            return HttpResponse(
+                200, {"Content-Type": "application/json"}, b'{"results":[],"next":null}'
+            )
         self.requests.append(request)
         response = self.responses.popleft()
         if isinstance(response, SourceHttpError):

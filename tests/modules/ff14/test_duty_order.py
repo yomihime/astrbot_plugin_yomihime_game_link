@@ -3,6 +3,7 @@
 import asyncio
 import json
 import unittest
+import weakref
 from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -15,7 +16,11 @@ from modules.ff14.features.duty_order import (
 )
 from modules.ff14.features.fflogs_models import CharacterRankingGroup
 from tests.modules.ff14 import test_fflogs_aggregation as fixture
-from yomihime_game_link_sdk.errors import ServiceUnavailable, SourceHttpError
+from yomihime_game_link_sdk.errors import (
+    OperationTimeout,
+    ServiceUnavailable,
+    SourceHttpError,
+)
 
 NAMES = (
     "巴哈姆特绝境战",
@@ -61,6 +66,166 @@ class Http:
 
 
 class DutyOrderTests(unittest.IsolatedAsyncioTestCase):
+    async def test_safe_state_reports_complete_cache_partial_and_failure(self):
+        events = []
+        evidence = SimpleNamespace(
+            observe=lambda operation, payload, **kw: events.append(
+                (operation, payload, kw)
+            )
+        )
+        client, http = DutyOrderCatalog(), Http()
+        await client.load(http, evidence=evidence, names=NAMES)
+        await client.load(http, evidence=evidence, names=NAMES)
+        self.assertEqual(len(http.requests), 1)
+        self.assertEqual([event[2]["cached"] for event in events], [False, True])
+        self.assertTrue(all(event[0] == "FF14DutyOrderState" for event in events))
+        self.assertTrue(
+            all(
+                event[1]
+                == {
+                    "state": "complete",
+                    "complete": True,
+                    "pages": 1,
+                    "rows": 7,
+                    "matched": 7,
+                    "unmatched": 0,
+                }
+                for event in events
+            )
+        )
+        self.assertTrue(all(event[2]["status"] is None for event in events))
+        client.close()
+        await client.load(Http(ValueError()), evidence=evidence, names=NAMES)
+        self.assertEqual(
+            events[-1][1],
+            {
+                "state": "unavailable",
+                "complete": False,
+                "pages": 0,
+                "rows": 0,
+                "matched": 0,
+                "unmatched": 7,
+            },
+        )
+        client.close()
+        await client.load(http, evidence=evidence, names=("Unknown Ultimate",))
+        self.assertEqual(
+            events[-1][1],
+            {
+                "state": "complete",
+                "complete": True,
+                "pages": 1,
+                "rows": 7,
+                "matched": 0,
+                "unmatched": 1,
+            },
+        )
+
+    async def test_complete_pagination_and_ttl_do_not_retain_http_authority(self):
+        client, http = DutyOrderCatalog(), Http()
+        reference = weakref.ref(http)
+        responses = iter((payload(NAMES[:3], "page-2"), payload(NAMES[3:])))
+
+        async def pages(request):
+            return SimpleNamespace(status_code=200, body=next(responses))
+
+        with (
+            patch.object(http, "fetch", pages),
+            patch("modules.ff14.features.duty_order.monotonic", return_value=100),
+        ):
+            result = await client.load(http)
+        self.assertTrue(result.complete)
+        self.assertEqual(len(result.names), 7)
+        self.assertEqual(client._cached[0], 100 + 86400)
+        del http
+        self.assertIsNone(reference())
+        http = Http()
+        with patch(
+            "modules.ff14.features.duty_order.monotonic", return_value=100 + 86399
+        ):
+            self.assertEqual(await client.load(http), result)
+        self.assertEqual(http.requests, [])
+        with patch(
+            "modules.ff14.features.duty_order.monotonic", return_value=100 + 86400
+        ):
+            self.assertTrue((await client.load(http)).complete)
+        self.assertEqual(len(http.requests), 1)
+
+    async def test_failure_ttl_and_cancellation_are_bounded(self):
+        client, http = DutyOrderCatalog(), Http(ValueError("synthetic"))
+        with patch("modules.ff14.features.duty_order.monotonic", return_value=100):
+            self.assertFalse((await client.load(http)).complete)
+        self.assertEqual(client._cached[0], 160)
+        with patch("modules.ff14.features.duty_order.monotonic", return_value=159):
+            await client.load(http)
+        self.assertEqual(len(http.requests), 1)
+        with patch("modules.ff14.features.duty_order.monotonic", return_value=160):
+            await client.load(http)
+        self.assertEqual(len(http.requests), 2)
+        client.close()
+        entered, cancelled = asyncio.Event(), asyncio.Event()
+
+        async def pending(request):
+            entered.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+
+        with patch.object(http, "fetch", pending):
+            task = asyncio.create_task(client.load(http))
+            await entered.wait()
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+        self.assertTrue(cancelled.is_set())
+        self.assertIsNone(client._cached)
+
+    async def test_second_page_duplicate_prevents_ambiguous_name_promotion(self):
+        client, http = DutyOrderCatalog(), Http()
+        responses = iter((payload(NAMES, "last"), payload((NAMES[-1],))))
+
+        async def pages(request):
+            http.requests.append(request)
+            return SimpleNamespace(status_code=200, body=next(responses))
+
+        with patch.object(http, "fetch", pages):
+            result = await client.load(http)
+        self.assertTrue(result.complete)
+        self.assertEqual(dict(http.requests[1].query)["cursor"], "last")
+        self.assertNotIn("query", dict(http.requests[1].query))
+        row = fixture.record().rankings[0]
+        groups = tuple(
+            CharacterRankingGroup(
+                i + 1,
+                name,
+                1,
+                3,
+                "ultimate",
+                "Unknown",
+                (replace(row, encounter_name=name),),
+            )
+            for i, name in enumerate(NAMES)
+        )
+        character = replace(fixture.record(), groups=groups)
+        ordered = apply_duty_order(character, result)
+        self.assertEqual(ordered.groups[-1].rankings[0].encounter_name, NAMES[-1])
+        self.assertEqual(ordered.groups[0].rankings[0].encounter_name, NAMES[-2])
+
+    async def test_http_auth_status_and_invocation_timeout_are_not_fallbacks(self):
+        for status in (401, 403):
+            with self.subTest(status=status):
+                client = DutyOrderCatalog()
+                with self.assertRaises(PermissionError):
+                    await client.load(
+                        Http(SourceHttpError("upstream_error", status_code=status))
+                    )
+                self.assertIsNone(client._cached)
+        client = DutyOrderCatalog()
+        with self.assertRaises(OperationTimeout):
+            await client.load(Http(OperationTimeout()))
+        self.assertIsNone(client._cached)
+
     async def test_bounded_managed_request_cache_and_close(self):
         http, client = Http(), DutyOrderCatalog()
         first = await client.load(http)

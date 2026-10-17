@@ -779,9 +779,10 @@ class BatchTests(unittest.IsolatedAsyncioTestCase):
         )
         summary = json.loads(summary_event["payload"])
         self.assertEqual(
-            sum(item["attempts"] for item in summary["operations"]), len(http.requests)
+            sum(item["attempts"] for item in summary["operations"]),
+            len(http.requests) + len(http.duty_requests),
         )
-        self.assertEqual(len(http.requests), 9)
+        self.assertEqual((len(http.requests), len(http.duty_requests)), (8, 1))
         self.assertEqual(summary["network_attempts"], "unknown")
         self.assertEqual(summary["host_oauth"], "unobserved")
         self.assertEqual(

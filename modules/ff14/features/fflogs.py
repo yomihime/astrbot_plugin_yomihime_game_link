@@ -310,6 +310,27 @@ class FFLogsCharacterLookup:
             cache = scope.cache
             active()
 
+        # Resolve optional public menu metadata sequentially, before cache rebinds
+        # and history workers. Retain only pure directory data, never a facade.
+        duty_order = None
+        if any(target[2] == "ultimate" for target in targets):
+            duty_order = await self._duty_order.load(
+                scope.http,
+                deadline=stop_at,
+                evidence=evidence,
+                names=tuple(
+                    {
+                        ultimate_group_key(
+                            zone.name, encounter.name
+                        ): ultimate_group_name(zone.name, encounter.name)
+                        for zone, _, category, _ in targets
+                        if category == "ultimate"
+                        for encounter in zone.encounters
+                    }.values()
+                ),
+            )
+            active()
+
         available = max(0, stop_at - monotonic())
         write_reserve = min(2, available * 0.1) if cache is not None else 0
         fetch_stop = stop_at - write_reserve
@@ -461,12 +482,10 @@ class FFLogsCharacterLookup:
         if evidence is not None:
             evidence.observe("FF14HistorySummary", summary, status=None)
         result = _assemble_catalog_rankings(character, metadata, targets, outcomes)
-        if any(group.category == "ultimate" for group in result.groups):
+        if duty_order is not None:
             from .duty_order import apply_duty_order
 
-            catalog = await self._duty_order.load(scope.http, deadline=stop_at)
-            active()
-            result = apply_duty_order(result, catalog)
+            result = apply_duty_order(result, duty_order)
         warnings = []
         if unsaved:
             warnings.append("部分已验证结果未能保存到缓存；后续调用可能需要重新查询。")

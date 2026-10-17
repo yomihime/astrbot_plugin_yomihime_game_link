@@ -169,13 +169,22 @@ def partition_version(name: str | None) -> str | None:
     if len(versions) != 1:
         return None
     version = versions[0]
-    if re.fullmatch(r"\s*" + re.escape(version) + r"\s*", name):
-        return version
-    if re.search(
-        r"(?:patch|version|版本|补丁|パッチ)\s*" + re.escape(version), name, re.I
+    label = name.strip()
+    # Accept a whole single-version label, optionally inside the existing
+    # composition label. A lone number within an open range is not a patch.
+    composition = re.fullmatch(
+        r"(?:standard composition|标准阵容构成)\s*[（(]\s*(.*?)\s*[)）]",
+        label,
+        re.I,
+    )
+    if composition:
+        label = composition[1]
+    escaped = re.escape(version)
+    if re.fullmatch(
+        rf"(?:{escaped}|(?:patch|version|版本|补丁|パッチ)\s*{escaped}|{escaped}\s*(?:版本|补丁))",
+        label,
+        re.I,
     ):
-        return version
-    if re.search(re.escape(version) + r"\s*(?:版本|补丁)", name):
         return version
     return None
 

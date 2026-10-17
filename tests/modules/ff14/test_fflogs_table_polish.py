@@ -20,6 +20,27 @@ from yomihime_game_link_sdk import cards
 
 
 class LogsTablePolishTests(unittest.TestCase):
+    def test_open_ranges_are_not_single_record_versions(self):
+        base = fixture.record().rankings[0]
+        for expansion, expected in (("Endwalker", "6.x"), ("Unknown", "—")):
+            for label in (
+                "Patch 6.4+",
+                "Patch 6.4 and later",
+                "版本 6.4 之前",
+                "Patch 6.4 or earlier",
+                "6.4版本以后",
+                "Patch >=6.4",
+            ):
+                with self.subTest(label=label, expansion=expansion):
+                    self.assertEqual(
+                        record_version(
+                            replace(
+                                base, origin=RankingOrigin(99, 1, 3, expansion, label)
+                            )
+                        ),
+                        expected,
+                    )
+
     def test_version_only_uses_explicit_labels_or_known_expansion_names(self):
         row = fixture.record().rankings[0]
         for expansion, partition, expected in (

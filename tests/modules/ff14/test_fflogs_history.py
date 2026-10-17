@@ -195,7 +195,7 @@ class HistoryBatchTests(unittest.IsolatedAsyncioTestCase):
                 result = await handler.invoke(None, card_fixture.TARGET)
                 self.assertIs(result.status, ResultStatus.SUCCESS)
                 self.assertIsNone(result.error)
-                self.assertEqual(len(http.requests), 7)
+                self.assertEqual((len(http.requests), len(http.duty_requests)), (6, 1))
                 wire = json.loads(
                     next(
                         request.body

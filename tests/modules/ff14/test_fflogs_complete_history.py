@@ -46,6 +46,37 @@ class CompleteHistoryTests(unittest.IsolatedAsyncioTestCase):
     requested = explicit_fixture.ExplicitHistoryTests.requested
     planned_packs = explicit_fixture.ExplicitHistoryTests.planned_packs
 
+    async def test_optional_menu_state_precedes_history_and_reports_cache_hit(self):
+        from tests.modules.ff14.test_duty_order import payload
+
+        events = []
+        evidence = SimpleNamespace(
+            observe=lambda operation, body, **kw: events.append((operation, body, kw))
+        )
+        original = self.scope.http.fetch
+        menu_calls = []
+
+        async def fetch(request):
+            if request.source_id == "xivapi_items":
+                self.assertEqual(self.calls, [])
+                self.assertEqual(self.operations["lookup"], 0)
+                menu_calls.append(request)
+                return SimpleNamespace(status_code=200, body=payload())
+            return await original(request)
+
+        self.scope.http.fetch = fetch
+        first = await self.collect(evidence)
+        second = await self.collect(evidence)
+        states = [event for event in events if event[0] == "FF14DutyOrderState"]
+        self.assertEqual(events[0][0], "FF14DutyOrderState")
+        self.assertEqual([event[2]["cached"] for event in states], [False, True])
+        self.assertTrue(all(event[1]["complete"] for event in states))
+        self.assertEqual(len(menu_calls), 1)
+        self.assertEqual(first.rankings, second.rankings)
+        for event in events:
+            if event[0] == "FF14HistorySummary":
+                self.assertEqual(event[1]["planned"], 111)
+
     def summary(self):
         events = []
         evidence = SimpleNamespace(
@@ -290,10 +321,14 @@ class CompleteHistoryTests(unittest.IsolatedAsyncioTestCase):
     async def test_rate_limit_stops_queued_batches_without_inventing_coverage(self):
         self.scope.cache = None
         calls = 0
+        menu_calls = 0
 
         async def limited(request):
-            nonlocal calls
-            calls += 1
+            nonlocal calls, menu_calls
+            if request.source_id == "xivapi_items":
+                menu_calls += 1
+            else:
+                calls += 1
             raise SourceHttpError("rate_limited", status_code=429)
 
         self.scope.http.fetch = limited
@@ -301,6 +336,7 @@ class CompleteHistoryTests(unittest.IsolatedAsyncioTestCase):
         result = await self.collect(evidence)
         summary = events[-1][1]
         self.assertEqual(calls, 1)
+        self.assertEqual(menu_calls, 1)
         self.assertEqual(
             (summary["attempted"], summary["request_failed"], summary["not_queried"]),
             (12, 12, 99),

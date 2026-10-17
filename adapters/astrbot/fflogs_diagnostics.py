@@ -20,6 +20,7 @@ OPERATIONS = frozenset(
         "FF14MetadataState",
         "FF14RequestSummary",
         "FF14HistorySummary",
+        "FF14DutyOrderState",
     }
 )
 
@@ -86,6 +87,19 @@ def _type(value, depth=0):
 
 def _safe_payload(operation, body):
     """Validate a closed diagnostic wire format without importing game code."""
+    if operation == "FF14DutyOrderState":
+        return _object(
+            body,
+            {
+                "state": lambda item: item
+                in {"complete", "incomplete", "unavailable", "deadline"},
+                "complete": lambda item: type(item) is bool,
+                "pages": lambda item: type(item) is int and 0 <= item <= 2,
+                "rows": lambda item: type(item) is int and 0 <= item <= 200,
+                "matched": lambda item: type(item) is int and 0 <= item <= 10000,
+                "unmatched": lambda item: type(item) is int and 0 <= item <= 10000,
+            },
+        )
     if operation == "FF14HistorySummary":
         fields = (
             "planned",
@@ -454,13 +468,18 @@ class FFLogsDiagnostics(logging.Handler):
         if (
             type(event["cached"]) is not bool
             or type(event["truncated"]) is not bool
-            or operation == "FF14HistorySummary"
+            or operation in {"FF14HistorySummary", "FF14DutyOrderState"}
             and event["status"] is not None
             or not (
                 (
                     event["cached"]
                     or operation
-                    in {"FF14MetadataState", "FF14RequestSummary", "FF14HistorySummary"}
+                    in {
+                        "FF14MetadataState",
+                        "FF14RequestSummary",
+                        "FF14HistorySummary",
+                        "FF14DutyOrderState",
+                    }
                 )
                 and event["status"] is None
                 or type(event["status"]) is int
