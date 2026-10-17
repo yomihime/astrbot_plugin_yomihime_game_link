@@ -36,6 +36,9 @@ GLOW_LIGHT_COLOR = "#ebc361"
 GLOW_LIGHT_OPACITY_CAP = 155
 GLOW_LIGHT_POWER = 0.75
 ERROR_COLOR = "#c83e4d"
+BUFFER_RADIUS = 0.25  # Final pixels; half a mask pixel at production 2x.
+BUFFER_OPACITY = 0.15
+BUFFER_FEATHER = 0.08  # Final pixels.
 
 
 class ExitStack(_ExitStack):
@@ -89,6 +92,7 @@ class TextSpan:
     text: str
     role: TextRole = TextRole.NORMAL
     grade: Grade | None = None
+    explicit_color: bool = False
 
     def __post_init__(self):
         if (
@@ -97,6 +101,7 @@ class TextSpan:
             or any(
                 category(c).startswith("C") or c in "\u2028\u2029" for c in self.text
             )
+            or type(self.explicit_color) is not bool
             or not isinstance(self.role, TextRole)
             or (
                 not isinstance(self.grade, Grade)
@@ -140,6 +145,7 @@ class DrawInfo:
     patch_bounds: tuple[int, int, int, int]
     mask_bounds: tuple[int, int, int, int] | None
     effect_bounds: tuple[int, int, int, int] | None
+    buffer: bool = False
 
 
 def rgb(color: str) -> tuple[int, int, int]:
@@ -357,6 +363,34 @@ class RichSession:
         self._charge(mask.width * mask.height * 2)
         return stack.enter_context(shadow_mask(mask, size))
 
+    def _buffer(self, mask, stack):
+        """Approved outer-only A mask; reserve all seven patch rasters first.
+
+        Interpolate radius 0 and 1 at 2x instead of rounding 0.25 final px
+        up to one mask pixel. Every temporary has explicit exception-safe
+        ownership. The existing 32-byte/patch-pixel live-work allowance covers
+        these eight L masks (including the borrowed glyph) without a canvas.
+        """
+        from PIL import Image, ImageChops, ImageFilter
+
+        self._charge(mask.width * mask.height * 7)
+        high = stack.enter_context(mask.filter(ImageFilter.MaxFilter(3)))
+        blended = stack.enter_context(Image.blend(mask, high, BUFFER_RADIUS * SCALE))
+        high.close()
+        grown = stack.enter_context(
+            blended.filter(ImageFilter.GaussianBlur(BUFFER_FEATHER * SCALE))
+        )
+        blended.close()
+        outer = stack.enter_context(ImageChops.subtract(grown, mask))
+        grown.close()
+        inverse = stack.enter_context(ImageChops.invert(mask))
+        weighted = stack.enter_context(ImageChops.multiply(outer, inverse))
+        outer.close()
+        inverse.close()
+        alpha = stack.enter_context(weighted.point(lambda a: round(a * BUFFER_OPACITY)))
+        weighted.close()
+        return alpha
+
     def _geometry(self, span, font, size):
         """Finite measurements only; no mask, crop, copy or pixel scan."""
         if self.painted or self.closed:
@@ -530,6 +564,14 @@ class RichSession:
                     replacement = ImageChops.lighter(extent, alpha)
                 extent.close()
                 extent = stack.enter_context(replacement)
+            buffered = span.explicit_color or span.role is TextRole.GRADED
+            if buffered:
+                self._charge(pixels)
+                with ExitStack() as local:
+                    alpha = self._buffer(mask, local)
+                    replacement = ImageChops.lighter(extent, alpha)
+                extent.close()
+                extent = stack.enter_context(replacement)
             self._charge(pixels)
             effect_bounds = extent.getbbox()
             edges = ink
@@ -547,6 +589,7 @@ class RichSession:
                 bounds,
                 ink,
                 effect_bounds,
+                buffered,
             )
         self.plans.append(_Plan(info, font, size, tuple(box), pad))
         return info
@@ -767,6 +810,17 @@ class RichSession:
                     self.image.paste(patch, info.patch_bounds[:2])
                 finally:
                     patch.close()
+        for plan in plans:
+            if not plan.info.buffer:
+                continue
+            with ExitStack() as stack:
+                mask = self._mask(plan, stack)
+                alpha = self._buffer(mask, stack)
+                shade = max(
+                    ("#fafafa", "#202127"),
+                    key=lambda color: contrast_ratio(plan.info.face, color),
+                )
+                self.image.paste(rgb(shade), plan.info.patch_bounds, alpha)
         for plan in plans:
             if plan.info.mask_bounds is None:
                 continue

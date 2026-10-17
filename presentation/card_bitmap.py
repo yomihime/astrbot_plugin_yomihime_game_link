@@ -507,9 +507,13 @@ class _RichLayout:
         if width <= 0:
             raise BitmapUnavailable("layout_overflow")
         tokens = (
-            [(c, default_role or TextRole.NORMAL, None) for c in value]
+            [(c, default_role or TextRole.NORMAL, None, False) for c in value]
             if type(value) is str
-            else [(c, span.role, span.grade) for span in value.spans for c in span.text]
+            else [
+                (c, span.role, span.grade, span.explicit_color)
+                for span in value.spans
+                for c in span.text
+            ]
         )
         lines = []
         runs = []
@@ -532,30 +536,33 @@ class _RichLayout:
                 )
             )
 
-        def candidate(char, role, grade):
+        def candidate(char, role, grade, explicit_color):
             extend = (
                 runs
                 and runs[-1].role is role
                 and runs[-1].grade is grade
+                and runs[-1].explicit_color is explicit_color
                 and len(runs[-1].text) < 512
             )
-            span = TextSpan(runs[-1].text + char if extend else char, role, grade)
+            span = TextSpan(
+                runs[-1].text + char if extend else char, role, grade, explicit_color
+            )
             prefix = prefixes[-2] if extend else prefixes[-1]
             metrics = prefix.append(_measure_run(font, span.text, self.measure))
             return span, metrics, extend
 
-        for char, role, grade in tokens:
+        for char, role, grade, explicit_color in tokens:
             if char == "\n":
                 emit()
                 runs, prefixes, chars = [], [_LineMetrics()], 0
                 continue
-            span, metrics, extend = candidate(char, role, grade)
+            span, metrics, extend = candidate(char, role, grade, explicit_color)
             if metrics.width > width * 2 or chars >= 1024:
                 if not runs:
                     raise BitmapUnavailable("layout_overflow")
                 emit()
                 runs, prefixes, chars = [], [_LineMetrics()], 0
-                span, metrics, extend = candidate(char, role, grade)
+                span, metrics, extend = candidate(char, role, grade, explicit_color)
                 if metrics.width > width * 2:
                     raise BitmapUnavailable("layout_overflow")
             if extend:

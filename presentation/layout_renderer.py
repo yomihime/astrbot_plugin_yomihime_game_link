@@ -1029,7 +1029,7 @@ def _paint_text(layout, session):
                 source = (
                     TextSpan(span.text, TextRole.GRADED, Grade.GOLD)
                     if span.emphasis == "gold"
-                    else TextSpan(span.text)
+                    else TextSpan(span.text, explicit_color=span.color is not None)
                 )
                 run = _measure_run(font, span.text, layout.measure)
                 if text.align == "right" and len(line.spans) == 1:

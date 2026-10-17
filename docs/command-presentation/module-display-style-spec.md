@@ -149,3 +149,7 @@ card:
 - 国服官方职业名称：[幻梦寻宝旅人职业列表](https://actff1.web.sdo.com/20250218_DreamTraveler/index.html)、[国服 7.0 新职业介绍](https://actff1.web.sdo.com/project/20240927dawntrail/patch70/job.html)、[官方中文资料站职业列表](https://ff.web.sdo.com/date/na/game/index.html)。只采用职业专名，不把活动日期作为版本开放依据
 - 日文全名及英文身份：[日文官方 Job Guide](https://jp.finalfantasyxiv.com/jobguide/battle/)、[英文官方 Job Guide](https://na.finalfantasyxiv.com/jobguide/battle/)。中文、日文全名和英文缩写是模块展示策略，不维护副本翻译或每版本副本名单
 - 第三方客户端实现：[fflogsapi / character.py，固定 commit bc331d9，L244–269](https://github.com/halworsen/fflogsapi/blob/bc331d95c245a7592f370845202a9bc90c4fd45d/fflogsapi/characters/character.py#L244-L269)，用于 `zoneRankings` 按 encounter ID 读取 `totalKills` 的实现参考；不代表官方 JSON 契约或已完成本地 fixture 核验
+
+### 语义色外缓冲（Core）
+
+显式 `Span.color` 与等级/金色强调使用固定 0.25 最终像素、15% 不透明度的轻外缓冲；普通主题文字不启用。2× 蒙版在原始字形与 1 蒙版像素扩张之间插值 50%，再做 0.08 最终像素柔化，减去原蒙版并乘其反蒙版，只保留外缘。缓冲色从 `#fafafa`、`#202127` 中选取与原字面色对比更高者；不推断数值或业务等级。原字色、字体、字号、布局测量、真实背景采样、B 柔影与金色光效配方均不变，所有辅助层先于清晰字面绘制。缓冲仅分配既有受限字形 patch，各临时蒙版计入累积预算并显式关闭，不新增整图缓冲或 SDK 字段。
