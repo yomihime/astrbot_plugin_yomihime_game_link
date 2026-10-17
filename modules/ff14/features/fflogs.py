@@ -128,6 +128,7 @@ class FFLogsCharacterLookup:
         self._services = services
         self._lifecycle = object()
         self._metadata_cache: dict[str, tuple[float, OutputMetadata | None, str]] = {}
+        self._ranking_contract_cache = {}
         from .chat_context import PendingTargets
 
         self._chat_pending = PendingTargets()
@@ -135,6 +136,7 @@ class FFLogsCharacterLookup:
     def close(self) -> None:
         self._lifecycle = object()
         self._metadata_cache.clear()
+        self._ranking_contract_cache.clear()
         self._chat_pending.close()
 
     async def _character_metadata(
@@ -406,17 +408,34 @@ class FFLogsCharacterLookup:
         from .fflogs_evidence import RequestMetrics
 
         metrics = RequestMetrics() if explicit_command else None
+        observation = None
+        if (
+            context is not None
+            and context.origin is InvocationOrigin.WEB_PUBLIC
+            and any(key in parameters for key in ("timeframe", "spec_name"))
+            and not isinstance(_character_inputs(parameters), CapabilityResult)
+        ):
+            from .fflogs_scope_contract import InvocationObservation
+
+            metrics = RequestMetrics()
+            observation = InvocationObservation(parameters, metrics)
         try:
             async with asyncio.timeout(30):
-                return await self._execute(
+                result = await self._execute(
                     context,
                     parameters,
                     capture_evidence=explicit_command,
                     deadline=monotonic() + 29.5,
                     metrics=metrics,
+                    observation=observation,
                 )
+                return observation.attach(result) if observation is not None else result
         except TimeoutError:
-            return _error(ErrorCode.UPSTREAM_ERROR, "FFLogs 查询超时，请稍后重试。")
+            result = _error(ErrorCode.UPSTREAM_ERROR, "FFLogs 查询超时，请稍后重试。")
+            if observation is not None:
+                observation.reject("deadline")
+                return observation.attach(result)
+            return result
         finally:
             if metrics is not None:
                 metrics.finish()
@@ -434,19 +453,37 @@ class FFLogsCharacterLookup:
         capture_evidence=False,
         deadline=None,
         metrics=None,
+        observation=None,
     ) -> CapabilityResult:
         lifecycle = self._lifecycle
         inputs = _character_inputs(parameters)
         if isinstance(inputs, CapabilityResult):
             return inputs
         realm, server_label, name, server_hint, metric, zone_tuple = inputs
+        advanced_filters = {
+            key: parameters[key]
+            for key in ("timeframe", "spec_name")
+            if key in parameters
+        }
+        if advanced_filters and (
+            tool
+            or context is not None
+            and context.origin is not InvocationOrigin.WEB_PUBLIC
+        ):
+            return _error(
+                ErrorCode.PARAMETER_ERROR, "这些筛选条件仅支持正式网页单范围查询。"
+            )
         if metrics is not None:
             from types import SimpleNamespace
 
             if scope is None:
                 scope = await self._services.scopes.bind(context)
+            observed_http = metrics.wrap(scope.http)
             scope = SimpleNamespace(
-                http=metrics.wrap(scope.http), cache=getattr(scope, "cache", None)
+                http=observation.wrap(observed_http)
+                if observation is not None
+                else observed_http,
+                cache=getattr(scope, "cache", None),
             )
         if realm is None:
             from ..query_resolution import QueryResolutionError
@@ -495,12 +532,64 @@ class FFLogsCharacterLookup:
         try:
             if scope is None:
                 scope = await self._services.scopes.bind(context)
+            if advanced_filters:
+                from .fflogs_scope_contract import fetch_contract
+
+                if observation is not None:
+                    observation.stage = "schema"
+
+                def check_active():
+                    if self._lifecycle is not lifecycle:
+                        raise ServiceUnavailable()
+
+                cached = self._ranking_contract_cache.get(source_id)
+                if cached is None or cached[0] <= monotonic():
+                    if observation is not None:
+                        observation.schema_cache = "module_miss"
+                    contract = await fetch_contract(scope.http, source_id, check_active)
+                    check_active()
+                    self._ranking_contract_cache[source_id] = (
+                        monotonic() + METADATA_CACHE_SECONDS,
+                        contract,
+                    )
+                else:
+                    if observation is not None:
+                        observation.schema_cache = "module_hit"
+                    contract = cached[1]
+                if (
+                    "timeframe" in advanced_filters
+                    and advanced_filters["timeframe"] not in contract.timeframe_values
+                ):
+                    from yomihime_game_link_sdk.results import FactDocument
+
+                    return replace(
+                        _error(
+                            ErrorCode.PARAMETER_ERROR,
+                            "timeframe 不在来源当前支持的枚举中。",
+                        ),
+                        model_facts=FactDocument(
+                            {
+                                "status": "error",
+                                "error": {
+                                    "code": ErrorCode.PARAMETER_ERROR.value,
+                                    "message": "timeframe 不在来源当前支持的枚举中。",
+                                },
+                                "supplement": contract.supplement(),
+                            }
+                        ),
+                    )
             if resolved_server is None:
+                if observation is not None:
+                    observation.stage = "server-directory"
                 catalog = FFLogsCatalog(scope.http, source_id)
                 resolution = await catalog.resolve_server(
                     realm,
                     server_label,
-                    **({"page_budget": 4} if capture_evidence else {}),
+                    **(
+                        {"page_budget": 4}
+                        if capture_evidence or advanced_filters
+                        else {}
+                    ),
                 )
             else:
                 from types import SimpleNamespace
@@ -572,6 +661,24 @@ class FFLogsCharacterLookup:
                 zoneId=zone_tuple[0], difficulty=zone_tuple[1], partition=zone_tuple[2]
             )
         try:
+            if advanced_filters:
+                declarations, arguments = [], []
+                if "timeframe" in advanced_filters:
+                    declarations.append("$timeframe: RankingTimeframeType!")
+                    arguments.append("timeframe: $timeframe")
+                    variables["timeframe"] = advanced_filters["timeframe"]
+                if "spec_name" in advanced_filters:
+                    declarations.append("$specName: String!")
+                    arguments.append("specName: $specName")
+                    variables["specName"] = advanced_filters["spec_name"]
+                query = query.replace(
+                    "$partition: Int!", "$partition: Int!, " + ", ".join(declarations)
+                ).replace(
+                    "partition: $partition",
+                    "partition: $partition, " + ", ".join(arguments),
+                )
+            if observation is not None:
+                observation.stage = "character-fetch"
             response = await scope.http.fetch(
                 HttpRequest(
                     source_id,
@@ -581,6 +688,8 @@ class FFLogsCharacterLookup:
                     headers={"Content-Type": "application/json"},
                 )
             )
+            if observation is not None:
+                observation.stage = "graphql-envelope"
             data = parse_graphql_envelope(response.body, exact_numbers=True)
             character_data = data.get("characterData")
             raw_character = (
@@ -588,6 +697,9 @@ class FFLogsCharacterLookup:
                 if isinstance(character_data, dict)
                 else None
             )
+            if observation is not None:
+                observation.stage = "character-shape"
+                observation.character_shape(raw_character, name, server.name)
             if raw_character is None:
                 return _error(
                     ErrorCode.NOT_FOUND,
@@ -596,35 +708,83 @@ class FFLogsCharacterLookup:
             if not isinstance(raw_character, dict):
                 raise FFLogsPayloadError("character projection is malformed")
             if raw_character.get("hidden") is True:
+                if observation is not None:
+                    observation.reject("not_public", "hidden", value=True)
                 return _error(
                     ErrorCode.NOT_PUBLIC,
                     "该角色的 FFLogs 记录已隐藏；本模块不会查询私密数据。",
                 )
-            character = parse_public_character(raw_character)
-            if (tool or capture_evidence) and (
+            try:
+                character = parse_public_character(raw_character)
+            except FFLogsPayloadError:
+                if observation is not None:
+                    observation.locate_parse_failure(raw_character)
+                raise
+            if observation is not None:
+                observation.stage = "identity"
+            if (tool or capture_evidence or advanced_filters) and (
                 " ".join(character.name.casefold().split())
                 != " ".join(name.casefold().split())
                 or " ".join(character.server_name.casefold().split())
                 != " ".join(server.name.casefold().split())
             ):
+                if observation is not None:
+                    field = (
+                        "name"
+                        if observation.identity.get("name_matches") is not True
+                        else "server.name"
+                    )
+                    observation.reject(
+                        "identity_mismatch",
+                        field,
+                        value=raw_character.get("name")
+                        if field == "name"
+                        else raw_character["server"].get("name"),
+                    )
                 return _error(
                     ErrorCode.UNPARSED,
                     "FFLogs 返回的角色或服务器与本次目标不一致，未展示战绩。",
                 )
+            if observation is not None:
+                observation.stage = "selection"
             if character.metric != metric:
+                if observation is not None:
+                    observation.reject(
+                        "metric_mismatch",
+                        "metric",
+                        value=raw_character["rankings"].get("metric"),
+                    )
                 return _error(
                     ErrorCode.UNPARSED,
                     "FFLogs \u8fd4\u56de\u7684\u6307\u6807\u4e0e\u8bf7\u6c42\u4e0d\u4e00\u81f4\uff0c\u672a\u5c55\u793a\u8fd9\u7ec4\u6218\u7ee9\u3002",
                 )
-            if (
-                zone_tuple is not None
-                and (
-                    character.zone_id,
-                    character.difficulty_id,
-                    character.partition,
+            if zone_tuple is not None and (
+                (character.zone_id, character.difficulty_id) != zone_tuple[:2]
+                or not (
+                    character.partition == zone_tuple[2]
+                    or (zone_tuple[2] == -1 and character.partition > 0)
                 )
-                != zone_tuple
             ):
+                if observation is not None:
+                    fields = ("zone", "difficulty", "partition")
+                    field = next(
+                        field
+                        for field, actual, expected in zip(
+                            fields,
+                            (
+                                character.zone_id,
+                                character.difficulty_id,
+                                character.partition,
+                            ),
+                            zone_tuple,
+                        )
+                        if actual != expected
+                    )
+                    observation.reject(
+                        "selection_mismatch",
+                        field,
+                        value=raw_character["rankings"].get(field),
+                    )
                 return _error(
                     ErrorCode.UNPARSED,
                     "FFLogs返回的副本、难度或分区与请求不一致。未展示战绩。",
@@ -635,6 +795,23 @@ class FFLogsCharacterLookup:
                     data,
                     status=response.status_code,
                     filters=variables,
+                )
+            if advanced_filters:
+                from .fflogs_scope_contract import scoped_facts
+
+                if observation is not None:
+                    observation.stage = "row-fields"
+                scoped = scoped_facts(
+                    raw_character["rankings"],
+                    {
+                        "zone_id": zone_tuple[0],
+                        "difficulty": zone_tuple[1],
+                        "partition": zone_tuple[2],
+                        "metric": metric,
+                        **advanced_filters,
+                    },
+                    source_id,
+                    observation=observation,
                 )
         except SourceHttpError as exc:
             return source_error(exc)
@@ -677,6 +854,8 @@ class FFLogsCharacterLookup:
                     )
             except (ServiceUnavailable, PermissionError):
                 return _error(ErrorCode.MODULE_UNAVAILABLE, "FFLogs 来源服务暂不可用。")
+        if observation is not None:
+            observation.stage = "result"
         result = _character_result(
             character,
             host,
@@ -700,6 +879,36 @@ class FFLogsCharacterLookup:
                 warnings=list(result.warnings),
             )
             return tool_result(result, {"fflogs": facts})
+        if advanced_filters and result.error is None:
+            from yomihime_game_link_sdk.results import FactDocument
+
+            return replace(
+                result,
+                model_facts=FactDocument(
+                    {"status": result.status.value, "error": None, "fflogs": scoped}
+                ),
+            )
+        if (
+            advanced_filters
+            and result.error is not None
+            and result.error.code is ErrorCode.NO_RECORDS
+            and not scoped["total_rows"]
+        ):
+            from yomihime_game_link_sdk.results import FactDocument
+
+            return replace(
+                result,
+                model_facts=FactDocument(
+                    {
+                        "status": "error",
+                        "error": {
+                            "code": result.error.code.value,
+                            "message": result.error.message,
+                        },
+                        "supplement": {"fflogs": scoped},
+                    }
+                ),
+            )
         return result
 
 
@@ -1278,14 +1487,36 @@ def _character_inputs(parameters: JsonObject):
     )
     if all(value is None for value in zone_values):
         zone = None
-    elif all(
-        type(value) is int and 1 <= value <= 2_147_483_647 for value in zone_values
+    elif (
+        all(
+            type(value) is int and 1 <= value <= 2_147_483_647
+            for value in zone_values[:2]
+        )
+        and type(zone_values[2]) is int
+        and (zone_values[2] == -1 or 1 <= zone_values[2] <= 2_147_483_647)
     ):
         zone = zone_values
     else:
         return _error(
             ErrorCode.PARAMETER_ERROR,
-            "zone_id、difficulty、partition 必须同时提供，且均为正整数。",
+            "zone_id、difficulty 必须为正整数，partition 必须为 -1 或正整数，且三者同时提供。",
+        )
+    from .fflogs_scope_contract import TOKEN
+
+    advanced = {
+        key: parameters[key] for key in ("timeframe", "spec_name") if key in parameters
+    }
+    if advanced and (
+        zone is None
+        or realm is None
+        or any(
+            not isinstance(value, str) or not TOKEN.fullmatch(value)
+            for value in advanced.values()
+        )
+    ):
+        return _error(
+            ErrorCode.PARAMETER_ERROR,
+            "timeframe、spec_name 必须为有效名称，并提供明确区域及完整副本、难度、分区条件。",
         )
     return realm, server, name, hint, metric, zone
 

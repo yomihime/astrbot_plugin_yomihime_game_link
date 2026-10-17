@@ -82,9 +82,17 @@ def message_parameters(text: str) -> dict:
         if key not in allowed or key in values or not value:
             raise ValueError(CLARIFICATION)
         if key in FILTER_FIELDS:
-            if not value.isascii() or not value.isdigit() or len(value) > 10:
+            if not (
+                key == "partition"
+                and value == "-1"
+                or value.isascii()
+                and value.isdigit()
+                and len(value) <= 10
+            ):
                 raise ValueError(CLARIFICATION)
             value = int(value)
+            if value == 0:
+                raise ValueError(CLARIFICATION)
         values[key] = value
     if not ROLE_FIELDS.issubset(values):
         raise ValueError(CLARIFICATION)

@@ -321,8 +321,21 @@
               },
               "partition": {
                 "type": "integer",
-                "minimum": 1,
+                "minimum": -1,
+                "description": "-1 is an accepted request sentinel; its coverage and selection behavior depend on the source and remain subject to verification. Otherwise use a positive partition ID. Zero is invalid.",
                 "maximum": 2147483647
+              },
+              "timeframe": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 80,
+                "description": "Explicit public-web zone query only. Value must be confirmed by the source timeframe enum; invalid values return safe enum help before the character query."
+              },
+              "spec_name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 80,
+                "description": "Explicit public-web zone query only; maps to the source specName argument. Requires a complete zone/difficulty/partition group."
               },
               "action": {
                 "type": "string",
