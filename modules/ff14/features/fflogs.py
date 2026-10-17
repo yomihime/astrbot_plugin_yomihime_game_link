@@ -21,7 +21,11 @@ from yomihime_game_link_sdk.display import (
     Privacy,
     TextBlock,
 )
-from yomihime_game_link_sdk.errors import ServiceUnavailable, SourceHttpError
+from yomihime_game_link_sdk.errors import (
+    ParameterError,
+    ServiceUnavailable,
+    SourceHttpError,
+)
 from yomihime_game_link_sdk.results import (
     CapabilityResult,
     ErrorCode,
@@ -484,13 +488,27 @@ class FFLogsCharacterLookup:
 
             result = apply_duty_order(result, duty_order)
         if evidence is not None:
-            from .fflogs_evidence import winner_summary
+            try:
+                from .fflogs_evidence import winner_summary
 
-            evidence.observe(
-                "FF14HistorySummary",
-                {**summary, **winner_summary(result, metadata, MAX_CHARACTER_ROWS)},
-                status=None,
-            )
+                evidence.observe(
+                    "FF14HistorySummary",
+                    {**summary, **winner_summary(result, metadata, MAX_CHARACTER_ROWS)},
+                    status=None,
+                )
+            except (
+                PermissionError,
+                TimeoutError,
+                ServiceUnavailable,
+                SourceHttpError,
+                FFLogsPayloadError,
+                ParameterError,
+            ):
+                raise
+            except Exception:
+                # Only optional diagnostic construction/emission is isolated;
+                # validated ranking assembly and control failures stay outside.
+                pass
         warnings = []
         if unsaved:
             warnings.append("部分已验证结果未能保存到缓存；后续调用可能需要重新查询。")
@@ -2016,7 +2034,9 @@ def _character_result(
         TextBlock(f"角色：{character.name} @ {character.server_name}"),
         TextBlock(f"战绩指标：{metric_label}；数据来自 FFLogs 公开记录。"),
         TextBlock(
-            "查询条件：FFLogs 默认副本、难度和分区。"
+            "查询条件：按来源目录中已验证的副本、难度和分区查询。"
+            if character.groups
+            else "查询条件：FFLogs 默认副本、难度和分区。"
             if zone is None
             else "查询条件：已应用指定的副本、难度和分区。"
         ),
@@ -2024,7 +2044,8 @@ def _character_result(
     if character.groups:
         blocks.append(
             TextBlock(
-                "分区范围：绝境战逐项查询来源目录中的标准阵容历史分区；零式使用各副本的 FFLogs 默认分区。"
+                "分区范围：绝境战逐项查询来源目录中的标准阵容历史分区；"
+                "零式查询目录明确合格的标准与非标准阵容分区，排除 Echo / 超越之力，再按原始百分位选优。"
             )
         )
     elif character.partition == -1:

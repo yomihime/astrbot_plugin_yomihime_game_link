@@ -84,6 +84,7 @@ class ManagedFont:
         self._task = asyncio.create_task(self._initialize(), name="ygl:managed-font")
 
     async def _initialize(self):
+        generation = self._generation
         try:
             try:
                 content = self._read()
@@ -102,7 +103,8 @@ class ManagedFont:
         except asyncio.CancelledError:
             raise
         except Exception:
-            self._change("unavailable", "resource_unavailable")
+            if not self._closed and generation == self._generation:
+                self._change("unavailable", "resource_unavailable")
 
     def _safe_root(self, *, create=False):
         for directory in (self._root.parent, self._root):
@@ -161,6 +163,9 @@ class ManagedFont:
         self._change("ready")
 
     async def _download(self):
+        generation = self._generation
+        if self._closed:
+            return
         self._change("downloading")
         error = "download_connection"
         try:
@@ -200,7 +205,7 @@ class ManagedFont:
                         except (aiohttp.ClientError, OSError):
                             error = "download_connection"
                             continue
-                        if self._closed:
+                        if self._closed or generation != self._generation:
                             return
                         try:
                             self._install(content)
@@ -219,7 +224,7 @@ class ManagedFont:
             error = "download_timeout"
         except Exception:
             error = "download_connection"
-        if not self._closed:
+        if not self._closed and generation == self._generation:
             self._change("unavailable", error)
 
     @staticmethod
@@ -246,7 +251,11 @@ class ManagedFont:
     def retry(self):
         if self._closed:
             raise ValueError("font_manager_closed")
-        if self._source != "canonical" and (self._task is None or self._task.done()):
+        if (
+            not self._upload_lock.locked()
+            and self._source != "canonical"
+            and (self._task is None or self._task.done())
+        ):
             self._change("downloading")
             self._task = asyncio.create_task(self._download(), name="ygl:managed-font")
         return self.status()
@@ -257,25 +266,52 @@ class ManagedFont:
         async with self._upload_lock:
             if self._closed or generation != self._generation:
                 raise ValueError("font_manager_closed")
-            # Join the only background writer before publication. Recheck the
-            # Host capability and lifecycle after the last await before commit.
-            if self._task is not None and not self._task.done():
-                self._task.cancel()
-                with suppress(asyncio.CancelledError):
-                    await self._task
-            check()
-            if self._closed or generation != self._generation:
-                raise ValueError("font_manager_closed")
-            self._install(content)
-            return self.status()
+            # Hold writer ownership through cancellation, authorization and
+            # publication. Retry must not replace the task during this join.
+            self._change("checking")
+            error = "upload_cancelled"
+            installed = False
+            try:
+                task = self._task
+                if task is not None and not task.done():
+                    task.cancel()
+                    # A cancelled child is an expected result; cancellation of
+                    # this upload itself must still propagate to the caller.
+                    await asyncio.gather(task, return_exceptions=True)
+                error = "upload_rejected"
+                check()
+                if self._closed or generation != self._generation:
+                    raise ValueError("font_manager_closed")
+                try:
+                    self._install(content)
+                except _FontParseFailure:
+                    error = "upload_fontparse"
+                    raise
+                except Exception:
+                    error = "upload_write"
+                    raise
+                installed = True
+                return self.status()
+            finally:
+                if (
+                    not installed
+                    and not self._closed
+                    and generation == self._generation
+                ):
+                    self._change(
+                        "ready" if self._source == "canonical" else "unavailable", error
+                    )
 
     async def close(self):
         self._closed = True
         self._generation += 1
-        if self._task is not None:
-            self._task.cancel()
+        generation, task = self._generation, self._task
+        if task is not None:
+            task.cancel()
             with suppress(asyncio.CancelledError):
-                await self._task
+                await task
+        if generation != self._generation:
+            return
         self._task = None
         self._provider, self._source = None, "none"
         self._change("stopped")

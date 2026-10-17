@@ -1,14 +1,17 @@
 """Fixed Host auth/ASGI upload consumer; synthetic requests, no live instance."""
 
+import asyncio
 import unittest
 from unittest.mock import patch
 
 from ygl_test_subject.adapters.astrbot.runtime import PLUGIN_NAME
+from ygl_test_subject.core.contracts.administration import AdminAuthorizationDenied
 from ygl_test_subject.presentation.bundled_font import FONT_FILENAME, FONT_SIZE
 from ygl_test_subject.presentation.card_bitmap import BitmapUnavailable
 from ygl_test_subject.services import managed_font as fonts
 
 from tests.host import test_admin_pages as admin_fixture
+from tests.services import test_managed_font as font_fixture
 
 
 class FontUploadFailureTests(unittest.IsolatedAsyncioTestCase):
@@ -61,6 +64,47 @@ class FontUploadFailureTests(unittest.IsolatedAsyncioTestCase):
                 load.assert_not_called()
         self.assertEqual(self.pages.requests, {})
         self.assertEqual(self.runtime._admin_source._proofs, {})
+
+    async def test_post_join_auth_loss_keeps_old_font_ready_and_request_cleanup(self):
+        manager = self.runtime._managed_font
+        entered, cancelled = asyncio.Event(), asyncio.Event()
+        before = manager._path.read_bytes()
+        provider = manager.provider()
+
+        class Blocked(font_fixture.DownloadResponse):
+            async def __aenter__(self):
+                entered.set()
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    cancelled.set()
+
+        original = self.runtime._admin_source.check
+
+        def check(*args, **kwargs):
+            if cancelled.is_set():
+                raise AdminAuthorizationDenied
+            return original(*args, **kwargs)
+
+        with (
+            patch("aiohttp.ClientSession", font_fixture.DownloadSession([Blocked()])),
+            patch.object(self.runtime._admin_source, "check", side_effect=check),
+        ):
+            manager._task = asyncio.create_task(fonts.ManagedFont._download(manager))
+            await entered.wait()
+            response = await self.upload(manager._reference)
+        self.assertEqual(response.status_code, 403, response.text)
+        self.assertEqual(response.json()["code"], "admin_authorization_denied")
+        self.assertTrue(manager._task.cancelled())
+        self.assertEqual(manager.status()["state"], "ready")
+        self.assertIs(manager.provider(), provider)
+        self.assertEqual(manager._path.read_bytes(), before)
+        self.assertEqual(self.pages.requests, {})
+        self.assertEqual(self.runtime._admin_source._proofs, {})
+        # A subsequent normally authorized request remains usable.
+        recovered = await self.upload(manager._reference)
+        self.assertEqual(recovered.status_code, 200, recovered.text)
+        self.assertEqual(recovered.json()["data"]["state"], "ready")
 
     async def test_upload_without_dashboard_proof_is_rejected_before_parser(self):
         with patch.object(
