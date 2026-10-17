@@ -36,6 +36,7 @@ class MessageSampleTests(unittest.IsolatedAsyncioTestCase):
 
         for error in (sdk.ServiceUnavailable(), asyncio.CancelledError()):
             with self.subTest(error=type(error).__name__):
+
                 async def read():
                     raise error
 
@@ -50,6 +51,9 @@ class MessageSampleTests(unittest.IsolatedAsyncioTestCase):
     def test_helper_public_annotations_resolve(self):
         self.assertEqual(
             get_type_hints(read_tool_message),
-            {"services": sdk.ModuleServices, "invocation": sdk.InvocationView,
-             "return": sdk.MessageContext},
+            {
+                "services": sdk.ModuleServices,
+                "invocation": sdk.InvocationView,
+                "return": sdk.MessageContext,
+            },
         )

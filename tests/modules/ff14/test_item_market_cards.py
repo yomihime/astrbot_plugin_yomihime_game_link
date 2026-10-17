@@ -172,7 +172,7 @@ class ItemCardTests(unittest.IsolatedAsyncioTestCase):
 
     def test_bundled_logo_resource_is_pinned_and_bytes_only(self):
         manifest = json.loads(
-            (ROOT / "modules/ff14/yomihime.manifest.json").read_text()
+            (ROOT / "modules/ff14/yomihime.manifest.json").read_text(encoding="utf-8")
         )
         module = manifest["modules"][0]
         relative = module["display"]["logo_resource"]

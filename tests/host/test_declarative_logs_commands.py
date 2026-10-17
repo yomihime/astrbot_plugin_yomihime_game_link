@@ -183,7 +183,9 @@ class DeclarativeLogsCommandTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Synthetic 75-4", text)
         self.assertIn("12,345.5", text)
         self.assertIn("绝境战逐项查询来源目录中的标准阵容历史分区", text)
-        self.assertIn("零式使用各副本的 FFLogs 默认分区", text)
+        self.assertIn("零式查询目录明确合格的标准与非标准阵容分区", text)
+        self.assertIn("排除 Echo / 超越之力，再按原始百分位选优", text)
+        self.assertNotIn("各副本的 FFLogs 默认分区", text)
         self.assertIn("绝境战取已查询来源返回的最高百分位", text)
         self.assertNotIn(fixture.SENTINEL, text)
 

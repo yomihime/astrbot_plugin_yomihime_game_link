@@ -17,13 +17,20 @@ test('frontend manifest rebuild preserves non-page resources and recomputes asse
   assert.deepEqual(await mergeManifestResources(root,result,generated),result);
  }finally{await rm(root,{recursive:true,force:true});}
 });
-test('resource merge rejects missing, malformed and escaping package assets',async()=>{
+test('resource merge rejects missing and malformed package assets',async()=>{
  const root=await mkdtemp(join(tmpdir(),'ygl-theme-resource-failure-'));
  try{
-  await mkdir(join(root,'package'));await writeFile(join(root,'outside.svg'),'<svg/>');await symlink(join(root,'outside.svg'),join(root,'package/escape.svg'));
-  for(const path of ['../outside.svg','/outside.svg','assets//logo.svg','assets/./logo.svg','assets\\logo.svg','missing.svg','escape.svg'])await assert.rejects(mergeManifestResources(join(root,'package'),[{path,sha256:'a'.repeat(64)}],generated));
+  await mkdir(join(root,'package'));
+  for(const path of ['../outside.svg','/outside.svg','assets//logo.svg','assets/./logo.svg','assets\\logo.svg','missing.svg'])await assert.rejects(mergeManifestResources(join(root,'package'),[{path,sha256:'a'.repeat(64)}],generated));
   await assert.rejects(mergeManifestResources(root,[],[{path:'assets/logo.svg',sha256:'a'.repeat(64)}]));
   await assert.rejects(mergeManifestResources(root,[],[generated[0],{...generated[0],path:'pages/dist/ENTRY.js'}]));
+ }finally{await rm(root,{recursive:true,force:true});}
+});
+test('resource merge rejects a symlink escaping the package',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'ygl-theme-resource-link-failure-'));
+ try{
+  await mkdir(join(root,'package'));await writeFile(join(root,'outside.svg'),'<svg/>');await symlink(join(root,'outside.svg'),join(root,'package/escape.svg'));
+  await assert.rejects(mergeManifestResources(join(root,'package'),[{path:'escape.svg',sha256:'a'.repeat(64)}],generated));
  }finally{await rm(root,{recursive:true,force:true});}
 });
 test('published FF14 manifest includes its logo and generated page resource contract',async()=>{
