@@ -88,7 +88,7 @@ class DeclarativeLogsCommandTests(unittest.IsolatedAsyncioTestCase):
                 card, content = self.captured[-1]
                 self.assertEqual(sent.png, content)
                 with Image.open(BytesIO(content)) as image:
-                    self.assertEqual((image.format, image.width), ("PNG", 1040))
+                    self.assertEqual((image.format, image.width), ("PNG", 1400))
                     self.assertGreater(image.height, 1500)
                     image.verify()
                 self.assertEqual(card.layout, "table")

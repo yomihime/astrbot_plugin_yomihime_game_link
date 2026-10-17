@@ -7,6 +7,8 @@ adapter. The painter never infers content or combines different selections.
 from __future__ import annotations
 
 import re
+import unicodedata
+from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import ROUND_DOWN, ROUND_HALF_UP, Decimal, InvalidOperation, localcontext
 
@@ -254,7 +256,12 @@ def character_card(
                             style="heading",
                         )
                     )
-                    blocks.append(_ranking_table(rows, metric, job_language))
+                    blocks.append(
+                        _ranking_table(
+                            rows, metric, job_language, include_record_version=True
+                        )
+                    )
+                    blocks.extend(_ranking_notes(rows))
                 else:
                     ultimate_rows.extend(rows)
             if ultimate_rows:
@@ -263,6 +270,7 @@ def character_card(
                         ultimate_rows, metric, job_language, include_record_version=True
                     )
                 )
+                blocks.extend(_ranking_notes(ultimate_rows))
             if not blocks:
                 blocks.append(cards.Text("受本图展示上限限制，此类别记录未展示。"))
             subtitle = (
@@ -282,7 +290,7 @@ def character_card(
         rows = character.rankings[:limit]
         displayed_count = len(rows)
         content = (
-            (_ranking_table(rows, metric, job_language),)
+            (_ranking_table(rows, metric, job_language), *_ranking_notes(rows))
             if rows
             else (cards.Text("当前筛选条件下没有公开战绩记录。"),)
         )
@@ -294,7 +302,7 @@ def character_card(
                 panel=False,
             )
         )
-    return ff14_card(
+    document = ff14_card(
         f"{character.name} @ {character.server_name}",
         category="Logs",
         subtitle=f"最终幻想 XIV · FFLogs · {'CN' if realm == 'cn' else 'Global'}",
@@ -346,6 +354,71 @@ def character_card(
         sources=(f"数据源：{'cn.fflogs.com' if realm == 'cn' else 'www.fflogs.com'}",),
     )
 
+    catalog_layout = bool(character.groups or character.catalog_evaluated)
+    return _single_line_layout(document, catalog_layout=catalog_layout)
+
+
+def _single_line_layout(document, *, catalog_layout):
+    """Bounded module-owned width variants, not source-name abbreviations.
+
+    Display units conservatively separate ordinary CJK and longer Latin names;
+    the actual renderer still measures every glyph and enforces its budgets.
+    """
+    tables = [
+        block
+        for section in document.blocks
+        if isinstance(section, cards.Section)
+        for block in section.blocks
+        if isinstance(block, cards.Table)
+    ]
+    units = max(
+        (
+            sum(
+                2 if unicodedata.east_asian_width(char) in {"W", "F"} else 1
+                for char in row[0]
+            )
+            for table in tables
+            for row in table.rows
+        ),
+        default=0,
+    )
+    if units <= 18:
+        return replace(document, width=1240) if catalog_layout else document
+
+    width = 1400 if units <= 28 else 1500
+    weights = (
+        (46, 22.4, 12.8, 16.4, 13.6, 17.6)
+        if units <= 28
+        else (60, 22.4, 12.8, 15.2, 12.8, 15.6)
+    )
+
+    def widened(block):
+        if not isinstance(block, cards.Table):
+            return block
+        # Keep metric headers/values readable while reserving the widest
+        # allocation for full names; no global raster budget is increased.
+        column_weights = (
+            weights if len(block.columns) == 6 else (*weights[:2], *weights[3:])
+        )
+        return replace(
+            block,
+            columns=tuple(
+                replace(column, weight=weight)
+                for column, weight in zip(block.columns, column_weights)
+            ),
+        )
+
+    return replace(
+        document,
+        width=width,
+        blocks=tuple(
+            replace(section, blocks=tuple(widened(block) for block in section.blocks))
+            if isinstance(section, cards.Section)
+            else section
+            for section in document.blocks
+        ),
+    )
+
 
 __all__ = [
     "CATALOG_LIMITATION",
@@ -361,32 +434,30 @@ __all__ = [
 ]
 
 
+def _ranking_notes(rankings):
+    """Keep row-specific status visible without splitting table-cell values."""
+    notes = []
+    for row in rankings:
+        message = {
+            "no_records": "查询成功，无公开记录",
+            "failed": "查询失败",
+            "not_queried": "未查询",
+        }.get(row.query_state)
+        if row.query_state == "record" and not row.history_complete:
+            message = HISTORY_INCOMPLETE
+        if message:
+            notes.append(
+                cards.Text(f"{row.encounter_name}：{message}", style="caption")
+            )
+    return tuple(notes)
+
+
 def _ranking_table(
     rankings, metric, job_language="zh", *, include_record_version=False
 ):
     rows = tuple(
         (
-            "\n".join(
-                (
-                    row.encounter_name,
-                    *(
-                        (
-                            {
-                                "no_records": "查询成功，无公开记录",
-                                "failed": "查询失败",
-                                "not_queried": "未查询",
-                            }[row.query_state],
-                        )
-                        if row.query_state != "record"
-                        else ()
-                    ),
-                    *(
-                        (HISTORY_INCOMPLETE,)
-                        if not row.history_complete and row.query_state == "record"
-                        else ()
-                    ),
-                )
-            ),
+            row.encounter_name,
             job_display(row.spec, job_language),
             *((record_version(row),) if include_record_version else ()),
             amount("invalid") if row.source_error else amount(row.best_amount),
@@ -405,36 +476,38 @@ def _ranking_table(
         columns=(
             cards.Column(
                 "副本",
-                weight=(3.1 if job_language == "ja" else 2.9)
+                weight=30
                 if include_record_version
                 else (2.7 if job_language == "ja" else 3.7),
+                wrap="nowrap",
             ),
             cards.Column(
                 "职业",
-                weight=2.6
-                if job_language == "ja"
-                else (1.8 if include_record_version else 1.6),
+                weight=22.4
+                if include_record_version
+                else (2.6 if job_language == "ja" else 1.6),
+                wrap="nowrap",
             ),
             *(
-                (cards.Column("记录版本", weight=1.6, wrap="nowrap"),)
+                (cards.Column("记录版本", weight=12.8, wrap="nowrap"),)
                 if include_record_version
                 else ()
             ),
             cards.Column(
                 f"最高 {metric}",
-                weight=1.9 if include_record_version else 1.8,
+                weight=16.4 if include_record_version else 1.8,
                 align="right",
                 wrap="nowrap",
             ),
             cards.Column(
                 "过本次数",
-                weight=1.6 if include_record_version else 1.4,
+                weight=13.6 if include_record_version else 1.4,
                 align="right",
                 wrap="nowrap",
             ),
             cards.Column(
                 "最佳百分位",
-                weight=1.9 if include_record_version else 1.8,
+                weight=17.6 if include_record_version else 1.8,
                 align="right",
                 valign="center",
                 wrap="nowrap",

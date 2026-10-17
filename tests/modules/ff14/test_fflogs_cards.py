@@ -1108,8 +1108,8 @@ class FFLogsOfflineCatalogReferenceTests(unittest.IsolatedAsyncioTestCase):
                     )
                     self.assertTrue(
                         any(
-                            row[2].spans[0].text == "12,346"
-                            and row[3].spans[0].text == "80"
+                            row[3].spans[0].text == "12,346"
+                            and row[4].spans[0].text == "80"
                             for row in savage_rows
                         )
                     )
