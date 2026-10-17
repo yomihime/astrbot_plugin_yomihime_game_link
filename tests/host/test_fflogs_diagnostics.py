@@ -11,12 +11,127 @@ from ygl_test_subject.modules.ff14.features.fflogs_evidence import (
     LOGGER_NAME,
     MARKER,
     Evidence,
+    project,
 )
 
 from tests.modules.ff14 import test_fflogs as fixture
 
 
 class DiagnosticBridgeTests(unittest.TestCase):
+    def history_summary(self):
+        return project(
+            "FF14HistorySummary",
+            {
+                "planned": 111,
+                "eligible": 111,
+                "attempted": 111,
+                "fresh_positive": 100,
+                "fresh_empty": 11,
+                "batches_attempted": 10,
+                "max_inflight": 2,
+                "history_budget_ms": 83000,
+                "invocation_budget_ms": 90000,
+                "output_reserve_ms": 5000,
+            },
+        )
+
+    def test_real_history_emitter_forwards_exact_summary_once_and_deduplicates(self):
+        payload = self.history_summary()
+        self.assertEqual(len(payload), 22)
+        evidence = Evidence("fflogs_public_cn")
+        for _ in range(2):
+            evidence.observe("FF14HistorySummary", payload, status=None)
+        self.assertEqual(len(self.sent), 1)
+        event = json.loads(self.sent[0].split(" ", 1)[1])
+        self.assertEqual(event["operation"], "FF14HistorySummary")
+        self.assertIsNone(event["status"])
+        self.assertEqual(json.loads(event["payload"]), payload)
+        self.assertNotIn("Synthetic Hero", self.sent[0])
+        self.assertNotIn("canonicalID", self.sent[0])
+
+    def test_real_history_emitter_rejects_status_and_strips_untrusted_input(self):
+        payload = self.history_summary()
+        for status in (200, 99, 600, True, "PRIVATE", {}, []):
+            with self.subTest(status=status):
+                Evidence("fflogs_public_cn").observe(
+                    "FF14HistorySummary", payload, status=status
+                )
+                self.assertEqual(self.sent, [])
+        Evidence("fflogs_public_cn").observe(
+            "FF14HistorySummary",
+            {
+                **payload,
+                "actor_id": "PRIVATE",
+                "token": "PRIVATE",
+                "request_failed": {"nested": "PRIVATE"},
+                "attempted": True,
+            },
+            status=None,
+        )
+        self.assertEqual(len(self.sent), 1)
+        event = json.loads(self.sent[0].split(" ", 1)[1])
+        body = json.loads(event["payload"])
+        self.assertEqual(set(body), set(payload))
+        self.assertEqual(body["request_failed"], 0)
+        self.assertEqual(body["attempted"], 0)
+        self.assertNotIn("PRIVATE", self.sent[0])
+
+    def test_history_wire_rejects_every_noninteger_or_out_of_range_counter(self):
+        payload = self.history_summary()
+        for field in payload:
+            for value in (True, -1, 2147483648, 1.0, "PRIVATE", None, {}, []):
+                with self.subTest(field=field, value=value):
+                    self.bridge.close()
+                    self.bridge.start()
+                    self.bridge.emit(
+                        self.record(
+                            self.event(
+                                operation="FF14HistorySummary",
+                                status=None,
+                                payload=json.dumps({**payload, field: value}),
+                            )
+                        )
+                    )
+                    self.assertEqual(self.sent, [])
+        # The exact safe integer boundary remains legal for every field.
+        self.bridge.close()
+        self.bridge.start()
+        maximum = dict.fromkeys(payload, 2147483647)
+        Evidence("fflogs_public_global").observe(
+            "FF14HistorySummary", maximum, status=None
+        )
+        self.assertEqual(len(self.sent), 1)
+        self.assertEqual(
+            json.loads(json.loads(self.sent[0].split(" ", 1)[1])["payload"]), maximum
+        )
+
+    def test_history_wire_rejects_missing_extra_private_nested_and_unknown_fields(self):
+        payload = self.history_summary()
+        missing = dict(payload)
+        missing.pop("planned")
+        bodies = (
+            missing,
+            {**payload, "extra": 1},
+            {**payload, "actor_id": "PRIVATE"},
+            {**payload, "planned": {"nested": 111}},
+            {"summary": payload},
+            [],
+        )
+        for body in bodies:
+            with self.subTest(body=body):
+                self.bridge.close()
+                self.bridge.start()
+                self.bridge.emit(
+                    self.record(
+                        self.event(
+                            operation="FF14HistorySummary",
+                            status=None,
+                            payload=json.dumps(body),
+                        )
+                    )
+                )
+                self.assertEqual(self.sent, [])
+
     def setUp(self):
         self.sent = []
         self.bridge = FFLogsDiagnostics(self.sent.append)

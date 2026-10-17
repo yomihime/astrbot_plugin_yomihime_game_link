@@ -465,6 +465,7 @@ class CoreRuntime:
         reschedule_configuration: RescheduleConfiguration = DEFAULT_RESCHEDULE_CONFIGURATION,
         max_subscriptions_per_owner: int = 100,
         handler_timeout: float = 30.0,
+        command_timeout: float = 90.0,
         send_timeout: float = 30.0,
         claim_lease: timedelta = timedelta(minutes=2),
         pump_interval: float = 5.0,
@@ -810,6 +811,9 @@ class CoreRuntime:
             owner_cleanup=owner_cleanup,
         )
         self.admin_facade = AdminFacade(self.admin_operations, self.admin_authorization)
+        from ..core.invocation_budget import InvocationBudgetPolicy
+
+        self._budget_policy = InvocationBudgetPolicy(command_timeout)
         self.gateway = Gateway(
             self.registry,
             self.issuer,
@@ -818,6 +822,7 @@ class CoreRuntime:
             private_authorizer=self.module_services.authorize_private,
             owner_authority=self.owner_authority,
             handler_timeout=handler_timeout,
+            budget_policy=self._budget_policy,
             clock=monotonic_clock,
             public_fact_guard=lambda facts: _require_public_fact_resources(
                 facts, self.resource_visibility
@@ -1494,7 +1499,9 @@ class CoreRuntime:
                 or state.identity.module_epoch != module.epoch
             ):
                 raise PermissionError("module changed while ingress was being prepared")
-            deadline = self._monotonic_clock() + self._handler_timeout
+            deadline = self._budget_policy.deadline(
+                origin, self._monotonic_clock(), self._handler_timeout
+            )
             view = self.issuer.issue(
                 origin=origin,
                 module_id=module_id,

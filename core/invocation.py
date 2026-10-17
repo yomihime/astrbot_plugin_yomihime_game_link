@@ -52,6 +52,7 @@ from yomihime_game_link_sdk.results import (
 from ..core.contracts.validation import validate_parameters
 from ..core.contracts.validation_boundary import validate_contract
 from .context_issuer import ContextIssuer, InvalidInvocation
+from .invocation_budget import InvocationBudgetPolicy
 from .lifecycle import LifecycleController, LifecycleError
 from .policy import origin_allowed, tool_allowed
 from .ports import AdmissionLease, AdmissionPort
@@ -180,6 +181,7 @@ class Gateway:
         owner_authority: object | None = None,
         public_fact_guard: Callable[[FactDocument], Awaitable[None]] | None = None,
         handler_timeout: float = 30.0,
+        budget_policy: InvocationBudgetPolicy | None = None,
         clock: Callable[[], float] = monotonic,
     ) -> None:
         validate_contract(private_authorizer)
@@ -224,6 +226,12 @@ class Gateway:
         self._private_authorizer = private_authorizer
         self._owner_authority = owner_authority
         self._handler_timeout = float(handler_timeout)
+        if (
+            budget_policy is not None
+            and type(budget_policy) is not InvocationBudgetPolicy
+        ):
+            raise TypeError("budget_policy must be a Core invocation policy")
+        self._budget_policy = budget_policy or InvocationBudgetPolicy()
         self._clock = clock
         self._web_generation = 1
         self._web_closed = False
@@ -281,7 +289,9 @@ class Gateway:
                 module_epoch=module.epoch,
                 registry_revision=snapshot.revision,
                 generation=self._web_generation,
-                deadline=self._clock() + min(30.0, self._handler_timeout),
+                deadline=self._budget_policy.deadline(
+                    InvocationOrigin.WEB_PUBLIC, self._clock(), self._handler_timeout
+                ),
             )
             binding = self._issuer.public_web_binding(view)
         except Exception:
@@ -617,9 +627,9 @@ class Gateway:
                 return denied(ErrorCode.UNKNOWN)
 
         try:
-            deadline = self._clock() + self._handler_timeout
-            if trusted.deadline is not None:
-                deadline = min(deadline, trusted.deadline)
+            deadline = self._budget_policy.deadline(
+                trusted.origin, self._clock(), self._handler_timeout, trusted.deadline
+            )
             scope = lifecycle.scope(trusted.module_id)
 
             async def invoke_current():

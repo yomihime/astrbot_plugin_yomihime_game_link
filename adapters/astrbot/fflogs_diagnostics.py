@@ -19,6 +19,7 @@ OPERATIONS = frozenset(
         "FF14CatalogCharacter",
         "FF14MetadataState",
         "FF14RequestSummary",
+        "FF14HistorySummary",
     }
 )
 
@@ -85,6 +86,36 @@ def _type(value, depth=0):
 
 def _safe_payload(operation, body):
     """Validate a closed diagnostic wire format without importing game code."""
+    if operation == "FF14HistorySummary":
+        fields = (
+            "planned",
+            "eligible",
+            "cache_hit",
+            "cache_positive",
+            "cache_empty",
+            "attempted",
+            "fresh_positive",
+            "fresh_empty",
+            "missing_alias",
+            "invalid",
+            "request_failed",
+            "not_queried",
+            "cache_unsaved",
+            "batches_attempted",
+            "max_inflight",
+            "read_ms",
+            "fetch_ms",
+            "write_ms",
+            "total_ms",
+            "history_budget_ms",
+            "invocation_budget_ms",
+            "output_reserve_ms",
+        )
+
+        def count(value):
+            return type(value) is int and 0 <= value <= 2147483647
+
+        return _object(body, dict.fromkeys(fields, count))
     if operation == "FF14RequestSummary":
         operations = {
             "UniversalisWorlds",
@@ -423,10 +454,13 @@ class FFLogsDiagnostics(logging.Handler):
         if (
             type(event["cached"]) is not bool
             or type(event["truncated"]) is not bool
+            or operation == "FF14HistorySummary"
+            and event["status"] is not None
             or not (
                 (
                     event["cached"]
-                    or operation in {"FF14MetadataState", "FF14RequestSummary"}
+                    or operation
+                    in {"FF14MetadataState", "FF14RequestSummary", "FF14HistorySummary"}
                 )
                 and event["status"] is None
                 or type(event["status"]) is int

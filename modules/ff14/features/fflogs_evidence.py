@@ -26,6 +26,7 @@ OPERATIONS = frozenset(
         "FF14CatalogCharacter",
         "FF14MetadataState",
         "FF14RequestSummary",
+        "FF14HistorySummary",
     }
 )
 _NAME = re.compile(r"[_A-Za-z][_0-9A-Za-z]{0,127}\Z")
@@ -177,6 +178,38 @@ def project(operation, payload):
     """Closed projection; never retains identity, URLs, errors or auth fields."""
     if operation not in OPERATIONS or not isinstance(payload, dict):
         return {}
+    if operation == "FF14HistorySummary":
+        # Closed, identity-free counts. Never put one entry per target in facts.
+        fields = (
+            "planned",
+            "eligible",
+            "cache_hit",
+            "cache_positive",
+            "cache_empty",
+            "attempted",
+            "fresh_positive",
+            "fresh_empty",
+            "missing_alias",
+            "invalid",
+            "request_failed",
+            "not_queried",
+            "cache_unsaved",
+            "batches_attempted",
+            "max_inflight",
+            "read_ms",
+            "fetch_ms",
+            "write_ms",
+            "total_ms",
+            "history_budget_ms",
+            "invocation_budget_ms",
+            "output_reserve_ms",
+        )
+        return {
+            key: payload[key]
+            if type(payload.get(key)) is int and 0 <= payload[key] <= 2147483647
+            else 0
+            for key in fields
+        }
     if operation == "FF14RequestSummary":
 
         def count(value):

@@ -21,7 +21,6 @@ from modules.ff14.features.fflogs import (
 from modules.ff14.features.fflogs_catalog import select_character_zones
 from modules.ff14.features.fflogs_history_cache import (
     HISTORY_CACHE_TTL,
-    HistoryRotation,
     cache_pack_key,
     cache_packs,
     history_identity,
@@ -191,7 +190,7 @@ class ExplicitHistoryTests(unittest.IsolatedAsyncioTestCase):
             body = body.replace('"' + raw + '"', raw)
         return SimpleNamespace(status_code=200, body=body.encode())
 
-    async def run_history(self):
+    async def run_history(self, *, deadline=None):
         started = monotonic()
         io = {"lookup": 0, "put": 0, "ranking_posts": 0}
         token = self.current_io.set(io)
@@ -204,10 +203,9 @@ class ExplicitHistoryTests(unittest.IsolatedAsyncioTestCase):
                 VARIABLES,
                 self.handler._lifecycle,
                 cache_owner=self.owner,
+                deadline=deadline,
             )
         finally:
-            from modules.ff14.features.fflogs import CATALOG_RANKING_DEADLINE_SECONDS
-
             print(
                 "CACHE_IO "
                 + json.dumps(
@@ -215,7 +213,7 @@ class ExplicitHistoryTests(unittest.IsolatedAsyncioTestCase):
                         "test": self.id(),
                         "elapsed_ms": round((monotonic() - started) * 1000),
                         **io,
-                        "ranking_deadline_seconds": CATALOG_RANKING_DEADLINE_SECONDS,
+                        "deadline_supplied": deadline is not None,
                     }
                 ),
                 flush=True,
@@ -242,31 +240,25 @@ class ExplicitHistoryTests(unittest.IsolatedAsyncioTestCase):
         )
         return cache_packs(self.metadata, keys)
 
-    async def test_real_cache_three_calls_cover_111_then_all_hit_and_preserve_savage(
+    async def test_real_cache_one_call_covers_111_then_all_hit_and_preserve_savage(
         self,
     ):
         targets = _catalog_query_targets(select_character_zones(self.metadata, 73))
         self.assertEqual(len(targets), 111)
-        previous = set()
-        for expected, complete in ((48, False), (48, False), (15, True)):
-            start = len(self.calls)
-            result = await self.run_history()
-            fresh = self.requested(self.calls[start:])
-            self.assertEqual(len(fresh), expected)
-            self.assertFalse(previous.intersection(fresh))
-            previous.update(fresh)
-            self.assertEqual(result.catalog_complete, complete)
-            self.assertEqual(
-                {g.zone_id for g in result.groups if g.category == "savage"},
-                {73, 74, 75},
+        result = await self.run_history()
+        self.assertEqual(len(self.requested(self.calls)), 111)
+        self.assertEqual(len(set(self.requested(self.calls))), 111)
+        self.assertTrue(result.catalog_complete)
+        self.assertEqual(
+            {g.zone_id for g in result.groups if g.category == "savage"}, {73, 74, 75}
+        )
+        self.assertTrue(
+            all(
+                g.rankings[0].query_state == "record"
+                for g in result.groups
+                if g.category == "savage"
             )
-            self.assertTrue(
-                all(
-                    g.rankings[0].query_state == "record"
-                    for g in result.groups
-                    if g.category == "savage"
-                )
-            )
+        )
         self.assertEqual(len(self.calls), 10)
         count = len(self.calls)
         cached = await self.run_history()
@@ -275,19 +267,18 @@ class ExplicitHistoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(cached.catalog_complete)
         self.assertIsNotNone(cached.history_fetched_at)
         self.assertEqual(cached.history_cache_ttl, 900)
+        self.assertEqual(result.groups, cached.groups)
 
-    async def test_failure_rotates_without_becoming_coverage_and_recovers(self):
+    async def test_failure_retries_all_unmet_scopes_and_recovers(self):
         self.source_fails = True
         failed = await self.run_history()
         first = set(self.requested(self.calls))
+        self.assertEqual(len(first), 111)
         self.assertFalse(failed.catalog_complete)
         self.source_fails = False
         before = len(self.calls)
-        partial = await self.run_history()
-        self.assertFalse(first.intersection(self.requested(self.calls[before:])))
-        self.assertFalse(partial.catalog_complete)
-        for _ in range(2):
-            complete = await self.run_history()
+        complete = await self.run_history()
+        self.assertEqual(first, set(self.requested(self.calls[before:])))
         self.assertTrue(complete.catalog_complete)
 
     async def test_real_cache_owner_isolation_and_expiry(self):
@@ -313,35 +304,48 @@ class ExplicitHistoryTests(unittest.IsolatedAsyncioTestCase):
         ):
             before = len(self.calls)
             result = await self.run_history()
-            self.assertEqual(len(self.requested(self.calls[before:])), 48)
+            self.assertEqual(len(self.requested(self.calls[before:])), 111)
             self.assertEqual(result.history_cache_hits, 0)
 
-    async def test_cancel_releases_lock_and_close_rejects_inflight(self):
+    async def test_cancel_awaits_workers_and_close_rejects_inflight(self):
+        entered, exited = asyncio.Event(), asyncio.Event()
+        active = 0
+        original = self.fetch
+
+        async def blocking(request):
+            nonlocal active
+            active += 1
+            entered.set()
+            try:
+                return await original(request)
+            finally:
+                active -= 1
+                if active == 0:
+                    exited.set()
+
+        self.scope.http.fetch = blocking
         self.pause = asyncio.Event()
         task = asyncio.create_task(self.run_history())
-        await asyncio.sleep(0.01)
+        await entered.wait()
         task.cancel()
         with self.assertRaises(asyncio.CancelledError):
             await task
-        self.assertTrue(
-            all(
-                not state.lock.locked() and state.users == 0
-                for state in self.handler._history_rotation.entries.values()
-            )
-        )
+        self.assertTrue(exited.is_set())
+        self.assertEqual(active, 0)
         self.pause = None
-        self.assertFalse((await self.run_history()).catalog_complete)
+        self.assertTrue((await self.run_history()).catalog_complete)
         self.pause = asyncio.Event()
         self.metadata = replace(self.metadata, expansion_order=(10, 20))
-        before = len(self.calls)
+        entered.clear()
+        exited.clear()
         task = asyncio.create_task(self.run_history())
-        while len(self.calls) == before:
-            await asyncio.sleep(0.01)
+        await entered.wait()
         self.handler.close()
         self.pause.set()
         with self.assertRaises(ServiceUnavailable):
             await task
-        self.assertFalse(self.handler._history_rotation.entries)
+        self.assertTrue(exited.is_set())
+        self.assertEqual(active, 0)
 
     async def test_cache_128_digit_full_row_winner_survives_real_sqlite(self):
         self.metadata = replace(
@@ -417,7 +421,8 @@ class ExplicitHistoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.operations["put"], 0)
         self.visibility = False
         self.return_id = 999
-        self.assertFalse((await self.run_history()).catalog_complete)
+        with self.assertRaises(PermissionError):
+            await self.run_history()
         self.assertEqual(self.operations["put"], 0)
         self.return_id = None
 
@@ -510,11 +515,12 @@ class ExplicitHistoryTests(unittest.IsolatedAsyncioTestCase):
         self.cache = self.contract._cache(self.owner)
         self.assertEqual((await self.run_history()).history_cache_hits, 0)
 
-    async def test_same_role_concurrent_calls_serialize_and_reuse_fresh_results(self):
-        await asyncio.gather(self.run_history(), self.run_history())
+    async def test_same_role_calls_have_no_rotation_or_cross_request_lock(self):
+        results = await asyncio.gather(self.run_history(), self.run_history())
+        self.assertTrue(all(result.catalog_complete for result in results))
         requested = self.requested(self.calls)
-        self.assertEqual(len(requested), 96)
-        self.assertEqual(len(set(requested)), 96)
+        self.assertEqual(len(requested), 222)
+        self.assertEqual(len(set(requested)), 111)
 
     async def test_revoked_invocation_cache_is_not_a_miss(self):
         self.contract.issuer.release(self.owner)
@@ -522,67 +528,61 @@ class ExplicitHistoryTests(unittest.IsolatedAsyncioTestCase):
             await self.run_history()
         self.assertFalse(self.calls)
 
-    async def test_slow_cache_cannot_starve_http_or_advance_cursor_without_attempt(
-        self,
-    ):
-        self.cache_delay = 0.1
-        with patch(
-            "modules.ff14.features.fflogs.CATALOG_RANKING_DEADLINE_SECONDS", 0.04
-        ):
-            for attempt in (1, 2):
-                before = len(self.calls)
-                result = await self.run_history()
-                self.assertEqual(len(self.requested(self.calls[before:])), 48)
-                self.assertTrue(
-                    any(row.query_state == "record" for row in result.rankings)
-                )
-                state = next(iter(self.handler._history_rotation.entries.values()))
-                self.assertEqual(state.cursor, 48 * attempt)
-                self.assertFalse(result.catalog_complete)
-                self.assertLess(
-                    self.http_starts[before] - self.lookup_starts[attempt - 1], 0.1
-                )
-        identity = history_identity(
-            self.source, self.role, VARIABLES, self.metadata, self.owner
-        )
-        state = self.handler._history_rotation.acquire(identity)
-        await state.lock.acquire()
-        cursor = state.cursor
-        before = len(self.calls)
-        try:
-            with patch(
-                "modules.ff14.features.fflogs.CATALOG_RANKING_DEADLINE_SECONDS", 0.04
-            ):
-                result = await self.run_history()
-            self.assertEqual(state.cursor, cursor)
-            self.assertEqual(len(self.calls), before)
-        finally:
-            state.lock.release()
-            self.handler._history_rotation.release(state)
+    async def test_slow_cache_cannot_starve_complete_http_queue(self):
+        entered, cancelled = asyncio.Event(), asyncio.Event()
+        timeout = asyncio.timeout
+        active = {}
+
+        def controlled_timeout(delay):
+            context = timeout(delay)
+            active[asyncio.current_task()] = context
+            return context
+
+        async def hanging_lookup(query):
+            entered.set()
+            active[asyncio.current_task()].reschedule(asyncio.get_running_loop().time())
+            try:
+                await asyncio.Future()
+            finally:
+                cancelled.set()
+
+        self.scope.cache.lookup = hanging_lookup
+        with patch("modules.ff14.features.fflogs.asyncio.timeout", controlled_timeout):
+            result = await self.run_history()
+        self.assertTrue(entered.is_set())
+        self.assertTrue(cancelled.is_set())
+        self.assertEqual(len(self.requested(self.calls)), 111)
+        self.assertTrue(result.catalog_complete)
 
     async def test_writing_stall_is_after_all_http_and_keeps_returned_rows(self):
         async def immediate_miss(query):
             return CacheLookup(CacheLookupStatus.MISS)
 
         attempts = []
+        timeout = asyncio.timeout
+        active = {}
+
+        def controlled_timeout(delay):
+            context = timeout(delay)
+            active[asyncio.current_task()] = context
+            return context
 
         async def stalled_put(*args, **kwargs):
             self.operations["put"] += 1
             self.current_io.get()["put"] += 1
             attempts.append(len(self.calls))
+            active[asyncio.current_task()].reschedule(asyncio.get_running_loop().time())
             await asyncio.Event().wait()
 
         self.scope.cache.lookup = immediate_miss
         self.scope.cache.put = stalled_put
-        with patch(
-            "modules.ff14.features.fflogs.CATALOG_RANKING_DEADLINE_SECONDS", 0.15
-        ):
+        with patch("modules.ff14.features.fflogs.asyncio.timeout", controlled_timeout):
             result = await self.run_history()
-        self.assertEqual(attempts, [4])
-        self.assertEqual(len(self.requested(self.calls)), 48)
+        self.assertEqual(attempts, [10])
+        self.assertEqual(len(self.requested(self.calls)), 111)
         self.assertTrue(any(row.query_state == "record" for row in result.rankings))
         self.assertTrue(any("保存" in warning for warning in result.catalog_warnings))
-        self.assertFalse(result.catalog_complete)
+        self.assertTrue(result.catalog_complete)
 
     async def test_complete_fresh_history_stays_complete_when_put_times_out(self):
         self.metadata = replace(self.metadata, zones=self.metadata.zones[:4])
@@ -591,16 +591,22 @@ class ExplicitHistoryTests(unittest.IsolatedAsyncioTestCase):
             return CacheLookup(CacheLookupStatus.MISS)
 
         attempts = []
+        timeout = asyncio.timeout
+        active = {}
+
+        def controlled_timeout(delay):
+            context = timeout(delay)
+            active[asyncio.current_task()] = context
+            return context
 
         async def stalled_put(*args, **kwargs):
             attempts.append(len(self.calls))
+            active[asyncio.current_task()].reschedule(asyncio.get_running_loop().time())
             await asyncio.Event().wait()
 
         self.scope.cache.lookup = immediate_miss
         self.scope.cache.put = stalled_put
-        with patch(
-            "modules.ff14.features.fflogs.CATALOG_RANKING_DEADLINE_SECONDS", 0.15
-        ):
+        with patch("modules.ff14.features.fflogs.asyncio.timeout", controlled_timeout):
             result = await self.run_history()
         self.assertEqual(attempts, [1])
         self.assertEqual(len(self.requested(self.calls)), 6)
@@ -687,7 +693,7 @@ class SnapshotTests(unittest.TestCase):
                 snapshot_payload(selection, fetched_at=time() - HISTORY_CACHE_TTL)
             )
 
-    def test_keys_and_lifetime_rotation_are_bounded(self):
+    def test_keys_preserve_every_identity_dimension(self):
         metadata = catalog()
         role = fixture.record()
         base = history_identity("fflogs_public_cn", role, VARIABLES, metadata)
@@ -716,13 +722,6 @@ class SnapshotTests(unittest.TestCase):
             ),
             3,
         )
-        rotation = HistoryRotation()
-        for index in range(32):
-            state = rotation.acquire(str(index))
-            rotation.release(state)
-        self.assertEqual(len(rotation.entries), 16)
-        rotation.clear()
-        self.assertFalse(rotation.entries)
 
     def test_unknown_and_nonstandard_labels_do_not_disappear_or_get_queried(self):
         metadata = catalog()

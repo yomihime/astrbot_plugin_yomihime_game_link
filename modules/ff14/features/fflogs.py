@@ -82,10 +82,8 @@ MAX_HTML_TAGS = 20_000
 METADATA_DEADLINE_SECONDS = 5
 METADATA_CACHE_SECONDS = 900
 METADATA_FAILURE_CACHE_SECONDS = 60
-MAX_CHARACTER_ZONES = 48
 CATALOG_BATCH_SIZE = 12
 MAX_CHARACTER_ROWS = 40
-CATALOG_RANKING_DEADLINE_SECONDS = 15
 CATALOG_DIAGNOSTIC_BYTES = 16_384
 _LOGGER = logging.getLogger(__name__)
 _INTEGER = re.compile(r"[0-9]+\Z", re.ASCII)
@@ -135,9 +133,6 @@ class FFLogsCharacterLookup:
         self._lifecycle = object()
         self._metadata_cache: dict[str, tuple[float, OutputMetadata | None, str]] = {}
         self._ranking_contract_cache = {}
-        from .fflogs_history_cache import HistoryRotation
-
-        self._history_rotation = HistoryRotation()
         from .chat_context import PendingTargets
 
         self._chat_pending = PendingTargets()
@@ -146,7 +141,6 @@ class FFLogsCharacterLookup:
         self._lifecycle = object()
         self._metadata_cache.clear()
         self._ranking_contract_cache.clear()
-        self._history_rotation.clear()
         self._chat_pending.close()
 
     async def _character_metadata(
@@ -243,6 +237,8 @@ class FFLogsCharacterLookup:
         *,
         deadline=None,
         cache_owner=None,
+        metrics=None,
+        budget=None,
     ):
         from .fflogs_history_cache import (
             HISTORY_CACHE_TTL,
@@ -254,11 +250,12 @@ class FFLogsCharacterLookup:
             snapshot_payload,
         )
 
+        started = monotonic()
+        stop_at = deadline if deadline is not None else started + 30
         targets = _catalog_query_targets(
             select_character_zones(metadata, character.zone_id)
         )
-        # The legacy fair ordering is retained for the first pass, then rotated.
-        all_ordered = _bounded_catalog_targets(targets, limit=None)
+        all_ordered = _bounded_catalog_targets(targets)
         keys = tuple(
             dict.fromkeys(
                 _target_key(target, character.metric) for target in all_ordered
@@ -272,199 +269,210 @@ class FFLogsCharacterLookup:
         identity = history_identity(
             source_id, character, identity_variables, metadata, cache_owner
         )
-        state = self._history_rotation.acquire(identity)
-        if state is None:
-            return _assemble_catalog_rankings(character, metadata, targets, {})
-        stop_at = min(
-            monotonic() + CATALOG_RANKING_DEADLINE_SECONDS,
-            deadline if deadline is not None else float("inf"),
-        )
-        try:
+        cache = getattr(scope, "cache", None)
+        packs = cache_packs(metadata, tuple(key for key in keys if key in eligible))
+        cached, dates, loaded = {}, {}, {}
+        fresh, acquired, attempted = {}, {}, set()
+        summary = {
+            "planned": len(keys),
+            "eligible": len(eligible),
+            "history_budget_ms": max(0, int((stop_at - started) * 1000)),
+            **(budget or {}),
+        }
+
+        def active():
+            if self._lifecycle is not lifecycle:
+                raise ServiceUnavailable()
+
+        async def cache_backend_guard():
+            nonlocal scope, cache
+            # The public cache facade deliberately collapses backend failures.
+            # Rebind via the existing authority, never infer authority from errors.
+            active()
+            if cache_owner is None or self._services is None:
+                raise ServiceUnavailable()
             async with asyncio.timeout(max(0, stop_at - monotonic())):
-                await state.lock.acquire()
-        except TimeoutError:
-            self._history_rotation.release(state)
-            return _assemble_catalog_rankings(character, metadata, targets, {})
-        except BaseException:
-            self._history_rotation.release(state)
-            raise
-        cache_task = None
-        try:
-            if self._lifecycle is not lifecycle:
-                raise ServiceUnavailable()
-            cache = getattr(scope, "cache", None)
-            packs = cache_packs(metadata, tuple(key for key in keys if key in eligible))
-            cached, dates, loaded = {}, {}, {}
-            available = max(0, stop_at - monotonic())
-            # Persistence cannot occupy an HTTP slot or prevent fresh dispatch.
-            write_reserve = min(2, available * 0.15) if cache is not None else 0
-            fetch_stop = stop_at - write_reserve
+                renewed = await self._services.scopes.bind(cache_owner)
+            # Binding rotates the exact caller proof. Never reuse an older facade.
+            from types import SimpleNamespace
 
-            async def read_packs():
-                if cache is None:
-                    return
-                order = tuple(range(len(packs)))
-                order = order[state.read_cursor :] + order[: state.read_cursor]
-                for index in order:
-                    if monotonic() >= fetch_stop:
-                        break
-                    group = packs[index]
-                    state.read_cursor = (index + 1) % len(packs)
-                    try:
-                        async with asyncio.timeout(max(0, fetch_stop - monotonic())):
-                            lookup = await cache.lookup(
-                                CacheQuery(cache_pack_key(identity, group))
-                            )
-                        snapshots, selections, times = {}, {}, {}
-                        if (
-                            lookup.status is CacheLookupStatus.HIT
-                            and lookup.entry.expires_at.timestamp() > time()
-                        ):
-                            snapshots, selections, times = restore_pack(
-                                lookup.entry.payload, identity, group
-                            )
-                            for key, selection in selections.items():
-                                if (
-                                    not _selection_scope_matches(selection, key)
-                                    or not _selection_membership_matches(
-                                        metadata, key[0], selection
-                                    )
-                                    or len({row.encounter_id for row in selection.rows})
-                                    != len(selection.rows)
-                                    or any(
-                                        target[2] == "savage" and selection.size != 8
-                                        for target in targets
-                                        if _target_key(target, character.metric) == key
-                                    )
-                                ):
-                                    raise FFLogsPayloadError("history pack selection")
-                        loaded[index] = snapshots
-                        cached.update(selections)
-                        dates.update(times)
-                    except (FFLogsPayloadError, ValueError, TypeError):
-                        loaded[index] = {}
-                    except TimeoutError:
-                        break
-                    except (PermissionError, ServiceUnavailable):
-                        raise
-                    except Exception:
-                        raise ServiceUnavailable() from None
-                    if self._lifecycle is not lifecycle:
-                        raise ServiceUnavailable()
-
-            cache_task = asyncio.create_task(read_packs())
-            await asyncio.wait({cache_task}, timeout=min(2, available * 0.2))
-            if cache_task.done():
-                cache_task.result()  # Authorization failures are never misses.
-            rotated = keys[state.cursor :] + keys[: state.cursor]
-            pairs = tuple(
-                key for key in rotated if key in eligible and key not in cached
-            )[:MAX_CHARACTER_ZONES]
-
-            def attempted(batch_keys):
-                state.cursor = (keys.index(batch_keys[-1]) + 1) % len(keys)
-
-            fresh, acquired = {}, {}
-            await self._fetch_catalog_rankings(
-                scope,
-                source_id,
-                character,
-                metadata,
-                identity_variables,
-                lifecycle,
-                evidence,
-                deadline=fetch_stop,
-                targets=targets,
-                pairs=pairs,
-                outcomes=fresh,
-                fetched=acquired,
-                on_attempt=attempted,
+            scope = SimpleNamespace(
+                http=metrics.wrap(renewed.http)
+                if metrics is not None
+                else renewed.http,
+                cache=getattr(renewed, "cache", None),
             )
-            # The reader belongs to this invocation; never detach it on return.
-            await cache_task
-            if self._lifecycle is not lifecycle:
-                raise ServiceUnavailable()
-            if any(value == "hidden" for value in fresh.values()):
-                return replace(character, hidden=True, rankings=(), groups=())
-            good = {
-                key: value for key, value in fresh.items() if not isinstance(value, str)
-            }
-            outcomes = {**cached, **good}
-            for key, value in fresh.items():
-                outcomes.setdefault(key, value)
-            used_dates = {key: dates[key] for key in cached if key not in good}
-            used_dates.update(acquired)
-            unsaved = False
-            prepared = {}
-            for key, selection in good.items():
+            cache = scope.cache
+            active()
+
+        available = max(0, stop_at - monotonic())
+        write_reserve = min(2, available * 0.1) if cache is not None else 0
+        fetch_stop = stop_at - write_reserve
+        read_stop = min(fetch_stop, monotonic() + min(2, available * 0.1))
+        read_started = monotonic()
+        if cache is not None:
+            for index, group in enumerate(packs):
+                active()
+                if monotonic() >= read_stop:
+                    break
                 try:
-                    prepared[key] = snapshot_payload(
-                        selection, fetched_at=acquired[key]
-                    )
-                except (FFLogsPayloadError, ValueError, TypeError):
-                    unsaved = True
-            write_order = tuple(range(len(packs)))
-            write_order = (
-                write_order[state.write_cursor :] + write_order[: state.write_cursor]
-            )
-            for index in write_order:
-                group = packs[index]
-                updates = {key: prepared[key] for key in group if key in prepared}
-                if not updates or cache is None:
-                    continue
-                if index not in loaded or monotonic() >= stop_at:
-                    unsaved = True
-                    continue
-                try:
-                    combined = {**loaded[index], **updates}
-                    payload = pack_payload(identity, combined, group)
-                    async with asyncio.timeout(max(0, stop_at - monotonic())):
-                        state.write_cursor = (index + 1) % len(packs)
-                        await cache.put(
-                            cache_pack_key(identity, group),
-                            payload,
-                            ttl_seconds=HISTORY_CACHE_TTL,
+                    async with asyncio.timeout(max(0, read_stop - monotonic())):
+                        lookup = await cache.lookup(
+                            CacheQuery(cache_pack_key(identity, group))
                         )
-                except (PermissionError, ServiceUnavailable):
+                    snapshots, selections, times = {}, {}, {}
+                    if (
+                        lookup.status is CacheLookupStatus.HIT
+                        and lookup.entry.expires_at.timestamp() > time()
+                    ):
+                        snapshots, selections, times = restore_pack(
+                            lookup.entry.payload, identity, group
+                        )
+                        for key, selection in selections.items():
+                            if (
+                                not _selection_scope_matches(selection, key)
+                                or not _selection_membership_matches(
+                                    metadata, key[0], selection
+                                )
+                                or len({row.encounter_id for row in selection.rows})
+                                != len(selection.rows)
+                                or any(
+                                    target[2] == "savage" and selection.size != 8
+                                    for target in targets
+                                    if _target_key(target, character.metric) == key
+                                )
+                            ):
+                                raise FFLogsPayloadError("history pack selection")
+                    loaded[index] = snapshots
+                    cached.update(selections)
+                    dates.update(times)
+                except ServiceUnavailable:
+                    await cache_backend_guard()
+                    loaded[index] = {}
+                except PermissionError:
                     raise
                 except TimeoutError:
-                    unsaved = True
                     break
                 except Exception:
-                    unsaved = True
-            if self._lifecycle is not lifecycle:
-                raise ServiceUnavailable()
-            result = _assemble_catalog_rankings(character, metadata, targets, outcomes)
-            warnings = []
-            if unsaved:
-                warnings.append(
-                    "部分已验证结果未能保存到缓存；后续调用可能需要重新查询。"
-                )
-            if any(
-                isinstance(value, str) and value not in {"not_queried"}
+                    # Corrupt/oversize codecs and ordinary storage failures are misses.
+                    loaded[index] = {}
+                active()
+        summary["read_ms"] = max(0, int((monotonic() - read_started) * 1000))
+        pairs = tuple(key for key in keys if key in eligible and key not in cached)
+        fetch_started = monotonic()
+        await self._fetch_catalog_rankings(
+            scope,
+            source_id,
+            character,
+            metadata,
+            identity_variables,
+            lifecycle,
+            evidence,
+            deadline=fetch_stop,
+            targets=targets,
+            pairs=pairs,
+            outcomes=fresh,
+            fetched=acquired,
+            on_attempt=attempted.update,
+            summary=summary,
+        )
+        summary["fetch_ms"] = max(0, int((monotonic() - fetch_started) * 1000))
+        active()
+        if any(value == "hidden" for value in fresh.values()):
+            return replace(character, hidden=True, rankings=(), groups=())
+        good = {
+            key: value for key, value in fresh.items() if not isinstance(value, str)
+        }
+        outcomes = {**cached, **fresh}
+        used_dates = {**dates, **acquired}
+        unsaved = set()
+        prepared = {}
+        for key, selection in good.items():
+            try:
+                prepared[key] = snapshot_payload(selection, fetched_at=acquired[key])
+            except (FFLogsPayloadError, ValueError, TypeError):
+                unsaved.add(key)
+        write_started = monotonic()
+        saved = set()
+        for index, group in enumerate(packs):
+            updates = {key: prepared[key] for key in group if key in prepared}
+            if not updates:
+                continue
+            if cache is None or monotonic() >= stop_at:
+                unsaved.update(updates)
+                continue
+            try:
+                # Loaded siblings remain intact. An unread pack is never overwritten.
+                if index not in loaded:
+                    unsaved.update(updates)
+                    continue
+                payload = pack_payload(identity, {**loaded[index], **updates}, group)
+                async with asyncio.timeout(max(0, stop_at - monotonic())):
+                    await cache.put(
+                        cache_pack_key(identity, group),
+                        payload,
+                        ttl_seconds=HISTORY_CACHE_TTL,
+                    )
+                saved.update(updates)
+            except ServiceUnavailable:
+                await cache_backend_guard()
+                unsaved.update(updates)
+            except PermissionError:
+                raise
+            except TimeoutError:
+                unsaved.update(prepared.keys() - saved)
+                break
+            except Exception:
+                unsaved.update(updates)
+            active()
+        active()
+        summary.update(
+            cache_hit=len(cached),
+            cache_positive=sum(bool(value.rows) for value in cached.values()),
+            cache_empty=sum(not value.rows for value in cached.values()),
+            attempted=len(attempted),
+            fresh_positive=sum(bool(value.rows) for value in good.values()),
+            fresh_empty=sum(not value.rows for value in good.values()),
+            missing_alias=sum(value == "missing_alias" for value in fresh.values()),
+            invalid=sum(
+                value
+                in {
+                    "invalid",
+                    "failed_membership",
+                    "excluded_size",
+                    "excluded_difficulty",
+                }
                 for value in fresh.values()
-            ):
-                warnings.append(
-                    "部分本次范围查询未成功；已取得的有效缓存仍按获取时间保留。"
-                )
-            if warnings:
-                result = replace(
-                    result,
-                    catalog_warnings=(*result.catalog_warnings, *warnings),
-                )
-            return replace(
-                result,
-                history_cache_hits=len(cached.keys() - good.keys()),
-                history_fetched_at=min(used_dates.values()) if used_dates else None,
-                history_cache_ttl=HISTORY_CACHE_TTL if used_dates else None,
+                if isinstance(value, str)
+            ),
+            request_failed=sum(value == "request_failed" for value in fresh.values()),
+            not_queried=sum(
+                key not in outcomes or outcomes[key] == "not_queried" for key in keys
+            ),
+            cache_unsaved=len(unsaved),
+            write_ms=max(0, int((monotonic() - write_started) * 1000)),
+            total_ms=max(0, int((monotonic() - started) * 1000)),
+        )
+        if evidence is not None:
+            evidence.observe("FF14HistorySummary", summary, status=None)
+        result = _assemble_catalog_rankings(character, metadata, targets, outcomes)
+        warnings = []
+        if unsaved:
+            warnings.append("部分已验证结果未能保存到缓存；后续调用可能需要重新查询。")
+        if any(
+            isinstance(value, str) and value != "not_queried"
+            for value in fresh.values()
+        ):
+            warnings.append(
+                "部分本次范围查询未成功；已取得的有效缓存仍按获取时间保留。"
             )
-        finally:
-            if cache_task is not None:
-                if not cache_task.done():
-                    cache_task.cancel()
-                await asyncio.gather(cache_task, return_exceptions=True)
-            state.lock.release()
-            self._history_rotation.release(state)
+        return replace(
+            result,
+            catalog_warnings=(*result.catalog_warnings, *warnings),
+            history_cache_hits=len(cached),
+            history_fetched_at=min(used_dates.values()) if used_dates else None,
+            history_cache_ttl=HISTORY_CACHE_TTL if used_dates else None,
+        )
 
     async def _fetch_catalog_rankings(
         self,
@@ -482,161 +490,187 @@ class FFLogsCharacterLookup:
         outcomes=None,
         fetched=None,
         on_attempt=None,
+        summary=None,
     ):
         """Query bounded batches; every catalog target retains an outcome."""
-        stop_at = min(
-            monotonic() + CATALOG_RANKING_DEADLINE_SECONDS,
-            deadline if deadline is not None else float("inf"),
-        )
-        semaphore = asyncio.Semaphore(2)
+        stop_at = deadline if deadline is not None else monotonic() + 30
+        hidden = False
+        limited = False
 
         async def batch(keys):
-            async with semaphore:
+            nonlocal limited
+            if self._lifecycle is not lifecycle:
+                raise ServiceUnavailable()
+            if monotonic() >= stop_at:
+                return {key: "not_queried" for key in keys}
+            variables = {
+                key: identity_variables[key]
+                for key in ("name", "serverSlug", "serverRegion", "metric")
+            }
+            # Source and character/server identity are fixed by this invocation.
+            # Every alias retains its full requested scope, not its actual echo.
+            arguments, aliases = [], []
+            if any(key[4] == "Historical" for key in keys):
+                variables["historicalTimeframe"] = "Historical"
+                arguments.append("$historicalTimeframe: RankingTimeframeType!")
+            for index, (
+                zone_id,
+                difficulty_id,
+                partition_id,
+                _,
+                timeframe,
+                spec_name,
+            ) in enumerate(keys):
+                variables[f"z{index}"] = zone_id
+                variables[f"d{index}"] = difficulty_id
+                arguments.extend((f"$z{index}: Int!", f"$d{index}: Int!"))
+                if partition_id is not None:
+                    variables[f"p{index}"] = partition_id
+                    arguments.append(f"$p{index}: Int!")
+                partition_argument = (
+                    f", partition: $p{index}" if partition_id is not None else ""
+                )
+                timeframe_argument = (
+                    ", timeframe: $historicalTimeframe"
+                    if timeframe == "Historical"
+                    else ""
+                )
+                # None means the job argument is omitted, not guessed from rows.
+                assert spec_name is None
+                aliases.append(
+                    f"z{index}: zoneRankings(zoneID: $z{index}, difficulty: $d{index}, metric: $metric{partition_argument}{timeframe_argument})"
+                )
+            query = (
+                "query FF14CatalogCharacter($name: String!, $serverSlug: String!, "
+                "$serverRegion: String!, $metric: CharacterPageRankingMetricType!, "
+                + ", ".join(arguments)
+                + ") { characterData { character(name: $name, serverSlug: $serverSlug, "
+                "serverRegion: $serverRegion) { id name hidden server { name } "
+                + " ".join(aliases)
+                + " } } }"
+            )
+            try:
+                async with asyncio.timeout(max(0, stop_at - monotonic())):
+                    if on_attempt is not None:
+                        on_attempt(keys)
+                    response = await scope.http.fetch(
+                        HttpRequest(
+                            source_id,
+                            GRAPHQL_PATH,
+                            method="POST",
+                            body=_graphql_body(query, variables),
+                            headers={"Content-Type": "application/json"},
+                        )
+                    )
                 if self._lifecycle is not lifecycle:
                     raise ServiceUnavailable()
-                if monotonic() >= stop_at:
-                    return {key: "not_queried" for key in keys}
-                variables = {
-                    key: identity_variables[key]
-                    for key in ("name", "serverSlug", "serverRegion", "metric")
-                }
-                # Source and character/server identity are fixed by this invocation.
-                # Every alias retains its full requested scope, not its actual echo.
-                arguments, aliases = [], []
-                if any(key[4] == "Historical" for key in keys):
-                    variables["historicalTimeframe"] = "Historical"
-                    arguments.append("$historicalTimeframe: RankingTimeframeType!")
-                for index, (
-                    zone_id,
-                    difficulty_id,
-                    partition_id,
-                    _,
-                    timeframe,
-                    spec_name,
-                ) in enumerate(keys):
-                    variables[f"z{index}"] = zone_id
-                    variables[f"d{index}"] = difficulty_id
-                    arguments.extend((f"$z{index}: Int!", f"$d{index}: Int!"))
-                    if partition_id is not None:
-                        variables[f"p{index}"] = partition_id
-                        arguments.append(f"$p{index}: Int!")
-                    partition_argument = (
-                        f", partition: $p{index}" if partition_id is not None else ""
-                    )
-                    timeframe_argument = (
-                        ", timeframe: $historicalTimeframe"
-                        if timeframe == "Historical"
-                        else ""
-                    )
-                    # None means the job argument is omitted, not guessed from rows.
-                    assert spec_name is None
-                    aliases.append(
-                        f"z{index}: zoneRankings(zoneID: $z{index}, difficulty: $d{index}, metric: $metric{partition_argument}{timeframe_argument})"
-                    )
-                query = (
-                    "query FF14CatalogCharacter($name: String!, $serverSlug: String!, "
-                    "$serverRegion: String!, $metric: CharacterPageRankingMetricType!, "
-                    + ", ".join(arguments)
-                    + ") { characterData { character(name: $name, serverSlug: $serverSlug, "
-                    "serverRegion: $serverRegion) { id name hidden server { name } "
-                    + " ".join(aliases)
-                    + " } } }"
+                data = parse_graphql_envelope(
+                    response.body, exact_numbers=True, allow_partial_errors=True
                 )
-                try:
-                    async with asyncio.timeout(max(0, stop_at - monotonic())):
-                        if on_attempt is not None:
-                            on_attempt(keys)
-                        response = await scope.http.fetch(
-                            HttpRequest(
-                                source_id,
-                                GRAPHQL_PATH,
-                                method="POST",
-                                body=_graphql_body(query, variables),
-                                headers={"Content-Type": "application/json"},
-                            )
-                        )
-                    if self._lifecycle is not lifecycle:
-                        raise ServiceUnavailable()
-                    data = parse_graphql_envelope(
-                        response.body, exact_numbers=True, allow_partial_errors=True
-                    )
-                    container = data.get("characterData")
-                    value = (
-                        container.get("character")
-                        if isinstance(container, dict)
-                        else None
-                    )
-                    if isinstance(value, dict) and value.get("hidden") is True:
-                        return {key: "hidden" for key in keys}
-                    if (
-                        not isinstance(value, dict)
-                        or value.get("id") != character.character_id
-                        or value.get("name") != character.name
-                        or value.get("hidden") is not False
-                        or not isinstance(value.get("server"), dict)
-                        or value["server"].get("name") != character.server_name
-                    ):
-                        raise FFLogsPayloadError("catalog character identity changed")
-                    if evidence is not None:
-                        evidence.observe(
-                            "FF14CatalogCharacter",
-                            data,
-                            status=response.status_code,
-                            filters=variables,
-                        )
-                except (
-                    SourceHttpError,
-                    FFLogsGraphQLError,
-                    FFLogsPayloadError,
-                    TimeoutError,
+                container = data.get("characterData")
+                value = (
+                    container.get("character") if isinstance(container, dict) else None
+                )
+                if isinstance(value, dict) and value.get("hidden") is True:
+                    return {key: "hidden" for key in keys}
+                if (
+                    not isinstance(value, dict)
+                    or value.get("id") != character.character_id
+                    or value.get("name") != character.name
+                    or value.get("hidden") is not False
+                    or not isinstance(value.get("server"), dict)
+                    or value["server"].get("name") != character.server_name
                 ):
-                    return {key: "failed" for key in keys}
-                except (ServiceUnavailable, PermissionError):
-                    raise
-                except Exception:
-                    return {key: "failed" for key in keys}
-                result = {}
-                for index, key in enumerate(keys):
-                    try:
-                        selection = parse_rankings(value.get(f"z{index}"))
-                        categories = {
-                            category
-                            for target in targets
-                            for category in (target[2],)
-                            if _target_key(target, character.metric) == key
-                        }
-                        if "savage" in categories and (
-                            selection.size != 8 or selection.difficulty_id != key[1]
-                        ):
-                            result[key] = (
-                                "excluded_size"
-                                if selection.size != 8
-                                else "excluded_difficulty"
-                            )
-                            continue
-                        if not _selection_scope_matches(selection, key) or len(
-                            {r.encounter_id for r in selection.rows}
-                        ) != len(selection.rows):
-                            raise FFLogsPayloadError("catalog selection changed")
-                        if not _selection_membership_matches(
-                            metadata, key[0], selection
-                        ):
-                            result[key] = "failed_membership"
-                            continue
-                        result[key] = selection
-                        fetched[key] = time()
-                    except FFLogsPayloadError:
-                        result[key] = "failed"
-                return result
+                    raise PermissionError("catalog character identity changed")
+                if evidence is not None:
+                    evidence.observe(
+                        "FF14CatalogCharacter",
+                        data,
+                        status=response.status_code,
+                        filters=variables,
+                    )
+            except SourceHttpError as error:
+                if error.status_code in (401, 403):
+                    raise PermissionError() from None
+                if error.status_code == 429:
+                    limited = True
+                return {key: "request_failed" for key in keys}
+            except (
+                FFLogsGraphQLError,
+                FFLogsPayloadError,
+                TimeoutError,
+            ):
+                return {key: "request_failed" for key in keys}
+            except (ServiceUnavailable, PermissionError):
+                raise
+            except Exception:
+                return {key: "request_failed" for key in keys}
+            result = {}
+            for index, key in enumerate(keys):
+                try:
+                    if f"z{index}" not in value:
+                        result[key] = "missing_alias"
+                        continue
+                    selection = parse_rankings(value[f"z{index}"])
+                    categories = {
+                        category
+                        for target in targets
+                        for category in (target[2],)
+                        if _target_key(target, character.metric) == key
+                    }
+                    if "savage" in categories and (
+                        selection.size != 8 or selection.difficulty_id != key[1]
+                    ):
+                        result[key] = (
+                            "excluded_size"
+                            if selection.size != 8
+                            else "excluded_difficulty"
+                        )
+                        continue
+                    if not _selection_scope_matches(selection, key) or len(
+                        {r.encounter_id for r in selection.rows}
+                    ) != len(selection.rows):
+                        raise FFLogsPayloadError("catalog selection changed")
+                    if not _selection_membership_matches(metadata, key[0], selection):
+                        result[key] = "failed_membership"
+                        continue
+                    result[key] = selection
+                    fetched[key] = time()
+                except FFLogsPayloadError:
+                    result[key] = "invalid"
+            return result
 
-        tasks = [
-            asyncio.create_task(batch(pairs[i : i + CATALOG_BATCH_SIZE]))
+        pending = iter(
+            pairs[i : i + CATALOG_BATCH_SIZE]
             for i in range(0, len(pairs), CATALOG_BATCH_SIZE)
-        ]
+        )
+        active_count = 0
+
+        async def worker():
+            nonlocal hidden, active_count
+            for batch_keys in pending:
+                if hidden or limited or monotonic() >= stop_at:
+                    return
+                active_count += 1
+                if summary is not None:
+                    summary["batches_attempted"] = (
+                        summary.get("batches_attempted", 0) + 1
+                    )
+                    summary["max_inflight"] = max(
+                        summary.get("max_inflight", 0), active_count
+                    )
+                try:
+                    outcome = await batch(batch_keys)
+                    outcomes.update(outcome)
+                    hidden = hidden or any(
+                        value == "hidden" for value in outcome.values()
+                    )
+                finally:
+                    active_count -= 1
+
+        tasks = [asyncio.create_task(worker()) for _ in range(min(2, len(pairs)))]
         try:
-            # gather preserves the requested target order despite completion order.
-            for outcome in await asyncio.gather(*tasks):
-                outcomes.update(outcome)
+            await asyncio.gather(*tasks)
         finally:
             for task in tasks:
                 if not task.done():
@@ -678,15 +712,25 @@ class FFLogsCharacterLookup:
 
             metrics = RequestMetrics()
             observation = InvocationObservation(parameters, metrics)
+        started = monotonic()
+        stop_at = getattr(context, "deadline", None)
+        if stop_at is None:
+            stop_at = started + 30
+        # Keep a portion of the granted budget for drawing and authorized delivery.
+        work_stop = stop_at - min(5, max(0, stop_at - started) * 0.1)
         try:
-            async with asyncio.timeout(30):
+            async with asyncio.timeout(max(0, stop_at - monotonic())):
                 result = await self._execute(
                     context,
                     parameters,
                     capture_evidence=explicit_command,
-                    deadline=monotonic() + 29.5,
+                    deadline=work_stop,
                     metrics=metrics,
                     observation=observation,
+                    budget={
+                        "invocation_budget_ms": max(0, int((stop_at - started) * 1000)),
+                        "output_reserve_ms": max(0, int((stop_at - work_stop) * 1000)),
+                    },
                 )
                 return observation.attach(result) if observation is not None else result
         except TimeoutError:
@@ -713,6 +757,7 @@ class FFLogsCharacterLookup:
         deadline=None,
         metrics=None,
         observation=None,
+        budget=None,
     ) -> CapabilityResult:
         lifecycle = self._lifecycle
         inputs = _character_inputs(parameters)
@@ -1113,6 +1158,8 @@ class FFLogsCharacterLookup:
                         evidence,
                         deadline=deadline,
                         cache_owner=context,
+                        metrics=metrics,
+                        budget=budget,
                     )
             except (ServiceUnavailable, PermissionError):
                 return _error(ErrorCode.MODULE_UNAVAILABLE, "FFLogs 来源服务暂不可用。")
@@ -1232,7 +1279,7 @@ def _selection_scope_matches(selection, requested):
     )
 
 
-def _bounded_catalog_targets(targets, *, limit=MAX_CHARACTER_ZONES):
+def _bounded_catalog_targets(targets, *, limit=None):
     """Cover distinct names/tiers before spending the budget on historical IDs."""
     buckets = {}
     for index, target in enumerate(targets):
@@ -1266,9 +1313,10 @@ def _bounded_catalog_targets(targets, *, limit=MAX_CHARACTER_ZONES):
                 selected.setdefault(_target_key(targets[indexes[depth]]), None)
     # Query order must retain this fair round-robin, not the original catalog
     # order. Assembly separately iterates `targets` for source display order.
-    return tuple(
-        target for key in selected for target in targets if _target_key(target) == key
-    )
+    by_key = {}
+    for target in targets:
+        by_key.setdefault(_target_key(target), []).append(target)
+    return tuple(target for key in selected for target in by_key[key])
 
 
 def _selection_membership_matches(metadata, zone_id, selection):
@@ -1318,6 +1366,8 @@ def _assemble_catalog_rankings(character, metadata, targets, outcomes):
         if scope_failed:
             selection = "failed"
         state = selection if isinstance(selection, str) else "record"
+        if state in {"missing_alias", "invalid", "request_failed"}:
+            state = "failed"
         membership_failed = state == "failed_membership" or (
             not isinstance(selection, str)
             and not _selection_membership_matches(metadata, zone.zone_id, selection)

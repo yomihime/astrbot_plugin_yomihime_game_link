@@ -1046,13 +1046,17 @@ class FFLogsOfflineCatalogReferenceTests(unittest.IsolatedAsyncioTestCase):
 
                 http.fetch = fetch
                 handler = FFLogsCharacterLookup(fixture._services(http))
+                original_rankings = handler._catalog_rankings
+
+                async def rankings(*args, **kwargs):
+                    if phase == "before_dispatch":
+                        kwargs["deadline"] = 0
+                    return await original_rankings(*args, **kwargs)
+
                 task = None
                 try:
                     with (
-                        patch(
-                            "modules.ff14.features.fflogs.CATALOG_RANKING_DEADLINE_SECONDS",
-                            0 if phase == "before_dispatch" else 15,
-                        ),
+                        patch.object(handler, "_catalog_rankings", rankings),
                         patch(
                             "modules.ff14.features.fflogs.asyncio.timeout",
                             controlled_timeout,
@@ -1071,8 +1075,6 @@ class FFLogsOfflineCatalogReferenceTests(unittest.IsolatedAsyncioTestCase):
                         self.assertFalse(entered.is_set())
                         self.assertFalse(cancelled.is_set())
                         self.assertEqual(in_flight, [])
-                        state = next(iter(handler._history_rotation.entries.values()))
-                        self.assertEqual(state.cursor, 0)
                         self.assertTrue(
                             any("未查询" in warning for warning in result.warnings)
                         )

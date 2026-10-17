@@ -1,20 +1,17 @@
-"""Bounded FF14 ranking snapshots and invocation-driven history rotation."""
+"""Bounded FF14 ranking snapshots; cache never determines query coverage."""
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import json
-from collections import OrderedDict
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict
 from decimal import Decimal, InvalidOperation
-from time import monotonic, time
+from time import time
 
 from .fflogs_models import FFLogsPayloadError, parse_rankings
 
 HISTORY_CACHE_TTL = 900
-MAX_PROGRESS_ROLES = 16
 MAX_CACHE_BYTES = 65_536
 MAX_CACHE_NODES = 512
 POLICY = "explicit-standard-history-pack-v2"
@@ -247,48 +244,3 @@ def restore_snapshot(payload):
             except InvalidOperation:
                 raise FFLogsPayloadError("history snapshot number") from None
     return parse_rankings(selection), fetched
-
-
-@dataclass
-class HistoryProgress:
-    expires: float
-    cursor: int = 0
-    read_cursor: int = 0
-    write_cursor: int = 0
-    users: int = 0
-    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-
-
-class HistoryRotation:
-    """Small lifetime-local fairness state; never a coverage or task store."""
-
-    def __init__(self):
-        self.entries = OrderedDict()
-
-    def acquire(self, identity):
-        now = monotonic()
-        for key, state in tuple(self.entries.items()):
-            if not state.users and state.expires <= now:
-                self.entries.pop(key)
-        state = self.entries.get(identity)
-        if state is None:
-            if len(self.entries) >= MAX_PROGRESS_ROLES:
-                removable = next(
-                    (key for key, state in self.entries.items() if not state.users),
-                    None,
-                )
-                if removable is None:
-                    return None
-                self.entries.pop(removable)
-            state = HistoryProgress(now + HISTORY_CACHE_TTL)
-            self.entries[identity] = state
-        self.entries.move_to_end(identity)
-        state.users += 1
-        state.expires = now + HISTORY_CACHE_TTL
-        return state
-
-    def release(self, state):
-        state.users -= 1
-
-    def clear(self):
-        self.entries.clear()

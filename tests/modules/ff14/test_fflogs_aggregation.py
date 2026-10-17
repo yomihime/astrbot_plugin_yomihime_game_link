@@ -317,7 +317,7 @@ class CatalogPolicyTests(unittest.TestCase):
         )
         candidates = targets(expanded)
         selected = _bounded_catalog_targets(candidates)
-        self.assertEqual(len({key(target) for target in selected}), 48)
+        self.assertEqual(len({key(target) for target in selected}), 1103)
         self.assertEqual({target[2] for target in selected}, {"ultimate", "savage"})
         self.assertEqual(
             {target[0].zone_id for target in selected if target[2] == "savage"},
@@ -325,12 +325,14 @@ class CatalogPolicyTests(unittest.TestCase):
         )
         self.assertEqual(
             {target[0].zone_id for target in selected if target[2] == "ultimate"},
-            set(range(200, 245)),
+            set(range(200, 255)),
         )
         outcomes = {key(target): selection(target) for target in selected}
         result = _assemble_catalog_rankings(record(), expanded, candidates, outcomes)
-        self.assertTrue(any(not row.history_complete for row in result.rankings))
-        self.assertTrue(any("未查询" in warning for warning in result.catalog_warnings))
+        self.assertTrue(all(row.history_complete for row in result.rankings))
+        self.assertFalse(
+            any("未查询" in warning for warning in result.catalog_warnings)
+        )
 
     def test_schema_gates_new_values_and_missing_sizes_remains_unknown(self):
         schema = catalog_fixture.expanded_schema()["data"]
@@ -458,6 +460,7 @@ class BatchTests(unittest.IsolatedAsyncioTestCase):
                     "metric": "rdps",
                 },
                 handler._lifecycle,
+                deadline=15,
             )
         self.assertEqual(len(calls), 2)
         self.assertTrue(
@@ -885,12 +888,12 @@ class BatchTests(unittest.IsolatedAsyncioTestCase):
             },
             handler._lifecycle,
         )
-        self.assertEqual((len(calls), peak), (4, 2))
+        self.assertEqual((len(calls), peak), (46, 2))
         self.assertEqual(
             sum(
                 sum(key.startswith("z") for key in item["variables"]) for item in calls
             ),
-            48,
+            551,
         )
         self.assertTrue(all("partition: $p" in call["query"] for call in calls))
-        self.assertFalse(result.catalog_complete)
+        self.assertTrue(result.catalog_complete)
