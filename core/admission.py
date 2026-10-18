@@ -4,15 +4,17 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from threading import RLock
 from uuid import uuid4
 
 from yomihime_game_link_sdk.contexts import InvocationView
 from yomihime_game_link_sdk.declarations import CapabilityReference, ModuleManifest
 from yomihime_game_link_sdk.services import CapabilityHealth, HealthReport, HealthStatus
+from yomihime_game_link_sdk.subscriptions import ScheduleTrigger
 
 from ..core.contracts.validation_boundary import validate_contract
 from .context_issuer import ContextIssuer, InvalidInvocation
@@ -115,6 +117,7 @@ class AdmissionController(AdmissionPort):
         self._leases: dict[str, _LeaseRecord] = {}
         self._view_leases: dict[str, str] = {}
         self._mutation_lock = asyncio.Lock()
+        self._commit_lock = RLock()
         self._mutation_context: ContextVar[object | None] = ContextVar(
             f"admission_mutation_{id(self)}", default=None
         )
@@ -195,6 +198,9 @@ class AdmissionController(AdmissionPort):
             or execution.key.scope.kind is not schedule.shared_scope
         ):
             raise AdmissionError("scheduler claim does not match its declaration")
+        background = schedule.trigger is ScheduleTrigger.BACKGROUND
+        if background != (execution.background_fence is not None):
+            raise AdmissionError("scheduler claim trigger authority differs")
         lease = ScheduledLease(
             lease_id=uuid4().hex,
             execution_lease_id=execution.token,
@@ -204,6 +210,7 @@ class AdmissionController(AdmissionPort):
             collector_id=collector_id,
             key_version=execution.key.key_version,
             dependencies=(),
+            background=background,
         )
         self._record(
             lease,
@@ -281,18 +288,30 @@ class AdmissionController(AdmissionPort):
         # Registry revision is intentionally not compared: it is a directory hint.
         del snapshot
 
+    @contextmanager
+    def commit_guard(self, lease):
+        """Order gate close/release against the actual synchronous COMMIT.
+
+        Callers acquire Registry's snapshot guard before this lock and never
+        await while either is held. No path here acquires the Registry lock.
+        """
+        with self._commit_lock:
+            self.check(lease)
+            yield
+
     def release(self, lease: AdmissionLease | ScheduledLease | DeliveryLease) -> None:
         """Drop one exact lease record; repeated release is harmless."""
         if not isinstance(lease, (AdmissionLease, ScheduledLease, DeliveryLease)):
             raise InvalidAdmissionLease("unrecognized lease")
-        record = self._leases.get(lease.lease_id)
-        if record is None:
-            return
-        if record.lease is not lease:
-            raise InvalidAdmissionLease("lease object is not issuer-owned")
-        if record.view is not None:
-            self.issuer.detach_lease_for_cleanup(record.view, lease)
-        self._forget(lease.lease_id)
+        with self._commit_lock:
+            record = self._leases.get(lease.lease_id)
+            if record is None:
+                return
+            if record.lease is not lease:
+                raise InvalidAdmissionLease("lease object is not issuer-owned")
+            if record.view is not None:
+                self.issuer.detach_lease_for_cleanup(record.view, lease)
+            self._forget(lease.lease_id)
 
     def activate(self, identity: RunIdentity, health: HealthReport) -> None:
         """Open a gate only after Lifecycle published its active projection."""
@@ -323,8 +342,9 @@ class AdmissionController(AdmissionPort):
             raise TypeError("close requires a RunIdentity")
         if not isinstance(reason, str) or not reason.strip():
             raise ValueError("reason must be non-empty text")
-        if self._open.get(identity.module_id) is identity:
-            self._open.pop(identity.module_id, None)
+        with self._commit_lock:
+            if self._open.get(identity.module_id) is identity:
+                self._open.pop(identity.module_id, None)
 
     @asynccontextmanager
     async def mutation(self, owner: str) -> AsyncIterator[None]:
@@ -574,13 +594,14 @@ class AdmissionController(AdmissionPort):
             self._forget(lease_id)
 
     def _forget(self, lease_id: str) -> None:
-        record = self._leases.pop(lease_id, None)
-        if (
-            record is not None
-            and record.view is not None
-            and self._view_leases.get(record.view.invocation_id) == lease_id
-        ):
-            self._view_leases.pop(record.view.invocation_id, None)
+        with self._commit_lock:
+            record = self._leases.pop(lease_id, None)
+            if (
+                record is not None
+                and record.view is not None
+                and self._view_leases.get(record.view.invocation_id) == lease_id
+            ):
+                self._view_leases.pop(record.view.invocation_id, None)
 
 
 async def _shield_abort(

@@ -1,5 +1,5 @@
 /// <reference types="vite/client" />
-type FieldPresentation = {label?: string; width?: 'short'|'medium'|'long'; input?: 'time'; order?: number; advanced?: boolean; hint?:string; reset?:'replace-default'; booleanLabels?:{'true':string;'false':string}};
+type FieldPresentation = {label?: string; width?: 'short'|'medium'|'long'; input?: 'time'; order?: number; advanced?: boolean; hint?:string; reset?:'replace-default'; booleanLabels?:{'true':string;'false':string}; optionLabels?:Record<string,string>};
 type GroupPresentation = {title?: string};
 type CredentialPresentation = {label?: string};
 type Presentation = {owner: string; saveLabel?: string; groups?: Record<string, GroupPresentation>; fields?: Record<string, FieldPresentation>; credentials?: Record<string, CredentialPresentation>};

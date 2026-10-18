@@ -7,7 +7,8 @@ invocation around asynchronous service calls.
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
+from contextlib import AbstractAsyncContextManager, contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from time import monotonic
@@ -127,6 +128,9 @@ class RegistryRegistrationLookup(ModuleRegistrationLookup):
         self._registry = registry
 
     async def require_registered(self, module_id: str) -> ModuleRegistrationSnapshot:
+        return self._current(module_id)
+
+    def _current(self, module_id: str) -> ModuleRegistrationSnapshot:
         try:
             snapshot = self._registry.snapshot()
             module = snapshot.module(module_id)
@@ -139,6 +143,21 @@ class RegistryRegistrationLookup(ModuleRegistrationLookup):
             module.epoch,
             module.manifest.collections,
         )
+
+    @contextmanager
+    def record_write_guard(
+        self, expected: ModuleRegistrationSnapshot
+    ) -> Iterator[None]:
+        """Keep a worker commit in the exact enabled module registration."""
+        with self._registry._snapshot_guard():
+            current = self._current(expected.module_id)
+            if (
+                not current.enabled
+                or current.epoch != expected.epoch
+                or current.collections != expected.collections
+            ):
+                raise ValueError("module registration changed")
+            yield
 
 
 class _IssuerCallerCapabilityIssuer(CallerCapabilityIssuer):
@@ -641,7 +660,7 @@ def _record_output(method, result):
 
 
 class _BoundRecordCollection:
-    __slots__ = ("__collection", "__check_sync", "__check")
+    __slots__ = ("__collection", "__check_sync", "__check", "__mutation")
     _allowed = frozenset({"scope", "get", "create", "replace", "query", "delete"})
 
     def __init__(
@@ -649,10 +668,12 @@ class _BoundRecordCollection:
         collection: object,
         check_sync: Callable[[], None],
         check: Callable[[], Awaitable[None]],
+        mutation: Callable[[], AbstractAsyncContextManager[None]],
     ) -> None:
         object.__setattr__(self, "_BoundRecordCollection__collection", collection)
         object.__setattr__(self, "_BoundRecordCollection__check_sync", check_sync)
         object.__setattr__(self, "_BoundRecordCollection__check", check)
+        object.__setattr__(self, "_BoundRecordCollection__mutation", mutation)
 
     def __getattr__(self, name: str) -> object:
         if name not in self._allowed:
@@ -677,7 +698,14 @@ class _BoundRecordCollection:
         async def invoke(*args: object, **kwargs: object) -> object:
             await self.__check()
             parameters(_record_input, name, args, kwargs)
-            result = await target(*args, **kwargs)
+            if name in {"create", "replace", "delete"}:
+                # Keep grant/lifecycle mutation serialized until the accepted
+                # SQLite job commits or rolls back, including cancellation drain.
+                async with self.__mutation():
+                    await self.__check()
+                    result = await target(*args, **kwargs)
+            else:
+                result = await target(*args, **kwargs)
             await self.__check()
             _record_output(name, result)
             return result
@@ -686,17 +714,19 @@ class _BoundRecordCollection:
 
 
 class _BoundRecords:
-    __slots__ = ("__collection", "__check_sync", "__check")
+    __slots__ = ("__collection", "__check_sync", "__check", "__mutation")
 
     def __init__(
         self,
         collection: Callable[[str], Awaitable[object]],
         check_sync: Callable[[], None],
         check: Callable[[], Awaitable[None]],
+        mutation: Callable[[], AbstractAsyncContextManager[None]],
     ) -> None:
         object.__setattr__(self, "_BoundRecords__collection", collection)
         object.__setattr__(self, "_BoundRecords__check_sync", check_sync)
         object.__setattr__(self, "_BoundRecords__check", check)
+        object.__setattr__(self, "_BoundRecords__mutation", mutation)
 
     @public_boundary("service")
     async def collection(self, name: str) -> _BoundRecordCollection:
@@ -704,7 +734,9 @@ class _BoundRecords:
         parameters(_collection_name, name)
         collection = await self.__collection(name)
         await self.__check()
-        return _BoundRecordCollection(collection, self.__check_sync, self.__check)
+        return _BoundRecordCollection(
+            collection, self.__check_sync, self.__check, self.__mutation
+        )
 
 
 class _BoundCache:
@@ -1039,6 +1071,23 @@ class InvocationServiceBinder:
                     lease, ScheduledLease
                 ):
                     raise ValueError
+                if lease.background and any(
+                    value is not None
+                    for value in (
+                        view.actor_id,
+                        view.grant_id,
+                        view.grant_revision,
+                        view.adapter_id,
+                        view.conversation_id,
+                        view.subscription_id,
+                        view.subscription_revision,
+                        view.delivery_route,
+                        view.conversation_kind,
+                        view.subscription_scope,
+                        view.parent_id,
+                    )
+                ):
+                    raise ValueError
             else:
                 if (
                     view.origin
@@ -1211,7 +1260,9 @@ class InvocationServiceBinder:
             check_sync()
 
         grant_store = self._repositories.authorization
-        record_repository = self._repositories.records_for(module)
+        record_repository = self._repositories.records_for(module).with_write_check(
+            check_sync
+        )
 
         async def collection_for_invocation(name: str) -> object:
             current_module = self._check(invocation)
@@ -1279,7 +1330,14 @@ class InvocationServiceBinder:
         bound = _InvocationServices(
             invocation=invocation,
             message=_BoundMessage(self._issuer, invocation, check_sync, check),
-            records=_BoundRecords(collection_for_invocation, check_sync, check),
+            records=_BoundRecords(
+                collection_for_invocation,
+                check_sync,
+                check,
+                lambda: self._lifecycle.admission.mutation(
+                    f"records-write:{module.module_id}"
+                ),
+            ),
             cache=_BoundCache(cache, check_sync, check),
             http=_BoundHttp(self._http, check_sync, check),
             resources=_BoundResources(resources, check_sync, check),

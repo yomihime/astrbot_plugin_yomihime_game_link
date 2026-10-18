@@ -248,6 +248,10 @@ def _map_module(value: object, contract_version: str) -> ModuleManifest:
             OwnershipKind, item["shared_scope"], "shared_scope"
         )
         item["trigger"] = _enum(ScheduleTrigger, item["trigger"], "schedule trigger")
+        if "background_parameters" in item:
+            item["background_parameters"] = tuple(
+                _shape(item["background_parameters"], "array", "background_parameters")
+            )
         schedules.append(validate_contract(ScheduleDescriptor(**item)))
     subscriptions = []
     for raw in _list(obj, "subscriptions"):

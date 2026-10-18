@@ -35,6 +35,7 @@ from yomihime_game_link_sdk.storage import JsonValue as JsonValue
 from yomihime_game_link_sdk.subscriptions import (
     ScheduleDescriptor as ScheduleDescriptor,
 )
+from yomihime_game_link_sdk.subscriptions import ScheduleTrigger as ScheduleTrigger
 from yomihime_game_link_sdk.subscriptions import (
     SubscriptionDescriptor as SubscriptionDescriptor,
 )
@@ -139,6 +140,7 @@ EXTENSION_DESCRIPTOR_FIELDS: Mapping[str, frozenset[str]] = MappingProxyType(
                 "minimum_interval_seconds",
                 "default_interval_seconds",
                 "interval_config_key",
+                "background_parameters",
             }
         ),
         "subscription": frozenset(
@@ -551,6 +553,13 @@ def check_ModuleManifest(self) -> None:
         (item.collector_id not in declared_collectors for item in self.subscriptions)
     ):
         raise ValueError("subscription references an undeclared collector")
+    background_collectors = {
+        item.collector_id
+        for item in self.schedules
+        if item.trigger is ScheduleTrigger.BACKGROUND
+    }
+    if any(item.collector_id in background_collectors for item in self.subscriptions):
+        raise ValueError("subscription cannot reference a background collector")
     for command in self.commands:
         capability = capabilities.get(command.capability_id)
         if capability is None:

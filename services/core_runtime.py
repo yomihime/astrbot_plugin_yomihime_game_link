@@ -69,6 +69,7 @@ from ..infrastructure.sqlite.repositories_config_migration import (
 )
 from ..infrastructure.sqlite.repositories_output import SQLiteRootOutputRepository
 from ..infrastructure.sqlite.repositories_runtime import SQLiteModuleRuntimeRepository
+from ..infrastructure.sync_diagnostics import SyncDiagnostics
 from ..services.admin_authorization import AdminAuthorizationService, ContextValidator
 from ..services.admin_facade import AdminFacade
 from ..services.admin_operations import (
@@ -120,7 +121,9 @@ from .core_configuration import (
     core_config_target,
 )
 
-DEFAULT_CADENCE_CONFIGURATION = CadenceConfiguration((60.0, 300.0, 900.0, 3600.0))
+DEFAULT_CADENCE_CONFIGURATION = CadenceConfiguration(
+    (60.0, 300.0, 900.0, 3600.0, 21600.0, 43200.0, 86400.0)
+)
 DEFAULT_CADENCE_REVISION = 1
 DEFAULT_SCHEDULER_QUOTAS = SchedulerQuotas(4, 2, 2, 20, 10.0, 1.0, 30)
 DEFAULT_RESCHEDULE_CONFIGURATION = RescheduleConfiguration(120.0, 0.05, 0.1, 0.0)
@@ -453,6 +456,8 @@ class CoreRuntime:
         module_host_config_snapshots: Mapping[str, Mapping[str, object]] | None = None,
         public_web_validator: PublicWebProofValidator | None = None,
         public_web_capabilities: frozenset[tuple[str, str]] = frozenset(),
+        capability_timeouts: Mapping[tuple[str, str], float] | None = None,
+        collector_timeouts: Mapping[tuple[str, str], float] | None = None,
         source_credential_policies: Sequence[SourceCredentialPolicy] = (),
         managed_source_credentials=(),
         factory_source: FactorySourcePort | None = None,
@@ -491,6 +496,30 @@ class CoreRuntime:
             raise ValueError("identity_namespace is required")
         bundled_defaults = _normalize_bundled_defaults(trusted_bundled_defaults)
         bundled_manifests = _normalize_bundled_manifests(trusted_bundled_manifests)
+        from ..core.invocation_budget import (
+            InvocationBudgetPolicy,
+            freeze_execution_timeouts,
+        )
+
+        capability_timeouts = freeze_execution_timeouts(
+            capability_timeouts,
+            targets={
+                (owner, item.capability_id)
+                for owner, manifest in bundled_manifests.items()
+                for item in manifest.capabilities
+            },
+        )
+        collector_timeouts = freeze_execution_timeouts(
+            collector_timeouts,
+            targets={
+                (owner, item.collector_id)
+                for owner, manifest in bundled_manifests.items()
+                for item in manifest.schedules
+            },
+        )
+        self._budget_policy = InvocationBudgetPolicy(
+            command_timeout, capability_timeouts
+        )
         subscription_gates = _normalize_subscription_gates(
             trusted_subscription_gates, bundled_manifests
         )
@@ -668,6 +697,7 @@ class CoreRuntime:
             self.lifecycle.admission,
             principal_id=config_principal_id,
         )
+        self.sync_diagnostics = SyncDiagnostics()
         self.module_services = ModuleServicesFactory(
             self.registry,
             self.issuer,
@@ -737,7 +767,19 @@ class CoreRuntime:
             claim_lease=claim_lease,
             send_timeout=send_timeout,
         )
+
+        async def background_config_for(module):
+            target = ConfigTarget(config_principal_id, module.module_id)
+            snapshot = await self.config_repository.current_initialized(target)
+            return (
+                snapshot
+                if snapshot is not None
+                else await self.config_repository.current(target)
+            )
+
         self.scheduler = SharedCollectionScheduler(
+            diagnostics=self.sync_diagnostics,
+            collector_timeouts=collector_timeouts,
             registry=self.registry,
             issuer=self.issuer,
             lifecycle=self.lifecycle,
@@ -758,6 +800,7 @@ class CoreRuntime:
             quotas=scheduler_quotas,
             now=utc_clock,
             monotonic_clock=monotonic_clock,
+            background_config_for=background_config_for,
         )
         self.admin_authorization = AdminAuthorizationService(
             self.admin_credential_repository,
@@ -811,12 +854,10 @@ class CoreRuntime:
             owner_cleanup=owner_cleanup,
         )
         self.admin_facade = AdminFacade(self.admin_operations, self.admin_authorization)
-        from ..core.invocation_budget import InvocationBudgetPolicy
-
-        self._budget_policy = InvocationBudgetPolicy(command_timeout)
         self.gateway = Gateway(
             self.registry,
             self.issuer,
+            diagnostics=self.sync_diagnostics,
             admission=self.lifecycle.admission,
             lifecycle=self.lifecycle,
             private_authorizer=self.module_services.authorize_private,
@@ -1500,7 +1541,11 @@ class CoreRuntime:
             ):
                 raise PermissionError("module changed while ingress was being prepared")
             deadline = self._budget_policy.deadline(
-                origin, self._monotonic_clock(), self._handler_timeout
+                origin,
+                self._monotonic_clock(),
+                self._handler_timeout,
+                module_id=module_id,
+                capability_id=capability_id,
             )
             view = self.issuer.issue(
                 origin=origin,
@@ -1739,6 +1784,7 @@ class CoreRuntime:
 
         self._cleanup_pending = False
         self._closed = True
+        self.sync_diagnostics.close()
         self._started = False
         return True
 

@@ -11,10 +11,13 @@ import asyncio
 import hashlib
 import json
 import random
-from collections.abc import Callable, Mapping
+import sys
+from collections.abc import Awaitable, Callable, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from math import isfinite
+from threading import RLock
 from time import monotonic
 from typing import Protocol
 from uuid import uuid4
@@ -22,7 +25,7 @@ from zoneinfo import ZoneInfo
 
 from yomihime_game_link_sdk.contexts import InvocationOrigin, InvocationView
 from yomihime_game_link_sdk.declarations import SourceDeclaration
-from yomihime_game_link_sdk.services import InvocationServiceBinder
+from yomihime_game_link_sdk.services import ConfigSnapshot, InvocationServiceBinder
 from yomihime_game_link_sdk.storage import (
     GrantReference,
     JsonObject,
@@ -62,6 +65,7 @@ from ..core.contracts.validation import _validate as _validate_schema
 from ..core.contracts.validation_boundary import validate_contract
 from ..core.ports import (
     AdmissionPort,
+    BackgroundJob,
     CollectionRunRequest,
     DigestWindowRepository,
     ExecutionLease,
@@ -72,6 +76,41 @@ from ..core.ports import (
 )
 from ..core.registry import RegisteredModule, Registry, RegistrySnapshot
 from ..core.task_scope import ScopeCancelled, ScopeDeadlineExceeded, ScopeStaleError
+from ..infrastructure.sync_diagnostics import SyncDiagnostics
+from ..infrastructure.sync_diagnostics import emit as diagnostic
+
+
+class _CollectionCommitFence:
+    """Short synchronous authorization, revoked before draining a cancelled IO."""
+
+    def __init__(self, *, deadline, clock, check, registry, admission, lease):
+        self.deadline = deadline
+        self.clock = clock
+        self.check = check
+        self.registry = registry
+        self.admission = admission
+        self.lease = lease
+        self._lock = RLock()
+        self._revoked = False
+
+    def revoke(self):
+        with self._lock:
+            self._revoked = True
+
+    @contextmanager
+    def guard(self):
+        # Lock order: per-call fence -> Registry snapshot -> Admission commit.
+        # No await occurs while held. Invalidation never takes them in reverse.
+        with self._lock, self.registry._snapshot_guard():
+            if self._revoked:
+                raise ScopeCancelled("collection commit was cancelled")
+            if self.clock() >= self.deadline:
+                raise ScopeDeadlineExceeded("collection commit deadline elapsed")
+            self.check()
+            with self.admission.commit_guard(self.lease):
+                if self.clock() >= self.deadline:
+                    raise ScopeDeadlineExceeded("collection commit deadline elapsed")
+                yield
 
 
 class ExecutionClaimProofRegistry:
@@ -259,7 +298,7 @@ def canonical_collection_key(
         raise CandidateRejected("module is disabled")
     if descriptor not in module.manifest.schedules:
         raise CandidateRejected("schedule is not registered")
-    if descriptor.trigger is not ScheduleTrigger.PERIODIC:
+    if descriptor.trigger not in (ScheduleTrigger.PERIODIC, ScheduleTrigger.BACKGROUND):
         raise CandidateRejected("on-demand schedules cannot run periodically")
     if descriptor.shared_scope is OwnershipKind.PUBLIC:
         if scope.kind is not OwnershipKind.PUBLIC:
@@ -439,10 +478,20 @@ class SharedCollectionScheduler:
         runtime_minimum_for: Callable[[RegisteredModule, ScheduleDescriptor], float]
         | None = None,
         source_minimum_for: Callable[[SourceDeclaration], float] | None = None,
+        background_config_for: Callable[[RegisteredModule], Awaitable[ConfigSnapshot]]
+        | None = None,
+        diagnostics: SyncDiagnostics | None = None,
+        collector_timeouts=None,
     ) -> None:
         validate_contract(binder_for)
         validate_contract(runtime_minimum_for)
         validate_contract(source_minimum_for)
+        self.background_config_for = background_config_for
+        self.diagnostics = diagnostics
+        from ..core.invocation_budget import freeze_execution_timeouts
+
+        self.collector_timeouts = freeze_execution_timeouts(collector_timeouts)
+        self._background_registration_signature = None
         self.registry = registry
         self.issuer = issuer
         self.lifecycle = lifecycle
@@ -474,10 +523,147 @@ class SharedCollectionScheduler:
         self._module_gates: dict[str, asyncio.Semaphore] = {}
         self._source_gates: dict[tuple[str, str], asyncio.Semaphore] = {}
 
+    async def reconcile_background_jobs(self) -> None:
+        """Discover only explicit public manifest jobs; no synthetic subscribers."""
+        if self.background_config_for is None:
+            return
+        jobs = []
+        identities = []
+        for module in self.registry.snapshot().modules.values():
+            schedules = tuple(
+                item
+                for item in module.manifest.schedules
+                if item.trigger is ScheduleTrigger.BACKGROUND
+            )
+            if not module.enabled or not schedules:
+                continue
+            try:
+                self.lifecycle.guard(module.module_id, epoch=module.epoch)
+                config = await self.background_config_for(module)
+                validate_contract(config)
+                if config.target is None or config.target.module_id != module.module_id:
+                    raise CandidateRejected(
+                        "background config has no exact module target"
+                    )
+                live = self.registry.snapshot().modules.get(module.module_id)
+                if live is not module:
+                    continue
+                module_jobs = []
+                for schedule in schedules:
+                    field = next(
+                        (
+                            item
+                            for item in module.manifest.config_fields
+                            if item.name == schedule.interval_config_key
+                            and not item.sensitive
+                        ),
+                        None,
+                    )
+                    if field is None:
+                        raise CandidateRejected(
+                            "background interval must reference ordinary module configuration"
+                        )
+                    requested = config.values.get(
+                        field.name,
+                        field.default
+                        if field.default is not None
+                        else schedule.default_interval_seconds,
+                    )
+                    if (
+                        type(requested) not in (float, int)
+                        or not isfinite(requested)
+                        or requested <= 0
+                    ):
+                        raise CandidateRejected("background cadence is invalid")
+                    if field.value_schema is not None:
+                        _validate_schema(field.value_schema, requested, "interval", 0)
+                    source = next(
+                        (
+                            item
+                            for item in module.manifest.sources
+                            if item.source_id == schedule.source_id
+                        ),
+                        None,
+                    )
+                    if source is None:
+                        raise CandidateRejected("background source is not declared")
+                    keys = tuple(
+                        canonical_collection_key(
+                            module, schedule, parameters, OwnerScope.public()
+                        )
+                        for parameters in schedule.background_parameters
+                    )
+                    if len({_key_token(key) for key in keys}) != len(keys):
+                        raise CandidateRejected(
+                            "background parameters normalize to duplicate keys"
+                        )
+                    declaration = [
+                        schedule.collector_id,
+                        schedule.key_version,
+                        schedule.source_id,
+                        schedule.data_version,
+                        _plain_json(schedule.input_schema),
+                        schedule.minimum_interval_seconds,
+                        schedule.default_interval_seconds,
+                        schedule.interval_config_key,
+                        [_key_token(key) for key in keys],
+                    ]
+                    digest = hashlib.sha256(
+                        json.dumps(
+                            declaration, sort_keys=True, separators=(",", ":")
+                        ).encode()
+                    ).hexdigest()
+                    for key in keys:
+                        candidate = DueCollectionJob(
+                            key,
+                            _utc_now(self.now()),
+                            float(requested),
+                            config.revision,
+                            _key_token(key),
+                        )
+                        cadence = self._cadence_seconds(
+                            candidate, module, schedule, source
+                        )
+                        module_jobs.append(
+                            BackgroundJob(
+                                key, cadence, config.revision, config.target, digest
+                            )
+                        )
+                jobs.extend(module_jobs)
+                identities.append((module.module_id, module.epoch))
+            except (
+                ValueError,
+                TypeError,
+                CandidateRejected,
+                ScopeStaleError,
+                ScopeCancelled,
+            ):
+                # Invalid/removed config revokes this module's persistent jobs.
+                continue
+        signature = (
+            tuple(identities),
+            tuple(
+                (
+                    _key_token(job.key),
+                    job.cadence_seconds,
+                    job.config_revision,
+                    job.config_target.principal_id,
+                    job.declaration_digest,
+                )
+                for job in jobs
+            ),
+        )
+        if signature != self._background_registration_signature:
+            await self.repository.reconcile_background_jobs(
+                tuple(jobs), now=_utc_now(self.now())
+            )
+            self._background_registration_signature = signature
+
     async def run_due_page(
         self, *, after_cursor: DueJobCursor | None = None, limit: int | None = None
     ) -> ScanPage:
         """Process one fair page. Persist ``next_cursor`` in the host between runs."""
+        await self.reconcile_background_jobs()
         now = _utc_now(self.now())
         page_limit = (
             self.quotas.max_scan_page
@@ -556,7 +742,8 @@ class SharedCollectionScheduler:
                 if item.collector_id == key.collector_id
                 and item.key_version == key.key_version
                 and item.source_id == key.source_id
-                and item.trigger is ScheduleTrigger.PERIODIC
+                and item.trigger
+                in (ScheduleTrigger.PERIODIC, ScheduleTrigger.BACKGROUND)
             ),
             None,
         )
@@ -580,6 +767,20 @@ class SharedCollectionScheduler:
         )
         if normalized != key:
             raise CandidateRejected("persisted collection key is not canonical")
+        if descriptor.trigger is ScheduleTrigger.BACKGROUND:
+            declared = tuple(
+                canonical_collection_key(
+                    module, descriptor, parameters, OwnerScope.public()
+                )
+                for parameters in descriptor.background_parameters
+            )
+            if (
+                len(set(_key_token(item) for item in declared)) != len(declared)
+                or key not in declared
+            ):
+                raise CandidateRejected(
+                    "background key is outside the fixed declaration"
+                )
         return snapshot, module, descriptor, source
 
     async def _principal_for(self, key: CollectionKey) -> _Principal | None:
@@ -668,6 +869,7 @@ class SharedCollectionScheduler:
         cadence_seconds: float,
         source: SourceDeclaration,
         completion_at: datetime,
+        background: bool = False,
     ) -> datetime:
         validate_contract(observation)
         validate_contract(source)
@@ -680,6 +882,10 @@ class SharedCollectionScheduler:
         else:
             base_seconds = cadence_seconds
             jitter_ratio = self.reschedule.success_jitter_ratio
+        if background:
+            # A fixed background cadence is a remote-sync budget, including failures.
+            base_seconds = max(base_seconds, cadence_seconds)
+            jitter_ratio = 0.0
         sample = self.random_source()
         if (
             type(sample) not in (int, float)
@@ -707,14 +913,24 @@ class SharedCollectionScheduler:
         lease: ExecutionLease | None = None
         invocation: InvocationView | None = None
         scheduled_lease = None
+        core_final = "not_committed"
+        final_observation = None
+        diagnostic_token = None
+        diagnostic_active = False
+
+        def trace_event(stage, **fields):
+            if diagnostic_active:
+                diagnostic(stage, **fields)
+
         try:
             _snapshot, module, schedule, source = self._registered_schedule(
                 candidate.key
             )
-            principal = await self._principal_for(candidate.key)
-            if principal is None:
+            background = schedule.trigger is ScheduleTrigger.BACKGROUND
+            principal = None if background else await self._principal_for(candidate.key)
+            if not background and principal is None:
                 return None
-            if self.evaluation_preparer is None:
+            if not background and self.evaluation_preparer is None:
                 # A persisted due job is subscription-backed. Do not publish an
                 # observation separately from its matched-event transaction.
                 return None
@@ -743,11 +959,31 @@ class SharedCollectionScheduler:
                 )
                 if live_schedule != schedule:
                     return None
+                declared_timeout = self.collector_timeouts.get(
+                    (module.module_id, schedule.collector_id)
+                )
+                timeout_seconds = (
+                    declared_timeout
+                    if declared_timeout is not None
+                    else min(
+                        self.quotas.collection_timeout_seconds, source.timeout_seconds
+                    )
+                )
                 request = self._run_request(
                     candidate,
                     cadence_seconds,
                     live_module.epoch,
                     live_snapshot.revision,
+                    background=background,
+                    lease_seconds=max(
+                        30.0,
+                        (
+                            timeout_seconds
+                            if declared_timeout is not None
+                            else self.quotas.collection_timeout_seconds
+                        )
+                        + 10.0,
+                    ),
                 )
                 lease = await self.repository.claim_due(
                     request, now=_utc_now(self.now())
@@ -764,28 +1000,33 @@ class SharedCollectionScheduler:
                 scheduled_lease = self.admission.admit_schedule(
                     lease, schedule.collector_id
                 )
-                timeout_seconds = min(
-                    self.quotas.collection_timeout_seconds,
-                    source.timeout_seconds,
-                )
                 deadline = self.monotonic_clock() + timeout_seconds
                 invocation = self.issuer.issue(
                     origin=InvocationOrigin.SCHEDULER,
                     module_id=module.module_id,
                     module_epoch=live_module.epoch,
                     registry_revision=live_snapshot.revision,
-                    actor_id=principal.owner_id,
+                    actor_id=None if principal is None else principal.owner_id,
                     deadline=deadline,
                     grant_id=None
-                    if principal.grant is None
+                    if principal is None or principal.grant is None
                     else principal.grant.grant_id,
                     grant_revision=None
-                    if principal.grant is None
+                    if principal is None or principal.grant is None
                     else principal.grant.revision,
                     capability_id=None,
                 )
                 self.issuer.attach_lease(invocation, scheduled_lease)
+                if self.diagnostics is not None:
+                    diagnostic_token = self.diagnostics.activate(
+                        invocation.invocation_id,
+                        invocation.origin.value,
+                        public=candidate.key.scope.kind is OwnershipKind.PUBLIC,
+                    )
+                    diagnostic_active = candidate.key.scope.kind is OwnershipKind.PUBLIC
+                    trace_event("core_start", budget_ms=int(timeout_seconds * 1000))
                 binder = self.binder_for(module.module_id)
+                trace_event("bind")
                 bound = await binder.bind(invocation)
                 self.admission.check(scheduled_lease)
                 context = validate_contract(
@@ -798,17 +1039,22 @@ class SharedCollectionScheduler:
                 require_collection_context(
                     self.issuer, context, clock=self.monotonic_clock
                 )
-                checkpoint = await self.repository.current_checkpoint(
-                    principal.subscription_id, candidate.key
-                )
+                if background:
+                    previous = await self.repository.previous_background_observation(
+                        lease
+                    )
+                else:
+                    checkpoint = await self.repository.current_checkpoint(
+                        principal.subscription_id, candidate.key
+                    )
+                    previous = (
+                        None
+                        if checkpoint is None
+                        or checkpoint.fence != lease.subscription_fence
+                        else checkpoint.snapshot.observation
+                    )
                 await self._require_current_execution(
                     candidate.key, principal, lease, scheduled_lease
-                )
-                previous = (
-                    None
-                    if checkpoint is None
-                    or checkpoint.fence != lease.subscription_fence
-                    else checkpoint.snapshot.observation
                 )
                 handlers = self.lifecycle.handlers(module.module_id)
                 work = bound.tasks.await_result(
@@ -816,7 +1062,12 @@ class SharedCollectionScheduler:
                         context, candidate.key.parameters, previous
                     )
                 )
-                observation = await asyncio.wait_for(work, timeout=timeout_seconds)
+                trace_event("collector_start")
+                observation = await asyncio.wait_for(
+                    work, timeout=max(0.0, deadline - self.monotonic_clock())
+                )
+                trace_event("collector_return")
+                trace_event("validate")
                 if (
                     not isinstance(observation, Observation)
                     or observation.key != candidate.key
@@ -840,8 +1091,12 @@ class SharedCollectionScheduler:
                 await self._require_current_execution(
                     candidate.key, principal, lease, scheduled_lease
                 )
-                evaluation_commit = await self.evaluation_preparer.prepare_evaluations(
-                    lease, observation
+                evaluation_commit = (
+                    ObservationEvaluationCommit(observation, ())
+                    if background
+                    else await self.evaluation_preparer.prepare_evaluations(
+                        lease, observation
+                    )
                 )
                 if (
                     not isinstance(evaluation_commit, ObservationEvaluationCommit)
@@ -866,19 +1121,43 @@ class SharedCollectionScheduler:
                     cadence_seconds=cadence_seconds,
                     source=source,
                     completion_at=completion_at,
+                    background=background,
                 )
-                committed = await self.repository.commit_observation_with_evaluations(
-                    lease, evaluation_commit, next_due_at=next_due_at
+                trace_event("core_commit")
+                if declared_timeout is None:
+                    committed = (
+                        await self.repository.commit_observation_with_evaluations(
+                            lease, evaluation_commit, next_due_at=next_due_at
+                        )
+                    )
+                else:
+                    committed = await self._commit_declared_observation(
+                        lease, scheduled_lease, evaluation_commit, next_due_at, deadline
+                    )
+                core_final = "completed" if committed else "not_committed"
+                final_observation = observation.completeness.value
+                trace_event(
+                    "core_commit", code="committed" if committed else "not_committed"
                 )
                 return CollectionResult(lease, observation, committed)
         except asyncio.CancelledError:
+            core_final = "cancelled"
+            trace_event("core_failure", code="cancelled")
             raise
         except (ScopeCancelled, ScopeStaleError):
+            core_final = "stale"
+            trace_event("core_failure", code="stale")
             return None
-        except (ScopeDeadlineExceeded, asyncio.TimeoutError):
+        except (ScopeDeadlineExceeded, asyncio.TimeoutError) as exc:
+            trace_event(
+                "core_failure",
+                code="core_deadline"
+                if isinstance(exc, ScopeDeadlineExceeded)
+                else "collector_timeout",
+            )
             if lease is None:
                 return None
-            return await self._commit_failed_outcome(
+            result = await self._commit_failed_outcome(
                 candidate,
                 principal,
                 lease,
@@ -886,10 +1165,18 @@ class SharedCollectionScheduler:
                 source,
                 scheduled_lease,
             )
+            core_final = "error" if result.committed else "not_committed"
+            final_observation = (
+                None
+                if result.observation is None
+                else result.observation.completeness.value
+            )
+            return result
         except Exception:
+            trace_event("core_failure", code="error")
             if lease is None:
                 return None
-            return await self._commit_failed_outcome(
+            result = await self._commit_failed_outcome(
                 candidate,
                 principal,
                 lease,
@@ -897,19 +1184,89 @@ class SharedCollectionScheduler:
                 source,
                 scheduled_lease,
             )
+            core_final = "error" if result.committed else "not_committed"
+            final_observation = (
+                None
+                if result.observation is None
+                else result.observation.completeness.value
+            )
+            return result
         finally:
-            if scheduled_lease is not None:
-                self.admission.release(scheduled_lease)
-            if invocation is not None:
-                self.issuer.release(invocation)
-            if lease is not None:
-                self.execution_claim_proofs.discard(lease)
-                await _release_execution_shielded(self.repository, lease)
+            try:
+                if scheduled_lease is not None:
+                    self.admission.release(scheduled_lease)
+                if invocation is not None:
+                    self.issuer.release(invocation)
+                if lease is not None:
+                    self.execution_claim_proofs.discard(lease)
+                    await _release_execution_shielded(self.repository, lease)
+            finally:
+                if isinstance(sys.exception(), asyncio.CancelledError):
+                    core_final = "cancelled"
+                trace_event(
+                    "core_final",
+                    code=core_final,
+                    observation_completeness=final_observation,
+                )
+                if self.diagnostics is not None:
+                    self.diagnostics.reset(diagnostic_token)
+
+    async def _commit_declared_observation(
+        self, lease, scheduled_lease, evaluation_commit, next_due_at, deadline
+    ):
+        """Fence normal output at COMMIT; failure finalization stays lease-bound."""
+
+        def check_registration():
+            module = self.registry.snapshot().modules.get(lease.key.module_id)
+            if (
+                module is None
+                or not module.enabled
+                or module.epoch != lease.module_epoch
+            ):
+                raise ScopeStaleError("module changed before collection commit")
+
+        fence = _CollectionCommitFence(
+            deadline=deadline,
+            clock=self.monotonic_clock,
+            check=check_registration,
+            registry=self.registry,
+            admission=self.admission,
+            lease=scheduled_lease,
+        )
+        work = asyncio.create_task(
+            self.repository.commit_observation_with_evaluations(
+                lease,
+                evaluation_commit,
+                next_due_at=next_due_at,
+                commit_guard=fence.guard,
+            ),
+            name="scheduler-declared-observation-commit",
+        )
+        try:
+            return await asyncio.wait_for(
+                asyncio.shield(work),
+                timeout=max(0.0, deadline - self.monotonic_clock()),
+            )
+        except asyncio.CancelledError:
+            # The executor drains an already-running transaction before exposing
+            # cancellation. Revoke here first, while only our shield is cancelled.
+            fence.revoke()
+            try:
+                await _drain_commit_task(work)
+            except asyncio.CancelledError:
+                pass
+            raise
+        except TimeoutError:
+            fence.revoke()
+            await _drain_commit_task(work)
+            raise ScopeDeadlineExceeded("collection commit deadline elapsed") from None
+        finally:
+            fence.revoke()
 
     async def _commit_failed_outcome(
         self,
         candidate: DueCollectionJob,
-        principal: _Principal,
+        principal: _Principal | None,
         lease: ExecutionLease,
         cadence_seconds: float,
         source: SourceDeclaration,
@@ -939,8 +1296,10 @@ class SharedCollectionScheduler:
             await self._require_current_execution(
                 candidate.key, principal, lease, scheduled_lease
             )
-            evaluation_commit = await self.evaluation_preparer.prepare_evaluations(
-                lease, failed
+            evaluation_commit = (
+                ObservationEvaluationCommit(failed, ())
+                if lease.background_fence is not None
+                else await self.evaluation_preparer.prepare_evaluations(lease, failed)
             )
             if (
                 not isinstance(evaluation_commit, ObservationEvaluationCommit)
@@ -957,6 +1316,7 @@ class SharedCollectionScheduler:
                 cadence_seconds=cadence_seconds,
                 source=source,
                 completion_at=_utc_now(self.now()),
+                background=lease.background_fence is not None,
             )
             committed = await self.repository.commit_observation_with_evaluations(
                 lease, evaluation_commit, next_due_at=next_due_at
@@ -971,7 +1331,13 @@ class SharedCollectionScheduler:
 
     @staticmethod
     def _run_request(
-        candidate: DueCollectionJob, cadence: float, epoch: int, registry_revision: int
+        candidate: DueCollectionJob,
+        cadence: float,
+        epoch: int,
+        registry_revision: int,
+        *,
+        background: bool = False,
+        lease_seconds: float | None = None,
     ):
         return CollectionRunRequest(
             candidate.key,
@@ -980,6 +1346,8 @@ class SharedCollectionScheduler:
             candidate.config_revision,
             epoch,
             registry_revision,
+            background,
+            lease_seconds,
         )
 
     def _data_version(self, key: CollectionKey) -> int:
@@ -1001,7 +1369,7 @@ class SharedCollectionScheduler:
     async def _require_current_execution(
         self,
         key: CollectionKey,
-        principal: _Principal,
+        principal: _Principal | None,
         lease: ExecutionLease,
         scheduled_lease,
     ) -> None:
@@ -1014,12 +1382,20 @@ class SharedCollectionScheduler:
         module = snapshot.modules.get(key.module_id)
         if module is None or not module.enabled or module.epoch != lease.module_epoch:
             raise ScopeStaleError("module registration changed")
-        if principal.grant is not None:
+        if lease.background_fence is not None:
+            if principal is not None:
+                raise ScopeStaleError("background work cannot have a user principal")
+            _, _, schedule, _ = self._registered_schedule(key)
+            if schedule.trigger is not ScheduleTrigger.BACKGROUND:
+                raise ScopeStaleError("background declaration changed")
+        elif principal is None:
+            raise ScopeStaleError("subscription work has no principal")
+        if principal is not None and principal.grant is not None:
             if not await self._grant_is_current(
                 principal.grant, owner_id=principal.owner_id, module_id=key.module_id
             ):
                 raise ScopeStaleError("authorization grant changed")
-        if await self._principal_for(key) != principal:
+        if principal is not None and await self._principal_for(key) != principal:
             raise ScopeStaleError("subscription owner or grant changed")
         if not await self.repository.is_current(lease, now=_utc_now(self.now())):
             raise ScopeStaleError("persistent execution claim changed")
@@ -1177,6 +1553,24 @@ class SharedCollectionScheduler:
         return await self.digest_windows.list_due_routes(
             now=now, limit=page_limit, after_cursor=after_cursor
         )
+
+
+async def _drain_commit_task(task):
+    """Wait only this owned task, retaining any new outer cancellation."""
+    cancellation = None
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError as exc:
+            if task.cancelled():
+                break
+            cancellation = exc
+        except BaseException:
+            break
+    if task.done() and not task.cancelled():
+        task.exception()  # Observe a rejected worker outcome after revocation.
+    if cancellation is not None:
+        raise cancellation
 
 
 async def _release_execution_shielded(

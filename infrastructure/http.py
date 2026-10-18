@@ -25,6 +25,7 @@ from yomihime_game_link_sdk.services import HttpRequest, HttpResponse, SourceHtt
 
 from ..core.contracts.validation_boundary import validate_contract
 from ..core.public_errors import public_boundary
+from .sync_diagnostics import emit as diagnostic
 
 
 class HttpTransport(Protocol):
@@ -474,16 +475,21 @@ class SourceHttpService(SourceHttp):
         source_acquired = False
 
         try:
+            diagnostic(
+                "http_queue", budget_ms=int(source.declaration.timeout_seconds * 1000)
+            )
             await self._wait_for_deadline(self._global_semaphore.acquire(), deadline)
             global_acquired = True
             await self._wait_for_deadline(source.semaphore.acquire(), deadline)
             source_acquired = True
+            diagnostic("http_quota")
             await self._reserve_quota(source, deadline)
             lease = await self._credential_lease(source.declaration, checked, deadline)
             result = await self._perform_resource_request(
                 source.declaration, checked, lease, deadline
             )
             response = self._validate_response(result)
+            diagnostic("http_response", http_status=response.status_code)
             self._ensure_remaining(deadline)
             if response.status_code == 401 and lease is not None:
                 await self._invalidate_credential(source.declaration, lease, deadline)
@@ -514,7 +520,17 @@ class SourceHttpService(SourceHttp):
                 raise SourceHttpError(
                     "upstream_error", status_code=response.status_code
                 ) from None
+            diagnostic("http_end", code="ok", http_status=response.status_code)
             return response
+        except asyncio.CancelledError:
+            diagnostic("http_end", code="cancelled")
+            raise
+        except SourceHttpError as exc:
+            diagnostic("http_end", code=exc.code, http_status=exc.status_code)
+            raise
+        except Exception:
+            diagnostic("http_end", code="error")
+            raise
         finally:
             if source_acquired:
                 # A quota entry is deliberately retained after failure or
@@ -619,6 +635,7 @@ class SourceHttpService(SourceHttp):
             proof,
         )
         try:
+            diagnostic("http_transport")
             return self._validate_response(
                 await self._wait_for_deadline(
                     self._invoke_transport(transport_request), deadline
@@ -663,15 +680,18 @@ class SourceHttpService(SourceHttp):
         if remaining <= 0:
             if inspect.iscoroutine(awaitable):
                 awaitable.close()
+            diagnostic("http_end", code="http_deadline")
             raise SourceHttpError("timeout") from None
         try:
             return await asyncio.wait_for(awaitable, timeout=remaining)
         except asyncio.TimeoutError:
+            diagnostic("http_end", code="http_deadline")
             raise SourceHttpError("timeout") from None
 
     @staticmethod
     def _ensure_remaining(deadline: float) -> None:
         if asyncio.get_running_loop().time() >= deadline:
+            diagnostic("http_end", code="http_deadline")
             raise SourceHttpError("timeout") from None
 
     def _validate_request(self, request: HttpRequest) -> HttpRequest:

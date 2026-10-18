@@ -134,6 +134,13 @@ class LLMToolTests(unittest.IsolatedAsyncioTestCase):
         )
         self.addAsyncCleanup(self.runtime.terminate)
         await self.runtime.initialize()
+        await fixture.AstrBotRuntimeTests._assert_initial_public_calendar_sync(
+            self, self.runtime, self.transport
+        )
+        # Retain the exact two-region startup audit, then leave the original
+        # no-request, source, cache and owner checks on the command/tool delta.
+        self.initial_background_requests = tuple(self.transport.requests)
+        self.transport.requests.clear()
         self.manager = self.context.provider_manager.llm_tools
         self.provider = ControlledProvider()
 

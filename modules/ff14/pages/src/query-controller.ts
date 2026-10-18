@@ -15,6 +15,8 @@ const capabilities: Record<string,string> = {items:'item.lookup',market:'ff14.ma
 export function capabilityParameters(route:string,body:any){if(route==='market')return {input:JSON.stringify(body)};if(route==='logs')return {realm:body.region,server:body.server,character:body.character,metric:'rdps'};return body;}
 export const STOP_MESSAGE = '已停止展示。仅停止展示，本次请求可能仍在后台处理；不会自动重试。';
 const drafts = new Map<string,Record<string,string>>();
+// Calendar's reviewed Core budget is 45s; allow 5s for bridge/publication/rendering.
+export function queryTimeoutMs(route:string) {return route==='calendar'?50000:35000;}
 export function createQueryController(options: PageOptions, changed: () => void, timeoutMs=35000) {
   const route = options.routeId; if (!fields[route]) throw Error('invalid_query_route');
   const key = JSON.stringify([options.context.owner,route,options.context.boundary,options.context.runtimeId,options.context.epoch]);
@@ -31,7 +33,7 @@ export function createQueryController(options: PageOptions, changed: () => void,
     const errors = clean.errors as Record<string,string>; invalidate(); state.errors=errors;
     if (Object.keys(errors).length) {state.message='请先修正表单中标出的输入。'; changed(); return;}
     const version=sequence; state.phase='loading'; state.message='正在查询…'; changed();
-    timer=setTimeout(()=>{if (current(version)) {sequence++; timer=null; state.phase='timeout'; state.message='等待查询超过35秒，已停止展示。后台请求可能仍在处理，请检查会话与来源后手动重试。'; changed();}},timeoutMs);
+    timer=setTimeout(()=>{if (current(version)) {sequence++; timer=null; state.phase='timeout'; state.message=`等待查询超过${timeoutMs/1000}秒，已停止展示。后台请求可能仍在处理，请检查会话与来源后手动重试。`; changed();}},timeoutMs);
     try {const response=await options.services.invoke(capabilities[route],capabilityParameters(route,clean.body)); if (!current(version)) return; const result=validateQueryResult(response); clearTimer(); state.result=result; state.phase='result'; state.message=''; changed();}
     catch {if (!current(version)) return; clearTimer(); state.phase='error'; state.message='查询未完成，请检查登录、网页地址和输入后手动重试。可重新登录 Dashboard，检查插件配置齿轮中的网页地址，保存重载后重新打开本页。'; changed();}
   }

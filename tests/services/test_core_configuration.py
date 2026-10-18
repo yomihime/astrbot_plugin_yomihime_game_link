@@ -16,6 +16,7 @@ from ygl_test_subject.modules.ff14.config import (
     CALENDAR_VALUE_VALIDATORS,
     DAYS,
     DELIVERY_TIME,
+    SYNC_INTERVAL,
     TIMEZONE,
     FF14ConfigSnapshot,
     legacy_core_defaults,
@@ -164,7 +165,7 @@ class CoreSelectionTests(unittest.TestCase):
         )
         self.assertEqual(
             {field.name for field in CALENDAR_CONFIG_FIELDS},
-            {DAYS, TIMEZONE, DELIVERY_TIME},
+            {DAYS, TIMEZONE, DELIVERY_TIME, SYNC_INTERVAL},
         )
 
     def test_falsy_legacy_mapping_inputs_reject_and_selected_json_is_detached(self):
@@ -687,13 +688,14 @@ class CoreDefaultsRuntimeTests(unittest.IsolatedAsyncioTestCase):
         grant = await runtime.admin_authorization.authorize(
             AdminOperation.UPDATE_CONFIG, invocation=None, context=context
         )
-        for name in (DAYS, TIMEZONE, DELIVERY_TIME):
+        for name in (DAYS, TIMEZONE, DELIVERY_TIME, SYNC_INTERVAL):
             with self.assertRaisesRegex(ValueError, "require a value"):
                 ConfigFieldUpdate(name, ConfigUpdateMode.REPLACE, value=None)
         invalid = {
             DAYS: [True, False, 0, 31, "7", 7.0],
             TIMEZONE: ["", "Unknown/Bad", "../UTC", "UTC\n"],
             DELIVERY_TIME: ["8:00", "24:00", "00:60", "08:00\n"],
+            SYNC_INTERVAL: [True, False, 0, 900, 21601, 86401, "21600", 21600.0],
         }
         for name, values in invalid.items():
             for value in values:
@@ -713,7 +715,12 @@ class CoreDefaultsRuntimeTests(unittest.IsolatedAsyncioTestCase):
                             grant,
                         )
                     self.assertEqual((await coordinator.current()).revision, 1)
-        valid = {DAYS: 30, TIMEZONE: "UTC", DELIVERY_TIME: "23:59"}
+        valid = {
+            DAYS: 30,
+            TIMEZONE: "UTC",
+            DELIVERY_TIME: "23:59",
+            SYNC_INTERVAL: 43200,
+        }
         result = await coordinator.update_admin(
             target,
             ConfigPatch(
@@ -740,3 +747,42 @@ class CoreDefaultsRuntimeTests(unittest.IsolatedAsyncioTestCase):
             coordinator.view(), runtime.core_defaults, runtime.lifecycle.admission
         )
         self.assertEqual((await combined.current()).revision, 2)
+        self.assertEqual(
+            FF14ConfigSnapshot.from_values(
+                (await combined.current()).values
+            ).calendar_sync_interval_seconds,
+            43200,
+        )
+        update = ConfigFieldUpdate(SYNC_INTERVAL, ConfigUpdateMode.REPLACE, value=86400)
+        with self.assertRaises(RevisionConflict):
+            await coordinator.update_admin(
+                target, ConfigPatch(1, (update,), CALENDAR_CONFIG_FIELDS), grant
+            )
+        self.assertEqual((await coordinator.current()).revision, 2)
+        self.assertEqual((await coordinator.current()).values[SYNC_INTERVAL], 43200)
+        await coordinator.update_admin(
+            target, ConfigPatch(2, (update,), CALENDAR_CONFIG_FIELDS), grant
+        )
+        self.assertEqual((await combined.current()).revision, 3)
+        self.assertEqual(
+            FF14ConfigSnapshot.from_values(
+                (await combined.current()).values
+            ).calendar_sync_interval_seconds,
+            86400,
+        )
+        await coordinator.update_admin(
+            target,
+            ConfigPatch(
+                3,
+                (ConfigFieldUpdate(SYNC_INTERVAL, ConfigUpdateMode.CLEAR),),
+                CALENDAR_CONFIG_FIELDS,
+            ),
+            grant,
+        )
+        self.assertEqual((await combined.current()).revision, 4)
+        self.assertEqual(
+            FF14ConfigSnapshot.from_values(
+                (await combined.current()).values
+            ).calendar_sync_interval_seconds,
+            21600,
+        )

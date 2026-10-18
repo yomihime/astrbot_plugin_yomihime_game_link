@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import shutil
@@ -75,6 +76,7 @@ class _FixtureTransport:
     def __init__(self) -> None:
         self.fixture = json.loads(FIXTURE.read_text(encoding="utf-8"))
         self.requests: list[TransportRequest] = []
+        self.calendar_ready = asyncio.Event()
         self.credential_exchanges = []
 
     async def request(self, request: TransportRequest) -> HttpResponse:
@@ -98,6 +100,13 @@ class _FixtureTransport:
         ):
             payload = self.fixture["garland"]["linked_item_detail"]
         elif request.source_id == "ff14_calendar_primary":
+            if (
+                len(
+                    [r for r in self.requests if r.source_id == "ff14_calendar_primary"]
+                )
+                == 2
+            ):
+                self.calendar_ready.set()
             return validate_contract(
                 HttpResponse(200, {"Content-Type": "text/calendar"}, CALENDAR_ICS)
             )
@@ -299,7 +308,7 @@ class FF14InstalledModuleTests(unittest.IsolatedAsyncioTestCase):
                 ),
                 ("command", "llm_tool"),
             )
-            self.assertEqual(len(module_manifest.schedules), 1)
+            self.assertEqual(len(module_manifest.schedules), 2)
             self.assertEqual(
                 module_manifest.schedules[0].collector_id, "ff14.calendar.collect"
             )
@@ -307,6 +316,14 @@ class FF14InstalledModuleTests(unittest.IsolatedAsyncioTestCase):
                 module_manifest.schedules[0].source_id, "ff14_calendar_primary"
             )
             self.assertEqual(module_manifest.schedules[0].default_interval_seconds, 900)
+            sync = module_manifest.schedules[1]
+            self.assertEqual(sync.collector_id, "ff14.calendar.sync")
+            self.assertEqual(sync.trigger.value, "background")
+            self.assertEqual(sync.default_interval_seconds, 21600)
+            self.assertEqual(
+                tuple(dict(v) for v in sync.background_parameters),
+                ({"region": "cn"}, {"region": "global"}),
+            )
             self.assertEqual(len(module_manifest.subscriptions), 1)
             self.assertEqual(
                 module_manifest.subscriptions[0].notification_modes, ("instant",)
@@ -317,6 +334,7 @@ class FF14InstalledModuleTests(unittest.IsolatedAsyncioTestCase):
                     "credential_fflogs_cn",
                     "credential_fflogs_global",
                     "ff14_subscriptions_enabled",
+                    "ff14_calendar_sync_interval_seconds",
                     "ff14_calendar_default_days",
                     "ff14_calendar_default_timezone",
                     "ff14_calendar_default_delivery_time",
@@ -402,6 +420,39 @@ class FF14InstalledModuleTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertTrue(enabled.enabled)
                 self.assertEqual(enabled.lifecycle.value, "active")
+                # Real Core pump registration performs both public syncs without
+                # any subscription, and subsequent scans do not fetch again.
+                await runtime.scheduler.run_due_page()
+                await asyncio.wait_for(transport.calendar_ready.wait(), timeout=10)
+                await asyncio.gather(*tuple(runtime.scheduler._active.values()))
+                completed_syncs = await runtime.database.executor.run_read(
+                    lambda unit: tuple(
+                        row[0]
+                        for row in unit.execute(
+                            "SELECT o.completeness FROM b04_background_jobs b "
+                            "JOIN b04_collection_jobs j ON j.job_key=b.job_key "
+                            "JOIN b04_observations o ON o.observation_id=j.observation_id"
+                        )
+                    )
+                )
+                self.assertEqual(completed_syncs, ("complete", "complete"))
+                calendar_requests = [
+                    r
+                    for r in transport.requests
+                    if r.source_id == "ff14_calendar_primary"
+                ]
+                self.assertEqual(len(calendar_requests), 2)
+                self.assertEqual(len({r.path for r in calendar_requests}), 2)
+                self.assertEqual(
+                    await runtime.database.executor.run_read(
+                        lambda unit: unit.execute(
+                            "SELECT COUNT(*) FROM b04_subscriptions"
+                        ).fetchone()[0]
+                    ),
+                    0,
+                )
+                await runtime.scheduler.run_due_page()
+                self.assertEqual(len(transport.requests), 2)
 
                 self.assertNotIn(
                     "ff14.logs.output_percentile",
@@ -469,6 +520,7 @@ class FF14InstalledModuleTests(unittest.IsolatedAsyncioTestCase):
                     [
                         (request.source_id, request.path)
                         for request in transport.requests
+                        if not request.source_id.startswith("ff14_calendar_")
                     ],
                     [
                         ("xivapi_items", "/api/sheet/Item/90001"),
@@ -542,6 +594,7 @@ class FF14InstalledModuleTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertEqual(transport.credential_exchanges, [])
 
+                before_calendar = len(transport.requests)
                 calendar = await runtime.invoke_command(
                     GLOBAL_MODULE_ID,
                     "calendar",
@@ -550,9 +603,41 @@ class FF14InstalledModuleTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertEqual(calendar.result.status.value, "success")
                 self.assertEqual(calendar.result.privacy.value, "public")
-                self.assertEqual(
-                    transport.requests[-1].source_id, "ff14_calendar_primary"
+                self.assertEqual(len(transport.requests), before_calendar)
+                manual = bridge.parse(
+                    _TextEvent("/ygl ff14 calendar 国服 refresh=true")
                 )
+                self.assertIsInstance(manual, CommandInvocation)
+                self.assertIs(manual.parameters["refresh"], True)
+                calendar_handler = (
+                    runtime.registry.snapshot()
+                    .module(GLOBAL_MODULE_ID)
+                    .handlers.capabilities["ff14.calendar.query"]
+                )
+                snapshot_errors = []
+                original_read = calendar_handler._snapshots.read
+
+                async def checked_read(*args, **kwargs):
+                    try:
+                        return await original_read(*args, **kwargs)
+                    except Exception as exc:
+                        snapshot_errors.append(f"{type(exc).__name__}: {exc}")
+                        raise
+
+                with patch.object(
+                    calendar_handler._snapshots, "read", side_effect=checked_read
+                ):
+                    refreshed = await runtime.invoke_command(
+                        manual.module_id,
+                        manual.operation_path,
+                        manual.parameters,
+                        ingress=ingress,
+                    )
+                self.assertEqual(snapshot_errors, [])
+                self.assertEqual(
+                    refreshed.result.status.value, "success", repr(refreshed.result)
+                )
+                self.assertEqual(len(transport.requests), before_calendar)
 
                 created = await runtime.invoke_command(
                     GLOBAL_MODULE_ID,

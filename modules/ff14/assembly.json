@@ -1,6 +1,14 @@
 {
   "version": 1,
   "module_id": "ff14/ff14",
+  "execution_budgets": {
+    "capabilities": {
+      "ff14.calendar.query": 45
+    },
+    "collectors": {
+      "ff14.calendar.sync": 45
+    }
+  },
   "sources": {
     "universalis_market": "universalis.app",
     "xivapi_items": "xivapi-v2.xivcdn.com",

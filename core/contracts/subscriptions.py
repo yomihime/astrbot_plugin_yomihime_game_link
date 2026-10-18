@@ -1227,6 +1227,73 @@ def check_IntervalLimits(self) -> None:
         raise ValueError("intervals must be positive seconds")
 
 
+def preflight_schedule_parameters(self) -> None:
+    """Bound and detach fixed inputs before the general contract visitor."""
+    parameters = self.background_parameters
+    if not isinstance(parameters, (tuple, list)):
+        raise TypeError("background parameters must be a sequence of JSON objects")
+    if len(parameters) > 32:
+        raise ValueError("background schedules allow at most 32 parameter sets")
+    nodes = 0
+    active: set[int] = set()
+
+    def plain(value: object, depth: int) -> object:
+        nonlocal nodes
+        nodes += 1
+        if nodes > 2048 or depth > 16:
+            raise ValueError("background parameters exceed the JSON budget")
+        if type(value) is str:
+            if len(value) > 4096:
+                raise ValueError("background parameter string budget exceeded")
+            return value
+        if value is None or type(value) is bool:
+            return value
+        if type(value) is int:
+            if value.bit_length() > 4096:
+                raise ValueError("background parameter integer budget exceeded")
+            return value
+        if type(value) is float:
+            if not isfinite(value):
+                raise ValueError("background parameter numbers must be finite")
+            return value
+        if not isinstance(value, (Mapping, tuple, list)):
+            raise TypeError("background parameters must contain only JSON data")
+        token = id(value)
+        if token in active:
+            raise ValueError("background parameters cannot contain cycles")
+        if len(value) > 256:
+            raise ValueError("background parameter container budget exceeded")
+        active.add(token)
+        try:
+            if isinstance(value, Mapping):
+                result = {}
+                for key, child in value.items():
+                    if type(key) is not str:
+                        raise TypeError("background parameter keys must be strings")
+                    result[plain(key, depth + 1)] = plain(child, depth + 1)
+                return result
+            return [plain(child, depth + 1) for child in value]
+        finally:
+            active.remove(token)
+
+    values = []
+    for value in parameters:
+        if not isinstance(value, Mapping):
+            raise TypeError("background parameters must be JSON objects")
+        values.append(plain(value, 0))
+    try:
+        encoded = json.dumps(values, ensure_ascii=False, allow_nan=False).encode(
+            "utf-8"
+        )
+    except (ValueError, UnicodeError):
+        raise ValueError("background parameters cannot be encoded as JSON") from None
+    if len(encoded) > 65536:
+        raise ValueError("background parameters exceed the encoded JSON budget")
+    object.__setattr__(
+        self, "background_parameters", tuple(freeze_json(v) for v in values)
+    )
+
+
 def check_ScheduleDescriptor(self) -> None:
     for field in ("collector_id", "source_id"):
         _identifier(getattr(self, field), field)
@@ -1248,11 +1315,15 @@ def check_ScheduleDescriptor(self) -> None:
         or (self.minimum_interval_seconds <= 0)
     ):
         raise ValueError("minimum interval must be positive")
-    if self.trigger is ScheduleTrigger.PERIODIC:
+    if self.trigger in (ScheduleTrigger.PERIODIC, ScheduleTrigger.BACKGROUND):
         if self.default_interval_seconds is None:
-            raise ValueError("periodic schedules require a default interval")
+            raise ValueError(
+                "periodic and background schedules require a default interval"
+            )
         if self.interval_config_key is None:
-            raise ValueError("periodic schedules require an interval config key")
+            raise ValueError(
+                "periodic and background schedules require an interval config key"
+            )
         if (
             isinstance(self.default_interval_seconds, bool)
             or not isinstance(self.default_interval_seconds, (int, float))
@@ -1275,6 +1346,17 @@ def check_ScheduleDescriptor(self) -> None:
     if snapshot["type"] != "object":
         raise ValueError("schedule input_schema must be a closed object")
     object.__setattr__(self, "input_schema", snapshot)
+    if self.trigger is ScheduleTrigger.BACKGROUND:
+        if self.shared_scope is not OwnershipKind.PUBLIC:
+            raise ValueError("background schedules require PUBLIC scope")
+        if not 1 <= len(self.background_parameters) <= 32:
+            raise ValueError("background schedules require 1 to 32 parameter sets")
+        from .validation import _validate
+
+        for parameters in self.background_parameters:
+            _validate(snapshot, parameters, "background parameters", 0)
+    elif self.background_parameters:
+        raise ValueError("only background schedules may define background parameters")
 
 
 def check_SubscriptionDescriptor(self) -> None:

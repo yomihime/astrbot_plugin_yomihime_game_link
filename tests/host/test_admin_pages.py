@@ -114,7 +114,7 @@ class AdminPagesTests(unittest.IsolatedAsyncioTestCase):
         data = response.json()["data"]
         self.assertEqual(set(data), {"schema_version", "fields"})
         self.assertEqual(
-            len([field for field in data["fields"] if field["readable"]]), 7
+            len([field for field in data["fields"] if field["readable"]]), 8
         )
         self.assertNotIn("PRIVATE-INVALID-LEGACY", response.text)
         self.assertEqual(
@@ -133,6 +133,119 @@ class AdminPagesTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             (await self.call("catalog", {}, headers=asset)).status_code, 401
         )
+        self.assertEqual(self.pages.requests, {})
+        self.assertEqual(self.runtime._admin_source._proofs, {})
+
+    async def test_sync_diagnostics_is_bounded_metadata_under_existing_admin_proof(
+        self,
+    ):
+        from ygl_test_subject.infrastructure.sync_diagnostics import emit
+
+        diagnostics = self.runtime._core.sync_diagnostics
+        token = diagnostics.activate("a" * 32, "web_public")
+        try:
+            emit(
+                "sync_start",
+                region="cn",
+                trigger="manual",
+                body="PRIVATE-DIAGNOSTIC-SENTINEL",
+            )
+            emit("core_final", code="completed", capability_status="error")
+        finally:
+            diagnostics.reset(token)
+        response = await self.call("sync-diagnostics", {})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.history[0].status_code, 307)
+        self.assertEqual(response.headers["cache-control"], "no-store")
+        data = response.json()["data"]
+        self.assertEqual(data["retention"], "memory_only")
+        self.assertEqual(data["attempts"][-1]["core_final"], "completed")
+        self.assertEqual(data["attempts"][-1]["capability_status"], "error")
+        self.assertNotIn("PRIVATE-DIAGNOSTIC-SENTINEL", response.text)
+        self.assertEqual(
+            (await self.call("sync-diagnostics", {"region": "cn"})).status_code, 400
+        )
+        self.assertEqual(
+            (await self.call("sync-diagnostics", {}, headers={})).status_code, 401
+        )
+        wrong_origin = {**self.headers, "Origin": "https://other.test"}
+        self.assertEqual(
+            (await self.call("sync-diagnostics", {}, headers=wrong_origin)).status_code,
+            403,
+        )
+        asset = {
+            **self.headers,
+            "Authorization": "Bearer "
+            + _token(
+                token_type="plugin_page_asset",
+                plugin_name=PLUGIN_NAME,
+                page_name="management",
+            ),
+        }
+        self.assertEqual(
+            (await self.call("sync-diagnostics", {}, headers=asset)).status_code, 401
+        )
+        self.assertEqual(self.pages.requests, {})
+        self.assertEqual(self.runtime._admin_source._proofs, {})
+
+    async def test_calendar_sync_interval_auth_schema_cas_and_refresh(self):
+        name = "ff14_calendar_sync_interval_seconds"
+        owner = "ff14/ff14"
+        catalog = (await self.call("catalog", {})).json()["data"]["fields"]
+        field = next(
+            field
+            for field in catalog
+            if field["module_id"] == owner and field["name"] == name
+        )
+        self.assertEqual(field["description"], "日历同步周期")
+        self.assertEqual(field["group"], "calendar")
+        self.assertEqual(field["default"], 21600)
+        self.assertEqual(
+            field["value_schema"], {"type": "integer", "enum": [21600, 43200, 86400]}
+        )
+        self.assertTrue(field["readable"])
+        self.assertTrue(field["editable"])
+        row = (await self.call("read", {})).json()["data"][owner]
+        self.assertEqual(row["fields"][name]["value"], 21600)
+
+        def body(value):
+            return {
+                "module_id": owner,
+                "expected_revision": row["revision"],
+                "updates": [{"field": name, "mode": "replace", "value": value}],
+            }
+
+        for value in (None, True, False, 0, 900, 21601, 21600.0, "21600"):
+            with self.subTest(value=value):
+                response = await self.call("update", body(value))
+                self.assertEqual(response.status_code, 400, response.text)
+        self.assertEqual(
+            (await self.call("update", body(43200), headers={})).status_code, 401
+        )
+        self.assertEqual((await self.call("read", {})).json()["data"][owner], row)
+        for value in (43200, 86400, 21600):
+            patchdata = body(value)
+            response = await self.call("update", patchdata)
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual((await self.call("update", patchdata)).status_code, 409)
+            row = (await self.call("read", {})).json()["data"][owner]
+            self.assertEqual(row["revision"], response.json()["data"]["revision"])
+            self.assertEqual(row["fields"][name]["value"], value)
+            self.assertEqual(row["fields"][name]["source"], "sqlite")
+        clear = {
+            "module_id": owner,
+            "expected_revision": row["revision"],
+            "updates": [{"field": name, "mode": "clear"}],
+        }
+        response = await self.call("update", clear)
+        self.assertEqual(response.status_code, 200, response.text)
+        row = (await self.call("read", {})).json()["data"][owner]
+        self.assertEqual(
+            row["fields"][name],
+            {"value": 21600, "state": "valid", "source": "default", "present": False},
+        )
+        self.assertFalse(self.runtime.ready)
+        self.assertFalse(self.runtime.core_runtime.started)
         self.assertEqual(self.pages.requests, {})
         self.assertEqual(self.runtime._admin_source._proofs, {})
 
@@ -224,6 +337,7 @@ class AdminPagesTests(unittest.IsolatedAsyncioTestCase):
                 "ff14_calendar_default_days",
                 "ff14_calendar_default_timezone",
                 "ff14_calendar_default_delivery_time",
+                "ff14_calendar_sync_interval_seconds",
             },
         )
         field = next(f for f in declarations if f["name"] == gate)

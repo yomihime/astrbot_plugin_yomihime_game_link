@@ -19,6 +19,7 @@ from .http import (
     TransportRequest,
     _AuthenticatedRequestProof,
 )
+from .sync_diagnostics import emit as diagnostic
 
 _RESPONSE_SECRET_MARKERS = (
     "auth",
@@ -33,6 +34,56 @@ _RESPONSE_SECRET_MARKERS = (
 _CHUNK_SIZE = 64 * 1024
 _BEARER_TOKEN = re.compile(r"Bearer [A-Za-z0-9._~+/=-]+\Z")
 _BASIC_TOKEN = re.compile(r"Basic [A-Za-z0-9+/]+={0,2}\Z")
+
+
+class _ConnectionRetrySuppressed(Exception):
+    """Carry only a fixed family across aiohttp's implicit retry boundary."""
+
+    def __init__(self, code):
+        super().__init__("transport_failed")
+        self.code = code
+
+
+async def _single_connection_attempt(request, handler):
+    """Public client middleware: one controlled request cannot silently replay.
+
+    aiohttp retries ClientOSError/ServerDisconnectedError for idempotent methods.
+    Connector errors already have a no-retry branch; leave those unchanged.
+    Explicit SourceHttp credential refresh remains above this transport boundary.
+    """
+    try:
+        return await handler(request)
+    except (
+        aiohttp.ClientConnectorError,
+        aiohttp.ClientConnectorCertificateError,
+        aiohttp.ClientConnectorSSLError,
+    ):
+        raise
+    except (aiohttp.ClientOSError, aiohttp.ServerDisconnectedError) as exc:
+        raise _ConnectionRetrySuppressed(_transport_error_code(exc)) from None
+
+
+def _transport_error_code(exc):
+    """Closed exception families only; never inspect exception text or URLs."""
+    if type(exc) is _ConnectionRetrySuppressed:
+        return exc.code
+    for name, code in (
+        ("ClientConnectorDNSError", "dns_error"),
+        ("ClientConnectorCertificateError", "tls_error"),
+        ("ClientSSLError", "tls_error"),
+        ("ConnectionTimeoutError", "connect_timeout"),
+        ("SocketTimeoutError", "read_timeout"),
+        ("ServerTimeoutError", "transport_timeout"),
+        ("ClientConnectorError", "connect_error"),
+        ("ServerDisconnectedError", "connection_closed"),
+        ("ClientPayloadError", "response_payload"),
+        ("ClientOSError", "connection_io"),
+        ("ClientError", "other_transport"),
+    ):
+        kind = getattr(aiohttp, name, None)
+        if isinstance(kind, type) and isinstance(exc, kind):
+            return code
+    return "transport_timeout" if isinstance(exc, TimeoutError) else "unknown"
 
 
 class AioHttpTransport:
@@ -78,12 +129,16 @@ class AioHttpTransport:
                 request.max_response_bytes,
             )
         except asyncio.CancelledError:
+            diagnostic("transport_error", code="cancelled")
             raise
-        except SourceHttpError:
+        except SourceHttpError as exc:
+            diagnostic("transport_error", code=exc.code, http_status=exc.status_code)
             raise
-        except asyncio.TimeoutError:
+        except asyncio.TimeoutError as exc:
+            diagnostic("transport_error", code=_transport_error_code(exc))
             raise SourceHttpError("timeout") from None
-        except Exception:
+        except Exception as exc:
+            diagnostic("transport_error", code=_transport_error_code(exc))
             # Do not propagate aiohttp exception text: it can include a URL or
             # upstream-controlled detail. SourceHttp exposes only stable codes.
             raise SourceHttpError("transport_failed") from None
@@ -125,6 +180,8 @@ class AioHttpTransport:
         session = await self._get_session()
         headers = dict(request_headers)
         headers["Accept-Encoding"] = "identity"
+        # An entry count, not proof of headers sent or peer receipt.
+        diagnostic("network_attempt")
         async with session.request(
             method,
             url,
@@ -135,6 +192,7 @@ class AioHttpTransport:
             proxy=self._proxy_url,
             ssl=True,
         ) as response:
+            diagnostic("http_response", http_status=response.status)
             content_encoding = response.headers.get("Content-Encoding", "")
             if content_encoding.strip().lower() not in {"", "identity"}:
                 raise SourceHttpError("invalid_response") from None
@@ -180,6 +238,7 @@ class AioHttpTransport:
                     cookie_jar=aiohttp.DummyCookieJar(),
                     trust_env=False,
                     auto_decompress=False,
+                    middlewares=(_single_connection_attempt,),
                 )
             return self._session
 

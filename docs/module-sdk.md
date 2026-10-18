@@ -1,14 +1,14 @@
 # Game Link module SDK
 
-The independently installable distribution is `yomihime-game-link-sdk==0.1.0a7`. Import its public declarations with `import yomihime_game_link_sdk as ygl`. It requires Python 3.11 or newer and has no third-party runtime dependencies.
+The independently installable distribution is `yomihime-game-link-sdk==0.1.0a8`. Import its public declarations with `import yomihime_game_link_sdk as ygl`. It requires Python 3.11 or newer and has no third-party runtime dependencies.
 
 ## Install and import
 
 Install the reviewed wheel into your module development environment:
 
 ```powershell
-python -m pip install --no-deps ./yomihime_game_link_sdk-0.1.0a7-py3-none-any.whl
-python -I -c "import yomihime_game_link_sdk as ygl; assert ygl.__version__ == '0.1.0a7'; assert ygl.MODULE_ABI_VERSION == '2.0'"
+python -m pip install --no-deps ./yomihime_game_link_sdk-0.1.0a8-py3-none-any.whl
+python -I -c "import yomihime_game_link_sdk as ygl; assert ygl.__version__ == '0.1.0a8'; assert ygl.MODULE_ABI_VERSION == '2.0'"
 ```
 
 The plugin release contains the exact content-pinned SDK from that wheel. Its bootstrap rejects changed contents, foreign package origins, partial preload graphs, and any preloaded retired `yomihime_sdk` graph. The retired root `api` and `yomihime_sdk.api` modules have no compatibility redirects. Historical stored-data readers are separate from module import compatibility.
@@ -56,6 +56,29 @@ as `None`. New cards persist losslessly in a namespaced, versioned representatio
 (including bounded base64 image bytes); unknown card storage versions or types
 are rejected. This does not migrate or overwrite existing records. Downgrading
 to a6 cannot read new card-bearing records and is not a supported rollback path.
+
+## Background collectors
+
+SDK a8 adds `ScheduleTrigger.BACKGROUND` (`"background"`) and the trailing
+`ScheduleDescriptor.background_parameters: tuple[JsonObject, ...] = ()`.
+The DTO remains descriptive: Core validates each fixed parameter set against
+the collector's closed object schema and takes a detached, deeply immutable
+snapshot. Background collectors require PUBLIC ownership and 1–32 parameter
+sets. PERIODIC and ON_DEMAND declarations require the new field to stay empty.
+
+BACKGROUND uses the same minimum, default and configurable interval fields as
+PERIODIC. It runs independently of subscription demand; subscriptions cannot
+reference a background collector. Core's scheduler normalizes the fixed inputs
+through the collector and rejects duplicate normalized collection keys.
+
+Fixed inputs have a total 2048-node budget (including object keys), maximum
+depth 16 per parameter object, 4096 characters per key/string, 256 members per
+container, and 4096-bit integers. Their complete JSON array must fit 64 KiB of
+UTF-8 with `ensure_ascii=False`, `allow_nan=False` and default separators.
+Cycles, non-finite numbers and non-JSON objects are rejected. No credential,
+actor or grant authority may be supplied through these public parameters.
+These declarations do not change module ABI `2.0`, disk/factory protocol `1`,
+or display/facts/storage format `1.8.0`.
 
 ## Injected services and public failures
 

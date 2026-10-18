@@ -6,7 +6,14 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum, StrEnum
 from math import isfinite
-from typing import AsyncContextManager, Awaitable, Callable, Mapping, Protocol
+from typing import (
+    AsyncContextManager,
+    Awaitable,
+    Callable,
+    ContextManager,
+    Mapping,
+    Protocol,
+)
 
 from yomihime_game_link_sdk.contexts import (
     InvocationConversationKind,
@@ -37,6 +44,7 @@ from yomihime_game_link_sdk.storage import (
     GrantReference,
     JsonObject,
     OwnerScope,
+    OwnershipKind,
     RecordPage,
     ResourceMetadata,
     SecretMetadata,
@@ -291,8 +299,11 @@ class ScheduledLease:
     collector_id: str
     key_version: int
     dependencies: tuple[DependencyIdentity, ...]
+    background: bool = False
 
     def __post_init__(self) -> None:
+        if type(self.background) is not bool:
+            raise TypeError("background must be a bool")
         _lease_text(self.lease_id, "lease_id")
         _lease_text(self.execution_lease_id, "execution_lease_id")
         validate_module_id(self.module_id)
@@ -465,6 +476,12 @@ class AdmissionPort(Protocol):
     ) -> DeliveryLease: ...
 
     def check(self, lease: AdmissionLease | ScheduledLease | DeliveryLease) -> None: ...
+
+    def commit_guard(
+        self, lease: AdmissionLease | ScheduledLease | DeliveryLease
+    ) -> ContextManager[None]:
+        """Hold exact admission validity across one synchronous durable commit."""
+        ...
 
     def release(
         self, lease: AdmissionLease | ScheduledLease | DeliveryLease
@@ -1011,6 +1028,8 @@ class CollectionRunRequest:
     config_revision: int
     module_epoch: int
     registry_revision: int
+    background: bool = False
+    lease_seconds: float | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.key, CollectionKey):
@@ -1019,6 +1038,12 @@ class CollectionRunRequest:
         _positive_finite(self.cadence_seconds, "cadence_seconds")
         for name in ("config_revision", "module_epoch", "registry_revision"):
             _positive_int(getattr(self, name), name)
+        if type(getattr(self, "background", None)) is not bool:
+            raise TypeError("background must be a bool")
+        if self.background and self.key.scope.kind is not OwnershipKind.PUBLIC:
+            raise ValueError("background work must be public")
+        if self.lease_seconds is not None:
+            _positive_finite(self.lease_seconds, "lease_seconds")
 
 
 @dataclass(frozen=True, slots=True)
@@ -1085,6 +1110,46 @@ class EvaluationCheckpoint:
 
 
 @dataclass(frozen=True, slots=True)
+class BackgroundJob:
+    """Core-owned registration of one fixed, public manifest parameter set."""
+
+    key: CollectionKey
+    cadence_seconds: float
+    config_revision: int
+    config_target: ConfigTarget
+    declaration_digest: str
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.key, CollectionKey)
+            or self.key.scope.kind is not OwnershipKind.PUBLIC
+        ):
+            raise ValueError("background jobs must have a public collection key")
+        _positive_finite(self.cadence_seconds, "cadence_seconds")
+        _positive_int(self.config_revision, "config_revision")
+        ConfigTarget_validate(self.config_target)
+        if self.config_target.module_id != self.key.module_id:
+            raise ValueError("background configuration target differs")
+        if (
+            type(self.declaration_digest) is not str
+            or len(self.declaration_digest) != 64
+        ):
+            raise ValueError("background declaration digest is invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class BackgroundFence:
+    """Durable background generation and enabled module intent, never a user."""
+
+    generation: int
+    intent_revision: int
+
+    def __post_init__(self) -> None:
+        _positive_int(self.generation, "generation")
+        _positive_int(self.intent_revision, "intent_revision")
+
+
+@dataclass(frozen=True, slots=True)
 class ExecutionLease:
     key: CollectionKey
     token: str
@@ -1093,6 +1158,7 @@ class ExecutionLease:
     registry_revision: int
     expires_at: datetime
     subscription_fence: SubscriptionFence | None = None
+    background_fence: BackgroundFence | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.key, CollectionKey):
@@ -1106,6 +1172,16 @@ class ExecutionLease:
             and type(self.subscription_fence) is not SubscriptionFence
         ):
             raise TypeError("lease subscription fence is invalid")
+        if self.background_fence is not None:
+            if type(self.background_fence) is not BackgroundFence:
+                raise TypeError("lease background fence is invalid")
+            if (
+                self.subscription_fence is not None
+                or self.key.scope.kind is not OwnershipKind.PUBLIC
+            ):
+                raise ValueError(
+                    "background leases cannot carry subscription authority"
+                )
 
 
 class SchedulerRepository(Protocol):
@@ -1117,6 +1193,21 @@ class SchedulerRepository(Protocol):
     module epoch, and registry revision. A stale, revoked, disabled, expired,
     or mismatched result returns False and is not committed.
     """
+
+    async def reconcile_background_jobs(
+        self, jobs: tuple[BackgroundJob, ...], *, now: datetime
+    ) -> None:
+        """Reconcile exact manifest jobs, preserving due times across restarts.
+
+        Only enabled durable module intents and the exact current configuration
+        revision admit jobs. Removed declarations become inactive and invalidate
+        outstanding background claims. Subscription associations are untouched.
+        """
+        ...
+
+    async def previous_background_observation(
+        self, lease: ExecutionLease
+    ) -> Observation | None: ...
 
     async def claim_due(
         self, request: CollectionRunRequest, *, now: datetime
@@ -1146,7 +1237,8 @@ class SchedulerRepository(Protocol):
         Candidates contain the full key, due time, cadence, config revision,
         and cursor. Order by (due_at, job_key) and use strict greater-than
         after_cursor comparison. Return only due rows with an active current
-        subscription association and no unexpired lease. The scheduler obtains
+        subscription association or a current explicit background registration,
+        and no unexpired lease. The scheduler obtains
         current enabled module epoch and registry revision from Registry before
         claiming. Persisted values never attest current module state. Caller
         advances past every returned row, including live-check rejects, and
@@ -1201,6 +1293,7 @@ class SchedulerRepository(Protocol):
         commit: ObservationEvaluationCommit,
         *,
         next_due_at: datetime | None = None,
+        commit_guard: Callable[[], ContextManager[None]] | None = None,
     ) -> bool:
         """Atomically commit observation, CAS states/cursors, and outputs.
 
@@ -1213,9 +1306,13 @@ class SchedulerRepository(Protocol):
         the entire commit. Evaluation pipelines must use this method instead
         of splitting writes across ``commit_observation`` and later repository
         calls. The scheduler must also check the current Registry snapshot
-        immediately before this call. Without a lock shared with Registry, the
-        snapshot check and database commit are not linearizable with concurrent
-        module disable; this contract makes no stronger claim. Optional
+        immediately before this call. Optional ``commit_guard`` is Core-owned:
+        enter it at transaction entry and again around actual COMMIT, alongside
+        a fresh lease-expiry check. The actual COMMIT must recheck live lease
+        expiry even without this optional guard, including safe FAILED outcomes.
+        Its caller supplies deadline/cancellation
+        and registration/admission locks. Without it the legacy preflight
+        contract makes no stronger concurrent-disable claim. Optional
         ``next_due_at`` is an explicit UTC reschedule chosen by the scheduler
         from completion time, outcome, configured backoff, and configured
         jitter. It must be later than the observation collection time and is

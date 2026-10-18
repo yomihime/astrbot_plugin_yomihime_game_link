@@ -32,6 +32,7 @@ from yomihime_game_link_sdk.display import (
 from yomihime_game_link_sdk.results import CapabilityResult, ErrorCode, ResultStatus
 
 from ...core.contracts.validation_boundary import validate_contract
+from ...core.invocation_budget import freeze_execution_timeouts
 from ...core.ports import PublicWebBinding
 from ...core.public_result import public_fact_strings
 
@@ -172,11 +173,15 @@ class HostPublicWebValidator:
         current,
         *,
         bindings=None,
+        capability_timeouts=None,
         clock=monotonic,
         wall_clock=time,
     ):
         self._generation = generation
         self._bindings = dict(bindings or {})
+        self._capability_timeouts = freeze_execution_timeouts(
+            capability_timeouts, targets=set(self._bindings.values())
+        )
         self._current = current
         self._clock, self._wall_clock = clock, wall_clock
         self._salt = secrets.token_bytes(32)
@@ -211,8 +216,9 @@ class HostPublicWebValidator:
         if endpoint not in self._bindings or type(expiry) is not int:
             raise WebPublicRejected("request_rejected")
         now = self._clock()
+        ttl = self._capability_timeouts.get(self._bindings[endpoint], PROOF_TTL)
         deadline = min(
-            (now if started_at is None else started_at) + PROOF_TTL,
+            (now if started_at is None else started_at) + ttl,
             now + expiry - self._wall_clock(),
         )
         ticket = object()

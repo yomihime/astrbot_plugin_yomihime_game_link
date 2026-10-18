@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
+from threading import RLock
 from types import MappingProxyType
 
 from yomihime_game_link_sdk.declarations import ModuleManifest, PackageManifest
@@ -110,6 +112,7 @@ class Registry:
     """Own the current package set and publish whole immutable snapshots."""
 
     def __init__(self) -> None:
+        self._snapshot_lock = RLock()
         self._packages: set[str] = set()
         self._observers: set[Callable[[], None]] = set()
         self._lifecycle_owner: object | None = None
@@ -138,6 +141,21 @@ class Registry:
         """Return the current snapshot object without copying or mutating it."""
 
         return self._snapshot
+
+    @contextmanager
+    def _snapshot_guard(self) -> Iterator[RegistrySnapshot]:
+        """Fence a synchronous durable commit against snapshot publication.
+
+        Async callers must not await while holding this short worker-side
+        guard. This orders registration changes, not admission gate closure.
+        """
+        with self._snapshot_lock:
+            yield self._snapshot
+
+    def _publish_snapshot(self, snapshot: RegistrySnapshot) -> None:
+        with self._snapshot_lock:
+            self._snapshot = snapshot
+        self._notify()
 
     def is_active(self, module_id: str | RegisteredModule) -> bool:
         """Consult the Lifecycle owner; intent alone never proves availability."""
@@ -221,8 +239,7 @@ class Registry:
             tools=candidate_tools,
         )
         self._packages.add(manifest.package_id)
-        self._snapshot = new_snapshot
-        self._notify()
+        self._publish_snapshot(new_snapshot)
         return new_snapshot
 
     def set_enabled(self, module_id: str, enabled: bool) -> RegistrySnapshot:
@@ -258,8 +275,7 @@ class Registry:
             routes=old.routes,
             tools=old.tools,
         )
-        self._snapshot = new_snapshot
-        self._notify()
+        self._publish_snapshot(new_snapshot)
         return new_snapshot
 
     def _bind_lifecycle_owner(
@@ -307,8 +323,7 @@ class Registry:
             routes=old.routes,
             tools=old.tools,
         )
-        self._snapshot = updated
-        self._notify()
+        self._publish_snapshot(updated)
         return updated
 
     def _install_lifecycle_handlers(
@@ -333,8 +348,7 @@ class Registry:
             routes=old.routes,
             tools=old.tools,
         )
-        self._snapshot = updated
-        self._notify()
+        self._publish_snapshot(updated)
         return updated
 
     def _detach_lifecycle_module(self, owner, module_id):
@@ -342,17 +356,17 @@ class Registry:
             raise RegistryError("only quiescent Lifecycle owner may detach a module")
         old = self._snapshot
         old.module(module_id)
-        self._snapshot = RegistrySnapshot(
+        updated = RegistrySnapshot(
             old.revision + 1,
             {key: value for key, value in old.modules.items() if key != module_id},
             {key: value for key, value in old.routes.items() if value != module_id},
             {key: value for key, value in old.tools.items() if value[0] != module_id},
         )
         package_id = module_id.split("/", 1)[0]
-        if not any(key.startswith(package_id + "/") for key in self._snapshot.modules):
+        if not any(key.startswith(package_id + "/") for key in updated.modules):
             self._packages.discard(package_id)
-        self._notify()
-        return self._snapshot
+        self._publish_snapshot(updated)
+        return updated
 
     def _restore_lifecycle_module(self, owner, package_id, manifest, handlers):
         if owner is not self._lifecycle_owner:
@@ -366,7 +380,7 @@ class Registry:
         ):
             raise RegistryError("restored module indexes conflict")
         self._validate_handlers(manifest, handlers)
-        self._snapshot = RegistrySnapshot(
+        updated = RegistrySnapshot(
             old.revision + 1,
             {
                 **old.modules,
@@ -382,8 +396,8 @@ class Registry:
             },
         )
         self._packages.add(package_id)
-        self._notify()
-        return self._snapshot
+        self._publish_snapshot(updated)
+        return updated
 
     @staticmethod
     def _validate_handlers(module: ModuleManifest, handlers: ModuleHandlers) -> None:

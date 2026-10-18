@@ -957,7 +957,7 @@ elif mismatch == 'abi':
 elif mismatch == 'path':
     sdk.__file__ = str(Path(root).parent / 'foreign-sdk' / '__init__.py')
 elif mismatch == 'future':
-    sdk.__version__ = '0.1.0a8'
+    sdk.__version__ = '0.1.0a9'
 else:
     raise AssertionError('unknown probe')
 try:

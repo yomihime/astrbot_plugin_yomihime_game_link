@@ -51,6 +51,8 @@ from yomihime_game_link_sdk.results import (
 
 from ..core.contracts.validation import validate_parameters
 from ..core.contracts.validation_boundary import validate_contract
+from ..infrastructure.sync_diagnostics import SyncDiagnostics
+from ..infrastructure.sync_diagnostics import emit as diagnostic
 from .context_issuer import ContextIssuer, InvalidInvocation
 from .invocation_budget import InvocationBudgetPolicy
 from .lifecycle import LifecycleController, LifecycleError
@@ -127,7 +129,9 @@ class _PublicWebFlight:
             task.cancel()
             raise
 
-    def seal(self) -> None:
+    def seal(self, diagnostic_reason=None) -> None:
+        if diagnostic_reason is not None:
+            diagnostic("core_failure", code=diagnostic_reason)
         if not self.sealed:
             self.sealed = True
             try:
@@ -183,6 +187,7 @@ class Gateway:
         handler_timeout: float = 30.0,
         budget_policy: InvocationBudgetPolicy | None = None,
         clock: Callable[[], float] = monotonic,
+        diagnostics: SyncDiagnostics | None = None,
     ) -> None:
         validate_contract(private_authorizer)
         validate_contract(public_fact_guard)
@@ -206,6 +211,7 @@ class Gateway:
         if private_authorizer is not None and not callable(private_authorizer):
             raise TypeError("private_authorizer must be callable")
         self._public_fact_guard = public_fact_guard
+        self._sync_diagnostics = diagnostics
         if owner_authority is not None and any(
             not callable(getattr(owner_authority, name, None))
             for name in ("capture", "require_current")
@@ -290,7 +296,11 @@ class Gateway:
                 registry_revision=snapshot.revision,
                 generation=self._web_generation,
                 deadline=self._budget_policy.deadline(
-                    InvocationOrigin.WEB_PUBLIC, self._clock(), self._handler_timeout
+                    InvocationOrigin.WEB_PUBLIC,
+                    self._clock(),
+                    self._handler_timeout,
+                    module_id=module_id,
+                    capability_id=capability_id,
                 ),
             )
             binding = self._issuer.public_web_binding(view)
@@ -310,6 +320,16 @@ class Gateway:
             return _error(ErrorCode.RATE_LIMITED)
         flight = _PublicWebFlight(self, view, binding.bearer_key)
         self._web_flights[view.invocation_id] = flight
+        diagnostic_token = None
+        if self._sync_diagnostics is not None:
+            diagnostic_token = self._sync_diagnostics.activate(
+                view.invocation_id, view.origin.value
+            )
+            diagnostic(
+                "core_start",
+                budget_ms=max(0, int((view.deadline - self._clock()) * 1000)),
+            )
+        invocation_completed = False
 
         async def execute() -> CapabilityResult:
             with observe_tasks(flight):
@@ -323,13 +343,14 @@ class Gateway:
             flight.root = task
             flight.register(task)
             flight.timer = asyncio.get_running_loop().call_later(
-                max(0.0, view.deadline - self._clock()), flight.seal
+                max(0.0, view.deadline - self._clock()), flight.seal, "core_deadline"
             )
             done, _ = await asyncio.wait(
                 {task}, timeout=max(0.0, view.deadline - self._clock())
             )
             if done and not task.cancelled():
                 result = task.result()
+                invocation_completed = True
                 if result.status in (
                     ResultStatus.SUCCESS,
                     ResultStatus.PARTIAL_SUCCESS,
@@ -339,7 +360,10 @@ class Gateway:
                         flight, binding.generation, active=True
                     )
         except asyncio.CancelledError:
+            diagnostic("core_final", code="cancelled")
             flight.seal()
+            if self._sync_diagnostics is not None:
+                self._sync_diagnostics.reset(diagnostic_token)
             raise
         except Exception:
             result = _error(ErrorCode.MODULE_UNAVAILABLE)
@@ -358,7 +382,21 @@ class Gateway:
                 # or close the gateway. Recheck after intentional proof release.
                 self._require_web_publication(flight, binding.generation, active=False)
             except Exception:
+                diagnostic(
+                    "core_final",
+                    code="error",
+                    capability_status=ResultStatus.ERROR.value,
+                )
+                if self._sync_diagnostics is not None:
+                    self._sync_diagnostics.reset(diagnostic_token)
                 return _error(ErrorCode.MODULE_UNAVAILABLE)
+        diagnostic(
+            "core_final",
+            code="completed" if invocation_completed else "error",
+            capability_status=result.status.value,
+        )
+        if self._sync_diagnostics is not None:
+            self._sync_diagnostics.reset(diagnostic_token)
         return result
 
     def _require_web_publication(
@@ -430,8 +468,16 @@ class Gateway:
                 self._require_current(view, lease)
             return checked
         except asyncio.CancelledError:
+            diagnostic("core_failure", code="cancelled")
             raise
+        except ScopeDeadlineExceeded:
+            diagnostic("core_failure", code="core_deadline")
+            return _error(ErrorCode.MODULE_UNAVAILABLE)
+        except (ScopeCancelled, ScopeStaleError):
+            diagnostic("core_failure", code="stale")
+            return _error(ErrorCode.MODULE_UNAVAILABLE)
         except Exception:
+            diagnostic("core_failure", code="error")
             return _error(ErrorCode.MODULE_UNAVAILABLE)
 
     async def invoke_command(
@@ -626,9 +672,31 @@ class Gateway:
             except Exception:
                 return denied(ErrorCode.UNKNOWN)
 
+        diagnostic_token = None
+        if self._sync_diagnostics is not None:
+            diagnostic_token = self._sync_diagnostics.activate(
+                trusted.invocation_id,
+                trusted.origin.value,
+                public=not private and trusted.grant_id is None,
+            )
+
+        def finish(outcome, code="completed"):
+            diagnostic("core_final", code=code, capability_status=outcome.status.value)
+            if self._sync_diagnostics is not None:
+                self._sync_diagnostics.reset(diagnostic_token)
+            return outcome
+
         try:
             deadline = self._budget_policy.deadline(
-                trusted.origin, self._clock(), self._handler_timeout, trusted.deadline
+                trusted.origin,
+                self._clock(),
+                self._handler_timeout,
+                trusted.deadline,
+                module_id=trusted.module_id,
+                capability_id=capability_id,
+            )
+            diagnostic(
+                "core_start", budget_ms=max(0, int((deadline - self._clock()) * 1000))
             )
             scope = lifecycle.scope(trusted.module_id)
 
@@ -658,6 +726,9 @@ class Gateway:
                 deadline_monotonic=deadline,
             )
         except asyncio.CancelledError:
+            diagnostic("core_final", code="cancelled")
+            if self._sync_diagnostics is not None:
+                self._sync_diagnostics.reset(diagnostic_token)
             raise
         except (
             _MessageSourceRejected,
@@ -665,10 +736,17 @@ class Gateway:
             ScopeDeadlineExceeded,
             ScopeStaleError,
             LifecycleError,
-        ):
-            return denied(ErrorCode.MODULE_UNAVAILABLE)
+        ) as exc:
+            diagnostic(
+                "core_failure",
+                code="core_deadline"
+                if isinstance(exc, ScopeDeadlineExceeded)
+                else "stale",
+            )
+            return finish(denied(ErrorCode.MODULE_UNAVAILABLE), "error")
         except Exception:
-            return denied(ErrorCode.UNKNOWN)
+            diagnostic("core_failure", code="error")
+            return finish(denied(ErrorCode.UNKNOWN), "error")
 
         # Re-check both authority and static state after an await.  This closes
         # the release/disable race for handlers that complete late.
@@ -686,13 +764,15 @@ class Gateway:
                 self._require_private_grant(grant, trusted)
                 self._require_current(trusted, lease)
         except Exception:
-            return denied(ErrorCode.MODULE_UNAVAILABLE)
+            diagnostic("core_failure", code="error")
+            return finish(denied(ErrorCode.MODULE_UNAVAILABLE), "error")
 
         try:
             privacy = Privacy.PRIVATE if private else Privacy.PUBLIC
-            return self._valid_result(result, expected_privacy=privacy)
+            return finish(self._valid_result(result, expected_privacy=privacy))
         except Exception:
-            return denied(ErrorCode.UNKNOWN)
+            diagnostic("core_failure", code="validation_error")
+            return finish(denied(ErrorCode.UNKNOWN), "error")
 
     def _require_current(self, view: InvocationView, lease: object) -> None:
         validate_contract(view)

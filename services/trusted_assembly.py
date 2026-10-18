@@ -12,6 +12,7 @@ from yomihime_game_link_sdk.declarations import InvocationPolicy, SourceDeclarat
 from yomihime_game_link_sdk.services import ConfigTarget
 
 from ..core.contracts.validation_boundary import validate_contract
+from ..core.invocation_budget import freeze_execution_timeouts
 from ..extensions.disk_manifest import parse_manifest
 from .configuration_migration import OrdinaryMigrationField
 from .core_configuration import (
@@ -57,6 +58,8 @@ class ReviewedAssembly:
     migration_id: str
     public_bindings: Mapping
     support: object
+    capability_timeouts: Mapping | None = None
+    collector_timeouts: Mapping | None = None
 
     @property
     def public_capabilities(self):
@@ -160,7 +163,7 @@ def assemble_reviewed(inventory, *, principal_id, support, selected=False):
         raise ValueError("invalid assembly JSON") from exc
     nodes = 0
 
-    def walk(value, depth=0):
+    def walk(value, depth=0, *, budget=False):
         nonlocal nodes
         nodes += 1
         if nodes > 512 or depth > 8:
@@ -170,11 +173,17 @@ def assemble_reviewed(inventory, *, principal_id, support, selected=False):
         elif type(value) is dict:
             for key, child in value.items():
                 _string(key)
-                walk(child, depth + 1)
+                walk(
+                    child,
+                    depth + 1,
+                    budget=budget or depth == 0 and key == "execution_budgets",
+                )
         elif type(value) is list:
             for child in value:
-                walk(child, depth + 1)
-        elif value is not None and type(value) not in (bool, int):
+                walk(child, depth + 1, budget=budget)
+        elif value is not None and type(value) not in (
+            (bool, int, float) if budget else (bool, int)
+        ):
             raise ValueError("invalid assembly value")
 
     walk(descriptor)
@@ -190,7 +199,8 @@ def assemble_reviewed(inventory, *, principal_id, support, selected=False):
             "public",
             "page_sources",
             "credential_regions",
-        ),
+        )
+        + (("execution_budgets",) if "execution_budgets" in descriptor else ()),
     )
     if (
         type(descriptor["version"]) is not int
@@ -198,6 +208,23 @@ def assemble_reviewed(inventory, *, principal_id, support, selected=False):
         or descriptor["module_id"] != owner
     ):
         raise ValueError("assembly version or owner mismatch")
+    timeouts = {}
+    raw_budgets = descriptor.get(
+        "execution_budgets", {"capabilities": {}, "collectors": {}}
+    )
+    _keys(raw_budgets, ("capabilities", "collectors"))
+    for kind, declarations, identifier in (
+        ("capabilities", module.capabilities, "capability_id"),
+        ("collectors", module.schedules, "collector_id"),
+    ):
+        values = raw_budgets[kind]
+        if type(values) is not dict:
+            raise ValueError("invalid assembly execution budgets")
+        targets = {(owner, getattr(item, identifier)) for item in declarations}
+        timeouts[kind] = freeze_execution_timeouts(
+            {(owner, name): seconds for name, seconds in values.items()},
+            targets=targets,
+        )
     fields = {f.name: f for f in module.config_fields}
     sources = {s.source_id: s for s in module.sources}
     hosts = descriptor["sources"]
@@ -385,4 +412,6 @@ def assemble_reviewed(inventory, *, principal_id, support, selected=False):
                 }
             )
         ),
+        timeouts["capabilities"],
+        timeouts["collectors"],
     )

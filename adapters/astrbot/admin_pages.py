@@ -27,6 +27,7 @@ _OPERATIONS = {
     "font-retry": AdminOperation.UPDATE_CONFIG,
     "font-upload": AdminOperation.UPDATE_CONFIG,
     "read": AdminOperation.READ_CONFIG,
+    "sync-diagnostics": AdminOperation.READ_CONFIG,
     "catalog": AdminOperation.READ_CONFIG,
     "update": AdminOperation.UPDATE_CONFIG,
     "rollback": AdminOperation.ROLLBACK_CONFIG,
@@ -202,6 +203,16 @@ class AdminPages:
 
     async def _invoke(self, endpoint, core, data, context):
         ops = core.admin_operations
+        if endpoint == "sync-diagnostics":
+            if data:
+                raise ValueError("diagnostic parameters must be empty")
+            await core.admin_authorization.authorize(
+                AdminOperation.READ_CONFIG,
+                invocation=None,
+                context=context,
+                resources=ops.ordinary_resources(),
+            )
+            return core.sync_diagnostics.snapshot()
         if endpoint.startswith("font-"):
             current, source = self.runtime.management_entry()
             if current is not core:
