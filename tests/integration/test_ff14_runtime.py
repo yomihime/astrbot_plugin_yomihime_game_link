@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import re
 import shutil
 import tempfile
@@ -42,6 +43,8 @@ class _CalendarTransport:
     """Offline HTTP boundary; Core, collector, parser, and scheduler stay real."""
 
     def __init__(self, event_local_date) -> None:
+        self.clock_ready = asyncio.Event()
+        self.request_started = asyncio.Event()
         self.primary_unavailable = False
         self.fallback_unavailable = False
         self.requests: list[TransportRequest] = []
@@ -61,6 +64,8 @@ class _CalendarTransport:
         ).encode("ascii")
 
     async def request(self, request: TransportRequest) -> HttpResponse:
+        self.request_started.set()
+        await self.clock_ready.wait()
         self.requests.append(request)
         if request.source_id == "ff14_calendar_primary":
             if self.primary_unavailable:
@@ -195,11 +200,45 @@ class FF14CalendarRuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 authorization=self._admin_context,
             )
             self.assertEqual(enabled.lifecycle.value, "active")
-        # Inject only the deterministic clock seam into the real loaded collector.
-        collector = runtime.lifecycle.handlers(GLOBAL_MODULE_ID).collectors[
-            "ff14.calendar.collect"
-        ]
-        collector._clock = self.clock
+        # Freeze every clock in the real shared snapshot/collector graph before
+        # releasing the transport. Startup background work must not mix real
+        # wall time with this deterministic subscription clock.
+        handlers = runtime.lifecycle.handlers(GLOBAL_MODULE_ID)
+        for collector_id in ("ff14.calendar.collect", "ff14.calendar.sync"):
+            collector = handlers.collectors[collector_id]
+            collector._clock = self.clock
+            collector._snapshots.clock = self.clock
+        self.transport.clock_ready.set()
+        initial_requests = len(self.transport.requests)
+        await runtime.scheduler.run_due_page()
+        await asyncio.gather(*tuple(runtime.scheduler._active.values()))
+        completed = await runtime.database.executor.run_read(
+            lambda unit: tuple(
+                row[0]
+                for row in unit.execute(
+                    "SELECT o.completeness FROM b04_background_jobs b "
+                    "JOIN b04_collection_jobs j ON j.job_key=b.job_key "
+                    "JOIN b04_observations o ON o.observation_id=j.observation_id"
+                )
+            )
+        )
+        self.assertEqual(completed, ("complete", "complete"))
+        if initial_requests == 0:
+            self.assertEqual(
+                [request.source_id for request in self.transport.requests],
+                ["ff14_calendar_primary", "ff14_calendar_primary"],
+            )
+            self.assertEqual(
+                len({request.path for request in self.transport.requests}), 2
+            )
+            self.assertTrue(
+                all(
+                    request.credential_ref is None
+                    for request in self.transport.requests
+                )
+            )
+        else:
+            self.assertEqual(len(self.transport.requests), initial_requests)
         return runtime
 
     @staticmethod
@@ -444,6 +483,28 @@ class FF14CalendarRuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
         self.transport.primary_unavailable = True
         self.transport.fallback_unavailable = True
+        requests_before = len(self.transport.requests)
+        self.clock.advance(timedelta(minutes=20))
+        self.assertEqual(await self._run_collection(), 1)
+        cached_snapshot = (
+            await self.runtime.b04_repositories.scheduler.current_evaluation(
+                alice_id, alice.collection_key
+            )
+        )
+        # Reminder cadence only re-evaluates the successful local snapshot.
+        self.assertNotEqual(
+            cached_snapshot.observation.observation_id, last_complete_observation_id
+        )
+        self.assertEqual(len(self.transport.requests), requests_before)
+        fetched_at = cached_snapshot.observation.payload["source_fetched_at"]
+        self.assertEqual(await self.runtime.delivery.dispatch_due_events(), 0)
+
+        # The independent six-hour schedule attempts primary+fallback for both
+        # regions, keeps the complete data on failure, and never duplicates a
+        # consumed daily notification.
+        self.clock.advance(timedelta(hours=5, minutes=20))
+        self.assertEqual(await self._run_collection(), 3)
+        self.assertEqual(len(self.transport.requests), requests_before + 4)
         self.clock.advance(timedelta(minutes=20))
         self.assertEqual(await self._run_collection(), 1)
         failed_snapshot = (
@@ -452,18 +513,27 @@ class FF14CalendarRuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         self.assertEqual(
-            failed_snapshot.observation.observation_id,
-            last_complete_observation_id,
+            failed_snapshot.observation.payload["source_fetched_at"], fetched_at
         )
         self.assertEqual(await self.runtime.delivery.dispatch_due_events(), 0)
         self.assertEqual(len(self.message_port.calls), message_count + 2)
 
         self.transport.fallback_unavailable = False
+        self.clock.advance(timedelta(hours=5, minutes=40))
+        self.assertEqual(await self._run_collection(), 3)
+        self.assertEqual(len(self.transport.requests), requests_before + 8)
         self.clock.advance(timedelta(minutes=20))
         self.assertEqual(await self._run_collection(), 1)
-        self.assertIn(
-            "ff14_calendar_fallback",
-            [request.source_id for request in self.transport.requests],
+        switched_snapshot = (
+            await self.runtime.b04_repositories.scheduler.current_evaluation(
+                alice_id, alice.collection_key
+            )
+        )
+        self.assertEqual(
+            switched_snapshot.observation.payload["source_id"], "ff14_calendar_fallback"
+        )
+        self.assertNotEqual(
+            switched_snapshot.observation.payload["source_fetched_at"], fetched_at
         )
         self.assertEqual(await self.runtime.delivery.dispatch_due_events(), 0)
         self.assertEqual(len(self.message_port.calls), message_count + 2)
@@ -484,6 +554,87 @@ class FF14CalendarRuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         self.assertEqual(recovered_unknown.state, DeliveryState.UNKNOWN)
+
+    async def test_background_outcomes_validate_and_never_advance_last_good_on_failure(
+        self,
+    ):
+        # Startup has already committed two complete observations through the
+        # real collector, Core validator, lease and SQLite transaction.
+        async def state():
+            return await self.runtime.database.executor.run_read(
+                lambda unit: (
+                    tuple(
+                        row[0]
+                        for row in unit.execute(
+                            "SELECT observation_id FROM b04_collection_jobs ORDER BY job_key"
+                        )
+                    ),
+                    unit.execute("SELECT COUNT(*) FROM b04_observations").fetchone()[0],
+                )
+            )
+
+        good_ids, count = await state()
+        self.assertEqual(len(good_ids), 2)
+        self.assertTrue(all(good_ids))
+        original_feed = self.transport.calendar_ics
+        self.transport.fallback_unavailable = True
+        for partial in (True, False):
+            self.clock.advance(timedelta(hours=6))
+            self.transport.calendar_ics = original_feed.replace(
+                b"END:VCALENDAR\r\n", b""
+            )
+            self.transport.primary_unavailable = not partial
+            jobs = await self.runtime.b04_repositories.scheduler.list_due_jobs(
+                now=self.clock(), limit=10
+            )
+            self.assertEqual(len(jobs), 2)
+            results = await asyncio.gather(
+                *(self.runtime.scheduler.run_due_job(job) for job in jobs)
+            )
+            for result in results:
+                self.assertTrue(result.committed)
+                self.assertFalse(
+                    result.failed,
+                    "collector must return a valid explicit outcome, not throw",
+                )
+                observation = validate_contract(result.observation)
+                self.assertEqual(observation.completeness.value, "failed")
+                self.assertEqual(observation.covered_ids, ())
+                self.assertIn(observation.payload["region"], ("cn", "global"))
+                self.assertIn("source_fetched_at", observation.payload)
+                self.assertEqual(
+                    observation.payload["source_fetched_at"],
+                    datetime(2026, 1, 14, 23, 59, tzinfo=UTC).isoformat(),
+                )
+            current_ids, new_count = await state()
+            self.assertEqual(current_ids, good_ids)
+            self.assertEqual(new_count, count + 2)
+            count = new_count
+            self.assertEqual(await self._run_collection(), 0)
+
+        # Cancellation propagates through Core and cannot publish any outcome
+        # or replace the last-good pointer, even after a source claim exists.
+        self.clock.advance(timedelta(hours=6))
+        self.transport.clock_ready.clear()
+        self.transport.request_started.clear()
+        candidate = (
+            await self.runtime.b04_repositories.scheduler.list_due_jobs(
+                now=self.clock(), limit=10
+            )
+        )[0]
+        task = asyncio.create_task(self.runtime.scheduler.run_due_job(candidate))
+        await asyncio.wait_for(self.transport.request_started.wait(), timeout=5)
+        self.assertTrue(await self.runtime.scheduler.cancel_local(candidate.key))
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        self.transport.clock_ready.set()
+        self.assertEqual(await state(), (good_ids, count))
+        leases = await self.runtime.database.executor.run_read(
+            lambda unit: unit.execute(
+                "SELECT COUNT(*) FROM b04_collection_jobs WHERE lease_token IS NOT NULL"
+            ).fetchone()[0]
+        )
+        self.assertEqual(leases, 0)
 
     async def test_revision_cancel_cas_and_delivery_history(self) -> None:
         subscription_id = await self._subscribe("alice")

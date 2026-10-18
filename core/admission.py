@@ -13,6 +13,7 @@ from uuid import uuid4
 from yomihime_game_link_sdk.contexts import InvocationView
 from yomihime_game_link_sdk.declarations import CapabilityReference, ModuleManifest
 from yomihime_game_link_sdk.services import CapabilityHealth, HealthReport, HealthStatus
+from yomihime_game_link_sdk.subscriptions import ScheduleTrigger
 
 from ..core.contracts.validation_boundary import validate_contract
 from .context_issuer import ContextIssuer, InvalidInvocation
@@ -195,6 +196,9 @@ class AdmissionController(AdmissionPort):
             or execution.key.scope.kind is not schedule.shared_scope
         ):
             raise AdmissionError("scheduler claim does not match its declaration")
+        background = schedule.trigger is ScheduleTrigger.BACKGROUND
+        if background != (execution.background_fence is not None):
+            raise AdmissionError("scheduler claim trigger authority differs")
         lease = ScheduledLease(
             lease_id=uuid4().hex,
             execution_lease_id=execution.token,
@@ -204,6 +208,7 @@ class AdmissionController(AdmissionPort):
             collector_id=collector_id,
             key_version=execution.key.key_version,
             dependencies=(),
+            background=background,
         )
         self._record(
             lease,

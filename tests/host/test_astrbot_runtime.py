@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import shutil
 import tempfile
@@ -142,9 +143,20 @@ class _ItemReplyTransport(_IdleTransport):
     def __init__(self) -> None:
         super().__init__()
         self.requests: list[object] = []
+        self.calendar_ready = asyncio.Event()
 
     async def request(self, request) -> HttpResponse:
         self.requests.append(request)
+        if request.source_id == "ff14_calendar_primary":
+            if sum(r.source_id == "ff14_calendar_primary" for r in self.requests) == 2:
+                self.calendar_ready.set()
+            return validate_contract(
+                HttpResponse(
+                    200,
+                    {"content-type": "text/calendar"},
+                    b"BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Tests//EN\r\nEND:VCALENDAR\r\n",
+                )
+            )
         if request.source_id == "xivapi_items":
             body = {
                 "row_id": 100,
@@ -218,6 +230,9 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.temporary = tempfile.TemporaryDirectory(
             prefix="ygl-astrbot-runtime-", dir=ROOT
         )
+        # Registered first, so later async runtime termination runs before the
+        # directory is deleted (unittest cleanups are LIFO, after tearDown).
+        self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
         self.data_dir = self.root / "plugin-data"
         self.data_dir.mkdir()
@@ -230,7 +245,7 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
         )
 
     def tearDown(self) -> None:
-        self.temporary.cleanup()
+        """Directory cleanup is deferred until registered async cleanup finishes."""
 
     def _rewrite_source(
         self, source_id: str, *, host: str | None = None, remove: bool = False
@@ -1800,11 +1815,121 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await runtime.terminate()
 
+    async def _assert_initial_public_calendar_sync(
+        self, runtime, transport, *, expect_cached=False
+    ):
+        # Enabling the real module deliberately schedules both public regions,
+        # even without subscriptions. Observe the cost rather than filtering it
+        # out of item/FFLogs assertions below.
+        core = runtime.core_runtime
+        if expect_cached:
+            self.assertFalse(core.scheduler._active)
+            self.assertFalse(transport.calendar_ready.is_set())
+            self.assertEqual(transport.requests, [])
+        else:
+            await asyncio.wait_for(transport.calendar_ready.wait(), timeout=5)
+            await asyncio.gather(*tuple(core.scheduler._active.values()))
+            self.assertEqual(len(transport.requests), 2)
+        completed = await core.database.executor.run_read(
+            lambda unit: tuple(
+                row[0]
+                for row in unit.execute(
+                    "SELECT o.completeness FROM b04_background_jobs b "
+                    "JOIN b04_collection_jobs j ON j.job_key=b.job_key "
+                    "JOIN b04_observations o ON o.observation_id=j.observation_id"
+                )
+            )
+        )
+        self.assertEqual(completed, ("complete", "complete"))
+        from ygl_test_subject.modules.ff14.features.calendar_evaluator import (
+            calendar_source_spec,
+        )
+
+        if expect_cached:
+            # A real restart retains last-good observations and future due times.
+            # Missing/stale records or overdue work must never pass as a hot hit.
+            now = core._utc_clock()
+            due_times, records = await core.database.executor.run_read(
+                lambda unit: (
+                    tuple(
+                        row[0]
+                        for row in unit.execute(
+                            "SELECT j.due_at FROM b04_background_jobs b "
+                            "JOIN b04_collection_jobs j ON j.job_key=b.job_key "
+                            "WHERE b.module_id='ff14/ff14' AND b.active=1"
+                        )
+                    ),
+                    tuple(
+                        (row[0], row[1])
+                        for row in unit.execute(
+                            "SELECT record_key, payload_json FROM module_records "
+                            "WHERE module_id='ff14/ff14' "
+                            "AND collection='calendar_snapshots' "
+                            "AND owner_kind='public'"
+                        )
+                    ),
+                )
+            )
+            self.assertEqual(len(due_times), 2)
+            for due in due_times:
+                self.assertGreater(datetime.fromisoformat(due), now)
+            self.assertEqual(
+                {key for key, _ in records},
+                {f"{region}:ff14_calendar_primary" for region in ("cn", "global")},
+            )
+            self.assertEqual(len(records), 2)
+            for key, raw in records:
+                value = json.loads(raw)
+                region = key.split(":", 1)[0]
+                self.assertEqual(value["region"], region)
+                self.assertEqual(value["source_id"], "ff14_calendar_primary")
+                self.assertEqual(value["last_status"], "complete")
+                spec = calendar_source_spec(region, "ff14_calendar_primary")
+                self.assertEqual(
+                    value["url_fingerprint"],
+                    hashlib.sha256(spec.url.encode()).hexdigest(),
+                )
+                complete = value["complete"]
+                self.assertEqual(
+                    complete["raw"],
+                    "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n"
+                    "PRODID:-//Tests//EN\r\nEND:VCALENDAR\r\n",
+                )
+                fetched = datetime.fromisoformat(complete["fetched_at"])
+                self.assertLessEqual(fetched, now)
+                self.assertLess(now - fetched, timedelta(hours=6))
+                self.assertGreater(datetime.fromisoformat(value["next_due_at"]), now)
+        else:
+            self.assertEqual(
+                {request.path for request in transport.requests},
+                {
+                    calendar_source_spec(region, "ff14_calendar_primary").path
+                    for region in ("cn", "global")
+                },
+            )
+            for request in transport.requests:
+                self.assertEqual(request.module_id, "ff14/ff14")
+                self.assertEqual(request.source_id, "ff14_calendar_primary")
+                self.assertEqual(request.host, "calendar.google.com")
+                self.assertEqual(request.method, "GET")
+                self.assertIsNone(request.credential_ref)
+                self.assertFalse(
+                    any(name.casefold() == "authorization" for name in request.headers)
+                )
+                self.assertEqual(len(request.body or b""), 0)
+        # No credential exchange, fallback or repeated scan request is needed.
+        self.assertEqual((await core.scheduler.run_due_page()).processed, 0)
+        self.assertEqual(len(transport.requests), 0 if expect_cached else 2)
+        if expect_cached:
+            self.assertFalse(core.scheduler._active)
+            self.assertFalse(transport.calendar_ready.is_set())
+
     async def test_help_and_item_png_use_exact_event_and_release_owned_ingress(self):
         context = _Context()
         transport = _ItemReplyTransport()
         runtime = self._runtime(context, http_transport_factory=lambda: transport)
         await runtime.initialize()
+        await self._assert_initial_public_calendar_sync(runtime, transport)
         try:
             from types import SimpleNamespace
 
@@ -1834,7 +1959,12 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(core.output._generated_png._entries, {})
             self.assertEqual(
                 [r.source_id for r in transport.requests],
-                ["xivapi_items", "garland_items"],
+                [
+                    "ff14_calendar_primary",
+                    "ff14_calendar_primary",
+                    "xivapi_items",
+                    "garland_items",
+                ],
             )
         finally:
             await runtime.terminate()
@@ -1844,6 +1974,7 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
         transport = _ItemReplyTransport()
         runtime = self._runtime(context, http_transport_factory=lambda: transport)
         await runtime.initialize()
+        await self._assert_initial_public_calendar_sync(runtime, transport)
         core = runtime.core_runtime
         self.assertIsNotNone(core)
 
@@ -1855,11 +1986,21 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             [request.source_id for request in transport.requests],
-            ["xivapi_items", "garland_items"],
+            [
+                "ff14_calendar_primary",
+                "ff14_calendar_primary",
+                "xivapi_items",
+                "garland_items",
+            ],
         )
         self.assertEqual(
             [request.host for request in transport.requests],
-            ["xivapi-v2.xivcdn.com", "garlandtools.cn"],
+            [
+                "calendar.google.com",
+                "calendar.google.com",
+                "xivapi-v2.xivcdn.com",
+                "garlandtools.cn",
+            ],
         )
         self.assertEqual(len(context.calls), 1)
         self.assertIn("Copper Ore", context.calls[0][1].chain[0].text)
@@ -1970,11 +2111,15 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
         transport = _ItemReplyTransport()
         runtime = self._runtime(context, http_transport_factory=lambda: transport)
         await runtime.initialize()
+        await self._assert_initial_public_calendar_sync(runtime, transport)
 
         event = self._event(message="/ygl ff14 logs global Aether Rada")
         self.assertIsNone(await runtime.handle_event(event))
 
-        self.assertEqual(transport.requests, [])
+        self.assertEqual(
+            [r.source_id for r in transport.requests],
+            ["ff14_calendar_primary", "ff14_calendar_primary"],
+        )
         self.assertEqual(len(context.calls), 1)
         self.assertNotIn("credential", context.calls[0][1].chain[0].text.lower())
         await runtime.terminate()

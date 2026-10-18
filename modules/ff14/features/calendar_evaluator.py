@@ -90,6 +90,10 @@ _WARNING_TEXT = {
     "source_timeout": "日历源请求超时。",
     "source_unavailable": "日历源暂不可用。",
     "source_partial": "来源未完整解析，自动摘要暂不可用。",
+    "snapshot_stale": "本地日历已陈旧，等待后台同步。",
+    "snapshot_refresh_failed": "同步未成功，显示上次完整日历。",
+    "snapshot_too_old": "日历超过48小时未更新，已暂停自动摘要。",
+    "refresh_cooldown": "刷新间隔为5分钟，已显示本地日历。",
     "stored_occurrence_limit": "日历内容超过自动摘要存储上限。",
 }
 _PARSER_WARNING_CODES = frozenset(
@@ -233,6 +237,7 @@ def build_calendar_document(
     timezone_name: str,
     now: datetime,
     source_variant: str,
+    fetched_at: datetime | None = None,
     source_url: str | None = None,
     interpretation_timezone: str | None = None,
     completeness: ObservationCompleteness = ObservationCompleteness.COMPLETE,
@@ -256,11 +261,14 @@ def build_calendar_document(
         raise ValueError("calendar document needs a parsed source")
     source_label = _SOURCE_LABELS[source_variant]
     local_now = now.astimezone(zone)
+    local_fetched = (fetched_at or now).astimezone(zone)
     blocks: list[TextBlock | TableBlock] = [
         TextBlock(
             f"范围：{local_date.isoformat()} 起 {days} 个本地日历日（{timezone_name}）"
         ),
-        TextBlock(f"数据源：{source_label}；获取时间：{local_now:%Y-%m-%d %H:%M %Z}。"),
+        TextBlock(
+            f"数据源：{source_label}；获取时间：{local_fetched:%Y-%m-%d %H:%M %Z}。"
+        ),
     ]
     blocks.append(
         TextBlock("来源更新时间未知；仅汇总所选公开日历来源，不保证覆盖全部活动。")
@@ -361,7 +369,7 @@ def build_calendar_document(
     )
     card_blocks.append(
         cards.Text(
-            f"来源：{source_label}\n获取：{local_now:%Y.%m.%d %H:%M} · {timezone_name}",
+            f"来源：{source_label}\n获取：{local_fetched:%Y.%m.%d %H:%M} · {timezone_name}",
             style="caption",
         )
     )
@@ -378,7 +386,7 @@ def build_calendar_document(
         subject=f"{local_date.isoformat()} 起 {days} 个本地日历日",
         ordered_blocks=tuple(blocks),
         sources=(source_label,),
-        timestamps=(TimeValue(local_now, timezone_name),),
+        timestamps=(TimeValue(local_fetched, timezone_name),),
         privacy=privacy,
     )
 
@@ -494,6 +502,7 @@ class CalendarDailySummaryEvaluator:
             days=DAILY_WINDOW_DAYS,
             timezone_name=settings["timezone"],
             now=collected_at,
+            fetched_at=snapshot.get("source_fetched_at"),
             source_variant=snapshot["source_variant"],
             source_url=snapshot["source_url"],
             privacy=Privacy.PUBLIC,
@@ -575,6 +584,18 @@ def _complete_payload(observation: Observation, region: str) -> Mapping[str, obj
         or window_start >= window_end
     ):
         raise ValueError("invalid source window")
+    fetched_at = None
+    if "source_fetched_at" in payload:
+        try:
+            fetched_at = datetime.fromisoformat(str(payload["source_fetched_at"]))
+            if fetched_at.utcoffset() is None or not timedelta(
+                0
+            ) <= observation.collected_at - fetched_at <= timedelta(hours=48):
+                raise ValueError("source snapshot is too old for reminders")
+        except (TypeError, ValueError, OverflowError):
+            raise ValueError(
+                "source snapshot is not fresh enough for reminders"
+            ) from None
     for occurrence in occurrences:
         item = _as_display_occurrence(occurrence)
         if item.source_id != source_id or len(item.summary) > 240:
@@ -588,6 +609,7 @@ def _complete_payload(observation: Observation, region: str) -> Mapping[str, obj
         "window_end": window_end.astimezone(UTC),
         "occurrences": occurrences,
         "warning_codes": payload.get("warnings", ()),
+        "source_fetched_at": fetched_at,
     }
 
 

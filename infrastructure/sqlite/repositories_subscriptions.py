@@ -85,6 +85,8 @@ from ...core.contracts.subscriptions import (
 from ...core.contracts.validation_boundary import validate_contract
 from ...core.contracts.version import CONTRACT_VERSION
 from ...core.ports import (
+    BackgroundFence,
+    BackgroundJob,
     CollectionRunRequest,
     EvaluationCheckpoint,
     ExecutionLease,
@@ -403,6 +405,37 @@ def _read_subscription_fence(
 ) -> SubscriptionFence | None:
     admission = _read_subscription_admission(unit, binding)
     return None if admission is None else admission[0]
+
+
+def _read_background_fence(
+    unit: SQLiteUnitOfWork, key: CollectionKey
+) -> BackgroundFence | None:
+    """Attest manifest registration, ordinary config and runtime intent atomically."""
+    if key.scope.kind is not OwnershipKind.PUBLIC:
+        return None
+    row = unit.execute(
+        "SELECT * FROM b04_background_jobs WHERE job_key=?", (_job_key(key),)
+    ).fetchone()
+    if row is None or row["active"] != 1 or row["module_id"] != key.module_id:
+        return None
+    package_id, module_id = key.module_id.split("/", 1)
+    intent = unit.execute(
+        "SELECT desired_enabled,intent_revision FROM module_runtime_intents WHERE package_id=? AND module_id=?",
+        (package_id, module_id),
+    ).fetchone()
+    config = unit.execute(
+        "SELECT revision FROM config_state WHERE principal_id=? AND module_id=?",
+        (row["config_principal_id"], key.module_id),
+    ).fetchone()
+    if (
+        intent is None
+        or intent["desired_enabled"] != 1
+        or intent["intent_revision"] != row["intent_revision"]
+        or config is None
+        or config["revision"] != row["config_revision"]
+    ):
+        return None
+    return BackgroundFence(row["generation"], row["intent_revision"])
 
 
 def _scope_values(
@@ -1157,17 +1190,167 @@ class SQLiteSchedulerRepository(_Repository):
             raise TypeError("utc_clock must be callable")
         self._utc_clock = utc_clock
 
+    async def reconcile_background_jobs(
+        self, jobs: tuple[BackgroundJob, ...], *, now: datetime
+    ) -> None:
+        now = _utc_instant(now, "now")
+        if (
+            type(jobs) is not tuple
+            or len(jobs) > 2048
+            or any(type(job) is not BackgroundJob for job in jobs)
+        ):
+            raise ValueError("background registration budget exceeded")
+        keys = tuple(_job_key(job.key) for job in jobs)
+        if len(set(keys)) != len(keys):
+            raise ValueError("duplicate background collection keys")
+
+        def reconcile(unit):
+            retained = set()
+            for item, job in zip(jobs, keys):
+                package_id, module_id = item.key.module_id.split("/", 1)
+                intent = unit.execute(
+                    "SELECT desired_enabled,intent_revision FROM module_runtime_intents WHERE package_id=? AND module_id=?",
+                    (package_id, module_id),
+                ).fetchone()
+                config = unit.execute(
+                    "SELECT revision FROM config_state WHERE principal_id=? AND module_id=?",
+                    (item.config_target.principal_id, item.config_target.module_id),
+                ).fetchone()
+                if (
+                    intent is None
+                    or intent["desired_enabled"] != 1
+                    or config is None
+                    or config["revision"] != item.config_revision
+                ):
+                    continue
+                if (
+                    unit.execute(
+                        "SELECT 1 FROM b04_subscription_jobs WHERE job_key=?", (job,)
+                    ).fetchone()
+                    is not None
+                ):
+                    raise ValueError("background job cannot replace subscription work")
+                _put_job(unit, item.key)
+                old = unit.execute(
+                    "SELECT * FROM b04_background_jobs WHERE job_key=?", (job,)
+                ).fetchone()
+                work = unit.execute(
+                    "SELECT * FROM b04_collection_jobs WHERE job_key=?", (job,)
+                ).fetchone()
+                unchanged = (
+                    old is not None
+                    and old["active"] == 1
+                    and old["config_principal_id"] == item.config_target.principal_id
+                    and old["config_revision"] == item.config_revision
+                    and old["declaration_digest"] == item.declaration_digest
+                    and old["intent_revision"] == intent["intent_revision"]
+                    and work["cadence_seconds"] == item.cadence_seconds
+                )
+                retained.add(job)
+                if unchanged:
+                    continue
+                generation = 1 if old is None else old["generation"] + 1
+                due_at = now
+                if (
+                    old is not None
+                    and old["active"] == 1
+                    and work["observation_id"] is not None
+                ):
+                    previous = unit.execute(
+                        "SELECT observation_json FROM b04_observations WHERE observation_id=?",
+                        (work["observation_id"],),
+                    ).fetchone()
+                    if previous is not None:
+                        due_at = max(
+                            now,
+                            _load(previous[0]).collected_at
+                            + timedelta(seconds=item.cadence_seconds),
+                        )
+                unit.execute(
+                    "INSERT INTO b04_background_jobs VALUES (?,?,?,?,?,?,?,1) ON CONFLICT(job_key) DO UPDATE SET "
+                    "config_principal_id=excluded.config_principal_id,config_revision=excluded.config_revision,"
+                    "declaration_digest=excluded.declaration_digest,intent_revision=excluded.intent_revision,generation=excluded.generation,active=1",
+                    (
+                        job,
+                        item.key.module_id,
+                        item.config_target.principal_id,
+                        item.config_revision,
+                        item.declaration_digest,
+                        intent["intent_revision"],
+                        generation,
+                    ),
+                )
+                unit.execute(
+                    "UPDATE b04_collection_jobs SET due_at=?,cadence_seconds=?,config_revision=?,lease_token=NULL,lease_expires_at=NULL WHERE job_key=?",
+                    (_iso(due_at), item.cadence_seconds, item.config_revision, job),
+                )
+            for row in unit.execute(
+                "SELECT job_key FROM b04_background_jobs WHERE active=1"
+            ).fetchall():
+                if row["job_key"] not in retained:
+                    unit.execute(
+                        "UPDATE b04_background_jobs SET active=0,generation=generation+1 WHERE job_key=?",
+                        (row["job_key"],),
+                    )
+                    unit.execute(
+                        "UPDATE b04_collection_jobs SET due_at=NULL,lease_token=NULL,lease_expires_at=NULL WHERE job_key=?",
+                        (row["job_key"],),
+                    )
+
+        await self.database.executor.run_transaction(reconcile, begin_mode="IMMEDIATE")
+
+    async def previous_background_observation(
+        self, lease: ExecutionLease
+    ) -> Observation | None:
+        if lease.background_fence is None:
+            return None
+
+        def read(unit):
+            if _read_background_fence(unit, lease.key) != lease.background_fence:
+                return None
+            row = unit.execute(
+                "SELECT o.observation_json FROM b04_collection_jobs j JOIN b04_observations o ON o.observation_id=j.observation_id WHERE j.job_key=? AND j.lease_token=?",
+                (_job_key(lease.key), lease.token),
+            ).fetchone()
+            return None if row is None else _load(row[0])
+
+        return await self.database.executor.run_read(read)
+
     async def claim_due(
         self, request: CollectionRunRequest, *, now: datetime
     ) -> ExecutionLease | None:
         now = now.astimezone(UTC)
 
         def _run(unit: SQLiteUnitOfWork) -> Any:
-            fence = _read_subscription_fence(
-                unit, self._subscription_gate_bindings.get(request.key.module_id)
+            background = (
+                _read_background_fence(unit, request.key)
+                if request.background
+                else None
             )
-            if fence is None:
-                return None
+            if request.background:
+                if background is None:
+                    return None
+                marker = unit.execute(
+                    "SELECT config_revision FROM b04_background_jobs WHERE job_key=?",
+                    (_job_key(request.key),),
+                ).fetchone()
+                if marker["config_revision"] != request.config_revision:
+                    return None
+                fence = None
+            else:
+                if (
+                    unit.execute(
+                        "SELECT 1 FROM b04_background_jobs WHERE job_key=?",
+                        (_job_key(request.key),),
+                    ).fetchone()
+                    is not None
+                ):
+                    return None
+                fence = _read_subscription_fence(
+                    unit, self._subscription_gate_bindings.get(request.key.module_id)
+                )
+                if fence is None:
+                    return None
             job = _put_job(unit, request.key)
             row = unit.execute(
                 "SELECT due_at,lease_token,lease_expires_at FROM b04_collection_jobs WHERE job_key=?",
@@ -1187,7 +1370,12 @@ class SQLiteSchedulerRepository(_Repository):
             ):
                 return None
             token = secrets.token_urlsafe(24).replace("/", "_")
-            expires = now + timedelta(seconds=request.cadence_seconds)
+            duration = (
+                request.cadence_seconds
+                if not request.background
+                else min(request.lease_seconds or 60.0, 3600.0)
+            )
+            expires = now + timedelta(seconds=duration)
             unit.execute(
                 "UPDATE b04_collection_jobs SET due_at=?,cadence_seconds=?,config_revision=?,module_epoch=?,registry_revision=?,lease_token=?,lease_expires_at=?,gate_revision=?,intent_revision=? WHERE job_key=?",
                 (
@@ -1198,8 +1386,8 @@ class SQLiteSchedulerRepository(_Repository):
                     request.registry_revision,
                     token,
                     _iso(expires),
-                    fence.gate_revision,
-                    fence.intent_revision,
+                    None if fence is None else fence.gate_revision,
+                    None if fence is None else fence.intent_revision,
                     job,
                 ),
             )
@@ -1211,6 +1399,7 @@ class SQLiteSchedulerRepository(_Repository):
                 request.registry_revision,
                 expires,
                 fence,
+                background,
             )
 
         return await self.database.executor.run_transaction(
@@ -1230,15 +1419,19 @@ class SQLiteSchedulerRepository(_Repository):
             ).fetchone()
             if row is None or row["key_json"] != key_json:
                 return False
-            current = _read_subscription_fence(
-                unit, self._subscription_gate_bindings.get(lease.key.module_id)
-            )
-            if (
-                current is None
-                or lease.subscription_fence != current
-                or _row_fence(row) != current
-            ):
-                return False
+            if lease.background_fence is not None:
+                if _read_background_fence(unit, lease.key) != lease.background_fence:
+                    return False
+            else:
+                current = _read_subscription_fence(
+                    unit, self._subscription_gate_bindings.get(lease.key.module_id)
+                )
+                if (
+                    current is None
+                    or lease.subscription_fence != current
+                    or _row_fence(row) != current
+                ):
+                    return False
             expires_at = row["lease_expires_at"]
             if expires_at is None:
                 return False
@@ -1276,8 +1469,13 @@ class SQLiteSchedulerRepository(_Repository):
                 "FROM b04_collection_jobs j WHERE j.due_at IS NOT NULL AND j.due_at<=? "
                 "AND (j.lease_token IS NULL OR j.lease_expires_at<=?) "
                 "AND j.cadence_seconds IS NOT NULL AND j.config_revision IS NOT NULL "
-                "AND EXISTS (SELECT 1 FROM b04_subscription_jobs sj JOIN b04_subscriptions s USING(subscription_id) "
-                "WHERE sj.job_key=j.job_key AND s.status='active' AND sj.subscription_revision=s.revision)"
+                "AND (EXISTS (SELECT 1 FROM b04_subscription_jobs sj JOIN b04_subscriptions s USING(subscription_id) "
+                "WHERE sj.job_key=j.job_key AND s.status='active' AND sj.subscription_revision=s.revision) "
+                "OR EXISTS (SELECT 1 FROM b04_background_jobs bg "
+                "JOIN config_state c ON c.principal_id=bg.config_principal_id AND c.module_id=bg.module_id "
+                "JOIN module_runtime_intents mi ON bg.module_id=mi.package_id||'/'||mi.module_id "
+                "WHERE bg.job_key=j.job_key AND bg.active=1 AND c.revision=bg.config_revision "
+                "AND mi.desired_enabled=1 AND mi.intent_revision=bg.intent_revision))"
             )
             parameters: list[object] = [_iso(now), _iso(now)]
             if after_cursor is not None:
@@ -1389,11 +1587,22 @@ class SQLiteSchedulerRepository(_Repository):
                 current = _read_subscription_fence(
                     unit, self._subscription_gate_bindings.get(lease.key.module_id)
                 )
-                if (
-                    row is None
-                    or current is None
+                if lease.background_fence is not None:
+                    if (
+                        commit.subscriptions
+                        or _read_background_fence(unit, lease.key)
+                        != lease.background_fence
+                    ):
+                        return False
+                    current = None
+                elif (
+                    current is None
                     or lease.subscription_fence != current
                     or _row_fence(row) != current
+                ):
+                    return False
+                if (
+                    row is None
                     or row["key_json"] != _key_json(lease.key)
                     or row["lease_token"] != lease.token
                     or int(row["config_revision"] or 0) != lease.config_revision

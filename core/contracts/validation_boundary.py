@@ -77,6 +77,13 @@ def validate_contract(value):
                         from ..public_result import preflight_error_facts
 
                         preflight_error_facts(item)
+                if (
+                    kind.__module__ == "yomihime_game_link_sdk.subscriptions"
+                    and kind.__name__ == "ScheduleDescriptor"
+                ):
+                    from .subscriptions import preflight_schedule_parameters
+
+                    preflight_schedule_parameters(item)
                 check = checks.get(kind)
                 # HTTP headers have a dedicated safe normalization boundary;
                 # run it before visiting a caller-controlled Mapping.

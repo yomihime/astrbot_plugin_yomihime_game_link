@@ -115,8 +115,20 @@ class CatalogRuntimeTests(unittest.IsolatedAsyncioTestCase):
             )
         self.source.end(context)
         allowed = [field for field in result["fields"] if field["readable"]]
-        self.assertEqual(len(allowed), 4)
+        self.assertEqual(len(allowed), 5)
         self.assertTrue(all(field["editable"] for field in allowed))
+        sync_interval = next(
+            field
+            for field in allowed
+            if field["name"] == "ff14_calendar_sync_interval_seconds"
+        )
+        self.assertEqual(sync_interval["module_id"], "ff14/ff14")
+        self.assertEqual(sync_interval["description"], "日历同步周期")
+        self.assertEqual(sync_interval["default"], 21600)
+        self.assertEqual(
+            sync_interval["value_schema"],
+            {"type": "integer", "enum": [21600, 43200, 86400]},
+        )
 
     async def test_catalog_requires_current_read_proof(self):
         for context in (None, self.context(AdminOperation.UPDATE_CONFIG)):

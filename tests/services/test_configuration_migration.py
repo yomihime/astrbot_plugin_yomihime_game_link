@@ -20,7 +20,14 @@ from ygl_test_subject.infrastructure.sqlite.repositories_config import (
 from ygl_test_subject.infrastructure.sqlite.repositories_config_migration import (
     SQLiteOrdinaryConfigurationMigrationRepository,
 )
-from ygl_test_subject.modules.ff14.config import DAYS, DELIVERY_TIME, REGION, TIMEZONE
+from ygl_test_subject.modules.ff14.config import (
+    DAYS,
+    DELIVERY_TIME,
+    REGION,
+    SYNC_INTERVAL,
+    TIMEZONE,
+    FF14ConfigSnapshot,
+)
 from ygl_test_subject.services.configuration import ConfigurationValueError
 from ygl_test_subject.services.configuration_migration import (
     OrdinaryConfigurationMigration,
@@ -88,6 +95,15 @@ class MigrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(snapshots[self.ff14].values[DAYS], 3)
         self.assertEqual(snapshots[self.ff14].values[TIMEZONE], "UTC")
         self.assertEqual(snapshots[self.ff14].values[DELIVERY_TIME], "08:00")
+        # The new interval is an ordinary default, outside the fixed v1 legacy
+        # migration inventory. Existing migration markers stay compatible.
+        self.assertNotIn(SYNC_INTERVAL, snapshots[self.ff14].values)
+        self.assertEqual(
+            FF14ConfigSnapshot.from_values(
+                snapshots[self.ff14].values
+            ).calendar_sync_interval_seconds,
+            21600,
+        )
         self.assertEqual(snapshots[self.ff14].values["unrelated"], "kept")
         self.assertEqual(raw, {REGION: "cn", DAYS: None, TIMEZONE: "UTC"})
 
@@ -176,6 +192,7 @@ class MigrationTests(unittest.IsolatedAsyncioTestCase):
             set((await self.config.current(self.ff14)).values),
             {DAYS, TIMEZONE, DELIVERY_TIME},
         )
+        self.assertNotIn(SYNC_INTERVAL, (await self.config.current(self.ff14)).values)
         self.assertEqual(await self.migration.migrate(None), ())
 
     async def test_each_target_cas_conflict_no_partial_write(self):
@@ -274,7 +291,12 @@ class MigrationTests(unittest.IsolatedAsyncioTestCase):
         await self.seed(self.ff14, {DAYS: 5})
         await self.migration.migrate({REGION: "global", TIMEZONE: "UTC"})
         await self.seed(
-            self.ff14, {"unrelated": "later", "subscriptions_enabled": False}
+            self.ff14,
+            {
+                "unrelated": "later",
+                "subscriptions_enabled": False,
+                SYNC_INTERVAL: 43200,
+            },
         )
         current = await self.snapshots()
         legacy = await self.migration.rollback(
@@ -285,7 +307,12 @@ class MigrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(restored[self.core].values, {})
         self.assertEqual(
             restored[self.ff14].values,
-            {DAYS: 5, "unrelated": "later", "subscriptions_enabled": False},
+            {
+                DAYS: 5,
+                "unrelated": "later",
+                "subscriptions_enabled": False,
+                SYNC_INTERVAL: 43200,
+            },
         )
         self.assertFalse(await self.migration.complete())
 

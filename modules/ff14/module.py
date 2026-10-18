@@ -15,8 +15,9 @@ from yomihime_game_link_sdk.services import (
 from yomihime_game_link_sdk.storage import JsonObject
 
 from .config import FF14ConfigSnapshot
-from .features.calendar import CalendarCollector, CalendarQuery
+from .features.calendar import CalendarCollector, CalendarQuery, CalendarSyncCollector
 from .features.calendar_evaluator import CalendarDailySummaryEvaluator
+from .features.calendar_snapshots import CalendarSnapshots
 from .features.calendar_subscriptions import CalendarSubscriptionHandler
 from .features.fflogs import FFLogsCharacterLookup
 from .features.items import ItemLookup
@@ -69,6 +70,7 @@ class FF14Module:
         self._market = MarketQueryHandler(services)
         self._items = ItemLookup(services)
         self._logs = FFLogsCharacterLookup(services)
+        calendar_snapshots = CalendarSnapshots(services)
         self._handlers = ModuleHandlers(
             capabilities={
                 CAPABILITY_STATUS: _StatusHandler(),
@@ -77,7 +79,9 @@ class FF14Module:
                 CAPABILITY_MARKET_QUERY: self._market,
                 CAPABILITY_MARKET_SELECT: self._market,
                 CAPABILITY_FFLOGS_CHARACTER: self._logs,
-                CAPABILITY_CALENDAR_QUERY: CalendarQuery(services, config=config),
+                CAPABILITY_CALENDAR_QUERY: CalendarQuery(
+                    services, config=config, snapshots=calendar_snapshots
+                ),
                 CAPABILITY_CALENDAR_SUBSCRIPTION_CREATE: CalendarSubscriptionHandler(
                     services, "subscribe", config=config
                 ),
@@ -91,7 +95,14 @@ class FF14Module:
                     services, "cancel"
                 ),
             },
-            collectors={"ff14.calendar.collect": CalendarCollector(services)},
+            collectors={
+                "ff14.calendar.collect": CalendarCollector(
+                    services, snapshots=calendar_snapshots
+                ),
+                "ff14.calendar.sync": CalendarSyncCollector(
+                    services, snapshots=calendar_snapshots
+                ),
+            },
             evaluators={"ff14.calendar.daily_summary": CalendarDailySummaryEvaluator()},
         )
 

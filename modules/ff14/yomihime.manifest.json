@@ -413,6 +413,9 @@
                 "type": "string",
                 "minLength": 1,
                 "maxLength": 128
+              },
+              "refresh": {
+                "type": "boolean"
               }
             },
             "required": [
@@ -570,9 +573,10 @@
           "parameter_mapping": {
             "region": "region",
             "days": "days",
-            "timezone": "timezone"
+            "timezone": "timezone",
+            "refresh": "refresh"
           },
-          "help_text": "查看活动日历与订阅指令。\n概览：/ygl ff14 calendar <国服|国际服> [days=7]\n用法：/ygl ff14 calendar <国服|国际服> [days=7] [timezone=Asia/Shanghai]\n参数：days 为 1–30；省略 days 与 timezone 读取模块配置。范围从指定时区的本地日期起算。\n示例：/ygl ff14 calendar 国服 days=7"
+          "help_text": "查看活动日历与订阅指令。\n概览：/ygl ff14 calendar <国服|国际服> [days=7]\n用法：/ygl ff14 calendar <国服|国际服> [days=7] [timezone=Asia/Shanghai]\n参数：days 为 1–30；省略 days 与 timezone 读取模块配置。范围从指定时区的本地日期起算。\n示例：/ygl ff14 calendar 国服 days=7\n刷新：增加 refresh=true 可手动同步，每个来源最短间隔5分钟。常规查询只读本地日历。"
         },
         {
           "operation_path": "status",
@@ -752,6 +756,21 @@
           },
           "group": "calendar",
           "description": "日历默认投递时间"
+        },
+        {
+          "name": "ff14_calendar_sync_interval_seconds",
+          "sensitive": false,
+          "default": 21600,
+          "value_schema": {
+            "type": "integer",
+            "enum": [
+              21600,
+              43200,
+              86400
+            ]
+          },
+          "group": "calendar",
+          "description": "日历同步周期"
         }
       ],
       "sources": [
@@ -839,6 +858,43 @@
           "minimum_interval_seconds": 900,
           "default_interval_seconds": 900,
           "interval_config_key": "ff14_calendar_interval_seconds"
+        },
+        {
+          "collector_id": "ff14.calendar.sync",
+          "key_version": 1,
+          "source_id": "ff14_calendar_primary",
+          "data_version": 1,
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "region": {
+                "type": "string",
+                "enum": [
+                  "国服",
+                  "国际服",
+                  "cn",
+                  "global"
+                ]
+              }
+            },
+            "required": [
+              "region"
+            ],
+            "additionalProperties": false
+          },
+          "shared_scope": "public",
+          "trigger": "background",
+          "minimum_interval_seconds": 21600,
+          "default_interval_seconds": 21600,
+          "interval_config_key": "ff14_calendar_sync_interval_seconds",
+          "background_parameters": [
+            {
+              "region": "cn"
+            },
+            {
+              "region": "global"
+            }
+          ]
         }
       ],
       "subscriptions": [
@@ -886,7 +942,15 @@
           ]
         }
       ],
-      "collections": [],
+      "collections": [
+        {
+          "name": "calendar_snapshots",
+          "schema_version": 1,
+          "owner_kind": "public",
+          "retention_category": "standard",
+          "indexes": []
+        }
+      ],
       "pages": [
         {
           "route_id": "items",

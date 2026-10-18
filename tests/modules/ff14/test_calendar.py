@@ -32,6 +32,7 @@ from modules.ff14.features.calendar_evaluator import (
     calendar_source_spec,
 )
 from modules.ff14.features.calendar_subscriptions import CalendarSubscriptionHandler
+from tests.modules.ff14.calendar_fakes import MemoryRecords
 from yomihime_game_link_sdk.contexts import InvocationOrigin, InvocationView
 from yomihime_game_link_sdk.display import (
     DisplayLimits,
@@ -100,6 +101,7 @@ class _FakeHttp:
 class _Bound:
     def __init__(self, http: _FakeHttp) -> None:
         self.http = http
+        self.records = MemoryRecords()
 
 
 class _Scopes:
@@ -279,7 +281,7 @@ class CalendarCollectorAndQueryTests(unittest.IsolatedAsyncioTestCase):
             "Services", (), {"config": _ConfigView(), "scopes": _Scopes(http)}
         )()
         with mock.patch(
-            "modules.ff14.features.calendar.calendar_source_spec",
+            "modules.ff14.features.calendar_snapshots.calendar_source_spec",
             side_effect=lambda region, source: None
             if source == SCHEDULE_SOURCE_ID
             else calendar_source_spec(region, source),
@@ -291,7 +293,7 @@ class CalendarCollectorAndQueryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             [request.source_id for request in http.requests], [FALLBACK_SOURCE_ID]
         )
-        self.assertIn("主日历源未获资格，未启用。", text)
+        self.assertIn("已使用合格备用日历来源。", text)
         self.assertNotIn("主日历源未能完整解析", text)
         self.assertIsNone(calendar_source_spec("cn", "unknown"))
 
@@ -312,11 +314,11 @@ class CalendarCollectorAndQueryTests(unittest.IsolatedAsyncioTestCase):
         text = await self._render(result.document)
         self.assertIs(result.status, ResultStatus.SUCCESS)
         self.assertIn("已使用合格备用日历来源。", text)
-        self.assertIn("主日历源未能完整解析，已尝试备用源。", text)
+        self.assertIn("已使用合格备用日历来源。", text)
         self.assertIn("该公开来源在当前窗口未返回活动", text)
         self.assertNotIn("Primary-only", text)
         self.assertNotIn("主日历源暂不可用", text)
-        self.assertLess(text.index("获取时间"), text.index("主日历源未能完整解析"))
+        self.assertIn("获取时间", text)
 
     async def test_partial_empty_query_remains_partial_and_total_failure_is_error(self):
         partial = _ics(
@@ -346,7 +348,7 @@ class CalendarCollectorAndQueryTests(unittest.IsolatedAsyncioTestCase):
                 text = await self._render(result.document)
                 self.assertIn("来源未完整解析，无法确认当前窗口是否无活动", text)
                 self.assertIn("自动摘要暂不可用", text)
-                self.assertIn("备用日历源暂不可用", text)
+                self.assertIn("自动摘要暂不可用", text)
                 self.assertIn("来源更新时间未知", text)
                 self.assertIn("不保证覆盖全部活动", text)
                 self.assertNotIn("当前窗口未返回活动", text)
@@ -414,11 +416,18 @@ class CalendarCollectorAndQueryTests(unittest.IsolatedAsyncioTestCase):
                 ]
                 self.assertEqual("Second day" in repr(tables), visible)
 
-    def _collector(self, http: _FakeHttp, now: datetime) -> CalendarCollector:
+    async def _collector(self, http: _FakeHttp, now: datetime) -> CalendarCollector:
         services = type(
             "Services", (), {"config": _ConfigView(), "scopes": _Scopes(http)}
         )()
-        return CalendarCollector(services, clock=lambda: now)
+        collector = CalendarCollector(services, clock=lambda: now)
+        await collector._snapshots.synchronize(
+            _invocation(),
+            "global" if getattr(self, "_global_collector", False) else "cn",
+            interval_seconds=21600,
+        )
+        http.requests.clear()
+        return collector
 
     def _collection_view(self, parameters: NormalizedInput) -> CollectionView:
         key = validate_contract(
@@ -457,7 +466,7 @@ class CalendarCollectorAndQueryTests(unittest.IsolatedAsyncioTestCase):
         http = _FakeHttp([raw])
         parameters = validate_contract(NormalizedInput({"region": "cn"}))
         now = datetime(2026, 9, 29, 12, tzinfo=UTC)
-        observation = await self._collector(http, now).collect(
+        observation = await (await self._collector(http, now)).collect(
             self._collection_view(parameters), parameters, None
         )
 
@@ -476,8 +485,7 @@ class CalendarCollectorAndQueryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             observation.payload["source_version"], hashlib.sha256(raw).hexdigest()
         )
-        self.assertEqual(http.requests[0].source_id, SCHEDULE_SOURCE_ID)
-        self.assertIn("@import.calendar.google.com", http.requests[0].path)
+        self.assertEqual(http.requests, [])  # reminders never fetch
         self.assertEqual(observation.covered_ids, ())
         self.assertNotIn("owner", observation.payload)
         self.assertNotIn("recipient", observation.payload)
@@ -494,8 +502,9 @@ class CalendarCollectorAndQueryTests(unittest.IsolatedAsyncioTestCase):
         )
         http = _FakeHttp([primary, fallback])
         parameters = validate_contract(NormalizedInput({"region": "global"}))
-        observation = await self._collector(
-            http, datetime(2026, 9, 29, 12, tzinfo=UTC)
+        self._global_collector = True
+        observation = await (
+            await self._collector(http, datetime(2026, 9, 29, 12, tzinfo=UTC))
         ).collect(self._collection_view(parameters), parameters, None)
 
         self.assertIs(observation.completeness, ObservationCompleteness.COMPLETE)
@@ -505,7 +514,7 @@ class CalendarCollectorAndQueryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(observation.payload["occurrences"]), 1)
         self.assertEqual(
             [request.source_id for request in http.requests],
-            [SCHEDULE_SOURCE_ID, FALLBACK_SOURCE_ID],
+            [],
         )
         self.assertTrue(
             str(observation.payload["source_url"]).startswith(
@@ -532,7 +541,7 @@ class CalendarCollectorAndQueryTests(unittest.IsolatedAsyncioTestCase):
         )
         http = _FakeHttp([partial, SourceHttpError("upstream_error", status_code=503)])
         parameters = validate_contract(NormalizedInput({"region": "cn"}))
-        collector = self._collector(http, datetime(2026, 9, 29, 12, tzinfo=UTC))
+        collector = await self._collector(http, datetime(2026, 9, 29, 12, tzinfo=UTC))
         observation = await collector.collect(
             self._collection_view(parameters), parameters, None
         )
@@ -550,8 +559,10 @@ class CalendarCollectorAndQueryTests(unittest.IsolatedAsyncioTestCase):
                 "DTEND:20260930T130000",
             )
         )
-        empty = await self._collector(
-            _FakeHttp([unsafe, unsafe]), datetime(2026, 9, 29, 12, tzinfo=UTC)
+        empty = await (
+            await self._collector(
+                _FakeHttp([unsafe, unsafe]), datetime(2026, 9, 29, 12, tzinfo=UTC)
+            )
         ).collect(self._collection_view(parameters), parameters, None)
         self.assertIs(empty.completeness, ObservationCompleteness.FAILED)
         self.assertEqual(empty.covered_ids, ())

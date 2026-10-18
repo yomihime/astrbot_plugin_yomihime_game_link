@@ -69,7 +69,22 @@ class ConfigAdapterTests(unittest.TestCase):
             for key, field in schema.items()
             if key != "web_public_origin"
         }
-        self.assertEqual(defaults, dict(ff14_config_snapshot(None).as_values()))
+        legacy_fields = {
+            "ff14_default_region",
+            "ff14_calendar_default_days",
+            "ff14_calendar_default_timezone",
+            "ff14_calendar_default_delivery_time",
+        }
+        snapshot_values = dict(ff14_config_snapshot(None).as_values())
+        sync_interval = "ff14_calendar_sync_interval_seconds"
+        self.assertEqual(set(defaults), legacy_fields)
+        self.assertEqual(
+            defaults, {name: snapshot_values[name] for name in legacy_fields}
+        )
+        # New module settings do not expand the original Host migration schema.
+        self.assertEqual(snapshot_values[sync_interval], 21600)
+        self.assertEqual(set(snapshot_values), legacy_fields | {sync_interval})
+        self.assertNotIn(sync_interval, schema)
         self.assertEqual(schema["ff14_default_region"]["options"], ["cn", "global"])
         self.assertEqual(
             {name: field["type"] for name, field in schema.items()},
@@ -97,7 +112,7 @@ class ConfigAdapterTests(unittest.TestCase):
         self.assertFalse(any("secret" in field for field in schema.values()))
         self.assertEqual(
             set(schema),
-            set(ff14_config_snapshot({}).as_values()) | {"web_public_origin"},
+            legacy_fields | {"web_public_origin"},
         )
         self.assertEqual(schema["web_public_origin"]["default"], "")
 

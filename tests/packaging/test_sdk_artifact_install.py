@@ -19,7 +19,7 @@ from scripts.build_release import build_release
 
 ROOT = Path(__file__).resolve().parents[2]
 EXPECTED_WHEEL_SHA256 = (
-    "b6eaefee0045b91a4cc4ab71acd6b3f86824dcfcf5ea6fad574087106b937cb1"
+    "c5702caec32da638dcd336855b4ab5a9321c3d0a18d44243f33cd09b1aeeaf52"
 )
 EXPECTED_RESOURCES = {
     f"yomihime_game_link_sdk/_examples/{example}/{filename}"
@@ -138,8 +138,18 @@ assert sdk.SourceHttpError is CanonicalSourceHttpError
 assert GatewayResultType is sdk.CapabilityResult
 assert OutputResultType is sdk.CapabilityResult
 
-assert sdk.__version__ == "0.1.0a7"
+assert sdk.__version__ == "0.1.0a8"
 assert sdk.MODULE_ABI_VERSION == "2.0"
+assert sdk.ScheduleTrigger.BACKGROUND.value == "background"
+assert sdk.ScheduleDescriptor.__dataclass_fields__["background_parameters"].default == ()
+background = validate_contract(sdk.ScheduleDescriptor(
+    collector_id="background_probe", key_version=1, source_id="public_source",
+    data_version=1, input_schema={"type": "object"},
+    shared_scope=sdk.OwnershipKind.PUBLIC, trigger=sdk.ScheduleTrigger.BACKGROUND,
+    minimum_interval_seconds=60, default_interval_seconds=300,
+    interval_config_key="background_interval", background_parameters=({},),
+))
+assert background.background_parameters == ({},)
 assert sdk.PrivacyFloor.OWNER.value == "owner"
 assert sdk.InvocationOrigin("web_public") is sdk.InvocationOrigin.WEB_PUBLIC
 assert sdk.InvocationPolicy("command_and_public_web") is sdk.InvocationPolicy.COMMAND_AND_PUBLIC_WEB
@@ -366,7 +376,7 @@ class InstalledArtifactTests(unittest.TestCase):
             wheel_digest = hashlib.sha256(wheel.read_bytes()).hexdigest()
             self.assertEqual(wheel_digest, EXPECTED_WHEEL_SHA256)
             self.assertEqual(
-                wheel.name, "yomihime_game_link_sdk-0.1.0a7-py3-none-any.whl"
+                wheel.name, "yomihime_game_link_sdk-0.1.0a8-py3-none-any.whl"
             )
             with zipfile.ZipFile(wheel) as archive:
                 entries = set(archive.namelist())

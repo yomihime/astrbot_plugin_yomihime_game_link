@@ -66,6 +66,12 @@ class TrustedAssemblyTests(unittest.TestCase):
         self.assertEqual(len(assembly.credential_policies), 2)
         self.assertEqual(len(assembly.managed_credentials), 2)
         self.assertEqual(len(assembly.migration_fields), 4)
+        sync_interval = "ff14_calendar_sync_interval_seconds"
+        self.assertIn(sync_interval, SUPPORT.ordinary_config_fields)
+        self.assertNotIn(
+            sync_interval,
+            {field.declaration.name for field in assembly.migration_fields},
+        )
         self.assertEqual(
             assembly.public_bindings["items"], ("ff14/ff14", "item.lookup")
         )

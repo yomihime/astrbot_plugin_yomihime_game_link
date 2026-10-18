@@ -192,7 +192,9 @@ class BundledExtensionTests(unittest.IsolatedAsyncioTestCase):
     def assert_ff14_factory_contract(self, instance, health) -> None:
         handlers = instance.handlers()
         self.assertEqual(set(handlers.capabilities), self.EXPECTED_CAPABILITIES)
-        self.assertEqual(set(handlers.collectors), {"ff14.calendar.collect"})
+        self.assertEqual(
+            set(handlers.collectors), {"ff14.calendar.collect", "ff14.calendar.sync"}
+        )
         self.assertEqual(set(handlers.evaluators), {"ff14.calendar.daily_summary"})
         self.assertEqual(set(health.capabilities), self.EXPECTED_CAPABILITIES)
         self.assertNotIn("ff14.logs.output_percentile", health.capabilities)

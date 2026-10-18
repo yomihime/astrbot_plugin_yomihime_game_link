@@ -14,7 +14,9 @@ REGION = "ff14_default_region"
 DAYS = "ff14_calendar_default_days"
 TIMEZONE = "ff14_calendar_default_timezone"
 DELIVERY_TIME = "ff14_calendar_default_delivery_time"
-ORDINARY_FIELDS = frozenset((REGION, DAYS, TIMEZONE, DELIVERY_TIME))
+SYNC_INTERVAL = "ff14_calendar_sync_interval_seconds"
+CALENDAR_SYNC_INTERVALS = (21600, 43200, 86400)
+ORDINARY_FIELDS = frozenset((REGION, DAYS, TIMEZONE, DELIVERY_TIME, SYNC_INTERVAL))
 
 # The manifest owns these defaults; Host legacy JSON is migration input only.
 CALENDAR_CONFIG_FIELDS = (
@@ -38,6 +40,13 @@ CALENDAR_CONFIG_FIELDS = (
         default="08:00",
         group="calendar",
         value_schema={"type": "string", "minLength": 5, "maxLength": 5},
+    ),
+    ConfigField(
+        SYNC_INTERVAL,
+        description="日历同步周期",
+        default=21600,
+        group="calendar",
+        value_schema={"type": "integer", "enum": list(CALENDAR_SYNC_INTERVALS)},
     ),
 )
 
@@ -72,6 +81,7 @@ class FF14ConfigSnapshot:
     calendar_default_days: int = 7
     calendar_default_timezone: str = "Asia/Shanghai"
     calendar_default_delivery_time: str = "08:00"
+    calendar_sync_interval_seconds: int = 21600
 
     def __post_init__(self) -> None:
         if type(self.default_region) is not str or self.default_region not in (
@@ -101,6 +111,11 @@ class FF14ConfigSnapshot:
             or re.fullmatch(r"(?:[01][0-9]|2[0-3]):[0-5][0-9]", delivery_time) is None
         ):
             raise FF14ConfigError(DELIVERY_TIME)
+        if (
+            type(self.calendar_sync_interval_seconds) is not int
+            or self.calendar_sync_interval_seconds not in CALENDAR_SYNC_INTERVALS
+        ):
+            raise FF14ConfigError(SYNC_INTERVAL)
 
     @classmethod
     def from_values(cls, values: Mapping[str, object]) -> FF14ConfigSnapshot:
@@ -114,6 +129,7 @@ class FF14ConfigSnapshot:
             values.get(DAYS, 7),
             values.get(TIMEZONE, "Asia/Shanghai"),
             values.get(DELIVERY_TIME, "08:00"),
+            values.get(SYNC_INTERVAL, 21600),
         )
 
     def as_values(self) -> Mapping[str, object]:
@@ -123,6 +139,7 @@ class FF14ConfigSnapshot:
                 DAYS: self.calendar_default_days,
                 TIMEZONE: self.calendar_default_timezone,
                 DELIVERY_TIME: self.calendar_default_delivery_time,
+                SYNC_INTERVAL: self.calendar_sync_interval_seconds,
             }
         )
 

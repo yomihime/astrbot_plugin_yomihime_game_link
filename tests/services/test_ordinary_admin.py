@@ -20,6 +20,7 @@ from ygl_test_subject.modules.ff14.config import (
     CALENDAR_VALUE_VALIDATORS,
     DAYS,
     DELIVERY_TIME,
+    SYNC_INTERVAL,
     TIMEZONE,
 )
 from ygl_test_subject.services.configuration_migration import OrdinaryMigrationField
@@ -56,7 +57,9 @@ class OrdinaryAdminTests(unittest.IsolatedAsyncioTestCase):
                     field.name,
                     CALENDAR_VALUE_VALIDATORS.get(field.name),
                 )
+                # Only these legacy JSON fields existed before module-owned sync.
                 for field in CALENDAR_CONFIG_FIELDS
+                if field.name in (DAYS, TIMEZONE, DELIVERY_TIME)
             ),
         )
         self.raw = {"legacy_region": "INVALID-PRIVATE-RAW"}
@@ -150,6 +153,11 @@ class OrdinaryAdminTests(unittest.IsolatedAsyncioTestCase):
     ):
         self.assertTrue(self.core.management_available)
         self.assertTrue(self.core.configuration_blocked)
+        self.assertEqual(len(self.fields), 4)
+        self.assertNotIn(
+            SYNC_INTERVAL, {field.declaration.name for field in self.fields}
+        )
+        self.assertIn(SYNC_INTERVAL, self.resources[self.ff14target])
         self.assertFalse(self.core.started)
         self.assertFalse(self.core.accepting)
         self.assertIsNone(self.core._pump_task)

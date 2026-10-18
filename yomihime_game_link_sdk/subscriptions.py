@@ -215,6 +215,7 @@ class ScheduleDescriptor:
     minimum_interval_seconds: float
     default_interval_seconds: float | None = None
     interval_config_key: str | None = None
+    background_parameters: tuple[JsonObject, ...] = ()
 
     def __post_init__(self) -> None:
         if isinstance(self.input_schema, Mapping):
@@ -225,6 +226,7 @@ class ScheduleDescriptor:
 
 class ScheduleTrigger(str, Enum):
     PERIODIC = "periodic"
+    BACKGROUND = "background"
     ON_DEMAND = "on_demand"
 
 

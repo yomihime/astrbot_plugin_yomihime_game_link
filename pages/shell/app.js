@@ -694,6 +694,16 @@ var G = new Map(Object.values(/* @__PURE__ */ Object.assign({ "../../../../modul
 			width: "medium",
 			order: 3
 		},
+		ff14_calendar_sync_interval_seconds: {
+			label: "日历同步周期",
+			width: "short",
+			order: 4,
+			optionLabels: {
+				21600: "每6小时",
+				43200: "每12小时",
+				86400: "每24小时"
+			}
+		},
 		ff14_subscriptions_enabled: {
 			label: "订阅推送",
 			width: "short",
@@ -787,7 +797,7 @@ function ie(r, i = r.getElementById("management-root"), a = "settings") {
 			}, o ? [n("option", {
 				value: "",
 				disabled: !0
-			}, "请选择有效值"), ...o.map((e, r) => n("option", { value: String(r) }, t.choices?.[r]?.label || (i.booleanLabels && typeof e == "boolean" ? i.booleanLabels[String(e)] : String(e))))] : void 0),
+			}, "请选择有效值"), ...o.map((e, r) => n("option", { value: String(r) }, t.choices?.[r]?.label || i.optionLabels?.[String(e)] || (i.booleanLabels && typeof e == "boolean" ? i.booleanLabels[String(e)] : String(e))))] : void 0),
 			n("button", {
 				type: "button",
 				"data-action": "default",

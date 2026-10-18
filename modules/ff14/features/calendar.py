@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import uuid
-from dataclasses import dataclass
 from datetime import UTC, datetime, time, timedelta
 from typing import Callable, Mapping
 
@@ -37,9 +36,11 @@ from .calendar_evaluator import (
 )
 from .calendar_ics import MAX_WINDOW, parse_ics
 from .calendar_models import CalendarOccurrence, CalendarParseResult, Completeness
+from .calendar_snapshots import CalendarSnapshots, CalendarSourceSnapshot
 
 MODULE_ID = "ff14"
 COLLECTOR_ID = "ff14.calendar.collect"
+SYNC_COLLECTOR_ID = "ff14.calendar.sync"
 SCHEDULE_SOURCE_ID = "ff14_calendar_primary"
 FALLBACK_SOURCE_ID = "ff14_calendar_fallback"
 KEY_VERSION = 1
@@ -50,20 +51,6 @@ MAX_STORED_OCCURRENCES = 2_000
 MAX_STORED_SUMMARY = 240
 
 _REGIONS = {"cn": "国服", "global": "国际服"}
-
-
-@dataclass(frozen=True, slots=True)
-class CalendarSourceSnapshot:
-    region: str
-    completeness: ObservationCompleteness
-    window_start: datetime
-    window_end: datetime
-    source_id: str | None = None
-    source_variant: str | None = None
-    source_url: str | None = None
-    source_version: str | None = None
-    occurrences: tuple[CalendarOccurrence, ...] = ()
-    warning_codes: tuple[str, ...] = ()
 
 
 class CalendarSourceReader:
@@ -164,9 +151,11 @@ class CalendarCollector:
         services: ModuleServices,
         *,
         clock: Callable[[], datetime] | None = None,
+        snapshots: CalendarSnapshots | None = None,
     ) -> None:
         self._services = services
         self._clock = clock or _utc_now
+        self._snapshots = snapshots or CalendarSnapshots(services, clock=self._clock)
 
     def normalize(self, parameters: JsonObject) -> NormalizedInput:
         if not isinstance(parameters, Mapping):
@@ -200,9 +189,13 @@ class CalendarCollector:
         window_end = start_of_utc_date + timedelta(days=9)
         if window_end - window_start > MAX_WINDOW:
             raise ValueError("calendar collection window exceeds parser policy")
-        bound = await self._services.scopes.bind(context.invocation)
-        snapshot = await CalendarSourceReader(bound.http).read(
+        config = FF14ConfigSnapshot.from_values(
+            (await self._services.config.current()).values
+        )
+        snapshot = await self._snapshots.read(
+            context.invocation,
             region,
+            interval_seconds=config.calendar_sync_interval_seconds,
             window_start=window_start,
             window_end=window_end,
             display_timezone="UTC",
@@ -232,6 +225,9 @@ class CalendarCollector:
             "source_variant": snapshot.source_variant or "",
             "source_url": snapshot.source_url or "",
             "source_version": snapshot.source_version or "",
+            "source_fetched_at": snapshot.fetched_at.isoformat()
+            if snapshot.fetched_at
+            else "",
             "warnings": tuple(_unique(warnings)),
             "occurrences": tuple(
                 _serialize_occurrence(item, snapshot.source_id or "")
@@ -252,8 +248,71 @@ class CalendarCollector:
         )
 
 
+class CalendarSyncCollector(CalendarCollector):
+    """Core-owned background schedule, independent of reminder subscriptions."""
+
+    async def collect(self, context, parameters, previous):
+        del previous
+        if context.invocation is None or context.key.collector_id != SYNC_COLLECTOR_ID:
+            raise ValueError(
+                "calendar synchronization requires its scheduled invocation"
+            )
+        if (
+            context.key.module_id.rsplit("/", 1)[-1] != MODULE_ID
+            or context.key.key_version != KEY_VERSION
+            or context.key.source_id != SCHEDULE_SOURCE_ID
+            or context.key.scope != OwnerScope.public()
+            or context.key.parameters != self.normalize(dict(parameters.values))
+        ):
+            raise ValueError("calendar synchronization key does not match its contract")
+        config = FF14ConfigSnapshot.from_values(
+            (await self._services.config.current()).values
+        )
+        await self._snapshots.synchronize(
+            context.invocation,
+            str(parameters.values["region"]),
+            interval_seconds=config.calendar_sync_interval_seconds,
+        )
+        now = _aware_utc(self._clock())
+        start = datetime.combine(now.date() - timedelta(days=1), time.min, UTC)
+        snapshot = await self._snapshots.read(
+            context.invocation,
+            str(parameters.values["region"]),
+            window_start=start,
+            window_end=start + timedelta(days=32),
+            display_timezone="UTC",
+            reject_floating=False,
+            interval_seconds=config.calendar_sync_interval_seconds,
+        )
+        succeeded = (
+            snapshot.completeness is ObservationCompleteness.COMPLETE
+            and "snapshot_refresh_failed" not in snapshot.warning_codes
+        )
+        return Observation(
+            observation_id=str(uuid.uuid4()),
+            key=context.key,
+            data_version=DATA_VERSION,
+            source_observed_at=None,
+            collected_at=now,
+            completeness=(
+                ObservationCompleteness.COMPLETE
+                if succeeded
+                else ObservationCompleteness.FAILED
+            ),
+            covered_ids=(),
+            payload={
+                "region": parameters.values["region"],
+                "checked_at": now.isoformat(),
+                "source_fetched_at": snapshot.fetched_at.isoformat()
+                if snapshot.fetched_at
+                else "",
+                "warnings": snapshot.warning_codes,
+            },
+        )
+
+
 class CalendarQuery:
-    """One-shot public calendar query using the same fixed source reader."""
+    """Read the persistent snapshot; only a cold miss or manual refresh fetches."""
 
     def __init__(
         self,
@@ -261,10 +320,12 @@ class CalendarQuery:
         *,
         clock: Callable[[], datetime] | None = None,
         config: FF14ConfigSnapshot | None = None,
+        snapshots: CalendarSnapshots | None = None,
     ) -> None:
         self._services = services
         self._clock = clock or _utc_now
         self._config = config
+        self._snapshots = snapshots or CalendarSnapshots(services, clock=self._clock)
 
     async def invoke(
         self, context: InvocationView, parameters: JsonObject
@@ -285,9 +346,12 @@ class CalendarQuery:
         if utc_end - utc_start > MAX_WINDOW:
             return _error(ErrorCode.PARAMETER_ERROR, "查询天数超出日历范围。")
         try:
-            bound = await self._services.scopes.bind(context)
-            snapshot = await CalendarSourceReader(bound.http).read(
+            snapshot = await self._snapshots.read(
+                context,
                 region,
+                interval_seconds=config.calendar_sync_interval_seconds,
+                cold_sync=True,
+                manual=parameters.get("refresh", False),
                 window_start=utc_start,
                 window_end=utc_end,
                 display_timezone=timezone_name,
@@ -309,6 +373,7 @@ class CalendarQuery:
             days=days,
             timezone_name=timezone_name,
             now=retrieved_at,
+            fetched_at=snapshot.fetched_at,
             source_variant=snapshot.source_variant or "",
             source_url=snapshot.source_url,
             interpretation_timezone=timezone_name,
@@ -350,7 +415,9 @@ def _normalize_query(
     config = config or FF14ConfigSnapshot()
     if not isinstance(parameters, Mapping):
         return _error(ErrorCode.PARAMETER_ERROR, "请提供日历区域。")
-    allowed = {"region", "days", "timezone"}
+    allowed = {"region", "days", "timezone", "refresh"}
+    if "refresh" in parameters and type(parameters["refresh"]) is not bool:
+        return _error(ErrorCode.PARAMETER_ERROR, "刷新参数需为布尔值。")
     if set(parameters) - allowed or "region" not in parameters:
         return _error(ErrorCode.PARAMETER_ERROR, "请提供有效的日历区域和查询参数。")
     try:

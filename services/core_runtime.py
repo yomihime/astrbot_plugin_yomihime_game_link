@@ -120,7 +120,9 @@ from .core_configuration import (
     core_config_target,
 )
 
-DEFAULT_CADENCE_CONFIGURATION = CadenceConfiguration((60.0, 300.0, 900.0, 3600.0))
+DEFAULT_CADENCE_CONFIGURATION = CadenceConfiguration(
+    (60.0, 300.0, 900.0, 3600.0, 21600.0, 43200.0, 86400.0)
+)
 DEFAULT_CADENCE_REVISION = 1
 DEFAULT_SCHEDULER_QUOTAS = SchedulerQuotas(4, 2, 2, 20, 10.0, 1.0, 30)
 DEFAULT_RESCHEDULE_CONFIGURATION = RescheduleConfiguration(120.0, 0.05, 0.1, 0.0)
@@ -737,6 +739,16 @@ class CoreRuntime:
             claim_lease=claim_lease,
             send_timeout=send_timeout,
         )
+
+        async def background_config_for(module):
+            target = ConfigTarget(config_principal_id, module.module_id)
+            snapshot = await self.config_repository.current_initialized(target)
+            return (
+                snapshot
+                if snapshot is not None
+                else await self.config_repository.current(target)
+            )
+
         self.scheduler = SharedCollectionScheduler(
             registry=self.registry,
             issuer=self.issuer,
@@ -758,6 +770,7 @@ class CoreRuntime:
             quotas=scheduler_quotas,
             now=utc_clock,
             monotonic_clock=monotonic_clock,
+            background_config_for=background_config_for,
         )
         self.admin_authorization = AdminAuthorizationService(
             self.admin_credential_repository,

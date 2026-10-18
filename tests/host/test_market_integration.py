@@ -34,7 +34,7 @@ from tests.modules.ff14.test_market import (
 from yomihime_game_link_sdk.services import HttpResponse
 
 
-class FixtureTransport(runtime_fixture._IdleTransport):
+class FixtureTransport(runtime_fixture._ItemReplyTransport):
     """All price/directory rows are marked synthetic; no live HTTP exists."""
 
     def __init__(self):
@@ -43,6 +43,11 @@ class FixtureTransport(runtime_fixture._IdleTransport):
         self.callback = None
 
     async def request(self, request):
+        # Only the declared primary calendar route uses the shared valid empty
+        # ICS fixture; any unexpected fallback still fails the exact startup
+        # assertions rather than disappearing behind a broad source filter.
+        if request.source_id == "ff14_calendar_primary":
+            return await super().request(request)
         self.requests.append(request)
         if self.callback:
             body = await self.callback(request)
@@ -109,7 +114,7 @@ class MarketHostIntegrationTests(unittest.IsolatedAsyncioTestCase):
     tearDown = runtime_fixture.AstrBotRuntimeTests.tearDown
     _runtime = runtime_fixture.AstrBotRuntimeTests._runtime
 
-    async def start(self):
+    async def start(self, *, expect_calendar_cached=False):
         self.transport = FixtureTransport()
         self.context = runtime_fixture._Context()
         self.runtime = self._runtime(
@@ -119,6 +124,13 @@ class MarketHostIntegrationTests(unittest.IsolatedAsyncioTestCase):
         )
         await self.runtime.initialize()
         self.addAsyncCleanup(self.runtime.terminate)
+        await runtime_fixture.AstrBotRuntimeTests._assert_initial_public_calendar_sync(
+            self, self.runtime, self.transport, expect_cached=expect_calendar_cached
+        )
+        # Keep the verified startup cost, then preserve every original exact
+        # command/tool request assertion as a post-startup delta. No filtering.
+        self.initial_background_requests = tuple(self.transport.requests)
+        self.transport.requests.clear()
         self.web, _ = page_fixture._host_contracts()
         self.token = page_fixture._token()
 
@@ -360,7 +372,7 @@ class MarketHostIntegrationTests(unittest.IsolatedAsyncioTestCase):
     async def test_directory_and_name_late_results_are_fenced_by_handler(self):
         for stage in ("directory", "name"):
             with self.subTest(stage=stage):
-                await self.start()
+                await self.start(expect_calendar_cached=stage == "name")
                 entered, release = asyncio.Event(), asyncio.Event()
                 blocked = False
 
