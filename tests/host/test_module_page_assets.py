@@ -15,7 +15,7 @@ from ygl_test_subject.adapters.astrbot.bundled import install_bundled_ff14
 from ygl_test_subject.extensions.discovery import discover_packages
 from ygl_test_subject.extensions.page_resources import capture_page_resources
 
-from scripts.build_dashboard_zip import ROOT, projected_page_assets
+from scripts.build_dashboard_zip import ROOT, included_files, projected_page_assets
 from tests.host.astrbot_contract import page_asset_contract
 
 
@@ -23,16 +23,33 @@ class ModulePageAssetTests(unittest.TestCase):
     def test_official_view_discovery_and_per_root_resources(self):
         service, _ = page_asset_contract()
 
-        async def pages_root(_plugin):
-            return ROOT / "pages"
-
-        service.resolve_plugin_pages_root = pages_root
-        pages = asyncio.run(service.discover_plugin_pages(None))
-        self.assertEqual(
-            [page.name for page in pages],
-            ["00-game-link", "ff14", "management", "shell"],
-        )
         assets = projected_page_assets(ROOT)
+        # Discover the actual package inputs, not ignored historical files in a
+        # developer checkout. FF14 is now a module inside the unified shell.
+        with tempfile.TemporaryDirectory() as temporary:
+            staged = Path(temporary)
+            for source in included_files(ROOT):
+                relative = source.relative_to(ROOT)
+                if relative.parts[0] == "pages":
+                    target = staged / relative
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(source.read_bytes())
+            for name, content in assets.items():
+                if name.startswith("pages/"):
+                    target = staged / name
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(content)
+
+            async def pages_root(_plugin):
+                return staged / "pages"
+
+            service.resolve_plugin_pages_root = pages_root
+            pages = asyncio.run(service.discover_plugin_pages(None))
+            self.assertEqual(
+                [page.name for page in pages],
+                ["00-game-link", "management", "shell"],
+            )
+            self.assertFalse((staged / "pages/ff14").exists())
         for page in ("00-game-link", "shell", "management"):
             root = ROOT / "pages" / page
             html = assets.get(
