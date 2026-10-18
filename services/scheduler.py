@@ -11,6 +11,7 @@ import asyncio
 import hashlib
 import json
 import random
+import sys
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
@@ -73,6 +74,8 @@ from ..core.ports import (
 )
 from ..core.registry import RegisteredModule, Registry, RegistrySnapshot
 from ..core.task_scope import ScopeCancelled, ScopeDeadlineExceeded, ScopeStaleError
+from ..infrastructure.sync_diagnostics import SyncDiagnostics
+from ..infrastructure.sync_diagnostics import emit as diagnostic
 
 
 class ExecutionClaimProofRegistry:
@@ -442,11 +445,13 @@ class SharedCollectionScheduler:
         source_minimum_for: Callable[[SourceDeclaration], float] | None = None,
         background_config_for: Callable[[RegisteredModule], Awaitable[ConfigSnapshot]]
         | None = None,
+        diagnostics: SyncDiagnostics | None = None,
     ) -> None:
         validate_contract(binder_for)
         validate_contract(runtime_minimum_for)
         validate_contract(source_minimum_for)
         self.background_config_for = background_config_for
+        self.diagnostics = diagnostics
         self._background_registration_signature = None
         self.registry = registry
         self.issuer = issuer
@@ -869,6 +874,15 @@ class SharedCollectionScheduler:
         lease: ExecutionLease | None = None
         invocation: InvocationView | None = None
         scheduled_lease = None
+        core_final = "not_committed"
+        final_observation = None
+        diagnostic_token = None
+        diagnostic_active = False
+
+        def trace_event(stage, **fields):
+            if diagnostic_active:
+                diagnostic(stage, **fields)
+
         try:
             _snapshot, module, schedule, source = self._registered_schedule(
                 candidate.key
@@ -952,7 +966,16 @@ class SharedCollectionScheduler:
                     capability_id=None,
                 )
                 self.issuer.attach_lease(invocation, scheduled_lease)
+                if self.diagnostics is not None:
+                    diagnostic_token = self.diagnostics.activate(
+                        invocation.invocation_id,
+                        invocation.origin.value,
+                        public=candidate.key.scope.kind is OwnershipKind.PUBLIC,
+                    )
+                    diagnostic_active = candidate.key.scope.kind is OwnershipKind.PUBLIC
+                    trace_event("core_start", budget_ms=int(timeout_seconds * 1000))
                 binder = self.binder_for(module.module_id)
+                trace_event("bind")
                 bound = await binder.bind(invocation)
                 self.admission.check(scheduled_lease)
                 context = validate_contract(
@@ -988,7 +1011,10 @@ class SharedCollectionScheduler:
                         context, candidate.key.parameters, previous
                     )
                 )
+                trace_event("collector_start")
                 observation = await asyncio.wait_for(work, timeout=timeout_seconds)
+                trace_event("collector_return")
+                trace_event("validate")
                 if (
                     not isinstance(observation, Observation)
                     or observation.key != candidate.key
@@ -1044,18 +1070,34 @@ class SharedCollectionScheduler:
                     completion_at=completion_at,
                     background=background,
                 )
+                trace_event("core_commit")
                 committed = await self.repository.commit_observation_with_evaluations(
                     lease, evaluation_commit, next_due_at=next_due_at
                 )
+                core_final = "completed" if committed else "not_committed"
+                final_observation = observation.completeness.value
+                trace_event(
+                    "core_commit", code="committed" if committed else "not_committed"
+                )
                 return CollectionResult(lease, observation, committed)
         except asyncio.CancelledError:
+            core_final = "cancelled"
+            trace_event("core_failure", code="cancelled")
             raise
         except (ScopeCancelled, ScopeStaleError):
+            core_final = "stale"
+            trace_event("core_failure", code="stale")
             return None
-        except (ScopeDeadlineExceeded, asyncio.TimeoutError):
+        except (ScopeDeadlineExceeded, asyncio.TimeoutError) as exc:
+            trace_event(
+                "core_failure",
+                code="core_deadline"
+                if isinstance(exc, ScopeDeadlineExceeded)
+                else "collector_timeout",
+            )
             if lease is None:
                 return None
-            return await self._commit_failed_outcome(
+            result = await self._commit_failed_outcome(
                 candidate,
                 principal,
                 lease,
@@ -1063,10 +1105,18 @@ class SharedCollectionScheduler:
                 source,
                 scheduled_lease,
             )
+            core_final = "error" if result.committed else "not_committed"
+            final_observation = (
+                None
+                if result.observation is None
+                else result.observation.completeness.value
+            )
+            return result
         except Exception:
+            trace_event("core_failure", code="error")
             if lease is None:
                 return None
-            return await self._commit_failed_outcome(
+            result = await self._commit_failed_outcome(
                 candidate,
                 principal,
                 lease,
@@ -1074,14 +1124,32 @@ class SharedCollectionScheduler:
                 source,
                 scheduled_lease,
             )
+            core_final = "error" if result.committed else "not_committed"
+            final_observation = (
+                None
+                if result.observation is None
+                else result.observation.completeness.value
+            )
+            return result
         finally:
-            if scheduled_lease is not None:
-                self.admission.release(scheduled_lease)
-            if invocation is not None:
-                self.issuer.release(invocation)
-            if lease is not None:
-                self.execution_claim_proofs.discard(lease)
-                await _release_execution_shielded(self.repository, lease)
+            try:
+                if scheduled_lease is not None:
+                    self.admission.release(scheduled_lease)
+                if invocation is not None:
+                    self.issuer.release(invocation)
+                if lease is not None:
+                    self.execution_claim_proofs.discard(lease)
+                    await _release_execution_shielded(self.repository, lease)
+            finally:
+                if isinstance(sys.exception(), asyncio.CancelledError):
+                    core_final = "cancelled"
+                trace_event(
+                    "core_final",
+                    code=core_final,
+                    observation_completeness=final_observation,
+                )
+                if self.diagnostics is not None:
+                    self.diagnostics.reset(diagnostic_token)
 
     async def _commit_failed_outcome(
         self,

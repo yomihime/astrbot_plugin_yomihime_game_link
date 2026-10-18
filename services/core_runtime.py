@@ -69,6 +69,7 @@ from ..infrastructure.sqlite.repositories_config_migration import (
 )
 from ..infrastructure.sqlite.repositories_output import SQLiteRootOutputRepository
 from ..infrastructure.sqlite.repositories_runtime import SQLiteModuleRuntimeRepository
+from ..infrastructure.sync_diagnostics import SyncDiagnostics
 from ..services.admin_authorization import AdminAuthorizationService, ContextValidator
 from ..services.admin_facade import AdminFacade
 from ..services.admin_operations import (
@@ -670,6 +671,7 @@ class CoreRuntime:
             self.lifecycle.admission,
             principal_id=config_principal_id,
         )
+        self.sync_diagnostics = SyncDiagnostics()
         self.module_services = ModuleServicesFactory(
             self.registry,
             self.issuer,
@@ -750,6 +752,7 @@ class CoreRuntime:
             )
 
         self.scheduler = SharedCollectionScheduler(
+            diagnostics=self.sync_diagnostics,
             registry=self.registry,
             issuer=self.issuer,
             lifecycle=self.lifecycle,
@@ -830,6 +833,7 @@ class CoreRuntime:
         self.gateway = Gateway(
             self.registry,
             self.issuer,
+            diagnostics=self.sync_diagnostics,
             admission=self.lifecycle.admission,
             lifecycle=self.lifecycle,
             private_authorizer=self.module_services.authorize_private,
@@ -1752,6 +1756,7 @@ class CoreRuntime:
 
         self._cleanup_pending = False
         self._closed = True
+        self.sync_diagnostics.close()
         self._started = False
         return True
 

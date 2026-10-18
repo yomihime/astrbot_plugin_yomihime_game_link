@@ -136,6 +136,58 @@ class AdminPagesTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.pages.requests, {})
         self.assertEqual(self.runtime._admin_source._proofs, {})
 
+    async def test_sync_diagnostics_is_bounded_metadata_under_existing_admin_proof(
+        self,
+    ):
+        from ygl_test_subject.infrastructure.sync_diagnostics import emit
+
+        diagnostics = self.runtime._core.sync_diagnostics
+        token = diagnostics.activate("a" * 32, "web_public")
+        try:
+            emit(
+                "sync_start",
+                region="cn",
+                trigger="manual",
+                body="PRIVATE-DIAGNOSTIC-SENTINEL",
+            )
+            emit("core_final", code="completed", capability_status="error")
+        finally:
+            diagnostics.reset(token)
+        response = await self.call("sync-diagnostics", {})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.history[0].status_code, 307)
+        self.assertEqual(response.headers["cache-control"], "no-store")
+        data = response.json()["data"]
+        self.assertEqual(data["retention"], "memory_only")
+        self.assertEqual(data["attempts"][-1]["core_final"], "completed")
+        self.assertEqual(data["attempts"][-1]["capability_status"], "error")
+        self.assertNotIn("PRIVATE-DIAGNOSTIC-SENTINEL", response.text)
+        self.assertEqual(
+            (await self.call("sync-diagnostics", {"region": "cn"})).status_code, 400
+        )
+        self.assertEqual(
+            (await self.call("sync-diagnostics", {}, headers={})).status_code, 401
+        )
+        wrong_origin = {**self.headers, "Origin": "https://other.test"}
+        self.assertEqual(
+            (await self.call("sync-diagnostics", {}, headers=wrong_origin)).status_code,
+            403,
+        )
+        asset = {
+            **self.headers,
+            "Authorization": "Bearer "
+            + _token(
+                token_type="plugin_page_asset",
+                plugin_name=PLUGIN_NAME,
+                page_name="management",
+            ),
+        }
+        self.assertEqual(
+            (await self.call("sync-diagnostics", {}, headers=asset)).status_code, 401
+        )
+        self.assertEqual(self.pages.requests, {})
+        self.assertEqual(self.runtime._admin_source._proofs, {})
+
     async def test_calendar_sync_interval_auth_schema_cas_and_refresh(self):
         name = "ff14_calendar_sync_interval_seconds"
         owner = "ff14/ff14"

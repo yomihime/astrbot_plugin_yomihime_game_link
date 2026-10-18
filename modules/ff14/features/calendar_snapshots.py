@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime, time, timedelta
 from typing import Callable
@@ -30,6 +31,16 @@ FALLBACK = "ff14_calendar_fallback"
 MANUAL_COOLDOWN_SECONDS = 300
 SOURCE_TIMEOUT_SECONDS = 3.0
 MAX_REMINDER_AGE = timedelta(hours=48)
+
+
+def _diagnostic(stage, **fields):
+    """Optional closed-metadata signal; no Core dependency or business effect."""
+    try:
+        logging.getLogger("yomihime_game_link.calendar_sync_diagnostic").debug(
+            "calendar_sync", extra={"ygl_sync": {"stage": stage, **fields}}
+        )
+    except BaseException:
+        pass
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,7 +104,10 @@ class CalendarSnapshots:
             86400,
         ):
             raise ValueError("invalid calendar synchronization interval")
+        _diagnostic("sync_start", region=region, trigger=mode)
+        _diagnostic("bind")
         bound = await self.services.scopes.bind(invocation)
+        _diagnostic("bind", code="ok")
         records = await bound.records.collection(COLLECTION)
         return await self._synchronize_bound(
             records, bound.http, region, interval_seconds, mode
@@ -117,13 +131,20 @@ class CalendarSnapshots:
                 and value.get("complete")
             ):
                 break
+        _diagnostic("sync_end", code="ok")
         return cooled_down
 
     async def _synchronize_source(self, records, http, region, spec, interval, mode):
         key = source_key(region, spec)
+        _diagnostic(
+            "source_start",
+            source=spec.source_id,
+            region=region,
+            budget_ms=int(SOURCE_TIMEOUT_SECONDS * 1000),
+        )
         async with self._locks.setdefault(key, asyncio.Lock()):
             now = self._now()
-            current = await records.get(key)
+            current = await self._record_operation("records_read", records.get(key))
             value = dict(current.value) if current is not None else {}
             fingerprint = hashlib.sha256(spec.url.encode()).hexdigest()
             if value.get("url_fingerprint") != fingerprint:
@@ -137,14 +158,17 @@ class CalendarSnapshots:
                 next_due = anchor + timedelta(seconds=interval)
             retry_after = _instant(value.get("retry_after"))
             if mode == "due" and next_due is not None and now < next_due:
+                _diagnostic("source_skip", code="not_due")
                 return value, False
             if mode == "cold" and (value.get("complete") or value.get("partial")):
+                _diagnostic("source_skip", code="cached")
                 return value, False
             if (
                 mode in ("cold", "manual")
                 and retry_after is not None
                 and now < retry_after
             ):
+                _diagnostic("source_skip", code="cooldown")
                 return value, mode == "manual"
             # Claim before network IO. Restart and concurrent service instances
             # observe this durable bound even if the original task is cancelled.
@@ -167,6 +191,7 @@ class CalendarSnapshots:
                 }
             )
             try:
+                _diagnostic("records_claim")
                 claim = (
                     await records.create(key, value)
                     if current is None
@@ -174,11 +199,21 @@ class CalendarSnapshots:
                         key, value, expected_revision=current.revision
                     )
                 )
+                _diagnostic("records_claim", code="ok")
             except (RevisionConflict, UniqueConstraintViolation):
+                _diagnostic("records_claim", code="revision_conflict")
                 latest = await records.get(key)
                 return (
                     dict(latest.value) if latest is not None else {}
                 ), mode == "manual"
+            except BaseException as exc:
+                _diagnostic(
+                    "records_claim",
+                    code="cancelled"
+                    if isinstance(exc, asyncio.CancelledError)
+                    else "call_error_commit_unknown",
+                )
+                raise
             try:
                 # Each source has an independent budget. A slow primary cannot
                 # consume the fallback's budget inside Core's ten-second run.
@@ -191,8 +226,11 @@ class CalendarSnapshots:
                 raw = response.body
                 if len(raw) > MAX_BYTES:
                     raise SourceHttpError("response_too_large")
+                _diagnostic("decode")
                 text = raw.decode("utf-8", errors="strict")
+                _diagnostic("decode", code="ok")
                 start = datetime.combine(now.date() - timedelta(days=1), time.min, UTC)
+                _diagnostic("parse")
                 parsed = parse_ics(
                     raw,
                     window_start=start,
@@ -203,6 +241,13 @@ class CalendarSnapshots:
                 )
                 complete = parsed.completeness is Completeness.COMPLETE
                 field = "complete" if complete else "partial"
+                _diagnostic(
+                    "parse",
+                    completeness=field,
+                    warnings=tuple(w.code for w in parsed.warnings),
+                    warning_count=len(parsed.warnings),
+                    occurrence_count=len(parsed.occurrences),
+                )
                 value[field] = {
                     "raw": text,
                     "fetched_at": self._now().isoformat(),
@@ -213,15 +258,43 @@ class CalendarSnapshots:
                     # Success makes the obsolete partial slot unnecessary.
                     value.pop("partial", None)
             except SourceHttpError as exc:
+                _diagnostic("source_end", code=exc.code, http_status=exc.status_code)
                 if exc.code == "cancelled":
                     raise
                 value["last_status"] = "failed"
-            except (TimeoutError, UnicodeError):
+            except TimeoutError:
+                _diagnostic("source_end", code="source_deadline")
                 value["last_status"] = "failed"
+            except UnicodeError:
+                _diagnostic("decode", code="invalid_utf8")
+                value["last_status"] = "failed"
+            except asyncio.CancelledError:
+                _diagnostic("source_end", code="cancelled")
+                raise
             # No catch for cancellation or authority/service errors: they must
             # propagate. The bound records service fences late module epochs.
-            await records.replace(key, value, expected_revision=claim.revision)
+            await self._record_operation(
+                "records_commit",
+                records.replace(key, value, expected_revision=claim.revision),
+            )
+            _diagnostic("source_end", code=value["last_status"])
             return value, False
+
+    @staticmethod
+    async def _record_operation(stage, operation):
+        _diagnostic(stage)
+        try:
+            result = await operation
+        except BaseException as exc:
+            _diagnostic(
+                stage,
+                code="cancelled"
+                if isinstance(exc, asyncio.CancelledError)
+                else "call_error_commit_unknown",
+            )
+            raise
+        _diagnostic(stage, code="ok")
+        return result
 
     async def read(
         self,
@@ -236,7 +309,14 @@ class CalendarSnapshots:
         cold_sync: bool = False,
         manual: bool = False,
     ) -> CalendarSourceSnapshot:
+        if manual or cold_sync:
+            _diagnostic(
+                "sync_start", region=region, trigger="manual" if manual else "cold"
+            )
+            _diagnostic("bind")
         bound = await self.services.scopes.bind(invocation)
+        if manual or cold_sync:
+            _diagnostic("bind", code="ok")
         records = await bound.records.collection(COLLECTION)
         values = [] if manual else await self._values(records, region)
         limited = False
