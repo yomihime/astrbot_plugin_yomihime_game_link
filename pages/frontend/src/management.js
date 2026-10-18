@@ -120,15 +120,15 @@ export function createManagementPage(document,bridge,window,{expectedPage='manag
   let suspended=initiallySuspended;
   const fonts=createFontSettings(bridge,window,panel=>view.font(panel),()=>loseAccess());
   const credentialControls=new Map();let encryptionReady=false;let savedFocus=null,selectedOwner=null;
-  const emptyDraft=scope==='maintenance'?'[[],[],false]':'[[],[]]';let draftState=emptyDraft;
+  const emptyDraft='[[],[]]';let draftState=emptyDraft;
   const statusNotice=createNotice(window,(message,tone)=>{status.textContent=message;status.dataset.tone=tone;});
   const notice=(message,tone='error')=>statusNotice.show(message,tone);
-  const cryptoAdvice='当前加密不可用，请管理员检查宿主密钥与加密组件；修改外部环境后需正常重启同一宿主，再重开此页。已有凭据时请保留原密钥。';
+  const cryptoAdvice='仅 FFLogs 凭据写入暂不可用。请在 AstrBot 进程环境中配置 YGL_SECRET_KEY（标准 Base64 编码的 32 字节密钥），正常重启同一宿主后重开本页。已有凭据必须保留原密钥，切勿覆盖；不要把密钥发到聊天或日志。';
+  const cryptoDetail=value=>({not_provided:'宿主进程未读取到 YGL_SECRET_KEY。',invalid_encoding_or_length:'密钥编码或长度无效；需要标准 Base64 解码后恰好 32 字节。',cannot_safely_confirm:'无法安全确认密钥状态。',valid_format:({component_unavailable:'AES-GCM 组件不可用。',self_test_failed:'AES-GCM 内存自检失败。',unknown:'无法确认加密组件状态。'}[value.codec_state]||'')}[value.key_state]||'无法安全确认加密状态。');
   function draftChanged(){
     const next=JSON.stringify([
       [...controls].filter(([,c])=>c.mode&&c.mode.value!=='keep').map(([key,c])=>[key,c.mode.value,c.input?.value]),
       [...credentialControls].filter(([,c])=>c.mode&&c.mode.value!=='keep'||c.clientId?.value||c.clientSecret?.value||c.confirm?.checked).map(([key,c])=>[key,c.mode?.value,c.clientId?.value,c.clientSecret?.value,c.confirm?.checked]),
-      ...(scope==='maintenance'?[Boolean(element('replacement')?.checked)]:[]),
     ]);
     if(next!==draftState){draftState=next;onDraftMutation();}view.drafts();buttons();
   }
@@ -140,8 +140,7 @@ export function createManagementPage(document,bridge,window,{expectedPage='manag
     fonts.sync(fontVisible,!closed&&ready&&!suspended&&!stale);
     setButton(element('refresh'),closed||!ready||active!==null);
     const usable=!closed&&ready&&!stale&&snapshot!==null&&Object.keys(snapshot).length>0&&active===null;
-    setButton(element('rollback'),!usable);setButton(element('recover'),!usable||catalog.fields.some(f=>f.readable&&!f.editable));
-    if(element('replacement'))element('replacement').disabled=blocked(element('recover'));
+    setButton(element('recover'),!usable||catalog.fields.some(f=>f.readable&&!f.editable));
     for(const [target,card]of cards){const selected=selectedOwner===null||selectedOwner===target;setButton(card.save,!usable||!selected||!catalog||!ownedFields(catalog,target).some(writable));if(card.discard)setButton(card.discard,!ready||closed||active!==null||!selected);}
     // Preserve focused editable drafts while reading; submit buttons fence writes.
     for(const control of controls.values()){const allowed=!closed&&ready&&(selectedOwner===null||selectedOwner===control.field.module_id)&&writable(control.field);control.mode.disabled=!allowed;control.input.disabled=!allowed;if(control.reset)control.reset.disabled=!allowed;}
@@ -160,9 +159,8 @@ export function createManagementPage(document,bridge,window,{expectedPage='manag
     if(!current(attempt))fail('stale_context');const response=await bridge.apiPost(`admin/${endpoint}`,body);if(!current(attempt))fail('stale_context');
     if(endpoint==='catalog')return validateCatalog(response);if(endpoint==='read')return response;
     if(endpoint==='credential-catalog')return validateCredentialCatalog(response);
-    if(endpoint==='credential-readiness'){if(!exact(response,['ready','state','reason_code'])||typeof response.ready!=='boolean'||!['ready','unavailable'].includes(response.state)||(response.state==='ready')!==response.ready||!['ready','secret_encryption_unavailable'].includes(response.reason_code))fail('operation_unavailable');return response;}
+    if(endpoint==='credential-readiness'){if(!exact(response,['ready','state','reason_code','diagnostics'])||typeof response.ready!=='boolean'||!['ready','unavailable'].includes(response.state)||(response.state==='ready')!==response.ready||!['ready','secret_encryption_unavailable'].includes(response.reason_code)||!exact(response.diagnostics,['key_state','codec_state'])||!['not_provided','invalid_encoding_or_length','valid_format','cannot_safely_confirm'].includes(response.diagnostics.key_state)||!['not_run','available','component_unavailable','self_test_failed','unknown'].includes(response.diagnostics.codec_state))fail('operation_unavailable');return response;}
     if((endpoint==='update'||endpoint==='credential-update')&&(!exact(response,['module_id','revision'])||response.module_id!==body.module_id||!Number.isSafeInteger(response.revision)||response.revision<=body.expected_revision))fail('operation_unavailable');
-    if(endpoint==='rollback'&&(!exact(response,['rolled_back'])||response.rolled_back!==true))fail('operation_unavailable');
     if(endpoint==='recover'&&(!exact(response,['recovered'])||response.recovered!==true))fail('operation_unavailable');return response;
   }
   function inputValue(f,value){const choices=settingValues(f);if(value===null&&!followsCoreTheme(f))return '';return choices?String(choices.findIndex(v=>v===value)):String(value);}
@@ -241,7 +239,7 @@ export function createManagementPage(document,bridge,window,{expectedPage='manag
   }
   async function refresh(attempt){stale=true;buttons();const declarations=await post('catalog',{},attempt),values=validateSnapshot(await post('read',{},attempt),declarations);if(!current(attempt))fail('stale_context');catalog=declarations;snapshot=values;
     let credentialNotice='';try{const forms=await post('credential-catalog',{},attempt),states=validateCredentialStatus(await post('credential-status',{},attempt),forms);if(!current(attempt))fail('stale_context');credentialCatalog=forms;credentialSnapshot=states;
-      encryptionReady=false;try{const readiness=await post('credential-readiness',{},attempt);encryptionReady=readiness.ready;credentialNotice=encryptionReady?'':cryptoAdvice;}catch(error){if(!current(attempt)||managementAccessLost(error))throw error;credentialNotice='未能确认加密状态，暂不能填写凭据；请核对宿主管理会话与部署后重开此页。';}if(!encryptionReady)clearSecrets();}
+      encryptionReady=false;try{const readiness=await post('credential-readiness',{diagnostics:true},attempt);encryptionReady=readiness.ready;credentialNotice=encryptionReady?'':cryptoDetail(readiness.diagnostics)+cryptoAdvice;}catch(error){if(!current(attempt)||managementAccessLost(error))throw error;credentialNotice='未能确认加密状态，暂不能填写凭据；请核对宿主管理会话与部署后重开此页。';}if(!encryptionReady)clearSecrets();}
     catch(error){if(!current(attempt))throw error;credentialCatalog=null;credentialSnapshot=null;if(managementAccessLost(error)){clearSecrets();throw error;}credentialNotice='来源凭据状态暂不可用；未读取旧值，请刷新核对后再提交。';}
     stale=false;if(scope==='settings'){await render();if(credentialCatalog){await renderCredentials();view.credentials([...credentialControls.values()],draftChanged,credentialNotice);await nextTick();buttons();}else view.credentials([...credentialControls.values()],draftChanged,credentialNotice);}if(!current(attempt))fail('stale_context');onCapabilities([...new Set([...catalog.fields,...(credentialCatalog?.fields||[])].map(f=>f.module_id))],credentialCatalog!==null);return {credentials:credentialCatalog!==null};}
   async function run(action){
@@ -261,11 +259,11 @@ export function createManagementPage(document,bridge,window,{expectedPage='manag
   }
   const revisions=()=>Object.fromEntries(Object.entries(snapshot).map(([target,row])=>[target,row.revision]));
   element('refresh').addEventListener('click',()=>!blocked(element('refresh'))&&run(async attempt=>{const result=await refresh(attempt);notice(result.credentials?'已刷新。':'普通设置已刷新，凭据状态暂未核实。',result.credentials?'success':'warning');}));
-  for(const action of ['rollback','recover'])element(action)?.addEventListener('click',()=>!blocked(element(action))&&run(async attempt=>{
+  for(const action of ['recover'])element(action)?.addEventListener('click',()=>!blocked(element(action))&&run(async attempt=>{
     if(!await beforeMaintenance({action,isCurrent:()=>current(attempt)})||!current(attempt))return;
-    await post(action,{expected_revisions:revisions(),...(action==='recover'?{complete_from_current:element('replacement').checked}:{})},attempt);
+    await post(action,{expected_revisions:revisions()},attempt);
     try{await refresh(attempt);}catch(error){if(!current(attempt))throw error;stale=true;fail(managementAccessLost(error)?'write_ack_authorization_denied':'write_ack_readback_unverified');}
-    onConfigurationSaved();notice(action==='rollback'?'受审迁移已限定回退，其他数据保留。':'配置已重新校验，业务运行已恢复。','success');
+    onConfigurationSaved();notice('配置已重新校验，业务运行已恢复。','success');
   }));
   function accept(context){
     if(closed)return;view.context(context);document.documentElement.dataset.theme=context?.isDark===true||context?.theme==='dark'?'dark':'light';document.documentElement.lang=typeof context?.locale==='string'?context.locale:'zh-CN';let next;
@@ -291,4 +289,4 @@ export function createManagementPage(document,bridge,window,{expectedPage='manag
 }
 
 
-if(typeof document!=='undefined' && document.getElementById('management-root'))createManagementPage(document,window.AstrBotPluginPage,window).start();
+if(typeof document!=='undefined' && document.getElementById('management-root'))createManagementPage(document,window.AstrBotPluginView,window).start();

@@ -6,6 +6,8 @@ import {createHash} from 'node:crypto';
 import {mergeManifestResources} from './manifest-resources.mjs';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const frontend = resolve(root, 'pages/frontend');
+// Vite/Rolldown may derive minifier names from cwd; all entry points use one root.
+process.chdir(frontend);
 const shell = resolve(root, 'pages/shell');
 const ff14 = resolve(root, 'modules/ff14/pages');
 const aliases = {vue: resolve(frontend, 'node_modules/vue/dist/vue.runtime.esm-bundler.js'), 'naive-ui': resolve(frontend, 'node_modules/naive-ui/es/index.mjs')};
@@ -32,7 +34,6 @@ await build({...common, build: {outDir: resolve(root, 'pages/management'), empty
 await build({...common, build: {outDir: resolve(ff14, 'dist'), emptyOutDir: true, lib: {entry: resolve(ff14, 'src/entry.ts'), formats: ['es'], fileName: () => 'entry.js', cssFileName: 'styles'}, rolldownOptions: {external: ['vue', 'naive-ui'], output: {paths: {'vue': '../../../../../runtime.js', 'naive-ui': '../../../../../runtime.js'}}}, minify: true}});
 await copyFile(resolve(frontend, 'src/index.html'), resolve(shell, 'index.html'));
 await copyFile(resolve(frontend, 'src/management-index.html'), resolve(root, 'pages/management/index.html'));
-for (const name of ['app.js','index.html','styles.css']) await copyFile(resolve(ff14, 'compat', name), resolve(root, 'pages/ff14', name));
 const resources = [];
 for (const file of (await readdir(resolve(ff14, 'dist'))).sort()) {
   const bytes = await readFile(resolve(ff14, 'dist', file));
@@ -58,7 +59,7 @@ for (const name of [...runtimePackages].sort()) {
   const file=name.replaceAll('/','_')+'.txt'; await writeFile(resolve(shell,'licenses',file),content); licenseFiles.push(`licenses/${file}`); notices.push(content);
 }
 await writeFile(resolve(shell,'THIRD_PARTY_NOTICES.txt'),notices.join('\n\n--------------------\n\n'));
-const auditDir=resolve(root,'.architecture-refactor/modular-r0-r3'); await mkdir(auditDir,{recursive:true});
+const auditDir=resolve(root,'.build/frontend'); await mkdir(auditDir,{recursive:true});
 await writeFile(resolve(auditDir,'runtime-packages.json'),JSON.stringify({packages:[...runtimePackages].sort(),facades:[{package:'vue',reason:'public runtime export facade; implementation rendered from @vue packages'}],modules:moduleAudit,licenseFiles},null,2)+'\n');
 console.log(JSON.stringify({runtimeBytes: (await readFile(resolve(shell, 'runtime.js'))).length, resources}));
 

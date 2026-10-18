@@ -80,7 +80,7 @@ class UnifiedManagementHostTests(unittest.IsolatedAsyncioTestCase):
     asyncTearDown = admin_fixture.AdminPagesTests.asyncTearDown
     call = admin_fixture.AdminPagesTests.call
 
-    async def recover(self):
+    async def configure_ready_core(self):
         rows = (await self.call("read", {})).json()["data"]
         response = await self.call(
             "update",
@@ -100,13 +100,16 @@ class UnifiedManagementHostTests(unittest.IsolatedAsyncioTestCase):
                 "expected_revisions": {
                     owner: row["revision"] for owner, row in rows.items()
                 },
-                "complete_from_current": False,
             },
         )
-        self.assertEqual(response.status_code, 200, response.text)
+        # A fresh current configuration is already running; recovery is only
+        # authorized while configuration-blocked, never as an extra restart API.
+        self.assertEqual(response.status_code, 403, response.text)
+        self.assertTrue(self.runtime.core_runtime.started)
+        self.assertFalse(self.runtime.core_runtime.configuration_blocked)
 
     async def test_disable_unload_preserves_configuration_and_trusted_restore(self):
-        await self.recover()
+        await self.configure_ready_core()
         core = self.runtime.core_runtime
         with patch.dict(
             os.environ, {"YGL_SECRET_KEY": base64.b64encode(bytes(range(32))).decode()}
@@ -227,7 +230,7 @@ class UnifiedManagementHostTests(unittest.IsolatedAsyncioTestCase):
 
         from yomihime_game_link_sdk.services import ConfigTarget
 
-        await self.recover()
+        await self.configure_ready_core()
         for endpoint, updates in (
             (
                 "update",
@@ -402,9 +405,9 @@ class NeutralPublicHostTests(unittest.IsolatedAsyncioTestCase):
                 authorization=context,
             )
         self.modules.end(context)
-        from ygl_test_subject.adapters.astrbot.ff14_pages import FF14Pages
+        from ygl_test_subject.adapters.astrbot.public_pages import PublicPages
 
-        self.pages = FF14Pages(_Context(), self.runtime)
+        self.pages = PublicPages(_Context(), self.runtime)
         self.pages.register()
 
     async def asyncTearDown(self):

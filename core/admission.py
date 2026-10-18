@@ -16,8 +16,8 @@ from yomihime_game_link_sdk.declarations import CapabilityReference, ModuleManif
 from yomihime_game_link_sdk.services import CapabilityHealth, HealthReport, HealthStatus
 from yomihime_game_link_sdk.subscriptions import ScheduleTrigger
 
-from ..core.contracts.validation_boundary import validate_contract
 from .context_issuer import ContextIssuer, InvalidInvocation
+from .contracts.validation_boundary import validate_contract
 from .ports import (
     AdmissionLease,
     AdmissionPort,

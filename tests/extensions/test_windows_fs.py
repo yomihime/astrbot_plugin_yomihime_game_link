@@ -21,8 +21,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from ygl_test_subject.core.contracts.manifests import EXTENSION_MANIFEST_ABI
-from ygl_test_subject.extensions import discovery, windows_fs
-from ygl_test_subject.extensions import windows_maintenance as maintenance
+from ygl_test_subject.extensions import discovery
 from ygl_test_subject.extensions.discovery import (
     EXTENSION_ROOT_MAX_ENTRIES,
     EXTENSION_ROOT_MAX_PACKAGES,
@@ -36,7 +35,9 @@ from ygl_test_subject.extensions.source_snapshot import (
     SourceSnapshotLimits,
     capture_source_bundle,
 )
-from ygl_test_subject.extensions.windows_fs import (
+from ygl_test_subject.infrastructure.windows import fs as windows_fs
+from ygl_test_subject.infrastructure.windows import maintenance
+from ygl_test_subject.infrastructure.windows.fs import (
     WindowsScanError,
     _assert_x64_layout,
     _ByHandleFileInformation,
@@ -332,7 +333,7 @@ class WindowsAbiTests(unittest.TestCase):
 
     def test_unsupported_matrix_fails_before_root_access(self) -> None:
         with patch(
-            "ygl_test_subject.extensions.windows_fs._native_windows_version",
+            "ygl_test_subject.infrastructure.windows.fs._native_windows_version",
             return_value=(10, 0, 0),
         ):
             with self.assertRaises(WindowsScanError) as raised:

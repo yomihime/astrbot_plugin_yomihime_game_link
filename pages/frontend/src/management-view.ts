@@ -57,7 +57,7 @@ export function createManagementView(document:Document,container:HTMLElement=doc
     items.length>1?h('nav',{class:'credential-tabs','aria-label':'凭据来源'},items.map(c=>h('button',{type:'button','aria-pressed':current===c.field.name,onClick:()=>{regions.value={...regions.value,[key]:c.field.name};}},credentialLabel(c.field)+(credentialDirty(c)?' · 未保存':'')))):null,...items.map(c=>credential(c,current===c.field.name)),
    ]});})):null,
    scope==='maintenance'?h(SettingsGroup,{title:'限定恢复',class:'maintenance-panel'},{default:()=>[
-    h('p','仅处理受审普通配置迁移；后续修改会阻止回退。订阅及其它持久数据保留。'),button('rollback','回退受审迁移'),h('p',h('label',{class:'ui-check-label'},[h('input',{id:'replacement',type:'checkbox',onChange:mutate}),h('span','以全部迁移字段已显式保存的有效新值完成恢复（缺少旧准备材料时）')])),button('recover','重新校验并恢复运行'),
+    h('p','修正无效普通设置后重新校验并恢复运行。已有订阅及其它持久数据保留。'),button('recover','重新校验并恢复运行'),
    ]}):null,
   ])});
  };}});const app=createApp(App);app.mount(container);

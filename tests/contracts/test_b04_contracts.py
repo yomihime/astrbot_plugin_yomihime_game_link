@@ -261,7 +261,7 @@ class B04ContractTests(unittest.TestCase):
         )
         self.assertEqual(
             tuple(inspect.signature(methods[1]).parameters),
-            ("self", "lease", "commit", "next_due_at"),
+            ("self", "lease", "commit", "next_due_at", "commit_guard"),
         )
 
     def test_c02_subscription_scope_and_revision_cas_values(self):

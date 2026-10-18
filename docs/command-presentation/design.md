@@ -2,7 +2,7 @@
 
 ## 范围与状态
 
-本设计将人类命令展示与 LLM 事实输出分开，同时保留现有 Core、模块、presentation、Host 边界。PR 起始交付为文档和 `examples/command_cards/` 离线原型；后续生产接入按[实施计划](implementation-plan.md)推进，已完成与未验范围以[当前检查点](README.md)为准。
+本设计将人类命令展示与 LLM 事实输出分开，同时保留现有 Core、模块、presentation、Host 边界。PR 起始交付为文档和 `examples/command_cards/` 离线原型；后续生产接入按[实施计划](../history/command-presentation/implementation-plan.md)推进，已完成与未验范围以[当前检查点](README.md)为准。
 
 SDK `0.1.0a6`、现有结果契约、授权边界与生命周期不在此阶段升级。样图只证明排版方向，不能证明查询、资源注册、权限或消息投递可用。
 

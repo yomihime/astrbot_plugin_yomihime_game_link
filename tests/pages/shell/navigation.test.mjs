@@ -16,7 +16,7 @@ test('built mobile navigation opens module home and exposes only declared inner 
  window.matchMedia=()=>({matches:false,addEventListener(){},removeEventListener(){}});window.scrollTo=()=>{};window.confirm=()=>true;
  const data=moduleCatalog();data.modules.push({...data.modules[0],module_id:'example/demo',route:'demo',category:'platform',pages:[],resources:[]},{...data.modules[0],module_id:'empty/none',route:'none',pages:[],resources:[]});
  const binding={pluginName:'astrbot_plugin_yomihime_game_link',pageName:'shell',binding:1},calls=[];
- window.AstrBotPluginPage={ready:()=>Promise.resolve(binding),onContext(fn){fn(binding);return()=>{};},apiGet:()=>Promise.resolve(data),apiPost(endpoint,body){calls.push({endpoint,body});if(endpoint==='admin/catalog')return Promise.resolve(catalog());if(endpoint==='admin/read')return Promise.resolve(snapshot());if(endpoint==='admin/credential-catalog')return Promise.resolve(credentialCatalog());if(endpoint==='admin/credential-status')return Promise.resolve(credentialStatus());if(endpoint==='admin/credential-readiness')return Promise.resolve(null);if(endpoint==='admin/modules')return Promise.resolve({registry_revision:1,modules:[]});return Promise.reject(Error('unexpected_write'));}};
+ window.AstrBotPluginView={ready:()=>Promise.resolve(binding),onContext(fn){fn(binding);return()=>{};},apiGet:()=>Promise.resolve(data),apiPost(endpoint,body){calls.push({endpoint,body});if(endpoint==='admin/catalog')return Promise.resolve(catalog());if(endpoint==='admin/read')return Promise.resolve(snapshot());if(endpoint==='admin/credential-catalog')return Promise.resolve(credentialCatalog());if(endpoint==='admin/credential-status')return Promise.resolve(credentialStatus());if(endpoint==='admin/credential-readiness')return Promise.resolve(null);if(endpoint==='admin/modules')return Promise.resolve({registry_revision:1,modules:[]});return Promise.reject(Error('unexpected_write'));}};
  const directory=resolve(root,'.architecture-refactor/management-home-settings-ux/tests/backend/shell-navigation-'+process.pid);await mkdir(directory,{recursive:true});for(const name of ['app.js','runtime.js'])await copyFile(resolve(root,'pages/shell',name),resolve(directory,name));
  // The loader exists only in release-builder projection. This navigation test
  // injects asset failure, while production.test.mjs covers literal module loads.
@@ -34,17 +34,12 @@ test('built mobile navigation opens module home and exposes only declared inner 
   const append=window.document.head.append.bind(window.document.head);window.document.head.append=(...nodes)=>{append(...nodes);for(const node of nodes)if(node.matches?.('link[data-module-style]'))queueMicrotask(()=>node.dispatchEvent(new window.Event('load')));};
   const template=window.document.getElementById('module-style-assets');for(const path of data.modules[0].pages[0].styles){const link=window.document.createElement('link');link.rel='stylesheet';link.dataset.resource=path;link.href='./'+path;template.content.append(link);}
   window.document.querySelector('.module-tabs a[href="#/module/ff14%2Fff14/-/queries"]').click();await flush();const query=window.document.querySelector('.query-links a[href="#/module/ff14%2Fff14/market"]');assert.ok(query,'module queries remain secondary reachable links');assert.equal(mobile.querySelectorAll('details a').length,0);query.click();await flush();assert.equal(window.location.hash,'#/module/ff14%2Fff14/market');assert.equal(module.value,'ff14/ff14');assert.equal(calls.filter(call=>call.endpoint==='admin/credential-update').length,0);
-  assert.equal(window.document.querySelector('#module-management-container [data-reopen-guidance]'),null);window.document.querySelector('.module-tabs a[href="#/module/ff14%2Fff14"]').click();await flush();const reopen=window.document.querySelector('#module-management-container [data-reopen-guidance]');assert.ok(reopen,'sandboxed management home must provide host menu instructions');assert.match(reopen.textContent,/宿主左侧.*插件.*astrbot_plugin_yomihime_game_link.*monitor/);assert.equal(window.document.querySelector('#module-management-container a[target="_top"]'),null);assert.equal(window.document.querySelector('#module-management-container a[href="/#/extension/plugins"]'),null);
+  assert.equal(window.document.querySelector('#module-management-container [data-reopen-guidance]'),null);window.document.querySelector('.module-tabs a[href="#/module/ff14%2Fff14"]').click();await flush();const reopen=window.document.querySelector('#module-management-container [data-reopen-guidance]');assert.ok(reopen,'sandboxed management home must provide host menu instructions');assert.match(reopen.textContent,/宿主左侧.*插件.*astrbot_plugin_yomihime_game_link.*打开视图/);assert.equal(window.document.querySelector('#module-management-container a[target="_top"]'),null);assert.equal(window.document.querySelector('#module-management-container a[href="/#/extension/plugins"]'),null);
  }finally{window.dispatchEvent(new window.Event('pagehide'));dom.window.close();}
 });
 
-test('retired FF14 locator gives manual host-menu instructions without forbidden top navigation',async()=>{
- // The supported Host iframe has allow-scripts/forms/downloads but no
- // allow-top-navigation or allow-top-navigation-by-user-activation.
- const sandbox='allow-scripts allow-forms allow-downloads';
- assert.equal(sandbox.split(' ').some(token=>token.startsWith('allow-top-navigation')),false);
- for(const path of ['modules/ff14/pages/compat/index.html','pages/ff14/index.html']){
-  const dom=new JSDOM(await readFile(resolve(root,path),'utf8'));
-  try{const guidance=dom.window.document.querySelector('[data-reopen-guidance]');assert.ok(guidance,path);assert.match(guidance.textContent,/宿主左侧.*插件.*astrbot_plugin_yomihime_game_link.*monitor/);assert.equal(dom.window.document.querySelector('a'),null);assert.equal(dom.window.document.querySelector('script').getAttribute('src'),'./app.js');}finally{dom.window.close();}
- }
+test('retired FF14 compatibility locator is absent from current source',async()=>{
+ await assert.rejects(readFile(resolve(root,'modules/ff14/pages/compat/index.html'),'utf8'),{code:'ENOENT'});
+ const builder=await readFile(resolve(root,'scripts/build_dashboard_zip.py'),'utf8');
+ assert.equal(builder.includes('pages/ff14/'),false);
 });

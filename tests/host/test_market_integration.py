@@ -14,7 +14,7 @@ from unittest.mock import patch
 
 import httpx
 from fastapi import FastAPI, Request
-from ygl_test_subject.adapters.astrbot.ff14_pages import FF14Pages
+from ygl_test_subject.adapters.astrbot.public_pages import PublicPages
 from ygl_test_subject.adapters.astrbot.runtime import PLUGIN_NAME
 from ygl_test_subject.core.contracts.administration import AdminAuthorizationDenied
 from ygl_test_subject.core.contracts.validation_boundary import validate_contract
@@ -216,7 +216,7 @@ class MarketHostIntegrationTests(unittest.IsolatedAsyncioTestCase):
     ):
         await self.start()
         web, namespace = host_contracts()
-        pages = FF14Pages(page_fixture._Context(), self.runtime)
+        pages = PublicPages(page_fixture._Context(), self.runtime)
         pages.register()
         self.addCleanup(pages.close)
         app = FastAPI()
@@ -545,7 +545,7 @@ class MarketHostIntegrationTests(unittest.IsolatedAsyncioTestCase):
             ConfigFieldUpdate,
             ConfigPatch,
         )
-        from ygl_test_subject.services.core_configuration import (
+        from ygl_test_subject.services.configuration.defaults import (
             CORE_CONFIG_FIELDS,
             CORE_MODULE_ID,
             core_config_target,

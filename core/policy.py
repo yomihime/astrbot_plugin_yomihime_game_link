@@ -14,7 +14,7 @@ from yomihime_game_link_sdk.declarations import (
     PrivacyFloor,
 )
 
-from ..core.contracts.validation_boundary import validate_contract
+from .contracts.validation_boundary import validate_contract
 
 
 def origin_allowed(origin: object, expected: InvocationOrigin) -> bool:

@@ -18,12 +18,11 @@
 | 能力、命令、工具、字段、来源和页面声明 | [FF14 manifest](../modules/ff14/yomihime.manifest.json)；声明必须通过磁盘解析与固定 SDK 合同校验 |
 | 工厂与业务处理 | [FF14 工厂](../modules/ff14/module.py)；handler 使用受限服务，不直接取得宿主账号或秘密 |
 | 宿主工具对象 | [工具发布适配器](../adapters/astrbot/tool_publisher.py)；冲突拒绝，撤销 exact object，旧回调重新检查 owner/epoch |
-| 显式受审模块装配 | [模块装配数据](../modules/ff14/assembly.json)、[模块纯支持](../modules/ff14/assembly.py)、[宿主适配](../adapters/astrbot/trusted_assembly.py)；只处理 Host 明确选择的捕获输入，JSON 不指定 import 或授予权限 |
-| 通用配置目录与管理 | [配置目录](../services/configuration_catalog.py)、[管理操作](../services/admin_operations.py)；目录与授权分别成立 |
+| 显式受审模块装配 | [模块装配数据](../modules/ff14/assembly.json)、[模块纯支持](../modules/ff14/assembly.py)、宿主适配（历史记录未随库提供）；只处理 Host 明确选择的捕获输入，JSON 不指定 import 或授予权限 |
+| 通用配置目录与管理 | 配置目录（历史记录未随库提供）、[管理操作](../services/admin_operations.py)；目录与授权分别成立 |
 | FF14 凭据表单与消费 | [模块装配中的表单声明](../modules/ff14/assembly.json)、[受限管理政策](../services/managed_source_credentials.py)、[来源消费](../services/source_credentials.py) |
 | 公共壳与管理视图 | [前端构建](../pages/frontend/build.mjs)；管理页测试需单独运行，`npm test` 当前只含 shell 测试 |
 | 模块业务页面与资源 | [模块页面源码](../modules/ff14/pages/src)、[资源摘要](../modules/ff14/pages/resources.json)；构建后校验 manifest 和发布投影 |
-| 旧 FF14 定位入口 | [静态兼容页](../modules/ff14/pages/compat) 构建投影到 `pages/ff14`；仅引导从宿主插件列表正式重开，不执行业务或转发授权 URL |
 | 稳定持久目录 | [存储路由](../services/module_storage.py)；Core 选择 module_id，用户输入不能选择路径 |
 | 正式包与 SDK | [发布构建](../scripts/build_release.py)、[插件包清单](../scripts/build_dashboard_zip.py)；核对实际 wheel、pin、资源和许可证，不只测试源码副本 |
 
@@ -45,7 +44,7 @@
 
 当前 Host 仍明确选择内置 FF14 发布包。装配描述及源码 fingerprint 证明选定输入的一致性，不是独立发布签名，也不让扫描到的模块自动获得来源、网页或管理权限。旧业务 renderer 和专属业务状态装配已退出；保留的旧物理路径只返回静态定位说明。物品、市场、Logs 和日历由正式 Vue 模块页执行。共享存储与旧安装槽的清理由独立迁移/恢复方案处理。
 
-旧 Host `config_adapter.py` 仅保留弃用标记，不再提供普通配置兼容函数；实际调用已迁至 FF14 的配置支持。根 `pages/ff14` 由静态兼容页构建生成并核对字节，不能作为另一套手改业务实现。
+旧 Host `config_adapter.py` 与 `ff14_pages.py` 兼容别名已删除；普通配置使用 Core 当前设置服务，页面使用 `PublicPages`。已退役的 FF14 定位页及其兼容投影也已删除；所有 FF14 业务界面由当前模块页承载。
 
 ## 统一设置与生命周期能力矩阵
 
@@ -63,7 +62,7 @@ Core 与模块的命名空间配置是当前读写权威；Core 目录不依赖 
 
 `disable` 关闭业务准入，继续允许模块设置与启用管理。显式 `unload` 退出 active 普通/凭据目录、页面、来源、工具和 owner 注册，但模块管理仍显示可信恢复候选；保留最大部署政策不允许旧请求在卸载后提交。SDK 1.7 的生命周期 marker 仅用于精确 owner 管理操作，不能据此读写任何配置字段。
 
-当前薄 SDK 发布构建使用 `yomihime_game_link_sdk-0.1.0a8-py3-none-any.whl`，实际摘要与 pin 由构建核对。SDK 发行编号、模块 ABI `2.0`、输出/展示/存储合同 `1.8.0` 及磁盘/工厂协议 `1` 独立判断；旧模块接口在开发期不兼容，不能将旧 1.x SDK 作为当前发行加载。已发布旧工件字节及受限旧展示记录读取边界保留，不迁移配置、凭据或数据库。升级固定 SDK 需要保留数据的宿主卸载与冷加载，以退出旧进程中已导入的 SDK；不能以同壳恢复模拟该步骤。此前 SDK 1.7 的独立实例安装、首次冷加载、最小公开查询、普通管理读写及保留数据解除挂载/恢复属于历史实机证据。本批薄 SDK 仅有实际 Core 离线装配证据，真实 AstrBot 初始化、实例更新与冷加载、凭据查询、IM 投递和模型调用仍未验证。
+当前薄 SDK 发布构建使用 `yomihime_game_link_sdk-0.1.0a9-py3-none-any.whl`，实际摘要与 pin 由构建核对。SDK 发行编号、模块 ABI `2.0`、输出/展示/存储合同 `1.8.0` 及磁盘/工厂协议 `1` 独立判断；旧模块接口在开发期不兼容，不能将旧 1.x SDK 作为当前发行加载。已发布旧工件字节及受限旧展示记录读取边界保留，不迁移配置、凭据或数据库。升级固定 SDK 需要保留数据的宿主卸载与冷加载，以退出旧进程中已导入的 SDK；不能以同壳恢复模拟该步骤。此前 SDK 1.7 的独立实例安装、首次冷加载、最小公开查询、普通管理读写及保留数据解除挂载/恢复属于历史实机证据。本批通过隔离真实 AstrBot4.29.1 ZIP 安装/初始化/管理鉴权/页面资源/帮助图片；用户实例、真实凭据查询、IM 平台和模型调用仍需独立验证。
 
 SDK a8 的新增合同为 PUBLIC `BACKGROUND` 调度与 1–32 组固定 `background_parameters`；详情见[SDK 说明](module-sdk.md#background-collectors)。本轮候选 wheel 为 53,838 bytes，SHA-256 `c5702caec32da638dcd336855b4ab5a9321c3d0a18d44243f33cd09b1aeeaf52`。Python 3.12.14、setuptools 80.9.0、wheel 0.45.1 下两次独立临时源码构建字节一致，已验证实际 wheel 安装和隔离冷 bootstrap；不代表 Python 3.13.9 正式构建环境或真实宿主安装验收。历史 a7 工件与实机记录保持原版本。
 

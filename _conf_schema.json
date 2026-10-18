@@ -1,32 +1,4 @@
 {
-  "ff14_default_region": {
-    "description": "默认 FF14 区域",
-    "type": "string",
-    "default": "cn",
-    "options": [
-      "cn",
-      "global"
-    ],
-    "invisible": true
-  },
-  "ff14_calendar_default_days": {
-    "description": "日历默认查询天数",
-    "type": "int",
-    "default": 7,
-    "invisible": true
-  },
-  "ff14_calendar_default_timezone": {
-    "description": "日历默认时区",
-    "type": "string",
-    "default": "Asia/Shanghai",
-    "invisible": true
-  },
-  "ff14_calendar_default_delivery_time": {
-    "description": "新订阅每日摘要时间",
-    "type": "string",
-    "default": "08:00",
-    "invisible": true
-  },
   "web_public_origin": {
     "description": "网页访问地址（可选）",
     "type": "string",

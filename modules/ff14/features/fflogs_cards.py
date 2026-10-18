@@ -430,24 +430,6 @@ __all__ = [
 ]
 
 
-def _ranking_notes(rankings):
-    """Keep row-specific status visible without splitting table-cell values."""
-    notes = []
-    for row in rankings:
-        message = {
-            "no_records": "查询成功，无公开记录",
-            "failed": "查询失败",
-            "not_queried": "未查询",
-        }.get(row.query_state)
-        if row.query_state == "record" and not row.history_complete:
-            message = HISTORY_INCOMPLETE
-        if message:
-            notes.append(
-                cards.Text(f"{row.encounter_name}：{message}", style="caption")
-            )
-    return tuple(notes)
-
-
 def _ranking_table(
     rankings, metric, job_language="zh", *, include_record_version=False
 ):

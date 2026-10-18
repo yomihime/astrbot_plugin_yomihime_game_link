@@ -51,31 +51,6 @@
     }
   ],
   "gate": "ff14_subscriptions_enabled",
-  "migration": {
-    "id": "ff14-core-defaults-v1",
-    "fields": [
-      {
-        "target": "$core",
-        "field": "default_region",
-        "legacy": "ff14_default_region"
-      },
-      {
-        "target": "ff14/ff14",
-        "field": "ff14_calendar_default_days",
-        "legacy": "ff14_calendar_default_days"
-      },
-      {
-        "target": "ff14/ff14",
-        "field": "ff14_calendar_default_timezone",
-        "legacy": "ff14_calendar_default_timezone"
-      },
-      {
-        "target": "ff14/ff14",
-        "field": "ff14_calendar_default_delivery_time",
-        "legacy": "ff14_calendar_default_delivery_time"
-      }
-    ]
-  },
   "public": {
     "items": "item.lookup",
     "character": "ff14.logs.character",

@@ -19,7 +19,7 @@ from scripts.build_release import build_release
 
 ROOT = Path(__file__).resolve().parents[2]
 EXPECTED_WHEEL_SHA256 = (
-    "c5702caec32da638dcd336855b4ab5a9321c3d0a18d44243f33cd09b1aeeaf52"
+    "4d8d71c4ab04805c3a1edbd9e194b5228e66c9e0290caf01daae9374d65a74e5"
 )
 EXPECTED_RESOURCES = {
     f"yomihime_game_link_sdk/_examples/{example}/{filename}"
@@ -138,7 +138,7 @@ assert sdk.SourceHttpError is CanonicalSourceHttpError
 assert GatewayResultType is sdk.CapabilityResult
 assert OutputResultType is sdk.CapabilityResult
 
-assert sdk.__version__ == "0.1.0a8"
+assert sdk.__version__ == "0.1.0a9"
 assert sdk.MODULE_ABI_VERSION == "2.0"
 assert sdk.ScheduleTrigger.BACKGROUND.value == "background"
 assert sdk.ScheduleDescriptor.__dataclass_fields__["background_parameters"].default == ()
@@ -325,7 +325,7 @@ class InstalledArtifactTests(unittest.TestCase):
             workdir = Path(work).resolve()
             source_root = workdir / "source"
             source_root.mkdir()
-            for relative in ("LICENSE", "pyproject.toml", "setup.py"):
+            for relative in ("SDK-LICENSE", "pyproject.toml", "setup.py"):
                 shutil.copy2(ROOT / relative, source_root / relative)
             (source_root / "docs").mkdir()
             shutil.copy2(
@@ -376,7 +376,7 @@ class InstalledArtifactTests(unittest.TestCase):
             wheel_digest = hashlib.sha256(wheel.read_bytes()).hexdigest()
             self.assertEqual(wheel_digest, EXPECTED_WHEEL_SHA256)
             self.assertEqual(
-                wheel.name, "yomihime_game_link_sdk-0.1.0a8-py3-none-any.whl"
+                wheel.name, "yomihime_game_link_sdk-0.1.0a9-py3-none-any.whl"
             )
             with zipfile.ZipFile(wheel) as archive:
                 entries = set(archive.namelist())

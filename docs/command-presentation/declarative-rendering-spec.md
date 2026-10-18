@@ -1,3 +1,5 @@
+> 本文包含历史 SDK a7 工件和验收记录，勿作为当前版本或包摘要。当前 SDK 见 [模块 SDK](../module-sdk.md)，当前交接见 [alpha 清理说明](../alpha-cleanup-handoff.md)。
+
 # 声明式图片渲染契约与四类设计样例
 
 日期：2026-10-16。状态：**四类内容、五张图片的当前视觉设计已获用户确认**（Help、Item、Logs 浅/深、Market）。声明式卡片阶段已接入 SDK 纯声明、Core 共用渲染、Host 命令发送、两级主题设置和 FF14 事实投影。本轮进一步将正式命令字体改为 Core 持久资源管理，轻量插件包不再附带 OTF；源码已接入，当前字体片离线验收及新包登记见第 8 节。本轮字体片尚未安装到真实 Local Test，不能与正在本地安装的前一阶段 `8139d724…` 包混同。视觉确认不等于真实上游、Windows 或当前会话显示验收，标签语法仍待评审。
@@ -381,7 +383,7 @@ python -m unittest discover -s tests/presentation -t . -p 'test_layout*.py' -v
 
 样例的独立 requirements 与 Core 根运行依赖都固定 `Pillow==12.3.0`、`resvg_py==0.5.0`；SDK wheel 没有运行依赖。新 renderer 不要求 fontTools，字体维护专项测试如使用它遵循各自依赖。CLI 默认创建系统临时目录；显式输出必须在仓库外，文件独占创建，不覆盖旧 `samples/`。配套 `provenance.json` 记录来源、fixture 范围、尺寸、字节数和 SHA-256。
 
-获准归档的五张样图在 [samples/declarative](../../examples/command_cards/samples/declarative/)，附统一 provenance。迁移到纯 SDK 后五张 PNG 字节不变。历史样图保留；视觉确认不改变 Help 可用性、Logs、Market 为离线 fixture、Item 为截图转录的数据性质。
+获准归档的五张样图在 [samples/declarative](../../examples/command_cards/samples/declarative)，附统一 provenance。迁移到纯 SDK 后五张 PNG 字节不变。历史样图保留；视觉确认不改变 Help 可用性、Logs、Market 为离线 fixture、Item 为截图转录的数据性质。
 
 ## 8. 当前证据与本地 Codex 交接
 

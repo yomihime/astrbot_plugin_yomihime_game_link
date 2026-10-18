@@ -25,7 +25,7 @@ ROOT = Path(__file__).resolve().parents[1]
 EXPECTED_PYTHON = (3, 13)
 EXPECTED_TOOL_VERSIONS = {"setuptools": "80.9.0", "wheel": "0.45.1"}
 SOURCE_DATE_EPOCH = "315532800"
-SDK_SOURCE_FILES = ("LICENSE", "pyproject.toml", "setup.py")
+SDK_SOURCE_FILES = ("SDK-LICENSE", "pyproject.toml", "setup.py")
 SDK_EXAMPLE_DIRS = ("empty_module", "offline_sample")
 TAG_PATTERN = re.compile(r"v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\Z")
 PLUGIN_NAME_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*\Z")
@@ -177,7 +177,7 @@ def build_release(
         Path(output_dir) if output_dir is not None else repository_root / "dist"
     )
     zip_name = f"{plugin_name}-{metadata_version}.zip"
-    wheel_name = "yomihime_game_link_sdk-0.1.0a8-py3-none-any.whl"
+    wheel_name = "yomihime_game_link_sdk-0.1.0a9-py3-none-any.whl"
 
     with tempfile.TemporaryDirectory(prefix="yomihime-release-build-") as temporary:
         work_root = Path(temporary)

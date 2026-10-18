@@ -30,11 +30,6 @@ def _require_identifier(value: str, field: str) -> None:
         raise ValueError(f"{field} must be a lowercase, dotted identifier")
 
 
-def _require_optional_identifier(value: str | None, field: str) -> None:
-    if value is not None:
-        _require_identifier(value, field)
-
-
 def _require_opaque_id(value: str, field: str) -> None:
     if not isinstance(value, str) or not value or len(value) > 256:
         raise ValueError(

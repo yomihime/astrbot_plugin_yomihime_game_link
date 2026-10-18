@@ -33,7 +33,7 @@ from yomihime_game_link_sdk.storage import SecretMetadataState as SecretMetadata
 from yomihime_game_link_sdk.storage import SecretRef as SecretRef
 from yomihime_game_link_sdk.storage import VersionedRecord as VersionedRecord
 
-from ...core.contracts.validation_boundary import validate_contract
+from .validation_boundary import validate_contract
 
 JsonScalar: TypeAlias = str | int | float | bool | None
 

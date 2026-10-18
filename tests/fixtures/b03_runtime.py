@@ -21,7 +21,7 @@ from ygl_test_subject.infrastructure.sqlite.repositories import SQLiteRepositori
 from ygl_test_subject.infrastructure.sqlite.repositories_subscriptions import (
     SQLiteSchedulerRepository,
 )
-from ygl_test_subject.services.configuration import ConfigurationService
+from ygl_test_subject.services.configuration.operations import ConfigurationService
 from ygl_test_subject.services.module_services import (
     ModuleServicesFactory,
     RegistryRegistrationLookup,

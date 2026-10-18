@@ -220,3 +220,15 @@ data/
 
 # Disposable outside-root symlink fixtures (also cleaned by the test itself).
 /tmp*-outside-manifest
+
+# Reproducible frontend projections; build before tests or release packaging.
+/pages/shell/
+/pages/management/
+/pages/00-game-link/
+/pages/ff14/
+/modules/ff14/pages/dist/
+# Verified developer fixture; scripts/prepare_test_font.py restores exact bytes.
+/presentation/assets/fonts/*.otf
+
+# Local frontend build audit and test artifacts.
+/.build/

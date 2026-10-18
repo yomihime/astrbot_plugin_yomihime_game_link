@@ -16,41 +16,43 @@ import tomllib
 from pathlib import Path
 from types import ModuleType
 from typing import Any, cast
+from unittest.mock import patch
 from urllib.parse import quote
 
 SOURCE_ENV = "YGL_TEST_ASTRBOT_SOURCE"
-HOST_VERSION = "4.28.2"
-HOST_COMMIT = "3c7adafa1397e182d60b1016bf88759265113c8a"
+HOST_VERSION = "4.29.1"
+HOST_COMMIT = "dffe922773725e9c178392c423676ad65044748c"
 HOST_REPOSITORY = "https://github.com/AstrBotDevs/AstrBot"
 # SHA256 of UTF-8 source with universal newlines (LF), identical on Windows/Linux.
 SOURCE_SHA256 = {
-    "astrbot/dashboard/services/config_service.py": "f9efc39d92432dec56180f3593b2f2211584a09ee00ed6fce4738e17187cf472",
+    "astrbot/core/utils/upload.py": "211c23524bee41187ac4e350ad48430113bf5491043e1e8a3518dcfd5d2b4518",
+    "astrbot/dashboard/services/config_service.py": "8775d098b2eb4c521106da14c2860844bea85c62467542b66810448796c203b8",
     "astrbot/core/pipeline/process_stage/stage.py": "b4e83a1d81955351a863ddb56016153b531333b6b9e4cd0df2e07db4ea13a268",
-    "astrbot/core/star/context.py": "a9a2772080b463583af2c3082b4c13e3612ebd9fda0d234147be462394a1ba2e",
+    "astrbot/core/star/context.py": "10f5f5dd40491564ee196854abb5f6a4e4e6fc46a6c5e62e29935e2c53b6294f",
     "astrbot/core/star/register/star_handler.py": "8eeeb59901d9944f10e326bfa10f76eee0629c3f380ed1fb7c5c47b3e50dc266",
-    "astrbot/core/agent/tool.py": "e761f599d3d6a8ab3c4afb47be6bb093fdad3ac5ffa9bd2d71cf58ee02c32935",
+    "astrbot/core/agent/tool.py": "6f5e22a90ebc4c11e87af169d62ca49347c772eab479bfa62a230547e4bb43a5",
     "astrbot/core/provider/func_tool_manager.py": "bef0154d4bd50b924cd9e1be82426d67bfc1f410c2f725d5812d9d936316eab4",
     "astrbot/core/astr_agent_context.py": "6c99c09bf086ce484c9c2f7d180fe3d17c268be398a013e68066a7b92dfa0c5e",
     "astrbot/core/platform/astr_message_event.py": "1c51db0b7e78e8cf6c8aa0f64c621d87e2af72a21fee0ff1524b68e6b5850954",
-    "astrbot/core/star/star_manager.py": "9f6d2f51f8ef006a7026e7aec0b232b06f4743734c4afdca494a0e6cb539c3ce",
+    "astrbot/core/star/star_manager.py": "6146ef6162716a6aa64cae5bf13bd93bcdd6c681a45e35ffd017f690715255fd",
     "astrbot/core/agent/tool_executor.py": "f061a0541fc968a1952d0506d5ea5e2fe96f28caa07d0ee625a38f9d5cad9d7a",
     "astrbot/core/agent/run_context.py": "1dc78f2312877a1fee7ec53ed62fd95329c00c8172f765ea6814f0126c562c58",
-    "astrbot/dashboard/services/plugin_page_service.py": "18e41ee0bb5d25e5ced473224cd4a89686d794dae0c2a74a053f8b8d154cef33",
-    "astrbot/core/config/astrbot_config.py": "1907838acd129201e92c96dd8b4a704183fa72150226ccaf1f4e82f9426ba014",
-    "pyproject.toml": "9834b677dae6bacfc2f1e75ed6da1e8e99c7f011bf31deeb278903ff8786689c",
-    "astrbot/__init__.py": "a199525f1f93fcc5799bcbf847381094de975e1a78ec161e0579decac715373c",
-    "astrbot/api/web.py": "3e171e2e0f48769ac481cf494576a9f4cd41d3ecd0c9f0af67722026f7228ed6",
+    "astrbot/dashboard/services/plugin_page_service.py": "262c68315e5f957d8c0dcd13904b958a6d8268aa2b3dfc236c915f9f8418771f",
+    "astrbot/core/config/astrbot_config.py": "3a3223bbbc2212e856a48e11a5d0c755bafd8b5c375b87f30f847d826ff3af7a",
+    "pyproject.toml": "dee4024d40f70fdfc986d9e81b46024d47fdde076b5b4e888d586e422021ab70",
+    "astrbot/__init__.py": "2c31376dc80eb209592e5d75b7ff239fb0fa2865026d0bb12d15c372a8957da1",
+    "astrbot/api/web.py": "faeb09a65f0f0559edfc4794ce152b5465e18c31ee4ab40c0a4e0f5ec8579d04",
     "astrbot/dashboard/responses.py": "2f3638f8196fbdd3315e6fe021a3163174e310b04f781b147ef5073c5f109e38",
-    "astrbot/dashboard/plugin_page_auth.py": "c853a4e56beaea3a9ca51aadf6dd050eac369fbbee12334c0d556872ea26cf21",
+    "astrbot/dashboard/plugin_page_auth.py": "69de4913a649f847bee3d24f30b8450ff77f289ce2f6d15c6844ecf0dc567d0d",
     "astrbot/dashboard/api/auth.py": "1ac9e90ee25412656f295aadcb48a119386ef62dc0c7516cf50e1a40512026ee",
-    "astrbot/dashboard/server.py": "cf715728509af8805658500a39602b0f058987feabaaf855939bdbdff07b62f7",
-    "astrbot/dashboard/asgi_runtime.py": "8013d0837b0ce8dd819c4933a4d72c98d70011da7d17d1ad8d58fb554ba5cfc0",
-    "astrbot/dashboard/api/plugins.py": "b2db96766684bff2af4e652fab37ba2b2cee8d1796fd0ef3e35a4dac7b5ccd86",
+    "astrbot/dashboard/server.py": "d911fd8273505aad4e088fafe55b6b634ea67e3515d67107dc6a23a76abea821",
+    "astrbot/dashboard/asgi_runtime.py": "adb7abe6ae3f09e27440ce72a65a174d509c97bb7827c450f74c055057f14991",
+    "astrbot/dashboard/api/plugins.py": "4ae3fa76ac36ec4cfb286057627cf97cee589ee6d7d8a36a83dc2fd43897c074",
     "astrbot/dashboard/services/auth_service.py": "9ef9124915d99eba5c1754b5c6efdc6cb508991140309fb57d0c6c1f0c216ba8",
 }
 SOURCE_OBJECT_SHA256 = {
-    "dashboard/src/components/shared/AstrBotConfig.vue": "92fd19c409c7b194a66df6e4c2ad0f89e3c98b10be55d4f762c456f4afd0bce1",
-    "dashboard/src/views/ExtensionPage.vue": "2fdc98b9e0291e14fed0d888081caf8cbb5ad7d5d552db73a006fad5e1c3526a",
+    "dashboard/src/components/shared/AstrBotConfig.vue": "48332387d458377c1dc278b09328124ef787ebc33a6423338797117b4d7c4ebc",
+    "dashboard/src/views/ExtensionPage.vue": "abdc929ada08aaa2304509673e62bdd887b5a43045c496191cbe368ecb1d53d7",
 }
 
 TEST_DEPENDENCIES = {
@@ -272,10 +274,12 @@ def host_contracts():
     except ImportError as exc:
         raise _environment_error("test dependencies could not be imported") from exc
 
-    web = _host_module(source, sources, "api/web.py")
-    responses = _host_module(source, sources, "dashboard/responses.py")
-    page_auth = _host_module(source, sources, "dashboard/plugin_page_auth.py")
-    asgi = _host_module(source, sources, "dashboard/asgi_runtime.py")
+    upload = _host_module(source, sources, "core/utils/upload.py")
+    with patch.dict(sys.modules, {"astrbot.core.utils.upload": upload}):
+        web = _host_module(source, sources, "api/web.py")
+        responses = _host_module(source, sources, "dashboard/responses.py")
+        page_auth = _host_module(source, sources, "dashboard/plugin_page_auth.py")
+        asgi = _host_module(source, sources, "dashboard/asgi_runtime.py")
     namespace = {
         "__name__": "host_contract_probe",
         "jwt": jwt,
@@ -385,82 +389,70 @@ def host_contracts():
 
 
 def page_asset_contract():
-    """Unchanged fixed Host HTML/CSS/JS rewrite methods, without Host startup."""
+    """Pinned official view discovery/path-token/HTML contracts, without startup."""
     import posixpath
-    from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+    from dataclasses import dataclass
+    from urllib.parse import urlencode, urlunsplit
+
+    import aiofiles.ospath as aio_ospath
 
     _, sources = validate_host_source()
-    tree = ast.parse(sources["astrbot/dashboard/services/plugin_page_service.py"])
+    source = sources["astrbot/dashboard/services/plugin_page_service.py"]
+    tree = ast.parse(source)
     owner = next(
-        node
-        for node in tree.body
-        if isinstance(node, ast.ClassDef) and node.name == "PluginPageService"
+        n
+        for n in tree.body
+        if isinstance(n, ast.ClassDef) and n.name == "PluginPageService"
     )
     names = {
         "normalize_plugin_page_name",
         "normalize_plugin_page_path",
-        "is_rewritable_asset_url",
-        "resolve_referenced_asset_path",
-        "build_plugin_page_asset_url",
-        "build_plugin_page_content_path",
+        "build_plugin_page_view_content_path",
         "get_plugin_page_bridge_sdk_url",
-        "is_js_relative_module_specifier",
-        "rewrite_relative_asset_url",
-        "rewrite_plugin_page_html",
-        "rewrite_plugin_page_css",
-        "rewrite_plugin_page_js",
+        "process_plugin_page_html",
         "apply_theme_to_html",
         "discover_plugin_pages",
+        "resolve_plugin_pages_root",
     }
-    methods = [node for node in owner.body if getattr(node, "name", None) in names]
+    methods = [n for n in owner.body if getattr(n, "name", None) in names]
+    if {n.name for n in methods} != names:
+        raise _environment_error("official view contract method missing")
     namespace = {
+        "__name__": "host_view_contract_probe",
         "re": re,
         "posixpath": posixpath,
-        "parse_qsl": parse_qsl,
         "quote": quote,
         "urlencode": urlencode,
-        "urlsplit": urlsplit,
         "urlunsplit": urlunsplit,
         "StarMetadata": Any,
         "Path": Path,
+        "aio_ospath": aio_ospath,
+        "dataclass": dataclass,
     }
-    from types import SimpleNamespace
-
-    async def isfile(path):
-        return Path(path).is_file()
-
-    namespace["aio_ospath"] = SimpleNamespace(isfile=isfile)
-    namespace["PLUGIN_PAGE_ENTRY_FILE_NAME"] = _literal_assignment(
-        sources["astrbot/dashboard/services/plugin_page_service.py"],
-        "PLUGIN_PAGE_ENTRY_FILE_NAME",
-    )
-    namespace["PluginPage"] = lambda **values: SimpleNamespace(**values)
-    regexes = [
-        node
-        for node in tree.body
-        if isinstance(node, ast.Assign)
-        and any(
-            isinstance(target, ast.Name)
-            and target.id
-            in {
-                "_HTML_ASSET_ATTR_RE",
-                "_CSS_URL_RE",
-                "_JS_DYNAMIC_IMPORT_RE",
-                "_JS_MODULE_FROM_RE",
-                "_JS_SIDE_EFFECT_IMPORT_RE",
-            }
-            for target in node.targets
-        )
+    # Complete real upstream dataclass and constants, no replacement DTOs.
+    definitions = [
+        n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "PluginPage"
     ]
+    constants = {
+        "PLUGIN_PAGE_ENTRY_FILE_NAME",
+        "PLUGIN_PAGE_ROOT_DIR_NAMES",
+        "_HTML_ASSET_ATTR_RE",
+    }
+    definitions = [
+        n
+        for n in tree.body
+        if isinstance(n, ast.Assign)
+        and any(isinstance(t, ast.Name) and t.id in constants for t in n.targets)
+    ] + definitions
     cls = ast.ClassDef(
         name="PluginPageService", bases=[], keywords=[], body=methods, decorator_list=[]
     )
     exec(
         compile(
             ast.fix_missing_locations(
-                ast.Module(body=[*regexes, cls], type_ignores=[])
+                ast.Module(body=[*definitions, cls], type_ignores=[])
             ),
-            "actual_host_page_asset_rewrite",
+            "actual_host_view_contract",
             "exec",
         ),
         namespace,

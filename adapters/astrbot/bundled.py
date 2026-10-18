@@ -71,7 +71,7 @@ def install_bundled_ff14(
     trusted.
     """
     if os.name == "nt":
-        from ...extensions.windows_fs import WindowsScanError, _check_runtime
+        from ...infrastructure.windows.fs import WindowsScanError, _check_runtime
 
         try:
             _check_runtime()
@@ -286,9 +286,6 @@ def _read_bundled_package(source_root: Path) -> dict[str, object]:
     auxiliary = {}
     auxiliary_paths = {
         "assembly.json",
-        "pages/compat/app.js",
-        "pages/compat/index.html",
-        "pages/compat/styles.css",
     }
     for relative in auxiliary_paths & inventory:
         auxiliary[relative] = _read_stable_file(
@@ -478,9 +475,6 @@ def _inventory_package(package_root: Path) -> set[str]:
                 MANIFEST_FILENAME,
                 README_FILENAME,
                 "assembly.json",
-                "pages/compat/app.js",
-                "pages/compat/index.html",
-                "pages/compat/styles.css",
             }:
                 found.add(relative)
             else:

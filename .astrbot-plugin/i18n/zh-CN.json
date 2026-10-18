@@ -1,0 +1,24 @@
+{
+  "views": {
+    "00-game-link": {
+      "title": "游戏连结"
+    },
+    "management": {
+      "title": "设置与维护"
+    },
+    "shell": {
+      "title": "模块工作台"
+    }
+  },
+  "pages": {
+    "00-game-link": {
+      "title": "游戏连结"
+    },
+    "management": {
+      "title": "设置与维护"
+    },
+    "shell": {
+      "title": "模块工作台"
+    }
+  }
+}

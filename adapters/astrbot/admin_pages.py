@@ -13,7 +13,6 @@ from ...core.contracts.administration import (
     AdminAuthorizationDenied,
     AdminOperation,
     ModuleUnloadReceipt,
-    OrdinaryRollbackReceipt,
 )
 from ...core.contracts.services import ConfigFieldUpdate, ConfigPatch
 from ...core.contracts.validation_boundary import validate_contract
@@ -30,7 +29,6 @@ _OPERATIONS = {
     "sync-diagnostics": AdminOperation.READ_CONFIG,
     "catalog": AdminOperation.READ_CONFIG,
     "update": AdminOperation.UPDATE_CONFIG,
-    "rollback": AdminOperation.ROLLBACK_CONFIG,
     "recover": AdminOperation.RECOVER_CONFIG,
     "credential-catalog": AdminOperation.READ_CONFIG,
     "credential-status": AdminOperation.READ_CONFIG,
@@ -341,11 +339,9 @@ class AdminPages:
                 authorization=context,
             )
             return {"module_id": result.module_id, "revision": result.revision}
-        keys = (
-            {"expected_revisions"}
-            if endpoint == "rollback"
-            else {"expected_revisions", "complete_from_current"}
-        )
+        if endpoint != "recover":
+            raise AdminAuthorizationDenied
+        keys = {"expected_revisions"}
         if set(data) != keys or type(data["expected_revisions"]) is not dict:
             raise ValueError("invalid recovery parameters")
         revisions = {
@@ -354,17 +350,8 @@ class AdminPages:
             ): revision
             for module_id, revision in data["expected_revisions"].items()
         }
-        if endpoint == "rollback":
-            receipt = await ops.ordinary_rollback(revisions, authorization=context)
-            if type(receipt) is not OrdinaryRollbackReceipt:
-                raise TypeError("invalid rollback receipt")
-            receipt.__post_init__()
-            return {"rolled_back": receipt.rolled_back}
-        if type(data["complete_from_current"]) is not bool:
-            raise ValueError("explicit recovery intent is required")
         return await self.runtime.recover_management(
             core,
             revisions,
             authorization=context,
-            complete_from_current=data["complete_from_current"],
         )

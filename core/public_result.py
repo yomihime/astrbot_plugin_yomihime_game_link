@@ -4,7 +4,7 @@ from collections.abc import Mapping
 
 from yomihime_game_link_sdk.results import FactDocument
 
-from ..core.contracts.validation_boundary import validate_contract
+from .contracts.validation_boundary import validate_contract
 
 
 def public_fact_strings(facts: FactDocument):

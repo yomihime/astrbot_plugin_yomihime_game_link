@@ -20,7 +20,6 @@ from yomihime_game_link_sdk.contexts import (
     InvocationSubscriptionScope,
     InvocationView,
 )
-from yomihime_game_link_sdk.declarations import SourceDeclaration
 from yomihime_game_link_sdk.display import DigestMember
 from yomihime_game_link_sdk.errors import (
     RevisionConflict as RevisionConflict,
@@ -28,7 +27,6 @@ from yomihime_game_link_sdk.errors import (
 from yomihime_game_link_sdk.errors import (
     UniqueConstraintViolation as UniqueConstraintViolation,
 )
-from yomihime_game_link_sdk.results import CapabilityResult
 from yomihime_game_link_sdk.services import (
     CallerCapability,
     ConfigSnapshot,
@@ -59,13 +57,13 @@ from yomihime_game_link_sdk.subscriptions import (
     Observation,
 )
 
-from ..core.contracts.administration import (
+from .contracts.administration import (
     AdminAuthorizationContext,
     AdminAuthorizationGrant,
     AdminOperation,
 )
-from ..core.contracts.display import _asset
-from ..core.contracts.services import (
+from .contracts.display import _asset
+from .contracts.services import (
     Binding,
     BindingDefaultSnapshot,
     CacheAccessRequest,
@@ -76,7 +74,7 @@ from ..core.contracts.services import (
     PersistedConfigPatch,
     Principal,
 )
-from ..core.contracts.storage import (
+from .contracts.storage import (
     ClaimedSecretReceipt,
     CollectionDescriptor_validate,
     OwnerScope_validate,
@@ -85,7 +83,7 @@ from ..core.contracts.storage import (
     SecretTarget,
     validate_module_id,
 )
-from ..core.contracts.subscriptions import (
+from .contracts.subscriptions import (
     ActiveDigestSchedule,
     DeliveryAttempt,
     DeliveryEvent,
@@ -106,7 +104,7 @@ from ..core.contracts.subscriptions import (
     SubscriptionJobChange,
     SubscriptionRecord,
 )
-from ..core.contracts.validation_boundary import validate_contract
+from .contracts.validation_boundary import validate_contract
 
 
 def _bounded_identifier(value: str, field: str) -> None:
@@ -811,10 +809,6 @@ class MessagePort(Protocol):
     async def send(
         self, target: MessageTarget, payload: RenderedMessage
     ) -> MessageReceipt: ...
-
-
-class HostIdentityPort(Protocol):
-    async def is_administrator(self, actor_id: str) -> bool: ...
 
 
 class UnitOfWork(Protocol):
@@ -1626,14 +1620,6 @@ class DeliveryRepository(Protocol):
         ...
 
 
-class ResultOutlet(Protocol):
-    """The sole core-to-host result route; modules receive no message port."""
-
-    async def deliver(
-        self, invocation: InvocationView, result: CapabilityResult
-    ) -> None: ...
-
-
 class AuthorizationWindowExpired(PermissionError):
     """A private write reached its SQLite decision point after Grant expiry."""
 
@@ -1664,10 +1650,6 @@ class ConfigRepository(Protocol):
     async def metadata(
         self, target: ConfigTarget, field: str
     ) -> SecretMetadata | None: ...
-
-
-class SourceRepository(Protocol):
-    async def declared(self, module_id: str) -> tuple[SourceDeclaration, ...]: ...
 
 
 class RecordRepository(Protocol):

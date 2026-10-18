@@ -19,174 +19,22 @@ from ygl_test_subject.modules.ff14.config import (
     SYNC_INTERVAL,
     TIMEZONE,
     FF14ConfigSnapshot,
-    legacy_core_defaults,
 )
-from ygl_test_subject.services.configuration import (
-    ConfigurationCoordinator,
-    ConfigurationValueError,
-)
-from ygl_test_subject.services.core_configuration import (
+from ygl_test_subject.services.configuration.defaults import (
     CORE_CONFIG_FIELDS,
     CORE_MODULE_ID,
-    DEFAULT_REGION,
     CoreDefaultsConfigView,
     CoreDefaultsView,
     core_config_target,
-    plan_configuration_rollback,
-    select_configuration_value,
+)
+from ygl_test_subject.services.configuration.operations import (
+    ConfigurationCoordinator,
+    ConfigurationValueError,
 )
 
 import tests.services.test_admin_operations as runtime_fixture
 from yomihime_game_link_sdk.declarations import ConfigField, ConfigUpdateMode
 from yomihime_game_link_sdk.services import ConfigTarget
-
-
-class CoreSelectionTests(unittest.TestCase):
-    def test_rollback_plan_preserves_missing_invalid_values_and_export_gate(self):
-        fields = CORE_CONFIG_FIELDS + CALENDAR_CONFIG_FIELDS
-        new = {"default_region": None, DAYS: 9}
-        legacy = {"default_region": "global", DELIVERY_TIME: "bad-time"}
-        plan = plan_configuration_rollback(
-            fields, new, legacy, new_configuration_written=False
-        )
-        self.assertFalse(plan.requires_current_export)
-        self.assertEqual(plan.original_new_values, new)
-        self.assertEqual(plan.original_legacy_values, legacy)
-        self.assertNotIn(TIMEZONE, plan.original_new_values)
-        new[DAYS] = 15
-        legacy["default_region"] = "cn"
-        self.assertEqual(plan.original_new_values[DAYS], 9)
-        self.assertEqual(plan.original_legacy_values["default_region"], "global")
-        after_write = plan_configuration_rollback(
-            fields, new, legacy, new_configuration_written=True
-        )
-        self.assertTrue(after_write.requires_current_export)
-        with self.assertRaises(ValueError):
-            plan_configuration_rollback(
-                (validate_contract(ConfigField("token", sensitive=True)),),
-                {},
-                {},
-                new_configuration_written=False,
-            )
-        with self.assertRaises(ValueError):
-            plan_configuration_rollback(
-                fields, {"unrelated": 1}, {}, new_configuration_written=False
-            )
-
-    def test_raw_presence_and_selection_matrix(self):
-        missing = object()
-        candidates = [missing, "cn", "global", None, "", "bad", True]
-        for new in candidates:
-            for old in candidates:
-                with self.subTest(new=new, old=old):
-                    fresh = {} if new is missing else {"default_region": new}
-                    legacy = {} if old is missing else {"legacy_region": old}
-                    before = (dict(fresh), dict(legacy))
-                    valid_new = new in ("cn", "global")
-                    valid_old = old in ("cn", "global")
-                    rejects = (new is not missing and not valid_new) or (
-                        new is missing and old is not missing and not valid_old
-                    )
-                    if rejects:
-                        with self.assertRaises(ConfigurationValueError) as caught:
-                            select_configuration_value(
-                                DEFAULT_REGION,
-                                fresh,
-                                legacy,
-                                legacy_field="legacy_region",
-                            )
-                        self.assertEqual(caught.exception.field, "default_region")
-                        self.assertEqual(
-                            caught.exception.code, "invalid_configuration_value"
-                        )
-                        self.assertNotIn("bad", str(caught.exception))
-                    else:
-                        selected = select_configuration_value(
-                            DEFAULT_REGION, fresh, legacy, legacy_field="legacy_region"
-                        )
-                        self.assertEqual(
-                            selected.value,
-                            new if valid_new else old if valid_old else "cn",
-                        )
-                        self.assertEqual(
-                            selected.origin,
-                            "new"
-                            if valid_new
-                            else "legacy"
-                            if valid_old
-                            else "default",
-                        )
-                        self.assertEqual(
-                            selected.conflict, valid_new and valid_old and new != old
-                        )
-                        self.assertEqual(selected.new_present, new is not missing)
-                        self.assertEqual(selected.legacy_present, old is not missing)
-                        self.assertNotIn("value", selected.diagnostic())
-                        self.assertNotIn("global", str(dict(selected.diagnostic())))
-                    self.assertEqual(
-                        (fresh, legacy), before, "rollback inputs must remain untouched"
-                    )
-
-    def test_host_mapping_does_not_inject_default_before_legacy_selection(self):
-        self.assertEqual(dict(legacy_core_defaults({})), {})
-        mapped = legacy_core_defaults({"ff14_default_region": "global"})
-        selected = select_configuration_value(DEFAULT_REGION, {}, mapped)
-        self.assertEqual(
-            (selected.value, selected.origin, selected.new_present),
-            ("global", "legacy", False),
-        )
-        self.assertEqual(
-            FF14ConfigSnapshot.from_values(
-                {"ff14_default_region": "global"}
-            ).default_region,
-            "global",
-        )
-        explicit_none = legacy_core_defaults({"ff14_default_region": None})
-        with self.assertRaises(ConfigurationValueError):
-            select_configuration_value(DEFAULT_REGION, {}, explicit_none)
-
-    def test_calendar_selection_each_field_and_legacy_rollback(self):
-        for field in CALENDAR_CONFIG_FIELDS:
-            check = CALENDAR_VALUE_VALIDATORS.get(field.name)
-            legacy = {field.name: field.default}
-            result = select_configuration_value(field, {}, legacy, validator=check)
-            self.assertEqual(result.origin, "legacy")
-            self.assertFalse(result.new_present)
-            for invalid in (None, True, "", "rejected-input"):
-                with self.subTest(field=field.name, invalid=invalid):
-                    with self.assertRaises(ConfigurationValueError):
-                        select_configuration_value(
-                            field, {field.name: invalid}, legacy, validator=check
-                        )
-                    self.assertEqual(legacy, {field.name: field.default})
-        self.assertEqual(
-            {field.name for field in CORE_CONFIG_FIELDS},
-            {"default_region", "image_theme"},
-        )
-        self.assertEqual(
-            {field.name for field in CALENDAR_CONFIG_FIELDS},
-            {DAYS, TIMEZONE, DELIVERY_TIME, SYNC_INTERVAL},
-        )
-
-    def test_falsy_legacy_mapping_inputs_reject_and_selected_json_is_detached(self):
-        for invalid in (False, [], "", 0):
-            with self.assertRaises(TypeError):
-                CoreDefaultsView(object(), legacy_defaults=invalid)
-        value = {"items": ["kept"]}
-        field = validate_contract(
-            ConfigField(
-                "settings",
-                value_schema={
-                    "type": "object",
-                    "properties": {
-                        "items": {"type": "array", "items": {"type": "string"}}
-                    },
-                },
-            )
-        )
-        selected = select_configuration_value(field, {"settings": value}, {})
-        value["items"].append("later")
-        self.assertEqual(selected.value["items"], ("kept",))
 
 
 class CoreDefaultsRuntimeTests(unittest.IsolatedAsyncioTestCase):
@@ -276,65 +124,6 @@ class CoreDefaultsRuntimeTests(unittest.IsolatedAsyncioTestCase):
                     None, CORE_MODULE_ID, authorization=context
                 )
 
-    async def test_actual_admin_write_conflicts_with_migration_without_partial_completion(
-        self,
-    ):
-        from unittest.mock import patch
-
-        from ygl_test_subject.infrastructure.sqlite.repositories_config_migration import (
-            SQLiteOrdinaryConfigurationMigrationRepository,
-        )
-        from ygl_test_subject.services.configuration_migration import (
-            OrdinaryConfigurationMigration,
-        )
-
-        from tests.host.assembly_contract import (
-            ordinary_migration_fields,
-        )
-
-        runtime = self._runtime()
-        await self._start_with_candidate(runtime)
-        _, context = await self._bootstrap(runtime)
-        repository = SQLiteOrdinaryConfigurationMigrationRepository(
-            runtime.config_repository
-        )
-        migration = OrdinaryConfigurationMigration(
-            repository,
-            ordinary_migration_fields("host-config"),
-            migration_id="ff14-core-defaults-v1",
-        )
-        original = repository.apply
-
-        async def admin_concurrent(definition, snapshots, selected, legacy):
-            await runtime.admin_facade.update_config(
-                None,
-                CORE_MODULE_ID,
-                ConfigPatch(
-                    snapshots[core_config_target("host-config")].revision,
-                    (
-                        ConfigFieldUpdate(
-                            "default_region", ConfigUpdateMode.REPLACE, value="global"
-                        ),
-                    ),
-                    CORE_CONFIG_FIELDS,
-                ),
-                authorization=context,
-            )
-            return await original(definition, snapshots, selected, legacy)
-
-        with patch.object(repository, "apply", admin_concurrent):
-            with self.assertRaises(RevisionConflict):
-                await migration.migrate({})
-        self.assertFalse(await migration.complete())
-        self.assertEqual(
-            (
-                await runtime.config_repository.current(
-                    validate_contract(ConfigTarget("host-config", "ff14/ff14"))
-                )
-            ).values,
-            {},
-        )
-
     async def test_admin_can_replace_invalid_core_without_bypassing_patch_guards(self):
         target = core_config_target("host-config")
         runtime, context = await self._seed_invalid_defaults(
@@ -385,7 +174,6 @@ class CoreDefaultsRuntimeTests(unittest.IsolatedAsyncioTestCase):
         )
         legacy_view = CoreDefaultsView(
             runtime.admin_operations._core_configuration().view(),
-            legacy_defaults={"default_region": "global"},
         )
         with self.assertRaises(ConfigurationValueError):
             await legacy_view.current()
@@ -409,7 +197,7 @@ class CoreDefaultsRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 legacy.values["origin"],
                 legacy.values["raw_present"],
             ),
-            ("global", "legacy", False),
+            ("cn", "default", False),
         )
 
     async def test_unrelated_or_keep_patch_cannot_hide_invalid_module_predecessor(self):
@@ -608,19 +396,18 @@ class CoreDefaultsRuntimeTests(unittest.IsolatedAsyncioTestCase):
             {},
         )
 
-    async def test_missing_raw_core_preserves_legacy_global_without_persistence(self):
+    async def test_missing_raw_core_uses_declaration_default_without_persistence(self):
         runtime = self._runtime()
         await self._start_with_candidate(runtime)
         view = CoreDefaultsView(
             runtime.admin_operations._core_configuration().view(),
-            legacy_defaults={"default_region": "global"},
         )
         result = await view.current()
         self.assertEqual(
             result.values,
             {
-                "default_region": "global",
-                "origin": "legacy",
+                "default_region": "cn",
+                "origin": "default",
                 "conflict": False,
                 "raw_present": False,
             },
@@ -654,7 +441,6 @@ class CoreDefaultsRuntimeTests(unittest.IsolatedAsyncioTestCase):
         await runtime.database.executor.run_transaction(seed)
         view = CoreDefaultsView(
             runtime.admin_operations._core_configuration().view(),
-            legacy_defaults={"default_region": "global"},
         )
         with self.assertRaises(ConfigurationValueError) as caught:
             await view.current()

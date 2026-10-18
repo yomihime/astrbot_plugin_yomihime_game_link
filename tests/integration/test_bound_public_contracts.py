@@ -536,7 +536,9 @@ class BoundPublicContractTests(unittest.IsolatedAsyncioTestCase):
             self.safe(raised.exception)
 
     async def test_module_config_identity_and_account_returned_dtos_are_checked(self):
-        from ygl_test_subject.services.configuration import ConfigurationService
+        from ygl_test_subject.services.configuration.operations import (
+            ConfigurationService,
+        )
         from ygl_test_subject.services.identity import IdentityResolverService
         from ygl_test_subject.services.module_services import _AccountOperations
 

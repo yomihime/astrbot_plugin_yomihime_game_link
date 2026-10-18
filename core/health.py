@@ -20,8 +20,8 @@ from yomihime_game_link_sdk.services import (
 )
 from yomihime_game_link_sdk.storage import SecretMetadataState
 
-from ..core.contracts.administration import ModuleLifecycle
-from ..core.contracts.validation_boundary import validate_contract
+from .contracts.administration import ModuleLifecycle
+from .contracts.validation_boundary import validate_contract
 from .lifecycle import LifecycleController
 from .ports import AdmissionPort, RunIdentity
 

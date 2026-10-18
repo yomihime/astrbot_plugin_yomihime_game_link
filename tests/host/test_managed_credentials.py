@@ -56,10 +56,7 @@ class ManagedCredentialPagesTests(unittest.IsolatedAsyncioTestCase):
         target = validate_contract(
             ConfigTarget("astrbot_plugin_yomihime_game_link", "ff14/ff14")
         )
-        for operation in (
-            AdminOperation.ROLLBACK_CONFIG,
-            AdminOperation.RECOVER_CONFIG,
-        ):
+        for operation in (AdminOperation.RECOVER_CONFIG,):
             with self.assertRaises(AdminAuthorizationDenied):
                 source.issue(
                     subject="synthetic",

@@ -28,7 +28,7 @@ from yomihime_game_link_sdk.errors import (
     ServiceUnavailable,
 )
 
-from ..core.contracts.validation_boundary import validate_contract
+from .contracts.validation_boundary import validate_contract
 from .policy import public_web_allowed
 from .ports import PublicWebBinding, PublicWebProofValidator
 from .public_errors import public_boundary

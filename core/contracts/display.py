@@ -33,18 +33,8 @@ from yomihime_game_link_sdk.display import TextBlock as TextBlock
 from yomihime_game_link_sdk.display import TimeValue as TimeValue
 from yomihime_game_link_sdk.display import UnknownBlock as UnknownBlock
 
-from ...core.contracts.validation_boundary import validate_contract
+from .validation_boundary import validate_contract
 from .version import CONTRACT_VERSION as CONTRACT_VERSION
-
-
-def _frozen(value: Any) -> Any:
-    if isinstance(value, Mapping):
-        return MappingProxyType({k: _frozen(v) for k, v in value.items()})
-    if isinstance(value, (list, set, frozenset)):
-        return tuple((_frozen(v) for v in value))
-    if isinstance(value, tuple):
-        return tuple((_frozen(v) for v in value))
-    return value
 
 
 def _text(value: str, name: str = "text") -> str:

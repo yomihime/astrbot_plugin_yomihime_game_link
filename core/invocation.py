@@ -49,11 +49,11 @@ from yomihime_game_link_sdk.results import (
     ResultStatus,
 )
 
-from ..core.contracts.validation import validate_parameters
-from ..core.contracts.validation_boundary import validate_contract
 from ..infrastructure.sync_diagnostics import SyncDiagnostics
 from ..infrastructure.sync_diagnostics import emit as diagnostic
 from .context_issuer import ContextIssuer, InvalidInvocation
+from .contracts.validation import validate_parameters
+from .contracts.validation_boundary import validate_contract
 from .invocation_budget import InvocationBudgetPolicy
 from .lifecycle import LifecycleController, LifecycleError
 from .policy import origin_allowed, tool_allowed
@@ -784,7 +784,7 @@ class Gateway:
     @staticmethod
     def _require_private_grant(grant: object, view: InvocationView) -> None:
         validate_contract(view)
-        from ..core.contracts.services import Grant, GrantStatus
+        from .contracts.services import Grant, GrantStatus
 
         if (
             not isinstance(grant, Grant)

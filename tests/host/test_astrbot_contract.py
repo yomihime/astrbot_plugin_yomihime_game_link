@@ -71,7 +71,7 @@ class AstrBotContractTests(unittest.TestCase):
 
     def test_different_version_is_an_error(self):
         with self._changed_source(
-            "astrbot/__init__.py", lambda text: text.replace('"4.28.2"', '"4.28.3"')
+            "astrbot/__init__.py", lambda text: text.replace('"4.29.1"', '"4.29.2"')
         ):
             with self.assertRaisesRegex(
                 contract.HostContractEnvironmentError, "Host version mismatch"

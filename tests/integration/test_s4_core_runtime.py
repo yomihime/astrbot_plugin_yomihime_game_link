@@ -20,6 +20,7 @@ from ygl_test_subject.scripts.build_release import build_sdk_wheel
 ROOT = Path(__file__).resolve().parents[2]
 
 
+@unittest.skipUnless(os.name == "nt", "requires native Windows NTFS qualification")
 class CoreRuntimeIntegrationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

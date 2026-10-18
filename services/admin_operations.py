@@ -33,7 +33,6 @@ from ..core.contracts.administration import (
     ModuleLifecycle,
     ModuleStatus,
     ModuleUnloadReceipt,
-    OrdinaryRollbackReceipt,
 )
 from ..core.contracts.services import (
     ConfigFieldUpdate,
@@ -50,13 +49,8 @@ from ..extensions.loader import ExtensionCandidate
 from ..infrastructure.secret_store import SQLiteSecretStore
 from ..infrastructure.sqlite.database import SQLiteDatabase
 from ..infrastructure.sqlite.repositories_config import SQLiteConfigRepository
-from ..services.admin_authorization import AdminAuthorizationService
-from ..services.configuration import (
-    ConfigurationCoordinator,
-    validate_configuration_value,
-)
-from ..services.extension_runtime import ExtensionRuntime
-from .core_configuration import (
+from .admin_authorization import AdminAuthorizationService
+from .configuration.defaults import (
     CORE_CONFIG_FIELDS,
     CORE_DEFAULTS_FIELD,
     CORE_MODULE_ID,
@@ -65,6 +59,11 @@ from .core_configuration import (
     core_config_target,
     module_configuration_fields,
 )
+from .configuration.operations import (
+    ConfigurationCoordinator,
+    validate_configuration_value,
+)
+from .extension_runtime import ExtensionRuntime
 from .managed_source_credentials import ManagedSourceCredentialPolicy
 
 
@@ -123,7 +122,6 @@ class AdminOperationsService(AdminOperations):
         config_principal_id: str,
         subscription_gate_fields: Mapping[ConfigTarget, tuple[str, ...]] | None = None,
         module_config_validators: Mapping[str, Mapping[str, object]] | None = None,
-        ordinary_migration=None,
         managed_source_credentials=(),
         ordinary_config_resources=None,
         managed_module_owners=(),
@@ -168,7 +166,7 @@ class AdminOperationsService(AdminOperations):
             }
         )
         self._inflight: set[asyncio.Task[object]] = set()
-        self._ordinary_migration = ordinary_migration
+        self._required_config_validators = self._module_config_validators
         policies = tuple(managed_source_credentials)
         if len(policies) > 32 or any(
             not isinstance(p, ManagedSourceCredentialPolicy) for p in policies
@@ -457,14 +455,38 @@ class AdminOperationsService(AdminOperations):
         }
 
     def require_ordinary_validators(self, resources=None):
-        if self._ordinary_migration is not None:
-            self._ordinary_migration.require_semantic_validators(
-                resources, value_validators=self._module_config_validators
-            )
+        for owner, fields in self._required_config_validators.items():
+            target = validate_contract(ConfigTarget(self.config_principal_id, owner))
+            for name, expected in fields.items():
+                if resources is not None and name not in resources.get(target, ()):
+                    continue
+                actual = self._module_config_validators.get(owner, {}).get(name)
+                if not callable(actual) or actual is not expected:
+                    raise ValueError("semantic validator unavailable")
+
+    async def validate_current_ordinary_configuration(self):
+        """Validate current storage and declaration defaults without migrating data."""
+        if not self._ordinary_config_resources:
+            return
+        self.require_ordinary_validators()
+        for target in self.ordinary_resources():
+            snapshot = await self._config_repository.current(target)
+            for field in self.ordinary_declarations(target):
+                if any(item.field == field.name for item in snapshot.secret_metadata):
+                    raise ValueError("ordinary configuration contains secret metadata")
+                if field == MODULE_REPLY_THEME and field.name not in snapshot.values:
+                    continue
+                validate_configuration_value(
+                    field,
+                    snapshot.values.get(field.name, field.default),
+                    self._module_config_validators.get(target.module_id, {}).get(
+                        field.name
+                    ),
+                )
 
     @_tracked_admin_request
     async def ordinary_catalog(self, *, authorization):
-        from .configuration_catalog import project_configuration_catalog
+        from .configuration.catalog import project_configuration_catalog
 
         resources = self.ordinary_resources()
         grant = await self.authorization.authorize(
@@ -569,27 +591,6 @@ class AdminOperationsService(AdminOperations):
                 grant, operation=AdminOperation.READ_CONFIG
             )
         return result
-
-    @_tracked_admin_request
-    async def ordinary_rollback(
-        self, expected_revisions, *, authorization
-    ) -> OrdinaryRollbackReceipt:
-        resources = self.ordinary_resources()
-        grant = await self.authorization.authorize(
-            AdminOperation.ROLLBACK_CONFIG,
-            invocation=None,
-            context=authorization,
-            resources=resources,
-        )
-        async with self.lifecycle.admission.mutation("admin-ordinary-rollback"):
-            await self.authorization.validate_generation(
-                grant, operation=AdminOperation.ROLLBACK_CONFIG
-            )
-            await self._ordinary_migration.rollback(expected_revisions, grant=grant)
-            await self.authorization.validate_generation(
-                grant, operation=AdminOperation.ROLLBACK_CONFIG
-            )
-        return OrdinaryRollbackReceipt(rolled_back=True)
 
     def _core_configuration(self) -> ConfigurationCoordinator:
         async def validate(grant):

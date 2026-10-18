@@ -14,9 +14,7 @@ from ygl_test_subject.adapters.astrbot.runtime import AstrBotRuntime
 from ygl_test_subject.core.contracts import administration as admin
 from ygl_test_subject.core.contracts.validation_boundary import validate_contract
 from ygl_test_subject.core.ports import Principal, RevisionConflict
-from ygl_test_subject.services.configuration_migration import OrdinaryMigrationField
-from ygl_test_subject.services.core_configuration import (
-    DEFAULT_REGION,
+from ygl_test_subject.services.configuration.defaults import (
     core_config_target,
 )
 from ygl_test_subject.services.core_runtime import CoreRuntime
@@ -47,7 +45,6 @@ class AdminReceiptTests(unittest.IsolatedAsyncioTestCase):
         other_path.write_text(json.dumps(other), encoding="utf8")
         self.target = validate_contract(ygl.ConfigTarget("fixture", self.owner))
         self.core_target = core_config_target("fixture")
-        label = validate_contract(ygl.ConfigField("label", default="before"))
         self.core = CoreRuntime(
             database=self.root / "runtime.sqlite3",
             extension_root=extensions,
@@ -73,13 +70,6 @@ class AdminReceiptTests(unittest.IsolatedAsyncioTestCase):
                     self.owner, "credential_demo", "source", "Demo source"
                 ),
             ),
-            ordinary_migration_fields=(
-                OrdinaryMigrationField(
-                    self.core_target, DEFAULT_REGION, "legacy_region"
-                ),
-                OrdinaryMigrationField(self.target, label, "legacy_label"),
-            ),
-            ordinary_migration_id="s3-fixture",
         )
         # Legitimate component composition: no CoreRuntime.start, fake started
         # flag, admission override or authorization bypass.
@@ -105,7 +95,6 @@ class AdminReceiptTests(unittest.IsolatedAsyncioTestCase):
             operations={
                 admin.AdminOperation.READ_CONFIG,
                 admin.AdminOperation.UPDATE_CONFIG,
-                admin.AdminOperation.ROLLBACK_CONFIG,
             },
         )
         self.credentials = self.core.admin_authorization.register_source(
@@ -270,68 +259,6 @@ class AdminReceiptTests(unittest.IsolatedAsyncioTestCase):
         await self.enabled()
         self.assertGreater(self.core.lifecycle.state(self.owner).epoch, status.epoch)
 
-    async def test_bounded_rollback_receipt_and_commit_uncertainty(self):
-        migration = self.core.ordinary_config_migration
-        await migration.migrate({"legacy_region": "global", "legacy_label": "migrated"})
-        targets = (self.core_target, self.target)
-        revisions = {
-            target: (await self.core.config_repository.current(target)).revision
-            for target in targets
-        }
-        before = {
-            target: await self.core.config_repository.current(target)
-            for target in targets
-        }
-        for invalid in (
-            {**revisions, self.target: revisions[self.target] - 1},
-            {**revisions, ygl.ConfigTarget("fixture", "foreign/module"): 1},
-        ):
-            with self.assertRaises((RevisionConflict, ValueError)):
-                await self.ops.ordinary_rollback(
-                    invalid, authorization=self.proof(self.ordinary)
-                )
-            self.assertEqual(
-                {
-                    target: await self.core.config_repository.current(target)
-                    for target in targets
-                },
-                before,
-            )
-        receipt = await self.ops.ordinary_rollback(
-            revisions, authorization=self.proof(self.ordinary)
-        )
-        self.assertEqual(type(receipt).__name__, "OrdinaryRollbackReceipt")
-        self.assertIs(receipt.rolled_back, True)
-        await migration.migrate({"legacy_region": "global", "legacy_label": "migrated"})
-        revisions = {
-            target: (await self.core.config_repository.current(target)).revision
-            for target in targets
-        }
-        projected = await self.pages._invoke(
-            "rollback",
-            self.core,
-            {"expected_revisions": {t.module_id: r for t, r in revisions.items()}},
-            self.proof(self.ordinary),
-        )
-        self.assertEqual(projected, {"rolled_back": True})
-        # The real transaction may commit before late source-current rejection.
-        await migration.migrate({"legacy_region": "global", "legacy_label": "migrated"})
-        revisions = {
-            target: (await self.core.config_repository.current(target)).revision
-            for target in targets
-        }
-        context = self.proof(self.ordinary)
-        original = migration.rollback
-
-        async def committed_then_revoke(expected, *, grant):
-            await original(expected, grant=grant)
-            self.ordinary.end(context)
-
-        with patch.object(migration, "rollback", committed_then_revoke):
-            with self.assertRaises(admin.AdminAuthorizationDenied):
-                await self.ops.ordinary_rollback(revisions, authorization=context)
-        self.assertFalse(await migration.complete())
-
     async def test_recovery_projection_declared_shape_and_host_safe_failures(self):
         expected = getattr(admin, "ManagementRecoveryProjection", None)
         self.assertIsNotNone(expected)
@@ -367,9 +294,6 @@ class AdminReceiptTests(unittest.IsolatedAsyncioTestCase):
                     admin.ModuleUnloadReceipt(*args)
         unknown = admin.ModuleUnloadReceipt(self.owner, None, None, None, None)
         self.assertIsNone(unknown.state)
-        for value in (None, 1, "true"):
-            with self.assertRaises(TypeError):
-                admin.OrdinaryRollbackReceipt(value)
 
         class Extra(admin.ModuleUnloadReceipt):
             pass
@@ -383,18 +307,4 @@ class AdminReceiptTests(unittest.IsolatedAsyncioTestCase):
                     self.core,
                     {"module_id": self.owner, "expected_registry_revision": 0},
                     self.proof(self.modules),
-                )
-
-        class RollbackExtra(admin.OrdinaryRollbackReceipt):
-            pass
-
-        with patch.object(
-            self.ops, "ordinary_rollback", return_value=RollbackExtra(True)
-        ):
-            with self.assertRaises(TypeError):
-                await self.pages._invoke(
-                    "rollback",
-                    self.core,
-                    {"expected_revisions": {}},
-                    self.proof(self.ordinary),
                 )

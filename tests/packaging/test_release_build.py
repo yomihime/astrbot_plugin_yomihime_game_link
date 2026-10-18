@@ -19,8 +19,8 @@ from setuptools import build_meta
 from scripts.build_dashboard_zip import (
     FF14_BUNDLE_REQUIRED_FILES,
     FF14_BUNDLE_ROOT,
-    FF14_COMPAT_FILES,
     FONT_ASSETS,
+    HOST_METADATA_FILES,
     MAINTENANCE_HELPER_FILES,
     OPERATOR_SCRIPT_FILES,
     PAGE_FILES,
@@ -44,14 +44,15 @@ def _write_operator_script_fixtures(root: Path) -> None:
         path = root / filename
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes((ROOT / filename).read_bytes())
-    for filename in (*OPERATOR_SCRIPT_FILES, *PAGE_FILES, *MAINTENANCE_HELPER_FILES):
+    for filename in (
+        *OPERATOR_SCRIPT_FILES,
+        *HOST_METADATA_FILES,
+        *PAGE_FILES,
+        *MAINTENANCE_HELPER_FILES,
+    ):
         path = root / filename
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(b"operator script fixture")
-    for relative in FF14_COMPAT_FILES:
-        canonical = root / FF14_BUNDLE_ROOT / relative
-        canonical.parent.mkdir(parents=True, exist_ok=True)
-        canonical.write_bytes((root / "pages/ff14" / Path(relative).name).read_bytes())
 
 
 def _render_record(payloads: dict[str, bytes], record_name: str) -> bytes:
@@ -177,6 +178,7 @@ class ReleaseBuildTests(unittest.TestCase):
                 "CHANGELOG.md",
                 "requirements.txt",
                 *OPERATOR_SCRIPT_FILES,
+                *HOST_METADATA_FILES,
                 *MAINTENANCE_HELPER_FILES,
                 *PAGE_FILES,
                 "extensions/disk_manifest.py",
@@ -275,28 +277,23 @@ class ReleaseBuildTests(unittest.TestCase):
                     if filename == "yomihime.manifest.json"
                     else b"FF14 package input"
                 )
-            (root / "pages/ff14/private.json").write_bytes(b"must not ship")
+            (root / "pages/management/private.json").write_bytes(b"must not ship")
+            (root / ".astrbot-plugin/i18n/private.json").write_bytes(b"must not ship")
             (root / "pages/unreviewed").mkdir()
             (root / "pages/unreviewed/index.html").write_bytes(b"must not ship")
             names = {path.relative_to(root).as_posix() for path in included_files(root)}
             self.assertEqual(
                 {name for name in names if name.startswith("pages/")}, set(PAGE_FILES)
             )
-            projected = root / "pages/ff14/app.js"
-            original_page = projected.read_bytes()
-            projected.write_bytes(b"changed generated page")
-            with self.assertRaisesRegex(ValueError, "projection differs"):
-                included_files(root)
-            projected.write_bytes(original_page)
-            extra = ff14_root / "pages/compat/unreviewed.js"
-            extra.write_bytes(b"unexpected canonical source")
-            with self.assertRaisesRegex(ValueError, "Unreviewed compatibility locator"):
-                included_files(root)
-            extra.unlink()
+            self.assertEqual(
+                {name for name in names if name.startswith(".astrbot-plugin/")},
+                set(HOST_METADATA_FILES),
+            )
             sentinel = root / "private-sentinel"
             sentinel.write_bytes(b"private")
             for filename, label in (
                 (PAGE_FILES[0], "Page asset"),
+                (HOST_METADATA_FILES[0], "Host metadata"),
                 (MAINTENANCE_HELPER_FILES[0], "Maintenance helper"),
             ):
                 with self.subTest(filename=filename):
@@ -423,7 +420,7 @@ class ReleaseBuildTests(unittest.TestCase):
     def test_reused_sdk_wheel_still_requires_the_independent_pin(self) -> None:
         with tempfile.TemporaryDirectory(prefix="yomihime-release-wheel-") as work:
             root = Path(work)
-            wheel = root / "yomihime_game_link_sdk-0.1.0a8-py3-none-any.whl"
+            wheel = root / "yomihime_game_link_sdk-0.1.0a9-py3-none-any.whl"
             wheel.write_bytes(b"not the reviewed wheel")
             output = root / "artifacts"
 
@@ -457,6 +454,7 @@ class ReleaseBuildTests(unittest.TestCase):
                     "README.md",
                     "modules/ff14/README.md",
                     *OPERATOR_SCRIPT_FILES,
+                    *HOST_METADATA_FILES,
                 ):
                     self.assertEqual(
                         archive.read(filename), (ROOT / filename).read_bytes()

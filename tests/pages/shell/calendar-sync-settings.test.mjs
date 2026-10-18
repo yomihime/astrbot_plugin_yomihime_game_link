@@ -26,7 +26,7 @@ async function fixture() {
       if (endpoint === 'admin/read') return structuredClone(values);
       if (endpoint === 'admin/credential-catalog') return {schema_version: 1, fields: []};
       if (endpoint === 'admin/credential-status') return {};
-      if (endpoint === 'admin/credential-readiness') return {ready: true, state: 'ready', reason_code: 'ready'};
+      if (endpoint === 'admin/credential-readiness') return {ready: true, state: 'ready', reason_code: 'ready',diagnostics:{key_state:'valid_format',codec_state:'available'}};
       assert.equal(endpoint, 'admin/update');
       writes.push(structuredClone(body));
       assert.equal(body.module_id, owner);

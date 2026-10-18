@@ -9,7 +9,7 @@ import {sourceModule,root} from './compile.mjs';
 import {catalog,success,selection,flush} from './fixtures.mjs';
 const {createScope}=await sourceModule(root+'pages/frontend/src/lifecycle.ts');
 const {createShell}=await sourceModule(root+'pages/frontend/src/controller.ts');
-const out=resolve(root,'.architecture-refactor/modular-r0-r3/production-module-test');
+const out=resolve(root,'.build/frontend/production-module-test');
 await mkdir(resolve(out,'module-assets/ff14/ff14/pages/dist'),{recursive:true});
 await copyFile(resolve(root,'pages/shell/runtime.js'),resolve(out,'runtime.js'));
 await copyFile(resolve(root,'modules/ff14/pages/dist/entry.js'),resolve(out,'module-assets/ff14/ff14/pages/dist/entry.js'));
@@ -85,7 +85,7 @@ test('production runtime graph and module remain local and share one Vue/UI impl
     assert.doesNotMatch(source,/(?:from|import)\s*[('" ]+node:/,'published chunks must not import Node builtins');
     assert.doesNotMatch(source,/(?<![.\w])require\s*\(/,'published ESM must not need a bare CommonJS require');
   }
-  const audit=JSON.parse(await readFile(resolve(root,'.architecture-refactor/modular-r0-r3/runtime-packages.json'),'utf8'));
+  const audit=JSON.parse(await readFile(resolve(root,'.build/frontend/runtime-packages.json'),'utf8'));
   for(const name of audit.packages) assert.ok(audit.licenseFiles.includes(`licenses/${name.replaceAll('/','_')}.txt`));
   assert.ok(audit.packages.includes('css-render'));assert.ok(audit.packages.includes('lodash-es'));assert.ok(audit.packages.includes('vue'));assert.ok(audit.packages.includes('naive-ui'));
 });

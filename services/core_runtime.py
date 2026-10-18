@@ -64,38 +64,42 @@ from ..infrastructure.sqlite.repositories_admin_credentials import (
     SQLiteAdminCredentialRepository,
 )
 from ..infrastructure.sqlite.repositories_config import SQLiteConfigRepository
-from ..infrastructure.sqlite.repositories_config_migration import (
-    SQLiteOrdinaryConfigurationMigrationRepository,
-)
 from ..infrastructure.sqlite.repositories_output import SQLiteRootOutputRepository
 from ..infrastructure.sqlite.repositories_runtime import SQLiteModuleRuntimeRepository
 from ..infrastructure.sync_diagnostics import SyncDiagnostics
-from ..services.admin_authorization import AdminAuthorizationService, ContextValidator
-from ..services.admin_facade import AdminFacade
-from ..services.admin_operations import (
+from .admin_authorization import AdminAuthorizationService, ContextValidator
+from .admin_facade import AdminFacade
+from .admin_operations import (
     AdminOperationsService,
     AdminStartupFailure,
 )
-from ..services.b04_runtime import B04Repositories, SQLiteResourceVisibilityProbe
-from ..services.delivery import DeliveryService
-from ..services.extension_runtime import (
+from .b04_runtime import B04Repositories, SQLiteResourceVisibilityProbe
+from .configuration.defaults import (
+    CORE_CONFIG_FIELDS,
+    CoreDefaultsView,
+    ThemeSettingsView,
+    core_config_target,
+)
+from .configuration.operations import ConfigurationCoordinator
+from .delivery import DeliveryService
+from .extension_runtime import (
     ExtensionRestoreFailure,
     ExtensionRuntime,
     FactorySourcePort,
 )
-from ..services.identity import (
+from .identity import (
     InvocationPrincipalResolver,
     TrustedIngressPrincipalProvisioner,
     TrustedRoutePublisher,
 )
-from ..services.module_catalog import project_module_catalog
-from ..services.module_services import (
+from .module_catalog import project_module_catalog
+from .module_services import (
     ModuleServicesFactory,
     RegistryRegistrationLookup,
     _freeze_host_config_snapshots,
 )
-from ..services.module_storage import ModuleStorageRouter
-from ..services.output import (
+from .module_storage import ModuleStorageRouter
+from .output import (
     CommandHeadingProjector,
     LifecycleApprovedSendScheduler,
     OutputResult,
@@ -103,23 +107,15 @@ from ..services.output import (
     OutputStatus,
     _require_public_fact_resources,
 )
-from ..services.owner_authority import OwnerRouteProofAuthority
-from ..services.scheduler import (
+from .owner_authority import OwnerRouteProofAuthority
+from .scheduler import (
     ExecutionClaimProofRegistry,
     RescheduleConfiguration,
     SchedulerQuotas,
     SharedCollectionScheduler,
 )
-from ..services.source_credentials import SourceCredentialPolicy
-from ..services.subscriptions import SubscriptionOperationsService
-from .configuration import ConfigurationCoordinator
-from .configuration_migration import OrdinaryConfigurationMigration
-from .core_configuration import (
-    CORE_CONFIG_FIELDS,
-    CoreDefaultsView,
-    ThemeSettingsView,
-    core_config_target,
-)
+from .source_credentials import SourceCredentialPolicy
+from .subscriptions import SubscriptionOperationsService
 
 DEFAULT_CADENCE_CONFIGURATION = CadenceConfiguration(
     (60.0, 300.0, 900.0, 3600.0, 21600.0, 43200.0, 86400.0)
@@ -475,11 +471,7 @@ class CoreRuntime:
         claim_lease: timedelta = timedelta(minutes=2),
         pump_interval: float = 5.0,
         cleanup_timeout: float = 5.0,
-        legacy_core_defaults: Mapping[str, object] | None = None,
         module_config_validators: Mapping[str, Mapping[str, object]] | None = None,
-        ordinary_migration_fields: tuple = (),
-        ordinary_migration_source: Callable[[], Mapping[str, object]] | None = None,
-        ordinary_migration_id: str = "ordinary-defaults-v1",
         ordinary_config_resources=None,
         managed_module_owners=(),
         owner_cleanup=None,
@@ -606,17 +598,6 @@ class CoreRuntime:
             subscription_gate_bindings=execution_gate_bindings,
         )
         self.config_repository: SQLiteConfigRepository = self.repositories.config
-        self.ordinary_config_migration = (
-            OrdinaryConfigurationMigration(
-                SQLiteOrdinaryConfigurationMigrationRepository(self.config_repository),
-                ordinary_migration_fields,
-                migration_id=ordinary_migration_id,
-                value_validators=module_config_validators or {},
-            )
-            if ordinary_migration_fields
-            else None
-        )
-        self._ordinary_migration_source = ordinary_migration_source
         self.runtime_repository = SQLiteModuleRuntimeRepository(database)
         self.admin_credential_repository = SQLiteAdminCredentialRepository(database)
 
@@ -685,12 +666,6 @@ class CoreRuntime:
         )
         self.core_defaults = CoreDefaultsView(
             core_configuration.view(),
-            legacy_defaults=legacy_core_defaults,
-            migration_complete=(
-                self.ordinary_config_migration.complete
-                if self.ordinary_config_migration is not None
-                else None
-            ),
         )
         self.theme_settings = ThemeSettingsView(
             self.config_repository,
@@ -847,7 +822,6 @@ class CoreRuntime:
             secret_store=self.secret_store,
             config_principal_id=config_principal_id,
             subscription_gate_fields=gate_fields,
-            ordinary_migration=self.ordinary_config_migration,
             managed_source_credentials=managed_source_credentials,
             ordinary_config_resources=ordinary_config_resources,
             managed_module_owners=managed_module_owners,
@@ -1085,10 +1059,11 @@ class CoreRuntime:
             return SubscriptionGateState(True, None, None, "state_unknown")
 
     async def recover_management(
-        self, expected_revisions, *, authorization, complete_from_current=False
+        self, expected_revisions, *, authorization
     ) -> ManagementRecoveryProjection:
         if not self.configuration_blocked or self._starting:
             raise AdminAuthorizationDenied
+        expected_revisions = MappingProxyType(dict(expected_revisions))
         resources = self.admin_operations.ordinary_resources()
         grant = await self.admin_authorization.authorize(
             AdminOperation.RECOVER_CONFIG,
@@ -1096,39 +1071,40 @@ class CoreRuntime:
             context=authorization,
             resources=resources,
         )
-        migration = self.ordinary_config_migration
         self.admin_operations.require_ordinary_validators()
         async with self.lifecycle.admission.mutation("admin-ordinary-recovery"):
 
             def check(unit):
-                self.admin_authorization.assert_generation_current(
-                    unit, grant, AdminOperation.RECOVER_CONFIG
-                )
-                if set(expected_revisions) != set(resources):
-                    raise ValueError("recovery requires both target revisions")
-                for target, revision in expected_revisions.items():
-                    if type(revision) is not int or revision < 1:
-                        raise ValueError("recovery revision is invalid")
-                    migration.repository._revision(unit, target, revision)
+                self._check_recovery_revisions(unit, grant, expected_revisions)
 
             await self.database.executor.run_transaction(check, begin_mode="IMMEDIATE")
             await self.admin_authorization.validate_generation(
                 grant, operation=AdminOperation.RECOVER_CONFIG
             )
-            if complete_from_current:
-                await migration.complete_from_current(expected_revisions, grant=grant)
-            elif not await migration.complete():
-                if not callable(self._ordinary_migration_source):
-                    raise ValueError("prepared ordinary migration input is required")
-                await migration.migrate(self._ordinary_migration_source(), grant=grant)
-            await self.admin_authorization.validate_generation(
-                grant, operation=AdminOperation.RECOVER_CONFIG
-            )
-        await self.start(recovery_grant=grant)
+        await self.start(recovery_grant=grant, recovery_revisions=expected_revisions)
         await self.admin_authorization.validate_generation(
             grant, operation=AdminOperation.RECOVER_CONFIG
         )
         return {"recovered": True}
+
+    def _check_recovery_revisions(self, unit, grant, revisions):
+        self.admin_authorization.assert_generation_current(
+            unit, grant, AdminOperation.RECOVER_CONFIG
+        )
+        if set(revisions) != set(self.admin_operations.ordinary_resources()):
+            raise ValueError("recovery requires all target revisions")
+        for target, revision in revisions.items():
+            if type(revision) is not int or revision < 1:
+                raise ValueError("recovery revision is invalid")
+            self.config_repository._ensure_state(unit, target)
+            actual = unit.execute(
+                "SELECT revision FROM config_state WHERE principal_id=? AND module_id=?",
+                (target.principal_id, target.module_id),
+            ).fetchone()[0]
+            if actual != revision:
+                from ..core.ports import RevisionConflict
+
+                raise RevisionConflict("config", revision, actual)
 
     def _check_recovery(self, grant):
         if grant is not None:
@@ -1139,7 +1115,9 @@ class CoreRuntime:
                     effect.context, AdminOperation.RECOVER_CONFIG, effect.resources
                 )
 
-    async def start(self, *, recovery_grant=None) -> CoreStartupReport:
+    async def start(
+        self, *, recovery_grant=None, recovery_revisions=None
+    ) -> CoreStartupReport:
         if self._closed or self._closing:
             raise RuntimeError("CoreRuntime is closing or closed")
         if self._started:
@@ -1167,26 +1145,26 @@ class CoreRuntime:
                 raise
             self._management_ready = True
             self._configuration_blocked = False
-            if self.ordinary_config_migration is not None:
-                try:
-                    async with self.lifecycle.admission.mutation(
-                        "ordinary-config-startup-migration"
-                    ):
-                        self.admin_operations.require_ordinary_validators()
-                        complete = await self.ordinary_config_migration.complete()
-                        self._check_recovery(recovery_grant)
-                        if not complete:
-                            if not callable(self._ordinary_migration_source):
-                                raise ValueError(
-                                    "prepared ordinary migration input is required"
-                                )
-                            await self.ordinary_config_migration.migrate(
-                                self._ordinary_migration_source(), grant=recovery_grant
-                            )
-                            self._check_recovery(recovery_grant)
-                except Exception:
-                    self._configuration_blocked = True
-                    raise
+            try:
+                async with self.lifecycle.admission.mutation(
+                    "ordinary-config-startup-validation"
+                ):
+                    if recovery_grant is not None:
+                        # The caller releases its mutation lease before start; recheck
+                        # the confirmed revisions atomically with current validation.
+                        await self.database.executor.run_transaction(
+                            lambda unit: self._check_recovery_revisions(
+                                unit, recovery_grant, recovery_revisions
+                            ),
+                            begin_mode="IMMEDIATE",
+                        )
+                    await (
+                        self.admin_operations.validate_current_ordinary_configuration()
+                    )
+                    self._check_recovery(recovery_grant)
+            except Exception:
+                self._configuration_blocked = True
+                raise
             expired_logins = (
                 await self.repositories.authorization.expire_pending_on_restart()
             )

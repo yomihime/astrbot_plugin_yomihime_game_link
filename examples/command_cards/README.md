@@ -19,7 +19,11 @@ python -m unittest examples.command_cards.test_declarative_samples -v
 
 源码 CLI 使用仓库保留的原版 Noto OTF，继续提供确定性的离线样图。当前轻量插件 ZIP 只保留字体 OFL/NOTICE；正式 Host 从 Core 持久资源获取同一固定字体，未就绪时有限系统回退或完整文本。CLI 不触发该后台下载，也不把系统字体输出覆盖到五张已确认的样图。字体身份、资源策略和页面操作见 [Spec §5.1](../../docs/command-presentation/declarative-rendering-spec.md#51-core-受管字体与轻量发布)。
 
-新路径固定 Pillow `12.3.0`、resvg_py `0.5.0`，与 Core 根运行依赖一致，不需要手动 Cairo DLL。SDK wheel 无运行依赖；Windows 已有官方 wheel，但未在本轮实机验证。CLI 只向仓库外的新目录输出，并记录 PNG 摘要；不覆盖历史样图。
+新路径要求 Pillow `>=12.3.0`、resvg_py `>=0.5.0`，与 Core 根运行依赖一致，不需要手动 Cairo DLL。SDK wheel 无运行依赖；Windows 已有官方 wheel，但未在本轮实机验证。CLI 只向仓库外的新目录输出，并记录 PNG 摘要；不覆盖历史样图。
+
+## 样图来源与许可
+
+`samples/` 中的 PNG 由本仓库卡片样例代码渲染，用于离线视觉回归，不证明实时查询或宿主部署成功。帮助使用仓库声明；Logs 的角色与成绩为合成数据；声明式物品样图的数据来自用户提供的截图及 provenance 中记录的公开来源。详见 [声明式样图来源](samples/declarative/provenance.json) 和 [样式夹具检查](samples/style_reference_checks.json)。仓库样例代码沿用 AGPL-3.0；第三方原始内容及 Noto 字体各自的版权、许可与 OFL 声明保留，不因生成样图而重新授权。重新生成当前样例前先运行 `python scripts/prepare_test_font.py`。
 
 ## 历史离线原型说明（保留原记录）
 

@@ -40,7 +40,6 @@ class AdminPagesTests(unittest.IsolatedAsyncioTestCase):
             plugin_root=plugin_root,
             data_dir=Path(self.temp.name) / "data",
             config={},
-            raw_legacy_config={"ff14_default_region": "PRIVATE-INVALID-LEGACY"},
             http_transport_factory=lambda: self.transport,
             plain_factory=_Plain,
             chain_factory=_MessageChain,
@@ -105,6 +104,20 @@ class AdminPagesTests(unittest.IsolatedAsyncioTestCase):
             json=data,
             follow_redirects=True,
         )
+
+    async def test_recover_ready_core_is_rejected_without_shutdown(self):
+        core = self.runtime.core_runtime
+        rows = (await self.call("read", {})).json()["data"]
+        response = await self.call(
+            "recover",
+            {"expected_revisions": {key: row["revision"] for key, row in rows.items()}},
+        )
+        self.assertEqual(response.status_code, 403, response.text)
+        self.assertIs(self.runtime.core_runtime, core)
+        self.assertTrue(self.runtime.ready)
+        self.assertTrue(core.started)
+        self.assertEqual((await self.call("read", {})).status_code, 200)
+        self.assertEqual(self.runtime._admin_source._proofs, {})
 
     async def test_catalog_uses_existing_host_proof_redirect_and_empty_body(self):
         response = await self.call("catalog", {})
@@ -244,8 +257,8 @@ class AdminPagesTests(unittest.IsolatedAsyncioTestCase):
             row["fields"][name],
             {"value": 21600, "state": "valid", "source": "default", "present": False},
         )
-        self.assertFalse(self.runtime.ready)
-        self.assertFalse(self.runtime.core_runtime.started)
+        self.assertTrue(self.runtime.ready)
+        self.assertTrue(self.runtime.core_runtime.started)
         self.assertEqual(self.pages.requests, {})
         self.assertEqual(self.runtime._admin_source._proofs, {})
 
@@ -318,7 +331,7 @@ class AdminPagesTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.runtime._admin_source._proofs, {})
 
     async def test_reviewed_subscription_gate_bool_grant_and_exact_cas_boundaries(self):
-        """Real reviewed composition, isolated storage; never starts delivery."""
+        """Real reviewed composition with isolated storage and offline transport."""
         from ygl_test_subject.modules.ff14.config import ORDINARY_FIELDS
 
         gate = "ff14_subscriptions_enabled"
@@ -387,58 +400,8 @@ class AdminPagesTests(unittest.IsolatedAsyncioTestCase):
             current = (await self.call("read", {})).json()["data"]["ff14/ff14"]
             self.assertEqual(current["revision"], revision)
             self.assertIs(current["fields"][gate]["value"], value)
-        self.assertFalse(self.runtime.ready)
-        self.assertFalse(self.runtime.core_runtime.started)
-        self.assertEqual(self.pages.requests, {})
-        self.assertEqual(self.runtime._admin_source._proofs, {})
-
-    async def test_actual_host_read_update_conflict_recover_and_limited_rollback(self):
-        self.assertFalse(self.runtime.ready)
-        self.assertTrue(self.runtime.core_runtime.configuration_blocked)
-        response = await self.call("read", {})
-        self.assertEqual(response.status_code, 200, response.text)
-        data = response.json()["data"]
-        self.assertEqual(set(data), {"game_link/core", "ff14/ff14"})
-        self.assertNotIn("PRIVATE-INVALID-LEGACY", response.text)
-        revision = data["game_link/core"]["revision"]
-        patchdata = {
-            "module_id": "game_link/core",
-            "expected_revision": revision,
-            "updates": [
-                {"field": "default_region", "mode": "replace", "value": "global"}
-            ],
-        }
-        response = await self.call("update", patchdata)
-        self.assertEqual(response.status_code, 200, response.text)
-        self.assertFalse(self.runtime.ready)
-        self.assertEqual((await self.call("update", patchdata)).status_code, 409)
-        data = (await self.call("read", {})).json()["data"]
-        response = await self.call(
-            "recover",
-            {
-                "expected_revisions": {k: v["revision"] for k, v in data.items()},
-                "complete_from_current": False,
-            },
-        )
-        self.assertEqual(response.status_code, 200, response.text)
         self.assertTrue(self.runtime.ready)
         self.assertTrue(self.runtime.core_runtime.started)
-        data = (await self.call("read", {})).json()["data"]
-        response = await self.call(
-            "rollback",
-            {"expected_revisions": {k: v["revision"] for k, v in data.items()}},
-        )
-        self.assertEqual(response.status_code, 200, response.text)
-        self.assertEqual(
-            self.runtime._raw_legacy_config,
-            {"ff14_default_region": "PRIVATE-INVALID-LEGACY"},
-        )
-        self.assertEqual(
-            (
-                await self.runtime.core_runtime.admin_credential_repository.current()
-            ).generation,
-            0,
-        )
         self.assertEqual(self.pages.requests, {})
         self.assertEqual(self.runtime._admin_source._proofs, {})
 
@@ -506,7 +469,7 @@ class AdminPagesTests(unittest.IsolatedAsyncioTestCase):
             "recover", {"expected_revisions": {}, "complete_from_current": True}
         )
         self.assertEqual(response.status_code, 400, response.text)
-        self.assertFalse(self.runtime.ready)
+        self.assertTrue(self.runtime.ready)
         self.assertEqual(self.runtime._admin_source._proofs, {})
 
     async def test_missing_server_version_subject_mismatch_duplicate_size_and_old_handler(
@@ -535,9 +498,8 @@ class AdminPagesTests(unittest.IsolatedAsyncioTestCase):
             verified_dashboard_request(facade, path)
         facade.username = "synthetic"
         sys.modules["astrbot"].__version__ = "4.29.0"
-        with self.assertRaises(AdminAuthorizationDenied):
-            verified_dashboard_request(facade, path)
-        sys.modules["astrbot"].__version__ = "4.28.2"
+        self.assertEqual(verified_dashboard_request(facade, path)[1], "synthetic")
+        sys.modules["astrbot"].__version__ = "4.29.1"
         for content in (b'{"role":1,"role":2}', b"[]", b"{" + b" " * 9000 + b"}"):
             response = await self.client.post(
                 path,

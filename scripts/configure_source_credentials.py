@@ -25,7 +25,7 @@ from uuid import uuid4
 # outside the plugin directory. Pin imports to this package's own SDK before
 # importing any host/Core code; never inherit a process-global SDK by accident.
 _PLUGIN_ROOT = Path(__file__).resolve().parents[1]
-_SDK_VERSION = "0.1.0a8"
+_SDK_VERSION = "0.1.0a9"
 _SDK_MODULE_ABI_VERSION = "2.0"
 if str(_PLUGIN_ROOT) not in sys.path:
     sys.path.insert(0, str(_PLUGIN_ROOT))
@@ -47,7 +47,6 @@ from yomihime_game_link_sdk.display import DisplayLimits
 
 from ..adapters.astrbot.bundled import install_bundled_ff14
 from ..adapters.astrbot.runtime import PLUGIN_NAME
-from ..adapters.astrbot.trusted_assembly import assemble_reviewed
 from ..core.contracts.administration import (
     AdminAuthorizationContext,
     AdminOperation,
@@ -69,6 +68,7 @@ from ..infrastructure.sqlite.repositories_admin_credentials import (
 from ..presentation.rendering import GenericDisplayRenderer, RenderingBounds
 from ..services.admin_authorization import _matches
 from ..services.core_runtime import CoreRuntime, CoreRuntimeCleanupPending
+from ..services.trusted_assembly import assemble_reviewed
 from .admin_credentials import _finish_cleanup, _read_hidden, local_maintenance_guard
 
 MODULE_ID = "ff14/ff14"

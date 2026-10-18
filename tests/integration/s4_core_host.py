@@ -76,7 +76,7 @@ discover_packages = importlib.import_module(
 _rendering = importlib.import_module("plugin.presentation.rendering")
 GenericDisplayRenderer = _rendering.GenericDisplayRenderer
 RenderingBounds = _rendering.RenderingBounds
-windows_fs = importlib.import_module("plugin.extensions.windows_fs")
+windows_fs = importlib.import_module("plugin.infrastructure.windows.fs")
 
 windows_fs._check_runtime()
 print(

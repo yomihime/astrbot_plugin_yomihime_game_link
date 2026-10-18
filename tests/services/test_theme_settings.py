@@ -20,8 +20,7 @@ from ygl_test_subject.core.contracts.services import ConfigFieldUpdate, ConfigPa
 from ygl_test_subject.core.contracts.validation_boundary import validate_contract
 from ygl_test_subject.core.ports import RevisionConflict
 from ygl_test_subject.presentation.layout_renderer import list_themes
-from ygl_test_subject.services.configuration import ConfigurationValueError
-from ygl_test_subject.services.core_configuration import (
+from ygl_test_subject.services.configuration.defaults import (
     CORE_CONFIG_FIELDS,
     CORE_MODULE_ID,
     IMAGE_THEME,
@@ -30,6 +29,7 @@ from ygl_test_subject.services.core_configuration import (
     core_config_target,
     module_configuration_fields,
 )
+from ygl_test_subject.services.configuration.operations import ConfigurationValueError
 from ygl_test_subject.services.core_runtime import CoreRuntime
 from ygl_test_subject.services.trusted_assembly import ReviewedAssembly
 
@@ -390,8 +390,6 @@ class ThemeSettingsTests(unittest.IsolatedAsyncioTestCase):
             managed_credentials=(),
             credential_realms={},
             validators={},
-            migration_fields=(),
-            migration_id="test",
             public_bindings={},
             support=SimpleNamespace(ordinary_config_fields=("label",)),
         )

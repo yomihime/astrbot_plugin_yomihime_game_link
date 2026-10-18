@@ -103,7 +103,6 @@ async def export_catalog() -> dict:
             font_manager_factory=OfflineManagedFont,
             plugin_root=plugin_root,
             data_dir=data_dir,
-            raw_legacy_config={},
             http_transport_factory=_OfflineTransport,
             core_factory=_core_with_neutral_module,
         )

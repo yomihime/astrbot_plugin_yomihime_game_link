@@ -1,4 +1,4 @@
-"""The fixed AstrBot 4.28.2 ordinary Dashboard request gate, without JWT parsing."""
+"""The AstrBot ordinary Dashboard request contract gate, without JWT parsing."""
 
 from __future__ import annotations
 
@@ -9,7 +9,6 @@ from time import time
 from ...core.contracts.administration import AdminAuthorizationDenied
 from .web_public import normalize_origin
 
-HOST_VERSION = "4.28.2"
 BODY_LIMIT = 8192
 
 
@@ -37,12 +36,11 @@ def verified_dashboard_request(request, exact_path):
     if match is None or len(match[1]) > 8192:
         raise AdminAuthorizationDenied
     try:
-        import astrbot
-
-        if astrbot.__version__ != HOST_VERSION:
-            raise AdminAuthorizationDenied
         server = raw.app.state.dashboard_app_adapter._dashboard_server
-        payload, error = server._validate_dashboard_token(match[1], exact_path)
+        verifier = getattr(server, "_validate_dashboard_token", None)
+        if not callable(verifier) or getattr(verifier, "__self__", None) is not server:
+            raise AdminAuthorizationDenied
+        payload, error = verifier(match[1], exact_path)
         if (
             error
             or type(payload) is not dict

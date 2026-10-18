@@ -21,7 +21,7 @@ const realm=vm.createContext({window,document:window.document,navigator:window.n
   record:(kind,endpoint,body)=>calls.push({kind,endpoint,body})});
 for(const key of ['HTMLElement','Element','SVGElement','Node','MutationObserver','Event','MouseEvent','KeyboardEvent','InputEvent']) realm[key]=window[key];
 assert.equal(vm.runInContext('[typeof process, typeof global, typeof require, typeof Buffer].join(",")',realm),'undefined,undefined,undefined,undefined');
-vm.runInContext(`window.AstrBotPluginPage={ready:()=>Promise.resolve({pluginName:'astrbot_plugin_yomihime_game_link',pageName:'shell'}),onContext(){return()=>{}},apiGet(endpoint){record('get',endpoint);return Promise.resolve(${JSON.stringify(data)})},apiPost(endpoint,body){record('post',endpoint,body);return Promise.resolve(${JSON.stringify(success)})}}`,realm);
+vm.runInContext(`window.AstrBotPluginView={ready:()=>Promise.resolve({pluginName:'astrbot_plugin_yomihime_game_link',pageName:'shell'}),onContext(){return()=>{}},apiGet(endpoint){record('get',endpoint);return Promise.resolve(${JSON.stringify(data)})},apiPost(endpoint,body){record('post',endpoint,body);return Promise.resolve(${JSON.stringify(success)})}}`,realm);
 for(const path of data.modules[0].pages[0].styles){const link=window.document.createElement('link');link.rel='stylesheet';link.dataset.resource=path;link.href='./'+path;window.document.getElementById('module-style-assets').content.append(link);}
 const sources=new Map([
   ['/runtime.js',await readFile(root+'pages/shell/runtime.js','utf8')],

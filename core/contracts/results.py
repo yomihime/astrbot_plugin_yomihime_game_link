@@ -16,9 +16,9 @@ from yomihime_game_link_sdk.results import ErrorDetail as ErrorDetail
 from yomihime_game_link_sdk.results import FactDocument as FactDocument
 from yomihime_game_link_sdk.results import ResultStatus as ResultStatus
 
-from ...core.contracts.validation_boundary import validate_contract
 from .display import _text as _text
 from .display import _valid_value as _valid_value
+from .validation_boundary import validate_contract
 from .version import CONTRACT_VERSION as CONTRACT_VERSION
 
 

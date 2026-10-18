@@ -237,7 +237,7 @@ class PublicPages:
         return query
 
     def close(self) -> None:
-        """Remove only our handlers from 4.28.2's public registration list."""
+        """Remove only our handlers from the Host's public registration list."""
         self._closed = True
         self._generation += 1
         for state in tuple(self._query_states.values()):

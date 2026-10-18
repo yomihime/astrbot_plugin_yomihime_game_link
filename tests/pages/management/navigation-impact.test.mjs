@@ -11,7 +11,7 @@ async function fixture(denied){
  const dom=new JSDOM('<div id="management-root"></div>',{pretendToBeVisual:true}),calls=[];
  const forms=credentialCatalog();forms.fields.push({...forms.fields[0],module_id:'example/demo',name:'credential_demo'});
  const states={...credentialStatus(),'example/demo':{revision:1,fields:{credential_demo:'unset'}}};
- const responses={'admin/catalog':catalog(),'admin/read':snapshot(),'admin/credential-catalog':forms,'admin/credential-status':states,'admin/credential-readiness':{ready:true,state:'ready',reason_code:'ready'}};
+ const responses={'admin/catalog':catalog(),'admin/read':snapshot(),'admin/credential-catalog':forms,'admin/credential-status':states,'admin/credential-readiness':{ready:true,state:'ready',reason_code:'ready',diagnostics:{key_state:'valid_format',codec_state:'available'}}};
  const bridge={ready:()=>Promise.resolve(context),onContext(){return()=>{};},apiPost(endpoint){calls.push(endpoint);if(endpoint===denied)return Promise.reject(Error('admin_authorization_denied'));if(endpoint in responses)return Promise.resolve(responses[endpoint]);throw Error('unexpected_write');}};
  let mutations=0;const page=createManagementPage(dom.window.document,bridge,dom.window,{onDraftMutation:()=>mutations++});page.start();await flush();
  const edit=(node,value,event='change')=>{if(node.type==='checkbox')node.checked=value;else node.value=value;node.dispatchEvent(new dom.window.Event(event,{bubbles:true}));};

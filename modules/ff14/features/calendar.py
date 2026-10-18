@@ -27,7 +27,6 @@ from yomihime_game_link_sdk.subscriptions import (
 
 from ..config import FF14ConfigSnapshot
 from .calendar_evaluator import (
-    DAILY_WINDOW_DAYS,
     CalendarSourceSpec,
     build_calendar_document,
     calendar_source_spec,
@@ -45,12 +44,9 @@ SCHEDULE_SOURCE_ID = "ff14_calendar_primary"
 FALLBACK_SOURCE_ID = "ff14_calendar_fallback"
 KEY_VERSION = 1
 DATA_VERSION = 1
-DEFAULT_QUERY_DAYS = DAILY_WINDOW_DAYS
 MAX_QUERY_DAYS = 30
 MAX_STORED_OCCURRENCES = 2_000
 MAX_STORED_SUMMARY = 240
-
-_REGIONS = {"cn": "国服", "global": "国际服"}
 
 
 class CalendarSourceReader:

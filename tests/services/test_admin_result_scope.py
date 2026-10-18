@@ -29,7 +29,7 @@ from ygl_test_subject.infrastructure.sqlite.repositories_config import (
     SQLiteConfigRepository,
 )
 from ygl_test_subject.services.admin_authorization import AdminAuthorizationService
-from ygl_test_subject.services.configuration import (
+from ygl_test_subject.services.configuration.operations import (
     ConfigurationCoordinator,
     ConfigurationRecoveryRequired,
 )

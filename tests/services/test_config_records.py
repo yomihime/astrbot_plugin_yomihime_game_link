@@ -44,7 +44,7 @@ from ygl_test_subject.services.admin_authorization import (
     AdminAuthorizationService,
     _digest,
 )
-from ygl_test_subject.services.configuration import (
+from ygl_test_subject.services.configuration.operations import (
     ConfigurationCoordinator,
     ConfigurationRecoveryRequired,
     ConfigurationService,

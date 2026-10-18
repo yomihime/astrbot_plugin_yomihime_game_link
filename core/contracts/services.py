@@ -76,7 +76,6 @@ from yomihime_game_link_sdk.subscriptions import (
 )
 from yomihime_game_link_sdk.subscriptions import SubscriptionView as SubscriptionView
 
-from ...core.contracts.validation_boundary import validate_contract
 from .display import _asset as _asset
 from .manifests import _identifier as _manifest_identifier
 from .storage import ModuleStoragePaths as ModuleStoragePaths
@@ -89,6 +88,7 @@ from .storage import SecretTarget as SecretTarget
 from .storage import freeze_json as freeze_json
 from .storage import validate_module_id as validate_module_id
 from .subscriptions import DeliveryEvent as DeliveryEvent
+from .validation_boundary import validate_contract
 
 _UNSAFE_MAPPING = object()
 
@@ -896,10 +896,6 @@ class PersistedConfigPatch:
         object.__setattr__(self, "target", target)
 
 
-class ConfigWriter(Protocol):
-    async def update(self, module_id: str, patch: ConfigPatch) -> ConfigSnapshot: ...
-
-
 def validate_config_patch(target: ConfigTarget, patch: ConfigPatch) -> ConfigPatch:
     """The trusted coordinator boundary for metadata-only sensitive updates."""
     target = ConfigTarget_validate(target)
@@ -911,12 +907,6 @@ def validate_config_patch(target: ConfigTarget, patch: ConfigPatch) -> ConfigPat
     if patch.target is not None and ConfigTarget_validate(patch.target) != target:
         raise ValueError("config patch target does not match coordinator target")
     return patch
-
-
-class IdentityNamespace(str, Enum):
-    QQ = "qq"
-    DISCORD = "discord"
-    OTHER = "other"
 
 
 @dataclass(frozen=True, slots=True)
