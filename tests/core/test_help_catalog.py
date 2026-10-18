@@ -172,7 +172,7 @@ class HelpCatalogTests(unittest.TestCase):
                     .commands
                     if line.startswith("/ygl catalog 查询 ")
                 )
-                self.assertIn("命令 / 已授权公开网页 / 普通聊天工具", line)
+                self.assertNotIn("已授权公开网页", line)
                 self.assertNotIn("允许自然语言", line)
                 self.assertEqual(handler.calls, 0)
 
@@ -215,13 +215,13 @@ class HelpCatalogTests(unittest.TestCase):
             catalog.module(registry.snapshot(), "catalog").ordered_blocks[1].commands
         )
         web_line = next(line for line in lines if line.startswith("/ygl catalog web "))
-        self.assertIn("命令或已授权的公开网页入口", web_line)
+        self.assertEqual("/ygl catalog web help\nRead", web_line)
         self.assertNotIn("允许自然语言", web_line)
-        self.assertIn(
+        self.assertNotIn(
             "必须通过命令",
             next(line for line in lines if line.startswith("/ygl catalog 绑定 ")),
         )
-        self.assertIn(
+        self.assertNotIn(
             "允许自然语言",
             next(line for line in lines if line.startswith("/ygl catalog 查询 ")),
         )
@@ -234,7 +234,7 @@ class HelpCatalogTests(unittest.TestCase):
 
         self.assertIsInstance(document.ordered_blocks[0], TextBlock)
         text = document.ordered_blocks[0].text
-        self.assertIn("没有已注册模块", text)
+        self.assertIn("没有活跃可用模块", text)
         self.assertIn("/ygl help", text)
         self.assertIsInstance(document.ordered_blocks[1], CommandsBlock)
 
@@ -262,12 +262,12 @@ class HelpCatalogTests(unittest.TestCase):
         intro = document.ordered_blocks[0]
         commands = document.ordered_blocks[1]
         self.assertIsInstance(intro, TextBlock)
-        self.assertIn("已启用", intro.text)
+        self.assertIn("命令后加 help", intro.text)
         self.assertIsInstance(commands, CommandsBlock)
         self.assertIn("/ygl zeta 查询", commands.commands[0])
         self.assertIn("/ygl zeta 绑定", commands.commands[1])
-        self.assertIn("允许自然语言", commands.commands[0])
-        self.assertIn("必须通过命令", commands.commands[1])
+        self.assertNotIn("允许自然语言", commands.commands[0])
+        self.assertNotIn("必须通过命令", commands.commands[1])
 
     def test_hp04_unknown_route_is_friendly_and_same_operation_names_are_scoped(
         self,
@@ -315,7 +315,7 @@ class HelpCatalogTests(unittest.TestCase):
         new_document = catalog.module(registry.snapshot(), "alpha")
 
         self.assertIn("未找到模块路由", old_document.ordered_blocks[0].text)
-        self.assertIn("已启用", new_document.ordered_blocks[0].text)
+        self.assertIn("命令后加 help", new_document.ordered_blocks[0].text)
         self.assertIn("未找到模块路由", document.ordered_blocks[0].text)
         self.assertEqual(handler.calls, 0)
 
@@ -359,7 +359,11 @@ class HelpCatalogTests(unittest.TestCase):
             registry.snapshot(), "owner"
         )
 
-        self.assertIn("仅本人私聊可用", document.ordered_blocks[1].commands[0])
+        self.assertIn("List mine", document.ordered_blocks[1].commands[0])
+        details = HelpCatalog(active_query=lambda module: True).command(
+            registry.snapshot(), "owner", "list"
+        )
+        self.assertIn("仅本人私聊可用", details.ordered_blocks[0].text)
         self.assertEqual(handler.calls, 0)
 
 

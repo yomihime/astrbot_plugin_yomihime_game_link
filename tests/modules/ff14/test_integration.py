@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from secrets import token_urlsafe
+from unittest.mock import patch
 
 from ygl_test_subject.adapters.astrbot.command_bridge import (
     AstrBotCommandBridge,
@@ -74,10 +75,21 @@ class _FixtureTransport:
     def __init__(self) -> None:
         self.fixture = json.loads(FIXTURE.read_text(encoding="utf-8"))
         self.requests: list[TransportRequest] = []
+        self.credential_exchanges = []
 
     async def request(self, request: TransportRequest) -> HttpResponse:
         self.requests.append(request)
-        if request.source_id == "xivapi_items" and request.path.endswith("/search"):
+        if (
+            request.source_id == "universalis_market"
+            and request.path == "/api/v2/worlds"
+        ):
+            payload = [{"id": 71001, "name": "Synthetic World"}]
+        elif (
+            request.source_id == "universalis_market"
+            and request.path == "/api/v2/data-centers"
+        ):
+            payload = [{"name": "SyntheticDC", "region": "China", "worlds": [71001]}]
+        elif request.source_id == "xivapi_items" and request.path.endswith("/search"):
             payload = self.fixture["xivcdn"]["search_first_page"]
         elif request.source_id == "xivapi_items" and request.path.endswith("/90001"):
             payload = self.fixture["xivcdn"]["item_detail"]
@@ -100,7 +112,7 @@ class _FixtureTransport:
         )
 
     async def request_credential_exchange(self, request):
-        del request
+        self.credential_exchanges.append(request)
         raise AssertionError("FFLogs credentials are not configured in this test")
 
 
@@ -141,11 +153,10 @@ class FF14InstalledModuleTests(unittest.IsolatedAsyncioTestCase):
                 tuple(command.operation_path for command in module_manifest.commands),
                 (
                     "market",
-                    "status",
                     "item",
                     "logs",
-                    "output",
                     "calendar",
+                    "status",
                     "calendar subscribe",
                     "calendar subscriptions",
                     "calendar update",
@@ -167,12 +178,7 @@ class FF14InstalledModuleTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(capabilities["item.lookup"].privacy_floor.value, "public")
             self.assertEqual(capabilities["ff14.logs.character"].required_sources, ())
             self.assertEqual(capabilities["ff14.logs.character"].required_config, ())
-            self.assertEqual(
-                capabilities["ff14.logs.output_percentile"].required_sources, ()
-            )
-            self.assertEqual(
-                capabilities["ff14.logs.output_percentile"].required_config, ()
-            )
+            self.assertNotIn("ff14.logs.output_percentile", capabilities)
             for action in ("create", "update", "cancel"):
                 capability = capabilities[f"ff14.calendar.subscription.{action}"]
                 self.assertEqual(capability.privacy_floor.value, "owner")
@@ -397,13 +403,17 @@ class FF14InstalledModuleTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(enabled.enabled)
                 self.assertEqual(enabled.lifecycle.value, "active")
 
-                output_health, _ = runtime.health_resolver.current(
-                    GLOBAL_MODULE_ID, "ff14.logs.output_percentile"
+                self.assertNotIn(
+                    "ff14.logs.output_percentile",
+                    runtime.registry.snapshot()
+                    .module_for_route("ff14")
+                    .handlers.capabilities,
                 )
-                self.assertIs(output_health.status, HealthStatus.UNAVAILABLE)
-                self.assertIn("HTTP 403", output_health.reason)
-
                 bridge = AstrBotCommandBridge(runtime.registry)
+                self.assertIn(
+                    "未找到命令",
+                    bridge.parse(_TextEvent("/ygl ff14 output 国服 副本 难度 职业")),
+                )
                 parsed_calendar = bridge.parse(
                     _TextEvent(
                         "/ygl ff14 calendar 国际服 days=7 timezone=Asia/Shanghai"
@@ -438,7 +448,10 @@ class FF14InstalledModuleTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(status.result.status.value, "success")
                 self.assertEqual(status.result.privacy.value, "public")
                 self.assertIn("FFLogs", message_port.calls[-1][1].text)
-                self.assertIn("HTTP 403", message_port.calls[-1][1].text)
+                self.assertNotIn("HTTP 403", message_port.calls[-1][1].text)
+                self.assertIn(
+                    "未执行实时健康或凭据检查", message_port.calls[-1][1].text
+                )
 
                 item = await runtime.invoke_command(
                     GLOBAL_MODULE_ID, "item", {"query": "90001"}, ingress=ingress
@@ -464,21 +477,70 @@ class FF14InstalledModuleTests(unittest.IsolatedAsyncioTestCase):
                 )
 
                 before_fflogs = len(transport.requests)
-                missing_credentials = await runtime.invoke_command(
-                    GLOBAL_MODULE_ID,
-                    "logs",
-                    {
-                        "realm": "cn",
-                        "server": "Test Server",
-                        "character": "Test Character",
-                    },
-                    ingress=ingress,
+                logs_handler = (
+                    runtime.registry.snapshot()
+                    .module(GLOBAL_MODULE_ID)
+                    .handlers.capabilities["ff14.logs.character"]
                 )
+                with patch.object(
+                    logs_handler, "invoke", wraps=logs_handler.invoke
+                ) as invoked:
+                    malformed = await runtime.invoke_command(
+                        GLOBAL_MODULE_ID,
+                        "logs",
+                        {
+                            "realm": "cn",
+                            "server": "Test Server",
+                            "character": "Test Character",
+                        },
+                        ingress=ingress,
+                    )
+                    self.assertEqual(malformed.result.status.value, "error")
+                    self.assertEqual(
+                        malformed.result.error.code.value, "parameter_error"
+                    )
+                    invoked.assert_not_called()
+                    self.assertEqual(len(transport.requests), before_fflogs)
+                    self.assertEqual(transport.credential_exchanges, [])
+
+                    parsed_logs = bridge.parse(
+                        _TextEvent('/ygl ff14 logs "Synthetic World" "Synthetic Hero"')
+                    )
+                    self.assertIsInstance(parsed_logs, CommandInvocation)
+                    self.assertEqual(
+                        dict(parsed_logs.parameters),
+                        {"command": '"Synthetic World" "Synthetic Hero"'},
+                    )
+                    missing_credentials = await runtime.invoke_command(
+                        parsed_logs.module_id,
+                        parsed_logs.operation_path,
+                        parsed_logs.parameters,
+                        ingress=ingress,
+                    )
+                    invoked.assert_awaited_once()
                 self.assertEqual(missing_credentials.result.status.value, "error")
                 self.assertEqual(
                     missing_credentials.result.error.code.value, "auth_required"
                 )
-                self.assertEqual(len(transport.requests), before_fflogs)
+                self.assertCountEqual(
+                    [
+                        (request.source_id, request.path)
+                        for request in transport.requests[before_fflogs:]
+                    ],
+                    [
+                        ("universalis_market", "/api/v2/worlds"),
+                        ("universalis_market", "/api/v2/data-centers"),
+                    ],
+                )
+                self.assertEqual(
+                    [
+                        request
+                        for request in transport.requests
+                        if request.source_id.startswith("fflogs_")
+                    ],
+                    [],
+                )
+                self.assertEqual(transport.credential_exchanges, [])
 
                 calendar = await runtime.invoke_command(
                     GLOBAL_MODULE_ID,

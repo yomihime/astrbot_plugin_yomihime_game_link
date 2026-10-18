@@ -34,9 +34,11 @@ async def run():
         context = source.issue(subject='fixture', request=request, expiry=time.time()+30, operations={AdminOperation.READ_CONFIG}, resources=core.admin_operations.ordinary_resources(), live=lambda actual:actual is request)
         try:
             catalog = await core.admin_operations.ordinary_catalog(authorization=context)
-            assert len(catalog['fields']) == 1
+            assert len(catalog['fields']) == 2
             assert catalog['fields'][0]['name'] == 'default_region'
             assert catalog['fields'][0]['editable'] is True
+            assert catalog['fields'][1]['name'] == 'image_theme'
+            assert catalog['fields'][1]['readable'] is False
             assert not any(name == 'astrbot' or '.modules.ff14' in name for name in sys.modules)
             print('CORE_ONLY_CATALOG_OK')
         finally:

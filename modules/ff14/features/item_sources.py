@@ -15,6 +15,7 @@ from ..models import (
     AcquisitionRoute,
     ItemAmount,
     ItemCandidate,
+    ItemEffect,
     ItemRecord,
     ItemSearchPage,
 )
@@ -108,6 +109,7 @@ class ItemSourceClient:
         )
         warnings: tuple[str, ...]
         routes: tuple[AcquisitionRoute, ...]
+        effects: tuple[ItemEffect, ...] = ()
         try:
             garland_response = await self._http.fetch(
                 HttpRequest(
@@ -115,9 +117,9 @@ class ItemSourceClient:
                     f"{GARLAND_ITEM_PATH}/{item_id}.json",
                 )
             )
-            routes, warnings = parse_garland_acquisition(
-                _json_object(garland_response.body), requested_id=item_id
-            )
+            garland = _json_object(garland_response.body)
+            routes, warnings = parse_garland_acquisition(garland, requested_id=item_id)
+            effects = parse_garland_effects(garland, requested_id=item_id)
         except SourceHttpError as exc:
             routes = ()
             warnings = (_source_warning(exc),)
@@ -136,6 +138,7 @@ class ItemSourceClient:
                 f"https://garlandtools.cn/db/#item/{item_id}",
             ),
             warnings=warnings,
+            effects=effects,
         )
         partial = bool(warnings) or any(route.partial for route in routes)
         return ItemLookupSnapshot(record, partial)
@@ -183,8 +186,7 @@ def parse_xivapi_item_detail(
     if not _short_text(name, 160):
         raise ItemPayloadError("missing name")
     description = fields.get("Description")
-    if description is not None and not _short_text(description, 1_000):
-        description = None
+    description = _description_text(description)
     equip_level = fields.get("LevelEquip")
     if type(equip_level) is not int or equip_level < 0:
         equip_level = None
@@ -232,7 +234,7 @@ def parse_garland_acquisition(
         ("vendors", AcquisitionKind.VENDOR, "npc", "商販"),
         ("drops", AcquisitionKind.DROP, "mob", "掉落來源"),
         ("instances", AcquisitionKind.INSTANCE, "instance", "副本"),
-        ("quests", AcquisitionKind.QUEST, "quest", "任務"),
+        ("quests", AcquisitionKind.QUEST, "quest", "关联任务"),
     )
     recognized_groups = 0
     for field, kind, partial_type, label in group_specs:
@@ -341,6 +343,14 @@ def _embedded_route(
     if type(level) is int and level >= 0:
         details.append(f"等级：{level}")
 
+    if kind is AcquisitionKind.CRAFT:
+        recipe_id = _integer(entry.get("id"))
+        produced = _integer(entry.get("yield"))
+        if recipe_id is not None:
+            details.insert(0, f"配方 ID：{recipe_id}")
+        if produced is not None:
+            details.append(f"产量：{produced}")
+
     costs: list[ItemAmount] = []
     if kind is AcquisitionKind.CRAFT:
         raw_costs = entry.get("ingredients", [])
@@ -425,6 +435,44 @@ def _opaque_cursor(value: object) -> str | None:
     ):
         raise ValueError("invalid cursor")
     return value
+
+
+def _description_text(value: object) -> str | None:
+    """Allow line breaks only here; keep identity/name validators strict."""
+    if not isinstance(value, str) or len(value) > 1_000:
+        return None
+    normalized = value.replace("\r\n", "\n").replace("\r", "\n")
+    if not normalized.strip() or any(
+        (ord(char) < 32 and char != "\n") or 127 <= ord(char) <= 159
+        for char in normalized
+    ):
+        return None
+    return normalized.strip()
+
+
+def parse_garland_effects(
+    payload: dict[str, Any], *, requested_id: int
+) -> tuple[ItemEffect, ...]:
+    """Parse only bounded numeric attr.action facts, never infer missing HQ."""
+    item = payload.get("item")
+    if not isinstance(item, dict) or _integer(item.get("id")) != requested_id:
+        raise ItemPayloadError("Garland item identity mismatch")
+    effects = []
+    for field, quality in (("attr", "nq"), ("attr_hq", "hq")):
+        attributes = item.get(field)
+        action = attributes.get("action") if isinstance(attributes, dict) else None
+        if not isinstance(action, dict):
+            continue
+        for name, value in list(action.items())[:8]:
+            if not _short_text(name, 80) or not isinstance(value, dict):
+                continue
+            rate, limit = value.get("rate"), value.get("limit")
+            if any(
+                type(v) is not int or not 0 <= v <= 1_000_000 for v in (rate, limit)
+            ):
+                continue
+            effects.append(ItemEffect(name.strip(), quality, rate, limit))
+    return tuple(effects)
 
 
 def _short_text(value: object, limit: int) -> bool:

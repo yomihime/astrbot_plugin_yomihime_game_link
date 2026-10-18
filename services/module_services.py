@@ -22,7 +22,6 @@ from yomihime_game_link_sdk.contexts import (
     MessageContext,
 )
 from yomihime_game_link_sdk.declarations import (
-    ConfigField,
     ModuleManifest,
     PrivacyFloor,
 )
@@ -88,10 +87,13 @@ from .bindings import AccountOperationsService
 from .cache import CacheAccessService, ModuleCacheRepository
 from .configuration import ConfigurationCoordinator
 from .core_configuration import (
+    CORE_CONFIG_FIELDS,
     CORE_DEFAULTS_FIELD,
     CORE_MODULE_ID,
+    MODULE_REPLY_THEME,
     CoreDefaultsConfigView,
     CoreDefaultsView,
+    module_configuration_fields,
 )
 from .dependency_calls import DependencyInvoker
 from .identity import IdentityResolverService, InvocationPrincipalResolver
@@ -1551,13 +1553,15 @@ class ModuleServicesFactory:
         service_lifetime.check()
         self._service_lifetimes.add(service_lifetime)
         validate_contract(manifest)
-        fields: tuple[ConfigField, ...] = manifest.config_fields
-        if module_id == CORE_MODULE_ID or any(
-            field.name in {CORE_DEFAULTS_FIELD, "default_region"} for field in fields
-        ):
+        if module_id == CORE_MODULE_ID:
             raise ValueError("module config target or field is reserved by Core")
+        fields = module_configuration_fields(manifest.config_fields)
         host_values = self._module_host_config_snapshots.get(module_id, {})
-        if {CORE_DEFAULTS_FIELD, "default_region"} & set(host_values):
+        if {
+            CORE_DEFAULTS_FIELD,
+            *(field.name for field in CORE_CONFIG_FIELDS),
+            MODULE_REPLY_THEME.name,
+        } & set(host_values):
             raise ValueError("host config contains a reserved Core defaults field")
         if set(host_values) & {field.name for field in fields}:
             raise ValueError("host config conflicts with declared Core config fields")

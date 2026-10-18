@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from decimal import Decimal
 from math import isfinite
 
 
@@ -46,12 +47,21 @@ class ServerResolution:
 class DifficultyRecord:
     difficulty_id: int
     name: str
+    sizes: tuple[int, ...] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PartitionRecord:
+    partition_id: int
+    name: str
+    default: bool
 
 
 @dataclass(frozen=True, slots=True)
 class EncounterRecord:
     encounter_id: int
     name: str
+    zone_id: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,6 +70,10 @@ class ZoneRecord:
     name: str
     difficulties: tuple[DifficultyRecord, ...]
     encounters: tuple[EncounterRecord, ...]
+    expansion_id: int | None = None
+    expansion_name: str | None = None
+    frozen: bool | None = None
+    partitions: tuple[PartitionRecord, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,6 +87,9 @@ class GameSpecRecord:
 class OutputMetadata:
     zones: tuple[ZoneRecord, ...]
     specs: tuple[GameSpecRecord, ...]
+    character_catalog_verified: bool = False
+    # Provider order is not an independently verified chronological order.
+    expansion_order: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,6 +119,30 @@ class CharacterRanking:
     rank_percent: float | None
     best_amount: float | None
     spec: str | None
+    # Decimal is adapter-internal evidence for grading before display rounding.
+    # Public facts retain JSON-compatible numbers. Missing optional contracts
+    # must never be replaced by group size or the length of sampled rankings.
+    rank_percent_exact: Decimal | None = None
+    total_kills: int | None = None
+    source_error: bool = False
+    query_state: str = "record"
+    origin: RankingOrigin | None = None
+    history_complete: bool = True
+
+
+@dataclass(frozen=True, slots=True)
+class RankingOrigin:
+    zone_id: int
+    difficulty_id: int
+    partition: int
+    expansion_name: str | None
+    partition_name: str | None
+    # Requested scope is provenance, never reconstructed from actual selection.
+    requested_partition: int | None = None
+    requested_timeframe: str | None = None
+    requested_spec_name: str | None = None
+    # Only set by the explicit Savage directory policy; Ultimate is unchanged.
+    composition: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,6 +153,17 @@ class RankingSelection:
     partition: int
     size: int
     rows: tuple[CharacterRanking, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class CharacterRankingGroup:
+    zone_id: int
+    zone_name: str
+    difficulty_id: int
+    partition: int
+    category: str
+    expansion_name: str
+    rankings: tuple[CharacterRanking, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -127,6 +179,13 @@ class PublicCharacter:
     partition: int
     size: int
     rankings: tuple[CharacterRanking, ...]
+    groups: tuple[CharacterRankingGroup, ...] = ()
+    catalog_warnings: tuple[str, ...] = ()
+    catalog_complete: bool = False
+    catalog_evaluated: bool = False
+    history_cache_hits: int = 0
+    history_fetched_at: float | None = None
+    history_cache_ttl: int | None = None
 
 
 def parse_rankings(value: object) -> RankingSelection:
@@ -161,7 +220,15 @@ def parse_rankings(value: object) -> RankingSelection:
             spec = _short_text(spec, 80, "spec")
         result.append(
             CharacterRanking(
-                encounter_id, encounter_name, rank_percent, best_amount, spec
+                encounter_id,
+                encounter_name,
+                rank_percent,
+                best_amount,
+                spec,
+                Decimal(str(row["rankPercent"])) if rank_percent is not None else None,
+                _nonnegative_int(row["totalKills"], "total kills")
+                if row.get("totalKills") is not None
+                else None,
             )
         )
     return RankingSelection(
@@ -225,8 +292,15 @@ def _nonnegative_int(value: object, field: str) -> int:
 def _optional_number(value: object, minimum: float, maximum: float) -> float | None:
     if value is None:
         return None
-    if type(value) not in {int, float}:
+    if type(value) not in {int, float, Decimal}:
         raise FFLogsPayloadError("ranking number has an invalid type")
+    if isinstance(value, Decimal) and (
+        not value.is_finite()
+        or len(value.as_tuple().digits) > 128
+        or value.as_tuple().exponent < -128
+        or not Decimal(str(minimum)) <= value <= Decimal(str(maximum))
+    ):
+        raise FFLogsPayloadError("ranking number is outside its supported range")
     number = float(value)
     if not isfinite(number) or not minimum <= number <= maximum:
         raise FFLogsPayloadError("ranking number is outside its supported range")
@@ -250,6 +324,7 @@ def _has_control(value: str) -> bool:
 
 __all__ = [
     "CharacterRanking",
+    "CharacterRankingGroup",
     "DifficultyRecord",
     "EncounterRecord",
     "FFLogsPayloadError",
@@ -257,8 +332,10 @@ __all__ = [
     "MetadataCandidate",
     "MetadataResolution",
     "OutputMetadata",
+    "PartitionRecord",
     "PublicCharacter",
     "RankingSelection",
+    "RankingOrigin",
     "RegionRecord",
     "ServerRecord",
     "ServerResolution",

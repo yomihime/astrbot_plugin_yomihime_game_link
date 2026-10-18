@@ -1,0 +1,1348 @@
+{
+  "data": "Entire catalog, character and all records are synthetic offline fixtures; no API/catalog verification or query occurred.",
+  "font": "Explicit local font; bundled Regular is reused for bold unless overridden.",
+  "results": [
+    {
+      "file": "logs_style_cool_white.png",
+      "theme": "cool_white",
+      "size": [
+        1040,
+        2944
+      ],
+      "bytes": 666994,
+      "metrics": [
+        {
+          "text": "100.0%",
+          "face": "#e5cc80",
+          "background": "#edf1f5",
+          "contrast": 1.3931407519759718,
+          "shadow": true,
+          "shade": "#7c6d45",
+          "gold_glow": true,
+          "bounds": [
+            839.5,
+            413.0,
+            955.0,
+            439.5
+          ],
+          "patch_bounds": [
+            1619,
+            772,
+            1966,
+            933
+          ],
+          "mask_bounds": [
+            60,
+            54,
+            291,
+            107
+          ],
+          "effect_bounds": [
+            35,
+            24,
+            321,
+            138
+          ]
+        },
+        {
+          "text": "99.3%",
+          "face": "#e268a8",
+          "background": "#edf1f5",
+          "contrast": 2.729119523662228,
+          "shadow": false,
+          "shade": null,
+          "gold_glow": false,
+          "bounds": [
+            857.5,
+            521.0,
+            955.0,
+            547.5
+          ],
+          "patch_bounds": [
+            1658,
+            988,
+            1966,
+            1149
+          ],
+          "mask_bounds": [
+            57,
+            54,
+            252,
+            107
+          ],
+          "effect_bounds": [
+            57,
+            54,
+            252,
+            107
+          ]
+        },
+        {
+          "text": "95.0%",
+          "face": "#ff8000",
+          "background": "#edf1f5",
+          "contrast": 2.2184980123534803,
+          "shadow": false,
+          "shade": null,
+          "gold_glow": false,
+          "bounds": [
+            857.5,
+            629.0,
+            955.0,
+            655.5
+          ],
+          "patch_bounds": [
+            1658,
+            1204,
+            1966,
+            1365
+          ],
+          "mask_bounds": [
+            57,
+            54,
+            252,
+            107
+          ],
+          "effect_bounds": [
+            57,
+            54,
+            252,
+            107
+          ]
+        },
+        {
+          "text": "75.0%",
+          "face": "#a335ee",
+          "background": "#edf1f5",
+          "contrast": 4.301526320888028,
+          "shadow": false,
+          "shade": null,
+          "gold_glow": false,
+          "bounds": [
+            857.5,
+            737.0,
+            955.0,
+            763.5
+          ],
+          "patch_bounds": [
+            1658,
+            1420,
+            1966,
+            1581
+          ],
+          "mask_bounds": [
+            57,
+            54,
+            252,
+            107
+          ],
+          "effect_bounds": [
+            57,
+            54,
+            252,
+            107
+          ]
+        },
+        {
+          "text": "50.0%",
+          "face": "#0070ff",
+          "background": "#edf1f5",
+          "contrast": 3.8855160552435595,
+          "shadow": false,
+          "shade": null,
+          "gold_glow": false,
+          "bounds": [
+            856.5,
+            845.0,
+            955.0,
+            871.5
+          ],
+          "patch_bounds": [
+            1658,
+            1636,
+            1966,
+            1797
+          ],
+          "mask_bounds": [
+            55,
+            54,
+            252,
+            107
+          ],
+          "effect_bounds": [
+            55,
+            54,
+            252,
+            107
+          ]
+        },
+        {
+          "text": "25.0%",
+          "face": "#1eff00",
+          "background": "#edf1f5",
+          "contrast": 1.2045896633121582,
+          "shadow": true,
+          "shade": "#188605",
+          "gold_glow": false,
+          "bounds": [
+            857.0,
+            953.0,
+            955.0,
+            979.5
+          ],
+          "patch_bounds": [
+            1658,
+            1852,
+            1966,
+            2013
+          ],
+          "mask_bounds": [
+            56,
+            54,
+            252,
+            107
+          ],
+          "effect_bounds": [
+            52,
+            49,
+            257,
+            112
+          ]
+        },
+        {
+          "text": "0.0%",
+          "face": "#666666",
+          "background": "#edf1f5",
+          "contrast": 5.058705094859246,
+          "shadow": false,
+          "shade": null,
+          "gold_glow": false,
+          "bounds": [
+            877.0,
+            1061.0,
+            955.0,
+            1087.5
+          ],
+          "patch_bounds": [
+            1697,
+            2068,
+            1967,
+            2229
+          ],
+          "mask_bounds": [
+            57,
+            54,
+            213,
+            107
+          ],
+          "effect_bounds": [
+            57,
+            54,
+            213,
+            107
+          ]
+        },
+        {
+          "text": "99.7%",
+          "face": "#e268a8",
+          "background": "#edf1f5",
+          "contrast": 2.729119523662228,
+          "shadow": false,
+          "shade": null,
+          "gold_glow": false,
+          "bounds": [
+            857.5,
+            1347.0,
+            955.0,
+            1373.5
+          ],
+          "patch_bounds": [
+            1658,
+            2640,
+            1966,
+            2801
+          ],
+          "mask_bounds": [
+            57,
+            54,
+            252,
+            107
+          ],
+          "effect_bounds": [
+            57,
+            54,
+            252,
+            107
+          ]
+        },
+        {
+          "text": "96.4%",
+          "face": "#ff8000",
+          "background": "#edf1f5",
+          "contrast": 2.2184980123534803,
+          "shadow": false,
+          "shade": null,
+          "gold_glow": false,
+          "bounds": [
+            857.5,
+            1487.0,
+            955.0,
+            1513.5
+          ],
+          "patch_bounds": [
+            1658,
+            2920,
+            1966,
+            3081
+          ],
+          "mask_bounds": [
+            57,
+            54,
+            252,
+            107
+          ],
+          "effect_bounds": [
+            57,
+            54,
+            252,
+            107
+          ]
+        },
+        {
+          "text": "82.1%",
+          "face": "#a335ee",
+          "background": "#edf1f5",
+          "contrast": 4.301526320888028,
+          "shadow": false,
+          "shade": null,
+          "gold_glow": false,
+          "bounds": [
+            857.5,
+            1611.0,
+            955.0,
+            1637.5
+          ],
+          "patch_bounds": [
+            1658,
+            3168,
+            1966,
+            3329
+          ],
+          "mask_bounds": [
+            57,
+            54,
+            252,
+            107
+          ],
+          "effect_bounds": [
+            57,
+            54,
+            252,
+            107
+          ]
+        },
+        {
+          "text": "61.7%",
+          "face": "#0070ff",
+          "background": "#edf1f5",
+          "contrast": 3.8855160552435595,
+          "shadow": false,
+          "shade": null,
+          "gold_glow": false,
+          "bounds": [
+            857.5,
+            1719.0,
+            955.0,
+            1745.5
+          ],
+          "patch_bounds": [
+            1658,
+            3384,
+            1966,
+            3545
+          ],
+          "mask_bounds": [
+            57,
+            54,
+            252,
+            107
+          ],
+          "effect_bounds": [
+            57,
+            54,
+            252,
+            107
+          ]
+        },
+        {
+          "text": "—",
+          "face": "#4C5A69",
+          "background": "#edf1f5",
+          "contrast": 6.221618872447785,
+          "shadow": false,
+          "shade": null,
+          "gold_glow": false,
+          "bounds": [
+            926.5,
+            1839.0,
+            955.0,
+            1841.5
+          ],
+          "patch_bounds": [
+            1796,
+            3624,
+            1967,
+            3754
+          ],
+          "mask_bounds": [
+            57,
+            54,
+            114,
+            59
+          ],
+          "effect_bounds": [
+            57,
+            54,
+            114,
+            59
+          ]
+        },
+        {
+          "text": "90.4%",
+          "face": "#a335ee",
+          "background": "#edf1f5",
+          "contrast": 4.301526320888028,
+          "shadow": false,
+          "shade": null,
+          "gold_glow": false,
+          "bounds": [
+            857.5,
+            1935.0,
+            955.0,
+            1961.5
+          ],
+          "patch_bounds": [
+            1658,
+            3816,
+            1966,
+            3977
+          ],
+          "mask_bounds": [
+            57,
+            54,
+            252,
+            107
+          ],
+          "effect_bounds": [
+            57,
+            54,
+            252,
+            107
+          ]
+        },
+        {
+          "text": "93.6%",
+          "face": "#a335ee",
+          "background": "#edf1f5",
+          "contrast": 4.301526320888028,
+          "shadow": false,
+          "shade": null,
+          "gold_glow": false,
+          "bounds": [
+            857.5,
+            2043.0,
+            955.0,
+            2069.5
+          ],
+          "patch_bounds": [
+            1658,
+            4032,
+            1966,
+            4193
+          ],
+          "mask_bounds": [
+            57,
+            54,
+            252,
+            107
+          ],
+          "effect_bounds": [
+            57,
+            54,
+            252,
+            107
+          ]
+        },
+        {
+          "text": "74.2%",
+          "face": "#0070ff",
+          "background": "#edf1f5",
+          "contrast": 3.8855160552435595,
+          "shadow": false,
+          "shade": null,
+          "gold_glow": false,
+          "bounds": [
+            857.5,
+            2151.0,
+            955.0,
+            2177.5
+          ],
+          "patch_bounds": [
+            1658,
+            4248,
+            1966,
+            4409
+          ],
+          "mask_bounds": [
+            57,
+            54,
+            252,
+            107
+          ],
+          "effect_bounds": [
+            57,
+            54,
+            252,
+            107
+          ]
+        },
+        {
+          "text": "89.8%",
+          "face": "#a335ee",
+          "background": "#edf1f5",
+          "contrast": 4.301526320888028,
+          "shadow": false,
+          "shade": null,
+          "gold_glow": false,
+          "bounds": [
+            857.5,
+            2259.0,
+            955.0,
+            2285.5
+          ],
+          "patch_bounds": [
+            1658,
+            4464,
+            1966,
+            4625
+          ],
+          "mask_bounds": [
+            57,
+            54,
+            252,
+            107
+          ],
+          "effect_bounds": [
+            57,
+            54,
+            252,
+            107
+          ]
+        },
+        {
+          "text": "98.6%",
+          "face": "#ff8000",
+          "background": "#edf1f5",
+          "contrast": 2.2184980123534803,
+          "shadow": false,
+          "shade": null,
+          "gold_glow": false,
+          "bounds": [
+            857.5,
+            2367.0,
+            955.0,
+            2393.5
+          ],
+          "patch_bounds": [
+            1658,
+            4680,
+            1966,
+            4841
+          ],
+          "mask_bounds": [
+            57,
+            54,
+            252,
+            107
+          ],
+          "effect_bounds": [
+            57,
+            54,
+            252,
+            107
+          ]
+        },
+        {
+          "text": "95.8%",
+          "face": "#ff8000",
+          "background": "#edf1f5",
+          "contrast": 2.2184980123534803,
+          "shadow": false,
+          "shade": null,
+          "gold_glow": false,
+          "bounds": [
+            857.5,
+            2475.0,
+            955.0,
+            2501.5
+          ],
+          "patch_bounds": [
+            1658,
+            4896,
+            1966,
+            5057
+          ],
+          "mask_bounds": [
+            57,
+            54,
+            252,
+            107
+          ],
+          "effect_bounds": [
+            57,
+            54,
+            252,
+            107
+          ]
+        },
+        {
+          "text": "99.4%",
+          "face": "#e268a8",
+          "background": "#edf1f5",
+          "contrast": 2.729119523662228,
+          "shadow": false,
+          "shade": null,
+          "gold_glow": false,
+          "bounds": [
+            857.5,
+            2583.0,
+            955.0,
+            2609.5
+          ],
+          "patch_bounds": [
+            1658,
+            5112,
+            1966,
+            5273
+          ],
+          "mask_bounds": [
+            57,
+            54,
+            252,
+            107
+          ],
+          "effect_bounds": [
+            57,
+            54,
+            252,
+            107
+          ]
+        },
+        {
+          "text": "98.4%",
+          "face": "#ff8000",
+          "background": "#edf1f5",
+          "contrast": 2.2184980123534803,
+          "shadow": false,
+          "shade": null,
+          "gold_glow": false,
+          "bounds": [
+            857.5,
+            2691.0,
+            955.0,
+            2717.5
+          ],
+          "patch_bounds": [
+            1658,
+            5328,
+            1966,
+            5489
+          ],
+          "mask_bounds": [
+            57,
+            54,
+            252,
+            107
+          ],
+          "effect_bounds": [
+            57,
+            54,
+            252,
+            107
+          ]
+        }
+      ]
+    },
+    {
+      "file": "logs_style_deep_indigo.png",
+      "theme": "deep_indigo",
+      "size": [
+        1040,
+        2944
+      ],
+      "bytes": 710164,
+      "metrics": [
+        {
+          "text": "100.0%",
+          "face": "#e5cc80",
+          "background": "#11182b",
+          "contrast": 11.165942258526623,
+          "shadow": false,
+          "shade": null,
+          "gold_glow": true,
+          "bounds": [
+            839.5,
+            413.0,
+            955.0,
+            439.5
+          ],
+          "patch_bounds": [
+            1619,
+            772,
+            1966,
+            933
+          ],
+          "mask_bounds": [
+            60,
+            54,
+            291,
+            107
+          ],
+          "effect_bounds": [
+            35,
+            24,
+            321,
+            138
+          ]
+        },
+        {
+          "text": "99.3%",
+          "face": "#e268a8",
+          "background": "#11182b",
+          "contrast": 5.699907629435628,
+          "shadow": false,
+          "shade": null,
+          "gold_glow": false,
+          "bounds": [
+            857.5,
+            521.0,
+            955.0,
+            547.5
+          ],
+          "patch_bounds": [
+            1658,
+            988,
+            1966,
+            1149
+          ],
+          "mask_bounds": [
+            57,
+            54,
+            252,
+            107
+          ],
+          "effect_bounds": [
+            57,
+            54,
+            252,
+            107
+          ]
+        },
+        {
+          "text": "95.0%",
+          "face": "#ff8000",
+          "background": "#11182b",
+          "contrast": 7.011829223169714,
+          "shadow": false,
+          "shade": null,
+          "gold_glow": false,
+          "bounds": [
+            857.5,
+            629.0,
+            955.0,
+            655.5
+          ],
+          "patch_bounds": [
+            1658,
+            1204,
+            1966,
+            1365
+          ],
+          "mask_bounds": [
+            57,
+            54,
+            252,
+            107
+          ],
+          "effect_bounds": [
+            57,
+            54,
+            252,
+            107
+          ]
+        },
+        {
+          "text": "75.0%",
+          "face": "#a335ee",
+          "background": "#11182b",
+          "contrast": 3.6163277948634422,
+          "shadow": false,
+          "shade": null,
+          "gold_glow": false,
+          "bounds": [
+            857.5,
+            737.0,
+            955.0,
+            763.5
+          ],
+          "patch_bounds": [
+            1658,
+            1420,
+            1966,
+            1581
+          ],
+          "mask_bounds": [
+            57,
+            54,
+            252,
+            107
+          ],
+          "effect_bounds": [
+            57,
+            54,
+            252,
+            107
+          ]
+        },
+        {
+          "text": "50.0%",
+          "face": "#0070ff",
+          "background": "#11182b",
+          "contrast": 4.003516900559806,
+          "shadow": false,
+          "shade": null,
+          "gold_glow": false,
+          "bounds": [
+            856.5,
+            845.0,
+            955.0,
+            871.5
+          ],
+          "patch_bounds": [
+            1658,
+            1636,
+            1966,
+            1797
+          ],
+          "mask_bounds": [
+            55,
+            54,
+            252,
+            107
+          ],
+          "effect_bounds": [
+            55,
+            54,
+            252,
+            107
+          ]
+        },
+        {
+          "text": "25.0%",
+          "face": "#1eff00",
+          "background": "#11182b",
+          "contrast": 12.91371632045371,
+          "shadow": false,
+          "shade": null,
+          "gold_glow": false,
+          "bounds": [
+            857.0,
+            953.0,
+            955.0,
+            979.5
+          ],
+          "patch_bounds": [
+            1658,
+            1852,
+            1966,
+            2013
+          ],
+          "mask_bounds": [
+            56,
+            54,
+            252,
+            107
+          ],
+          "effect_bounds": [
+            56,
+            54,
+            252,
+            107
+          ]
+        },
+        {
+          "text": "0.0%",
+          "face": "#666666",
+          "background": "#11182b",
+          "contrast": 3.0750417157885113,
+          "shadow": false,
+          "shade": null,
+          "gold_glow": false,
+          "bounds": [
+            877.0,
+            1061.0,
+            955.0,
+            1087.5
+          ],
+          "patch_bounds": [
+            1697,
+            2068,
+            1967,
+            2229
+          ],
+          "mask_bounds": [
+            57,
+            54,
+            213,
+            107
+          ],
+          "effect_bounds": [
+            57,
+            54,
+            213,
+            107
+          ]
+        },
+        {
+          "text": "99.7%",
+          "face": "#e268a8",
+          "background": "#11182b",
+          "contrast": 5.699907629435628,
+          "shadow": false,
+          "shade": null,
+          "gold_glow": false,
+          "bounds": [
+            857.5,
+            1347.0,
+            955.0,
+            1373.5
+          ],
+          "patch_bounds": [
+            1658,
+            2640,
+            1966,
+            2801
+          ],
+          "mask_bounds": [
+            57,
+            54,
+            252,
+            107
+          ],
+          "effect_bounds": [
+            57,
+            54,
+            252,
+            107
+          ]
+        },
+        {
+          "text": "96.4%",
+          "face": "#ff8000",
+          "background": "#11182b",
+          "contrast": 7.011829223169714,
+          "shadow": false,
+          "shade": null,
+          "gold_glow": false,
+          "bounds": [
+            857.5,
+            1487.0,
+            955.0,
+            1513.5
+          ],
+          "patch_bounds": [
+            1658,
+            2920,
+            1966,
+            3081
+          ],
+          "mask_bounds": [
+            57,
+            54,
+            252,
+            107
+          ],
+          "effect_bounds": [
+            57,
+            54,
+            252,
+            107
+          ]
+        },
+        {
+          "text": "82.1%",
+          "face": "#a335ee",
+          "background": "#11182b",
+          "contrast": 3.6163277948634422,
+          "shadow": false,
+          "shade": null,
+          "gold_glow": false,
+          "bounds": [
+            857.5,
+            1611.0,
+            955.0,
+            1637.5
+          ],
+          "patch_bounds": [
+            1658,
+            3168,
+            1966,
+            3329
+          ],
+          "mask_bounds": [
+            57,
+            54,
+            252,
+            107
+          ],
+          "effect_bounds": [
+            57,
+            54,
+            252,
+            107
+          ]
+        },
+        {
+          "text": "61.7%",
+          "face": "#0070ff",
+          "background": "#11182b",
+          "contrast": 4.003516900559806,
+          "shadow": false,
+          "shade": null,
+          "gold_glow": false,
+          "bounds": [
+            857.5,
+            1719.0,
+            955.0,
+            1745.5
+          ],
+          "patch_bounds": [
+            1658,
+            3384,
+            1966,
+            3545
+          ],
+          "mask_bounds": [
+            57,
+            54,
+            252,
+            107
+          ],
+          "effect_bounds": [
+            57,
+            54,
+            252,
+            107
+          ]
+        },
+        {
+          "text": "—",
+          "face": "#D0D8E7",
+          "background": "#11182b",
+          "contrast": 12.32435164184425,
+          "shadow": false,
+          "shade": null,
+          "gold_glow": false,
+          "bounds": [
+            926.5,
+            1839.0,
+            955.0,
+            1841.5
+          ],
+          "patch_bounds": [
+            1796,
+            3624,
+            1967,
+            3754
+          ],
+          "mask_bounds": [
+            57,
+            54,
+            114,
+            59
+          ],
+          "effect_bounds": [
+            57,
+            54,
+            114,
+            59
+          ]
+        },
+        {
+          "text": "90.4%",
+          "face": "#a335ee",
+          "background": "#11182b",
+          "contrast": 3.6163277948634422,
+          "shadow": false,
+          "shade": null,
+          "gold_glow": false,
+          "bounds": [
+            857.5,
+            1935.0,
+            955.0,
+            1961.5
+          ],
+          "patch_bounds": [
+            1658,
+            3816,
+            1966,
+            3977
+          ],
+          "mask_bounds": [
+            57,
+            54,
+            252,
+            107
+          ],
+          "effect_bounds": [
+            57,
+            54,
+            252,
+            107
+          ]
+        },
+        {
+          "text": "93.6%",
+          "face": "#a335ee",
+          "background": "#11182b",
+          "contrast": 3.6163277948634422,
+          "shadow": false,
+          "shade": null,
+          "gold_glow": false,
+          "bounds": [
+            857.5,
+            2043.0,
+            955.0,
+            2069.5
+          ],
+          "patch_bounds": [
+            1658,
+            4032,
+            1966,
+            4193
+          ],
+          "mask_bounds": [
+            57,
+            54,
+            252,
+            107
+          ],
+          "effect_bounds": [
+            57,
+            54,
+            252,
+            107
+          ]
+        },
+        {
+          "text": "74.2%",
+          "face": "#0070ff",
+          "background": "#11182b",
+          "contrast": 4.003516900559806,
+          "shadow": false,
+          "shade": null,
+          "gold_glow": false,
+          "bounds": [
+            857.5,
+            2151.0,
+            955.0,
+            2177.5
+          ],
+          "patch_bounds": [
+            1658,
+            4248,
+            1966,
+            4409
+          ],
+          "mask_bounds": [
+            57,
+            54,
+            252,
+            107
+          ],
+          "effect_bounds": [
+            57,
+            54,
+            252,
+            107
+          ]
+        },
+        {
+          "text": "89.8%",
+          "face": "#a335ee",
+          "background": "#11182b",
+          "contrast": 3.6163277948634422,
+          "shadow": false,
+          "shade": null,
+          "gold_glow": false,
+          "bounds": [
+            857.5,
+            2259.0,
+            955.0,
+            2285.5
+          ],
+          "patch_bounds": [
+            1658,
+            4464,
+            1966,
+            4625
+          ],
+          "mask_bounds": [
+            57,
+            54,
+            252,
+            107
+          ],
+          "effect_bounds": [
+            57,
+            54,
+            252,
+            107
+          ]
+        },
+        {
+          "text": "98.6%",
+          "face": "#ff8000",
+          "background": "#11182b",
+          "contrast": 7.011829223169714,
+          "shadow": false,
+          "shade": null,
+          "gold_glow": false,
+          "bounds": [
+            857.5,
+            2367.0,
+            955.0,
+            2393.5
+          ],
+          "patch_bounds": [
+            1658,
+            4680,
+            1966,
+            4841
+          ],
+          "mask_bounds": [
+            57,
+            54,
+            252,
+            107
+          ],
+          "effect_bounds": [
+            57,
+            54,
+            252,
+            107
+          ]
+        },
+        {
+          "text": "95.8%",
+          "face": "#ff8000",
+          "background": "#11182b",
+          "contrast": 7.011829223169714,
+          "shadow": false,
+          "shade": null,
+          "gold_glow": false,
+          "bounds": [
+            857.5,
+            2475.0,
+            955.0,
+            2501.5
+          ],
+          "patch_bounds": [
+            1658,
+            4896,
+            1966,
+            5057
+          ],
+          "mask_bounds": [
+            57,
+            54,
+            252,
+            107
+          ],
+          "effect_bounds": [
+            57,
+            54,
+            252,
+            107
+          ]
+        },
+        {
+          "text": "99.4%",
+          "face": "#e268a8",
+          "background": "#11182b",
+          "contrast": 5.699907629435628,
+          "shadow": false,
+          "shade": null,
+          "gold_glow": false,
+          "bounds": [
+            857.5,
+            2583.0,
+            955.0,
+            2609.5
+          ],
+          "patch_bounds": [
+            1658,
+            5112,
+            1966,
+            5273
+          ],
+          "mask_bounds": [
+            57,
+            54,
+            252,
+            107
+          ],
+          "effect_bounds": [
+            57,
+            54,
+            252,
+            107
+          ]
+        },
+        {
+          "text": "98.4%",
+          "face": "#ff8000",
+          "background": "#11182b",
+          "contrast": 7.011829223169714,
+          "shadow": false,
+          "shade": null,
+          "gold_glow": false,
+          "bounds": [
+            857.5,
+            2691.0,
+            955.0,
+            2717.5
+          ],
+          "patch_bounds": [
+            1658,
+            5328,
+            1966,
+            5489
+          ],
+          "mask_bounds": [
+            57,
+            54,
+            252,
+            107
+          ],
+          "effect_bounds": [
+            57,
+            54,
+            252,
+            107
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -1,7 +1,14 @@
 import type {Catalog, ModuleDescriptor, ModuleDisplay, PageDescriptor} from './contracts';
 const record = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === 'object' && !Array.isArray(v);
 const str = (v: unknown, n = 4096): v is string => typeof v === 'string' && v.length > 0 && v.length <= n;
-const asset = (v: unknown): v is string => str(v) && /^module-assets\/[a-z][a-z0-9_.-]*\/[a-z][a-z0-9_.-]*\/pages\/(?:[a-zA-Z0-9_.-]+\/)*[a-zA-Z0-9_.-]+$/.test(v) && !v.split('/').some(p => p === '.' || p === '..');
+function moduleAsset(v: unknown): v is string {
+  if (!str(v)) return false;
+  const match = /^module-assets\/[a-z][a-z0-9_.-]*\/[a-z][a-z0-9_.-]*\/(.+)$/.exec(v);
+  if (!match || match[1].length > 240 || !/\.(?:js|css|svg|png|jpg|jpeg|webp|woff|woff2)$/.test(match[1])) return false;
+  // Match the portable manifest resource identity, never a URL or a file read.
+  return match[1].split('/').every(part => /^[A-Za-z0-9_-][A-Za-z0-9_.-]*$/.test(part) && !part.endsWith('.') && !/^(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)/i.test(part));
+}
+const pageAsset = (v: unknown): v is string => moduleAsset(v) && /^module-assets\/[a-z][a-z0-9_.-]*\/[a-z][a-z0-9_.-]*\/pages\//.test(v);
 function displayMetadata(value: unknown): ModuleDisplay | null {
   if (value === undefined || value === null) return null;
   const name = (v: unknown, limit: number): v is string => typeof v === 'string' && v.trim().length > 0 && [...v].length <= limit && !/[\p{Cc}\p{Cf}\p{Cs}]/u.test(v);
@@ -41,10 +48,10 @@ export function validateCatalog(input: unknown): Catalog {
     if (raw.state === 'loaded' ? !str(raw.runtime_id) || raw.enabled !== true || raw.lifecycle !== 'active' || value.runtime.state !== 'ready' : raw.runtime_id !== null || raw.pages.length || raw.resources.length) fail();
     if (!str(raw.asset_version, 64) || !/^[a-f0-9]{64}$/.test(raw.asset_version)) fail();
     const prefix = `module-assets/${raw.module_id}/`;
-    const resources = raw.resources.map((r: Record<string, any>) => {if (!record(r) || !asset(r.path) || !r.path.startsWith(prefix) || !str(r.sha256,64) || !/^[a-f0-9]{64}$/.test(r.sha256)) fail(); return {path: r.path as string, sha256: r.sha256 as string};});
+    const resources = raw.resources.map((r: Record<string, any>) => {if (!record(r) || !moduleAsset(r.path) || !r.path.startsWith(prefix) || !str(r.sha256,64) || !/^[a-f0-9]{64}$/.test(r.sha256)) fail(); return {path: r.path as string, sha256: r.sha256 as string};});
     if (new Set(resources.map((r: {path: string}) => r.path)).size !== resources.length) fail();
     const pages: PageDescriptor[] = raw.pages.map((p: Record<string, any>) => {
-      if (!record(p) || !str(p.route_id,128) || !/^[a-z][a-z0-9_.-]*$/.test(p.route_id) || !str(p.title,256) || !Number.isSafeInteger(p.order) || p.access !== 'public_web' || !(p.capability_id === null || str(p.capability_id,128)) || !asset(p.entry) || !p.entry.startsWith(prefix) || !p.entry.endsWith('.js') || !Array.isArray(p.styles) || p.styles.length > 16 || !p.styles.every((s: unknown) => asset(s) && s.startsWith(prefix) && s.endsWith('.css'))) fail();
+      if (!record(p) || !str(p.route_id,128) || !/^[a-z][a-z0-9_.-]*$/.test(p.route_id) || !str(p.title,256) || !Number.isSafeInteger(p.order) || p.access !== 'public_web' || !(p.capability_id === null || str(p.capability_id,128)) || !pageAsset(p.entry) || !p.entry.startsWith(prefix) || !p.entry.endsWith('.js') || !Array.isArray(p.styles) || p.styles.length > 16 || !p.styles.every((s: unknown) => pageAsset(s) && s.startsWith(prefix) && s.endsWith('.css'))) fail();
       if (![p.entry, ...p.styles].every(path => resources.some((r: {path: string}) => r.path === path))) fail();
       return {route_id: p.route_id as string, title: p.title as string, order: p.order as number, access: 'public_web', capability_id: p.capability_id as string | null, entry: p.entry as string, styles: [...p.styles] as string[]};
     });

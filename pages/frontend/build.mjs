@@ -3,6 +3,7 @@ import {resolve, dirname} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {readFile, writeFile, mkdir, readdir, copyFile} from 'node:fs/promises';
 import {createHash} from 'node:crypto';
+import {mergeManifestResources} from './manifest-resources.mjs';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const frontend = resolve(root, 'pages/frontend');
 const shell = resolve(root, 'pages/shell');
@@ -40,7 +41,8 @@ for (const file of (await readdir(resolve(ff14, 'dist'))).sort()) {
 await writeFile(resolve(ff14, 'resources.json'), JSON.stringify(resources, null, 2) + '\n');
 const manifestPath=resolve(root,'modules/ff14/yomihime.manifest.json');
 const manifestSource=await readFile(manifestPath,'utf8');
-const manifest=JSON.parse(manifestSource);for(const module of manifest.modules)module.resources=resources;
+const manifest=JSON.parse(manifestSource);
+for(const module of manifest.modules)module.resources=await mergeManifestResources(dirname(ff14),module.resources||[],resources);
 await writeFile(manifestPath,(JSON.stringify(manifest,null,2)+'\n').replaceAll('\n',manifestSource.includes('\r\n')?'\r\n':'\n'));
 await mkdir(resolve(shell, 'licenses'), {recursive: true});
 const notices = ['Third-party notices for the production shared Vue / Naive UI runtime.\nSources are locked in pages/frontend/package-lock.json.\n'];

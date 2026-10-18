@@ -19,6 +19,7 @@ from unittest import mock
 import scripts.build_dashboard_zip as zip_builder
 from scripts.build_dashboard_zip import (
     EXPECTED_WHEEL_SHA256,
+    FONT_ASSETS,
     MAINTENANCE_HELPER_FILES,
     OPERATOR_SCRIPT_FILES,
     PAGE_FILES,
@@ -36,6 +37,10 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def _write_operator_script_fixtures(root: Path) -> None:
+    for filename in FONT_ASSETS:
+        path = root / filename
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes((ROOT / filename).read_bytes())
     for filename in (*OPERATOR_SCRIPT_FILES, *PAGE_FILES, *MAINTENANCE_HELPER_FILES):
         path = root / filename
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -235,7 +240,7 @@ class SDKBootstrapTests(unittest.TestCase):
             )
         )
         package = validate_wheel(self.wheel)
-        self.assertEqual(len(manifest), 17)
+        self.assertEqual(len(manifest), 18)
         self.assertEqual(
             set(package), {"yomihime_game_link_sdk/" + name for name in manifest}
         )
@@ -437,9 +442,11 @@ class SDKBootstrapTests(unittest.TestCase):
         read_snapshot = zip_builder._read_snapshot
         replaced = False
 
-        def read_then_modify(path, allowed_root=None, label="Package input"):
+        def read_then_modify(
+            path, allowed_root=None, label="Package input", max_bytes=None
+        ):
             nonlocal replaced
-            snapshot = read_snapshot(path, allowed_root, label)
+            snapshot = read_snapshot(path, allowed_root, label, max_bytes=max_bytes)
             if Path(path) == runtime_file and not replaced:
                 runtime_file.write_bytes(b"changed after snapshot\n")
                 replaced = True

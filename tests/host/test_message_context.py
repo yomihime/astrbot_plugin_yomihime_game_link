@@ -1091,7 +1091,7 @@ class ControlledMessageTests(unittest.IsolatedAsyncioTestCase):
             self.b03.issuer.release(view)
 
     async def test_unbound_wrong_owner_and_expired_confirmation_cannot_query(self):
-        """Restore original business assertions after explicit receipt controls."""
+        """Trusted ingress plus typed continuation/selection, not text heuristics."""
         await self.start()
         self.recovery_trace = []
         core = self.runtime.core_runtime
@@ -1159,33 +1159,34 @@ class ControlledMessageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.transport.requests, [])
         self.recovery_trace.append("1467-1472_live_actor_only_denial_no_HTTP")
 
-        for index, text in enumerate(
-            (
-                "Synthetic Item 44091那个。",
-                "就Synthetic Item 44091",
-                "选择Synthetic Item 44091",
-                "选Synthetic Item 44091",
-            )
-        ):
-            with self.subTest(unbound_name=index):
-                wrapper = self.wrapper(text)
+        for action in ("continue", "clarify"):
+            with self.subTest(absent_action=action):
+                before = len(self.transport.requests)
+                wrapper = self.wrapper("就Synthetic Item 44091")
                 await self._recovery_read(wrapper)
-                self.assertEqual(self.transport.requests, [])
-                denied = await self.call(
-                    parameters={"query": "Synthetic Item 44091"}, wrapper=wrapper
-                )
+                self.assertEqual(len(self.transport.requests), before)
+                denied = await self.call(parameters={"action": action}, wrapper=wrapper)
                 self.assertEqual(denied["status"], "error")
                 self.assertEqual(denied["error"]["code"], "parameter_error")
-                self.assertTrue(
-                    denied["error"]["message"].startswith("没有有效候选可供确认")
-                )
-                self.assertEqual(self.transport.requests, [])
-                self.recovery_trace.append(
-                    "1473-1485_absent_candidate_name_" + str(index) + "_no_HTTP"
-                )
+                self.assertTrue(denied["error"]["message"].startswith("没有有效候选"))
+                self.assertEqual(len(self.transport.requests), before)
+                self.assertEqual(handler.registry.size, 0)
+                self.recovery_trace.append("absent_candidate_" + action + "_no_HTTP")
 
+        before = len(self.transport.requests)
+        denied = await self.call(
+            "ff14_market_select",
+            {"batch_id": "absent", "generation": "absent", "item_id": 44091},
+            self.wrapper("第一个"),
+        )
+        self.assertEqual(denied["status"], "error")
+        self.assertEqual(denied["error"]["code"], "parameter_error")
+        self.assertEqual(len(self.transport.requests), before)
+        self.assertEqual(handler.registry.size, 0)
+
+        source_wrapper = self.wrapper("Synthetic什么价")
         pending = await self.call(
-            parameters={"query": "Synthetic"}, wrapper=self.wrapper("Synthetic什么价")
+            parameters={"query": "Synthetic"}, wrapper=source_wrapper
         )
         self.assertEqual(pending["status"], "needs_selection")
         args = {key: pending["selection"][key] for key in ("batch_id", "generation")}
@@ -1198,12 +1199,89 @@ class ControlledMessageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(handler.registry.size, 1)
         self.recovery_trace.append("1486-1490_current_batch_generation_item_positive")
 
+        original_pending = next(iter(handler.registry._pending.values()))
+        original_batch = original_pending.batch
+        original_state = (
+            original_pending.source_ref,
+            original_pending.expires,
+            original_pending.generation,
+        )
+
+        def assert_unconsumed():
+            self.assertEqual(handler.registry.size, 1)
+            self.assertIs(
+                next(iter(handler.registry._pending.values())), original_pending
+            )
+            self.assertIs(original_pending.batch, original_batch)
+            self.assertEqual(
+                (
+                    original_pending.source_ref,
+                    original_pending.expires,
+                    original_pending.generation,
+                ),
+                original_state,
+            )
+            self.assertIsNone(original_pending.consumed_batch)
+            self.assertIsNone(original_pending.confirmation_ref)
+
+        # These are genuine, separately authorized users/conversations, not
+        # forged identity parameters. None can continue or select this batch.
+        for identity in (
+            {"sender": "other"},
+            {"session": "other"},
+            {"adapter": "other"},
+        ):
+            for action in ("continue", "clarify", "select"):
+                with self.subTest(identity=identity, action=action):
+                    before = len(self.transport.requests)
+                    denied = await self.call(
+                        "ff14_market_select"
+                        if action == "select"
+                        else "ff14_market_query",
+                        args if action == "select" else {"action": action},
+                        self.wrapper("第一个", **identity),
+                    )
+                    self.assertEqual(denied["status"], "error")
+                    self.assertEqual(denied["error"]["code"], "parameter_error")
+                    self.assertEqual(len(self.transport.requests), before)
+                    assert_unconsumed()
+
+        for field, value in (
+            ("batch_id", "wrong"),
+            ("generation", "wrong"),
+            ("item_id", 44093),
+        ):
+            with self.subTest(invalid_choice=field):
+                before = len(self.transport.requests)
+                denied = await self.call(
+                    "ff14_market_select", {**args, field: value}, self.wrapper("第一个")
+                )
+                self.assertEqual(denied["status"], "error")
+                self.assertEqual(denied["error"]["code"], "parameter_error")
+                self.assertEqual(len(self.transport.requests), before)
+                assert_unconsumed()
+
+        before = len(self.transport.requests)
+        denied = await self.call("ff14_market_select", args, source_wrapper)
+        self.assertEqual(denied["status"], "error")
+        self.assertEqual(denied["error"]["code"], "parameter_error")
+        self.assertEqual(len(self.transport.requests), before)
+        assert_unconsumed()
+        for action in ("continue", "clarify"):
+            with self.subTest(live_action=action):
+                before = len(self.transport.requests)
+                continued = await self.call(
+                    parameters={"action": action}, wrapper=self.wrapper("那个")
+                )
+                self.assertEqual(continued["status"], "needs_selection")
+                self.assertEqual(continued["selection"], pending["selection"])
+                self.assertEqual(continued["market"], pending["market"])
+                self.assertEqual(len(self.transport.requests), before)
+                assert_unconsumed()
+
         # All three messages and exact owned handles are live before changing
         # only the FF14 candidate clock. Source receipt TTL/owner stay intact.
-        expiry_queries = [
-            self.wrapper(text)
-            for text in ("Synthetic Item 44091那个。", "就Synthetic Item 44091")
-        ]
+        expiry_queries = [self.wrapper("那个"), self.wrapper("就它")]
         expiry_select = self.wrapper("Synthetic Item 44091那个。")
         expiry_sources = []
         before = len(self.transport.requests)
@@ -1217,25 +1295,24 @@ class ControlledMessageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.transport.requests), before)
         self.assertEqual(handler.registry.size, 1)
         handler.registry._clock = lambda: 10**20
-        for index, wrapper in enumerate(expiry_queries):
-            with self.subTest(expired_name=index):
+        for index, (action, wrapper) in enumerate(
+            zip(("continue", "clarify"), expiry_queries)
+        ):
+            with self.subTest(expired_action=action):
+                before = len(self.transport.requests)
                 source, owned, expires = expiry_sources[index]
                 self.assertTrue(
                     self.runtime.receiver.current(ygl.InvocationOrigin.LLM_TOOL, source)
                 )
                 self.assertTrue(self.runtime.current_owner(owned))
                 self.assertEqual(source.evidence.receipt.expires, expires)
-                denied = await self.call(
-                    parameters={"query": "Synthetic Item 44091"}, wrapper=wrapper
-                )
+                denied = await self.call(parameters={"action": action}, wrapper=wrapper)
                 self.assertEqual(denied["status"], "error")
                 self.assertEqual(denied["error"]["code"], "parameter_error")
-                self.assertTrue(
-                    denied["error"]["message"].startswith("没有有效候选可供确认")
-                )
+                self.assertTrue(denied["error"]["message"].startswith("没有有效候选"))
                 self.assertEqual(len(self.transport.requests), before)
                 self.recovery_trace.append(
-                    "1491-1497_candidate_clock_only_name_" + str(index) + "_no_HTTP"
+                    "candidate_clock_only_" + action + "_no_HTTP"
                 )
         source, owned, expires = expiry_sources[2]
         self.assertTrue(
@@ -1250,6 +1327,207 @@ class ControlledMessageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.transport.requests), before)
         self.assertEqual(handler.registry.size, 0)
         self.recovery_trace.append("1498-1503_expired_select_no_HTTP_registry_zero")
+
+    async def test_new_query_and_correction_reparse_candidates_without_market_io(self):
+        """Semantic new requests capture new defaults instead of selecting a batch."""
+        await self.start()
+        pending = await self.call(
+            parameters={
+                "query": "Synthetic",
+                "action": "query",
+                "region": "global",
+                "quality": "hq",
+                "intent": "min",
+            },
+            wrapper=self.wrapper("查Synthetic国际服HQ最低价"),
+        )
+        self.assertEqual(pending["status"], "needs_selection")
+        self.assertCountEqual(
+            [(r.source_id, r.path) for r in self.transport.requests],
+            [
+                ("universalis_market", "/api/v2/worlds"),
+                ("universalis_market", "/api/v2/data-centers"),
+                ("xivapi_items", "/api/search"),
+            ],
+        )
+        self.assertEqual(
+            pending["market"]["scope"]["regions"],
+            ["North-America", "Europe", "Japan", "Oceania"],
+        )
+        self.assertEqual(
+            (pending["market"]["quality"], pending["market"]["intent"]), ("hq", "min")
+        )
+        before = len(self.transport.requests)
+        corrected = await self.call(
+            parameters={"query": "Synthetic Item", "action": "correction"},
+            wrapper=self.wrapper("重新查Synthetic Item，使用默认范围"),
+        )
+        self.assertEqual(corrected["status"], "needs_selection")
+        self.assertEqual(
+            [(r.source_id, r.path) for r in self.transport.requests[before:]],
+            [("xivapi_items", "/api/search")],
+        )
+        self.assertNotEqual(
+            corrected["selection"]["generation"], pending["selection"]["generation"]
+        )
+        self.assertEqual(
+            corrected["market"]["scope"],
+            dict(
+                kind="region",
+                target=None,
+                regions=["China"],
+                source="default",
+                default_basis="core_default",
+            ),
+        )
+        self.assertEqual(
+            (corrected["market"]["quality"], corrected["market"]["intent"]),
+            ("all", "overview"),
+        )
+        for field in ("core_revision", "module_revision"):
+            self.assertEqual(corrected["market"][field], pending["market"][field])
+        before = len(self.transport.requests)
+        stale = {key: pending["selection"][key] for key in ("batch_id", "generation")}
+        denied = await self.call(
+            "ff14_market_select", {**stale, "item_id": 44091}, self.wrapper("第一个")
+        )
+        self.assertEqual(denied["status"], "error")
+        self.assertEqual(denied["error"]["code"], "parameter_error")
+        self.assertEqual(len(self.transport.requests), before)
+        current = await self.call(
+            parameters={"action": "continue"}, wrapper=self.wrapper("有哪些")
+        )
+        self.assertEqual(current["selection"], corrected["selection"])
+        self.assertEqual(len(self.transport.requests), before)
+
+    async def test_fresh_numeric_query_and_correction_use_new_default_scope(self):
+        """Fresh semantic numeric requests may query; they are not selection authority."""
+        await self.start()
+        # An existing global/HQ batch must not leak its frozen parameters into
+        # the independently requested default-scope numeric query/correction.
+        pending = await self.call(
+            parameters={
+                "query": "Synthetic",
+                "region": "global",
+                "quality": "hq",
+                "intent": "min",
+            },
+            wrapper=self.wrapper("查Synthetic国际服HQ最低价"),
+        )
+        self.assertEqual(pending["status"], "needs_selection")
+        for action, item_id in (("query", 44091), ("correction", 44092)):
+            with self.subTest(action=action):
+                before = len(self.transport.requests)
+                result = await self.call(
+                    parameters={"query": str(item_id), "action": action},
+                    wrapper=self.wrapper(f"重新查询物品ID {item_id}，默认范围"),
+                )
+                self.assertEqual(result["status"], "success", result)
+                self.assertEqual(result["market"]["item_id"], item_id)
+                self.assertEqual(
+                    result["market"]["scope"],
+                    dict(
+                        kind="region",
+                        target=None,
+                        regions=["China"],
+                        source="default",
+                        default_basis="core_default",
+                    ),
+                )
+                self.assertEqual(
+                    (result["market"]["quality"], result["market"]["intent"]),
+                    ("all", "overview"),
+                )
+                requests = self.transport.requests[before:]
+                self.assertTrue(requests)
+                self.assertTrue(
+                    all(
+                        r.source_id == "universalis_market"
+                        and "/aggregated/China/" in r.path
+                        and r.path.endswith(f"/{item_id}")
+                        for r in requests
+                    )
+                )
+        before = len(self.transport.requests)
+        stale = {key: pending["selection"][key] for key in ("batch_id", "generation")}
+        denied = await self.call(
+            "ff14_market_select", {**stale, "item_id": 44091}, self.wrapper("第一个")
+        )
+        self.assertEqual(denied["status"], "error")
+        self.assertEqual(denied["error"]["code"], "parameter_error")
+        self.assertEqual(len(self.transport.requests), before)
+
+    async def test_numeric_queries_cannot_reuse_pending_or_consumed_events(self):
+        """State fences survive a new batch; semantic action never grants identity."""
+        await self.start()
+        source = self.wrapper("查Synthetic国服HQ最低价")
+        pending = await self.call(
+            parameters={
+                "query": "Synthetic",
+                "region": "cn",
+                "quality": "hq",
+                "intent": "min",
+            },
+            wrapper=source,
+        )
+        self.assertEqual(pending["status"], "needs_selection")
+        for action in ("query", "correction"):
+            with self.subTest(pending_source_action=action):
+                before = len(self.transport.requests)
+                denied = await self.call(
+                    parameters={"query": "44092", "action": action}, wrapper=source
+                )
+                self.assertEqual(denied["status"], "error")
+                self.assertEqual(denied["error"]["code"], "parameter_error")
+                self.assertEqual(len(self.transport.requests), before)
+        args = {key: pending["selection"][key] for key in ("batch_id", "generation")}
+        confirmation = self.wrapper("第一个")
+        selected = await self.call(
+            "ff14_market_select", {**args, "item_id": 44091}, confirmation
+        )
+        self.assertEqual(selected["status"], "success", selected)
+        self.assertEqual(
+            (
+                selected["market"]["item_id"],
+                selected["market"]["quality"],
+                selected["market"]["intent"],
+            ),
+            (44091, "hq", "min"),
+        )
+        for replaced in (False, True):
+            if replaced:
+                replacement = await self.call(
+                    parameters={"query": "Synthetic", "action": "correction"},
+                    wrapper=self.wrapper("新查询Synthetic，默认范围"),
+                )
+                self.assertEqual(replacement["status"], "needs_selection")
+                self.assertNotEqual(
+                    replacement["selection"]["generation"],
+                    pending["selection"]["generation"],
+                )
+            for label, wrapper in (("source", source), ("confirmation", confirmation)):
+                for action in ("query", "correction"):
+                    with self.subTest(replaced=replaced, event=label, action=action):
+                        before = len(self.transport.requests)
+                        denied = await self.call(
+                            parameters={
+                                "query": "44092",
+                                "action": action,
+                                "region": "global",
+                                "quality": "nq",
+                            },
+                            wrapper=wrapper,
+                        )
+                        self.assertEqual(denied["status"], "error")
+                        self.assertEqual(denied["error"]["code"], "parameter_error")
+                        self.assertEqual(len(self.transport.requests), before)
+            if replaced:
+                before = len(self.transport.requests)
+                current = await self.call(
+                    parameters={"action": "continue"}, wrapper=self.wrapper("有哪些")
+                )
+                self.assertEqual(current["selection"], replacement["selection"])
+                self.assertEqual(len(self.transport.requests), before)
 
     async def test_recovery_controlled_host_prefix_rejects_before_capture(self):
         """Controlled Host contract; production Runtime prefix is static evidence."""

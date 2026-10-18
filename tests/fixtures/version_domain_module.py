@@ -1,17 +1,35 @@
 """SDK/stdlib-only version-domain test module; no Host/Core authority."""
+
 import yomihime_game_link_sdk as ygl
 
 
 def result(status=ygl.ResultStatus.SUCCESS):
     if status is ygl.ResultStatus.ERROR:
-        error = ygl.ErrorDetail(ygl.ErrorCode.NO_RECORDS, "No records; choose another source.")
-        return ygl.CapabilityResult("version-error", status, error=error,
-            model_facts=ygl.FactDocument({"status": "error", "error": {
-                "code": error.code.value, "message": error.message},
-                "supplement": {"archive": {"available": None}}}))
-    return ygl.CapabilityResult("version-result", status,
-        document=ygl.DisplayDocument("Version fixture", "public", (ygl.TextBlock("public result"),)),
-        model_facts=ygl.FactDocument({"status": status.value, "fixture": "version-domain"}))
+        error = ygl.ErrorDetail(
+            ygl.ErrorCode.NO_RECORDS, "No records; choose another source."
+        )
+        return ygl.CapabilityResult(
+            "version-error",
+            status,
+            error=error,
+            model_facts=ygl.FactDocument(
+                {
+                    "status": "error",
+                    "error": {"code": error.code.value, "message": error.message},
+                    "supplement": {"archive": {"available": None}},
+                }
+            ),
+        )
+    return ygl.CapabilityResult(
+        "version-result",
+        status,
+        document=ygl.DisplayDocument(
+            "Version fixture", "public", (ygl.TextBlock("public result"),)
+        ),
+        model_facts=ygl.FactDocument(
+            {"status": status.value, "fixture": "version-domain"}
+        ),
+    )
 
 
 class Handler:
@@ -46,7 +64,9 @@ class Instance:
         self.stops += 1
 
     async def check_health(self):
-        return ygl.HealthReport({"read": ygl.CapabilityHealth(ygl.HealthStatus.AVAILABLE)})
+        return ygl.HealthReport(
+            {"read": ygl.CapabilityHealth(ygl.HealthStatus.AVAILABLE)}
+        )
 
 
 class Factory:

@@ -95,6 +95,7 @@ from ..services.module_services import (
 )
 from ..services.module_storage import ModuleStorageRouter
 from ..services.output import (
+    CommandHeadingProjector,
     LifecycleApprovedSendScheduler,
     OutputResult,
     OutputService,
@@ -112,7 +113,12 @@ from ..services.source_credentials import SourceCredentialPolicy
 from ..services.subscriptions import SubscriptionOperationsService
 from .configuration import ConfigurationCoordinator
 from .configuration_migration import OrdinaryConfigurationMigration
-from .core_configuration import CORE_CONFIG_FIELDS, CoreDefaultsView, core_config_target
+from .core_configuration import (
+    CORE_CONFIG_FIELDS,
+    CoreDefaultsView,
+    ThemeSettingsView,
+    core_config_target,
+)
 
 DEFAULT_CADENCE_CONFIGURATION = CadenceConfiguration((60.0, 300.0, 900.0, 3600.0))
 DEFAULT_CADENCE_REVISION = 1
@@ -437,6 +443,8 @@ class CoreRuntime:
         host_ingress_validator: HostIngressValidator,
         host_message_current_validator: Callable[[InvocationOrigin, HostIngress], bool]
         | None = None,
+        command_heading_projector: CommandHeadingProjector | None = None,
+        command_card_renderer=None,
         config_principal_id: str,
         identity_namespace: str,
         trusted_bundled_defaults: Mapping[str, tuple[str, ...]] | None = None,
@@ -457,6 +465,7 @@ class CoreRuntime:
         reschedule_configuration: RescheduleConfiguration = DEFAULT_RESCHEDULE_CONFIGURATION,
         max_subscriptions_per_owner: int = 100,
         handler_timeout: float = 30.0,
+        command_timeout: float = 90.0,
         send_timeout: float = 30.0,
         claim_lease: timedelta = timedelta(minutes=2),
         pump_interval: float = 5.0,
@@ -654,6 +663,11 @@ class CoreRuntime:
                 else None
             ),
         )
+        self.theme_settings = ThemeSettingsView(
+            self.config_repository,
+            self.lifecycle.admission,
+            principal_id=config_principal_id,
+        )
         self.module_services = ModuleServicesFactory(
             self.registry,
             self.issuer,
@@ -676,12 +690,23 @@ class CoreRuntime:
         self.send_scheduler = LifecycleApprovedSendScheduler(self.lifecycle)
         self.root_output_repository = SQLiteRootOutputRepository(database)
         self.resource_visibility = SQLiteResourceVisibilityProbe(database)
+        self._command_ingresses = {}
+        self._command_message_port = message_port
         self.output = OutputService(
             issuer=self.issuer,
             admission=self.lifecycle.admission,
             send_scheduler=self.send_scheduler,
             registry=self.registry,
             renderer=renderer,
+            command_heading_projector=command_heading_projector,
+            command_card_renderer=command_card_renderer,
+            command_theme_settings=self.theme_settings.current,
+            command_card_logo=self._command_card_logo,
+            command_sender=(
+                self._send_command
+                if callable(getattr(message_port, "send_command", None))
+                else None
+            ),
             limits=display_limits,
             conversations=self._conversation_resolver,
             message_port=message_port,
@@ -786,6 +811,9 @@ class CoreRuntime:
             owner_cleanup=owner_cleanup,
         )
         self.admin_facade = AdminFacade(self.admin_operations, self.admin_authorization)
+        from ..core.invocation_budget import InvocationBudgetPolicy
+
+        self._budget_policy = InvocationBudgetPolicy(command_timeout)
         self.gateway = Gateway(
             self.registry,
             self.issuer,
@@ -794,6 +822,7 @@ class CoreRuntime:
             private_authorizer=self.module_services.authorize_private,
             owner_authority=self.owner_authority,
             handler_timeout=handler_timeout,
+            budget_policy=self._budget_policy,
             clock=monotonic_clock,
             public_fact_guard=lambda facts: _require_public_fact_resources(
                 facts, self.resource_visibility
@@ -890,6 +919,87 @@ class CoreRuntime:
         return project_module_catalog(
             snapshot, states, identities, runtime_state=runtime_state
         )
+
+    def require_help_source_current(self, source) -> None:
+        """Fence retained help facts against live, coherent module availability."""
+        from ..presentation.command_card import HelpCardSource
+
+        if type(source) is not HelpCardSource:
+            raise InvalidInvocation()
+        self._require_accepting_ingress()
+        snapshot = self.registry.snapshot()
+        if snapshot.revision != source.registry_revision:
+            raise InvalidInvocation()
+        for item in source.modules:
+            module = snapshot.modules.get(item.module_id)
+            if (
+                module is None
+                or module.epoch != item.epoch
+                or module.manifest != item.manifest
+                or not self.registry.is_active(module)
+            ):
+                raise InvalidInvocation()
+
+    async def prepare_help_card(self, source):
+        """Bind declared local logo resources and Core theme without new authority.
+
+        Resources are read only through the same bounded, hash-pinned package
+        capture used for installed static assets. No route, module identifier,
+        arbitrary file path, network fetch or public download API is introduced.
+        An unavailable optional presentation dependency chooses complete text.
+        """
+        from ..presentation.command_card import build_help_card
+
+        self.require_help_source_current(source)
+        settings = await self.theme_settings.current()
+        logos = {}
+        card = None
+        try:
+            for item in source.modules:
+                logo = await self._command_card_logo(item.module_id)
+                if logo is not None:
+                    logos[item.module_id] = logo
+            card = build_help_card(source, logos=logos)
+        except Exception:
+            # A missing/corrupt image must not suppress usable catalog text.
+            card = None
+        self.require_help_source_current(source)
+        return card, settings.core_theme
+
+    async def _command_card_logo(self, module_id):
+        """Bind only the current manifest's declared, hash-verified static logo."""
+        from yomihime_game_link_sdk.cards import Asset
+
+        from ..extensions.page_resources import capture_page_resources
+
+        module = self.registry.snapshot().module(module_id)
+        display = module.manifest.display
+        path = display.logo_resource if display is not None else None
+        if path is None:
+            return None
+        package_id, local_id = module_id.split("/", 1)
+        candidate = self.extension_runtime.candidate(package_id)
+        package = candidate.package if candidate is not None else None
+        if (
+            package is None
+            or package._provenance is None
+            or package.manifest is None
+            or next(
+                (m for m in package.manifest.modules if m.module_id == local_id), None
+            )
+            != module.manifest
+            or not self.registry.is_active(module)
+        ):
+            raise ValueError("command logo package is unavailable")
+        resources = await asyncio.to_thread(
+            capture_page_resources, package._provenance, package.manifest
+        )
+        if not self.registry.is_active(module):
+            raise InvalidInvocation()
+        kind = {".svg": "svg", ".png": "png", ".jpg": "jpeg", ".jpeg": "jpeg"}[
+            Path(path).suffix.lower()
+        ]
+        return Asset(kind, resources[path], alt=display.default_name)
 
     async def subscription_gate_state(self, module_id: str) -> SubscriptionGateState:
         """Read exact persistent eligibility and live state under the original gate."""
@@ -1389,7 +1499,9 @@ class CoreRuntime:
                 or state.identity.module_epoch != module.epoch
             ):
                 raise PermissionError("module changed while ingress was being prepared")
-            deadline = self._monotonic_clock() + self._handler_timeout
+            deadline = self._budget_policy.deadline(
+                origin, self._monotonic_clock(), self._handler_timeout
+            )
             view = self.issuer.issue(
                 origin=origin,
                 module_id=module_id,
@@ -1418,6 +1530,9 @@ class CoreRuntime:
                         self.issuer, view, accepted_ingress
                     )
                 if origin is InvocationOrigin.COMMAND:
+                    if len(self._command_ingresses) >= 128:
+                        raise PermissionError("command ingress capacity exceeded")
+                    self._command_ingresses[view.invocation_id] = (view, ingress)
                     result = await self.gateway.invoke_command(view, target, parameters)
                 else:
                     result = await self.gateway.invoke_tool(view, target, parameters)
@@ -1444,10 +1559,46 @@ class CoreRuntime:
                     )
                 return CoreInvocationOutcome(exposed_result, routed)
             finally:
+                self._command_ingresses.pop(view.invocation_id, None)
                 self.owner_authority.release(view)
                 self.issuer.release(view)
         finally:
             self._host_flights.discard(task)
+
+    async def _send_command(
+        self, invocation, result, target, payload, *, image_current=None
+    ):
+        """Resolve only an exact, still-owned invocation to its accepted ingress."""
+        from ..core.ports import MessageReceipt, MessageStatus
+
+        if (
+            target.authorized
+            or result.privacy is not Privacy.PUBLIC
+            or invocation.grant_id is not None
+            or invocation.grant_revision is not None
+        ):
+            # Private authority keeps the existing gate-approved sender;
+            # this preparation path is only for ordinary public commands.
+            return MessageReceipt(MessageStatus.FAILED)
+        owned = self._command_ingresses.get(invocation.invocation_id)
+        if owned is None or owned[0] is not invocation:
+            return MessageReceipt(MessageStatus.FAILED)
+        self._require_accepting_ingress()
+        self.issuer.require(invocation)
+        self.lifecycle.admission.check(self.output._root_lease(invocation))
+        # Revalidate Host identity after every preparation await. The adapter
+        # checks again synchronously immediately before event.send.
+        await self._host_ingress(InvocationOrigin.COMMAND, owned[1])
+        await self.output._validate_command_current(invocation, result, target)
+        self._require_accepting_ingress()
+        self.issuer.require(invocation)
+        self.lifecycle.admission.check(self.output._root_lease(invocation))
+        if image_current is not None:
+            # Last synchronous resource fence, after every preparation await.
+            image_current()
+        return await self._command_message_port.send_command(
+            owned[1], target, payload, image_current=image_current
+        )
 
     async def close(self, *, timeout: float | None = None) -> bool:
         bound = self._cleanup_timeout if timeout is None else timeout
@@ -1471,6 +1622,8 @@ class CoreRuntime:
             return True
         self._closing = True
         self._accepting = False
+        if self.output._generated_png is not None:
+            self.output._generated_png.close()
         # Fence pending durable activation before close can suspend on the
         # shared Admission mutation gate.
         self.extension_runtime.stop_accepting()

@@ -616,6 +616,49 @@ def _package(capability: CapabilityDescriptor, *, command=True, tool=True):
 
 
 class GatewayTests(IsolatedAsyncioTestCase):
+    async def test_command_budget_is_generic_and_clamped_to_trusted_deadline(self):
+        from ygl_test_subject.core.invocation_budget import InvocationBudgetPolicy
+
+        handler, view = await self._ready()
+        gateway = self._gateway()
+        self.assertEqual(gateway._budget_policy.command_timeout, 90)
+        scope = self.lifecycle.scope(view.module_id)
+        original = scope.run
+        observed = []
+
+        async def run(work, **kwargs):
+            observed.append(kwargs["deadline_monotonic"])
+            return await original(work, **kwargs)
+
+        before = time.monotonic()
+        with patch.object(scope, "run", side_effect=run):
+            result = await gateway.invoke_command(view, "查询", {"id": "one"})
+        self.assertIs(result.status, ResultStatus.SUCCESS)
+        self.assertGreaterEqual(observed[-1], before + 90)
+        self.assertLessEqual(observed[-1], time.monotonic() + 90)
+        trusted = self.issuer.issue(
+            origin=InvocationOrigin.COMMAND,
+            module_id=view.module_id,
+            module_epoch=view.module_epoch,
+            registry_revision=view.registry_revision,
+            actor_id=view.actor_id,
+            conversation_id=view.conversation_id,
+            capability_id=view.capability_id,
+            deadline=time.monotonic() + 7,
+        )
+        self.lifecycle.admission.admit(trusted, trusted.capability_id)
+        with patch.object(scope, "run", side_effect=run):
+            result = await gateway.invoke_command(trusted, "查询", {"id": "two"})
+        self.assertIs(result.status, ResultStatus.SUCCESS)
+        self.assertEqual(observed[-1], trusted.deadline)
+        gateway._budget_policy = InvocationBudgetPolicy(2)
+        before = time.monotonic()
+        with patch.object(scope, "run", side_effect=run):
+            result = await gateway.invoke_command(view, "查询", {"id": "three"})
+        self.assertIs(result.status, ResultStatus.SUCCESS)
+        self.assertGreaterEqual(observed[-1], before + 2)
+        self.assertLessEqual(observed[-1], time.monotonic() + 2)
+
     def setUp(self):
         self.registry = Registry()
         self.issuer = ContextIssuer()

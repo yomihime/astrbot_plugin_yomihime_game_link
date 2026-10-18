@@ -181,6 +181,12 @@ _ENUMS = {
 
 
 def _encode(value: Any) -> Any:
+    from yomihime_game_link_sdk.cards import Document as CardDocument
+
+    from ...core.contracts.cards import encode_card
+
+    if type(value) is CardDocument:
+        return {"$type": "cards.Document.v1", "fields": encode_card(value)}
     if isinstance(value, Enum):
         return {"$enum": type(value).__name__, "value": value.value}
     if isinstance(value, datetime):
@@ -196,6 +202,11 @@ def _encode(value: Any) -> Any:
                 item.name: _encode(getattr(value, item.name))
                 for item in fields(value)
                 if item.init
+                and not (
+                    type(value) is DisplayDocument
+                    and item.name == "card"
+                    and value.card is None
+                )
             },
         }
     if isinstance(value, Mapping):
@@ -220,6 +231,12 @@ def _decode(value: Any) -> Any:
         if "$decimal" in value:
             return Decimal(value["$decimal"])
         if "$type" in value:
+            if value["$type"] == "cards.Document.v1":
+                from ...core.contracts.cards import decode_card
+
+                if set(value) != {"$type", "fields"}:
+                    raise ValueError("invalid stored card wrapper")
+                return decode_card(value["fields"])
             cls = _DATACLASSES[value["$type"]]
             stored_fields = value["fields"]
             if cls is DisplayDocument:

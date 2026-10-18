@@ -61,7 +61,9 @@ from .core_configuration import (
     CORE_DEFAULTS_FIELD,
     CORE_MODULE_ID,
     DEFAULT_REGION,
+    MODULE_REPLY_THEME,
     core_config_target,
+    module_configuration_fields,
 )
 from .managed_source_credentials import ManagedSourceCredentialPolicy
 
@@ -211,9 +213,11 @@ class AdminOperationsService(AdminOperations):
         declarations = (
             CORE_CONFIG_FIELDS
             if target.module_id == CORE_MODULE_ID
-            else self._selection(
-                target.module_id, self.registry.snapshot()
-            ).manifest.config_fields
+            else module_configuration_fields(
+                self._selection(
+                    target.module_id, self.registry.snapshot()
+                ).manifest.config_fields
+            )
         )
         return tuple(
             field
@@ -488,7 +492,9 @@ class AdminOperationsService(AdminOperations):
             for module_id, selected in selections.items():
                 if module_id == CORE_MODULE_ID:
                     raise ValueError("reserved Core configuration owner")
-                declarations[module_id] = selected.manifest.config_fields
+                declarations[module_id] = module_configuration_fields(
+                    selected.manifest.config_fields
+                )
             result = project_configuration_catalog(
                 declarations,
                 resources,
@@ -534,13 +540,16 @@ class AdminOperationsService(AdminOperations):
                     try:
                         if any(m.field == name for m in snapshot.secret_metadata):
                             raise ValueError("ordinary metadata")
-                        validate_configuration_value(
-                            field,
-                            value,
-                            self._module_config_validators.get(
-                                target.module_id, {}
-                            ).get(name),
-                        )
+                        # The Core-managed module override is nullable only by
+                        # absence. An explicit null remains invalid stored data.
+                        if not (field == MODULE_REPLY_THEME and not present):
+                            validate_configuration_value(
+                                field,
+                                value,
+                                self._module_config_validators.get(
+                                    target.module_id, {}
+                                ).get(name),
+                            )
                     except (ValueError, TypeError):
                         state, value = "invalid", None
                     else:
@@ -679,13 +688,30 @@ class AdminOperationsService(AdminOperations):
                 return ()
             if current.manifest is not selection.manifest:
                 raise AdminAuthorizationDenied from None
+            # Presentation is Core-owned, never a capability dependency from
+            # the module manifest. Keep the shared config revision current but
+            # publish only business fields to capability-health tracking.
+            business_snapshot = validate_contract(
+                ConfigSnapshot(
+                    snapshot.revision,
+                    {
+                        name: value
+                        for name, value in snapshot.values.items()
+                        if name != MODULE_REPLY_THEME.name
+                    },
+                    snapshot.secret_metadata,
+                    snapshot.target,
+                )
+            )
             return self.health_resolver.publish_config(
-                module_id, snapshot, changed_fields=changed_fields
+                module_id,
+                business_snapshot,
+                changed_fields=changed_fields - {MODULE_REPLY_THEME.name},
             )
 
         return ConfigurationCoordinator(
             target,
-            selection.manifest.config_fields,
+            module_configuration_fields(selection.manifest.config_fields),
             self._config_repository,
             self.secret_store,
             self.secret_store,
@@ -778,7 +804,7 @@ class AdminOperationsService(AdminOperations):
         }
         metadata = {item.field: item for item in config.secret_metadata}
         values: dict[str, str] = {}
-        for field in selection.manifest.config_fields:
+        for field in module_configuration_fields(selection.manifest.config_fields):
             if allowed_fields is not None and field.name not in allowed_fields:
                 continue
             if field.sensitive:
@@ -1216,7 +1242,8 @@ class AdminOperationsService(AdminOperations):
                 },
             )
         if any(
-            update.field in {CORE_DEFAULTS_FIELD, "default_region"}
+            update.field
+            in {CORE_DEFAULTS_FIELD, *(field.name for field in CORE_CONFIG_FIELDS)}
             for update in patch.updates
         ):
             raise ValueError("module patch contains a reserved Core field")

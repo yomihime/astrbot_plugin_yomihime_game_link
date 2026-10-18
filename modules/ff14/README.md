@@ -8,7 +8,7 @@
 | --- | --- |
 | `/ygl ff14 status` | 查看功能状态。 |
 | `/ygl ff14 item <名称或 ID>` | 查物品公开资料、多候选与获取途径。 |
-| `/ygl ff14 logs <国服\|国际服> <服务器> <角色> [metric=rdps\|ndps\|cdps]` | 查公开角色战绩；重名服务器可用 `server_hint=...` 筛选。服务器或角色名有空格时用引号包起。|
+| `/ygl ff14 logs <服务器> <角色> [metric=rdps\|ndps\|cdps]` | 由可信服务器目录自动选择地区，查公开角色战绩；重名服务器可用 `server_hint=...` 筛选。服务器或角色名有空格时用引号包起。|
 | `/ygl ff14 calendar <国服\|国际服> [days=7] [timezone=Asia/Shanghai]` | 查从当前本地日期开始的日历活动，`days` 为 1–30。|
 
 日历查询以本次获取的公开日历为准，会显示获取时间，不把获取时间称作发布者更新时间。若主源失败会尝试固定备用源；都不可用时会明确返回失败，不用空结果或陈旧缓存伪装新数据。
@@ -42,6 +42,33 @@ python -m astrbot_plugin_yomihime_game_link.scripts.admin_credentials --help
 
 未配置的 FFLogs 区域会失败关闭，不会改用匿名请求。物品和日历查询不需要 FFLogs 凭据。
 
-`/ygl ff14 logs <国服|国际服> <服务器名> <角色名> [server_hint=...] [metric=rdps|ndps|cdps]` 只查询公开角色数据，不访问私密战斗报告。可按区域单独配置 FFLogs OAuth 客户端凭据；管理员须使用宿主提供的加密凭据配置入口。未配置的区域会失败关闭，不会降级成匿名请求。目前国服角色查询已用实际公开 API 验证；国际服结果会标为待核对的参考结果。
+`/ygl ff14 logs <服务器名> <角色名> [server_hint=...] [metric=rdps|ndps|cdps]` 只查询公开角色数据，不访问私密战斗报告。服务器的地区归属来自可信服务器目录，FFLogs 的 server ID 和 slug 仍由 FFLogs 解析；目录不可用、未知或歧义时分别失败，不猜地区或改用另一地区凭据。旧版“地区＋服务器＋角色”三位置写法不再接受。自然聊天中显式说明的地区只作归属校验，不改变其他能力的默认地区。
 
-`/ygl ff14 output <国服|国际服> <副本名称> <难度> <职业> [metric=rdps] [period=latest]` 目前暂不可用：FFLogs 统计页面返回 HTTP 403，且数据格式未通过验证，不显示分位数据。
+可按区域单独配置 FFLogs OAuth 客户端凭据；管理员须使用宿主提供的加密凭据配置入口。未配置的区域会失败关闭，不会降级成匿名请求。目前国服角色查询已有真实公开 API 历史证据；国际服结果仍为待核对的参考结果，图片成功不代表目录覆盖完整。
+
+FFLogs 输出统计尚未实现，当前不提供；旧 `output` 指令不再注册。
+
+
+## 模块徽标来源与权利说明
+
+FFXIV METEOR MODULE EMBLEM
+
+File: ff14-meteor.svg
+Trusted, bundled, hand-authored monochrome SVG reference rendering.
+Copied unchanged from the five user-approved declarative card samples. It is
+not an official vector or exact logo file. The hollow ring and asymmetric
+flames were recreated with reference to Square Enix's product photography:
+https://na.store.square-enix-games.com/final-fantasy-xiv-messenger-bag
+
+FINAL FANTASY XIV and its marks belong to Square Enix. This note makes no claim
+of ownership or permission to redistribute the underlying mark and does not
+apply a new license to it. Review suitability for each distribution. No official
+photograph or font is included.
+
+The manifest declares this bundled asset as display.logo_resource and pins its
+SHA-256 in resources. The module emits card.logo=None; Core resolves that
+registered default to captured immutable bytes through the public SDK Asset
+contract. Module code performs no filesystem or remote reads for presentation.
+Core owns SVG validation, theme color substitution and rasterization. Explicit
+SDK Asset values can override a registered logo without adding any game logic
+in Core. The original fallback document and full source links are preserved.

@@ -10,5 +10,5 @@ const registry = new Map(Object.values(discovered).map(value => [value.owner, va
 registry.set('game_link/core', {owner: 'game_link/core', saveLabel: '保存全局设置', groups: {'': {title: '查询默认值'}}, fields: {default_region: {label: '默认区域', width: 'short'}}});
 export const ownerPresentation = (owner: string) => registry.get(owner);
 export const fieldPresentation = (field: {module_id:string;name:string}) => registry.get(field.module_id)?.fields?.[field.name] || {};
-export const groupTitle = (owner:string, group:string) => registry.get(owner)?.groups?.[group]?.title || group || '普通设置';
+export const groupTitle = (owner:string, group:string) => (group==='reply_style'?'回复样式':registry.get(owner)?.groups?.[group]?.title || group || '普通设置');
 export const credentialLabel = (field:{module_id:string;name:string;description:string}) => registry.get(field.module_id)?.credentials?.[field.name]?.label || field.description.split('；')[0] || field.name;

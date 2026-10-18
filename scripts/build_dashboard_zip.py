@@ -17,9 +17,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 ARCHIVE = ROOT / "dist" / "astrbot_plugin_yomihime_game_link-local.zip"
 EXPECTED_WHEEL_SHA256 = (
-    "54d5a0766ae5b626e575ff0d1936b49ce14a7d7f57b6db1f62882653eea9c81e"
+    "b6eaefee0045b91a4cc4ab71acd6b3f86824dcfcf5ea6fad574087106b937cb1"
 )
 EXPECTED_WHEEL_ENTRIES = {
+    "yomihime_game_link_sdk/cards.py",
     "yomihime_game_link_sdk/_examples/offline_sample/manifest.json",
     "yomihime_game_link_sdk/_examples/offline_sample/module.py",
     "yomihime_game_link_sdk/errors.py",
@@ -30,17 +31,17 @@ EXPECTED_WHEEL_ENTRIES = {
     "yomihime_game_link_sdk/version.py",
     "yomihime_game_link_sdk/results.py",
     "yomihime_game_link_sdk/_examples/empty_module/README.md",
-    "yomihime_game_link_sdk-0.1.0a6.dist-info/licenses/LICENSE",
-    "yomihime_game_link_sdk-0.1.0a6.dist-info/METADATA",
+    "yomihime_game_link_sdk-0.1.0a7.dist-info/licenses/LICENSE",
+    "yomihime_game_link_sdk-0.1.0a7.dist-info/METADATA",
     "yomihime_game_link_sdk/_examples/empty_module/module.py",
     "yomihime_game_link_sdk/storage.py",
-    "yomihime_game_link_sdk-0.1.0a6.dist-info/top_level.txt",
+    "yomihime_game_link_sdk-0.1.0a7.dist-info/top_level.txt",
     "yomihime_game_link_sdk/subscriptions.py",
     "yomihime_game_link_sdk/contexts.py",
-    "yomihime_game_link_sdk-0.1.0a6.dist-info/WHEEL",
+    "yomihime_game_link_sdk-0.1.0a7.dist-info/WHEEL",
     "yomihime_game_link_sdk/py.typed",
     "yomihime_game_link_sdk/__init__.py",
-    "yomihime_game_link_sdk-0.1.0a6.dist-info/RECORD",
+    "yomihime_game_link_sdk-0.1.0a7.dist-info/RECORD",
     "yomihime_game_link_sdk/_examples/empty_module/manifest.json",
 }
 PACKAGE_ENTRY_NAMES = {
@@ -108,6 +109,7 @@ FF14_BUNDLE_REQUIRED_FILES = {
     "assembly.json",
     "module.py",
     "models.py",
+    "presentation.py",
     "query_resolution.py",
     "yomihime.manifest.json",
     "README.md",
@@ -123,7 +125,8 @@ FF14_COMPAT_FILES = {
     f"pages/compat/{name}" for name in ("app.js", "index.html", "styles.css")
 }
 FF14_BUNDLE_ROOT_FILES = FF14_BUNDLE_REQUIRED_FILES - {"features/__init__.py"}
-FF14_BUNDLE_ALLOWED_DIRS = {Path("features")}
+FF14_BUNDLE_ALLOWED_DIRS = {Path("features"), Path("assets")}
+FF14_BUNDLE_ASSET_FILES = {"assets/ff14-meteor.svg"}
 FF14_BUNDLE_CACHE_DIRS = {
     "__pycache__",
     ".cache",
@@ -140,6 +143,18 @@ RUNTIME_DIRS = (
     "presentation",
 )
 ALLOWED_SUFFIXES = {".py", ".sql"}
+# Exact reviewed binary/legal inputs. Never broaden the runtime suffix set or
+# recursively admit presentation/assets (including Python files placed there).
+FONT_ASSETS = {
+    "presentation/assets/fonts/OFL.txt": (
+        4301,
+        "6a73f9541c2de74158c0e7cf6b0a58ef774f5a780bf191f2d7ec9cc53efe2bf2",
+    ),
+    "presentation/assets/fonts/NOTICE.md": (
+        3131,
+        "9c4def9efd3007da62abc3f4be270e644b9afc66f749c20b6ed091147fec615b",
+    ),
+}
 EXCLUDED_RUNTIME_DIRS = {
     "__pycache__",
     ".cache",
@@ -231,7 +246,10 @@ def _file_token(metadata: os.stat_result) -> tuple[int, int, int, int, int]:
 
 
 def _read_snapshot(
-    path: Path, allowed_root: Path | None = None, label: str = "Package input"
+    path: Path,
+    allowed_root: Path | None = None,
+    label: str = "Package input",
+    max_bytes: int | None = None,
 ) -> bytes:
     """Read one opened file object after checking its path and handle identity."""
     candidate = Path(path)
@@ -258,7 +276,7 @@ def _read_snapshot(
             raise ValueError(f"{label} changed while it was being opened: {candidate}")
 
         with os.fdopen(descriptor, "rb", closefd=False) as stream:
-            content = stream.read()
+            content = stream.read() if max_bytes is None else stream.read(max_bytes + 1)
 
         opened_after = os.fstat(descriptor)
         current_path = (
@@ -290,11 +308,11 @@ def validate_wheel(path: Path) -> dict[str, bytes]:
                 "SDK wheel entry manifest differs from the reviewed artifact"
             )
         metadata_lines = set(
-            wheel.read("yomihime_game_link_sdk-0.1.0a6.dist-info/METADATA")
+            wheel.read("yomihime_game_link_sdk-0.1.0a7.dist-info/METADATA")
             .decode("utf-8")
             .splitlines()
         )
-        if not {"Name: yomihime-game-link-sdk", "Version: 0.1.0a6"} <= metadata_lines:
+        if not {"Name: yomihime-game-link-sdk", "Version: 0.1.0a7"} <= metadata_lines:
             raise ValueError("SDK wheel distribution metadata is unsupported")
         package = {name: wheel.read(name) for name in sorted(PACKAGE_ENTRY_NAMES)}
     return package
@@ -309,6 +327,8 @@ def _runtime_files(directory: Path, repository_root: Path) -> list[Path]:
             resolved = validate_source_path(entry, repository_root, "Runtime source")
             metadata = resolved.stat()
             if stat.S_ISDIR(metadata.st_mode):
+                if entry == repository_root / "presentation/assets":
+                    continue
                 if entry.name not in EXCLUDED_RUNTIME_DIRS:
                     pending.append(resolved)
             elif stat.S_ISREG(metadata.st_mode):
@@ -319,6 +339,17 @@ def _runtime_files(directory: Path, repository_root: Path) -> list[Path]:
                     f"Runtime source is not a regular file or directory: {entry}"
                 )
     return found
+
+
+def _font_asset_snapshot(path: Path, repository_root: Path) -> bytes:
+    name = path.relative_to(repository_root).as_posix()
+    size, digest = FONT_ASSETS[name]
+    content = _read_snapshot(
+        path, repository_root, "Bundled font asset", max_bytes=size
+    )
+    if len(content) != size or _sha256(content) != digest:
+        raise ValueError("Bundled font asset differs from its reviewed size/hash")
+    return content
 
 
 def _ff14_bundle_files(repository_root: Path) -> list[Path]:
@@ -360,6 +391,9 @@ def _ff14_bundle_files(repository_root: Path) -> list[Path]:
                 and Path(relative).parts[0] == "features"
                 and resolved.suffix == ".py"
             )
+            if relative in FF14_BUNDLE_ASSET_FILES:
+                # Captured below only through the manifest's hash-checked resource set.
+                continue
             if is_root_file or is_feature_file:
                 found.append(resolved)
             else:
@@ -377,6 +411,16 @@ def _ff14_bundle_files(repository_root: Path) -> list[Path]:
         )
     )
     resources = read_page_resources(package_root, manifest)
+    present_assets = (
+        {
+            path.relative_to(package_root).as_posix()
+            for path in (package_root / "assets").iterdir()
+        }
+        if (package_root / "assets").is_dir()
+        else set()
+    )
+    if not present_assets <= set(resources):
+        raise ValueError("FF14 static asset is not a declared, hash-pinned resource")
     for relative in sorted(FF14_COMPAT_FILES):
         canonical = validate_source_path(
             package_root / relative, repository_root, "FF14 compatibility locator"
@@ -509,6 +553,12 @@ def included_files(root: Path = ROOT) -> list[Path]:
             repository_root / directory, repository_root, "Runtime directory"
         )
         files.extend(_runtime_files(runtime_root, repository_root))
+    for name in FONT_ASSETS:
+        path = validate_source_path(
+            repository_root / name, repository_root, "Bundled font asset"
+        )
+        _font_asset_snapshot(path, repository_root)
+        files.append(path)
     files.extend(_ff14_bundle_files(repository_root))
     has_pages = "pages/shell/module-loader.js" in projected_page_assets(repository_root)
     for name in SHELL_FILES:
@@ -551,7 +601,11 @@ def build(
     ) as archive:
         for path in files:
             name = path.relative_to(repository_root).as_posix()
-            content = _read_snapshot(path, repository_root, "Runtime source")
+            content = (
+                _font_asset_snapshot(path, repository_root)
+                if name in FONT_ASSETS
+                else _read_snapshot(path, repository_root, "Runtime source")
+            )
             if name in page_assets:
                 content = page_assets[name]
             _write_entry(archive, name, content)

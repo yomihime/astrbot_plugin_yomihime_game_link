@@ -6,7 +6,8 @@ import asyncio
 import tempfile
 import weakref
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from functools import partial
 from pathlib import Path
 from secrets import token_urlsafe
 from threading import RLock
@@ -25,7 +26,7 @@ from yomihime_game_link_sdk.errors import (
     ServiceUnavailable,
 )
 from yomihime_game_link_sdk.services import CapabilityHealth, HealthStatus
-from yomihime_game_link_sdk.subscriptions import ConversationKind
+from yomihime_game_link_sdk.subscriptions import ConversationKind, ConversationRef
 
 from ...core.contracts.administration import (
     AdminAuthorizationDenied,
@@ -34,6 +35,7 @@ from ...core.contracts.administration import (
 )
 from ...core.contracts.validation_boundary import validate_contract
 from ...core.help_catalog import HelpCatalog
+from ...core.ports import MessageTarget, RenderedMessage
 from ...core.public_errors import public_boundary
 from ...extensions.factory_resolver import (
     ReviewedInventoryFactorySource,
@@ -41,6 +43,8 @@ from ...extensions.factory_resolver import (
 )
 from ...infrastructure.key_provider import EnvironmentKeyProvider
 from ...infrastructure.secret_codec import AESGCMSecretCodec
+from ...presentation.command_card import CommandCardRenderer
+from ...presentation.command_text import project_command_heading
 from ...presentation.rendering import GenericDisplayRenderer, RenderingBounds
 from ...scripts.prepare_ff14_config_migration import INPUT_FILENAME, load_prepared_input
 from ...services.admin_authorization import AdminAuthorizationService
@@ -51,10 +55,16 @@ from ...services.core_runtime import (
     CoreRuntimeCleanupPending,
     HostIngress,
 )
+from ...services.managed_font import ManagedFont
 from ...services.source_credentials import SourceCredentialPolicy
 from .bundled import BundledExtensionError, install_bundled_ff14
 from .command_bridge import AstrBotCommandBridge, CommandHelp, CommandInvocation
-from .message_port import AstrBotMessagePort, MessageChainFactory, PlainFactory
+from .message_port import (
+    AstrBotMessagePort,
+    ImageFactory,
+    MessageChainFactory,
+    PlainFactory,
+)
 from .trusted_assembly import LegacyAssemblySupport, assemble_reviewed
 from .web_public import (
     HostPublicWebValidator,
@@ -293,6 +303,7 @@ class _IngressEvidence:
     origin: InvocationOrigin = InvocationOrigin.COMMAND
     receipt: _MessageReceipt | None = field(default=None, repr=False)
     tool_handle: object | None = field(default=None, repr=False)
+    command_text: str | None = field(default=None, repr=False)
 
 
 class _AstrBotMessageIngress:
@@ -339,6 +350,9 @@ class _AstrBotMessageIngress:
             origin,
             receipt,
             tool_handle,
+            self._message_receipts._text(event)
+            if origin is InvocationOrigin.COMMAND
+            else None,
         )
         return HostIngress(
             adapter_id=adapter,
@@ -369,6 +383,8 @@ class _AstrBotMessageIngress:
             return False
         try:
             facts = self._read_event_facts(evidence.event)
+            if self._message_receipts._text(evidence.event) != evidence.command_text:
+                return False
         except Exception:
             return False
         return self._identity_current(ingress, evidence, facts)
@@ -486,8 +502,10 @@ class AstrBotRuntime:
         raw_legacy_config: Mapping[str, object] | None = None,
         plain_factory: PlainFactory | None = None,
         chain_factory: MessageChainFactory | None = None,
+        image_factory: ImageFactory | None = None,
         core_factory: Callable[..., CoreRuntime] = CoreRuntime,
         http_transport_factory: Callable[[], object] | None = None,
+        font_manager_factory=ManagedFont,
     ) -> None:
         if context is None:
             raise TypeError("AstrBot Context is required")
@@ -505,6 +523,16 @@ class AstrBotRuntime:
         self._data_dir = Path(data_dir)
         self._plain_factory = plain_factory
         self._chain_factory = chain_factory
+        self._image_factory = image_factory
+        self._managed_font = font_manager_factory(
+            self._data_dir / "resources" / "fonts"
+        )
+        self._command_cards = CommandCardRenderer(
+            font_provider_factory=self._managed_font.provider
+        )
+        self._message_port = None
+        self._help_image_count = 0
+        self._help_tasks = set()
         self._core_factory = core_factory
         if http_transport_factory is not None and not callable(http_transport_factory):
             raise TypeError("http_transport_factory must be callable")
@@ -518,6 +546,9 @@ class AstrBotRuntime:
         self._core: CoreRuntime | None = None
         self._bridge: AstrBotCommandBridge | None = None
         self._tool_publisher = None
+        from .fflogs_diagnostics import FFLogsDiagnostics
+
+        self._fflogs_diagnostics = FFLogsDiagnostics()
         self._http_transport: object | None = None
         self._transport_closed = False
         self._trusted_bundle = False
@@ -589,6 +620,7 @@ class AstrBotRuntime:
                 ),
             )
             self._ready = True
+            self._fflogs_diagnostics.start()
             await self._publish_tools_or_close(core)
             return result
 
@@ -829,7 +861,10 @@ class AstrBotRuntime:
                 self._context,
                 plain_factory=self._plain_factory,
                 chain_factory=self._chain_factory,
+                image_factory=self._image_factory,
+                command_current=self._command_current,
             )
+            self._message_port = message_port
             try:
                 validator = HostPublicWebValidator(
                     self._generation,
@@ -842,6 +877,17 @@ class AstrBotRuntime:
                     raise TypeError("HTTP transport must implement request")
                 if not callable(getattr(self._http_transport, "close", None)):
                     raise TypeError("owned HTTP transport must implement async close")
+                rendering_bounds = RenderingBounds(
+                    max_chars_per_page=3000,
+                    max_lines_per_page=100,
+                    max_fields_per_block=32,
+                    max_rows_per_block=50,
+                    max_asset_read_bytes=1,
+                    max_image_dimension=1,
+                    max_asset_reads=1,
+                    max_blocks_per_document=32,
+                    max_members_per_batch=8,
+                )
                 core = self._core_factory(
                     database=self._data_dir / "runtime.sqlite3",
                     extension_root=extension_root,
@@ -851,18 +897,11 @@ class AstrBotRuntime:
                         EnvironmentKeyProvider("YGL_SECRET_KEY")
                     ),
                     http_transport=self._http_transport,
-                    renderer=GenericDisplayRenderer(
-                        RenderingBounds(
-                            max_chars_per_page=3000,
-                            max_lines_per_page=100,
-                            max_fields_per_block=32,
-                            max_rows_per_block=50,
-                            max_asset_read_bytes=1,
-                            max_image_dimension=1,
-                            max_asset_reads=1,
-                            max_blocks_per_document=32,
-                            max_members_per_batch=8,
-                        )
+                    renderer=GenericDisplayRenderer(rendering_bounds),
+                    command_card_renderer=self._command_cards,
+                    command_heading_projector=partial(
+                        project_command_heading,
+                        max_heading_chars=rendering_bounds.max_chars_per_page,
                     ),
                     display_limits=validate_contract(DisplayLimits(2, 4096)),
                     message_port=message_port,
@@ -977,6 +1016,7 @@ class AstrBotRuntime:
                     )
                 )
             self._web_validator = validator
+            self._managed_font.start()
             try:
                 await core.start()
             except BaseException as exc:
@@ -992,6 +1032,7 @@ class AstrBotRuntime:
                     if self._config_error is None:
                         self._config_error = "ordinary_configuration"
                     return
+                await self._managed_font.close()
                 try:
                     closed = await core.close()
                 except BaseException:
@@ -1023,6 +1064,7 @@ class AstrBotRuntime:
                 ),
             )
             self._ready = True
+            self._fflogs_diagnostics.start()
             await self._publish_tools_or_close(core)
 
     async def _publish_tools_or_close(self, core) -> None:
@@ -1048,6 +1090,7 @@ class AstrBotRuntime:
 
     async def terminate(self) -> None:
         """Stop ingress and close the owned pump/modules/database once."""
+        self._fflogs_diagnostics.close()
         self._generation += 1
         self._message_receipts.close()
         if self._tool_publisher is not None:
@@ -1072,8 +1115,23 @@ class AstrBotRuntime:
             self._closing = False
 
     async def _close_owned_runtime(self) -> None:
+        self._fflogs_diagnostics.close()
+        await self._managed_font.close()
         self._message_receipts.close()
         pending = []
+        help_tasks = {
+            task
+            for task in self._help_tasks
+            if task is not asyncio.current_task() and not task.done()
+        }
+        for task in help_tasks:
+            task.cancel()
+        if help_tasks:
+            _done, unfinished = await asyncio.wait(help_tasks, timeout=5.0)
+            if unfinished:
+                pending.append(
+                    ("help_sends", RuntimeError("help send cleanup pending"))
+                )
         self._ready = False
         self._bridge = None
         if self._tool_publisher is not None:
@@ -1295,9 +1353,16 @@ class AstrBotRuntime:
                     )
                 except Exception:
                     return "命令暂时不可用。"
-                return (
-                    action + f"\n默认区域提示：{region}；"
-                    "缺省区域与显式参数的具体规则见模块帮助。"
+                hint = (
+                    f"默认区域提示：{region}；缺省区域与显式参数的具体规则见模块帮助。"
+                )
+                return CommandHelp(
+                    action + "\n" + hint,
+                    source=(
+                        replace(action.source, hints=(*action.source.hints, hint))
+                        if action.source is not None
+                        else None
+                    ),
                 )
             return action
         if not isinstance(action, CommandInvocation):
@@ -1326,6 +1391,75 @@ class AstrBotRuntime:
             # Never create a second reply that could duplicate an UNKNOWN send.
             return None
         return None
+
+    async def send_help(self, event, text):
+        """Send public help with at most three live PNG/base64 reservations.
+
+        A slot reserves 1 MiB PNG plus 4,194,312 conversion bytes,
+        held through event.send. Excess help requests choose text before send.
+        """
+        task = asyncio.current_task()
+        reserved = False
+        if task is not None:
+            self._help_tasks.add(task)
+        try:
+            ingress = self._make_ingress(event)
+            if not self._command_current(ingress):
+                return
+            reserved = self._help_image_count < 3
+            if reserved:
+                self._help_image_count += 1
+            source = text.source if isinstance(text, CommandHelp) else None
+            card = None
+            theme = "warm_paper"
+            if source is not None:
+                if reserved:
+                    card, theme = await self._core.prepare_help_card(source)
+                else:
+                    # Text-only overflow has no asset or raster reservation.
+                    # Fence retained catalog facts without loading logo bytes.
+                    self._core.require_help_source_current(source)
+            presentation = self._command_cards.help(
+                str(text),
+                image=reserved and (source is None or card is not None),
+                card=card,
+                core_theme=theme,
+            )
+            if source is not None:
+                self._core.require_help_source_current(source)
+            route = ConversationRef(
+                ingress.adapter_id,
+                ingress.conversation_kind,
+                ingress.conversation_id,
+                ingress.delivery_route,
+            )
+            target = MessageTarget(
+                ingress.conversation_id,
+                recipient_id=(
+                    ingress.actor_id if route.kind is ConversationKind.DIRECT else None
+                ),
+                conversation=route,
+            )
+            await self._message_port.send_command(
+                ingress,
+                target,
+                RenderedMessage(
+                    presentation.text,
+                    png_bytes=(
+                        presentation.bitmap.content
+                        if presentation.bitmap is not None
+                        else None
+                    ),
+                ),
+            )
+        except Exception:
+            # The exact-event adapter may already have begun dispatch.
+            return
+        finally:
+            if reserved:
+                self._help_image_count -= 1
+            if task is not None:
+                self._help_tasks.discard(task)
 
     def _is_owner_command(self, invocation: CommandInvocation) -> bool:
         core = self._core
@@ -1391,6 +1525,15 @@ class AstrBotRuntime:
             and publisher is not None
             and any(item is handle for item in publisher.handles)
             and publisher._current(handle)
+        )
+
+    def _command_current(self, ingress):
+        return (
+            self._ready
+            and not self._closing
+            and self._core is not None
+            and self._core.accepting
+            and self._validate_ingress(InvocationOrigin.COMMAND, ingress)
         )
 
     def _make_ingress(
