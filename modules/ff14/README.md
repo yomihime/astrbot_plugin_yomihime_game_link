@@ -46,7 +46,7 @@ python -m astrbot_plugin_yomihime_game_link.scripts.admin_credentials --help
 
 可按区域单独配置 FFLogs OAuth 客户端凭据；管理员须使用宿主提供的加密凭据配置入口。未配置的区域会失败关闭，不会降级成匿名请求。目前国服角色查询已有真实公开 API 历史证据；国际服结果仍为待核对的参考结果，图片成功不代表目录覆盖完整。
 
-`/ygl ff14 output <国服|国际服> <副本名称> <难度> <职业> [metric=rdps] [period=latest]` 目前暂不可用：FFLogs 统计页面返回 HTTP 403，且数据格式未通过验证，不显示分位数据。
+FFLogs 输出统计尚未实现，当前不提供；旧 `output` 指令不再注册。
 
 
 ## 模块徽标来源与权利说明

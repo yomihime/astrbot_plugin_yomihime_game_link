@@ -87,9 +87,44 @@ def build_item_card(record: ItemRecord) -> cards.Document:
         )
     ]
     if record.description:
-        blocks.append(cards.Text(record.description))
+        description, separator, details = record.description.partition("\n")
+        blocks.append(cards.Text(description))
+        if separator and details:
+            blocks.append(cards.Text(details, style="caption"))
+    if record.effects:
+        names = tuple(dict.fromkeys(effect.name for effect in record.effects))
+        values = {(effect.name, effect.quality): effect for effect in record.effects}
+
+        def effect_text(name: str, quality: str) -> str:
+            effect = values.get((name, quality))
+            return (
+                f"+{effect.rate}%（上限 {effect.limit}）"
+                if effect is not None
+                else "未提供"
+            )
+
+        blocks.append(
+            cards.Section(
+                "食用效果",
+                (
+                    cards.Table(
+                        (
+                            cards.Column("属性", 1),
+                            cards.Column("普通品质", 2),
+                            cards.Column("高品质", 2),
+                        ),
+                        tuple(
+                            (name, effect_text(name, "nq"), effect_text(name, "hq"))
+                            for name in names
+                        ),
+                    ),
+                ),
+            )
+        )
     routes = tuple(
-        route for route in record.routes if route.kind is not AcquisitionKind.CRAFT
+        route
+        for route in record.routes
+        if route.kind not in (AcquisitionKind.CRAFT, AcquisitionKind.QUEST)
     )
     if routes:
         blocks.append(
@@ -97,6 +132,17 @@ def build_item_card(record: ItemRecord) -> cards.Document:
                 "获取途径",
                 tuple(block for route in routes for block in _route_blocks(route)),
                 subtitle="已记录的有限途径；缺少关联不代表不可获得",
+            )
+        )
+    quests = tuple(
+        route for route in record.routes if route.kind is AcquisitionKind.QUEST
+    )
+    if quests:
+        blocks.append(
+            cards.Section(
+                "关联任务",
+                tuple(block for route in quests for block in _route_blocks(route)),
+                subtitle="来源关联不表示任务奖励或提交要求",
             )
         )
     for route in record.routes:
@@ -136,12 +182,17 @@ def build_item_card(record: ItemRecord) -> cards.Document:
             cards.Text(f"来源提示：{warning}", style="caption")
             for warning in record.warnings
         )
+    blocks.append(
+        cards.Text(
+            "数据源：XIVAPI-compatible (xivcdn) · Garland Tools CN", style="caption"
+        )
+    )
     return ff14_card(
         record.name,
         category="物品",
         subtitle="最终幻想 XIV · 物品详情",
         blocks=tuple(blocks),
-        sources=("数据源：XIVAPI-compatible (xivcdn) · Garland Tools CN",),
+        layout="table",
     )
 
 

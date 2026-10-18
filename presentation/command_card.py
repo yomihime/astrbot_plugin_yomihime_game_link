@@ -72,6 +72,16 @@ def build_help_card(source: HelpCardSource, *, logos=None) -> cards.Document:
     """Generic catalog-to-card projection; logos are already trusted bytes."""
     logos = logos or {}
     if not source.directory:
+        if source.document.card is not None:
+            return replace(
+                source.document.card,
+                brand=FULL_BRAND,
+                logo=logos.get(source.modules[0].module_id) if source.modules else None,
+                blocks=(
+                    *source.document.card.blocks,
+                    *(cards.Text(hint, style="caption") for hint in source.hints),
+                ),
+            )
         blocks = tuple(
             cards.Text(line)
             for block in source.document.ordered_blocks

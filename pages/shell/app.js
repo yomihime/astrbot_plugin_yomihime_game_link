@@ -742,7 +742,7 @@ function ie(r, i = r.getElementById("management-root"), a = "settings") {
 		disabled: !0
 	}, t), k = (e) => !!(e.mode && e.mode.value !== "keep"), A = (e) => !!(e.mode && e.mode.value !== "keep" || e.clientId?.value || e.clientSecret?.value);
 	function j(e) {
-		let t = e.field, r = t.value_schema, i = q(t), a = `config-${encodeURIComponent(t.module_id)}-${encodeURIComponent(t.name)}`, o = ne(t), s = () => e.inheritBaseline && !e.writePending ? "keep" : "clear", c = () => {
+		let t = e.field, r = t.value_schema, i = q(t), a = `config-${encodeURIComponent(t.module_id)}-${encodeURIComponent(t.name)}`, o = ne(t), s = () => e.inheritBaseline && !e.writePending && !e.baselineUnverified ? "keep" : "clear", c = () => {
 			e.mode && (e.mode.value = te(t) && e.input?.value !== "" && o?.[Number(e.input?.value)] === null ? s() : "replace"), e.draftVersion++, D();
 		};
 		return n(b, {
@@ -1429,7 +1429,7 @@ function Ce(e, t, n, { expectedPage: i = "management", container: a = e.getEleme
 					draftVersion: t.draftVersion
 				}];
 			})), r = _e(e, m[e].revision, n, p), i = r.updates.map((t) => D.get(JSON.stringify([e, t.field])));
-			for (let e of i) e.writePending = !0;
+			for (let e of i) e.writePending = !0, e.baselineUnverified = !0;
 			try {
 				await q("update", r, t), u();
 				try {
@@ -1537,7 +1537,7 @@ function Ce(e, t, n, { expectedPage: i = "management", container: a = e.getEleme
 			}, E.set(t, e)), e.controls = [];
 			for (let r of ce(p, t)) {
 				let i = $(r), a = JSON.stringify(r), o = D.get(i);
-				(!o || o.signature !== a) && (o = ee(r), D.set(i, o));
+				(!o || o.signature !== a) && (o = ee(r), D.set(i, o)), o.baselineUnverified = !1;
 				let s = r.readable ? m[t].fields[r.name] : null;
 				o.inheritBaseline = !!(te(r) && s?.state === "valid" && s.value === null && s.present === !1 && s.source === "default"), o.problem = r.readable ? r.editable ? he(r) ? s?.state === "invalid" ? "当前值无效，请修改或恢复默认。" : "" : "此类型暂不支持编辑。" : "当前只读，请核对模块状态。" : "无读取或修改权限。", he(r) ? (!o.mode || o.mode.value === "keep") && n.push([
 					o,

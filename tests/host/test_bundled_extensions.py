@@ -39,7 +39,6 @@ class BundledExtensionTests(unittest.IsolatedAsyncioTestCase):
         "ff14.market.query",
         "ff14.market.select",
         "ff14.logs.character",
-        "ff14.logs.output_percentile",
         "ff14.calendar.query",
         "ff14.calendar.subscription.create",
         "ff14.calendar.subscription.list",
@@ -196,10 +195,7 @@ class BundledExtensionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(set(handlers.collectors), {"ff14.calendar.collect"})
         self.assertEqual(set(handlers.evaluators), {"ff14.calendar.daily_summary"})
         self.assertEqual(set(health.capabilities), self.EXPECTED_CAPABILITIES)
-        output_health = health.capabilities["ff14.logs.output_percentile"]
-        self.assertIs(output_health.status, HealthStatus.UNAVAILABLE)
-        self.assertIn("HTTP 403", output_health.reason)
-        self.assertIn("尚未验证", output_health.reason)
+        self.assertNotIn("ff14.logs.output_percentile", health.capabilities)
 
     @staticmethod
     def _services(values=None):

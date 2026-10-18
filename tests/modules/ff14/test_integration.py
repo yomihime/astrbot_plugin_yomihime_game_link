@@ -153,11 +153,10 @@ class FF14InstalledModuleTests(unittest.IsolatedAsyncioTestCase):
                 tuple(command.operation_path for command in module_manifest.commands),
                 (
                     "market",
-                    "status",
                     "item",
                     "logs",
-                    "output",
                     "calendar",
+                    "status",
                     "calendar subscribe",
                     "calendar subscriptions",
                     "calendar update",
@@ -179,12 +178,7 @@ class FF14InstalledModuleTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(capabilities["item.lookup"].privacy_floor.value, "public")
             self.assertEqual(capabilities["ff14.logs.character"].required_sources, ())
             self.assertEqual(capabilities["ff14.logs.character"].required_config, ())
-            self.assertEqual(
-                capabilities["ff14.logs.output_percentile"].required_sources, ()
-            )
-            self.assertEqual(
-                capabilities["ff14.logs.output_percentile"].required_config, ()
-            )
+            self.assertNotIn("ff14.logs.output_percentile", capabilities)
             for action in ("create", "update", "cancel"):
                 capability = capabilities[f"ff14.calendar.subscription.{action}"]
                 self.assertEqual(capability.privacy_floor.value, "owner")
@@ -409,13 +403,17 @@ class FF14InstalledModuleTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(enabled.enabled)
                 self.assertEqual(enabled.lifecycle.value, "active")
 
-                output_health, _ = runtime.health_resolver.current(
-                    GLOBAL_MODULE_ID, "ff14.logs.output_percentile"
+                self.assertNotIn(
+                    "ff14.logs.output_percentile",
+                    runtime.registry.snapshot()
+                    .module_for_route("ff14")
+                    .handlers.capabilities,
                 )
-                self.assertIs(output_health.status, HealthStatus.UNAVAILABLE)
-                self.assertIn("HTTP 403", output_health.reason)
-
                 bridge = AstrBotCommandBridge(runtime.registry)
+                self.assertIn(
+                    "未找到命令",
+                    bridge.parse(_TextEvent("/ygl ff14 output 国服 副本 难度 职业")),
+                )
                 parsed_calendar = bridge.parse(
                     _TextEvent(
                         "/ygl ff14 calendar 国际服 days=7 timezone=Asia/Shanghai"
@@ -450,7 +448,10 @@ class FF14InstalledModuleTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(status.result.status.value, "success")
                 self.assertEqual(status.result.privacy.value, "public")
                 self.assertIn("FFLogs", message_port.calls[-1][1].text)
-                self.assertIn("HTTP 403", message_port.calls[-1][1].text)
+                self.assertNotIn("HTTP 403", message_port.calls[-1][1].text)
+                self.assertIn(
+                    "未执行实时健康或凭据检查", message_port.calls[-1][1].text
+                )
 
                 item = await runtime.invoke_command(
                     GLOBAL_MODULE_ID, "item", {"query": "90001"}, ingress=ingress

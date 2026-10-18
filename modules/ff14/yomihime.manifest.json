@@ -391,62 +391,6 @@
           "privacy_floor": "public"
         },
         {
-          "capability_id": "ff14.logs.output_percentile",
-          "input_schema": {
-            "type": "object",
-            "properties": {
-              "realm": {
-                "type": "string",
-                "enum": [
-                  "国服",
-                  "国际服",
-                  "cn",
-                  "global"
-                ]
-              },
-              "encounter": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 160
-              },
-              "difficulty": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 100
-              },
-              "job": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 100
-              },
-              "metric": {
-                "type": "string",
-                "enum": [
-                  "rdps",
-                  "ndps",
-                  "cdps"
-                ]
-              },
-              "period": {
-                "type": "string",
-                "enum": [
-                  "latest"
-                ]
-              }
-            },
-            "required": [
-              "realm",
-              "encounter",
-              "difficulty",
-              "job"
-            ],
-            "additionalProperties": false
-          },
-          "invocation_policy": "command_only",
-          "effect": "read_only",
-          "privacy_floor": "public"
-        },
-        {
           "capability_id": "ff14.calendar.query",
           "input_schema": {
             "type": "object",
@@ -602,13 +546,7 @@
           "parameter_mapping": {},
           "parameter_mode": "raw_tail",
           "raw_tail_parameter": "command",
-          "help_text": "查询物品市场价格与有限挂牌样本。\n用法：/ygl ff14 market <物品名或ID> [server=World dc=大区 region=cn|global quality=all|nq|hq intent=overview|min|listings]\n物品名可用双引号保护；范围可组合但必须一致；server 优先于 dc，dc 优先于 region；省略范围读取 Core 默认区域，省略品质为 all，省略意图为 overview。最低价用 min，挂牌明细最多五条，不代表完整 World 覆盖或实时可买；时间为来源上传时间，不是挂牌时间。\n歧义名称须明确选择；choose <批次> <generation> <物品ID> 续接当前候选，不替用户选择。\n示例：/ygl ff14 market 犎牛牛排 region=cn intent=min"
-        },
-        {
-          "operation_path": "status",
-          "capability_id": "status",
-          "parameter_mapping": {},
-          "help_text": "查看模块状态、凭据要求与数据源限制。\n用法：/ygl ff14 status"
+          "help_text": "查询物品市场价格与有限挂牌样本。\n概览：/ygl ff14 market <物品名或ID>\n用法：/ygl ff14 market <物品名或ID> [server=World dc=大区 region=cn|global quality=all|nq|hq intent=overview|min|listings]\n参数：server / dc / region 指定范围，可组合但必须一致；优先级 server > dc > region。省略范围读取 Core 默认区域，quality 默认 all，intent 默认 overview。\n限制：含空格的物品名用双引号；歧义名称需明确选择。最低价用 intent=min，挂牌明细最多五条，不代表完整覆盖或实时可买；时间为来源上传时间。\n参数：choose <批次> <generation> <物品ID> 续接当前候选。\n示例：/ygl ff14 market 犎牛牛排 region=cn intent=min"
         },
         {
           "operation_path": "item",
@@ -616,7 +554,7 @@
           "parameter_mapping": {
             "query": "query"
           },
-          "help_text": "按名称或 ID 查询物品信息与已验证获取途径。\n用法：/ygl ff14 item <物品名称或数字ID>\n示例：/ygl ff14 item 铜矿"
+          "help_text": "按名称或 ID 查询物品信息与已验证获取途径。\n概览：/ygl ff14 item <物品名称或数字ID>\n用法：/ygl ff14 item <物品名称或数字ID>\n示例：/ygl ff14 item 铜矿"
         },
         {
           "operation_path": "logs",
@@ -624,20 +562,7 @@
           "parameter_mapping": {},
           "parameter_mode": "raw_tail",
           "raw_tail_parameter": "command",
-          "help_text": "查询 FFLogs 公开角色战绩；服务器目录自动确定国服或国际服，需对应区域凭据。\n用法：/ygl ff14 logs <服务器名> <角色名> [server_hint=名称] [metric=rdps|ndps|cdps] [zone_id=N difficulty=N partition=N]\n国服与国际服凭据分开配置；目录不可用、名称未知或区域歧义时不猜测。含空格的名称用双引号；旧的地区位置参数不再支持。"
-        },
-        {
-          "operation_path": "output",
-          "capability_id": "ff14.logs.output_percentile",
-          "parameter_mapping": {
-            "realm": "realm",
-            "encounter": "encounter",
-            "difficulty": "difficulty",
-            "job": "job",
-            "metric": "metric",
-            "period": "period"
-          },
-          "help_text": "查询 FFLogs 输出统计；当前来源不可用。\n用法：/ygl ff14 output <国服|国际服> <副本名称> <难度> <职业> [metric=rdps] [period=latest]\nFFLogs 统计页面当前因 HTTP 403 暂不可用，数据格式尚未验证。"
+          "help_text": "查询 FFLogs 公开角色战绩，需对应区域凭据。\n概览：/ygl ff14 logs <服务器名> <角色名>\n用法：/ygl ff14 logs <服务器名> <角色名> [server_hint=名称] [metric=rdps|ndps|cdps] [zone_id=N difficulty=N partition=N]\n参数：服务器目录自动确定国服或国际服；metric 可选 rdps / ndps / cdps。server_hint 用于区分同名服务器；zone_id / difficulty / partition 用于精确筛选。\n限制：国服与国际服凭据分开配置；目录不可用、名称未知或区域歧义时不猜测。含空格的名称用双引号；不支持旧的地区位置参数。\n示例：/ygl ff14 logs 紫水栈桥 \"角色名\""
         },
         {
           "operation_path": "calendar",
@@ -647,7 +572,13 @@
             "days": "days",
             "timezone": "timezone"
           },
-          "help_text": "查询活动日历。\n用法：/ygl ff14 calendar <国服|国际服> [days=7] [timezone=Asia/Shanghai]\n省略 days 与 timezone 读取模块配置；days 为 1–30，范围从指定时区的本地日期起算。"
+          "help_text": "查看活动日历与订阅指令。\n概览：/ygl ff14 calendar <国服|国际服> [days=7]\n用法：/ygl ff14 calendar <国服|国际服> [days=7] [timezone=Asia/Shanghai]\n参数：days 为 1–30；省略 days 与 timezone 读取模块配置。范围从指定时区的本地日期起算。\n示例：/ygl ff14 calendar 国服 days=7"
+        },
+        {
+          "operation_path": "status",
+          "capability_id": "status",
+          "parameter_mapping": {},
+          "help_text": "查看模块状态、凭据要求与数据源限制。\n概览：/ygl ff14 status\n用法：/ygl ff14 status"
         },
         {
           "operation_path": "calendar subscribe",
@@ -657,7 +588,7 @@
             "timezone": "timezone",
             "time": "time"
           },
-          "help_text": "显式创建本人每日摘要订阅。\n用法：/ygl ff14 calendar subscribe <国服|国际服> [timezone=Asia/Shanghai] [time=08:00]\n仅本人私聊；省略 timezone 与 time 读取模块配置；每 15 分钟采集一次，不承诺设定时刻精准投递。"
+          "help_text": "创建本人的每日活动摘要订阅。\n概览：/ygl ff14 calendar subscribe <国服|国际服>\n用法：/ygl ff14 calendar subscribe <国服|国际服> [timezone=Asia/Shanghai] [time=08:00]\n参数：省略 timezone 与 time 读取模块配置。\n限制：每 15 分钟采集一次，不承诺设定时刻精准投递。\n示例：/ygl ff14 calendar subscribe 国服 time=08:00"
         },
         {
           "operation_path": "calendar subscriptions",
@@ -665,7 +596,7 @@
           "parameter_mapping": {
             "page": "page"
           },
-          "help_text": "分页查看本人日历订阅。\n用法：/ygl ff14 calendar subscriptions [page=1]\n仅本人私聊；page 从 1 起。"
+          "help_text": "分页查看本人的日历订阅。\n概览：/ygl ff14 calendar subscriptions\n用法：/ygl ff14 calendar subscriptions [page=1]\n参数：page 从 1 起，默认为 1。"
         },
         {
           "operation_path": "calendar update",
@@ -676,7 +607,7 @@
             "timezone": "timezone",
             "time": "time"
           },
-          "help_text": "更新本人订阅并校验版本。\n用法：/ygl ff14 calendar update <subscription-id> <expected-revision> [timezone=IANA] [time=HH:MM]\n仅本人私聊；使用 subscriptions 返回的 ID 与 revision，至少指定一个更新字段。"
+          "help_text": "更新本人的订阅时间或时区。\n概览：/ygl ff14 calendar update <subscription-id> <expected-revision> time=HH:MM\n用法：/ygl ff14 calendar update <subscription-id> <expected-revision> [timezone=IANA] [time=HH:MM]\n参数：使用 subscriptions 返回的 ID 与 revision；至少指定 timezone 或 time 中的一个更新字段。"
         },
         {
           "operation_path": "calendar cancel",
@@ -685,7 +616,7 @@
             "subscription_id": "subscription_id",
             "expected_revision": "expected_revision"
           },
-          "help_text": "取消本人订阅并校验版本。\n用法：/ygl ff14 calendar cancel <subscription-id> <expected-revision>\n仅本人私聊；使用 subscriptions 返回的 ID 与 revision。"
+          "help_text": "取消本人的日历订阅。\n概览：/ygl ff14 calendar cancel <subscription-id> <expected-revision>\n用法：/ygl ff14 calendar cancel <subscription-id> <expected-revision>\n参数：使用 subscriptions 返回的 ID 与 revision。"
         }
       ],
       "tools": [

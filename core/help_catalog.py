@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from yomihime_game_link_sdk.contexts import InvocationOrigin
-from yomihime_game_link_sdk.declarations import InvocationPolicy, PrivacyFloor
+from yomihime_game_link_sdk import cards
+from yomihime_game_link_sdk.declarations import PrivacyFloor
 from yomihime_game_link_sdk.display import CommandsBlock, DisplayDocument, TextBlock
-from yomihime_game_link_sdk.services import CapabilityHealth, HealthStatus
+from yomihime_game_link_sdk.services import CapabilityHealth
 
 from ..core.contracts.validation_boundary import validate_contract
 from .registry import RegisteredModule, RegistryError, RegistrySnapshot
@@ -110,36 +110,31 @@ class HelpCatalog:
         if not self._visible(module):
             return self._unknown_route_document(route)
 
-        status = "已启用" if module.enabled else "未启用"
         manifest = module.manifest
-        intro = validate_contract(
-            TextBlock(
-                f"模块：{manifest.route}\n状态：{status}\n"
-                "在命令路径后加 help 查看参数与例子；执行时仍校验状态和调用来源。"
-            )
+        commands = self._children(manifest.commands)
+        entries = tuple(self._overview(manifest.route, command) for command in commands)
+        hint = "子命令与可选参数：在对应命令后加 help"
+        blocks = (
+            validate_contract(TextBlock(hint)),
+            validate_contract(
+                CommandsBlock(
+                    tuple(f"{usage}\n{summary}" for usage, summary in entries),
+                    fallback_text="该模块没有声明命令。" if not entries else None,
+                )
+            ),
         )
-        commands = tuple(
-            self._command_line(
-                module, command_only=False, health_query=self._health_query
-            )
-        )
-        if not commands:
-            command_block = validate_contract(
-                CommandsBlock((), fallback_text="该模块没有声明命令。")
-            )
-        else:
-            command_block = validate_contract(CommandsBlock(commands))
-        examples = tuple(
-            line
-            for command in manifest.commands
-            for line in command.help_text.splitlines()[1:]
-            if line.startswith("示例：")
-        )[:2]
-        blocks = (intro, command_block)
-        if examples:
-            blocks += (validate_contract(TextBlock("\n".join(examples))),)
+        card_blocks = tuple(self._compact_card(*entry) for entry in entries)
         return validate_contract(
-            DisplayDocument(f"{manifest.route} 模块帮助", manifest.route, blocks)
+            DisplayDocument(
+                f"{manifest.route} 模块帮助",
+                manifest.route,
+                blocks,
+                card=cards.Document(
+                    f"{self.display_name(module)} · 模块帮助",
+                    (*card_blocks, cards.Text(hint, style="caption")),
+                    layout="table",
+                ),
+            )
         )
 
     def command(
@@ -175,22 +170,107 @@ class HelpCatalog:
                     ),
                 )
             )
-        line = next(
-            line
-            for line in self._command_line(
-                module, command_only=False, health_query=self._health_query
-            )
-            if line.startswith(f"/ygl {route} {operation_path} help —")
+        # The module owns wording. Only explicitly declared labels are parsed;
+        # legacy prose stays intact, and the overview-only line is not repeated.
+        lines = command.help_text.splitlines()
+        detail_lines = [
+            lines[0],
+            *(line for line in lines[1:] if not line.startswith("概览：")),
+        ]
+        capability = next(
+            item
+            for item in module.manifest.capabilities
+            if item.capability_id == command.capability_id
         )
+        if capability.privacy_floor is PrivacyFloor.OWNER:
+            detail_lines.append("权限：仅本人私聊可用")
+        elif capability.privacy_floor is PrivacyFloor.PRIVATE:
+            detail_lines.append("权限：需要个人授权")
+        children = self._children(module.manifest.commands, operation_path)
+        entries = tuple(self._overview(route, child) for child in children)
+        blocks = [validate_contract(TextBlock("\n".join(detail_lines)))]
+        card_blocks = [cards.Text(detail_lines[0])]
+        for line in detail_lines[1:]:
+            label, separator, body = line.partition("：")
+            if separator and label in ("用法", "示例", "参数", "限制", "权限"):
+                card_blocks.append(cards.Section(label, (cards.Text(body),)))
+            else:
+                card_blocks.append(cards.Text(line))
+        if entries:
+            blocks.append(
+                validate_contract(
+                    CommandsBlock(
+                        tuple(
+                            f"{usage}\n{summary}\n/ygl {route} {child.operation_path} help"
+                            for child, (usage, summary) in zip(children, entries)
+                        )
+                    )
+                )
+            )
+            card_blocks.append(
+                cards.Text("子命令 · 在命令后加 help 查看参数", style="heading")
+            )
+            card_blocks.extend(self._compact_card(*entry) for entry in entries)
         return validate_contract(
             DisplayDocument(
                 f"{route} {operation_path} 帮助",
                 route,
-                (
-                    validate_contract(TextBlock(line)),
-                    validate_contract(TextBlock(command.help_text)),
+                tuple(blocks),
+                card=cards.Document(
+                    f"{self.display_name(module)} · {operation_path} 帮助",
+                    tuple(card_blocks),
+                    layout="table",
                 ),
             )
+        )
+
+    @staticmethod
+    def _children(commands, parent=""):
+        """Nearest declared prefix wins; undeclared intermediate paths need no metadata."""
+        paths = {command.operation_path for command in commands}
+        result = []
+        for command in commands:
+            parts = command.operation_path.split()
+            ancestors = [
+                " ".join(parts[:i])
+                for i in range(1, len(parts))
+                if " ".join(parts[:i]) in paths
+            ]
+            if (ancestors[-1] if ancestors else "") == parent:
+                result.append(command)
+        return tuple(result)
+
+    @staticmethod
+    def _overview(route, command):
+        # 概览 is an optional, bounded single-line declaration, never inferred by
+        # stripping optional arguments from free-form usage or descriptions.
+        prefix = f"/ygl {route} {command.operation_path}"
+        usage = next(
+            (
+                line.removeprefix("概览：").strip()
+                for line in command.help_text.splitlines()[1:]
+                if line.startswith("概览：")
+            ),
+            "",
+        )
+        if len(usage) > 512 or not (usage == prefix or usage.startswith(prefix + " ")):
+            usage = prefix + " help"
+        return usage, command.help_text.splitlines()[0]
+
+    @staticmethod
+    def _compact_card(usage, summary):
+        return cards.Section(
+            "",
+            (
+                cards.Text(
+                    cards.Inline(
+                        (
+                            cards.Span(usage + "\n", emphasis="strong"),
+                            cards.Span(summary, emphasis="secondary"),
+                        )
+                    )
+                ),
+            ),
         )
 
     @staticmethod
@@ -203,82 +283,6 @@ class HelpCatalog:
         return tuple(
             sorted(snapshot.modules.values(), key=lambda item: item.manifest.route)
         )
-
-    @staticmethod
-    def _command_line(
-        module,
-        *,
-        command_only: bool,
-        health_query: Callable[[str, str], tuple[CapabilityHealth, int]] | None,
-    ) -> list[str]:
-        validate_contract(health_query)
-        manifest = module.manifest
-        capabilities = {
-            capability.capability_id: capability for capability in manifest.capabilities
-        }
-        lines: list[str] = []
-        for command in manifest.commands:
-            capability = capabilities[command.capability_id]
-            if command_only and (
-                InvocationOrigin.COMMAND not in capability.effective_origins
-                or (
-                    capability.invocation_origins is None
-                    and capability.invocation_policy
-                    is InvocationPolicy.NATURAL_LANGUAGE_ALLOWED
-                )
-            ):
-                continue
-            command_text = f"/ygl {manifest.route} {command.operation_path} help"
-            if command_only:
-                lines.append(command_text)
-                continue
-            policy = {
-                InvocationPolicy.COMMAND_ONLY: "必须通过命令",
-                InvocationPolicy.COMMAND_AND_PUBLIC_WEB: "命令或已授权的公开网页入口",
-                InvocationPolicy.NATURAL_LANGUAGE_ALLOWED: "允许自然语言",
-            }[capability.invocation_policy]
-            if capability.invocation_origins is not None:
-                policy = " / ".join(
-                    {
-                        InvocationOrigin.COMMAND: "命令",
-                        InvocationOrigin.WEB_PUBLIC: "已授权公开网页",
-                        InvocationOrigin.LLM_TOOL: "普通聊天工具",
-                    }[origin]
-                    for origin in capability.effective_origins
-                )
-            privacy = {
-                PrivacyFloor.PRIVATE: "需要个人授权",
-                PrivacyFloor.OWNER: "仅本人私聊可用",
-                PrivacyFloor.PUBLIC: "公开能力",
-            }[capability.privacy_floor]
-            status = "模块未启用" if not module.enabled else "可用性由执行时状态校验"
-            if health_query is not None:
-                status = HelpCatalog._health_label(
-                    health_query, module.module_id, capability.capability_id
-                )
-            lines.append(
-                f"{command_text} — {command.help_text.splitlines()[0]}（{policy}；{privacy}；{status}）"
-            )
-        return lines
-
-    @staticmethod
-    def _health_label(health_query, module_id: str, capability_id: str) -> str:
-        try:
-            health, revision = health_query(module_id, capability_id)
-            if (
-                not isinstance(health, CapabilityHealth)
-                or isinstance(revision, bool)
-                or not isinstance(revision, int)
-                or revision < 0
-            ):
-                raise ValueError
-        except Exception:
-            return "状态未知"
-        if health.status is HealthStatus.AVAILABLE:
-            return "当前可用"
-        if health.status is HealthStatus.UNAVAILABLE:
-            return "当前不可用"
-        return "状态未知"
 
     @staticmethod
     def _unknown_route_document(route: str) -> DisplayDocument:

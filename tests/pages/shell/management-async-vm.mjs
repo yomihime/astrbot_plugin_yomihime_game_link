@@ -25,7 +25,30 @@ function secrets(){return [...document.querySelectorAll('[data-role=client_id],[
 async function draftSecrets(){for(const card of document.querySelectorAll('[data-credential]')){edit(card.querySelector('select'),'replace','change');for(const node of card.querySelectorAll('[data-role=client_id],[data-role=client_secret]'))edit(node,'synthetic-test-pair');for(const node of card.querySelectorAll('[data-action=reveal]'))click(node);}edit(field('default_region','game_link/core').querySelector('[data-role=value]'),'1');await flush();assert.ok(secrets().every(n=>n.value&&n.type==='text'));}
 try{
  const app=module('/app.js');await app.link((specifier,ref)=>module(new URL(specifier,ref.identifier).pathname));await app.evaluate();await flush();assert.ok(input());
- if(['inherit','default','unchanged','conflict','read-failure'].includes(scenario)){
+ if(scenario.startsWith('after-failure-')){
+  const conflict=scenario==='after-failure-conflict',denied=scenario==='after-failure-denied',unchanged=scenario==='after-failure-unchanged';
+  edit(input(),'2','change');
+  if(conflict)fixture.failNext('admin/update','revision_conflict');
+  else fixture.failNext('admin/read',denied?'admin_authorization_denied':'fixture_network_failure');
+  click(save());await flush();assert.equal(writes().length,1);assert.equal(save().getAttribute('aria-disabled'),'true');
+  if(!unchanged){
+   if(scenario==='after-failure-default')click(field().querySelector('[data-action=default]'));else edit(input(),'0','change');
+   await flush();assert.equal(input().value,'0');assert.equal(mode(),'clear','a failed verification must not make the old inherited baseline authoritative');
+  }
+  // A second failed read must not consume the uncertainty or newer draft.
+  fixture.failNext('admin/read','fixture_network_failure');click(refresh());await flush();assert.equal(save().getAttribute('aria-disabled'),'true');assert.equal(input().value,unchanged?'2':'0');
+  click(refresh());await flush();assert.equal(input().value,unchanged?'2':'0');assert.equal(save().getAttribute('aria-disabled'),'false');
+  if(unchanged){assert.equal(mode(),'replace');click(document.querySelector('section[data-owner="ff14/ff14"] [data-action=discard]'));await flush();assert.equal(mode(),'keep');assert.equal(input().value,'2');}
+  else{
+   assert.equal(mode(),'clear');
+   if(scenario==='after-failure-owner'){
+    const other=field('reply_theme','example/demo');assert.equal(other.querySelector('[data-role=value]').value,'3');assert.equal(other.querySelector('[data-role=mode]').value,'keep');
+   }
+   click(save());await flush();assert.deepEqual(writes().at(-1).body,{module_id:'ff14/ff14',expected_revision:conflict?7:8,updates:[{field:'reply_theme',mode:'clear'}]});assert.equal(input().value,'0');assert.equal(mode(),'keep');
+   // Once verified, inherited absence is again a no-op, not a permanent clear.
+   edit(input(),'0','change');await flush();assert.equal(mode(),'keep');assert.equal(writes().length,2);
+  }
+ }else if(['inherit','default','unchanged','conflict','read-failure'].includes(scenario)){
   edit(input(),'2','change');if(scenario==='conflict')fixture.failNext('admin/update','revision_conflict');fixture.hold('admin/update');click(save());await flush();assert.equal(writes().length,1);
   if(scenario!=='unchanged'){if(scenario==='default')click(field().querySelector('[data-action=default]'));else edit(input(),'0','change');}
   if(scenario==='read-failure')fixture.failNext('admin/read','fixture_network_failure');fixture.release('admin/update');await flush();

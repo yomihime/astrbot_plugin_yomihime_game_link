@@ -209,7 +209,7 @@ function E(r, u = r.getElementById("management-root"), p = "settings") {
 		disabled: !0
 	}, t), I = (e) => !!(e.mode && e.mode.value !== "keep"), L = (e) => !!(e.mode && e.mode.value !== "keep" || e.clientId?.value || e.clientSecret?.value);
 	function R(e) {
-		let t = e.field, r = t.value_schema, i = b(t), a = `config-${encodeURIComponent(t.module_id)}-${encodeURIComponent(t.name)}`, o = te(t), s = () => e.inheritBaseline && !e.writePending ? "keep" : "clear", c = () => {
+		let t = e.field, r = t.value_schema, i = b(t), a = `config-${encodeURIComponent(t.module_id)}-${encodeURIComponent(t.name)}`, o = te(t), s = () => e.inheritBaseline && !e.writePending && !e.baselineUnverified ? "keep" : "clear", c = () => {
 			e.mode && (e.mode.value = w(t) && e.input?.value !== "" && o?.[Number(e.input?.value)] === null ? s() : "replace"), e.draftVersion++, P();
 		};
 		return n(h, {
@@ -896,7 +896,7 @@ function V(e, t, n, { expectedPage: i = "management", container: a = e.getElemen
 					draftVersion: t.draftVersion
 				}];
 			})), r = ae(e, m[e].revision, n, f), i = r.updates.map((t) => F.get(JSON.stringify([e, t.field])));
-			for (let e of i) e.writePending = !0;
+			for (let e of i) e.writePending = !0, e.baselineUnverified = !0;
 			try {
 				await X("update", r, t), l();
 				try {
@@ -1004,7 +1004,7 @@ function V(e, t, n, { expectedPage: i = "management", container: a = e.getElemen
 			}, A.set(t, e)), e.controls = [];
 			for (let r of P(f, t)) {
 				let i = N(r), a = JSON.stringify(r), o = F.get(i);
-				(!o || o.signature !== a) && (o = he(r), F.set(i, o));
+				(!o || o.signature !== a) && (o = he(r), F.set(i, o)), o.baselineUnverified = !1;
 				let s = r.readable ? m[t].fields[r.name] : null;
 				o.inheritBaseline = !!(w(r) && s?.state === "valid" && s.value === null && s.present === !1 && s.source === "default"), o.problem = r.readable ? r.editable ? ie(r) ? s?.state === "invalid" ? "当前值无效，请修改或恢复默认。" : "" : "此类型暂不支持编辑。" : "当前只读，请核对模块状态。" : "无读取或修改权限。", ie(r) ? (!o.mode || o.mode.value === "keep") && n.push([
 					o,

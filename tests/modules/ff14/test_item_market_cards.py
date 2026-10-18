@@ -126,7 +126,7 @@ class ItemCardTests(unittest.IsolatedAsyncioTestCase):
             "44091",
             "684",
             "1",
-            "获取途径",
+            "关联任务",
             "制作材料",
             *record.routes[0].details,
         ):

@@ -131,6 +131,32 @@ class AcquisitionRoute:
 
 
 @dataclass(frozen=True, slots=True)
+class ItemEffect:
+    """One optional, source-provided food attribute for one quality."""
+
+    name: str
+    quality: str
+    rate: int
+    limit: int
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.name, str)
+            or not 1 <= len(self.name) <= 80
+            or not self.name.strip()
+            or any(ord(c) < 32 or 127 <= ord(c) <= 159 for c in self.name)
+        ):
+            raise ValueError("effect name must be bounded single-line text")
+        if self.quality not in ("nq", "hq"):
+            raise ValueError("effect quality must be nq or hq")
+        if any(
+            type(v) is not int or not 0 <= v <= 1_000_000
+            for v in (self.rate, self.limit)
+        ):
+            raise ValueError("effect values must be bounded non-negative integers")
+
+
+@dataclass(frozen=True, slots=True)
 class ItemRecord:
     item_id: int
     name: str
@@ -140,6 +166,7 @@ class ItemRecord:
     routes: tuple[AcquisitionRoute, ...] = ()
     source_urls: tuple[str, ...] = ()
     warnings: tuple[str, ...] = ()
+    effects: tuple[ItemEffect, ...] = ()
 
     def __post_init__(self) -> None:
         if type(self.item_id) is not int or self.item_id < 1:
@@ -165,6 +192,12 @@ class ItemRecord:
             not isinstance(value, str) or not value.strip() for value in self.warnings
         ):
             raise ValueError("warnings must be non-empty text values")
+        if (
+            not isinstance(self.effects, tuple)
+            or len(self.effects) > 16
+            or any(not isinstance(value, ItemEffect) for value in self.effects)
+        ):
+            raise ValueError("effects must contain at most 16 ItemEffect values")
         object.__setattr__(self, "name", self.name.strip())
         if self.description is not None:
             object.__setattr__(self, "description", self.description.strip() or None)
@@ -174,6 +207,7 @@ __all__ = [
     "AcquisitionKind",
     "AcquisitionRoute",
     "ItemAmount",
+    "ItemEffect",
     "ItemCandidate",
     "ItemRecord",
     "ItemSearchPage",

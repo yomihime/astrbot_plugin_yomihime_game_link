@@ -176,7 +176,7 @@ export function createManagementPage(document,bridge,window,{expectedPage='manag
       const body=updateBody(target,snapshot[target].revision,selected,catalog),submitted=body.updates.map(update=>controls.get(JSON.stringify([target,update.field])));
       // An inherited selection made after submission is a new clear intent,
       // even while the last verified baseline still says inherited absence.
-      for(const c of submitted)c.writePending=true;
+      for(const c of submitted){c.writePending=true;c.baselineUnverified=true;}
       try{
       await post('update',body,attempt);onConfigurationSaved();
       try{await refresh(attempt);}catch(error){if(!current(attempt))throw error;stale=true;fail(managementAccessLost(error)?'write_ack_authorization_denied':'write_ack_readback_unverified');}
@@ -227,6 +227,9 @@ export function createManagementPage(document,bridge,window,{expectedPage='manag
       card.controls=[];
       for(const f of ownedFields(catalog,target)){
         const k=key(f),signature=JSON.stringify(f);let c=controls.get(k);if(!c||c.signature!==signature){c=makeControl(f);controls.set(k,c);}
+        // Only a current verified read can restore trust in the baseline. A failed
+        // write/readback must retain this fence after the operation has finished.
+        c.baselineUnverified=false;
         const row=f.readable?snapshot[target].fields[f.name]:null;c.inheritBaseline=Boolean(followsCoreTheme(f)&&row?.state==='valid'&&row.value===null&&row.present===false&&row.source==='default');c.problem=!f.readable?'无读取或修改权限。':!f.editable?'当前只读，请核对模块状态。':!supported(f)?'此类型暂不支持编辑。':row?.state==='invalid'?'当前值无效，请修改或恢复默认。':'';
         if(!supported(f))reset.push([c,row?.state==='valid'?JSON.stringify(row.value):'',c.mode?.value,c.input?.value,c.draftVersion]);else if(!c.mode||c.mode.value==='keep')reset.push([c,row?.state==='valid'?inputValue(f,row.value):'',c.mode?.value,c.input?.value,c.draftVersion]);
         card.controls.push(c);

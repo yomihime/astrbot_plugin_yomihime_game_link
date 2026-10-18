@@ -98,10 +98,19 @@ def _item_result(record: ItemRecord, *, partial: bool) -> CapabilityResult:
             f"装备等级：{record.equip_level if record.equip_level is not None else '未提供'}"
         ),
     ]
+    if record.effects:
+        effects = "；".join(
+            f"{effect.name}（{'普通品质' if effect.quality == 'nq' else '高品质'}）"
+            f"+{effect.rate}%（上限 {effect.limit}）"
+            for effect in record.effects
+        )
+        blocks[1] = TextBlock(blocks[1].text + "\n食用效果：" + effects)
     if record.description:
         blocks.append(TextBlock(record.description))
     if record.routes:
-        blocks.append(TextBlock("获取途径（有限展示，缺少关联不代表不可获得）："))
+        blocks.append(
+            TextBlock("获取途径与关联记录（有限展示，缺少关联不代表不可获得）：")
+        )
         for route in record.routes:
             completeness = "（部分信息）" if route.partial else ""
             blocks.append(

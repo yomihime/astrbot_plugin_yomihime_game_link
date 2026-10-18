@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from dateutil.tz import datetime_exists, resolve_imaginary
 
+from yomihime_game_link_sdk import cards
 from yomihime_game_link_sdk.display import (
     DisplayDocument,
     Link,
@@ -31,6 +32,7 @@ from yomihime_game_link_sdk.subscriptions import (
     SubscriptionView,
 )
 
+from ..presentation import ff14_card
 from .calendar_models import CalendarOccurrence
 
 SUMMARY_TYPE_ID = "ff14.calendar.daily_summary"
@@ -309,7 +311,69 @@ def build_calendar_document(
                 f"无时区标记的时间按 {interpretation_timezone} 解释；这不代表发布者时区。"
             )
         )
+    card_blocks: list[cards.Block] = [
+        cards.PropertyGrid(
+            (
+                cards.Property(
+                    "查询日期",
+                    f"{local_date:%Y.%m.%d} — "
+                    f"{local_date + timedelta(days=days - 1):%Y.%m.%d}",
+                ),
+                cards.Property("时区", timezone_name),
+            ),
+            columns=2,
+        )
+    ]
+    for item in selected[:MAX_DISPLAY_EVENTS]:
+        if item.all_day:
+            ongoing = item.start <= local_now.date()
+        else:
+            ongoing = item.start <= now
+        end = (
+            f"{item.end - timedelta(days=1):%Y-%m-%d}（全天）"
+            if item.all_day
+            else _format_end(item, zone)
+        )
+        card_blocks.append(
+            cards.Section(
+                _bounded_summary(item.summary),
+                (
+                    cards.PropertyGrid(
+                        (
+                            cards.Property(
+                                "日历状态", "进行中" if ongoing else "尚未开始"
+                            ),
+                            cards.Property("截止时间", end),
+                        ),
+                        columns=2,
+                    ),
+                    cards.Text(
+                        "开始时间：" + _format_start(item, zone), style="caption"
+                    ),
+                ),
+            )
+        )
+    # Keep all omission, interpretation, partial-source and freshness caveats.
+    card_blocks.extend(
+        cards.Text(block.text, style="caption")
+        for block in blocks[2:]
+        if isinstance(block, TextBlock)
+    )
+    card_blocks.append(
+        cards.Text(
+            f"来源：{source_label}\n获取：{local_now:%Y.%m.%d %H:%M} · {timezone_name}",
+            style="caption",
+        )
+    )
     return DisplayDocument(
+        card=ff14_card(
+            "活动日历",
+            category="日历",
+            blocks=tuple(card_blocks),
+            subtitle="最终幻想 XIV · "
+            + ("国服" if source_variant.startswith("cn_") else "国际服"),
+            layout="table",
+        ),
         title="FF14 活动日历摘要" if days == DAILY_WINDOW_DAYS else "FF14 活动日历",
         subject=f"{local_date.isoformat()} 起 {days} 个本地日历日",
         ordered_blocks=tuple(blocks),
