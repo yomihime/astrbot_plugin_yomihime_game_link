@@ -456,6 +456,8 @@ class CoreRuntime:
         module_host_config_snapshots: Mapping[str, Mapping[str, object]] | None = None,
         public_web_validator: PublicWebProofValidator | None = None,
         public_web_capabilities: frozenset[tuple[str, str]] = frozenset(),
+        capability_timeouts: Mapping[tuple[str, str], float] | None = None,
+        collector_timeouts: Mapping[tuple[str, str], float] | None = None,
         source_credential_policies: Sequence[SourceCredentialPolicy] = (),
         managed_source_credentials=(),
         factory_source: FactorySourcePort | None = None,
@@ -494,6 +496,30 @@ class CoreRuntime:
             raise ValueError("identity_namespace is required")
         bundled_defaults = _normalize_bundled_defaults(trusted_bundled_defaults)
         bundled_manifests = _normalize_bundled_manifests(trusted_bundled_manifests)
+        from ..core.invocation_budget import (
+            InvocationBudgetPolicy,
+            freeze_execution_timeouts,
+        )
+
+        capability_timeouts = freeze_execution_timeouts(
+            capability_timeouts,
+            targets={
+                (owner, item.capability_id)
+                for owner, manifest in bundled_manifests.items()
+                for item in manifest.capabilities
+            },
+        )
+        collector_timeouts = freeze_execution_timeouts(
+            collector_timeouts,
+            targets={
+                (owner, item.collector_id)
+                for owner, manifest in bundled_manifests.items()
+                for item in manifest.schedules
+            },
+        )
+        self._budget_policy = InvocationBudgetPolicy(
+            command_timeout, capability_timeouts
+        )
         subscription_gates = _normalize_subscription_gates(
             trusted_subscription_gates, bundled_manifests
         )
@@ -753,6 +779,7 @@ class CoreRuntime:
 
         self.scheduler = SharedCollectionScheduler(
             diagnostics=self.sync_diagnostics,
+            collector_timeouts=collector_timeouts,
             registry=self.registry,
             issuer=self.issuer,
             lifecycle=self.lifecycle,
@@ -827,9 +854,6 @@ class CoreRuntime:
             owner_cleanup=owner_cleanup,
         )
         self.admin_facade = AdminFacade(self.admin_operations, self.admin_authorization)
-        from ..core.invocation_budget import InvocationBudgetPolicy
-
-        self._budget_policy = InvocationBudgetPolicy(command_timeout)
         self.gateway = Gateway(
             self.registry,
             self.issuer,
@@ -1517,7 +1541,11 @@ class CoreRuntime:
             ):
                 raise PermissionError("module changed while ingress was being prepared")
             deadline = self._budget_policy.deadline(
-                origin, self._monotonic_clock(), self._handler_timeout
+                origin,
+                self._monotonic_clock(),
+                self._handler_timeout,
+                module_id=module_id,
+                capability_id=capability_id,
             )
             view = self.issuer.issue(
                 origin=origin,

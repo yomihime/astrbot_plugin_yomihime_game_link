@@ -125,6 +125,71 @@ class TrustedAssemblyTests(unittest.TestCase):
                 install_bundled_ff14(self.plugin, self.data)
         self.assertEqual(list(self.data.iterdir()), [])
 
+    def test_execution_budgets_are_selected_closed_typed_and_old_descriptor_compatible(
+        self,
+    ):
+        from ygl_test_subject.adapters.astrbot.trusted_assembly import assemble_reviewed
+        from ygl_test_subject.modules.ff14.assembly import SUPPORT
+
+        inventory = install_bundled_ff14(self.plugin, self.data).inventory
+        descriptor = json.loads(inventory.files["assembly.json"])
+
+        def assemble(value):
+            return assemble_reviewed(
+                replace(
+                    inventory,
+                    files={
+                        **inventory.files,
+                        "assembly.json": json.dumps(value).encode(),
+                    },
+                ),
+                principal_id="host",
+                support=SUPPORT,
+                selected=True,
+            )
+
+        selected = assemble(descriptor)
+        self.assertEqual(
+            dict(selected.capability_timeouts),
+            {("ff14/ff14", "ff14.calendar.query"): 45},
+        )
+        self.assertEqual(
+            dict(selected.collector_timeouts), {("ff14/ff14", "ff14.calendar.sync"): 45}
+        )
+        for values in (selected.capability_timeouts, selected.collector_timeouts):
+            with self.assertRaises(TypeError):
+                values[("ff14/ff14", "other")] = 45
+        legacy = dict(descriptor)
+        legacy.pop("execution_budgets")
+        self.assertEqual(dict(assemble(legacy).capability_timeouts), {})
+        self.assertEqual(dict(assemble(legacy).collector_timeouts), {})
+        invalid = [
+            {},
+            {"capabilities": {}},
+            {"capabilities": {}, "collectors": {}, "extra": {}},
+            {"capabilities": [], "collectors": {}},
+            {"capabilities": {"unknown": 45}, "collectors": {}},
+            {"capabilities": {"ff14.calendar.sync": 45}, "collectors": {}},
+            {"capabilities": {}, "collectors": {"ff14.calendar.query": 45}},
+        ]
+        invalid.extend(
+            {"capabilities": {"ff14.calendar.query": value}, "collectors": {}}
+            for value in (
+                True,
+                False,
+                0,
+                -1,
+                91,
+                float("nan"),
+                float("inf"),
+                "45",
+                None,
+            )
+        )
+        for values in invalid:
+            with self.subTest(budget=values), self.assertRaises(ValueError):
+                assemble({**descriptor, "execution_budgets": values})
+
     def test_legacy_without_descriptor_has_no_credential_or_public_grants(self):
         from ygl_test_subject.services.trusted_assembly import (
             LegacyAssemblySupport,

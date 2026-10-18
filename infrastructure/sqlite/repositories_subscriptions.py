@@ -11,6 +11,7 @@ import hashlib
 import json
 import secrets
 import sqlite3
+from contextlib import contextmanager, nullcontext
 from dataclasses import fields, is_dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
@@ -1568,8 +1569,11 @@ class SQLiteSchedulerRepository(_Repository):
         commit: ObservationEvaluationCommit,
         *,
         next_due_at: datetime | None = None,
+        commit_guard=None,
     ) -> bool:
         observation = commit.observation
+        if commit_guard is not None and not callable(commit_guard):
+            raise TypeError("commit guard must be callable")
         if lease.key != observation.key:
             return False
         if next_due_at is not None:
@@ -1579,6 +1583,9 @@ class SQLiteSchedulerRepository(_Repository):
         try:
 
             def _run(unit: SQLiteUnitOfWork) -> Any:
+                if commit_guard is not None:
+                    with commit_guard():
+                        pass
                 job = _job_key(lease.key)
                 row = unit.execute(
                     "SELECT * FROM b04_collection_jobs WHERE job_key=?", (job,)
@@ -1648,6 +1655,20 @@ class SQLiteSchedulerRepository(_Repository):
                             is None
                         ):
                             return False
+
+                @contextmanager
+                def guarded_commit():
+                    with commit_guard() if commit_guard is not None else nullcontext():
+                        # IMMEDIATE keeps token/config/fence rows stable. Fresh
+                        # lease expiry applies to normal output AND safe FAILED
+                        # finalization at the physical COMMIT authorization edge.
+                        if _StoredDateTime.fromisoformat(
+                            row["lease_expires_at"]
+                        ) <= _utc_instant(self._utc_clock(), "utc_clock"):
+                            raise _StaleEvaluationCommit
+                        yield
+
+                unit.add_commit_guard(guarded_commit)
                 unit.execute(
                     "INSERT INTO b04_observations VALUES (?,?,?,?,?,?)",
                     (

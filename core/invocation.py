@@ -296,7 +296,11 @@ class Gateway:
                 registry_revision=snapshot.revision,
                 generation=self._web_generation,
                 deadline=self._budget_policy.deadline(
-                    InvocationOrigin.WEB_PUBLIC, self._clock(), self._handler_timeout
+                    InvocationOrigin.WEB_PUBLIC,
+                    self._clock(),
+                    self._handler_timeout,
+                    module_id=module_id,
+                    capability_id=capability_id,
                 ),
             )
             binding = self._issuer.public_web_binding(view)
@@ -684,7 +688,12 @@ class Gateway:
 
         try:
             deadline = self._budget_policy.deadline(
-                trusted.origin, self._clock(), self._handler_timeout, trusted.deadline
+                trusted.origin,
+                self._clock(),
+                self._handler_timeout,
+                trusted.deadline,
+                module_id=trusted.module_id,
+                capability_id=capability_id,
             )
             diagnostic(
                 "core_start", budget_ms=max(0, int((deadline - self._clock()) * 1000))

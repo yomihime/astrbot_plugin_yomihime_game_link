@@ -372,7 +372,10 @@ function E(e, t) {
 	} : t;
 }
 var D = "已停止展示。仅停止展示，本次请求可能仍在后台处理；不会自动重试。", O = /* @__PURE__ */ new Map();
-function k(e, t, n = 35e3) {
+function k(e) {
+	return e === "calendar" ? 5e4 : 35e3;
+}
+function A(e, t, n = 35e3) {
 	let r = e.routeId;
 	if (!w[r]) throw Error("invalid_query_route");
 	let i = JSON.stringify([
@@ -411,7 +414,7 @@ function k(e, t, n = 35e3) {
 		}
 		let m = s;
 		a.phase = "loading", a.message = "正在查询…", t(), c = setTimeout(() => {
-			u(m) && (s++, c = null, a.phase = "timeout", a.message = "等待查询超过35秒，已停止展示。后台请求可能仍在处理，请检查会话与来源后手动重试。", t());
+			u(m) && (s++, c = null, a.phase = "timeout", a.message = `等待查询超过${n / 1e3}秒，已停止展示。后台请求可能仍在处理，请检查会话与来源后手动重试。`, t());
 		}, n);
 		try {
 			let n = await e.services.invoke(T[r], E(r, f.body));
@@ -450,7 +453,7 @@ function k(e, t, n = 35e3) {
 }
 //#endregion
 //#region ../../modules/ff14/pages/src/select-a11y.ts
-function A(e) {
+function j(e) {
 	let t = /* @__PURE__ */ new WeakMap();
 	return {
 		mounted(n, r) {
@@ -485,20 +488,20 @@ function A(e) {
 }
 //#endregion
 //#region ../../modules/ff14/pages/src/entry.ts
-function j(e) {
+function M(e) {
 	return e === null ? "—" : e && typeof e == "object" && !Array.isArray(e) && Object.hasOwn(e, "value") ? [String(e.value), e.currency || e.unit || e.timezone].filter(Boolean).join(" ") : e && typeof e == "object" ? JSON.stringify(e) : String(e);
 }
-var M = {
+var N = {
 	items: "查找物品与公开详情",
 	market: "按物品查询市场",
 	logs: "查询角色 Logs",
 	calendar: "查询活动日历"
-}, N = {
+}, P = {
 	items: "名称或 ID 查询；缺项与来源说明保留在结果中。",
 	market: "范围可留空，由服务端解析默认区域的全服范围；名称与范围别名也由服务端判定。",
 	logs: "选择对应区域和服务器，输入角色名；来源凭据由管理员维护，不在公开页面填写。",
 	calendar: "仅手动查询选定窗口；来源失败和覆盖限制以本次结果为准。"
-}, P = {
+}, F = {
 	parameter_error: "参数未被来源接受；范围含糊时使用明确 World ID 或规范数据中心名。",
 	auth_required: "来源凭据不可用，请联系管理员配置相应区域的来源凭据。",
 	auth_expired: "授权已过期，请重新登录 Dashboard。",
@@ -509,13 +512,13 @@ var M = {
 	no_records: "来源未返回记录；这不表示查询窗口已被完整覆盖。",
 	not_public: "来源内容未公开。"
 };
-function F(e) {
+function I(e) {
 	let t = e.document, r = t ? [n("h3", t.title), n("p", { class: "ff14-hint" }, t.subject)] : [];
-	for (let e of t?.blocks || []) e.kind === "text" ? r.push(n("p", { class: "ff14-result-text" }, e.text)) : ["fields", "metrics"].includes(e.kind) ? r.push(n("dl", { class: "ff14-fields" }, Object.entries(e[e.kind]).flatMap(([e, t]) => [n("dt", e), n("dd", j(t))]))) : e.kind === "table" ? (r.push(n("div", {
+	for (let e of t?.blocks || []) e.kind === "text" ? r.push(n("p", { class: "ff14-result-text" }, e.text)) : ["fields", "metrics"].includes(e.kind) ? r.push(n("dl", { class: "ff14-fields" }, Object.entries(e[e.kind]).flatMap(([e, t]) => [n("dt", e), n("dd", M(t))]))) : e.kind === "table" ? (r.push(n("div", {
 		class: "ff14-table-desktop",
 		tabindex: 0,
 		"aria-label": "结果表格"
-	}, [n("table", [n("thead", [n("tr", e.columns.map((e) => n("th", { scope: "col" }, e)))]), n("tbody", e.rows.map((e) => n("tr", e.map((e) => n("td", j(e))))))])]), n("div", { class: "ff14-table-mobile" }, e.rows.map((t) => n("dl", { class: "ff14-fields" }, t.flatMap((t, r) => [n("dt", e.columns[r]), n("dd", j(t))]))))), e.rows.length || r.push(n("p", { class: "ff14-warning" }, "来源返回的表格内容为空。"))) : r.push(n("ul", e.links.map((e) => n("li", [n("a", {
+	}, [n("table", [n("thead", [n("tr", e.columns.map((e) => n("th", { scope: "col" }, e)))]), n("tbody", e.rows.map((e) => n("tr", e.map((e) => n("td", M(e))))))])]), n("div", { class: "ff14-table-mobile" }, e.rows.map((t) => n("dl", { class: "ff14-fields" }, t.flatMap((t, r) => [n("dt", e.columns[r]), n("dd", M(t))]))))), e.rows.length || r.push(n("p", { class: "ff14-warning" }, "来源返回的表格内容为空。"))) : r.push(n("ul", e.links.map((e) => n("li", [n("a", {
 		href: e.url,
 		target: "_blank",
 		rel: "noopener noreferrer"
@@ -525,12 +528,12 @@ function F(e) {
 	let i = [...t?.sources || [], ...e.provenance];
 	i.length && r.push(n("p", { class: "ff14-hint" }, `来源 / 口径：${i.join("；")}`));
 	let a = [...t?.timestamps || [], ...e.timestamps];
-	return a.length && r.push(n("p", { class: "ff14-hint" }, `返回时间：${a.map(j).join("；")}`)), r;
+	return a.length && r.push(n("p", { class: "ff14-hint" }, `返回时间：${a.map(M).join("；")}`)), r;
 }
-function I(h, g) {
-	let _ = new Set(Array.from(h.ownerDocument.head.querySelectorAll("style"))), v = A(h), y = r({}), b = r(0), x = k(g, () => {
+function L(h, g) {
+	let _ = new Set(Array.from(h.ownerDocument.head.querySelectorAll("style"))), v = j(h), y = r({}), b = r(0), x = A(g, () => {
 		b.value++;
-	}), S = e(t({ setup() {
+	}, k(g.routeId)), S = e(t({ setup() {
 		return () => {
 			b.value;
 			let e = x.state, t = e.phase === "loading", r = e.result, _ = e.context, S = r?.model_facts?.selection, C = async (t) => {
@@ -549,10 +552,10 @@ function I(h, g) {
 				class: "ff14-page",
 				"data-theme": _.theme
 			}, [n(o, {
-				title: M[g.routeId],
+				title: N[g.routeId],
 				bordered: !1
 			}, { default: () => [
-				n("p", { class: "ff14-hint" }, N[g.routeId]),
+				n("p", { class: "ff14-hint" }, P[g.routeId]),
 				n("form", {
 					class: "ff14-form",
 					"aria-busy": t,
@@ -633,9 +636,9 @@ function I(h, g) {
 				r ? n("p", {
 					class: r.status === "error" ? "ff14-error" : r.status === "success" ? "ff14-success" : "ff14-warning",
 					role: r.status === "error" ? "alert" : "status"
-				}, r.status === "success" ? "查询完成" : r.status === "partial_success" ? "部分结果 · 保留来源说明" : r.status === "needs_selection" ? "需要选择物品 · 请确认本次候选" : `${r.error?.code === "not_found" ? "无匹配结果" : r.error?.code === "no_records" ? "没有可展示记录" : "查询失败"} · ${P[r.error?.code || ""] || "查询未完成，请检查输入与来源后手动重试。"}`) : n("p", { role: ["error", "timeout"].includes(e.phase) ? "alert" : "status" }, e.message),
+				}, r.status === "success" ? "查询完成" : r.status === "partial_success" ? "部分结果 · 保留来源说明" : r.status === "needs_selection" ? "需要选择物品 · 请确认本次候选" : `${r.error?.code === "not_found" ? "无匹配结果" : r.error?.code === "no_records" ? "没有可展示记录" : "查询失败"} · ${F[r.error?.code || ""] || "查询未完成，请检查输入与来源后手动重试。"}`) : n("p", { role: ["error", "timeout"].includes(e.phase) ? "alert" : "status" }, e.message),
 				t ? n("p", { class: "ff14-hint" }, "仅停止展示，本次请求可能仍在后台处理。") : null,
-				...r ? F(r) : [],
+				...r ? I(r) : [],
 				T ? n("div", { class: "ff14-market-context" }, [
 					n("dl", { class: "ff14-fields" }, [
 						n("dt", "当前解析范围"),
@@ -682,7 +685,7 @@ function I(h, g) {
 		};
 	} }));
 	S.mount(h);
-	let C = !1, T = !1, E = /* @__PURE__ */ new Set(["vueuc/binder", "vueuc/virtual-list"]), D = () => Array.from(h.ownerDocument.head.querySelectorAll("style[cssr-id]")).filter((e) => E.has(e.getAttribute("cssr-id")) && !_.has(e)), O = null, j = () => {
+	let C = !1, T = !1, E = /* @__PURE__ */ new Set(["vueuc/binder", "vueuc/virtual-list"]), D = () => Array.from(h.ownerDocument.head.querySelectorAll("style[cssr-id]")).filter((e) => E.has(e.getAttribute("cssr-id")) && !_.has(e)), O = null, M = () => {
 		if (T) return;
 		C = !0, O ||= /* @__PURE__ */ new Set([
 			() => x.dispose(),
@@ -698,12 +701,12 @@ function I(h, g) {
 		}
 		if (T = O.size === 0, e.length) throw AggregateError(e, "cleanup_pending");
 	};
-	return g.scope.onDispose(j), {
+	return g.scope.onDispose(M), {
 		update: (e) => {
 			C || x.update(e);
 		},
-		dispose: j
+		dispose: M
 	};
 }
 //#endregion
-export { I as mount };
+export { L as mount };

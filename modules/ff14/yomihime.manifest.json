@@ -819,13 +819,13 @@
         {
           "source_id": "ff14_calendar_primary",
           "host": "calendar.google.com",
-          "timeout_seconds": 20,
+          "timeout_seconds": 15,
           "requests_per_minute": 10
         },
         {
           "source_id": "ff14_calendar_fallback",
           "host": "p66-caldav.icloud.com",
-          "timeout_seconds": 20,
+          "timeout_seconds": 15,
           "requests_per_minute": 10
         }
       ],
@@ -1004,7 +1004,7 @@
         },
         {
           "path": "pages/dist/entry.js",
-          "sha256": "059f57b15e93280611ac16bbfa20c67eabaec01695209c0863c9d241e9525d0b"
+          "sha256": "711cb1fd124a901028e2cec5c070b7f3f54e72c85b9513e4c7a75c5f21999cd1"
         },
         {
           "path": "pages/dist/styles.css",

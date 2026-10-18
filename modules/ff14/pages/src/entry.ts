@@ -1,7 +1,7 @@
 import {createApp, defineComponent, h, withDirectives, ref} from 'vue';
 import {NConfigProvider,NButton,NInput,NSelect,NCard,NTag,darkTheme,zhCN,enUS,dateZhCN,dateEnUS} from 'naive-ui';
 import type {PageOptions, MountedPage} from '../../../../pages/frontend/src/contracts';
-import {createQueryController,fields} from './query-controller';
+import {createQueryController,fields,queryTimeoutMs} from './query-controller';
 import './styles.css';
 import {createSelectA11y} from './select-a11y';
 function resultValue(value:any): string {if (value===null) return '—'; if (value && typeof value==='object' && !Array.isArray(value) && Object.hasOwn(value,'value')) return [String(value.value),value.currency||value.unit||value.timezone].filter(Boolean).join(' '); return value && typeof value==='object'?JSON.stringify(value):String(value);}
@@ -27,7 +27,7 @@ function blocks(result:any) {
 export function mount(container:HTMLElement,options:PageOptions):MountedPage {
   const headStyles = new Set(Array.from(container.ownerDocument.head.querySelectorAll('style')));
   const selectA11y=createSelectA11y(container), expanded=ref<Record<string,boolean>>({});
-  const revision=ref(0), controller=createQueryController(options,()=>{revision.value++;});
+  const revision=ref(0), controller=createQueryController(options,()=>{revision.value++;},queryTimeoutMs(options.routeId));
   const app=createApp(defineComponent({setup(){return ()=>{
     revision.value; const state=controller.state, pending=state.phase==='loading', result=state.result, context=state.context;
     const candidates=result?.model_facts?.selection;

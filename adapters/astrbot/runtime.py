@@ -870,6 +870,9 @@ class AstrBotRuntime:
                     self._generation,
                     self._web_current,
                     bindings=self.public_page_bindings(),
+                    capability_timeouts=self._assembly.capability_timeouts
+                    if self._assembly
+                    else None,
                 )
                 self._http_transport = self._new_http_transport()
                 self._transport_closed = False
@@ -959,6 +962,12 @@ class AstrBotRuntime:
                     public_web_capabilities=self._assembly.public_capabilities
                     if self._assembly
                     else (),
+                    capability_timeouts=self._assembly.capability_timeouts
+                    if self._assembly
+                    else None,
+                    collector_timeouts=self._assembly.collector_timeouts
+                    if self._assembly
+                    else None,
                 )
             except BaseException:
                 try:

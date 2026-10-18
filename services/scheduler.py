@@ -13,9 +13,11 @@ import json
 import random
 import sys
 from collections.abc import Awaitable, Callable, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from math import isfinite
+from threading import RLock
 from time import monotonic
 from typing import Protocol
 from uuid import uuid4
@@ -76,6 +78,39 @@ from ..core.registry import RegisteredModule, Registry, RegistrySnapshot
 from ..core.task_scope import ScopeCancelled, ScopeDeadlineExceeded, ScopeStaleError
 from ..infrastructure.sync_diagnostics import SyncDiagnostics
 from ..infrastructure.sync_diagnostics import emit as diagnostic
+
+
+class _CollectionCommitFence:
+    """Short synchronous authorization, revoked before draining a cancelled IO."""
+
+    def __init__(self, *, deadline, clock, check, registry, admission, lease):
+        self.deadline = deadline
+        self.clock = clock
+        self.check = check
+        self.registry = registry
+        self.admission = admission
+        self.lease = lease
+        self._lock = RLock()
+        self._revoked = False
+
+    def revoke(self):
+        with self._lock:
+            self._revoked = True
+
+    @contextmanager
+    def guard(self):
+        # Lock order: per-call fence -> Registry snapshot -> Admission commit.
+        # No await occurs while held. Invalidation never takes them in reverse.
+        with self._lock, self.registry._snapshot_guard():
+            if self._revoked:
+                raise ScopeCancelled("collection commit was cancelled")
+            if self.clock() >= self.deadline:
+                raise ScopeDeadlineExceeded("collection commit deadline elapsed")
+            self.check()
+            with self.admission.commit_guard(self.lease):
+                if self.clock() >= self.deadline:
+                    raise ScopeDeadlineExceeded("collection commit deadline elapsed")
+                yield
 
 
 class ExecutionClaimProofRegistry:
@@ -446,12 +481,16 @@ class SharedCollectionScheduler:
         background_config_for: Callable[[RegisteredModule], Awaitable[ConfigSnapshot]]
         | None = None,
         diagnostics: SyncDiagnostics | None = None,
+        collector_timeouts=None,
     ) -> None:
         validate_contract(binder_for)
         validate_contract(runtime_minimum_for)
         validate_contract(source_minimum_for)
         self.background_config_for = background_config_for
         self.diagnostics = diagnostics
+        from ..core.invocation_budget import freeze_execution_timeouts
+
+        self.collector_timeouts = freeze_execution_timeouts(collector_timeouts)
         self._background_registration_signature = None
         self.registry = registry
         self.issuer = issuer
@@ -920,6 +959,16 @@ class SharedCollectionScheduler:
                 )
                 if live_schedule != schedule:
                     return None
+                declared_timeout = self.collector_timeouts.get(
+                    (module.module_id, schedule.collector_id)
+                )
+                timeout_seconds = (
+                    declared_timeout
+                    if declared_timeout is not None
+                    else min(
+                        self.quotas.collection_timeout_seconds, source.timeout_seconds
+                    )
+                )
                 request = self._run_request(
                     candidate,
                     cadence_seconds,
@@ -927,7 +976,13 @@ class SharedCollectionScheduler:
                     live_snapshot.revision,
                     background=background,
                     lease_seconds=max(
-                        30.0, self.quotas.collection_timeout_seconds + 10.0
+                        30.0,
+                        (
+                            timeout_seconds
+                            if declared_timeout is not None
+                            else self.quotas.collection_timeout_seconds
+                        )
+                        + 10.0,
                     ),
                 )
                 lease = await self.repository.claim_due(
@@ -944,10 +999,6 @@ class SharedCollectionScheduler:
                 self.execution_claim_proofs.prove(lease)
                 scheduled_lease = self.admission.admit_schedule(
                     lease, schedule.collector_id
-                )
-                timeout_seconds = min(
-                    self.quotas.collection_timeout_seconds,
-                    source.timeout_seconds,
                 )
                 deadline = self.monotonic_clock() + timeout_seconds
                 invocation = self.issuer.issue(
@@ -1012,7 +1063,9 @@ class SharedCollectionScheduler:
                     )
                 )
                 trace_event("collector_start")
-                observation = await asyncio.wait_for(work, timeout=timeout_seconds)
+                observation = await asyncio.wait_for(
+                    work, timeout=max(0.0, deadline - self.monotonic_clock())
+                )
                 trace_event("collector_return")
                 trace_event("validate")
                 if (
@@ -1071,9 +1124,16 @@ class SharedCollectionScheduler:
                     background=background,
                 )
                 trace_event("core_commit")
-                committed = await self.repository.commit_observation_with_evaluations(
-                    lease, evaluation_commit, next_due_at=next_due_at
-                )
+                if declared_timeout is None:
+                    committed = (
+                        await self.repository.commit_observation_with_evaluations(
+                            lease, evaluation_commit, next_due_at=next_due_at
+                        )
+                    )
+                else:
+                    committed = await self._commit_declared_observation(
+                        lease, scheduled_lease, evaluation_commit, next_due_at, deadline
+                    )
                 core_final = "completed" if committed else "not_committed"
                 final_observation = observation.completeness.value
                 trace_event(
@@ -1150,6 +1210,58 @@ class SharedCollectionScheduler:
                 )
                 if self.diagnostics is not None:
                     self.diagnostics.reset(diagnostic_token)
+
+    async def _commit_declared_observation(
+        self, lease, scheduled_lease, evaluation_commit, next_due_at, deadline
+    ):
+        """Fence normal output at COMMIT; failure finalization stays lease-bound."""
+
+        def check_registration():
+            module = self.registry.snapshot().modules.get(lease.key.module_id)
+            if (
+                module is None
+                or not module.enabled
+                or module.epoch != lease.module_epoch
+            ):
+                raise ScopeStaleError("module changed before collection commit")
+
+        fence = _CollectionCommitFence(
+            deadline=deadline,
+            clock=self.monotonic_clock,
+            check=check_registration,
+            registry=self.registry,
+            admission=self.admission,
+            lease=scheduled_lease,
+        )
+        work = asyncio.create_task(
+            self.repository.commit_observation_with_evaluations(
+                lease,
+                evaluation_commit,
+                next_due_at=next_due_at,
+                commit_guard=fence.guard,
+            ),
+            name="scheduler-declared-observation-commit",
+        )
+        try:
+            return await asyncio.wait_for(
+                asyncio.shield(work),
+                timeout=max(0.0, deadline - self.monotonic_clock()),
+            )
+        except asyncio.CancelledError:
+            # The executor drains an already-running transaction before exposing
+            # cancellation. Revoke here first, while only our shield is cancelled.
+            fence.revoke()
+            try:
+                await _drain_commit_task(work)
+            except asyncio.CancelledError:
+                pass
+            raise
+        except TimeoutError:
+            fence.revoke()
+            await _drain_commit_task(work)
+            raise ScopeDeadlineExceeded("collection commit deadline elapsed") from None
+        finally:
+            fence.revoke()
 
     async def _commit_failed_outcome(
         self,
@@ -1441,6 +1553,24 @@ class SharedCollectionScheduler:
         return await self.digest_windows.list_due_routes(
             now=now, limit=page_limit, after_cursor=after_cursor
         )
+
+
+async def _drain_commit_task(task):
+    """Wait only this owned task, retaining any new outer cancellation."""
+    cancellation = None
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError as exc:
+            if task.cancelled():
+                break
+            cancellation = exc
+        except BaseException:
+            break
+    if task.done() and not task.cancelled():
+        task.exception()  # Observe a rejected worker outcome after revocation.
+    if cancellation is not None:
+        raise cancellation
 
 
 async def _release_execution_shielded(

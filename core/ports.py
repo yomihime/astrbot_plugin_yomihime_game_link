@@ -6,7 +6,14 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum, StrEnum
 from math import isfinite
-from typing import AsyncContextManager, Awaitable, Callable, Mapping, Protocol
+from typing import (
+    AsyncContextManager,
+    Awaitable,
+    Callable,
+    ContextManager,
+    Mapping,
+    Protocol,
+)
 
 from yomihime_game_link_sdk.contexts import (
     InvocationConversationKind,
@@ -469,6 +476,12 @@ class AdmissionPort(Protocol):
     ) -> DeliveryLease: ...
 
     def check(self, lease: AdmissionLease | ScheduledLease | DeliveryLease) -> None: ...
+
+    def commit_guard(
+        self, lease: AdmissionLease | ScheduledLease | DeliveryLease
+    ) -> ContextManager[None]:
+        """Hold exact admission validity across one synchronous durable commit."""
+        ...
 
     def release(
         self, lease: AdmissionLease | ScheduledLease | DeliveryLease
@@ -1280,6 +1293,7 @@ class SchedulerRepository(Protocol):
         commit: ObservationEvaluationCommit,
         *,
         next_due_at: datetime | None = None,
+        commit_guard: Callable[[], ContextManager[None]] | None = None,
     ) -> bool:
         """Atomically commit observation, CAS states/cursors, and outputs.
 
@@ -1292,9 +1306,13 @@ class SchedulerRepository(Protocol):
         the entire commit. Evaluation pipelines must use this method instead
         of splitting writes across ``commit_observation`` and later repository
         calls. The scheduler must also check the current Registry snapshot
-        immediately before this call. Without a lock shared with Registry, the
-        snapshot check and database commit are not linearizable with concurrent
-        module disable; this contract makes no stronger claim. Optional
+        immediately before this call. Optional ``commit_guard`` is Core-owned:
+        enter it at transaction entry and again around actual COMMIT, alongside
+        a fresh lease-expiry check. The actual COMMIT must recheck live lease
+        expiry even without this optional guard, including safe FAILED outcomes.
+        Its caller supplies deadline/cancellation
+        and registration/admission locks. Without it the legacy preflight
+        contract makes no stronger concurrent-disable claim. Optional
         ``next_due_at`` is an explicit UTC reschedule chosen by the scheduler
         from completion time, outcome, configured backoff, and configured
         jitter. It must be later than the observation collection time and is

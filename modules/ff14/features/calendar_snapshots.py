@@ -29,7 +29,7 @@ COLLECTION = "calendar_snapshots"
 PRIMARY = "ff14_calendar_primary"
 FALLBACK = "ff14_calendar_fallback"
 MANUAL_COOLDOWN_SECONDS = 300
-SOURCE_TIMEOUT_SECONDS = 3.0
+SOURCE_TIMEOUT_SECONDS = 15.0
 MAX_REMINDER_AGE = timedelta(hours=48)
 
 
@@ -216,7 +216,7 @@ class CalendarSnapshots:
                 raise
             try:
                 # Each source has an independent budget. A slow primary cannot
-                # consume the fallback's budget inside Core's ten-second run.
+                # consume the fallback's full fifteen-second fetch budget.
                 async with asyncio.timeout(SOURCE_TIMEOUT_SECONDS):
                     response = await http.fetch(HttpRequest(spec.source_id, spec.path))
                 if not 200 <= response.status_code < 300:
