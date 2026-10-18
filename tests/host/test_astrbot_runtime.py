@@ -1827,7 +1827,10 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(transport.calendar_ready.is_set())
             self.assertEqual(transport.requests, [])
         else:
-            await asyncio.wait_for(transport.calendar_ready.wait(), timeout=5)
+            await asyncio.wait_for(
+                transport.calendar_ready.wait(),
+                timeout=core.scheduler.quotas.collection_timeout_seconds,
+            )
             await asyncio.gather(*tuple(core.scheduler._active.values()))
             self.assertEqual(len(transport.requests), 2)
         completed = await core.database.executor.run_read(
@@ -1928,6 +1931,7 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
         context = _Context()
         transport = _ItemReplyTransport()
         runtime = self._runtime(context, http_transport_factory=lambda: transport)
+        self.addAsyncCleanup(runtime.terminate)
         await runtime.initialize()
         await self._assert_initial_public_calendar_sync(runtime, transport)
         try:
@@ -1973,6 +1977,7 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
         context = _Context()
         transport = _ItemReplyTransport()
         runtime = self._runtime(context, http_transport_factory=lambda: transport)
+        self.addAsyncCleanup(runtime.terminate)
         await runtime.initialize()
         await self._assert_initial_public_calendar_sync(runtime, transport)
         core = runtime.core_runtime
@@ -2110,6 +2115,7 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
         context = _Context()
         transport = _ItemReplyTransport()
         runtime = self._runtime(context, http_transport_factory=lambda: transport)
+        self.addAsyncCleanup(runtime.terminate)
         await runtime.initialize()
         await self._assert_initial_public_calendar_sync(runtime, transport)
 
