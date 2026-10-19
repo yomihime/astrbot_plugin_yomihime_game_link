@@ -31,6 +31,10 @@ async function harness(failures,initial=old()){
       const next=failures.shift();if(next)throw Error(next);
       current={...current,state:'ready',reason_code:'ready',ready:true,source:'managed',generation:1,revision:2,impact:[]};return current;
     }
+    if(endpoint==='admin/master-key-reset'){
+      const next=failures.shift();if(next)throw Error(next);
+      current={...current,state:'ready',reason_code:'ready',ready:true,source:'managed',generation:1,revision:2,impact:[]};return current;
+    }
     throw Error('unexpected endpoint: '+endpoint);
   }};
   const page=createManagementPage(dom.window.document,bridge,dom.window);page.start();await flush();
@@ -104,4 +108,32 @@ test('revision conflict and lost management authority do not enter known-refusal
       assert.notEqual(h.dom.window.document.getElementById('status').textContent,messages[2]);
     }finally{h.close();}
   }
+});
+
+test('uncertain reset result clears consent and stays fenced until a fresh status read',async()=>{
+  const h=await harness(['synthetic-unexpected-fault']);
+  try{
+    const doc=h.dom.window.document,consent=doc.getElementById('master-key-reset-consent'),reset=doc.getElementById('master-key-reset');
+    consent.click();await flush();assert.equal(reset.disabled,false);
+    reset.click();await flush();
+    assert.equal(h.calls.filter(c=>c.endpoint==='admin/master-key-reset').length,1);
+    assert.equal(consent.checked,false);assert.equal(reset.disabled,true);
+    assert.equal(doc.getElementById('status').textContent,'未取得成功确认，请刷新核对配置与版本后重试。');
+    doc.getElementById('refresh').click();await flush();
+    assert.equal(h.calls.filter(c=>c.endpoint==='admin/master-key-status').length,2);
+    assert.equal(consent.checked,false);assert.equal(reset.disabled,true);
+    consent.click();await flush();assert.equal(reset.disabled,false);
+  }finally{h.close();}
+});
+
+test('reset authorization loss revokes the page confirmation without a second write',async()=>{
+  const h=await harness(['admin_authorization_denied']);
+  try{
+    const doc=h.dom.window.document,consent=doc.getElementById('master-key-reset-consent');
+    consent.click();await flush();doc.getElementById('master-key-reset').click();await flush();
+    assert.equal(h.calls.filter(c=>c.endpoint==='admin/master-key-reset').length,1);
+    assert.equal(doc.getElementById('master-key-reset-consent'),null);
+    assert.equal(doc.getElementById('master-key-reset'),null);
+    assert.match(doc.getElementById('status').textContent,/管理授权不可用/);
+  }finally{h.close();}
 });

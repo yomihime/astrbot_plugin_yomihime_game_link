@@ -152,14 +152,14 @@ export function createManagementPage(document,bridge,window,{expectedPage='manag
   }
   const current=attempt=>!closed&&ready&&generation===attempt,writable=f=>f.readable&&f.editable&&supported(f);
   const blocked=button=>!button||button.disabled||button.getAttribute('aria-disabled')==='true';
-  function clearMasterDraft(){for(const id of ['master-key-restore-input','master-key-reset-confirm']){const input=element(id);if(input)input.value='';}}
+  function clearMasterDraft(){const input=element('master-key-restore-input');if(input)input.value='';view.resetConfirmation();}
   function showMasterStatus(){
     if(scope!=='settings')return;
     view.masterKey(masterKeyStatus?{
       state:masterKeyStatus.state,reason:masterKeyStatus.reason_code,source:masterKeyStatus.source,
       generation:masterKeyStatus.generation,unknown:masterKeyStatus.unknown_count,impact:masterKeyStatus.impact,
       enabled:!closed&&ready&&!stale&&masterKeyStatus.inventory_digest.length===64&&masterKeyStatus.unknown_count===0,
-      busy:active!==null,onDraft:()=>onDraftMutation(),onRetry:()=>changeMasterKey('retry'),onRestore:()=>changeMasterKey('restore'),onReset:()=>changeMasterKey('reset'),
+      busy:active!==null,onDraft:()=>onDraftMutation(),onRetry:()=>changeMasterKey('retry'),onRestore:()=>changeMasterKey('restore'),onReset:()=>changeMasterKey('reset'),onCancelReset:()=>{view.resetConfirmation();onDraftMutation();notice('已取消重配，未提交。','success');},
     }:null);
   }
   function setButton(button,denied){if(!button)return;button.setAttribute('aria-disabled',String(denied));button.disabled=denied&&(closed||!ready||document.activeElement!==button);}
@@ -228,13 +228,13 @@ export function createManagementPage(document,bridge,window,{expectedPage='manag
   }
   function changeMasterKey(action){
     if(!['retry','restore','reset'].includes(action)||!masterKeyStatus||stale||active)return;
-    const source=masterKeyStatus,restore=element('master-key-restore-input'),reset=element('master-key-reset-confirm');
-    const value=action==='restore'?restore?.value:action==='reset'?reset?.value:null;
+    const source=masterKeyStatus,restore=element('master-key-restore-input'),reset=element('master-key-reset-consent');
+    const value=action==='restore'?restore?.value:null;
     if(action==='restore'&&(typeof value!=='string'||!/^[A-Za-z0-9+/]{43}=$/.test(value))){notice('请输入原主密钥的标准 Base64 编码。');return;}
-    if(action==='reset'&&value!=='RESET ENCRYPTED CREDENTIALS'){notice('全域重置确认短语不匹配。');return;}
+    if(action==='reset'&&!reset?.checked){notice('请先确认全域重配的影响。');return;}
     const body={expected_revision:source.revision,expected_generation:source.generation,inventory_digest:source.inventory_digest};
     if(action==='restore')body.encoded_key=value;
-    if(action==='reset')body.confirmation=value;
+    if(action==='reset')body.confirmation='RESET ENCRYPTED CREDENTIALS';
     clearMasterDraft();
     run(async attempt=>{
       if(!current(attempt)||masterKeyStatus!==source)fail('stale_context');
@@ -287,7 +287,7 @@ export function createManagementPage(document,bridge,window,{expectedPage='manag
     for(const [c,value,mode,input,draftVersion]of reset)if(c.input&&c.draftVersion===draftVersion&&(mode===undefined||c.mode.value===mode&&c.input.value===input))c.input.value=value;
     buttons();
   }
-  async function refresh(attempt){stale=true;buttons();const declarations=await post('catalog',{},attempt),values=validateSnapshot(await post('read',{},attempt),declarations);if(!current(attempt))fail('stale_context');catalog=declarations;snapshot=values;
+  async function refresh(attempt){view.resetConfirmation();stale=true;buttons();const declarations=await post('catalog',{},attempt),values=validateSnapshot(await post('read',{},attempt),declarations);if(!current(attempt))fail('stale_context');catalog=declarations;snapshot=values;
     if(scope==='settings'){try{masterKeyStatus=await post('master-key-status',{},attempt);}catch(error){masterKeyStatus=null;if(!current(attempt)||managementAccessLost(error))throw error;}}
     let credentialNotice='';try{const forms=await post('credential-catalog',{},attempt),states=validateCredentialStatus(await post('credential-status',{},attempt),forms);if(!current(attempt))fail('stale_context');credentialCatalog=forms;credentialSnapshot=states;
       encryptionReady=false;try{const readiness=await post('credential-readiness',{diagnostics:true},attempt);encryptionReady=readiness.ready&&masterKeyStatus?.ready===true;credentialNotice=encryptionReady?'':(readiness.ready?'主密钥库存未就绪。':cryptoDetail(readiness.diagnostics))+cryptoAdvice;}catch(error){if(!current(attempt)||managementAccessLost(error))throw error;credentialNotice='未能确认加密状态，暂不能填写凭据；请核对宿主管理会话与部署后重开此页。';}if(!encryptionReady)clearSecrets();}
@@ -322,7 +322,7 @@ export function createManagementPage(document,bridge,window,{expectedPage='manag
     contextSeen=true;if(ready&&next===boundary)return;fonts.invalidate();statusNotice.clear();onCapabilities(null);clearSecrets();clearMasterDraft();generation++;boundary=next;ready=true;stale=true;active=null;catalog=null;snapshot=null;credentialCatalog=null;credentialSnapshot=null;masterKeyStatus=null;view.fields([],draftChanged);view.credentials([],draftChanged);view.masterKey(null);cards.clear();controls.clear();credentialControls.clear();draftState=emptyDraft;buttons();
     run(async attempt=>{await refresh(attempt);});
   }
-  const masterDraft=()=>Boolean(element('master-key-restore-input')?.value||element('master-key-reset-confirm')?.value);
+  const masterDraft=()=>Boolean(element('master-key-restore-input')?.value);
   const dirty=()=>[...controls.values()].some(c=>c.mode?.value!=='keep')||[...credentialControls.values()].some(c=>c.mode?.value!=='keep'||c.clientId?.value||c.clientSecret?.value)||masterDraft();
   // Navigation preserves ordinary drafts but suspend clears credentials across
   // all owners. Keep this scope separate from global module-operation guards.
