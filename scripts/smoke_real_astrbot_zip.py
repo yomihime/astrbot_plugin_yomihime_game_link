@@ -103,6 +103,10 @@ os.environ["ASTRBOT_TEST_MODE"] = "true"
 os.environ["ASTRBOT_DASHBOARD_INITIAL_PASSWORD"] = "IsolatedSmokePassword123!"
 os.environ.pop("ASTRBOT_RESET_DASHBOARD_PASSWORD", None)
 os.environ.pop("YGL_SECRET_KEY", None)
+# Windows Proactor creates its self-pipe with socketpair during loop creation.
+# Complete that runtime setup before denying all Host and plugin socket calls.
+runner = asyncio.Runner()
+runner.get_loop()
 # Fully offline fixture: deny DNS and sockets before Host imports. ASGI uses no sockets.
 os.environ["ASTRBOT_DISABLE_METRICS"] = "1"
 attempts = []
@@ -415,4 +419,7 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        runner.run(main())
+    finally:
+        runner.close()

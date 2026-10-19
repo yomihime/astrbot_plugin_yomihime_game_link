@@ -20,7 +20,12 @@ def check(root=ROOT):
             if url.scheme or url.netloc or not url.path:
                 continue
             target = (path.parent / unquote(url.path)).resolve()
-            if PRIVATE.intersection(target.parts) or not target.exists():
+            try:
+                relative = target.relative_to(root)
+            except ValueError:
+                errors.append(f"{path.relative_to(root)}: {match[1]}")
+                continue
+            if PRIVATE.intersection(relative.parts) or not target.exists():
                 errors.append(f"{path.relative_to(root)}: {match[1]}")
     return errors
 

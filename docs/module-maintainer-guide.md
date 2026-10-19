@@ -18,8 +18,8 @@
 | 能力、命令、工具、字段、来源和页面声明 | [FF14 manifest](../modules/ff14/yomihime.manifest.json)；声明必须通过磁盘解析与固定 SDK 合同校验 |
 | 工厂与业务处理 | [FF14 工厂](../modules/ff14/module.py)；handler 使用受限服务，不直接取得宿主账号或秘密 |
 | 宿主工具对象 | [工具发布适配器](../adapters/astrbot/tool_publisher.py)；冲突拒绝，撤销 exact object，旧回调重新检查 owner/epoch |
-| 显式受审模块装配 | [模块装配数据](../modules/ff14/assembly.json)、[模块纯支持](../modules/ff14/assembly.py)、宿主适配（历史记录未随库提供）；只处理 Host 明确选择的捕获输入，JSON 不指定 import 或授予权限 |
-| 通用配置目录与管理 | 配置目录（历史记录未随库提供）、[管理操作](../services/admin_operations.py)；目录与授权分别成立 |
+| 显式受审模块装配 | [模块装配数据](../modules/ff14/assembly.json)、[模块纯支持](../modules/ff14/assembly.py)、[宿主适配](../adapters/astrbot/runtime.py)；只处理 Host 明确选择的捕获输入，JSON 不指定 import 或授予权限 |
+| 通用配置目录与管理 | [配置目录](../services/configuration/catalog.py)、[管理操作](../services/admin_operations.py)；目录与授权分别成立 |
 | FF14 凭据表单与消费 | [模块装配中的表单声明](../modules/ff14/assembly.json)、[受限管理政策](../services/managed_source_credentials.py)、[来源消费](../services/source_credentials.py) |
 | 公共壳与管理视图 | [前端构建](../pages/frontend/build.mjs)；管理页测试需单独运行，`npm test` 当前只含 shell 测试 |
 | 模块业务页面与资源 | [模块页面源码](../modules/ff14/pages/src)、[资源摘要](../modules/ff14/pages/resources.json)；构建后校验 manifest 和发布投影 |
@@ -58,13 +58,13 @@
 | REQ06 | exact owner disable/unload/restore；停用保留设置；卸载先 fence、排空与 cleanup，再撤销工具对象、许可、来源及 Registry 注册 | pending 保留可重试所有权；配置、秘密、缓存和 data 均保留。恢复只使用受信原候选；旧壳不自动续资产证明，应从宿主正式重开 |
 | REQ07 | 隔离中性模块有普通配置、公共只读能力和页面；正式 Host→Core 链验证同名页面隔离、声明不授信与持久数据恢复 | fixture 不入发布包；不等于任意第三方生产包安装验收 |
 
-Core 与模块的命名空间配置是当前读写权威；Core 目录不依赖 FF14 的 lifecycle 或 migration。原 native 四字段只保留受审的一次性导入机制，不再作为运行时配置权威或普通目录资源政策。非法初始配置仍可通过受权管理入口修复；本批没有自动执行任何真实配置或共享 SQLite 迁移。
+Core 与模块的命名空间配置是当前读写权威；Core 目录不依赖 FF14 的生命周期。首次安装从当前声明和通过校验的 SQLite 值初始化，不读取旧配置快照或执行旧字段导入。非法初始配置仍可通过受权管理入口修复；启动不清空现有数据库或订阅。
 
-`disable` 关闭业务准入，继续允许模块设置与启用管理。显式 `unload` 退出 active 普通/凭据目录、页面、来源、工具和 owner 注册，但模块管理仍显示可信恢复候选；保留最大部署政策不允许旧请求在卸载后提交。SDK 1.7 的生命周期 marker 仅用于精确 owner 管理操作，不能据此读写任何配置字段。
+`disable` 关闭业务准入，继续允许模块设置与启用管理。显式 `unload` 退出 active 普通/凭据目录、页面、来源、工具和 owner 注册，但模块管理仍显示可信恢复候选；保留最大部署政策不允许旧请求在卸载后提交。精确 owner、epoch 和生命周期检查不授予配置字段读写权。
 
-当前薄 SDK 发布构建使用 `yomihime_game_link_sdk-0.1.0a9-py3-none-any.whl`，实际摘要与 pin 由构建核对。SDK 发行编号、模块 ABI `2.0`、输出/展示/存储合同 `1.8.0` 及磁盘/工厂协议 `1` 独立判断；旧模块接口在开发期不兼容，不能将旧 1.x SDK 作为当前发行加载。已发布旧工件字节及受限旧展示记录读取边界保留，不迁移配置、凭据或数据库。升级固定 SDK 需要保留数据的宿主卸载与冷加载，以退出旧进程中已导入的 SDK；不能以同壳恢复模拟该步骤。此前 SDK 1.7 的独立实例安装、首次冷加载、最小公开查询、普通管理读写及保留数据解除挂载/恢复属于历史实机证据。本批通过隔离真实 AstrBot4.29.1 ZIP 安装/初始化/管理鉴权/页面资源/帮助图片；用户实例、真实凭据查询、IM 平台和模型调用仍需独立验证。
+当前薄 SDK 发布构建使用 `yomihime_game_link_sdk-0.1.0a9-py3-none-any.whl`，实际摘要与 pin 由构建核对。SDK 发行编号、模块 ABI `2.0`、输出/展示/存储合同 `1.8.0` 及磁盘/工厂协议 `1` 独立判断；旧模块接口在开发期不兼容，不能将旧 1.x SDK 作为当前发行加载。已发布旧工件字节及受限旧展示记录读取边界保留，不迁移配置、凭据或数据库。升级固定 SDK 需要保留数据的宿主卸载与冷加载，以退出旧进程中已导入的 SDK；不能以同壳恢复模拟该步骤。此前 SDK 1.7 的独立实例安装、首次冷加载、最小公开查询、普通管理读写及保留数据解除挂载/恢复，以及先前隔离 AstrBot 4.29.1 ZIP 冒烟，均为历史实机证据；本轮 Windows、用户实例、真实凭据查询、IM 平台和模型调用分别验收。
 
-SDK a8 的新增合同为 PUBLIC `BACKGROUND` 调度与 1–32 组固定 `background_parameters`；详情见[SDK 说明](module-sdk.md#background-collectors)。本轮候选 wheel 为 53,838 bytes，SHA-256 `c5702caec32da638dcd336855b4ab5a9321c3d0a18d44243f33cd09b1aeeaf52`。Python 3.12.14、setuptools 80.9.0、wheel 0.45.1 下两次独立临时源码构建字节一致，已验证实际 wheel 安装和隔离冷 bootstrap；不代表 Python 3.13.9 正式构建环境或真实宿主安装验收。历史 a7 工件与实机记录保持原版本。
+SDK a8 引入的 PUBLIC `BACKGROUND` 调度与 1–32 组固定 `background_parameters` 继续包含在 a9；详情见[SDK 说明](module-sdk.md#background-collectors)。PR #8 固定候选 a9 wheel 为 42,636 bytes，SHA-256 `4d8d71c4ab04805c3a1edbd9e194b5228e66c9e0290caf01daae9374d65a74e5`；本轮 Windows 构建和宿主验收以对应原始记录为准。历史 a7/a8 工件及测试不作为当前候选的验收。
 
 固定宿主 iframe 不允许原生 `confirm` 或顶层导航。现有草稿与模块生命周期守卫使用有归属的页面内确认，保留操作、owner、revision 与生命周期检查；取消等待按钮解除禁用后才安全恢复焦点，不抢新页面或用户已转移的焦点。需要新资源投影时，使用宿主左侧“插件”菜单和目标 monitor 正式重开；页面内文字指引不承诺自动跳转、无刷新热加载或资源授权续期。
 
@@ -76,7 +76,7 @@ SDK a8 的新增合同为 PUBLIC `BACKGROUND` 调度与 1–32 组固定 `backgr
 
 维护时先运行变更涉及的模块、Core 输出及 Host 合同测试，页面修改显式运行管理/模块页面测试和正式构建预览。冻结后独立审查，主要跨层修改集成后安排一次全量。离线回放、隔离浏览器、真实宿主和模型回答分别记录；已有 ACL、跳过、格式及 EOF 提示单列。私有工作记录、凭据、数据库、备份和候选 ZIP 不入 Git 或发布包。
 
-模块展示保留旧 SDK 1.8 引入的可选 `ModuleDisplay` 与磁盘 `display`，由模块提供名称和翻译。FF14 owner 与 `/ygl ff14` 路由不变。根 schema 四个旧 FF14 键保留 type/default 并设置 `invisible: true`，退出 AstrBot 普通表单但保留升级输入；准备文件必须来自保存前的原始 JSON presence，不可用 Host 补全后的默认值代替。完成迁移 marker 后不回落、不双写，回退仍受精确目标和 CAS 约束。当前薄 SDK 候选的真实实例更新与冷加载尚未验收。
+模块展示保留可选 `ModuleDisplay` 与磁盘 `display`，由模块提供名称和翻译。FF14 owner 与 `/ygl ff14` 路由不变。当前根配置声明仅保留网页访问地址；FF14 普通设置由模块目录和已校验的 SQLite 值提供。旧配置准备文件、迁移完成 marker 与回滚选择器已退出当前安装合同。
 
 
 ### 声明式命令图片与模块徽标
@@ -96,4 +96,4 @@ SDK a7 可在 `DisplayDocument.card` 附带纯 `cards.Document`，文本块仍�
 
 Core 全局「回复样式 → 图片字体」的状态、重试、上传复用正式管理身份/来源/资源/生命周期检查；只接受准确大小和 SHA 的同一固定字体，客户端文件名不决定目标路径。它不是主题配置草稿，不使用配置 CAS；状态 revision 也不授权写入。切页只忽略迟到回执，不保证取消已提交上传。
 
-轻量插件只分发字体 OFL 与 NOTICE，原版 OTF 仍在源码作为离线基准；不能因包内有 NOTICE 就声称运行时已有字体。后台网络不等待启动完成，但文件/哈希/Pillow 检查有同步开销。该片不改变 SDK a7 wheel 或已确认样图，不把系统回退字体渲染声明为与标准字体完全同图。新包与真实部署的验证状态见[当前交接](command-presentation/README.md)。
+仓库与轻量插件只分发字体 OFL 与 NOTICE；固定哈希的原版 OTF 是由 `scripts/prepare_test_font.py` 准备的开发夹具，不随源码或插件包分发。不能因包内有 NOTICE 就声称运行时已有字体。后台网络不等待启动完成，但文件/哈希/Pillow 检查有同步开销；系统回退字体渲染不声明为与标准字体完全同图。实际安装和渲染状态须按对应候选单独验收。
