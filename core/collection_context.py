@@ -17,8 +17,8 @@ from yomihime_game_link_sdk.contexts import InvocationOrigin, InvocationView
 from yomihime_game_link_sdk.storage import OwnershipKind
 from yomihime_game_link_sdk.subscriptions import CollectionView
 
-from ..core.contracts.validation_boundary import validate_contract
 from .context_issuer import ContextIssuer, InvalidInvocation
+from .contracts.validation_boundary import validate_contract
 
 
 def require_collection_context(

@@ -1,3 +1,5 @@
+> 本文包含历史 SDK a7 工件和验收记录，勿作为当前版本或包摘要。当前 SDK 见 [模块 SDK](../module-sdk.md)，当前交接见 [alpha 清理说明](../alpha-cleanup-handoff.md)。
+
 # 命令展示改进交接入口
 
 ## 合并前收尾验收（2026-10-18，接续 4c50923）
@@ -197,7 +199,7 @@ FF14 另修复两个已合成复现的缺口：超过 12 个目标时为存在�
 - Core 共用 renderer 生成 PNG，旧 `ordered_blocks` 保持完整文本回退。标准公共命令继续使用捕获的精确 event、一次性许可、预算/TTL/取消；仅发送提交前失败可降级，UNKNOWN 不盲目补发。私有/Grant/OWNER、LLM facts 与订阅路径不变
 - `回复样式 → 图片主题` 已接入正式设置存储：Core `image_theme` 默认暖桃纸；模块 `reply_theme` 缺省跟随核心，选择跟随使用 CLEAR 清除覆盖。两处预设由同一 Core 目录生成，复用现有授权、revision/CAS 和数据库，不复制前端清单
 - 实际 Help 取本次过滤目录；物品/市场从真实业务结果投影而非注入样图数据。Logs 条件使用 introspection 已证明的目录关系，只声称“FFLogs目录及默认副本所属资料片”；证据不足保留已知结果和简短限制。真实 schema、国服/国际服和游戏开放范围仍待验
-- [五张已确认样图及 provenance](../../examples/command_cards/samples/declarative/)仅是视觉基准。Help 为可用性 fixture、Item 为截图事实、Market 为历史示意、Logs 为合成排版数据；纯 SDK 迁移后五图字节不变，历史样图未覆盖
+- [五张已确认样图及 provenance](../../examples/command_cards/samples/declarative)仅是视觉基准。Help 为可用性 fixture、Item 为截图事实、Market 为历史示意、Logs 为合成排版数据；纯 SDK 迁移后五图字节不变，历史样图未覆盖
 
 ### 构建与验证记录
 
@@ -401,7 +403,7 @@ R2 仅改不入包的测试，字体片生产输入和内部资源输入摘要�
 ## 从这里开始
 
 1. 阅读 [设计约束](design.md) 与最新 [模块展示样式 Spec](module-display-style-spec.md)，区分已定要求、实现提案与待验证事项
-2. 按 [实施计划](implementation-plan.md) 的 P0 核对工作区，再只执行当前阶段任务卡
+2. 按 [实施计划](../history/command-presentation/implementation-plan.md) 的 P0 核对工作区，再只执行当前阶段任务卡
 3. 先核对上方最新 Local Test 实测，再阅读 R3、“本地收尾”及 E、B、A 历史；本轮仅完成 WebChat 最小图片验收，不能从历史待办自动开启新一轮
 4. P2 依照 [FFLogs 探查清单](fflogs-discovery.md) 只读核验；结果不足时保留缺口
 5. 查看并运行 [图片原型](../../examples/command_cards/README.md)，再进入 P3；P4 必须等目录规则有证据后才开始

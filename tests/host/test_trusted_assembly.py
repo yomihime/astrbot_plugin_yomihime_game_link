@@ -25,16 +25,11 @@ class TrustedAssemblyTests(unittest.TestCase):
         self.data.mkdir()
         shutil.copytree(ROOT / "modules/ff14", self.plugin / "modules/ff14")
 
-    def test_descriptor_and_legacy_are_one_immutable_inventory(self):
+    def test_descriptor_is_part_of_immutable_inventory(self):
         installed = install_bundled_ff14(self.plugin, self.data)
         self.assertTrue(installed.trusted)
         captured = installed.inventory
         self.assertIn("assembly.json", captured.files)
-        for name in ("app.js", "index.html", "styles.css"):
-            self.assertEqual(
-                captured.files[f"pages/compat/{name}"],
-                (ROOT / "pages/ff14" / name).read_bytes(),
-            )
         before = captured.files["assembly.json"]
         (self.plugin / "modules/ff14/assembly.json").write_text("{}", encoding="utf8")
         self.assertEqual(captured.files["assembly.json"], before)
@@ -53,10 +48,10 @@ class TrustedAssemblyTests(unittest.TestCase):
         self.assertFalse(install_bundled_ff14(self.plugin, self.data).trusted)
 
     def test_adapter_requires_explicit_reviewed_selection_and_closed_refs(self):
-        from ygl_test_subject.adapters.astrbot.trusted_assembly import (
+        from ygl_test_subject.modules.ff14.assembly import SUPPORT
+        from ygl_test_subject.services.trusted_assembly import (
             assemble_reviewed,
         )
-        from ygl_test_subject.modules.ff14.assembly import SUPPORT
 
         installed = install_bundled_ff14(self.plugin, self.data)
         inventory = installed.inventory
@@ -65,13 +60,8 @@ class TrustedAssemblyTests(unittest.TestCase):
         )
         self.assertEqual(len(assembly.credential_policies), 2)
         self.assertEqual(len(assembly.managed_credentials), 2)
-        self.assertEqual(len(assembly.migration_fields), 4)
         sync_interval = "ff14_calendar_sync_interval_seconds"
         self.assertIn(sync_interval, SUPPORT.ordinary_config_fields)
-        self.assertNotIn(
-            sync_interval,
-            {field.declaration.name for field in assembly.migration_fields},
-        )
         self.assertEqual(
             assembly.public_bindings["items"], ("ff14/ff14", "item.lookup")
         )
@@ -125,11 +115,11 @@ class TrustedAssemblyTests(unittest.TestCase):
                 install_bundled_ff14(self.plugin, self.data)
         self.assertEqual(list(self.data.iterdir()), [])
 
-    def test_execution_budgets_are_selected_closed_typed_and_old_descriptor_compatible(
+    def test_execution_budgets_are_required_selected_closed_and_typed(
         self,
     ):
-        from ygl_test_subject.adapters.astrbot.trusted_assembly import assemble_reviewed
         from ygl_test_subject.modules.ff14.assembly import SUPPORT
+        from ygl_test_subject.services.trusted_assembly import assemble_reviewed
 
         inventory = install_bundled_ff14(self.plugin, self.data).inventory
         descriptor = json.loads(inventory.files["assembly.json"])
@@ -161,8 +151,8 @@ class TrustedAssemblyTests(unittest.TestCase):
                 values[("ff14/ff14", "other")] = 45
         legacy = dict(descriptor)
         legacy.pop("execution_budgets")
-        self.assertEqual(dict(assemble(legacy).capability_timeouts), {})
-        self.assertEqual(dict(assemble(legacy).collector_timeouts), {})
+        with self.assertRaises(ValueError):
+            assemble(legacy)
         invalid = [
             {},
             {"capabilities": {}},
@@ -189,26 +179,6 @@ class TrustedAssemblyTests(unittest.TestCase):
         for values in invalid:
             with self.subTest(budget=values), self.assertRaises(ValueError):
                 assemble({**descriptor, "execution_budgets": values})
-
-    def test_legacy_without_descriptor_has_no_credential_or_public_grants(self):
-        from ygl_test_subject.services.trusted_assembly import (
-            LegacyAssemblySupport,
-            assemble_reviewed,
-        )
-
-        (self.plugin / "modules/ff14/assembly.json").unlink()
-        (self.plugin / "modules/ff14/assembly.py").unlink()
-        installed = install_bundled_ff14(self.plugin, self.data)
-        assembly = assemble_reviewed(
-            installed.inventory,
-            principal_id="host",
-            support=LegacyAssemblySupport("ff14/ff14"),
-            selected=True,
-        )
-        self.assertEqual(assembly.credential_policies, ())
-        self.assertEqual(assembly.managed_credentials, ())
-        self.assertEqual(assembly.public_capabilities, frozenset())
-        self.assertEqual(assembly.migration_fields, ())
 
     def test_support_lease_imports_captured_code_and_disposes_exact_namespace(self):
         from ygl_test_subject.extensions.factory_resolver import ReviewedSupportLease
@@ -310,15 +280,10 @@ class TrustedAssemblyTests(unittest.TestCase):
                 }
             ],
             "gate": "enabled",
-            "migration": {
-                "id": "neutral-v1",
-                "fields": [
-                    {"target": "neutral/mod", "field": "value", "legacy": "old_value"}
-                ],
-            },
             "public": {"items": "query"},
             "page_sources": ["api"],
             "credential_regions": ["test"],
+            "execution_budgets": {"capabilities": {}, "collectors": {}},
         }
         support = SimpleNamespace(module_id="neutral/mod", validators={})
         support.with_metadata = lambda _: support
@@ -335,7 +300,6 @@ class TrustedAssemblyTests(unittest.TestCase):
         self.assertEqual(
             assembly.credential_policies[0].token_host, "auth.example.test"
         )
-        self.assertEqual(assembly.migration_fields[0].legacy_field, "old_value")
         self.assertEqual(
             assembly.public_capabilities, frozenset({("neutral/mod", "query")})
         )

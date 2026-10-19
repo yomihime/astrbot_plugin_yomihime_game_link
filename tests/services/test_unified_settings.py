@@ -16,7 +16,7 @@ from ygl_test_subject.core.contracts.administration import (
 from ygl_test_subject.core.contracts.services import ConfigFieldUpdate, ConfigPatch
 from ygl_test_subject.core.contracts.validation_boundary import validate_contract
 from ygl_test_subject.core.ports import RevisionConflict
-from ygl_test_subject.services.core_configuration import core_config_target
+from ygl_test_subject.services.configuration.defaults import core_config_target
 from ygl_test_subject.services.core_runtime import CoreRuntime
 from ygl_test_subject.services.managed_source_credentials import (
     ManagedSourceCredentialPolicy,

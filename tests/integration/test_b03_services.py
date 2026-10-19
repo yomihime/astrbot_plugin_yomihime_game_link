@@ -41,7 +41,7 @@ from ygl_test_subject.services.authorization import (
     AuthorizationPermissionError,
     AuthorizationService,
 )
-from ygl_test_subject.services.configuration import ConfigurationCoordinator
+from ygl_test_subject.services.configuration.operations import ConfigurationCoordinator
 from ygl_test_subject.services.dependency_calls import DependencyInvoker
 from ygl_test_subject.services.module_services import (
     ModuleServicesFactory,

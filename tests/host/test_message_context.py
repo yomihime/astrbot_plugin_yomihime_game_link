@@ -25,12 +25,12 @@ from ygl_test_subject.core.invocation import Gateway
 from ygl_test_subject.core.lifecycle import _ServiceLifetime
 from ygl_test_subject.extensions.disk_manifest import parse_manifest
 from ygl_test_subject.modules.ff14.module import Factory
-from ygl_test_subject.services.configuration import ConfigurationService
-from ygl_test_subject.services.core_configuration import (
+from ygl_test_subject.services.configuration.defaults import (
     CORE_CONFIG_FIELDS,
     CoreDefaultsView,
     core_config_target,
 )
+from ygl_test_subject.services.configuration.operations import ConfigurationService
 from ygl_test_subject.services.core_runtime import _HostIngressAuthority
 from ygl_test_subject.services.identity import InvocationPrincipalResolver
 from ygl_test_subject.services.output import (

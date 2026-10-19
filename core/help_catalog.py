@@ -9,7 +9,7 @@ from yomihime_game_link_sdk.declarations import PrivacyFloor
 from yomihime_game_link_sdk.display import CommandsBlock, DisplayDocument, TextBlock
 from yomihime_game_link_sdk.services import CapabilityHealth
 
-from ..core.contracts.validation_boundary import validate_contract
+from .contracts.validation_boundary import validate_contract
 from .registry import RegisteredModule, RegistryError, RegistrySnapshot
 
 

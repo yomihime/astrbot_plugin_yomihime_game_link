@@ -1,10 +1,10 @@
 # FF14 物品来源约定（M1）
 
-> 适用范围更新（2026-09-29）：本文件保留来源协议和分阶段证据，下方 M2 预核验的“schema 未确认/无实调”等表述属于当时基线。后来 CN 角色 API 已有成功证据，见 [获授权的实测](../../.architecture-refactor/ff14-m2-authorized-live-evidence.md)；宿主物品/日历失败尚未归因。后续按 [新计划](../next-stage-plan.md) 同环境对照塔塔露。物品主源是 XIVAPI-compatible，Garland 是补充详情，不能冒称自动回退；日历主备来源单独核验。统计网页 output 已移出本期，403 不阻塞角色 Logs；本文不派发任务。
+> 适用范围更新（2026-09-29）：本文件保留来源协议和分阶段证据，下方 M2 预核验的“schema 未确认/无实调”等表述属于当时基线。后来 CN 角色 API 已有成功证据，见 获授权的实测（历史记录未随库提供）；宿主物品/日历失败尚未归因。后续按 [新计划](../history/next-stage-plan.md) 同环境对照塔塔露。物品主源是 XIVAPI-compatible，Garland 是补充详情，不能冒称自动回退；日历主备来源单独核验。统计网页 output 已移出本期，403 不阻塞角色 Logs；本文不派发任务。
 
 状态：来源字段基于文档、锁定参考实现和一次有限 live probe 核对；这不保证服务持续在线、配额、所有字段稳定或真实宿主端到端可用。源模型只覆盖一期物品查询，不是完整 FF14 数据模型。
 
-2026-10-01 W2：ID `44091` 的 XIVAPI-compatible 和 Garland 公开响应均成功，用户提供的 AstrBot 4.28.2 实例也已通过真实插件命令返回“犎牛牛排”与有限获取途径。日历现有四 variant 的当日资格见下一节；早期网络失败和响应计数保留在本地记录，不能替代最新完整读取证据。系统代理不会自动成为 AstrBot `http_proxy`。详细本地索引：[W2 证据](../../.architecture-refactor/ff14-w2-acceptance.md)。许可边界仍按下文，不随包分发远端数据集或图标。
+2026-10-01 W2：ID `44091` 的 XIVAPI-compatible 和 Garland 公开响应均成功，用户提供的 AstrBot 4.28.2 实例也已通过真实插件命令返回“犎牛牛排”与有限获取途径。日历现有四 variant 的当日资格见下一节；早期网络失败和响应计数保留在本地记录，不能替代最新完整读取证据。系统代理不会自动成为 AstrBot `http_proxy`。详细本地索引：W2 证据（历史记录未随库提供）。许可边界仍按下文，不随包分发远端数据集或图标。
 
 ## 日历来源资格（W2，2026-10-01）
 
@@ -55,7 +55,7 @@
 
 ## 证据、许可和边界
 
-有限探测记录见 [`.architecture-refactor/ff14-m1-source-evidence.json`](../../.architecture-refactor/ff14-m1-source-evidence.json)：2026-09-28 一次中文名称搜索、XIVAPI-compatible 数字 ID 详情和 Garland 同 ID 详情均返回 HTTP 200。它只证明当时三个请求可访问及所记少量字段形状；不是生产运行时、宿主链路、稳定性或长期可用性验收。合成 fixture `tests/fixtures/ff14/items.json` 不含真实玩家数据、完整上游条目或图像。
+有限探测记录见 `.architecture-refactor/ff14-m1-source-evidence.json`（历史记录未随库提供）：2026-09-28 一次中文名称搜索、XIVAPI-compatible 数字 ID 详情和 Garland 同 ID 详情均返回 HTTP 200。它只证明当时三个请求可访问及所记少量字段形状；不是生产运行时、宿主链路、稳定性或长期可用性验收。合成 fixture `tests/fixtures/ff14/items.json` 不含真实玩家数据、完整上游条目或图像。
 
 Garland 页面/API 与项目代码、XIVAPI-compatible 服务及游戏数据库/图像各自的许可范围不能互相推定。本模块当前仅随包分发自有解析代码、来源链接和合成 fixture，不随包分发来源数据库或图标。锁定参考仓库 [jawwe/astrbot_plugin_tataru `704578d`](https://github.com/jawwe/astrbot_plugin_tataru/tree/704578d8479105e016de0474eaa72395d0806de8) 用于辨认字段线索，未移植其代码、字典、线上数据或图片；若以后复制或实质改写其代码，必须在产物保留该 commit 的完整 MIT license 和 copyright notice。参考许可证：[MIT LICENSE](https://github.com/jawwe/astrbot_plugin_tataru/blob/704578d8479105e016de0474eaa72395d0806de8/LICENSE)。
 
@@ -69,7 +69,7 @@ Garland 页面/API 与项目代码、XIVAPI-compatible 服务及游戏数据库/
 
 ## FFLogs 来源（M2 预核验）
 
-本节是 FFLogs 实现前置，不表示 FFLogs 能力已启用。2026-09-28 对 FFLogs 官方文档的直接打开仍返回 403；下列 schema 结论来自搜索索引呈现的同一官方页面，属于**官方文档索引证据**，不是对实时 API、凭据、响应或国服覆盖的验证。每项链接均指向对应官方页面。独立调查记录见 [M2 来源交接](../../.architecture-refactor/ff14-m2-source-handoff.md) 和 [M2 合同提案](../../.architecture-refactor/ff14-m2-source-contract.md)。
+本节是 FFLogs 实现前置，不表示 FFLogs 能力已启用。2026-09-28 对 FFLogs 官方文档的直接打开仍返回 403；下列 schema 结论来自搜索索引呈现的同一官方页面，属于**官方文档索引证据**，不是对实时 API、凭据、响应或国服覆盖的验证。每项链接均指向对应官方页面。独立调查记录见 M2 来源交接（历史记录未随库提供） 和 M2 合同提案（历史记录未随库提供）。
 
 ### 两条数据路径
 

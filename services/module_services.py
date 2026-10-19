@@ -86,8 +86,7 @@ from ..infrastructure.sqlite.repositories import SQLiteRepositories
 from .authorization import AuthorizationService, SecretAvailability
 from .bindings import AccountOperationsService
 from .cache import CacheAccessService, ModuleCacheRepository
-from .configuration import ConfigurationCoordinator
-from .core_configuration import (
+from .configuration.defaults import (
     CORE_CONFIG_FIELDS,
     CORE_DEFAULTS_FIELD,
     CORE_MODULE_ID,
@@ -96,6 +95,7 @@ from .core_configuration import (
     CoreDefaultsView,
     module_configuration_fields,
 )
+from .configuration.operations import ConfigurationCoordinator
 from .dependency_calls import DependencyInvoker
 from .identity import IdentityResolverService, InvocationPrincipalResolver
 from .module_storage import ModuleStorageRouter

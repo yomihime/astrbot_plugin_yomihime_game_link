@@ -116,8 +116,54 @@ def _ref(row: sqlite3.Row) -> SecretRef:
 class SQLiteGrantStore:
     """A real SQLite implementation of ``GrantStore``."""
 
-    def __init__(self, database: SQLiteDatabase | str | Path) -> None:
+    def __init__(
+        self, database: SQLiteDatabase | str | Path, *, key_manager=None
+    ) -> None:
         self.database = _database(database)
+        self._key_manager = key_manager
+
+    def _check_grant_key(self, unit, grant: Grant) -> None:
+        manager = self._key_manager
+        if manager is None or grant.secret_ref is None:
+            return
+        selected = unit.execute(
+            "SELECT generation,revision,source FROM managed_master_key WHERE singleton=1"
+        ).fetchone()
+        if (
+            selected is None
+            or selected["source"] == "unselected"
+            or (int(selected["generation"]), int(selected["revision"]))
+            != (manager._generation, manager._revision)
+            or unit.execute(
+                "SELECT 1 FROM managed_master_key_operations "
+                "WHERE state='preparing' LIMIT 1"
+            ).fetchone()
+            is not None
+        ):
+            raise RevisionConflict("master_key", manager._generation or 0, 0)
+        receipt = unit.execute(
+            "SELECT principal_id,module_id,field,operation_id,key_generation,state "
+            "FROM secret_receipts WHERE secret_token=?",
+            (grant.secret_ref.token,),
+        ).fetchone()
+        if (
+            receipt is None
+            or int(receipt["key_generation"]) != int(selected["generation"])
+            or receipt["state"] not in {"staged", "claimed", "active"}
+            or (
+                receipt["principal_id"],
+                receipt["module_id"],
+                receipt["field"],
+                receipt["operation_id"],
+            )
+            != (
+                grant.secret_ref.principal_id,
+                grant.secret_ref.module_id,
+                grant.secret_ref.field,
+                grant.secret_ref.operation_id,
+            )
+        ):
+            raise RevisionConflict("master_key", manager._generation or 0, 0)
 
     @staticmethod
     def _validate_expected(value: int) -> int:
@@ -237,6 +283,14 @@ class SQLiteGrantStore:
             raise ValueError("grant does not match the stored revision")
         if current.status is not GrantStatus.ACTIVE:
             raise ValueError("only an active grant can be revoked")
+        if current.secret_ref is not None:
+            # Revocation must remain possible while a key operation is pending.
+            # Invalidate that operation under the same write reservation before
+            # the old grant authority changes; its later activation must fail.
+            unit.execute(
+                "UPDATE managed_master_key_operations SET state='abandoned' "
+                "WHERE state='preparing'"
+            )
         revoked = Grant(
             current.grant_id,
             expected_revision + 1,
@@ -272,6 +326,7 @@ class SQLiteGrantStore:
         params = self._grant_params(grant)
 
         def _worker(unit):
+            self._check_grant_key(unit, grant)
             try:
                 unit.execute(
                     "INSERT INTO grants (grant_id, revision, principal_id, module_id, account_id, "
@@ -297,6 +352,7 @@ class SQLiteGrantStore:
         _bounded(grant.grant_id, "grant_id")
 
         def _worker(unit):
+            self._check_grant_key(unit, grant)
             row = unit.execute(
                 "SELECT * FROM grants WHERE grant_id = ?", (grant.grant_id,)
             ).fetchone()
@@ -599,9 +655,13 @@ class SQLiteAuthRepository(SQLiteGrantStore, SQLiteLoginSessionRepository):
     """SQLite implementation of the composite authorization repository."""
 
     def __init__(
-        self, database: SQLiteDatabase | str | Path, *, expire_on_open: bool = True
+        self,
+        database: SQLiteDatabase | str | Path,
+        *,
+        expire_on_open: bool = True,
+        key_manager=None,
     ) -> None:
-        SQLiteGrantStore.__init__(self, database)
+        SQLiteGrantStore.__init__(self, database, key_manager=key_manager)
         # Opening a repository never performs SQL. CoreRuntime calls the
         # bounded asynchronous maintenance method during startup.
         self.expire_on_open = bool(expire_on_open)
@@ -696,6 +756,7 @@ class SQLiteAuthRepository(SQLiteGrantStore, SQLiteLoginSessionRepository):
             # BEGIN IMMEDIATE may wait behind another writer. Validate expiry
             # only after acquiring that reservation so a callback cannot
             # become authorized while blocked on SQLite's write lock.
+            self._check_grant_key(unit, grant)
             now = datetime.now(UTC)
             persisted = unit.execute(
                 "SELECT * FROM login_sessions WHERE session_id=?",

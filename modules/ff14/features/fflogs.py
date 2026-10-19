@@ -81,7 +81,6 @@ VERIFIED_CHARACTER_REALMS = frozenset({"cn"})
 VERIFIED_OUTPUT_METADATA_REALMS = frozenset({"cn"})
 LIVE_STATISTICS_MARKUP_VERIFIED = False
 MAX_HTML_BYTES = 1_000_000
-MAX_STAT_POINTS = 512
 MAX_HTML_TAGS = 20_000
 METADATA_DEADLINE_SECONDS = 5
 METADATA_CACHE_SECONDS = 900
@@ -90,7 +89,6 @@ CATALOG_BATCH_SIZE = 12
 MAX_CHARACTER_ROWS = 40
 CATALOG_DIAGNOSTIC_BYTES = 16_384
 _LOGGER = logging.getLogger(__name__)
-_INTEGER = re.compile(r"[0-9]+\Z", re.ASCII)
 _NUMBER = re.compile(r"(?:[0-9]{1,3}(?:,[0-9]{3})+|[0-9]+)(?:\.[0-9]+)?\Z", re.ASCII)
 
 _CHARACTER_DEFAULT_QUERY = """query FF14PublicCharacter(
@@ -2359,10 +2357,6 @@ def _metadata_choice(candidate) -> str:
         f"{candidate.zone_name} — {candidate.encounter_name} / "
         f"{candidate.difficulty_name} / {candidate.spec_name}"
     )
-
-
-def _positive_id(value: object) -> int | None:
-    return value if type(value) is int and 1 <= value <= 2_147_483_647 else None
 
 
 def _safe_http_code(error: SourceHttpError) -> str:

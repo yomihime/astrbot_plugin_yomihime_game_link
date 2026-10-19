@@ -14,11 +14,8 @@ from yomihime_game_link_sdk.services import ConfigTarget
 from ..core.contracts.validation_boundary import validate_contract
 from ..core.invocation_budget import freeze_execution_timeouts
 from ..extensions.disk_manifest import parse_manifest
-from .configuration_migration import OrdinaryMigrationField
-from .core_configuration import (
-    CORE_CONFIG_FIELDS,
+from .configuration.defaults import (
     MODULE_REPLY_THEME,
-    core_config_target,
     module_configuration_fields,
 )
 from .core_runtime import TrustedSubscriptionGate
@@ -54,8 +51,6 @@ class ReviewedAssembly:
     managed_credentials: tuple
     credential_realms: Mapping
     validators: Mapping
-    migration_fields: tuple
-    migration_id: str
     public_bindings: Mapping
     support: object
     capability_timeouts: Mapping | None = None
@@ -66,7 +61,7 @@ class ReviewedAssembly:
         return frozenset(self.public_bindings.values())
 
     def ordinary_resources(self, principal_id):
-        """Reviewed executable policy, separate from migration/declaration metadata."""
+        """Reviewed executable policy, separate from declaration metadata."""
         names = frozenset(getattr(self.support, "ordinary_config_fields", ()))
         declared = {
             f.name
@@ -82,16 +77,6 @@ class ReviewedAssembly:
                 names if module_id == self.module_id else frozenset()
             ) | {MODULE_REPLY_THEME.name}
         return resources
-
-
-@dataclass(frozen=True, slots=True)
-class LegacyAssemblySupport:
-    """No new policies or executable support for pre-descriptor packages."""
-
-    module_id: str
-
-    def ordinary_snapshot(self, _values, _defaults):
-        return None
 
 
 def _object(pairs):
@@ -137,24 +122,9 @@ def assemble_reviewed(inventory, *, principal_id, support, selected=False):
         raise ValueError("reviewed assembly owner mismatch")
     module = matches[0]
     manifests = MappingProxyType({owner: module})
-    empty = MappingProxyType({})
     raw = inventory.files.get("assembly.json")
     if raw is None:
-        # Historical bundles without a reviewed descriptor obtain no new grants.
-        return ReviewedAssembly(
-            owner,
-            manifests,
-            empty,
-            empty,
-            (),
-            (),
-            empty,
-            empty,
-            (),
-            "legacy-no-assembly",
-            empty,
-            support,
-        )
+        raise ValueError("reviewed assembly descriptor is required")
     if len(raw) > 32768:
         raise ValueError("assembly budget exceeded")
     try:
@@ -195,12 +165,11 @@ def assemble_reviewed(inventory, *, principal_id, support, selected=False):
             "sources",
             "credentials",
             "gate",
-            "migration",
             "public",
             "page_sources",
             "credential_regions",
-        )
-        + (("execution_budgets",) if "execution_budgets" in descriptor else ()),
+            "execution_budgets",
+        ),
     )
     if (
         type(descriptor["version"]) is not int
@@ -209,9 +178,7 @@ def assemble_reviewed(inventory, *, principal_id, support, selected=False):
     ):
         raise ValueError("assembly version or owner mismatch")
     timeouts = {}
-    raw_budgets = descriptor.get(
-        "execution_budgets", {"capabilities": {}, "collectors": {}}
-    )
+    raw_budgets = descriptor["execution_budgets"]
     _keys(raw_budgets, ("capabilities", "collectors"))
     for kind, declarations, identifier in (
         ("capabilities", module.capabilities, "capability_id"),
@@ -269,8 +236,6 @@ def assemble_reviewed(inventory, *, principal_id, support, selected=False):
             raise ValueError("duplicate credential region")
         realms[region] = (alias, label)
         source, field = sources.get(source_id), fields.get(alias)
-        if source is None and field is None:
-            continue  # Legacy bundles with neither half have no OAuth grant.
         if (
             source is None
             or field is None
@@ -318,44 +283,12 @@ def assemble_reviewed(inventory, *, principal_id, support, selected=False):
         gates[owner] = TrustedSubscriptionGate(
             module, gate, hashlib.sha256(inventory.manifest).digest()
         )
-    migration = descriptor["migration"]
-    _keys(migration, ("id", "fields"))
-    migration_id = _string(migration["id"])
-    if type(migration["fields"]) is not list or len(migration["fields"]) > 32:
-        raise ValueError("invalid migration fields")
     validators = dict(support.validators)
     if any(
         name not in fields or fields[name].sensitive or not callable(check)
         for name, check in validators.items()
     ):
         raise ValueError("invalid reviewed validators")
-    migrations, targets, legacy_keys = [], set(), set()
-    for item in migration["fields"]:
-        _keys(item, ("target", "field", "legacy"))
-        name, legacy = _string(item["field"]), _string(item["legacy"])
-        if item["target"] == "$core":
-            candidates = {f.name: f for f in CORE_CONFIG_FIELDS}
-            target, validator = core_config_target(principal_id), None
-        elif item["target"] == owner:
-            candidates = fields
-            target, validator = (
-                validate_contract(ConfigTarget(principal_id, owner)),
-                validators.get(name),
-            )
-        else:
-            raise ValueError("migration target mismatch")
-        field = candidates.get(name)
-        if (
-            field is None
-            or field.sensitive
-            or name == gate
-            or (target, name) in targets
-            or legacy in legacy_keys
-        ):
-            raise ValueError("migration field mismatch")
-        targets.add((target, name))
-        legacy_keys.add(legacy)
-        migrations.append(OrdinaryMigrationField(target, field, legacy, validator))
     public = descriptor["public"]
     if (
         type(public) is not dict
@@ -401,8 +334,6 @@ def assemble_reviewed(inventory, *, principal_id, support, selected=False):
         tuple(managed),
         MappingProxyType(realms),
         MappingProxyType({owner: MappingProxyType(validators)}),
-        tuple(migrations),
-        migration_id,
         MappingProxyType(bindings),
         support.with_metadata(
             freeze_json(

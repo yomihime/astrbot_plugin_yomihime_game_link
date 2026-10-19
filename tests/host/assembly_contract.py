@@ -25,9 +25,6 @@ def selected_assembly(plugin_root=ROOT, principal_id="host"):
             "assembly.json",
             "pages/dist/entry.js",
             "pages/dist/styles.css",
-            "pages/compat/app.js",
-            "pages/compat/index.html",
-            "pages/compat/styles.css",
         ):
             files[name] = (source / name).read_bytes()
         payload = {
@@ -42,7 +39,3 @@ def selected_assembly(plugin_root=ROOT, principal_id="host"):
         support=SUPPORT,
         selected=True,
     )
-
-
-def ordinary_migration_fields(principal_id):
-    return selected_assembly(principal_id=principal_id).migration_fields

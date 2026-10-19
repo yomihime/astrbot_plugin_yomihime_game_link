@@ -7,20 +7,15 @@ from unittest.mock import AsyncMock, patch
 from ygl_test_subject.core.contracts.administration import (
     AdminAuthorizationDenied,
     AdminOperation,
-    OrdinaryRollbackReceipt,
 )
 from ygl_test_subject.core.contracts.services import ConfigFieldUpdate, ConfigPatch
 from ygl_test_subject.core.contracts.validation_boundary import validate_contract
 from ygl_test_subject.modules.ff14.config import DELIVERY_TIME, TIMEZONE
-from ygl_test_subject.services.configuration_catalog import (
+from ygl_test_subject.services.configuration.catalog import (
     project_configuration_catalog,
 )
-from ygl_test_subject.services.configuration_migration import (
-    OrdinaryConfigurationMigration,
-    OrdinaryMigrationField,
-)
-from ygl_test_subject.services.core_configuration import DEFAULT_REGION
 
+from tests.fixtures.configuration import write_value
 from tests.services import test_ordinary_admin as ordinary_fixture
 from tests.services.test_admin_operations import _config_manifest
 from yomihime_game_link_sdk.declarations import ConfigField, ConfigUpdateMode
@@ -60,9 +55,7 @@ class CatalogRuntimeTests(unittest.IsolatedAsyncioTestCase):
         target = validate_contract(ConfigTarget("fixture", "admin/mod"))
         await self.core.config_repository.current(target)
         await self.core.database.executor.run_transaction(
-            lambda unit: self.core.ordinary_config_migration.repository._write(
-                unit, target, "mode", "PRIVATE-UNGRANTED-VALUE", 1
-            )
+            lambda unit: write_value(unit, target, "mode", "PRIVATE-UNGRANTED-VALUE", 1)
         )
         with patch.object(
             self.core.config_repository,
@@ -204,13 +197,11 @@ class CatalogRuntimeTests(unittest.IsolatedAsyncioTestCase):
                         await self.core.recover_management(
                             revisions,
                             authorization=context,
-                            complete_from_current=complete,
                         )
                     self.source.end(context)
                 self.assertEqual(
                     before, await self.core.config_repository.current(self.ff14target)
                 )
-                self.assertFalse(await self.core.ordinary_config_migration.complete())
                 self.assertTrue(self.core.management_available)
                 self.assertTrue(self.core.configuration_blocked)
         # Only the affected fields are gated: the Core default remains repairable.
@@ -239,44 +230,8 @@ class CatalogRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 self.ff14target, {TIMEZONE: "Asia/Shanghai"}, before.revision
             )
 
-    async def test_limited_rollback_survives_missing_validator_and_preserves_unrelated(
-        self,
-    ):
-        self.raw = {}
-        context = self.context(AdminOperation.RECOVER_CONFIG)
-        revisions = {
-            target: (await self.core.config_repository.current(target)).revision
-            for target in self.resources
-        }
-        await self.core.recover_management(revisions, authorization=context)
-        self.source.end(context)
-        unrelated = validate_contract(ConfigTarget("unrelated", "other/mod"))
-        await self.core.config_repository.current(unrelated)
-        await self.core.database.executor.run_transaction(
-            lambda unit: self.core.ordinary_config_migration.repository._write(
-                unit, unrelated, "note", "kept", 1
-            )
-        )
-        revisions = {
-            target: (await self.core.config_repository.current(target)).revision
-            for target in self.resources
-        }
-        context = self.context(AdminOperation.ROLLBACK_CONFIG)
-        with patch.object(self.core.admin_operations, "_module_config_validators", {}):
-            result = await self.core.admin_operations.ordinary_rollback(
-                revisions, authorization=context
-            )
-        self.source.end(context)
-        self.assertIs(type(result), OrdinaryRollbackReceipt)
-        self.assertIs(result.rolled_back, True)
-        self.assertEqual(
-            (await self.core.config_repository.current(unrelated)).values["note"],
-            "kept",
-        )
-        self.assertFalse(await self.core.ordinary_config_migration.complete())
-
     async def test_runtime_start_missing_binding_preserves_recovery_foundation(self):
-        self.raw = {}
+        await self.update(self.coretarget, {"default_region": "cn"})
         with patch.object(self.core.admin_operations, "_module_config_validators", {}):
             with self.assertRaisesRegex(ValueError, "semantic validator"):
                 await self.core.start()
@@ -319,33 +274,6 @@ class CatalogBudgetTests(unittest.TestCase):
                     for i in range(128)
                 )
             )
-
-    def test_standalone_migration_required_binding_is_frozen_and_guards_writes(self):
-        target = validate_contract(ConfigTarget("fixture", "game_link/core"))
-
-        def validator(value):
-            pass
-
-        migration = OrdinaryConfigurationMigration(
-            object(),
-            (OrdinaryMigrationField(target, DEFAULT_REGION, "legacy", validator),),
-            migration_id="fixture",
-            value_validators={},
-        )
-        with self.assertRaisesRegex(ValueError, "semantic validator"):
-            migration.require_semantic_validators()
-        migration.require_semantic_validators(
-            {
-                validate_contract(ConfigTarget("fixture", "other/mod")): {
-                    "default_region"
-                }
-            }
-        )
-        self.assertIs(
-            migration._required_validators[(target, "default_region")], validator
-        )
-        with self.assertRaises(TypeError):
-            migration._required_validators[(target, "default_region")] = None
 
     def test_sensitive_declarations_are_omitted(self):
         result = self.project(

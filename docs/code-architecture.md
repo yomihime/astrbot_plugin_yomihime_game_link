@@ -1,74 +1,16 @@
-# Yomihime Game Link · 代码架构索引
+# 当前代码分层
 
-> 状态：设计草案，按主体与模块划分。
-> 依据：[需求文档](requirements.md)、[基本设计](basic-design.md)。本索引定义文档和代码归属，便于后续并行开发，不是实施计划。
+- `yomihime_game_link_sdk/`：独立 MIT 声明与薄协议；无 Host/网络/存储实现依赖，a9，ABI 2.0
+- `core/`：生命周期、调用权限、注册和边界校验；`core/contracts/` 是 SDK 接收边界，不能成为第二套公开 SDK
+- `services/`：通用协调；`configuration/operations.py` 管理值校验、事务与 CAS，`defaults.py` 管理 Core/模块默认值，`catalog.py` 投影配置声明
+- `infrastructure/`：SQLite、HTTP、文件和加密；`windows/` 隔离经过环境资格限定的原生文件系统/维护实现
+- `adapters/astrbot/`：真实宿主请求、消息与页面适配，不能给模块数据凭空授予权限
+- `modules/ff14/`：FF14 来源、能力、日历同步、模块配置和 Vue 页面
+- `presentation/`：通用图像、布局和字体接口；游戏特定解释仍属于模块
+- `pages/frontend/`：共享页面源代码；`pages/{shell,management,00-game-link}` 与模块 `pages/dist/` 由构建生成，不跟踪重复产物
 
-## 1. 文档导航
+配置只读取当前 SQLite 值及声明默认值。无旧 Host JSON 导入、迁移准备文件或旧配置回退。显式无效值仍拒绝启动并保留管理修复入口；修复与恢复必须通过鉴权及 revision 检查。数据库 schema 初始化与正常资源恢复不属于被删除的旧配置迁移。
 
-实施顺序与当前批次见[开发计划](development-plan.md)。FF14 按用户最新决定，以模块用例驱动必要 Core 能力的逐片实现与联调；Steam/HBR 仍待整体 Core Ready Gate。各模块按[模块并行开发计划](module-development-plan.md)及其当前任务卡执行；本文保留架构职责与接口边界。
+发行 ZIP 从白名单输入生成，SDK 从独立可复现 wheel 注入并校验摘要。第三方许可和 `py.typed` 保留。仓库 checkout 不能替代正式安装 ZIP。
 
-**当前统筹从[内核收束总卡](../.coordination/tasks/core/CORE-HARDENING-01.md)和[看板](../.coordination/board.md)开始，按[协作协议](code-architecture/orchestration.md)执行。** [工作包导航](code-architecture/work-packages.md)与[子任务模板](code-architecture/task-template.md)用于明确职责，不再形成平行总计划。实现者接收实际接口、精确路径和验收，不依赖历史聊天。
-
-协作角色与审查要求见协作协议。主体按限定子任务开发，公共契约须先于依赖它的模块准备就绪。
-
-| 文档 | 负责内容 | 代码归属 |
-| --- | --- | --- |
-| [主体代码架构](code-architecture/core.md) | 公共 API、注册与权限、存储、展示、调度、投递、宿主和扩展包 | main.py、bootstrap.py、api/、core/、services/、presentation/、infrastructure/、integrations/、web/ |
-| [FF14 模块](code-architecture/ff14.md) | FFLogs、物品、活动日历查询与推送；按片联调补齐必要内核 | modules/ff14/ |
-| [Dota 2 模块](code-architecture/dota2.md) | 阻塞占位，等待参考插件完成后重新设计 | modules/dota2/（当前禁止创建） |
-| [Steam 平台模块](code-architecture/steam.md) | 公开身份、商品、价格与共享价格订阅 | modules/steam/ |
-| [HBR 模块](code-architecture/hbr.md) | 登录链路、账号资料、BOX、高分和公共目录 | modules/hbr/ |
-
-主体文档定义公共技术契约的目标语义；实际可导入声明以唯一的 `yomihime_sdk/api/` 为准，原 `api/` 是兼容转发。模块只定义自己的模型、适配器、能力声明和语义，不复制主体服务接口。
-
-当前已有大量 B02–B05 离线组件，但统一准入、实例装配与宿主链路仍需收束。文档中的目标目录与模块能力不代表全部实现；实际宿主代码在 `adapters/astrbot/`，SDK 声明在 `yomihime_sdk/api/`。模块文件名、内部能力 ID 和集合名仍为建议，来源能力与真实宿主接口需要验证。
-
-## 2. 并行开发的文件归属
-
-各模块工作仅维护自身目录、任务卡分配的 `yomihime.manifest.json` 和自身验证材料。验证材料建议分别归属 tests/modules/<模块>/；主体公共契约验证归属 tests/contracts/，不能把模块专属样本加入共享测试配置。
-
-下列共享文件由主体/集成维护者统一修改，模块只提出所需变更：
-
-- 公共 api/、主体服务和通用展示组件。
-- 安装包布局、共享包的 `yomihime.manifest.json` 及构建清单；具体路径由对应任务卡确定。
-- main.py、bootstrap.py、metadata.yaml、pyproject.toml、运行依赖文件。
-- 公共测试配置、README.md、需求文档、基本设计及主体文档。
-
-模块依赖在局部声明中记录，由集成维护者检查兼容性后汇总；不能由各模块独立修改共享依赖版本。每个模块只维护对应模块设计文档。
-
-当前磁盘 ABI 在每个扩展包根目录读取 `yomihime.manifest.json`，其中 `modules` 数组声明包内模块；不假定另有局部清单合并协议。FF14 源码清单到实际安装根的映射由其总卡 M0/K 任务验证，工作树路径不能替代可安装工件。
-
-## 3. 对接方式
-
-模块通过 ModuleFactory、ModuleHandlers 和 ModuleServices 接入，详见主体文档。内置与第三方模块使用相同的注册、权限、存储、展示和调度协议。
-
-各模块必须明确声明：
-
-- 能力输入、权限、必须命令/允许自然语言策略及依赖。
-- 命令映射与帮助说明，由主体生成两级 help。
-- DisplayDocument 及可进入模型的事实，不自行渲染或发送结果。
-- 模块集合、缓存范围、资源与保留类别。
-- 可选采集器的规范键、周期配置、完整性与匹配规则。
-
-模块可以使用公共协议的受控替身独立验证，不要求其他模块运行。替身不成为生产代码的私有接口，也不复制一套公共类型到模块内。协议不足时，由主体维护者更新通用契约和版本，各受影响模块据此适配。
-
-## 4. 跨模块关系
-
-| 使用方 | 依赖 | 性质与边界 |
-| --- | --- | --- |
-| FF14 | 主体公共服务、外部数据适配器 | 不依赖其他游戏模块 |
-| Dota 2 | 主体服务；Steam 公开身份解析 | Steam 为可选依赖，禁止导入 Steam 内部代码 |
-| Steam | 主体公共服务、外部数据适配器 | 不依赖 Dota 2，不能操作 Dota 绑定 |
-| HBR | 主体授权、资源、存储等服务 | 不依赖其他游戏模块；真实游戏授权仍待验证 |
-
-Dota 默认 Steam 派生身份由主体 IdentityResolver 按绑定规则提供；显式资料链接解析可经 DependencyInvoker 调用 Steam 公开能力。两种用途都不开放账号管理 Tool，也不读取他人凭据。
-
-共享公开采集以同一采集器与数据口径为边界；跨模块复用必须声明共同采集能力，不按 URL 自动合并。私人数据不跨用户复用。
-
-## 5. 文档变更规则
-
-产品范围以需求文档为准，系统行为以基本设计为准，公共代码接口以主体文档为准，各模块业务映射以模块文档为准。发现冲突应同步修正文档，不能由某个模块自行选择一套规则绕过公共约束。
-
-只有 /ygl 统一入口、dota2 路由及两级 help 等已确认部分视为固定交互；各模块文档中的其他操作名和可选能力不构成新的功能承诺。
-
-新增模块可增加对应文档和索引项，不需要在主体文档加入游戏专属实现章节。
+大型生命周期、调度及存储事务协调器没有仅为行数做机械拆分；跨状态/取消/原子性边界的重构应另有独立设计与完整回归。

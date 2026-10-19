@@ -13,6 +13,7 @@ from ygl_test_subject.core.contracts.administration import (
     AdminOperation,
 )
 from ygl_test_subject.core.contracts.validation_boundary import validate_contract
+from ygl_test_subject.infrastructure.key_provider import SecretKeyUnavailable
 
 from tests.host import test_admin_pages as admin_fixture
 from yomihime_game_link_sdk.services import ConfigTarget
@@ -56,10 +57,7 @@ class ManagedCredentialPagesTests(unittest.IsolatedAsyncioTestCase):
         target = validate_contract(
             ConfigTarget("astrbot_plugin_yomihime_game_link", "ff14/ff14")
         )
-        for operation in (
-            AdminOperation.ROLLBACK_CONFIG,
-            AdminOperation.RECOVER_CONFIG,
-        ):
+        for operation in (AdminOperation.RECOVER_CONFIG,):
             with self.assertRaises(AdminAuthorizationDenied):
                 source.issue(
                     subject="synthetic",
@@ -207,7 +205,12 @@ class ManagedCredentialPagesTests(unittest.IsolatedAsyncioTestCase):
         self,
     ):
         with patch.dict(
-            os.environ, {"YGL_SECRET_KEY": base64.b64encode(b"s" * 32).decode()}
+            os.environ,
+            {
+                "YGL_SECRET_KEY": base64.b64encode(
+                    self.runtime.core_runtime.managed_keys.get_key()
+                ).decode()
+            },
         ):
             revision = (await self.status())["ff14/ff14"]["revision"]
             responses = await asyncio.gather(
@@ -234,10 +237,31 @@ class ManagedCredentialPagesTests(unittest.IsolatedAsyncioTestCase):
                         "credential_fflogs_cn", revision=before["ff14/ff14"]["revision"]
                     )
                 )
-                await asyncio.wait_for(started.wait(), 2)
-                self.pages.close()
-                release.set()
-                response = await task
+                waiter = asyncio.create_task(started.wait())
+                try:
+                    done, _ = await asyncio.wait(
+                        {waiter, task}, timeout=15, return_when=asyncio.FIRST_COMPLETED
+                    )
+                    if task in done:
+                        early = await task
+                        self.fail(
+                            "credential update completed before staging: "
+                            f"HTTP {early.status_code}"
+                        )
+                    self.assertIn(waiter, done, "credential staging did not finish")
+                    self.assertFalse(task.done(), "update escaped the staging gate")
+                    self.pages.close()
+                    release.set()
+                    response = await asyncio.wait_for(task, 15)
+                finally:
+                    release.set()
+                    waiter.cancel()
+                    await asyncio.gather(waiter, return_exceptions=True)
+                    if not task.done():
+                        task.cancel()
+                        finished, _ = await asyncio.wait({task}, timeout=15)
+                        self.assertIn(task, finished, "credential task did not stop")
+                    await asyncio.gather(task, return_exceptions=True)
             self.assertEqual(response.status_code, 403, response.text)
             self.pages.register()
             self.assertEqual(await self.status(), before)
@@ -318,7 +342,12 @@ class ManagedCredentialPagesTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotIn("default", fields[0])
         with patch.dict(
-            os.environ, {"YGL_SECRET_KEY": base64.b64encode(b"s" * 32).decode()}
+            os.environ,
+            {
+                "YGL_SECRET_KEY": base64.b64encode(
+                    self.runtime.core_runtime.managed_keys.get_key()
+                ).decode()
+            },
         ):
             for alias in ("credential_fflogs_cn", "credential_fflogs_global"):
                 revision = (await self.status())["ff14/ff14"]["revision"]
@@ -350,7 +379,7 @@ class ManagedCredentialPagesTests(unittest.IsolatedAsyncioTestCase):
                     (await self.status())["ff14/ff14"]["fields"][alias], "unset"
                 )
 
-    async def test_closed_pair_missing_key_and_no_effect(self):
+    async def test_closed_pair_and_bound_key_unavailable_have_no_effect(self):
         before = await self.status()
         for value in (
             {},
@@ -363,10 +392,15 @@ class ManagedCredentialPagesTests(unittest.IsolatedAsyncioTestCase):
         ):
             response = await self.change("credential_fflogs_cn", value=value)
             self.assertEqual(response.status_code, 400, response.text)
-        with patch.dict(os.environ, {}, clear=True):
+        with patch.object(
+            self.runtime.core_runtime.managed_keys,
+            "get_key",
+            side_effect=SecretKeyUnavailable(reason="not_provided"),
+        ) as provider:
             response = await self.change("credential_fflogs_cn")
             self.assertEqual(response.status_code, 503, response.text)
             self.assertEqual(response.json()["code"], "secret_encryption_unavailable")
+            provider.assert_called()
         self.assertEqual(await self.status(), before)
 
     async def test_credential_endpoints_retain_host_negative_identity_proofs(self):

@@ -88,7 +88,6 @@ class AdminOperation(StrEnum):
     UNLOAD_MODULE = "unload_module"
     UPDATE_CONFIG = "update_config"
     READ_CONFIG = "read_config"
-    ROLLBACK_CONFIG = "rollback_config"
     RECOVER_CONFIG = "recover_config"
 
 
@@ -133,17 +132,6 @@ class ModuleUnloadReceipt:
             value = getattr(self, name)
             if value is not None and type(value) is not bool:
                 raise TypeError(f"{name} must be bool or unknown")
-
-
-@dataclass(frozen=True, slots=True)
-class OrdinaryRollbackReceipt:
-    """Acknowledgement of the bounded ledger rollback, not a database restore."""
-
-    rolled_back: bool
-
-    def __post_init__(self) -> None:
-        if type(self.rolled_back) is not bool:
-            raise TypeError("rolled_back must be bool")
 
 
 class OrdinaryConfigProjection(TypedDict):
@@ -455,15 +443,6 @@ class AdminOperations(Protocol):
         self, *, authorization: AdminAuthorizationContext
     ) -> Mapping[str, OrdinaryConfigProjection]:
         """Read only deployment-declared ordinary resources with source-owned proof."""
-        ...
-
-    async def ordinary_rollback(
-        self,
-        expected_revisions: Mapping[ConfigTarget, int],
-        *,
-        authorization: AdminAuthorizationContext,
-    ) -> OrdinaryRollbackReceipt:
-        """Bounded migration rollback, never an entire database restore."""
         ...
 
     async def config_snapshot(

@@ -1,0 +1,24 @@
+{
+  "views": {
+    "00-game-link": {
+      "title": "Game Link"
+    },
+    "management": {
+      "title": "Settings and Maintenance"
+    },
+    "shell": {
+      "title": "Module Workspace"
+    }
+  },
+  "pages": {
+    "00-game-link": {
+      "title": "Game Link"
+    },
+    "management": {
+      "title": "Settings and Maintenance"
+    },
+    "shell": {
+      "title": "Module Workspace"
+    }
+  }
+}

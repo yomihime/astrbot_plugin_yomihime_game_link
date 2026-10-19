@@ -13,7 +13,7 @@ from ygl_test_subject.core.contracts.administration import AdminAuthorizationDen
 from ygl_test_subject.core.contracts.services import ConfigFieldUpdate, ConfigPatch
 from ygl_test_subject.presentation.card_bitmap import BitmapUnavailable
 from ygl_test_subject.presentation.layout_renderer import render_document
-from ygl_test_subject.services.core_configuration import (
+from ygl_test_subject.services.configuration.defaults import (
     CORE_CONFIG_FIELDS,
     CORE_MODULE_ID,
     module_configuration_fields,
@@ -80,14 +80,17 @@ class DeclarativeCommandPipelineTests(unittest.IsolatedAsyncioTestCase):
                     help_card.blocks[0].blocks[0].cells[0].asset.kind, "svg"
                 )
                 self.assertEqual(self._png(context.calls[0][1].chain[0]), help_png)
-                for command in ("/ygl ff14 item 100", "/ygl ff14 market 44091"):
+                for command, layout in (
+                    ("/ygl ff14 item 100", "table"),
+                    ("/ygl ff14 market 44091", "detail"),
+                ):
                     event = self._event(message=command)
                     self.assertIsNone(await runtime.handle_event(event))
                     card, png = captured[-1]
                     self.assertEqual(self._png(context.calls[-1][1].chain[0]), png)
                     self.assertEqual(card.theme, "warm_paper")
                     self.assertIsNotNone(card.logo)
-                    self.assertEqual(card.layout, "detail")
+                    self.assertEqual(card.layout, layout)
                 self.assertEqual(len(context.calls), 3)
                 self.assertEqual(captured[-2][0].title, "Copper Ore")
                 self.assertEqual(runtime.core_runtime._command_ingresses, {})

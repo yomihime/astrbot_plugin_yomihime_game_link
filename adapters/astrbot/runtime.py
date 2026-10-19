@@ -42,14 +42,15 @@ from ...extensions.factory_resolver import (
     ReviewedSupportLease,
 )
 from ...infrastructure.key_provider import EnvironmentKeyProvider
+from ...infrastructure.managed_key_manager import ManagedKeyManager
 from ...infrastructure.secret_codec import AESGCMSecretCodec
+from ...infrastructure.sqlite.database import SQLiteDatabase
 from ...presentation.command_card import CommandCardRenderer
 from ...presentation.command_text import project_command_heading
 from ...presentation.rendering import GenericDisplayRenderer, RenderingBounds
-from ...scripts.prepare_ff14_config_migration import INPUT_FILENAME, load_prepared_input
 from ...services.admin_authorization import AdminAuthorizationService
-from ...services.configuration import ConfigurationValueError
-from ...services.core_configuration import CORE_CONFIG_FIELDS, core_config_target
+from ...services.configuration.defaults import CORE_CONFIG_FIELDS, core_config_target
+from ...services.configuration.operations import ConfigurationValueError
 from ...services.core_runtime import (
     CoreRuntime,
     CoreRuntimeCleanupPending,
@@ -57,6 +58,7 @@ from ...services.core_runtime import (
 )
 from ...services.managed_font import ManagedFont
 from ...services.source_credentials import SourceCredentialPolicy
+from ...services.trusted_assembly import assemble_reviewed
 from .bundled import BundledExtensionError, install_bundled_ff14
 from .command_bridge import AstrBotCommandBridge, CommandHelp, CommandInvocation
 from .message_port import (
@@ -65,7 +67,6 @@ from .message_port import (
     MessageChainFactory,
     PlainFactory,
 )
-from .trusted_assembly import LegacyAssemblySupport, assemble_reviewed
 from .web_public import (
     HostPublicWebValidator,
     WebPublicRejected,
@@ -499,7 +500,6 @@ class AstrBotRuntime:
         plugin_root: str | Path,
         data_dir: str | Path,
         config: Mapping[str, object] | None = None,
-        raw_legacy_config: Mapping[str, object] | None = None,
         plain_factory: PlainFactory | None = None,
         chain_factory: MessageChainFactory | None = None,
         image_factory: ImageFactory | None = None,
@@ -515,10 +515,6 @@ class AstrBotRuntime:
         self._config_snapshot = None
         self._config_error: str | None = None
         # Injected Host config is hydrated and cannot establish raw key presence.
-        # raw_legacy_config is a trusted offline fixture input, never chat input.
-        self._raw_legacy_config = (
-            dict(raw_legacy_config) if raw_legacy_config is not None else None
-        )
         self._plugin_root = Path(plugin_root)
         self._data_dir = Path(data_dir)
         self._plain_factory = plain_factory
@@ -562,6 +558,7 @@ class AstrBotRuntime:
         self._closing = False
         self._admin_source = None
         self._credential_admin_source = None
+        self._key_admin_source = None
         self._module_admin_source = None
 
     def management_current(self, core, source):
@@ -571,16 +568,19 @@ class AstrBotRuntime:
             and (
                 source is self._admin_source
                 or source is self._credential_admin_source
+                or source is self._key_admin_source
                 or source is self._module_admin_source
             )
             and not self._closing
             and getattr(core, "management_available", False) is True
         )
 
-    def management_entry(self, *, credentials=False, modules=False):
+    def management_entry(self, *, credentials=False, modules=False, master_key=False):
         source = (
             self._module_admin_source
             if modules
+            else self._key_admin_source
+            if master_key
             else self._credential_admin_source
             if credentials
             else self._admin_source
@@ -590,17 +590,18 @@ class AstrBotRuntime:
         return self._core, source
 
     async def recover_management(
-        self, core, revisions, *, authorization, complete_from_current
+        self, core, revisions, *, authorization
     ) -> ManagementRecoveryProjection:
         async with self._lock:
             current, source = self.management_entry()
-            if current is not core:
+            if current is not core or not core.configuration_blocked:
+                # Reject a recovery request against an already-running Core before
+                # entering startup-failure cleanup; rejection must not stop it.
                 raise AdminAuthorizationDenied
             try:
                 result = await core.recover_management(
                     revisions,
                     authorization=authorization,
-                    complete_from_current=complete_from_current,
                 )
             except BaseException:
                 # A preparatory failure retains only a healthy foundation;
@@ -821,12 +822,10 @@ class AstrBotRuntime:
             )
             if installation.trusted:
                 extension_root = installation.extension_root
-                support = LegacyAssemblySupport("ff14/ff14")
-                if "assembly.json" in installation.inventory.files:
-                    self._assembly_lease = ReviewedSupportLease(
-                        installation.inventory.files, selected=True
-                    )
-                    support = self._assembly_lease.support
+                self._assembly_lease = ReviewedSupportLease(
+                    installation.inventory.files, selected=True
+                )
+                support = self._assembly_lease.support
                 try:
                     self._assembly = assemble_reviewed(
                         installation.inventory,
@@ -891,14 +890,20 @@ class AstrBotRuntime:
                     max_blocks_per_document=32,
                     max_members_per_batch=8,
                 )
+                database = SQLiteDatabase(self._data_dir / "runtime.sqlite3")
+                managed_keys = ManagedKeyManager(
+                    database,
+                    self._data_dir,
+                    self._data_dir / "secrets",
+                    environment=EnvironmentKeyProvider("YGL_SECRET_KEY"),
+                )
                 core = self._core_factory(
-                    database=self._data_dir / "runtime.sqlite3",
+                    database=database,
                     extension_root=extension_root,
                     file_root=self._data_dir / "files",
                     secret_root=self._data_dir / "secrets",
-                    secret_codec=AESGCMSecretCodec(
-                        EnvironmentKeyProvider("YGL_SECRET_KEY")
-                    ),
+                    secret_codec=AESGCMSecretCodec(managed_keys),
+                    managed_key_manager=managed_keys,
                     http_transport=self._http_transport,
                     renderer=GenericDisplayRenderer(rendering_bounds),
                     command_card_renderer=self._command_cards,
@@ -942,22 +947,6 @@ class AstrBotRuntime:
                     if self._assembly
                     else (),
                     owner_cleanup=self._cleanup_module_owner,
-                    ordinary_migration_fields=self._assembly.migration_fields
-                    if self._assembly
-                    else (),
-                    ordinary_migration_id=self._assembly.migration_id
-                    if self._assembly
-                    else "unavailable-assembly",
-                    ordinary_migration_source=lambda: (
-                        self._raw_legacy_config
-                        if self._raw_legacy_config is not None
-                        else load_prepared_input(
-                            self._data_dir / INPUT_FILENAME,
-                            legacy_fields=tuple(
-                                f.legacy_field for f in self._assembly.migration_fields
-                            ),
-                        )
-                    ),
                     public_web_validator=validator,
                     public_web_capabilities=self._assembly.public_capabilities
                     if self._assembly
@@ -989,8 +978,15 @@ class AstrBotRuntime:
                     operations={
                         AdminOperation.READ_CONFIG,
                         AdminOperation.UPDATE_CONFIG,
-                        AdminOperation.ROLLBACK_CONFIG,
                         AdminOperation.RECOVER_CONFIG,
+                    },
+                )
+                self._key_admin_source = core.admin_authorization.register_source(
+                    "astrbot-dashboard-master-key",
+                    resources=core.admin_operations.master_key_resources(),
+                    operations={
+                        AdminOperation.READ_CONFIG,
+                        AdminOperation.UPDATE_CONFIG,
                     },
                 )
             if (
@@ -1114,6 +1110,8 @@ class AstrBotRuntime:
             self._module_admin_source.close()
         if self._credential_admin_source is not None:
             self._credential_admin_source.close()
+        if self._key_admin_source is not None:
+            self._key_admin_source.close()
         if self._web_validator is not None:
             self._web_validator.close()
         self._closing = True
@@ -1172,6 +1170,13 @@ class AstrBotRuntime:
                 pending.append(("credential_admin_source", exc))
             else:
                 self._credential_admin_source = None
+        if self._key_admin_source is not None:
+            try:
+                self._key_admin_source.close()
+            except BaseException as exc:
+                pending.append(("key_admin_source", exc))
+            else:
+                self._key_admin_source = None
         if self._web_validator is not None:
             try:
                 self._web_validator.close()
@@ -1338,8 +1343,8 @@ class AstrBotRuntime:
         if self._config_error is not None:
             return (
                 f"FF14 普通配置无效 [{self._config_error}]，插件尚未启动。"
-                "请通过合法 Core 配置管理权限修复；迁移输入保留原始值，"
-                "不要用 AstrBot 自动补默认的表单覆盖迁移材料。已有订阅记录保留。"
+                "请在已登录的插件设置页修正对应字段，再到配置维护重新校验。"
+                "已有订阅及其它数据保留；不会自动覆盖无效值。"
             )
         if not self._trusted_bundle and self._bundle_failure_reason is not None:
             return self._bundle_failure_diagnostic()

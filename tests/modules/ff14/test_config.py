@@ -14,12 +14,11 @@ from modules.ff14.config import (
     TIMEZONE,
     FF14ConfigError,
     FF14ConfigSnapshot,
-    ff14_config_snapshot,
 )
 
 
 class FF14ConfigTests(unittest.TestCase):
-    def test_missing_legacy_fields_and_boundaries(self):
+    def test_default_values_and_boundaries(self):
         self.assertEqual(FF14ConfigSnapshot.from_values({}), FF14ConfigSnapshot())
         for days in (1, 30):
             snapshot = FF14ConfigSnapshot.from_values(
@@ -62,10 +61,10 @@ class FF14ConfigTests(unittest.TestCase):
 
     def test_sync_interval_defaults_and_allowed_values_round_trip(self):
         self.assertEqual(FF14ConfigSnapshot().calendar_sync_interval_seconds, 21600)
-        self.assertEqual(ff14_config_snapshot(None).as_values()[SYNC_INTERVAL], 21600)
+        self.assertEqual(FF14ConfigSnapshot().as_values()[SYNC_INTERVAL], 21600)
         for seconds in (21600, 43200, 86400):
             with self.subTest(seconds=seconds):
-                snapshot = ff14_config_snapshot({SYNC_INTERVAL: seconds})
+                snapshot = FF14ConfigSnapshot.from_values({SYNC_INTERVAL: seconds})
                 self.assertEqual(snapshot.calendar_sync_interval_seconds, seconds)
                 self.assertEqual(snapshot.as_values()[SYNC_INTERVAL], seconds)
                 self.assertEqual(

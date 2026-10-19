@@ -503,13 +503,20 @@ class OutputService:
 
                 approval = SendApproval(sending.owner_token, ())
                 state["sending"] = sending
-                # Recheck owner identity after the durable SENDING transition;
-                # no await follows the final owner proof check on success.
+                # A different runtime may revoke or reset the grant after the
+                # durable SENDING transition. Read its current authority before
+                # approving the external send.
                 try:
+                    if invocation.grant_id is not None:
+                        grant_expiry = await self._check_result_authority(
+                            invocation, capability, result
+                        )
                     if capability.privacy_floor is PrivacyFloor.OWNER:
                         if self._owner_authority is None:
                             raise _OutputFailure("owner_proof_unavailable")
                         await self._owner_authority.require_current(invocation)
+                    # No await follows the final issuer, registry and admission
+                    # checks on success.
                     self._issuer.require(invocation)
                     self._require_current_module(invocation)
                     self._admission.check(lease)

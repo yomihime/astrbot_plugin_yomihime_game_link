@@ -190,7 +190,7 @@ def capture_source_bundle(
     if provenance.platform == "nt":
         if provenance.windows_identity is None:
             raise SourceSnapshotError("candidate_stale")
-        from .windows_fs import capture_python_sources
+        from ..infrastructure.windows.fs import capture_python_sources
 
         files = capture_python_sources(
             provenance.root_locator,

@@ -1,5 +1,6 @@
 // Synthetic declaration/value fixtures. No storage or real Host identity.
 export const context={pluginName:'astrbot_plugin_yomihime_game_link',pageName:'management',session:'mock-one'};
+export const masterKeyReady=()=>({state:'ready',reason_code:'ready',ready:true,source:'managed',generation:1,revision:2,inventory_digest:'a'.repeat(64),unknown_count:0,impact:[]});
 export function catalog(){
   const field=(module_id,name,description,value_schema,defaultValue,group=null)=>({module_id,name,description,group,value_schema,default:defaultValue,required:false,readable:true,editable:true,blocked_reason:null});
   return {schema_version:1,fields:[

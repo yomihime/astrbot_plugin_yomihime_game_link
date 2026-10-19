@@ -23,7 +23,7 @@ from ygl_test_subject.extensions.loader import (
 
 def has_safe_scan() -> bool:
     if os.name == "nt":
-        from extensions.windows_fs import WindowsScanError, _check_runtime
+        from infrastructure.windows.fs import WindowsScanError, _check_runtime
 
         try:
             _check_runtime()

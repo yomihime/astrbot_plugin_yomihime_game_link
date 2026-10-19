@@ -10,7 +10,7 @@ from pathlib import Path
 from secrets import token_urlsafe
 from time import monotonic
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from ygl_test_subject.core.admission import AdmissionError
 from ygl_test_subject.core.contracts.administration import AdminOperation
@@ -30,6 +30,13 @@ from ygl_test_subject.core.ports import (
 )
 from ygl_test_subject.extensions.discovery import discover_packages
 from ygl_test_subject.extensions.loader import CandidateState, ExtensionCandidate
+from ygl_test_subject.infrastructure.key_provider import SecretKeyUnavailable
+from ygl_test_subject.infrastructure.managed_key_file import ManagedKeyFileError
+from ygl_test_subject.infrastructure.managed_key_manager import (
+    ManagedKeyConflict,
+    ManagedKeyManager,
+)
+from ygl_test_subject.infrastructure.secret_codec import AESGCMSecretCodec
 from ygl_test_subject.infrastructure.sqlite.database import SQLiteDatabase
 from ygl_test_subject.services.admin_authorization import _digest
 from ygl_test_subject.services.core_runtime import (
@@ -1397,6 +1404,95 @@ class CoreRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await runtime.close(timeout=0.5))
         self.assertTrue(runtime.closed)
         self.assertEqual(source.capture_calls, 0)
+
+    async def test_managed_key_startup_errors_are_bounded_and_core_remains_usable(self):
+        sentinel = "synthetic-secret-path-body-do-not-log"
+        for error, code in (
+            (
+                ManagedKeyFileError("key_file_invalid"),
+                "managed_key_startup_unavailable",
+            ),
+            (ManagedKeyConflict(sentinel), "managed_key_startup_unavailable"),
+            (SecretKeyUnavailable(), "managed_key_startup_unavailable"),
+            (RuntimeError(sentinel), "managed_key_startup_unexpected"),
+        ):
+            with self.subTest(code=code):
+                runtime = self._runtime()
+                manager = ManagedKeyManager(
+                    runtime.database, self.root, self.root / "secrets"
+                )
+                runtime.managed_keys = manager
+                runtime.secret_store.key_manager = manager
+                runtime.secret_store.codec = AESGCMSecretCodec(manager)
+                try:
+                    with (
+                        patch.object(manager, "startup", AsyncMock(side_effect=error)),
+                        self.assertLogs(
+                            "ygl_test_subject.services.core_runtime", level="WARNING"
+                        ) as logs,
+                    ):
+                        await runtime.start()
+                        await runtime.start()
+                    self.assertEqual(len(logs.records), 1)
+                    record = logs.records[0]
+                    self.assertEqual(record.getMessage(), code)
+                    self.assertIsNone(record.exc_info)
+                    self.assertFalse(record.args)
+                    self.assertNotIn(sentinel, "\n".join(logs.output))
+                    self.assertTrue(runtime.accepting)
+                    self.assertEqual(
+                        runtime.public_module_catalog()["runtime"], {"state": "ready"}
+                    )
+                    self.assertEqual(
+                        (await runtime.core_defaults.current()).values[
+                            "default_region"
+                        ],
+                        "cn",
+                    )
+                    self.assertFalse(
+                        runtime.secret_store.encryption_readiness()["ready"]
+                    )
+                    with self.assertRaises(SecretKeyUnavailable):
+                        manager.get_key()
+                finally:
+                    self.assertTrue(await runtime.close(timeout=0.5))
+
+    async def test_managed_key_normal_blocked_statuses_do_not_log_errors(self):
+        for state in ("unconfigured", "needs_restore"):
+            with self.subTest(state=state):
+                runtime = self._runtime()
+                runtime.managed_keys = SimpleNamespace(
+                    startup=AsyncMock(return_value={"ready": False, "state": state})
+                )
+                try:
+                    with self.assertNoLogs(
+                        "ygl_test_subject.services.core_runtime", level="WARNING"
+                    ):
+                        await runtime.start()
+                    self.assertTrue(runtime.accepting)
+                    self.assertEqual(
+                        (await runtime.core_defaults.current()).values[
+                            "default_region"
+                        ],
+                        "cn",
+                    )
+                finally:
+                    self.assertTrue(await runtime.close(timeout=0.5))
+
+    async def test_managed_key_startup_cancellation_still_propagates(self):
+        runtime = self._runtime()
+        runtime.managed_keys = SimpleNamespace(
+            startup=AsyncMock(side_effect=asyncio.CancelledError())
+        )
+        try:
+            with self.assertNoLogs(
+                "ygl_test_subject.services.core_runtime", level="WARNING"
+            ):
+                with self.assertRaises(asyncio.CancelledError):
+                    await runtime.start()
+            self.assertFalse(runtime.accepting)
+        finally:
+            self.assertTrue(await runtime.close(timeout=0.5))
 
     async def test_command_heading_dependency_does_not_wrap_subscription_renderer(self):
         def project(*args):

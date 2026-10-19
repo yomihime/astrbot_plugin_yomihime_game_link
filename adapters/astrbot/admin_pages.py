@@ -13,11 +13,11 @@ from ...core.contracts.administration import (
     AdminAuthorizationDenied,
     AdminOperation,
     ModuleUnloadReceipt,
-    OrdinaryRollbackReceipt,
 )
 from ...core.contracts.services import ConfigFieldUpdate, ConfigPatch
 from ...core.contracts.validation_boundary import validate_contract
 from ...core.ports import RevisionConflict
+from ...infrastructure.managed_key_manager import ManagedKeyConflict
 from ...infrastructure.secret_store import SecretStoreUnavailable
 from .runtime import PLUGIN_NAME
 from .web_admin import bounded_body, bounded_font_upload, verified_dashboard_request
@@ -30,12 +30,15 @@ _OPERATIONS = {
     "sync-diagnostics": AdminOperation.READ_CONFIG,
     "catalog": AdminOperation.READ_CONFIG,
     "update": AdminOperation.UPDATE_CONFIG,
-    "rollback": AdminOperation.ROLLBACK_CONFIG,
     "recover": AdminOperation.RECOVER_CONFIG,
     "credential-catalog": AdminOperation.READ_CONFIG,
     "credential-status": AdminOperation.READ_CONFIG,
     "credential-update": AdminOperation.UPDATE_CONFIG,
     "credential-readiness": AdminOperation.READ_CONFIG,
+    "master-key-status": AdminOperation.READ_CONFIG,
+    "master-key-retry": AdminOperation.UPDATE_CONFIG,
+    "master-key-restore": AdminOperation.UPDATE_CONFIG,
+    "master-key-reset": AdminOperation.UPDATE_CONFIG,
     "modules": AdminOperation.LIST_MODULES,
     "module-enabled": AdminOperation.SET_ENABLED,
     "module-unload": AdminOperation.UNLOAD_MODULE,
@@ -105,12 +108,15 @@ class AdminPages:
                 concrete = request._get_current()
                 raw, subject, expiry = verified_dashboard_request(concrete, legacy)
                 credentials = endpoint.startswith("credential-")
+                master_key = endpoint.startswith("master-key-")
                 modules = endpoint.startswith("module")
                 core, source = self.runtime.management_entry(
-                    credentials=credentials, modules=modules
+                    credentials=credentials, modules=modules, master_key=master_key
                 )
                 resources = (
-                    core.admin_operations.credential_resources()
+                    core.admin_operations.master_key_resources()
+                    if master_key
+                    else core.admin_operations.credential_resources()
                     if credentials
                     else core.admin_operations.module_resources()
                     if modules
@@ -173,6 +179,24 @@ class AdminPages:
                 code, status = "admin_authorization_denied", 403
             except SecretStoreUnavailable:
                 code, status = "secret_encryption_unavailable", 503
+            except ManagedKeyConflict as error:
+                code = error.code
+                status = (
+                    409
+                    if code
+                    in {
+                        "stale_inventory",
+                        "operation_changed",
+                        "operation_incomplete",
+                        "environment_key_conflict",
+                        "key_conflict",
+                    }
+                    else 422
+                    if code == "key_does_not_decrypt_inventory"
+                    else 400
+                    if code in {"invalid_key", "confirmation_required"}
+                    else 503
+                )
             except (ValueError, TypeError):
                 code, status = "invalid_config", 400
             except Exception:
@@ -192,6 +216,12 @@ class AdminPages:
                     "code": code,
                     "message": "配置版本冲突，请刷新并重新核对后修改。"
                     if code == "revision_conflict"
+                    else "原密钥格式无效，请输入标准 Base64 编码的 32 字节密钥；旧凭据未更改。"
+                    if code == "invalid_key"
+                    else "所填密钥与当前密钥不一致；旧凭据未更改，请核对后重试。"
+                    if code == "key_conflict"
+                    else "所填密钥未能解开现有凭据；旧凭据未被替换，请核对原密钥后重试。"
+                    if code == "key_does_not_decrypt_inventory"
                     else "未取得成功确认，请刷新核对配置与版本后重试。",
                     "data": {},
                 },
@@ -284,6 +314,40 @@ class AdminPages:
             return await ops.credential_readiness(
                 authorization=context, diagnostics=bool(data)
             )
+        if endpoint == "master-key-status":
+            if data:
+                raise ValueError("invalid master key status parameters")
+            return await ops.master_key_status(authorization=context)
+        if endpoint in {"master-key-retry", "master-key-restore", "master-key-reset"}:
+            common = {"expected_revision", "expected_generation", "inventory_digest"}
+            extra = (
+                {"encoded_key"}
+                if endpoint == "master-key-restore"
+                else {"confirmation"}
+                if endpoint == "master-key-reset"
+                else set()
+            )
+            if set(data) != common | extra:
+                raise ValueError("invalid master key parameters")
+            if (
+                type(data["expected_revision"]) is not int
+                or data["expected_revision"] < 1
+                or type(data["expected_generation"]) is not int
+                or data["expected_generation"] < 0
+                or type(data["inventory_digest"]) is not str
+                or len(data["inventory_digest"]) != 64
+                or any(c not in "0123456789abcdef" for c in data["inventory_digest"])
+            ):
+                raise ValueError("invalid master key fence")
+            return await ops.master_key_change(
+                authorization=context,
+                action=endpoint.removeprefix("master-key-"),
+                expected_revision=data["expected_revision"],
+                expected_generation=data["expected_generation"],
+                inventory_digest=data["inventory_digest"],
+                encoded_key=data.get("encoded_key"),
+                confirmation=data.get("confirmation"),
+            )
         if endpoint in ("credential-catalog", "credential-status"):
             if data:
                 raise ValueError("credential read parameters must be empty")
@@ -341,11 +405,9 @@ class AdminPages:
                 authorization=context,
             )
             return {"module_id": result.module_id, "revision": result.revision}
-        keys = (
-            {"expected_revisions"}
-            if endpoint == "rollback"
-            else {"expected_revisions", "complete_from_current"}
-        )
+        if endpoint != "recover":
+            raise AdminAuthorizationDenied
+        keys = {"expected_revisions"}
         if set(data) != keys or type(data["expected_revisions"]) is not dict:
             raise ValueError("invalid recovery parameters")
         revisions = {
@@ -354,17 +416,8 @@ class AdminPages:
             ): revision
             for module_id, revision in data["expected_revisions"].items()
         }
-        if endpoint == "rollback":
-            receipt = await ops.ordinary_rollback(revisions, authorization=context)
-            if type(receipt) is not OrdinaryRollbackReceipt:
-                raise TypeError("invalid rollback receipt")
-            receipt.__post_init__()
-            return {"rolled_back": receipt.rolled_back}
-        if type(data["complete_from_current"]) is not bool:
-            raise ValueError("explicit recovery intent is required")
         return await self.runtime.recover_management(
             core,
             revisions,
             authorization=context,
-            complete_from_current=data["complete_from_current"],
         )

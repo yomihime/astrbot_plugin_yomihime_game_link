@@ -6,14 +6,14 @@ import vm from 'node:vm';
 import {JSDOM} from '../../../pages/frontend/node_modules/jsdom/lib/api.js';
 import {root} from './compile.mjs';
 import {catalog as shellCatalog} from './fixtures.mjs';
-import {catalog,snapshot,credentialCatalog,credentialStatus} from '../management/fixtures.mjs';
+import {catalog,snapshot,credentialCatalog,credentialStatus,masterKeyReady} from '../management/fixtures.mjs';
 
 async function scenario(kind){
  const dom=new JSDOM('<div id="app"></div>',{pretendToBeVisual:true,url:'http://localhost/#/settings/module/ff14%2Fff14'}),window=dom.window;
  window.Element.prototype.scrollTo=function(){};window.scrollTo=()=>{};window.matchMedia=()=>({matches:false,addEventListener(){},removeEventListener(){}});
  let pending=null,gets=0,binding;const posts=[],handlers=new Set();
- const responses={'admin/catalog':catalog(),'admin/read':snapshot(12),'admin/credential-catalog':credentialCatalog(),'admin/credential-status':credentialStatus(),'admin/credential-readiness':{ready:false,state:'unavailable',reason_code:'secret_encryption_unavailable'},'admin/modules':{registry_revision:5,modules:[]}};
- window.AstrBotPluginPage={onContext(fn){handlers.add(fn);fn(binding);return()=>handlers.delete(fn)},ready:()=>Promise.resolve(binding),apiGet(endpoint){assert.equal(endpoint,'catalog');gets++;return pending?.promise||Promise.resolve(shellCatalog());},apiPost(endpoint,body){posts.push({endpoint,body});assert.ok(endpoint in responses,endpoint);return Promise.resolve(vm.runInContext('('+JSON.stringify(responses[endpoint])+')',realm));}};
+ const responses={'admin/catalog':catalog(),'admin/read':snapshot(12),'admin/master-key-status':masterKeyReady(),'admin/credential-catalog':credentialCatalog(),'admin/credential-status':credentialStatus(),'admin/credential-readiness':{ready:false,state:'unavailable',reason_code:'secret_encryption_unavailable',diagnostics:{key_state:'not_provided',codec_state:'not_run'}},'admin/modules':{registry_revision:5,modules:[]}};
+ window.AstrBotPluginView={onContext(fn){handlers.add(fn);fn(binding);return()=>handlers.delete(fn)},ready:()=>Promise.resolve(binding),apiGet(endpoint){assert.equal(endpoint,'catalog');gets++;return pending?.promise||Promise.resolve(shellCatalog());},apiPost(endpoint,body){posts.push({endpoint,body});assert.ok(endpoint in responses,endpoint);return Promise.resolve(vm.runInContext('('+JSON.stringify(responses[endpoint])+')',realm));}};
  const realm=vm.createContext({window,document:window.document,navigator:window.navigator,location:window.location,console,TextEncoder,TextDecoder,AbortController,URL,setTimeout,clearTimeout,setInterval,clearInterval,getComputedStyle:window.getComputedStyle.bind(window),requestAnimationFrame:window.requestAnimationFrame.bind(window),cancelAnimationFrame:window.cancelAnimationFrame.bind(window)});
  binding=vm.runInContext('({pluginName:"astrbot_plugin_yomihime_game_link",pageName:"shell",session:"one"})',realm);
  for(const name of ['HTMLElement','Element','SVGElement','Node','MutationObserver','Event','MouseEvent','KeyboardEvent','InputEvent'])realm[name]=window[name];

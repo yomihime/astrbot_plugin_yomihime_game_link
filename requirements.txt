@@ -1,11 +1,11 @@
 # Runtime dependencies of the AstrBot plugin Core. The public SDK wheel stays
 # host-independent and declares no runtime dependencies.
-aiohttp>=3.13.2,<=3.14.3
-yarl>=1.22.0,<=1.25.1
-cryptography>=46.0.3,<=50.0.2
-icalendar==7.3.0
-python-dateutil==2.9.0.post0
-tzdata==2026.4
+aiohttp>=3.13.2
+yarl>=1.22.0
+cryptography>=46.0.3
+icalendar>=7.3.0
+python-dateutil>=2.9.0.post0
+tzdata>=2026.4
 # Core image rendering. The SDK remains definition-only with no dependencies.
-Pillow==12.3.0
-resvg_py==0.5.0
+Pillow>=12.3.0
+resvg_py>=0.5.0

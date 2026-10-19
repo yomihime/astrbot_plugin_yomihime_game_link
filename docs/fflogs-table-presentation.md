@@ -1,3 +1,5 @@
+> 本文包含历史 SDK a7 工件和验收记录，勿作为当前版本或包摘要。当前 SDK 见 [模块 SDK](module-sdk.md)，当前交接见 [alpha 清理说明](alpha-cleanup-handoff.md)。
+
 # Logs 表格显示与目录顺序
 
 ## 最新收尾状态（2026-10-18）

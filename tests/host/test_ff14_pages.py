@@ -9,7 +9,7 @@ from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from ygl_test_subject.adapters.astrbot.ff14_pages import FF14Pages
+from ygl_test_subject.adapters.astrbot.public_pages import PublicPages
 from ygl_test_subject.adapters.astrbot.runtime import PLUGIN_NAME, AstrBotRuntime
 from ygl_test_subject.adapters.astrbot.web_public import (
     HostPublicWebValidator,
@@ -145,7 +145,7 @@ class PublicWebPagesTests(unittest.IsolatedAsyncioTestCase):
         validator.attach(core)
         runtime._web_validator = validator
         context = _Context()
-        pages = FF14Pages(context, runtime)
+        pages = PublicPages(context, runtime)
         pages.register()
         return web, runtime, core, pages
 
@@ -703,10 +703,10 @@ class _PublicRuntime:
         raise AssertionError("page adapter must not read Core")
 
 
-class FF14PagesTests(unittest.IsolatedAsyncioTestCase):
+class PublicPagesTests(unittest.IsolatedAsyncioTestCase):
     async def test_exact_four_get_and_four_post_handlers_preserve_projections(self):
         context, runtime = _Context(), _PublicRuntime()
-        pages = FF14Pages(context, runtime)
+        pages = PublicPages(context, runtime)
         pages.register()
         pages.register()
         self.assertEqual(len(context.registered_web_apis), 9)
@@ -736,7 +736,7 @@ class FF14PagesTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_exception_output_contains_only_fixed_error(self):
         context, runtime = _Context(), _PublicRuntime()
-        pages = FF14Pages(context, runtime)
+        pages = PublicPages(context, runtime)
         pages.register()
         runtime.fail = True
         result = await context.registered_web_apis[2][1]()
@@ -754,7 +754,7 @@ class FF14PagesTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_catalog_close_fences_sync_projection_and_old_handlers(self):
         context, runtime = _Context(), _PublicRuntime()
-        pages = FF14Pages(context, runtime)
+        pages = PublicPages(context, runtime)
         pages.register()
         old = context.registered_web_apis[2][1]
         project = runtime.public_module_catalog
@@ -775,7 +775,7 @@ class FF14PagesTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_cleanup_keeps_replacements_and_fences_captured_old_handler(self):
         context, runtime = _Context(), _PublicRuntime()
-        pages = FF14Pages(context, runtime)
+        pages = PublicPages(context, runtime)
         pages.register()
         old = context.registered_web_apis[0][1]
 
@@ -803,7 +803,7 @@ class FF14PagesTests(unittest.IsolatedAsyncioTestCase):
         self,
     ):
         runtime = _PublicRuntime()
-        pages = FF14Pages(_Context(), runtime)
+        pages = PublicPages(_Context(), runtime)
         pages.register()
         old = pages._registrations[0][1]
         self.assertEqual(
@@ -824,7 +824,7 @@ class FF14PagesTests(unittest.IsolatedAsyncioTestCase):
 
     def test_failed_registration_rolls_back_even_after_host_insertion(self):
         context = _Context(fail_second=True)
-        pages = FF14Pages(context, _PublicRuntime())
+        pages = PublicPages(context, _PublicRuntime())
         with self.assertRaisesRegex(RuntimeError, "private host"):
             pages.register()
         self.assertEqual(context.registered_web_apis, [])

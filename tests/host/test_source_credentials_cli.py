@@ -51,8 +51,15 @@ _CLIENT_SECRET = "test-client-secret-do-not-print"
 
 class SourceCredentialCliTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
+        # Managed key files require a private ancestor chain on Windows. The
+        # repository checkout can be writable by unrelated principals.
+        fixture_parent = Path(
+            os.environ.get("YGL_MANAGED_KEY_TEST_ROOT")
+            or (Path.home() / "AppData" / "Local" if os.name == "nt" else ROOT)
+        )
+        self.assertTrue(fixture_parent.is_dir())
         self.temporary = tempfile.TemporaryDirectory(
-            prefix="ygl-source-credentials-", dir=ROOT
+            prefix="ygl-source-credentials-", dir=fixture_parent
         )
         self.root = Path(self.temporary.name)
         self.data_dir = self.root / "data"
@@ -114,6 +121,7 @@ class SourceCredentialCliTests(unittest.IsolatedAsyncioTestCase):
         )
         try:
             await core.database.executor.initialize()
+            self.assertTrue((await core.managed_keys.startup())["ready"])
             core.extension_runtime.scan(installation.extension_root)
             failures = await core.admin_operations.recover_discovered_configuration()
             self.assertFalse(any(row.module_id == cli.MODULE_ID for row in failures))
@@ -148,6 +156,7 @@ class SourceCredentialCliTests(unittest.IsolatedAsyncioTestCase):
         )
         try:
             await core.database.executor.initialize()
+            self.assertTrue((await core.managed_keys.startup())["ready"])
             snapshot = await core.config_repository.current(
                 validate_contract(ConfigTarget(PLUGIN_NAME, cli.MODULE_ID))
             )
@@ -233,6 +242,57 @@ class SourceCredentialCliTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ValueError, "client secret is invalid"):
             cli._validate_client_material("i", "s" * 513)
 
+    def test_data_directory_argument_accepts_absolute_path_without_normalizing(self):
+        args = cli._parser().parse_args(
+            ["--data-dir", str(self.data_dir), "--realm", "cn", "set"]
+        )
+        self.assertEqual(args.data_dir, self.data_dir)
+
+    async def test_invalid_data_directory_is_rejected_before_storage(self):
+        for path in (
+            Path("synthetic-relative-data"),
+            self.root / "not-created" / ".." / "data",
+        ):
+            with self.subTest(
+                path_kind="absolute" if path.is_absolute() else "relative"
+            ):
+                stderr = io.StringIO()
+                before = set(self.root.rglob("*"))
+                with (
+                    patch.object(cli, "local_maintenance_guard") as guard,
+                    patch.object(cli, "install_bundled_ff14") as install,
+                    patch.object(cli, "_new_core") as new_core,
+                    patch.object(cli, "SQLiteDatabase") as database,
+                    patch.object(cli, "ManagedKeyManager") as keys,
+                    patch.object(cli, "AioHttpTransport") as transport,
+                ):
+                    with patch.object(cli, "_configure") as configure:
+                        with (
+                            contextlib.redirect_stderr(stderr),
+                            self.assertRaises(SystemExit) as exit,
+                        ):
+                            cli.main(["--data-dir", str(path), "--realm", "cn", "set"])
+                        configure.assert_not_called()
+                    self.assertEqual(exit.exception.code, 2)
+                    self.assertIn(
+                        "absolute path without '..' components", stderr.getvalue()
+                    )
+                    self.assertNotIn(str(path), stderr.getvalue())
+                    with self.assertRaisesRegex(
+                        cli.argparse.ArgumentTypeError, "absolute path"
+                    ):
+                        await cli._configure(path, "set", "cn")
+                    for constructor in (
+                        guard,
+                        install,
+                        new_core,
+                        database,
+                        keys,
+                        transport,
+                    ):
+                        constructor.assert_not_called()
+                self.assertEqual(set(self.root.rglob("*")), before)
+
     async def test_real_facade_set_reopen_clear_and_secret_redaction(self) -> None:
         await self._seed_database()
         with patch.dict(os.environ, {"YGL_SECRET_KEY": self.key}):
@@ -284,7 +344,9 @@ class SourceCredentialCliTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotEqual(cleared.fields[alias], "configured")
             self.assertNotEqual(await self._read_config_status(alias), "configured")
 
-    async def test_wrong_admin_and_missing_key_fail_without_config_change(self) -> None:
+    async def test_wrong_admin_and_invalid_explicit_key_fail_without_change(
+        self,
+    ) -> None:
         await self._seed_database()
         with patch.dict(os.environ, {"YGL_SECRET_KEY": self.key}):
             before = await self._read_config_state("credential_fflogs_cn")
@@ -298,11 +360,10 @@ class SourceCredentialCliTests(unittest.IsolatedAsyncioTestCase):
                     client_secret=_CLIENT_SECRET,
                     plugin_root=self.plugin_root,
                 )
-            for invalid_key in (None, base64.b64encode(b"short").decode("ascii")):
-                environment = (
-                    {} if invalid_key is None else {"YGL_SECRET_KEY": invalid_key}
-                )
-                with patch.dict(os.environ, environment, clear=True):
+            for invalid_key in ("", base64.b64encode(b"short").decode("ascii")):
+                with patch.dict(
+                    os.environ, {"YGL_SECRET_KEY": invalid_key}, clear=True
+                ):
                     with self.assertRaises(Exception):
                         await cli._configure(
                             self.data_dir,
@@ -315,6 +376,23 @@ class SourceCredentialCliTests(unittest.IsolatedAsyncioTestCase):
                         )
             self.assertEqual(
                 await self._read_config_state("credential_fflogs_cn"), before
+            )
+
+    async def test_absent_environment_fresh_install_uses_managed_key(self) -> None:
+        await self._seed_database()
+        with patch.dict(os.environ, {}, clear=True):
+            configured = await cli._configure(
+                self.data_dir,
+                "set",
+                "cn",
+                current_credential=_ADMIN,
+                client_id=_CLIENT_ID,
+                client_secret=_CLIENT_SECRET,
+                plugin_root=self.plugin_root,
+            )
+            self.assertEqual(configured.fields["credential_fflogs_cn"], "configured")
+            self.assertEqual(
+                await self._read_config_status("credential_fflogs_cn"), "configured"
             )
 
     async def test_real_set_rotation_removes_old_ciphertext_and_clear_removes_new(self):
@@ -832,6 +910,7 @@ class SourceCredentialCliTests(unittest.IsolatedAsyncioTestCase):
             )
             try:
                 await core.database.executor.initialize()
+                self.assertTrue((await core.managed_keys.startup())["ready"])
                 core.extension_runtime.scan(installation.extension_root)
                 self.assertFalse(
                     await core.admin_operations.recover_discovered_configuration()
@@ -957,7 +1036,7 @@ elif mismatch == 'abi':
 elif mismatch == 'path':
     sdk.__file__ = str(Path(root).parent / 'foreign-sdk' / '__init__.py')
 elif mismatch == 'future':
-    sdk.__version__ = '0.1.0a9'
+    sdk.__version__ = '0.1.0a10'
 else:
     raise AssertionError('unknown probe')
 try:

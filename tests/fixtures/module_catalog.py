@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import shutil
 import tempfile
 from pathlib import Path
@@ -87,7 +88,10 @@ def _core_with_neutral_module(**kwargs):
 
 
 async def export_catalog() -> dict:
-    with tempfile.TemporaryDirectory(prefix="ygl-catalog-contract-") as temporary:
+    private_root = os.environ.get("YGL_MANAGED_KEY_TEST_ROOT")
+    with tempfile.TemporaryDirectory(
+        prefix="ygl-catalog-contract-", dir=private_root
+    ) as temporary:
         directory = Path(temporary)
         plugin_root = directory / "plugin"
         (plugin_root / "modules").mkdir(parents=True)
@@ -103,7 +107,6 @@ async def export_catalog() -> dict:
             font_manager_factory=OfflineManagedFont,
             plugin_root=plugin_root,
             data_dir=data_dir,
-            raw_legacy_config={},
             http_transport_factory=_OfflineTransport,
             core_factory=_core_with_neutral_module,
         )

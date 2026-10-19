@@ -494,10 +494,6 @@ def _project_snapshot_fields(snapshot, fields):
     )
 
 
-def _project_grant_snapshot(grant, snapshot):
-    return _grant_effect(grant).project_snapshot(snapshot)
-
-
 __all__ = [
     "AdminAuthorizationService",
     "AdminCredentialOperation",

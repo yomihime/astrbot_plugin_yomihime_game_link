@@ -80,7 +80,7 @@ class UnifiedManagementHostTests(unittest.IsolatedAsyncioTestCase):
     asyncTearDown = admin_fixture.AdminPagesTests.asyncTearDown
     call = admin_fixture.AdminPagesTests.call
 
-    async def recover(self):
+    async def configure_ready_core(self):
         rows = (await self.call("read", {})).json()["data"]
         response = await self.call(
             "update",
@@ -100,16 +100,24 @@ class UnifiedManagementHostTests(unittest.IsolatedAsyncioTestCase):
                 "expected_revisions": {
                     owner: row["revision"] for owner, row in rows.items()
                 },
-                "complete_from_current": False,
             },
         )
-        self.assertEqual(response.status_code, 200, response.text)
+        # A fresh current configuration is already running; recovery is only
+        # authorized while configuration-blocked, never as an extra restart API.
+        self.assertEqual(response.status_code, 403, response.text)
+        self.assertTrue(self.runtime.core_runtime.started)
+        self.assertFalse(self.runtime.core_runtime.configuration_blocked)
 
     async def test_disable_unload_preserves_configuration_and_trusted_restore(self):
-        await self.recover()
+        await self.configure_ready_core()
         core = self.runtime.core_runtime
         with patch.dict(
-            os.environ, {"YGL_SECRET_KEY": base64.b64encode(bytes(range(32))).decode()}
+            os.environ,
+            {
+                "YGL_SECRET_KEY": base64.b64encode(
+                    self.runtime.core_runtime.managed_keys.get_key()
+                ).decode()
+            },
         ):
             credential = (await self.call("credential-status", {})).json()["data"][
                 "ff14/ff14"
@@ -227,7 +235,7 @@ class UnifiedManagementHostTests(unittest.IsolatedAsyncioTestCase):
 
         from yomihime_game_link_sdk.services import ConfigTarget
 
-        await self.recover()
+        await self.configure_ready_core()
         for endpoint, updates in (
             (
                 "update",
@@ -294,13 +302,33 @@ class UnifiedManagementHostTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(result.status_code, 200, result.text)
 
     async def test_preflight_current_codec_only_and_no_credential_projection(self):
+        key = self.runtime.core_runtime.managed_keys.get_key()
         with patch.dict(os.environ, {}, clear=True):
             response = await self.call("credential-readiness", {})
             self.assertEqual(response.status_code, 200)
-            self.assertEqual(response.json()["data"]["state"], "unavailable")
+            self.assertEqual(
+                response.json()["data"],
+                {"ready": True, "state": "ready", "reason_code": "ready"},
+            )
+        conflicting = bytes([key[0] ^ 1]) + key[1:]
         with patch.dict(
-            os.environ, {"YGL_SECRET_KEY": base64.b64encode(bytes(range(32))).decode()}
+            os.environ, {"YGL_SECRET_KEY": base64.b64encode(conflicting).decode()}
         ):
+            self.assertEqual(
+                (await self.runtime.core_runtime.managed_keys.status())["state"],
+                "source_conflict",
+            )
+            response = await self.call("credential-readiness", {})
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(
+                response.json()["data"],
+                {
+                    "ready": False,
+                    "state": "unavailable",
+                    "reason_code": "secret_encryption_unavailable",
+                },
+            )
+        with patch.dict(os.environ, {"YGL_SECRET_KEY": base64.b64encode(key).decode()}):
             response = await self.call("credential-readiness", {})
             self.assertEqual(response.status_code, 200)
             self.assertEqual(
@@ -402,9 +430,9 @@ class NeutralPublicHostTests(unittest.IsolatedAsyncioTestCase):
                 authorization=context,
             )
         self.modules.end(context)
-        from ygl_test_subject.adapters.astrbot.ff14_pages import FF14Pages
+        from ygl_test_subject.adapters.astrbot.public_pages import PublicPages
 
-        self.pages = FF14Pages(_Context(), self.runtime)
+        self.pages = PublicPages(_Context(), self.runtime)
         self.pages.register()
 
     async def asyncTearDown(self):

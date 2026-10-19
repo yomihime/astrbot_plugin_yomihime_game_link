@@ -11,7 +11,10 @@ from __future__ import annotations
 import os
 import secrets
 from pathlib import Path
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
+
+if TYPE_CHECKING:
+    from .managed_key_manager import ManagedKeyManager
 
 from yomihime_game_link_sdk.storage import SecretRef
 
@@ -55,10 +58,39 @@ class SQLiteSecretStore:
         root: str | Path,
         *,
         codec: SecretCodec | None = None,
+        key_manager: ManagedKeyManager | None = None,
     ) -> None:
         self.database = _database(database)
         self.root = Path(root).expanduser()
         self.codec = codec
+        self.key_manager = key_manager
+
+    def _key_generation_in(self, unit: SQLiteUnitOfWork) -> int:
+        manager = self.key_manager
+        if manager is None:
+            return 0
+        row = unit.execute(
+            "SELECT generation,revision,source FROM managed_master_key WHERE singleton=1"
+        ).fetchone()
+        if (
+            row is None
+            or row["source"] == "unselected"
+            or (row["generation"], row["revision"])
+            != (manager._generation, manager._revision)
+            or unit.execute(
+                "SELECT 1 FROM managed_master_key_operations "
+                "WHERE state='preparing' LIMIT 1"
+            ).fetchone()
+            is not None
+        ):
+            raise SecretStoreUnavailable()
+        return int(row["generation"])
+
+    def _require_receipt_generation(self, unit: SQLiteUnitOfWork, row) -> None:
+        if self.key_manager is not None and int(
+            row["key_generation"]
+        ) != self._key_generation_in(unit):
+            raise SecretStoreUnavailable()
 
     def _require_codec(self) -> SecretCodec:
         codec = self.codec
@@ -215,12 +247,13 @@ class SQLiteSecretStore:
         )
 
         def reserve(unit: SQLiteUnitOfWork) -> int:
+            generation = self._key_generation_in(unit)
             row = unit.execute(
                 "SELECT COALESCE(MAX(ledger_revision), 0) AS revision FROM secret_receipts"
             ).fetchone()
             revision = int(row["revision"]) + 1
             unit.execute(
-                "INSERT INTO secret_receipts(secret_token,principal_id,module_id,field,operation_id,expected_config_revision,ledger_revision,state,payload_name) VALUES(?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO secret_receipts(secret_token,principal_id,module_id,field,operation_id,expected_config_revision,ledger_revision,state,payload_name,key_generation) VALUES(?,?,?,?,?,?,?,?,?,?)",
                 (
                     token,
                     target.principal_id,
@@ -231,6 +264,7 @@ class SQLiteSecretStore:
                     revision,
                     SecretReceiptState.RECOVERABLE.value,
                     f"{token}.blob",
+                    generation,
                 ),
             )
 
@@ -245,11 +279,12 @@ class SQLiteSecretStore:
         self._write_payload(token, value)
 
         def finalize(unit: SQLiteUnitOfWork) -> SecretReceipt:
+            generation = self._key_generation_in(unit)
             cursor = unit.execute(
                 "UPDATE secret_receipts SET state='staged', ledger_revision=ledger_revision+1 "
                 "WHERE secret_token=? AND principal_id=? AND module_id=? AND field=? "
                 "AND operation_id=? AND expected_config_revision=? "
-                "AND ledger_revision=? AND state='recoverable'",
+                "AND ledger_revision=? AND state='recoverable' AND key_generation=?",
                 (
                     token,
                     target.principal_id,
@@ -258,6 +293,7 @@ class SQLiteSecretStore:
                     operation_id,
                     expected_config_revision,
                     reserved_revision,
+                    generation,
                 ),
             )
             if cursor.rowcount != 1:
@@ -305,6 +341,7 @@ class SQLiteSecretStore:
             ).fetchone()
             if row is None:
                 raise RevisionConflict("secret_receipt", expected_ledger_revision, 0)
+            self._require_receipt_generation(unit, row)
             if (
                 int(row["ledger_revision"]) != expected_ledger_revision
                 or row["state"] != SecretReceiptState.STAGED.value
@@ -359,6 +396,7 @@ class SQLiteSecretStore:
             ).fetchone()
             if row is None:
                 raise RevisionConflict("secret_receipt", receipt.ledger_revision, 0)
+            self._require_receipt_generation(unit, row)
             authoritative = _ref(row)
             if (
                 row["state"] != SecretReceiptState.CLAIMED.value
@@ -548,31 +586,35 @@ class SQLiteSecretStore:
         owner = SecretOwner(
             owner.principal_id, owner.module_id, owner.field, owner.operation_id
         )
+        return await self.database.executor.run_read(
+            lambda unit: self._owned_row_in(unit, ref, owner)
+        )
 
-        def read(unit: SQLiteUnitOfWork) -> tuple[SecretRef, str | None]:
-            row = unit.execute(
-                "SELECT * FROM secret_receipts WHERE secret_token=?", (ref.token,)
-            ).fetchone()
-            if row is None:
-                return ref, None
-            # The persisted ledger row is authoritative.  The ref is a
-            # copyable DTO, so its owner fields cannot authorize access.
-            authoritative = _ref(row)
-            if ref != authoritative or (
-                row["principal_id"],
-                row["module_id"],
-                row["field"],
-                row["operation_id"],
-            ) != (
-                owner.principal_id,
-                owner.module_id,
-                owner.field,
-                owner.operation_id,
-            ):
-                raise ValueError("secret reference owner mismatch")
-            return authoritative, str(row["state"])
-
-        return await self.database.executor.run_read(read)
+    def _owned_row_in(
+        self, unit: SQLiteUnitOfWork, ref: SecretRef, owner: SecretOwner
+    ) -> tuple[SecretRef, str | None]:
+        row = unit.execute(
+            "SELECT * FROM secret_receipts WHERE secret_token=?", (ref.token,)
+        ).fetchone()
+        if row is None:
+            return ref, None
+        self._require_receipt_generation(unit, row)
+        # The persisted ledger row is authoritative.  The ref is a
+        # copyable DTO, so its owner fields cannot authorize access.
+        authoritative = _ref(row)
+        if ref != authoritative or (
+            row["principal_id"],
+            row["module_id"],
+            row["field"],
+            row["operation_id"],
+        ) != (
+            owner.principal_id,
+            owner.module_id,
+            owner.field,
+            owner.operation_id,
+        ):
+            raise ValueError("secret reference owner mismatch")
+        return authoritative, str(row["state"])
 
     async def read(self, secret_ref: SecretRef, *, owner: SecretOwner) -> bytes | None:
         validate_contract(secret_ref)
@@ -590,44 +632,47 @@ class SQLiteSecretStore:
 
     async def delete(self, secret_ref: SecretRef, *, owner: SecretOwner) -> None:
         validate_contract(secret_ref)
-        ref, state = await self._owned_row(secret_ref, owner)
-        if state is None:
-            return
-        path = self._path(ref.token)
-        try:
-            path.unlink(missing_ok=True)
-        except OSError:
+        ref = SecretRef_validate(secret_ref)
+        owner = SecretOwner(
+            owner.principal_id, owner.module_id, owner.field, owner.operation_id
+        )
 
-            def mark_delete_failed(unit: SQLiteUnitOfWork) -> None:
+        def cleanup(unit: SQLiteUnitOfWork) -> bool:
+            authoritative, state = self._owned_row_in(unit, ref, owner)
+            if state is None:
+                return True
+            try:
+                self._path(authoritative.token).unlink(missing_ok=True)
+            except OSError:
                 unit.execute(
                     "UPDATE secret_receipts SET state='delete_failed', ledger_revision=ledger_revision+1 WHERE secret_token=?",
                     (ref.token,),
                 )
-
-            await self.database.executor.run_transaction(
-                mark_delete_failed, begin_mode="IMMEDIATE"
-            )
-            raise SecretStoreUnavailable() from None
-
-        def mark_deleted(unit: SQLiteUnitOfWork) -> None:
+                return False
             unit.execute(
                 "UPDATE secret_receipts SET state='tombstoned', ledger_revision=ledger_revision+1 WHERE secret_token=?",
                 (ref.token,),
             )
+            return True
 
-        await self.database.executor.run_transaction(
-            mark_deleted, begin_mode="IMMEDIATE"
-        )
+        if not await self.database.executor.run_transaction(
+            cleanup, begin_mode="IMMEDIATE"
+        ):
+            raise SecretStoreUnavailable() from None
 
     async def mark_orphan(
         self, secret_ref: SecretRef, reason: str, *, owner: SecretOwner
     ) -> None:
         validate_contract(secret_ref)
-        ref, state = await self._owned_row(secret_ref, owner)
-        if state is None:
-            return
+        ref = SecretRef_validate(secret_ref)
+        owner = SecretOwner(
+            owner.principal_id, owner.module_id, owner.field, owner.operation_id
+        )
 
         def mark(unit: SQLiteUnitOfWork) -> None:
+            _, state = self._owned_row_in(unit, ref, owner)
+            if state is None or state == "tombstoned":
+                return
             unit.execute(
                 "UPDATE secret_receipts SET state='orphan', ledger_revision=ledger_revision+1 WHERE secret_token=?",
                 (ref.token,),

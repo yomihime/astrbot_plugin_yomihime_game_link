@@ -21,8 +21,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from ygl_test_subject.core.contracts.manifests import EXTENSION_MANIFEST_ABI
-from ygl_test_subject.extensions import discovery, windows_fs
-from ygl_test_subject.extensions import windows_maintenance as maintenance
+from ygl_test_subject.extensions import discovery
 from ygl_test_subject.extensions.discovery import (
     EXTENSION_ROOT_MAX_ENTRIES,
     EXTENSION_ROOT_MAX_PACKAGES,
@@ -36,7 +35,9 @@ from ygl_test_subject.extensions.source_snapshot import (
     SourceSnapshotLimits,
     capture_source_bundle,
 )
-from ygl_test_subject.extensions.windows_fs import (
+from ygl_test_subject.infrastructure.windows import fs as windows_fs
+from ygl_test_subject.infrastructure.windows import maintenance
+from ygl_test_subject.infrastructure.windows.fs import (
     WindowsScanError,
     _assert_x64_layout,
     _ByHandleFileInformation,
@@ -332,7 +333,7 @@ class WindowsAbiTests(unittest.TestCase):
 
     def test_unsupported_matrix_fails_before_root_access(self) -> None:
         with patch(
-            "ygl_test_subject.extensions.windows_fs._native_windows_version",
+            "ygl_test_subject.infrastructure.windows.fs._native_windows_version",
             return_value=(10, 0, 0),
         ):
             with self.assertRaises(WindowsScanError) as raised:
@@ -1166,10 +1167,16 @@ class WindowsMaintenanceNativeTests(unittest.TestCase):
             self.assertTrue(
                 profile(wintypes.HANDLE(handle.value), buffer, ctypes.byref(length))
             )
-        private_temp = Path(buffer.value) / "AppData" / "Local" / "Temp"
-        self.assertTrue(private_temp.is_dir())
+        # Temp can have effective mutation grants on an ancestor even when a
+        # child fixture receives a protected DACL. Keep the whole fixture
+        # chain subject to the guard, with an optional pre-verified test root.
+        fixture_parent = Path(
+            os.environ.get("YGL_WINDOWS_MAINTENANCE_TEST_ROOT")
+            or Path(buffer.value) / "AppData" / "Local"
+        )
+        self.assertTrue(fixture_parent.is_dir())
         self.temporary = tempfile.TemporaryDirectory(
-            prefix="ygl-maintenance-native-", dir=private_temp
+            prefix="ygl-maintenance-native-", dir=fixture_parent
         )
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name).resolve()

@@ -103,25 +103,6 @@ def discover_migrations(directory: str | Path) -> tuple[Migration, ...]:
     return tuple(sorted(migrations, key=lambda item: (item.version, item.name)))
 
 
-class MigrationRegistry:
-    """Explicit registration helper used by hosts that assemble migrations."""
-
-    def __init__(self) -> None:
-        self._migrations: dict[int, Migration] = {}
-
-    def register(self, migration: Migration) -> None:
-        if not isinstance(migration, Migration):
-            raise TypeError("migration must be a Migration")
-        if migration.version in self._migrations:
-            raise MigrationDiscoveryError("duplicate migration version")
-        if any(item.name == migration.name for item in self._migrations.values()):
-            raise MigrationDiscoveryError("duplicate migration name")
-        self._migrations[migration.version] = migration
-
-    def migrations(self) -> tuple[Migration, ...]:
-        return tuple(self._migrations[version] for version in sorted(self._migrations))
-
-
 def _statements(sql: str) -> Iterable[str]:
     """Yield complete statements without using executescript's implicit commit."""
 

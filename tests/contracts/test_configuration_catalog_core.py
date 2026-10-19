@@ -20,14 +20,13 @@ import tests
 from ygl_test_subject.core.contracts.administration import AdminOperation
 from yomihime_game_link_sdk.display import DisplayLimits
 from ygl_test_subject.services.core_runtime import CoreRuntime
-from ygl_test_subject.services.core_configuration import DEFAULT_REGION, core_config_target
-from ygl_test_subject.services.configuration_migration import OrdinaryMigrationField
+from ygl_test_subject.services.configuration.defaults import DEFAULT_REGION, core_config_target
 from tests.services.test_admin_operations import _Codec, _MessagePort, _Renderer
 async def run():
     with tempfile.TemporaryDirectory(dir=Path.cwd()) as work:
         root = Path(work); (root/'extensions').mkdir()
         target = core_config_target('fixture')
-        core = CoreRuntime(database=root/'core.db', extension_root=root/'extensions', file_root=root/'files', secret_root=root/'secrets', secret_codec=_Codec(), http_transport=lambda request: request, renderer=_Renderer(), display_limits=DisplayLimits(2,4096), message_port=_MessagePort(), admin_context_validator=lambda *_:False, host_ingress_validator=lambda *_:False, config_principal_id='fixture', identity_namespace='fixture', ordinary_migration_fields=(OrdinaryMigrationField(target,DEFAULT_REGION,'legacy'),), ordinary_migration_source=lambda:{}, ordinary_config_resources={target:{DEFAULT_REGION.name}}, pump_interval=3600)
+        core = CoreRuntime(database=root/'core.db', extension_root=root/'extensions', file_root=root/'files', secret_root=root/'secrets', secret_codec=_Codec(), http_transport=lambda request: request, renderer=_Renderer(), display_limits=DisplayLimits(2,4096), message_port=_MessagePort(), admin_context_validator=lambda *_:False, host_ingress_validator=lambda *_:False, config_principal_id='fixture', identity_namespace='fixture', ordinary_config_resources={target:{DEFAULT_REGION.name}}, pump_interval=3600)
         await core.start()
         source = core.admin_authorization.register_source('fixture-adapter', resources=core.admin_operations.ordinary_resources(), operations={AdminOperation.READ_CONFIG})
         request = object()

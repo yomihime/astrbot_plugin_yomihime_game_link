@@ -6,6 +6,7 @@ import {JSDOM} from '../../../pages/frontend/node_modules/jsdom/lib/api.js';
 import {root} from './compile.mjs';
 import {catalog as shellCatalog} from './fixtures.mjs';
 import {themeCatalog,themeSnapshot} from './theme-settings-fixtures.mjs';
+import {masterKeyReady} from '../management/fixtures.mjs';
 const dom=new JSDOM('<div id="app"></div>',{pretendToBeVisual:true,url:'http://localhost/#/settings'}),window=dom.window,document=window.document,calls=[];
 window.Element.prototype.scrollTo=function(){};window.scrollTo=()=>{};window.matchMedia=()=>({matches:false,addEventListener(){},removeEventListener(){}});
 let nativeCalls=0,conflict=false;window.confirm=()=>{nativeCalls++;return false;};
@@ -22,12 +23,12 @@ function post(endpoint,body){
    row.fields[update.field]={value:update.mode==='clear'?field.default:update.value,state:'valid',present:update.mode!=='clear',source:update.mode==='clear'?'default':'sqlite'};
   }row.revision++;return Promise.resolve({module_id:body.module_id,revision:row.revision});
  }
- const responses={'admin/catalog':declarations,'admin/read':values,'admin/credential-catalog':{schema_version:1,fields:[]},'admin/credential-status':{},'admin/credential-readiness':{ready:true,state:'ready',reason_code:'ready'},'admin/modules':status};
+ const responses={'admin/catalog':declarations,'admin/read':values,'admin/master-key-status':masterKeyReady(),'admin/credential-catalog':{schema_version:1,fields:[]},'admin/credential-status':{},'admin/credential-readiness':{ready:true,state:'ready',reason_code:'ready',diagnostics:{key_state:'valid_format',codec_state:'available'}},'admin/modules':status};
  assert.ok(endpoint in responses,endpoint);return Promise.resolve(responses[endpoint]);
 }
 const realm=vm.createContext({window,document,navigator:window.navigator,location:window.location,console,TextEncoder,TextDecoder,AbortController,URL,setTimeout,clearTimeout,setInterval,clearInterval,getComputedStyle:window.getComputedStyle.bind(window),requestAnimationFrame:window.requestAnimationFrame.bind(window),cancelAnimationFrame:window.cancelAnimationFrame.bind(window),post,registry});
 for(const name of ['HTMLElement','Element','SVGElement','Node','MutationObserver','Event','MouseEvent','KeyboardEvent','InputEvent'])realm[name]=window[name];
-vm.runInContext(`const handlers=new Set(),context={pluginName:'astrbot_plugin_yomihime_game_link',pageName:'shell',session:'theme-settings'};window.AstrBotPluginPage={onContext(fn){handlers.add(fn);fn(context);return()=>handlers.delete(fn)},ready:()=>Promise.resolve(context),apiGet:()=>Promise.resolve(JSON.parse(JSON.stringify(registry))),apiPost:(endpoint,body)=>post(endpoint,body).then(value=>JSON.parse(JSON.stringify(value)),error=>{throw Error(error.message)})};globalThis.emitContext=value=>handlers.forEach(fn=>fn(value));`,realm);
+vm.runInContext(`const handlers=new Set(),context={pluginName:'astrbot_plugin_yomihime_game_link',pageName:'shell',session:'theme-settings'};window.AstrBotPluginView={onContext(fn){handlers.add(fn);fn(context);return()=>handlers.delete(fn)},ready:()=>Promise.resolve(context),apiGet:()=>Promise.resolve(JSON.parse(JSON.stringify(registry))),apiPost:(endpoint,body)=>post(endpoint,body).then(value=>JSON.parse(JSON.stringify(value)),error=>{throw Error(error.message)})};globalThis.emitContext=value=>handlers.forEach(fn=>fn(value));`,realm);
 const sources=new Map([['/runtime.js',await readFile(root+'pages/shell/runtime.js','utf8')],['/app.js',await readFile(root+'pages/shell/app.js','utf8')],['/module-loader.js',"export function loadPage(){throw Error('No business load in theme settings test')}"]]),cache=new Map();
 function module(path){if(cache.has(path))return cache.get(path);assert.ok(sources.has(path));const mod=new vm.SourceTextModule(sources.get(path),{context:realm,identifier:'http://localhost'+path});cache.set(path,mod);return mod;}
 const flush=async()=>{for(let i=0;i<12;i++){await new Promise(resolve=>setTimeout(resolve,0));await cache.get('/runtime.js').namespace.nextTick();}};

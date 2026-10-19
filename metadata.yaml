@@ -4,3 +4,4 @@ desc: 开发版：支持 FF14 物品、公开战绩与活动日历查询，以�
 version: v0.1.2
 author: yomihime
 repo: https://github.com/yomihime/astrbot_plugin_yomihime_game_link
+astrbot_version: ">=4.29.1"

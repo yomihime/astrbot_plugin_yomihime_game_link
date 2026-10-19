@@ -9,6 +9,11 @@ const identifier=/^[a-z][a-z0-9_]*(?:[.-][a-z0-9_]+)*$/;
 const fail=(code='invalid_config')=>{throw Error(code);};
 // Exact bridge codes only; free-form messages never establish authorization.
 const managementAccessLost=error=>[error?.code,error?.error_code,error?.message].some(code=>['admin_authorization_denied','stale_context','page_revoked','asset_revoked'].includes(code))||[error?.status,error?.response?.status].some(status=>status===401||status===403);
+const knownMasterKeyRejections=new Set([
+  '原密钥格式无效，请输入标准 Base64 编码的 32 字节密钥；旧凭据未更改。',
+  '所填密钥与当前密钥不一致；旧凭据未更改，请核对后重试。',
+  '所填密钥未能解开现有凭据；旧凭据未被替换，请核对原密钥后重试。',
+]);
 const key=f=>JSON.stringify([f.module_id,f.name]);
 const ownedFields=(catalog,target)=>catalog.fields.filter(f=>f.module_id===target);
 const textLength=value=>[...value].length;
@@ -105,6 +110,19 @@ export function credentialUpdateBody(target,revision,name,mode,value,catalog){
   if(mode==='replace'&&(!exact(value,['client_id','client_secret'])||Object.values(value).some(v=>typeof v!=='string'||textLength(v)<1||textLength(v)>512||/[\x00-\x1f\x7f-\x9f]/u.test(v))))fail();
   return {module_id:target,expected_revision:revision,updates:[mode==='replace'?{field:name,mode,value}:{field:name,mode}]};
 }
+export function validateMasterKeyStatus(value){
+  jsonBudget(value);
+  if(!exact(value,['state','reason_code','ready','source','generation','revision','inventory_digest','unknown_count','impact'])||
+    !['ready','needs_restore','source_conflict','initialization_failed','unknown'].includes(value.state)||
+    typeof value.reason_code!=='string'||!/^[a-z_]{1,64}$/.test(value.reason_code)||
+    typeof value.ready!=='boolean'||value.ready!==(value.state==='ready')||
+    !['unselected','environment','managed'].includes(value.source)||
+    !Number.isSafeInteger(value.generation)||value.generation<0||!Number.isSafeInteger(value.revision)||value.revision<0||
+    typeof value.inventory_digest!=='string'||!(/^[0-9a-f]{64}$/.test(value.inventory_digest)||value.inventory_digest==='')||
+    !Number.isSafeInteger(value.unknown_count)||value.unknown_count<0||!Array.isArray(value.impact)||value.impact.length>128)fail('operation_unavailable');
+  for(const row of value.impact)if(!exact(row,['module_id','config_count','grant_count'])||typeof row.module_id!=='string'||row.module_id.length>128||!row.module_id.split('/').every(part=>identifier.test(part))||!Number.isSafeInteger(row.config_count)||row.config_count<0||!Number.isSafeInteger(row.grant_count)||row.grant_count<0)fail('operation_unavailable');
+  return value;
+}
 // Matching names bind the bridge surface; the backend owns authorization.
 const presentation=new Set(['theme','isDark','locale','i18n','displayName','pageTitle']);
 function contextBoundary(context,expectedPage){
@@ -115,33 +133,43 @@ function contextBoundary(context,expectedPage){
 }
 export function createManagementPage(document,bridge,window,{expectedPage='management',container=document.getElementById('management-root'),scope='settings',initiallySuspended=false,beforeMaintenance=async _operation=>false,onDraftMutation=()=>{},onConfigurationSaved=()=>{},onCapabilities=(/** @type {string[]|null} */ _owners, _complete=false)=>{}}={}){
   if(!container)fail('invalid_container'); const element=id=>Array.from(container.querySelectorAll('[id]')).find(node=>node.id===id)||null;
-  let catalog=null,snapshot=null,credentialCatalog=null,credentialSnapshot=null,ready=false,closed=false,stale=true,generation=0,boundary=null,contextSeen=false,off=null,active=null;
+  let catalog=null,snapshot=null,credentialCatalog=null,credentialSnapshot=null,masterKeyStatus=null,ready=false,closed=false,stale=true,generation=0,boundary=null,contextSeen=false,off=null,active=null;
   const view=createManagementView(document,container,scope),cards=new Map(),controls=new Map(),status=element('status');
   let suspended=initiallySuspended;
   const fonts=createFontSettings(bridge,window,panel=>view.font(panel),()=>loseAccess());
   const credentialControls=new Map();let encryptionReady=false;let savedFocus=null,selectedOwner=null;
-  const emptyDraft=scope==='maintenance'?'[[],[],false]':'[[],[]]';let draftState=emptyDraft;
+  const emptyDraft='[[],[]]';let draftState=emptyDraft;
   const statusNotice=createNotice(window,(message,tone)=>{status.textContent=message;status.dataset.tone=tone;});
   const notice=(message,tone='error')=>statusNotice.show(message,tone);
-  const cryptoAdvice='当前加密不可用，请管理员检查宿主密钥与加密组件；修改外部环境后需正常重启同一宿主，再重开此页。已有凭据时请保留原密钥。';
+  const cryptoAdvice='凭据写入暂不可用。请查看本页“凭据存储”状态。首次空库存会自动建立托管密钥；已有加密数据请恢复原密钥。仅高级环境密钥变更需要重启同一宿主。不要把密钥发到聊天或日志。';
+  const cryptoDetail=value=>({not_provided:'宿主进程未读取到 YGL_SECRET_KEY。',invalid_encoding_or_length:'密钥编码或长度无效；需要标准 Base64 解码后恰好 32 字节。',cannot_safely_confirm:'无法安全确认密钥状态。',valid_format:({component_unavailable:'AES-GCM 组件不可用。',self_test_failed:'AES-GCM 内存自检失败。',unknown:'无法确认加密组件状态。'}[value.codec_state]||'')}[value.key_state]||'无法安全确认加密状态。');
   function draftChanged(){
     const next=JSON.stringify([
       [...controls].filter(([,c])=>c.mode&&c.mode.value!=='keep').map(([key,c])=>[key,c.mode.value,c.input?.value]),
       [...credentialControls].filter(([,c])=>c.mode&&c.mode.value!=='keep'||c.clientId?.value||c.clientSecret?.value||c.confirm?.checked).map(([key,c])=>[key,c.mode?.value,c.clientId?.value,c.clientSecret?.value,c.confirm?.checked]),
-      ...(scope==='maintenance'?[Boolean(element('replacement')?.checked)]:[]),
     ]);
     if(next!==draftState){draftState=next;onDraftMutation();}view.drafts();buttons();
   }
   const current=attempt=>!closed&&ready&&generation===attempt,writable=f=>f.readable&&f.editable&&supported(f);
   const blocked=button=>!button||button.disabled||button.getAttribute('aria-disabled')==='true';
+  function clearMasterDraft(){const input=element('master-key-restore-input');if(input)input.value='';view.resetConfirmation();}
+  function showMasterStatus(){
+    if(scope!=='settings')return;
+    view.masterKey(masterKeyStatus?{
+      state:masterKeyStatus.state,reason:masterKeyStatus.reason_code,source:masterKeyStatus.source,
+      generation:masterKeyStatus.generation,unknown:masterKeyStatus.unknown_count,impact:masterKeyStatus.impact,
+      enabled:!closed&&ready&&!stale&&masterKeyStatus.inventory_digest.length===64&&masterKeyStatus.unknown_count===0,
+      busy:active!==null,onDraft:()=>onDraftMutation(),onRetry:()=>changeMasterKey('retry'),onRestore:()=>changeMasterKey('restore'),onReset:()=>changeMasterKey('reset'),onCancelReset:()=>{view.resetConfirmation();onDraftMutation();notice('已取消重配，未提交。','success');},
+    }:null);
+  }
   function setButton(button,denied){if(!button)return;button.setAttribute('aria-disabled',String(denied));button.disabled=denied&&(closed||!ready||document.activeElement!==button);}
   function buttons(){
+    showMasterStatus();
     const fontVisible=scope==='settings'&&(selectedOwner===null||selectedOwner==='game_link/core')&&Boolean(catalog?.fields.some(f=>f.module_id==='game_link/core'&&f.group==='reply_style'&&f.readable));
     fonts.sync(fontVisible,!closed&&ready&&!suspended&&!stale);
     setButton(element('refresh'),closed||!ready||active!==null);
     const usable=!closed&&ready&&!stale&&snapshot!==null&&Object.keys(snapshot).length>0&&active===null;
-    setButton(element('rollback'),!usable);setButton(element('recover'),!usable||catalog.fields.some(f=>f.readable&&!f.editable));
-    if(element('replacement'))element('replacement').disabled=blocked(element('recover'));
+    setButton(element('recover'),!usable||catalog.fields.some(f=>f.readable&&!f.editable));
     for(const [target,card]of cards){const selected=selectedOwner===null||selectedOwner===target;setButton(card.save,!usable||!selected||!catalog||!ownedFields(catalog,target).some(writable));if(card.discard)setButton(card.discard,!ready||closed||active!==null||!selected);}
     // Preserve focused editable drafts while reading; submit buttons fence writes.
     for(const control of controls.values()){const allowed=!closed&&ready&&(selectedOwner===null||selectedOwner===control.field.module_id)&&writable(control.field);control.mode.disabled=!allowed;control.input.disabled=!allowed;if(control.reset)control.reset.disabled=!allowed;}
@@ -160,9 +188,9 @@ export function createManagementPage(document,bridge,window,{expectedPage='manag
     if(!current(attempt))fail('stale_context');const response=await bridge.apiPost(`admin/${endpoint}`,body);if(!current(attempt))fail('stale_context');
     if(endpoint==='catalog')return validateCatalog(response);if(endpoint==='read')return response;
     if(endpoint==='credential-catalog')return validateCredentialCatalog(response);
-    if(endpoint==='credential-readiness'){if(!exact(response,['ready','state','reason_code'])||typeof response.ready!=='boolean'||!['ready','unavailable'].includes(response.state)||(response.state==='ready')!==response.ready||!['ready','secret_encryption_unavailable'].includes(response.reason_code))fail('operation_unavailable');return response;}
+    if(endpoint==='credential-readiness'){if(!exact(response,['ready','state','reason_code','diagnostics'])||typeof response.ready!=='boolean'||!['ready','unavailable'].includes(response.state)||(response.state==='ready')!==response.ready||!['ready','secret_encryption_unavailable'].includes(response.reason_code)||!exact(response.diagnostics,['key_state','codec_state'])||!['not_provided','invalid_encoding_or_length','valid_format','cannot_safely_confirm'].includes(response.diagnostics.key_state)||!['not_run','available','component_unavailable','self_test_failed','unknown'].includes(response.diagnostics.codec_state))fail('operation_unavailable');return response;}
+    if(endpoint.startsWith('master-key-'))return validateMasterKeyStatus(response);
     if((endpoint==='update'||endpoint==='credential-update')&&(!exact(response,['module_id','revision'])||response.module_id!==body.module_id||!Number.isSafeInteger(response.revision)||response.revision<=body.expected_revision))fail('operation_unavailable');
-    if(endpoint==='rollback'&&(!exact(response,['rolled_back'])||response.rolled_back!==true))fail('operation_unavailable');
     if(endpoint==='recover'&&(!exact(response,['recovered'])||response.recovered!==true))fail('operation_unavailable');return response;
   }
   function inputValue(f,value){const choices=settingValues(f);if(value===null&&!followsCoreTheme(f))return '';return choices?String(choices.findIndex(v=>v===value)):String(value);}
@@ -195,8 +223,28 @@ export function createManagementPage(document,bridge,window,{expectedPage='manag
   function loseAccess(message='管理授权不可用或页面已失效，请重新打开宿主管理页面后手动刷新。',tone='error'){
     // Revoke every sensitive owner draft and fence concurrent responses while
     // retaining ordinary local edits for an explicit authorized refresh.
-    generation++;active=null;stale=true;encryptionReady=false;credentialCatalog=null;credentialSnapshot=null;
-    fonts.invalidate();clearSecrets();onCapabilities(null);buttons();notice(message,tone);
+    generation++;active=null;stale=true;encryptionReady=false;credentialCatalog=null;credentialSnapshot=null;masterKeyStatus=null;
+    fonts.invalidate();clearSecrets();clearMasterDraft();onCapabilities(null);buttons();notice(message,tone);
+  }
+  function changeMasterKey(action){
+    if(!['retry','restore','reset'].includes(action)||!masterKeyStatus||stale||active)return;
+    const source=masterKeyStatus,restore=element('master-key-restore-input'),reset=element('master-key-reset-consent');
+    const value=action==='restore'?restore?.value:null;
+    if(action==='restore'&&(typeof value!=='string'||!/^[A-Za-z0-9+/]{43}=$/.test(value))){notice('请输入原主密钥的标准 Base64 编码。');return;}
+    if(action==='reset'&&!reset?.checked){notice('请先确认全域重配的影响。');return;}
+    const body={expected_revision:source.revision,expected_generation:source.generation,inventory_digest:source.inventory_digest};
+    if(action==='restore')body.encoded_key=value;
+    if(action==='reset')body.confirmation='RESET ENCRYPTED CREDENTIALS';
+    clearMasterDraft();
+    run(async attempt=>{
+      if(!current(attempt)||masterKeyStatus!==source)fail('stale_context');
+      let result;
+      try{result=await post('master-key-'+action,body,attempt);}
+      catch(error){if(!current(attempt))throw error;if(action==='restore'&&knownMasterKeyRejections.has(error?.message)){notice(error.message);return;}throw error;}
+      try{await refresh(attempt);}catch(error){if(!current(attempt))throw error;stale=true;fail(managementAccessLost(error)?'write_ack_authorization_denied':'write_ack_readback_unverified');}
+      if(!masterKeyStatus||masterKeyStatus.revision!==result.revision||masterKeyStatus.generation!==result.generation){stale=true;fail('write_ack_readback_unverified');}
+      notice(result.ready?'主密钥状态已就绪。':'操作已记录；请根据主密钥状态继续处理。',result.ready?'success':'warning');
+    });
   }
   function saveCredential(c){
     if(blocked(c.save)||c.mode.value==='replace'&&!encryptionReady)return;
@@ -239,11 +287,12 @@ export function createManagementPage(document,bridge,window,{expectedPage='manag
     for(const [c,value,mode,input,draftVersion]of reset)if(c.input&&c.draftVersion===draftVersion&&(mode===undefined||c.mode.value===mode&&c.input.value===input))c.input.value=value;
     buttons();
   }
-  async function refresh(attempt){stale=true;buttons();const declarations=await post('catalog',{},attempt),values=validateSnapshot(await post('read',{},attempt),declarations);if(!current(attempt))fail('stale_context');catalog=declarations;snapshot=values;
+  async function refresh(attempt){view.resetConfirmation();stale=true;buttons();const declarations=await post('catalog',{},attempt),values=validateSnapshot(await post('read',{},attempt),declarations);if(!current(attempt))fail('stale_context');catalog=declarations;snapshot=values;
+    if(scope==='settings'){try{masterKeyStatus=await post('master-key-status',{},attempt);}catch(error){masterKeyStatus=null;if(!current(attempt)||managementAccessLost(error))throw error;}}
     let credentialNotice='';try{const forms=await post('credential-catalog',{},attempt),states=validateCredentialStatus(await post('credential-status',{},attempt),forms);if(!current(attempt))fail('stale_context');credentialCatalog=forms;credentialSnapshot=states;
-      encryptionReady=false;try{const readiness=await post('credential-readiness',{},attempt);encryptionReady=readiness.ready;credentialNotice=encryptionReady?'':cryptoAdvice;}catch(error){if(!current(attempt)||managementAccessLost(error))throw error;credentialNotice='未能确认加密状态，暂不能填写凭据；请核对宿主管理会话与部署后重开此页。';}if(!encryptionReady)clearSecrets();}
+      encryptionReady=false;try{const readiness=await post('credential-readiness',{diagnostics:true},attempt);encryptionReady=readiness.ready&&masterKeyStatus?.ready===true;credentialNotice=encryptionReady?'':(readiness.ready?'主密钥库存未就绪。':cryptoDetail(readiness.diagnostics))+cryptoAdvice;}catch(error){if(!current(attempt)||managementAccessLost(error))throw error;credentialNotice='未能确认加密状态，暂不能填写凭据；请核对宿主管理会话与部署后重开此页。';}if(!encryptionReady)clearSecrets();}
     catch(error){if(!current(attempt))throw error;credentialCatalog=null;credentialSnapshot=null;if(managementAccessLost(error)){clearSecrets();throw error;}credentialNotice='来源凭据状态暂不可用；未读取旧值，请刷新核对后再提交。';}
-    stale=false;if(scope==='settings'){await render();if(credentialCatalog){await renderCredentials();view.credentials([...credentialControls.values()],draftChanged,credentialNotice);await nextTick();buttons();}else view.credentials([...credentialControls.values()],draftChanged,credentialNotice);}if(!current(attempt))fail('stale_context');onCapabilities([...new Set([...catalog.fields,...(credentialCatalog?.fields||[])].map(f=>f.module_id))],credentialCatalog!==null);return {credentials:credentialCatalog!==null};}
+    stale=false;if(scope==='settings'){await render();if(credentialCatalog){await renderCredentials();view.credentials([...credentialControls.values()],draftChanged,credentialNotice);await nextTick();buttons();}else view.credentials([...credentialControls.values()],draftChanged,credentialNotice);buttons();}if(!current(attempt))fail('stale_context');onCapabilities([...new Set([...catalog.fields,...(credentialCatalog?.fields||[])].map(f=>f.module_id))],credentialCatalog!==null);return {credentials:credentialCatalog!==null};}
   async function run(action){
     if(active||closed||!ready)return;const operation={generation};active=operation;buttons();
     try{await action(operation.generation);}catch(error){if(!current(operation.generation))return;
@@ -261,29 +310,30 @@ export function createManagementPage(document,bridge,window,{expectedPage='manag
   }
   const revisions=()=>Object.fromEntries(Object.entries(snapshot).map(([target,row])=>[target,row.revision]));
   element('refresh').addEventListener('click',()=>!blocked(element('refresh'))&&run(async attempt=>{const result=await refresh(attempt);notice(result.credentials?'已刷新。':'普通设置已刷新，凭据状态暂未核实。',result.credentials?'success':'warning');}));
-  for(const action of ['rollback','recover'])element(action)?.addEventListener('click',()=>!blocked(element(action))&&run(async attempt=>{
+  for(const action of ['recover'])element(action)?.addEventListener('click',()=>!blocked(element(action))&&run(async attempt=>{
     if(!await beforeMaintenance({action,isCurrent:()=>current(attempt)})||!current(attempt))return;
-    await post(action,{expected_revisions:revisions(),...(action==='recover'?{complete_from_current:element('replacement').checked}:{})},attempt);
+    await post(action,{expected_revisions:revisions()},attempt);
     try{await refresh(attempt);}catch(error){if(!current(attempt))throw error;stale=true;fail(managementAccessLost(error)?'write_ack_authorization_denied':'write_ack_readback_unverified');}
-    onConfigurationSaved();notice(action==='rollback'?'受审迁移已限定回退，其他数据保留。':'配置已重新校验，业务运行已恢复。','success');
+    onConfigurationSaved();notice('配置已重新校验，业务运行已恢复。','success');
   }));
   function accept(context){
     if(closed)return;view.context(context);document.documentElement.dataset.theme=context?.isDark===true||context?.theme==='dark'?'dark':'light';document.documentElement.lang=typeof context?.locale==='string'?context.locale:'zh-CN';let next;
-    try{next=contextBoundary(context,expectedPage);}catch{fonts.invalidate();onCapabilities(null);clearSecrets();contextSeen=true;generation++;ready=false;stale=true;active=null;boundary=null;catalog=null;snapshot=null;credentialCatalog=null;credentialSnapshot=null;view.fields([],draftChanged);view.credentials([],draftChanged);cards.clear();controls.clear();credentialControls.clear();draftState=emptyDraft;buttons();notice('宿主管理上下文无效，请重新打开页面。');return;}
-    contextSeen=true;if(ready&&next===boundary)return;fonts.invalidate();statusNotice.clear();onCapabilities(null);clearSecrets();generation++;boundary=next;ready=true;stale=true;active=null;catalog=null;snapshot=null;credentialCatalog=null;credentialSnapshot=null;view.fields([],draftChanged);view.credentials([],draftChanged);cards.clear();controls.clear();credentialControls.clear();draftState=emptyDraft;buttons();
+    try{next=contextBoundary(context,expectedPage);}catch{fonts.invalidate();onCapabilities(null);clearSecrets();clearMasterDraft();contextSeen=true;generation++;ready=false;stale=true;active=null;boundary=null;catalog=null;snapshot=null;credentialCatalog=null;credentialSnapshot=null;masterKeyStatus=null;view.fields([],draftChanged);view.credentials([],draftChanged);view.masterKey(null);cards.clear();controls.clear();credentialControls.clear();draftState=emptyDraft;buttons();notice('宿主管理上下文无效，请重新打开页面。');return;}
+    contextSeen=true;if(ready&&next===boundary)return;fonts.invalidate();statusNotice.clear();onCapabilities(null);clearSecrets();clearMasterDraft();generation++;boundary=next;ready=true;stale=true;active=null;catalog=null;snapshot=null;credentialCatalog=null;credentialSnapshot=null;masterKeyStatus=null;view.fields([],draftChanged);view.credentials([],draftChanged);view.masterKey(null);cards.clear();controls.clear();credentialControls.clear();draftState=emptyDraft;buttons();
     run(async attempt=>{await refresh(attempt);});
   }
-  const dirty=()=>[...controls.values()].some(c=>c.mode?.value!=='keep')||[...credentialControls.values()].some(c=>c.mode?.value!=='keep'||c.clientId?.value||c.clientSecret?.value);
+  const masterDraft=()=>Boolean(element('master-key-restore-input')?.value);
+  const dirty=()=>[...controls.values()].some(c=>c.mode?.value!=='keep')||[...credentialControls.values()].some(c=>c.mode?.value!=='keep'||c.clientId?.value||c.clientSecret?.value)||masterDraft();
   // Navigation preserves ordinary drafts but suspend clears credentials across
   // all owners. Keep this scope separate from global module-operation guards.
   function navigationImpact(){
     const ordinaryOwners=[...new Set([...controls.values()].filter(c=>(selectedOwner===null||c.field.module_id===selectedOwner)&&['replace','clear'].includes(c.mode?.value)).map(c=>c.field.module_id))];
     const credentialOwners=[...new Set([...credentialControls.values()].filter(c=>c.mode&&c.mode.value!=='keep'||c.clientId?.value||c.clientSecret?.value||c.confirm?.checked).map(c=>c.field.module_id))];
-    return {ordinaryOwners,credentialOwners,requiresConfirmation:ordinaryOwners.length>0||credentialOwners.length>0};
+    return {ordinaryOwners,credentialOwners,requiresConfirmation:ordinaryOwners.length>0||credentialOwners.length>0||masterDraft()};
   }
-  function suspend(){suspended=true;fonts.invalidate();if(status.dataset.tone==='success')statusNotice.clear();else statusNotice.cancel();const node=document.activeElement;savedFocus=container.contains(node)&&node?.id?{id:node.id,start:node.selectionStart,end:node.selectionEnd}:null;clearSecrets();generation++;active=null;stale=true;buttons();}
+  function suspend(){suspended=true;fonts.invalidate();if(status.dataset.tone==='success')statusNotice.clear();else statusNotice.cancel();const node=document.activeElement;savedFocus=container.contains(node)&&node?.id?{id:node.id,start:node.selectionStart,end:node.selectionEnd}:null;clearSecrets();clearMasterDraft();generation++;active=null;stale=true;buttons();}
   function resume(){if(closed||!ready)return;suspended=false;run(async attempt=>{await refresh(attempt);if(savedFocus){const node=element(savedFocus.id);node?.focus({preventScroll:true});if(node&&savedFocus.start!==null&&node.setSelectionRange)try{node.setSelectionRange(savedFocus.start,savedFocus.end);}catch{}savedFocus=null;}});}
-  function close(){if(closed)return;fonts.dispose();statusNotice.cancel();onCapabilities(null);clearSecrets();closed=true;generation++;ready=false;active=null;catalog=null;snapshot=null;credentialCatalog=null;credentialSnapshot=null;off?.();buttons();}
+  function close(){if(closed)return;fonts.dispose();statusNotice.cancel();onCapabilities(null);clearSecrets();clearMasterDraft();closed=true;generation++;ready=false;active=null;catalog=null;snapshot=null;credentialCatalog=null;credentialSnapshot=null;masterKeyStatus=null;off?.();buttons();}
   return {start(){
     if(!bridge||typeof bridge.apiPost!=='function'||typeof bridge.ready!=='function'||typeof bridge.onContext!=='function'){notice('请从宿主插件管理页面打开此页。');return;}
     off=bridge.onContext(accept);Promise.resolve(bridge.ready()).then(context=>{if(!contextSeen)accept(context);}).catch(()=>{if(!contextSeen&&!closed){ready=false;notice('宿主管理会话不可用。');buttons();}});window?.addEventListener('pagehide',close,{once:true});
@@ -291,4 +341,4 @@ export function createManagementPage(document,bridge,window,{expectedPage='manag
 }
 
 
-if(typeof document!=='undefined' && document.getElementById('management-root'))createManagementPage(document,window.AstrBotPluginPage,window).start();
+if(typeof document!=='undefined' && document.getElementById('management-root'))createManagementPage(document,window.AstrBotPluginView,window).start();

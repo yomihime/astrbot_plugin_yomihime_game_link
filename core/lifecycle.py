@@ -22,10 +22,10 @@ from yomihime_game_link_sdk.services import (
     ModuleInstance,
 )
 
-from ..core.contracts.administration import ModuleHealth, ModuleLifecycle, ModuleStatus
-from ..core.contracts.validation_boundary import validate_contract
 from .admission import AdmissionController, AdmissionError
 from .context_issuer import ContextIssuer, InvalidInvocation
+from .contracts.administration import ModuleHealth, ModuleLifecycle, ModuleStatus
+from .contracts.validation_boundary import validate_contract
 from .ports import AdmissionPort, ExecutionLease, RunIdentity
 from .registry import Registry, RegistryError
 from .task_scope import (

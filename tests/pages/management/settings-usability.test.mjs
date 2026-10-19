@@ -19,7 +19,7 @@ async function fixture(options={},initialState={}){
   if(endpoint==='admin/credential-readiness'&&state.readinessError)return Promise.reject(state.readinessError);
   if(endpoint==='admin/catalog'){const result=structuredClone(declarations);if(state.readonly)Object.assign(result.fields.find(f=>f.name==='ff14_calendar_default_days'),{editable:false,blocked_reason:'semantic_validator_unavailable'});return Promise.resolve(result);}
   if(endpoint==='admin/read'){const result=structuredClone(values);for(const row of Object.values(result))row.revision=revision;return Promise.resolve(result);}
-  if(endpoint==='admin/credential-catalog')return Promise.resolve(credentialCatalog());if(endpoint==='admin/credential-status')return Promise.resolve(credentialStatus(revision));if(endpoint==='admin/credential-readiness')return Promise.resolve(state.unready?{ready:false,state:'unavailable',reason_code:'secret_encryption_unavailable'}:{ready:true,state:'ready',reason_code:'ready'});throw Error('unexpected endpoint');
+  if(endpoint==='admin/credential-catalog')return Promise.resolve(credentialCatalog());if(endpoint==='admin/credential-status')return Promise.resolve(credentialStatus(revision));if(endpoint==='admin/credential-readiness')return Promise.resolve(state.unready?{ready:false,state:'unavailable',reason_code:'secret_encryption_unavailable',diagnostics:{key_state:'not_provided',codec_state:'not_run'}}:{ready:true,state:'ready',reason_code:'ready',diagnostics:{key_state:'valid_format',codec_state:'available'}});throw Error('unexpected endpoint');
  }};
  const page=createManagementPage(document,bridge,dom.window,options);page.start();await flush();
  return {dom,document,page,state,calls,timers,emit:ctx=>accept?.(ctx),status:()=>document.querySelector('#status'),click:id=>document.getElementById(id).click(),edit(node,value,event='change'){node.value=value;node.dispatchEvent(new dom.window.Event(event,{bubbles:true}));},field:name=>document.querySelector(`[data-field="${name}"]`),async close(){page.dispose();await flush();dom.window.close();}};
@@ -92,7 +92,7 @@ test('old success timer cannot erase a newer error; suspend/context/dispose revo
 });
 test('credential unset and encryption unknown are separate persistent hints with restart guidance',async()=>{
  const f=await fixture();try{
-  f.state.unready=true;f.click('refresh');await flush();const hint=f.document.querySelector('#credential-status');assert.match(hint.textContent,/当前加密不可用/);assert.match(hint.textContent,/重启同一宿主/);assert.doesNotMatch(hint.textContent,/缺少|未正确配置|key_missing/);
+  f.state.unready=true;f.click('refresh');await flush();const hint=f.document.querySelector('#credential-status');assert.match(hint.textContent,/凭据写入暂不可用/);assert.match(hint.textContent,/重启同一宿主/);assert.doesNotMatch(hint.textContent,/缺少|未正确配置|key_missing/);
   assert.match(f.document.querySelector('[data-credential="credential_fflogs_cn"] .credential-detail').textContent,/未配置/);assert.match(f.document.querySelector('[data-credential="credential_fflogs_global"] .credential-detail').textContent,/已保存/);
   const warning=hint.textContent;for(const timer of f.timers.values())timer.callback();assert.equal(hint.textContent,warning);assert.ok([...f.document.querySelectorAll('[data-role=client_secret]')].every(node=>node.disabled));
  }finally{await f.close();}

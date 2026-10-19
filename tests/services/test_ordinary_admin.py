@@ -23,13 +23,13 @@ from ygl_test_subject.modules.ff14.config import (
     SYNC_INTERVAL,
     TIMEZONE,
 )
-from ygl_test_subject.services.configuration_migration import OrdinaryMigrationField
-from ygl_test_subject.services.core_configuration import (
+from ygl_test_subject.services.configuration.defaults import (
     DEFAULT_REGION,
     core_config_target,
 )
 from ygl_test_subject.services.core_runtime import CoreRuntime
 
+from tests.fixtures.configuration import field_binding, write_value
 from tests.services.test_admin_operations import _Codec, _MessagePort, _Renderer
 from yomihime_game_link_sdk.declarations import ConfigField, ConfigUpdateMode
 from yomihime_game_link_sdk.display import DisplayLimits
@@ -49,20 +49,18 @@ class OrdinaryAdminTests(unittest.IsolatedAsyncioTestCase):
         self.coretarget = core_config_target("fixture")
         self.ff14target = validate_contract(ConfigTarget("fixture", "ff14/ff14"))
         self.fields = (
-            OrdinaryMigrationField(self.coretarget, DEFAULT_REGION, "legacy_region"),
+            field_binding(self.coretarget, DEFAULT_REGION),
             *(
-                OrdinaryMigrationField(
+                field_binding(
                     self.ff14target,
                     field,
-                    field.name,
                     CALENDAR_VALUE_VALIDATORS.get(field.name),
                 )
-                # Only these legacy JSON fields existed before module-owned sync.
+                # The fixture authorizes these four ordinary settings.
                 for field in CALENDAR_CONFIG_FIELDS
                 if field.name in (DAYS, TIMEZONE, DELIVERY_TIME)
             ),
         )
-        self.raw = {"legacy_region": "INVALID-PRIVATE-RAW"}
         self.core = CoreRuntime(
             database=self.root / "core.db",
             extension_root=extensions,
@@ -81,11 +79,16 @@ class OrdinaryAdminTests(unittest.IsolatedAsyncioTestCase):
                 self.coretarget: {DEFAULT_REGION.name},
                 self.ff14target: {field.name for field in CALENDAR_CONFIG_FIELDS},
             },
-            ordinary_migration_fields=self.fields,
-            ordinary_migration_source=lambda: self.raw,
             module_config_validators={"ff14/ff14": CALENDAR_VALUE_VALIDATORS},
             pump_interval=3600,
             cleanup_timeout=1,
+        )
+        await self.core.database.executor.initialize()
+        await self.core.config_repository.current(self.coretarget)
+        await self.core.database.executor.run_transaction(
+            lambda unit: write_value(
+                unit, self.coretarget, "default_region", "INVALID-PRIVATE-RAW", 1
+            )
         )
         with self.assertRaises(ValueError):
             await self.core.start()
@@ -96,7 +99,6 @@ class OrdinaryAdminTests(unittest.IsolatedAsyncioTestCase):
             operations={
                 AdminOperation.READ_CONFIG,
                 AdminOperation.UPDATE_CONFIG,
-                AdminOperation.ROLLBACK_CONFIG,
                 AdminOperation.RECOVER_CONFIG,
             },
         )
@@ -165,17 +167,15 @@ class OrdinaryAdminTests(unittest.IsolatedAsyncioTestCase):
         read = await self.read()
         self.assertEqual(set(read), {"game_link/core", "ff14/ff14"})
         self.assertNotIn("INVALID-PRIVATE-RAW", json.dumps(read))
-        self.assertFalse(read["game_link/core"]["fields"]["default_region"]["present"])
+        self.assertTrue(read["game_link/core"]["fields"]["default_region"]["present"])
         self.assertEqual(
             (await self.core.admin_credential_repository.current()).generation, 0
         )
-        self.assertEqual(self.raw, {"legacy_region": "INVALID-PRIVATE-RAW"})
 
     async def test_invalid_sqlite_value_safe_read_repair_and_cas(self):
-        migration = self.core.ordinary_config_migration.repository
         snapshot = await self.core.config_repository.current(self.coretarget)
         await self.core.database.executor.run_transaction(
-            lambda unit: migration._write(
+            lambda unit: write_value(
                 unit,
                 self.coretarget,
                 "default_region",
@@ -203,12 +203,9 @@ class OrdinaryAdminTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_repair_unrelated_invalid_field_is_not_silently_repaired(self):
-        migration = self.core.ordinary_config_migration.repository
         snapshot = await self.core.config_repository.current(self.ff14target)
         await self.core.database.executor.run_transaction(
-            lambda unit: migration._write(
-                unit, self.ff14target, DAYS, 99, snapshot.revision
-            )
+            lambda unit: write_value(unit, self.ff14target, DAYS, 99, snapshot.revision)
         )
         with self.assertRaises(ValueError):
             await self.update(self.ff14target, {TIMEZONE: "UTC"})
@@ -225,97 +222,57 @@ class OrdinaryAdminTests(unittest.IsolatedAsyncioTestCase):
         }
         with self.assertRaises(ValueError):
             await self.core.recover_management(
-                revisions, authorization=context, complete_from_current=True
+                revisions,
+                authorization=context,
             )
-        self.assertFalse(await self.core.ordinary_config_migration.complete())
         await self.update(self.coretarget, {"default_region": "global"})
         await self.update(
             self.ff14target, {DAYS: 3, TIMEZONE: "UTC", DELIVERY_TIME: "10:30"}
         )
         with self.assertRaises(RevisionConflict):
             await self.core.recover_management(
-                revisions, authorization=context, complete_from_current=True
+                revisions,
+                authorization=context,
             )
         revisions = {
             target: (await self.core.config_repository.current(target)).revision
             for target in self.resources
         }
         await self.core.recover_management(
-            revisions, authorization=context, complete_from_current=True
+            revisions,
+            authorization=context,
         )
         self.assertTrue(self.core.started)
         self.assertTrue(self.core.accepting)
         self.assertIsNotNone(self.core._pump_task)
-        marker = await self.core.database.executor.run_read(
-            lambda u: u.execute(
-                "SELECT snapshot_json FROM ordinary_config_migrations"
-            ).fetchone()[0]
-        )
-        self.assertEqual(json.loads(marker)["source"], "admin_replacement")
-        self.assertIsNone(json.loads(marker)["legacy"])
-        self.assertEqual(self.raw, {"legacy_region": "INVALID-PRIVATE-RAW"})
         self.assertEqual(
             (await self.core.admin_credential_repository.current()).generation, 0
         )
 
-    async def test_rollback_preserves_unrelated_and_same_value_later_write_blocks(self):
-        self.raw = {
-            "legacy_region": "global",
-            DAYS: 3,
-            TIMEZONE: "UTC",
-            DELIVERY_TIME: "10:30",
-        }
-        revisions = {
-            target: (await self.core.config_repository.current(target)).revision
-            for target in self.resources
-        }
-        context = self.context(AdminOperation.RECOVER_CONFIG)
-        await self.core.recover_management(revisions, authorization=context)
-        migration = self.core.ordinary_config_migration.repository
-        await self.core.config_repository.current(
-            validate_contract(ConfigTarget("unrelated", "other/mod"))
-        )
-        await self.core.database.executor.run_transaction(
-            lambda u: migration._write(
-                u,
-                validate_contract(ConfigTarget("unrelated", "other/mod")),
-                "note",
-                "keep",
-                1,
-            )
-        )
-        revisions = {
-            target: (await self.core.config_repository.current(target)).revision
-            for target in self.resources
-        }
-        rollback = self.context(AdminOperation.ROLLBACK_CONFIG)
-        await self.core.admin_operations.ordinary_rollback(
-            revisions, authorization=rollback
-        )
-        self.assertFalse(await self.core.ordinary_config_migration.complete())
-        self.assertEqual(
-            (
-                await self.core.config_repository.current(
-                    validate_contract(ConfigTarget("unrelated", "other/mod"))
-                )
-            ).values["note"],
-            "keep",
-        )
-        self.assertNotIn(
-            "default_region",
-            (await self.core.config_repository.current(self.coretarget)).values,
-        )
-        await self.core.ordinary_config_migration.migrate(self.raw)
+    async def test_recovery_rechecks_revision_after_releasing_initial_mutation_lease(
+        self,
+    ):
         await self.update(self.coretarget, {"default_region": "global"})
         revisions = {
             target: (await self.core.config_repository.current(target)).revision
             for target in self.resources
         }
-        with self.assertRaises(ValueError):
-            await self.core.admin_operations.ordinary_rollback(
-                revisions, authorization=rollback
-            )
-        self.assertTrue(await self.core.ordinary_config_migration.complete())
+        original_start = self.core.start
+
+        async def interleaved_start(**kwargs):
+            await self.update(self.coretarget, {"default_region": "cn"})
+            return await original_start(**kwargs)
+
+        self.core.start = interleaved_start
+        context = self.context(AdminOperation.RECOVER_CONFIG)
+        try:
+            with self.assertRaises(RevisionConflict):
+                await self.core.recover_management(revisions, authorization=context)
+            self.assertFalse(self.core.started)
+            self.assertTrue(self.core.configuration_blocked)
+            self.assertIsNone(self.core._pump_task)
+        finally:
+            self.source.end(context)
 
     async def test_no_extra_module_lifecycle_or_untrusted_recovery_after_close(self):
         context = self.context(AdminOperation.UPDATE_CONFIG)
@@ -342,7 +299,6 @@ class OrdinaryAdminTests(unittest.IsolatedAsyncioTestCase):
             await self.core.recover_management({}, authorization=context)
 
     async def test_database_integrity_failure_does_not_preserve_foundation(self):
-        self.raw = {}
         with patch.object(
             self.core.database.executor,
             "verify_integrity",
@@ -356,7 +312,6 @@ class OrdinaryAdminTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.core._pump_task)
 
     async def test_ended_recovery_proof_cannot_start_business(self):
-        self.raw = {}
         rows = await self.read()
         context = self.context(AdminOperation.RECOVER_CONFIG)
         self.source.end(context)

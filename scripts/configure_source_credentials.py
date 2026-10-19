@@ -25,7 +25,7 @@ from uuid import uuid4
 # outside the plugin directory. Pin imports to this package's own SDK before
 # importing any host/Core code; never inherit a process-global SDK by accident.
 _PLUGIN_ROOT = Path(__file__).resolve().parents[1]
-_SDK_VERSION = "0.1.0a8"
+_SDK_VERSION = "0.1.0a9"
 _SDK_MODULE_ABI_VERSION = "2.0"
 if str(_PLUGIN_ROOT) not in sys.path:
     sys.path.insert(0, str(_PLUGIN_ROOT))
@@ -47,7 +47,6 @@ from yomihime_game_link_sdk.display import DisplayLimits
 
 from ..adapters.astrbot.bundled import install_bundled_ff14
 from ..adapters.astrbot.runtime import PLUGIN_NAME
-from ..adapters.astrbot.trusted_assembly import assemble_reviewed
 from ..core.contracts.administration import (
     AdminAuthorizationContext,
     AdminOperation,
@@ -60,7 +59,7 @@ from ..extensions.factory_resolver import (
     ReviewedSupportLease,
 )
 from ..infrastructure.http_transport import AioHttpTransport
-from ..infrastructure.key_provider import EnvironmentKeyProvider
+from ..infrastructure.managed_key_manager import ManagedKeyManager
 from ..infrastructure.secret_codec import AESGCMSecretCodec
 from ..infrastructure.sqlite.database import SQLiteDatabase
 from ..infrastructure.sqlite.repositories_admin_credentials import (
@@ -69,11 +68,13 @@ from ..infrastructure.sqlite.repositories_admin_credentials import (
 from ..presentation.rendering import GenericDisplayRenderer, RenderingBounds
 from ..services.admin_authorization import _matches
 from ..services.core_runtime import CoreRuntime, CoreRuntimeCleanupPending
+from ..services.trusted_assembly import assemble_reviewed
 from .admin_credentials import _finish_cleanup, _read_hidden, local_maintenance_guard
 
 MODULE_ID = "ff14/ff14"
 _REALMS = ("cn", "global")
 _SESSION_TTL_SECONDS = 5 * 60
+_DATA_DIR_ERROR = "--data-dir requires an absolute path without '..' components"
 
 
 @dataclass(frozen=True, slots=True, eq=False)
@@ -143,12 +144,15 @@ def _new_core(
     inventory,
 ):
     transport = AioHttpTransport()
+    database = SQLiteDatabase(data_dir / "runtime.sqlite3")
+    managed_keys = ManagedKeyManager(database, data_dir, data_dir / "secrets")
     core = CoreRuntime(
-        database=SQLiteDatabase(data_dir / "runtime.sqlite3"),
+        database=database,
         extension_root=extension_root,
         file_root=data_dir / "files",
         secret_root=data_dir / "secrets",
-        secret_codec=AESGCMSecretCodec(EnvironmentKeyProvider("YGL_SECRET_KEY")),
+        secret_codec=AESGCMSecretCodec(managed_keys),
+        managed_key_manager=managed_keys,
         http_transport=transport,
         renderer=GenericDisplayRenderer(
             RenderingBounds(
@@ -192,6 +196,7 @@ async def _configure(
     prompt=getpass.getpass,
     label_sink=None,
 ) -> ConfigSummary:
+    data_dir = _data_directory(data_dir)
     if action not in {"set", "clear"} or realm not in _REALMS:
         raise ValueError("unsupported operation")
     database_path = data_dir / "runtime.sqlite3"
@@ -243,9 +248,11 @@ async def _configure(
             ):
                 raise PermissionError("operator authentication failed")
             session = authority.issue(state.generation)
+            key_status = await core.managed_keys.startup()
 
             if action == "set":
-                EnvironmentKeyProvider("YGL_SECRET_KEY").get_key()
+                if not key_status["ready"]:
+                    raise RuntimeError("master key is not ready")
                 if client_id is None:
                     client_id = _read_hidden(
                         "FFLogs client ID (hidden): ", prompt=prompt
@@ -367,9 +374,18 @@ def _validate_client_material(client_id: str, client_secret: str) -> None:
             raise ValueError(f"{label} is invalid")
 
 
+def _data_directory(value: str | Path) -> Path:
+    path = Path(value)
+    if not path.is_absolute() or ".." in path.parts:
+        raise argparse.ArgumentTypeError(_DATA_DIR_ERROR)
+    return path
+
+
 class _Parser(argparse.ArgumentParser):
     def error(self, _message: str) -> None:
         self.print_usage(sys.stderr)
+        if _message == f"argument --data-dir: {_DATA_DIR_ERROR}":
+            self.exit(2, f"FFLogs credential CLI: {_DATA_DIR_ERROR}\n")
         self.exit(
             2, "FFLogs credential CLI: invalid arguments; values are not accepted\n"
         )
@@ -380,8 +396,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--data-dir",
         required=True,
-        type=Path,
-        help="Existing AstrBot plugin data directory",
+        type=_data_directory,
+        help="Existing AstrBot plugin data directory (absolute path, no '..' components)",
     )
     parser.add_argument(
         "--realm",

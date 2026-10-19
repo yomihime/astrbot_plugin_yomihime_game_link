@@ -23,7 +23,7 @@
 
 此功能不使用 ETag/304；模块停用、卸载和旧运行实例的迟到写入由 Core 生命周期与持久任务租约拒绝。配置仍使用现有 revision/CAS 更新，不重写历史订阅。
 
-此版本使用 SDK 0.1.0a8 的独立后台调度声明。本次期限调整不改变 SDK；在正常停用与清理完成时，无需仅因本次更新再次完整重启 AstrBot。若从旧 SDK 版本更新，仍需完整重启以冷加载 SDK。不能把代码合并或离线测试视为已经部署、真实上游同步或提醒送达验收。
+当前交付 SDK 为 0.1.0a9，使用独立后台调度声明。本次期限调整不改变 SDK；在正常停用与清理完成时，无需仅因本次更新再次完整重启 AstrBot。若从旧 SDK 版本更新，仍需完整重启以冷加载 SDK。不能把代码合并或离线测试视为已经部署、真实上游同步或提醒送达验收。
 
 ## 日历订阅
 
@@ -33,24 +33,13 @@
 
 每个订阅为所选区服汇总一张活动摘要，只包含公开日历内容。订阅需先完成一次完整采集建立基线；首次完整采集在设定时刻或之后完成时，当天不发送，从次日开始发送。之后的数据在每个采集周期检查，设定时刻后的完整采集会触发当天摘要，通常最多有 15 分钟延迟，不承诺准点送达。
 
-## FFLogs 限制
+## FFLogs 配置与限制
 
-管理员本地配置 FFLogs 凭据时，先停止 AstrBot，并确认插件数据目录中已有 `runtime.sqlite3`。从安装目录 `astrbot_plugin_yomihime_game_link/` 的父目录，在具备文件所有者权限的 POSIX 交互终端运行；不要从源码树或聊天命令执行：
+从 AstrBot 正式插件菜单打开本插件设置，在 FF14 分组分别填写国服、国际服的 Client ID 与 Client Secret，保存后再查询 Logs。全新安装且加密库存为空时，Core 自动在受限插件数据目录创建并持久保存托管主密钥；正常配置无需终端或环境变量。保存成功表示凭据已加密保存、上游尚未验证，不代表 FFLogs 已认证成功。
 
-```text
-python -m astrbot_plugin_yomihime_game_link.scripts.admin_credentials --database <existing-data-dir>/runtime.sqlite3 bootstrap
-python -m astrbot_plugin_yomihime_game_link.scripts.configure_source_credentials --data-dir <existing-data-dir> --realm cn set
-python -m astrbot_plugin_yomihime_game_link.scripts.configure_source_credentials --data-dir <existing-data-dir> --realm global set
-```
+若“凭据存储”提示旧密钥缺失，请通过安全输入框恢复原密钥；只有验证能解开全部受影响凭据后才会切换。无法恢复时，可查看受影响范围并明确确认“重新配置凭据”，之后重新填写所需区域凭据。此操作影响共享密钥的所有模块加密配置和授权凭据，使旧凭据引用失效，保留普通配置与授权记录。本次重配不主动删除现有密文文件及旧托管密钥文件（如有），但不保证旧凭据可恢复；操作前应保存一致备份。初始化失败可使用面板的重试入口，未知库存或来源冲突保持阻断。
 
-先通过隐藏提示建立独立管理员凭据，之后可按区域分别设置 FFLogs 客户端 ID 和密钥；`clear` 操作会额外要求隐藏输入 `CLEAR` 确认。AstrBot 和维护工具必须使用相同的外部持久 `YGL_SECRET_KEY`（base64 编码的 32 字节密钥）。凭据不接受命令行参数。维护仅支持能验证本地权限的 POSIX 交互环境；Windows 当前无法验证所需 ACL，会失败关闭。工具要求已有数据库，不会创建或初始化 AstrBot 数据目录。维护进程本身不启动 Core，也不执行网络查询；完成配置后由管理员重新启动 AstrBot。
-
-安装后的帮助入口：
-
-```text
-python -m astrbot_plugin_yomihime_game_link.scripts.configure_source_credentials --help
-python -m astrbot_plugin_yomihime_game_link.scripts.admin_credentials --help
-```
+高级部署的环境来源和离线维护工具见[项目说明的 FFLogs 来源凭据](../../README.md#fflogs-来源凭据)。主密钥和 Client Secret 只通过安全控件输入，不要发到聊天、URL 或日志。备份需一致保存数据库、密文及私有托管密钥文件，不能只复制数据库。
 
 未配置的 FFLogs 区域会失败关闭，不会改用匿名请求。物品和日历查询不需要 FFLogs 凭据。
 

@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 from types import ModuleType
 
-SDK_VERSION = "0.1.0a8"
+SDK_VERSION = "0.1.0a9"
 SDK_MODULE_ABI_VERSION = "2.0"
 
 
@@ -31,7 +31,7 @@ SDK_PACKAGE_MANIFEST = {
     "services.py": "567a9342af5c5e52c90dc7ac8c9727d08f4f22775b255f400adc2e9e5be54c5a",
     "storage.py": "6311b4754da6e37616debd68003d6993cf89c0b060845387288e2de575313260",
     "subscriptions.py": "526b8b42f05ff92931f27ebe27fb8b09b526ad3fea2f599111cc0b1d8889677c",
-    "version.py": "218157c03eaedd5e98887fc8579ca2c594465c12f8b52cce6c10f6887b1b9554",
+    "version.py": "7c4eb7168b6d0bc5c9f3835463d8ae45b469c4308a5f768af59501bb4089d080",
 }
 
 SDK_MODULES = {

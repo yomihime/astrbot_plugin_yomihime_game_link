@@ -24,7 +24,7 @@ function response(endpoint,body){
   if(endpoint==='admin/rollback')return {rolled_back:true};
   throw Error('operation_unavailable');
 }
-window.AstrBotPluginPage={ready:()=>Promise.resolve(clone(binding)),onContext(fn){listener=fn;return()=>{listener=null;};},apiPost(endpoint,body){
+window.AstrBotPluginView={ready:()=>Promise.resolve(clone(binding)),onContext(fn){listener=fn;return()=>{listener=null;};},apiPost(endpoint,body){
   // Do not retain input pairs in the inspectable mock history.
   calls.push({endpoint,body:endpoint==='admin/credential-update'?{module_id:body.module_id,expected_revision:body.expected_revision,updates:body.updates.map(u=>({field:u.field,mode:u.mode}))}:clone(body)});let value,error;
   try{const failure=failures.get(endpoint);if(failure){failures.delete(endpoint);throw Error(failure);}value=response(endpoint,body);}catch(e){error=e;}

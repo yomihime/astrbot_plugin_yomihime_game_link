@@ -322,13 +322,6 @@ class SQLiteExecutor:
                 pass
 
 
-def _current_version(unit: SQLiteUnitOfWork) -> int:
-    row = unit.execute(
-        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations"
-    ).fetchone()
-    return int(row[0])
-
-
 def _reject_sqlite_handles(
     value: Any,
     active: set[int] | None = None,

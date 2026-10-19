@@ -233,7 +233,7 @@ def _reject_duplicate_package_ids(
 def _discover_windows(
     root: str | os.PathLike[str],
 ) -> tuple[DiscoveredPackage, ...]:
-    from .windows_fs import WindowsScanError, scan_windows_root
+    from ..infrastructure.windows.fs import WindowsScanError, scan_windows_root
 
     root_path = Path(root)
     try:

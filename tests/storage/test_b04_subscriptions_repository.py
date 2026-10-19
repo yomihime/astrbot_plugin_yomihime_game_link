@@ -938,12 +938,12 @@ class B04SubscriptionRepositoryTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(actual, stamp)
                 self.assertTrue(await self.scheduler.is_current(lease, now=self.now))
 
-    async def test_r01_real_full_migration_reopens_at_0100(self) -> None:
-        self.assertEqual(self.db.initialize(), 110)
-        self.assertEqual(self.db.initialize(), 110)
-        self.assertEqual(self.db.schema_version(), 110)
+    async def test_r01_real_full_migration_reopens_at_0120(self) -> None:
+        self.assertEqual(self.db.initialize(), 120)
+        self.assertEqual(self.db.initialize(), 120)
+        self.assertEqual(self.db.schema_version(), 120)
         reopened = SQLiteDatabase(self.path)
-        self.assertEqual(reopened.schema_version(), 110)
+        self.assertEqual(reopened.schema_version(), 120)
 
     async def test_repository_sql_callbacks_run_on_worker_thread(self) -> None:
         caller_thread = threading.get_ident()

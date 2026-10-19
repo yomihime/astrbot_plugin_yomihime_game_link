@@ -41,8 +41,8 @@ from yomihime_game_link_sdk.subscriptions import (
 )
 from yomihime_game_link_sdk.version import MODULE_ABI_VERSION
 
-from ...core.contracts.validation_boundary import validate_contract
 from .schema import freeze_input_schema as freeze_input_schema
+from .validation_boundary import validate_contract
 from .version import COMPATIBLE_CONTRACT_VERSIONS as COMPATIBLE_CONTRACT_VERSIONS
 from .version import CONTRACT_VERSION as CONTRACT_VERSION
 
@@ -172,11 +172,6 @@ EXTENSION_DESCRIPTOR_FIELDS: Mapping[str, frozenset[str]] = MappingProxyType(
         "collection_index": frozenset({"name", "field"}),
     }
 )
-
-
-def is_compatible_contract_version(value: str) -> bool:
-    """Return whether a package/descriptor can be read by this runtime."""
-    return isinstance(value, str) and value in COMPATIBLE_CONTRACT_VERSIONS
 
 
 def _identifier(value: str, field: str) -> None:

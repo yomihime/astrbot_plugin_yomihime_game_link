@@ -21,7 +21,7 @@ from pathlib import Path
 # Pin the SDK import to this installed package before importing Core-facing APIs,
 # while keeping this small maintenance CLI independent of AstrBot main.py.
 _PLUGIN_ROOT = Path(__file__).resolve().parents[1]
-_SDK_VERSION = "0.1.0a8"
+_SDK_VERSION = "0.1.0a9"
 _SDK_MODULE_ABI_VERSION = "2.0"
 if str(_PLUGIN_ROOT) not in sys.path:
     sys.path.insert(0, str(_PLUGIN_ROOT))
@@ -38,13 +38,13 @@ try:
 except Exception:
     raise RuntimeError("the pinned plugin-local SDK is unavailable") from None
 
-from ..extensions.windows_maintenance import WindowsMaintenanceGuard
 from ..infrastructure.sqlite.executor import SQLiteExecutorCloseTimeout
 from ..infrastructure.sqlite.repositories_admin_credentials import (
     AdminCredentialStateError,
     AdminCredentialStatus,
     SQLiteAdminCredentialRepository,
 )
+from ..infrastructure.windows.maintenance import WindowsMaintenanceGuard
 from ..services.admin_authorization import _digest, _matches
 
 _POSIX = os.name == "posix"

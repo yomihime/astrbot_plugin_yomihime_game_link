@@ -446,12 +446,12 @@ class BundledExtensionTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(outcome.reason, reason)
 
     async def test_unsupported_native_environment_keeps_the_safe_reason(self) -> None:
-        from ygl_test_subject.extensions.windows_fs import WindowsScanError
+        from ygl_test_subject.infrastructure.windows.fs import WindowsScanError
 
         with (
             patch("ygl_test_subject.adapters.astrbot.bundled.os.name", "nt"),
             patch(
-                "ygl_test_subject.extensions.windows_fs._check_runtime",
+                "ygl_test_subject.infrastructure.windows.fs._check_runtime",
                 side_effect=WindowsScanError("unsupported_environment"),
             ),
         ):

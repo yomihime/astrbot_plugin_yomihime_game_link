@@ -2,8 +2,10 @@ name: Build release artifacts
 
 on:
   push:
+    branches: [master]
     tags:
       - "v*"
+  pull_request:
   workflow_dispatch:
     inputs:
       tag:
@@ -33,7 +35,7 @@ jobs:
         uses: actions/checkout@v6
         with:
           repository: AstrBotDevs/AstrBot
-          ref: 3c7adafa1397e182d60b1016bf88759265113c8a
+          ref: dffe922773725e9c178392c423676ad65044748c
           path: .architecture-refactor/host-contract
           sparse-checkout: |
             astrbot/api
@@ -61,11 +63,8 @@ jobs:
       - name: Build module and shell pages
         run: npm run build --prefix pages/frontend
 
-      - name: Run module page lifecycle tests
-        run: npm test --prefix pages/frontend
-
-      - name: Run FF14 page state and DOM tests
-        run: node tests/pages/ff14/test_ui_a.mjs
+      - name: Verify reproducible frontend projections
+        run: python scripts/verify_frontend_build.py
 
       - name: Install build and test dependencies
         run: >-
@@ -78,8 +77,16 @@ jobs:
       - name: Install offline Host contract test dependencies
         run: python -m pip install --disable-pip-version-check -r requirements-test.txt
 
-      - name: Run FF14 item display contract and DOM tests
-        run: node tests/pages/ff14/test_item_display.mjs
+      - name: Prepare verified test font
+        run: python scripts/prepare_test_font.py
+
+      - name: Run shell, management and FF14 page tests
+        run: |
+          npm test --prefix pages/frontend
+          node --test tests/pages/management/*.test.mjs tests/pages/management/test_management.mjs tests/pages/management/test_credentials.mjs tests/pages/ff14/test_ui_a.mjs tests/pages/ff14/test_item_display.mjs tests/pages/ff14/test_market_projection.mjs tests/pages/ff14/test_market_ui.mjs
+
+      - name: Check documentation links
+        run: python scripts/check_doc_links.py
 
       - name: Build Linux SDK wheel for diagnostics
         env:
@@ -89,6 +96,8 @@ jobs:
           --no-cache-dir --wheel-dir dist .
 
       - name: Run unit tests
+        env:
+          YGL_TEST_SDK_WHEEL: ${{ github.workspace }}/dist/yomihime_game_link_sdk-0.1.0a9-py3-none-any.whl
         run: python -m unittest discover -s tests -t . -v
 
       - name: Check lint
@@ -108,7 +117,9 @@ jobs:
 
   build:
     needs: verify
-    runs-on: windows-latest
+    # Hosted Windows Server images are outside the native NTFS qualification matrix.
+    # Build the same platform-neutral ZIP through the reviewed POSIX path.
+    runs-on: ubuntu-latest
     env:
       YGL_TEST_ASTRBOT_SOURCE: ${{ github.workspace }}/.architecture-refactor/host-contract/astrbot
     steps:
@@ -116,14 +127,13 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Exclude independent Host test source from plugin checkout
-        shell: pwsh
-        run: Add-Content -LiteralPath .git/info/exclude -Value '/.architecture-refactor/host-contract/'
+        run: echo '/.architecture-refactor/host-contract/' >> .git/info/exclude
 
       - name: Check out pinned AstrBot contract source without running Host
         uses: actions/checkout@v6
         with:
           repository: AstrBotDevs/AstrBot
-          ref: 3c7adafa1397e182d60b1016bf88759265113c8a
+          ref: dffe922773725e9c178392c423676ad65044748c
           path: .architecture-refactor/host-contract
           sparse-checkout: |
             astrbot/api
@@ -162,7 +172,10 @@ jobs:
       - name: Install offline Host contract test dependencies
         run: python -m pip install --disable-pip-version-check -r requirements-test.txt
 
-      - name: Run Windows host and packaging tests
+      - name: Prepare verified test font
+        run: python scripts/prepare_test_font.py
+
+      - name: Run host and packaging tests on the supported build platform
         run: >-
           python -m unittest -v
           tests.host.test_b05_sdk_bootstrap
@@ -176,13 +189,13 @@ jobs:
       - name: Build plugin and SDK artifacts
         env:
           RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || inputs.tag }}
-        shell: pwsh
+        shell: bash
         run: |
-          if ([string]::IsNullOrWhiteSpace($env:RELEASE_TAG)) {
+          if [[ -z "$RELEASE_TAG" ]]; then
             python scripts/build_release.py
-          } else {
-            python scripts/build_release.py --tag $env:RELEASE_TAG
-          }
+          else
+            python scripts/build_release.py --tag "$RELEASE_TAG"
+          fi
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4

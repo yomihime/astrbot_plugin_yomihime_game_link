@@ -50,7 +50,7 @@ from ..infrastructure.sqlite.repositories_runtime import (
     RuntimeJournalPhase,
     SQLiteModuleRuntimeRepository,
 )
-from ..services.module_services import ModuleServicesFactory
+from .module_services import ModuleServicesFactory
 
 
 class FactoryBundleLease(Protocol):
