@@ -13,6 +13,7 @@ from ygl_test_subject.core.contracts.administration import (
     AdminOperation,
 )
 from ygl_test_subject.core.contracts.validation_boundary import validate_contract
+from ygl_test_subject.infrastructure.key_provider import SecretKeyUnavailable
 
 from tests.host import test_admin_pages as admin_fixture
 from yomihime_game_link_sdk.services import ConfigTarget
@@ -378,7 +379,7 @@ class ManagedCredentialPagesTests(unittest.IsolatedAsyncioTestCase):
                     (await self.status())["ff14/ff14"]["fields"][alias], "unset"
                 )
 
-    async def test_closed_pair_missing_key_and_no_effect(self):
+    async def test_closed_pair_and_bound_key_unavailable_have_no_effect(self):
         before = await self.status()
         for value in (
             {},
@@ -391,10 +392,15 @@ class ManagedCredentialPagesTests(unittest.IsolatedAsyncioTestCase):
         ):
             response = await self.change("credential_fflogs_cn", value=value)
             self.assertEqual(response.status_code, 400, response.text)
-        with patch.dict(os.environ, {}, clear=True):
+        with patch.object(
+            self.runtime.core_runtime.managed_keys,
+            "get_key",
+            side_effect=SecretKeyUnavailable(reason="not_provided"),
+        ) as provider:
             response = await self.change("credential_fflogs_cn")
             self.assertEqual(response.status_code, 503, response.text)
             self.assertEqual(response.json()["code"], "secret_encryption_unavailable")
+            provider.assert_called()
         self.assertEqual(await self.status(), before)
 
     async def test_credential_endpoints_retain_host_negative_identity_proofs(self):
