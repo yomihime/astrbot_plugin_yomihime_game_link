@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import logging
 import re
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -57,7 +58,9 @@ from ..extensions.discovery import DiscoveredPackage
 from ..extensions.loader import ExtensionCandidate
 from ..extensions.source_snapshot import PackageProvenance
 from ..infrastructure.files import LocalSafeFileStore
-from ..infrastructure.managed_key_manager import ManagedKeyManager
+from ..infrastructure.key_provider import SecretKeyUnavailable
+from ..infrastructure.managed_key_file import ManagedKeyFileError
+from ..infrastructure.managed_key_manager import ManagedKeyConflict, ManagedKeyManager
 from ..infrastructure.secret_store import SecretCodec, SQLiteSecretStore
 from ..infrastructure.sqlite.database import SQLiteDatabase
 from ..infrastructure.sqlite.repositories import SQLiteRepositories
@@ -117,6 +120,8 @@ from .scheduler import (
 )
 from .source_credentials import SourceCredentialPolicy
 from .subscriptions import SubscriptionOperationsService
+
+_LOG = logging.getLogger(__name__)
 
 DEFAULT_CADENCE_CONFIGURATION = CadenceConfiguration(
     (60.0, 300.0, 900.0, 3600.0, 21600.0, 43200.0, 86400.0)
@@ -1147,10 +1152,16 @@ class CoreRuntime:
                 if self.managed_keys is not None:
                     try:
                         await self.managed_keys.startup()
-                    except Exception:
+                    except (
+                        ManagedKeyConflict,
+                        ManagedKeyFileError,
+                        SecretKeyUnavailable,
+                    ):
                         # Key readiness is independent of Core's ordinary
                         # lifecycle; unavailable credentials stay fail closed.
-                        pass
+                        _LOG.warning("managed_key_startup_unavailable")
+                    except Exception:
+                        _LOG.warning("managed_key_startup_unexpected")
                     self._check_recovery(recovery_grant)
                     if self._closing:
                         raise asyncio.CancelledError

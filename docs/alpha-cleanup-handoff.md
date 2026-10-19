@@ -1,8 +1,10 @@
 # Alpha cleanup and AstrBot 4.29.1 handoff
 
+> Windows limitation: managed-key storage currently rejects untrusted principals' READ/LIST access on the entire plugin data root. Inherited read ACEs for groups such as `Users` can block initialization. Ordinary inherited-ACL installations are not proven out of the box; native local Windows evidence and Ubuntu CI are separate.
+
 ## Current installation contract
 
-Install the supported built ZIP into a disposable AstrBot 4.29.1 first. A repository source ZIP is not an installation artifact. Fresh configuration comes from current declarations and validated SQLite values; no legacy configuration snapshot, preparation command, rollback selector or migration-completion marker is required. Existing invalid values remain blocked and can be repaired through the authenticated settings page; startup does not erase existing databases or subscriptions. Historical SQL schema steps remain because they create the current schema safely.
+Install the supported built ZIP into a disposable AstrBot 4.29.1 first. A repository source ZIP is not an installation artifact. This alpha targets fresh installations without requiring deletion of user data. Configuration comes from current declarations and validated SQLite values; no legacy configuration snapshot, preparation command, rollback selector or migration-completion marker is required. The four legacy Host fields (default region, calendar days, timezone and daily summary time) are not migrated: existing users must reconfigure them in plugin settings. Existing invalid values remain blocked and can be repaired through the authenticated settings page; startup does not erase existing databases or subscriptions. Historical SQL schema files remain the applied-migration checksum ledger and must not be edited or deleted. The historical `ordinary_config_migrations` table is retired from the current ordinary-configuration runtime contract.
 
 The plugin remains AGPL-3.0; the standalone SDK is MIT, beginning with `0.1.0a9`. SDK contract/ABI validation and exact artifact hashes remain strict. External runtime dependencies use supported minima; build/test tools remain separately pinned.
 
@@ -14,7 +16,7 @@ Management mutations still require an ordinary Dashboard JWT, correct origin and
 
 For a fresh installation, open the official plugin settings, check that the credential storage panel is ready, then fill the regional FFLogs Client ID and Client Secret and save. Core automatically creates a random persistent managed master key only after proving that the complete shared encrypted inventory is empty. Ordinary users do not need an environment variable or a terminal. The key lives in the private persistent plugin data area and is reused after restart, plugin stop/start and code updates; keep that data area when updating the plugin.
 
-Existing ciphertext is never silently discarded or replaced with a new key. If its original key is missing or damaged, the credential storage panel offers **Restore key** and **Reconfigure credentials**. Restore uses a secure input and verifies every affected ciphertext before selecting the supplied key. Reconfiguration requires explicit confirmation of the affected modules and authorization credentials; they must be configured again. Ordinary configuration, grant identities, business data and fonts remain intact. Unknown or inconsistent inventory blocks mutation rather than assuming an empty installation. Key storage failure does not disable non-credential Core functionality.
+Existing ciphertext is never silently discarded or replaced with a new key. If its original key is missing or damaged, the credential storage panel offers **Restore key** and **Reconfigure credentials**. Restore uses a secure input and verifies every affected ciphertext before selecting the supplied key. Reconfiguration requires explicit confirmation of the affected modules and authorization credentials; they are logically invalidated and must be configured again. Ordinary configuration, grant identities, business data and fonts remain intact. Old files are retained; this is not cryptographic erasure and does not promise a historical-credential recovery entry or successful recovery after reset. Unknown or inconsistent inventory blocks mutation rather than assuming an empty installation. Key storage failure does not disable non-credential Core functionality.
 
 `YGL_SECRET_KEY` remains an advanced deployment option for a standard Base64 encoding of exactly 32 bytes. Explicit empty, malformed or conflicting environment values never fall back to a new managed key; the chosen source is persisted. Back up the consistent plugin database, encrypted payloads and private managed-key files together in restricted local storage. Environment-managed keys remain the deployment operator's responsibility. No management API returns a master key or saved credential value, and there is no plaintext fallback. Storage readiness, saved-record presence, decryptability and successful upstream FFLogs validation are separate states.
 
@@ -35,7 +37,20 @@ The original real-host smoke baseline installs the exact ZIP in official AstrBot
 
 Native Windows qualification is independent of the AstrBot version. The existing conservative NTFS/OS/Python qualification matrix is unchanged; Linux tests and skipped Windows tests do not extend it. Before deployment, local Codex should verify the exact ZIP hash, actual Windows qualification, cold fresh startup, dashboard/browser bridge behavior, help image rendering and lifecycle shutdown. Use disposable data and fixed fixtures first; live credentials, business APIs and production delivery require separate local verification.
 
+Managed-key protection currently checks READ/LIST trust on the whole plugin data root, rather than only its private key directory. Inherited read ACEs for untrusted principals can block an otherwise qualified Windows installation. Local Windows acceptance used restricted private roots and does not establish ordinary inherited-ACL usability; Ubuntu CI does not exercise that native ACL boundary. Diagnose through the normal credential-storage status and safe error code first. Only an authorized operator should inspect the root ACL or seek system-administrator help; do not recursively loosen permissions, delete user data or bypass the checks. The maintenance CLI requires an absolute `--data-dir` without `..` components before any storage is constructed. Official AstrBot 4.29.1 `StarTools` supplies an absolute data path; the CLI defect does not establish a universal Host startup failure.
+
 This cleanup deliberately does not split every large implementation file, replace the native Windows trust architecture, or redesign the UI. Those changes need their own coherent behavioral and security review. Obsolete configuration and page compatibility is not promised; existing encrypted data still receives the protection described above. No automatic merge, tag or release is performed.
+
+## Deferred to a separate PR
+
+- Move the key-management entry and revise its form UX
+- Review the Windows private-root protection scope
+- Design environment-key to managed-key migration
+- Clarify Core/Module ownership of diagnostics and caches
+- Decouple private fields and perform broader refactors
+- Address frontend freshness, complete-CI constraints and a new Windows CI matrix
+
+These are follow-up design and implementation items, not changes or acceptance claims in this closeout.
 
 ## Historical Windows follow-up (ed6b2ba, 2026-10-19)
 

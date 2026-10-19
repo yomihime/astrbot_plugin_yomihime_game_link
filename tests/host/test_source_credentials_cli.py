@@ -242,6 +242,57 @@ class SourceCredentialCliTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ValueError, "client secret is invalid"):
             cli._validate_client_material("i", "s" * 513)
 
+    def test_data_directory_argument_accepts_absolute_path_without_normalizing(self):
+        args = cli._parser().parse_args(
+            ["--data-dir", str(self.data_dir), "--realm", "cn", "set"]
+        )
+        self.assertEqual(args.data_dir, self.data_dir)
+
+    async def test_invalid_data_directory_is_rejected_before_storage(self):
+        for path in (
+            Path("synthetic-relative-data"),
+            self.root / "not-created" / ".." / "data",
+        ):
+            with self.subTest(
+                path_kind="absolute" if path.is_absolute() else "relative"
+            ):
+                stderr = io.StringIO()
+                before = set(self.root.rglob("*"))
+                with (
+                    patch.object(cli, "local_maintenance_guard") as guard,
+                    patch.object(cli, "install_bundled_ff14") as install,
+                    patch.object(cli, "_new_core") as new_core,
+                    patch.object(cli, "SQLiteDatabase") as database,
+                    patch.object(cli, "ManagedKeyManager") as keys,
+                    patch.object(cli, "AioHttpTransport") as transport,
+                ):
+                    with patch.object(cli, "_configure") as configure:
+                        with (
+                            contextlib.redirect_stderr(stderr),
+                            self.assertRaises(SystemExit) as exit,
+                        ):
+                            cli.main(["--data-dir", str(path), "--realm", "cn", "set"])
+                        configure.assert_not_called()
+                    self.assertEqual(exit.exception.code, 2)
+                    self.assertIn(
+                        "absolute path without '..' components", stderr.getvalue()
+                    )
+                    self.assertNotIn(str(path), stderr.getvalue())
+                    with self.assertRaisesRegex(
+                        cli.argparse.ArgumentTypeError, "absolute path"
+                    ):
+                        await cli._configure(path, "set", "cn")
+                    for constructor in (
+                        guard,
+                        install,
+                        new_core,
+                        database,
+                        keys,
+                        transport,
+                    ):
+                        constructor.assert_not_called()
+                self.assertEqual(set(self.root.rglob("*")), before)
+
     async def test_real_facade_set_reopen_clear_and_secret_redaction(self) -> None:
         await self._seed_database()
         with patch.dict(os.environ, {"YGL_SECRET_KEY": self.key}):

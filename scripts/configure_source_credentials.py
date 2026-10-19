@@ -74,6 +74,7 @@ from .admin_credentials import _finish_cleanup, _read_hidden, local_maintenance_
 MODULE_ID = "ff14/ff14"
 _REALMS = ("cn", "global")
 _SESSION_TTL_SECONDS = 5 * 60
+_DATA_DIR_ERROR = "--data-dir requires an absolute path without '..' components"
 
 
 @dataclass(frozen=True, slots=True, eq=False)
@@ -195,6 +196,7 @@ async def _configure(
     prompt=getpass.getpass,
     label_sink=None,
 ) -> ConfigSummary:
+    data_dir = _data_directory(data_dir)
     if action not in {"set", "clear"} or realm not in _REALMS:
         raise ValueError("unsupported operation")
     database_path = data_dir / "runtime.sqlite3"
@@ -372,9 +374,18 @@ def _validate_client_material(client_id: str, client_secret: str) -> None:
             raise ValueError(f"{label} is invalid")
 
 
+def _data_directory(value: str | Path) -> Path:
+    path = Path(value)
+    if not path.is_absolute() or ".." in path.parts:
+        raise argparse.ArgumentTypeError(_DATA_DIR_ERROR)
+    return path
+
+
 class _Parser(argparse.ArgumentParser):
     def error(self, _message: str) -> None:
         self.print_usage(sys.stderr)
+        if _message == f"argument --data-dir: {_DATA_DIR_ERROR}":
+            self.exit(2, f"FFLogs credential CLI: {_DATA_DIR_ERROR}\n")
         self.exit(
             2, "FFLogs credential CLI: invalid arguments; values are not accepted\n"
         )
@@ -385,8 +396,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--data-dir",
         required=True,
-        type=Path,
-        help="Existing AstrBot plugin data directory",
+        type=_data_directory,
+        help="Existing AstrBot plugin data directory (absolute path, no '..' components)",
     )
     parser.add_argument(
         "--realm",
