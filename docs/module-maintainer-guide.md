@@ -52,7 +52,7 @@
 | --- | --- | --- |
 | REQ01 | 壳底部固定全局设置，空目录或 FF14 未加载仍可进入 Core 设置 | 真实 monitor 入口、Core 往返/CAS、解除挂载 FF14 后全局设置可用已验证 |
 | REQ02 | 公共表单按 owner/group 显示；全局只选 Core，各模块导航有自己的设置入口；普通值与凭据接口分离，保存采用 revision CAS | schema/catalog 只描述 UI；资源权来自显式部署政策和逐请求鉴权，不能从声明自动获得 |
-| REQ03 | 当前注入 KeyProvider/codec 提供无秘密 readiness；未就绪或未知时禁止填写/替换；已受权 clear 仍须确认并通过最新 catalog/CAS，keep 零写；FFLogs cn/global 独立操作 | 仅接入现有 external/env 密钥提供者（默认 `YGL_SECRET_KEY`）；没有持久主钥生成或自动轮换实现，预检不读取旧 secret |
+| REQ03 | Core 持久记录主密钥来源、代际与库存；全域空库存时可自动建立私有托管密钥，旧密文须验证原密钥可解后恢复；未就绪或未知时禁止填写/替换；已受权 clear 仍须确认并通过最新 catalog/CAS，keep 零写；FFLogs cn/global 独立操作 | 高级环境来源 `YGL_SECRET_KEY` 显式提供时不回退；全域重置须明确确认并使所有模块的旧加密配置/授权凭据失效，普通配置与授权记录保留。诊断不回读密钥，主密钥就绪不证明上游 OAuth 有效 |
 | REQ04 | 公共调用使用闭合 owner/page/capability_id/parameters 信封；Host 不分派行情业务，FF14 解释输入并验证行情事实 | 保留受信 allowlist、epoch、准入、只读/隐私检查与 32 blocks/512 nodes 总预算 |
 | REQ05 | Logs/日历使用模块 Vue 页及现有客户端、错误和恢复语义；旧业务 renderer 已移除 | 旧兼容入口仅指引使用宿主插件菜单正式重开；真实未配置/来源失败处理已验证，真实 FFLogs 和日历内容仍待外部条件 |
 | REQ06 | exact owner disable/unload/restore；停用保留设置；卸载先 fence、排空与 cleanup，再撤销工具对象、许可、来源及 Registry 注册 | pending 保留可重试所有权；配置、秘密、缓存和 data 均保留。恢复只使用受信原候选；旧壳不自动续资产证明，应从宿主正式重开 |

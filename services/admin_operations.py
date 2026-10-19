@@ -46,6 +46,7 @@ from ..core.ports import RevisionConflict
 from ..core.registry import RegisteredModule, Registry, RegistrySnapshot
 from ..extensions.discovery import DiscoveredPackage
 from ..extensions.loader import ExtensionCandidate
+from ..infrastructure.managed_key_manager import ManagedKeyManager
 from ..infrastructure.secret_store import SQLiteSecretStore
 from ..infrastructure.sqlite.database import SQLiteDatabase
 from ..infrastructure.sqlite.repositories_config import SQLiteConfigRepository
@@ -119,6 +120,7 @@ class AdminOperationsService(AdminOperations):
         database: SQLiteDatabase,
         config_repository: SQLiteConfigRepository,
         secret_store: SQLiteSecretStore,
+        managed_key_manager: ManagedKeyManager | None = None,
         config_principal_id: str,
         subscription_gate_fields: Mapping[ConfigTarget, tuple[str, ...]] | None = None,
         module_config_validators: Mapping[str, Mapping[str, object]] | None = None,
@@ -154,6 +156,7 @@ class AdminOperationsService(AdminOperations):
         self.database = database
         self._config_repository = config_repository
         self.secret_store = secret_store
+        self.managed_keys = managed_key_manager
         self.config_principal_id = config_principal_id
         self._subscription_gate_fields = MappingProxyType(
             dict(subscription_gate_fields or {})
@@ -246,6 +249,110 @@ class AdminOperationsService(AdminOperations):
             )
             await self.authorization.validate_generation(
                 grant, operation=AdminOperation.READ_CONFIG
+            )
+            self._require_accepting()
+            return result
+
+    def master_key_resources(self):
+        return {
+            ConfigTarget(self.config_principal_id, CORE_MODULE_ID): {"__master_key__"}
+        }
+
+    @_tracked_admin_request
+    async def master_key_status(self, *, authorization):
+        grant = await self.authorization.authorize(
+            AdminOperation.READ_CONFIG,
+            invocation=None,
+            context=authorization,
+            resources=self.master_key_resources(),
+        )
+        async with self.lifecycle.admission.mutation("admin-master-key-status"):
+            await self.authorization.validate_generation(
+                grant, operation=AdminOperation.READ_CONFIG
+            )
+            self._require_accepting()
+            manager = self.managed_keys
+            if manager is None:
+                result = {
+                    "state": "unknown",
+                    "reason_code": "manager_unavailable",
+                    "ready": False,
+                    "source": "unselected",
+                    "generation": 0,
+                    "revision": 0,
+                    "inventory_digest": "",
+                    "unknown_count": 1,
+                    "impact": (),
+                }
+            else:
+                try:
+                    result = await manager.status()
+                except Exception:
+                    result = {
+                        "state": "unknown",
+                        "reason_code": "inventory_unavailable",
+                        "ready": False,
+                        "source": "unselected",
+                        "generation": 0,
+                        "revision": 0,
+                        "inventory_digest": "",
+                        "unknown_count": 1,
+                        "impact": (),
+                    }
+            await self.authorization.validate_generation(
+                grant, operation=AdminOperation.READ_CONFIG
+            )
+            self._require_accepting()
+            return result
+
+    @_tracked_admin_request
+    async def master_key_change(
+        self,
+        *,
+        authorization,
+        action: str,
+        expected_revision: int,
+        expected_generation: int,
+        inventory_digest: str,
+        encoded_key: str | None = None,
+        confirmation: str | None = None,
+    ):
+        if action not in {"retry", "restore", "reset"}:
+            raise ValueError("invalid master-key action")
+        grant = await self.authorization.authorize(
+            AdminOperation.UPDATE_CONFIG,
+            invocation=None,
+            context=authorization,
+            resources=self.master_key_resources(),
+        )
+        async with self.lifecycle.admission.mutation("admin-master-key-change"):
+            await self.authorization.validate_generation(
+                grant, operation=AdminOperation.UPDATE_CONFIG
+            )
+            self._require_accepting()
+            manager = self.managed_keys
+            if manager is None:
+                raise AdminAuthorizationDenied
+
+            def fence(unit):
+                self.authorization.assert_generation_current(
+                    unit, grant, AdminOperation.UPDATE_CONFIG
+                )
+
+            arguments = {
+                "expected_revision": expected_revision,
+                "expected_generation": expected_generation,
+                "inventory_digest": inventory_digest,
+                "fence": fence,
+            }
+            if action == "retry":
+                result = await manager.retry(**arguments)
+            elif action == "restore":
+                result = await manager.restore(encoded_key, **arguments)
+            else:
+                result = await manager.reset(confirmation=confirmation, **arguments)
+            await self.authorization.validate_generation(
+                grant, operation=AdminOperation.UPDATE_CONFIG
             )
             self._require_accepting()
             return result

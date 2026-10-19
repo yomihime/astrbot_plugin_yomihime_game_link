@@ -91,11 +91,14 @@ class SQLiteRepositories:
             self.database,
             subscription_gate_fields=subscription_gate_fields,
             clock=config_clock,
+            key_manager=secret_store.key_manager,
         )
         self.identities = SQLiteIdentityRepository(self.database)
         self.conversations = SQLiteConversationRepository(self.database)
         self.bindings = SQLiteBindingRepository(self.database, registration_lookup)
-        self.authorization = SQLiteAuthRepository(self.database, expire_on_open=True)
+        self.authorization = SQLiteAuthRepository(
+            self.database, expire_on_open=True, key_manager=secret_store.key_manager
+        )
         self.grant_revocation = SQLiteGrantRevocationRepository(self.database)
         self.cache = SQLiteCacheRepository(self.database)
         self.resources = SQLiteResourceRepository(self.database, file_store)

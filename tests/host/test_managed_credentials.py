@@ -231,10 +231,31 @@ class ManagedCredentialPagesTests(unittest.IsolatedAsyncioTestCase):
                         "credential_fflogs_cn", revision=before["ff14/ff14"]["revision"]
                     )
                 )
-                await asyncio.wait_for(started.wait(), 2)
-                self.pages.close()
-                release.set()
-                response = await task
+                waiter = asyncio.create_task(started.wait())
+                try:
+                    done, _ = await asyncio.wait(
+                        {waiter, task}, timeout=15, return_when=asyncio.FIRST_COMPLETED
+                    )
+                    if task in done:
+                        early = await task
+                        self.fail(
+                            "credential update completed before staging: "
+                            f"HTTP {early.status_code}"
+                        )
+                    self.assertIn(waiter, done, "credential staging did not finish")
+                    self.assertFalse(task.done(), "update escaped the staging gate")
+                    self.pages.close()
+                    release.set()
+                    response = await asyncio.wait_for(task, 15)
+                finally:
+                    release.set()
+                    waiter.cancel()
+                    await asyncio.gather(waiter, return_exceptions=True)
+                    if not task.done():
+                        task.cancel()
+                        finished, _ = await asyncio.wait({task}, timeout=15)
+                        self.assertIn(task, finished, "credential task did not stop")
+                    await asyncio.gather(task, return_exceptions=True)
             self.assertEqual(response.status_code, 403, response.text)
             self.pages.register()
             self.assertEqual(await self.status(), before)

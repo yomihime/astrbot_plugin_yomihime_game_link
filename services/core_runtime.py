@@ -57,6 +57,7 @@ from ..extensions.discovery import DiscoveredPackage
 from ..extensions.loader import ExtensionCandidate
 from ..extensions.source_snapshot import PackageProvenance
 from ..infrastructure.files import LocalSafeFileStore
+from ..infrastructure.managed_key_manager import ManagedKeyManager
 from ..infrastructure.secret_store import SecretCodec, SQLiteSecretStore
 from ..infrastructure.sqlite.database import SQLiteDatabase
 from ..infrastructure.sqlite.repositories import SQLiteRepositories
@@ -434,6 +435,7 @@ class CoreRuntime:
         file_root: str | Path,
         secret_root: str | Path,
         secret_codec: SecretCodec | None,
+        managed_key_manager: ManagedKeyManager | None = None,
         http_transport: object,
         renderer: DisplayRenderer,
         display_limits: DisplayLimits,
@@ -558,6 +560,7 @@ class CoreRuntime:
         )
 
         self.database = database
+        self.managed_keys = managed_key_manager
         self.module_host_config_snapshots = host_config_snapshots
         self.extension_root = Path(extension_root)
         self._trusted_bundled_defaults = bundled_defaults
@@ -565,7 +568,9 @@ class CoreRuntime:
         self._trusted_subscription_gates = subscription_gates
         self.module_storage = ModuleStorageRouter(Path(file_root).parent / "modules")
         self.file_store = LocalSafeFileStore(file_root)
-        self.secret_store = SQLiteSecretStore(database, secret_root, codec=secret_codec)
+        self.secret_store = SQLiteSecretStore(
+            database, secret_root, codec=secret_codec, key_manager=managed_key_manager
+        )
         self.registry = Registry()
         self.issuer = ContextIssuer(
             clock=monotonic_clock,
@@ -820,6 +825,7 @@ class CoreRuntime:
             config_repository=self.config_repository,
             module_config_validators=module_config_validators,
             secret_store=self.secret_store,
+            managed_key_manager=managed_key_manager,
             config_principal_id=config_principal_id,
             subscription_gate_fields=gate_fields,
             managed_source_credentials=managed_source_credentials,
@@ -1138,6 +1144,16 @@ class CoreRuntime:
                 self._check_recovery(recovery_grant)
                 if self._closing:
                     raise asyncio.CancelledError
+                if self.managed_keys is not None:
+                    try:
+                        await self.managed_keys.startup()
+                    except Exception:
+                        # Key readiness is independent of Core's ordinary
+                        # lifecycle; unavailable credentials stay fail closed.
+                        pass
+                    self._check_recovery(recovery_grant)
+                    if self._closing:
+                        raise asyncio.CancelledError
                 candidates = self.extension_runtime.scan(self.extension_root)
             except BaseException:
                 self._management_ready = False

@@ -4,7 +4,7 @@ import vm from 'node:vm';
 import {JSDOM} from '../../../pages/frontend/node_modules/jsdom/lib/api.js';
 import {root} from './compile.mjs';
 import {catalog as shellCatalog} from './fixtures.mjs';
-import {catalog,snapshot,credentialCatalog,credentialStatus} from '../management/fixtures.mjs';
+import {catalog,snapshot,credentialCatalog,credentialStatus,masterKeyReady} from '../management/fixtures.mjs';
 const dom=new JSDOM('<div id="app"></div>',{pretendToBeVisual:true,url:'http://localhost/#/'}),window=dom.window,calls=[],pending=[];
 window.Element.prototype.scrollTo=function(){};window.scrollTo=()=>{};window.matchMedia=()=>({matches:false,addEventListener(){},removeEventListener(){}});
 let nativeCalls=0;window.confirm=()=>{nativeCalls++;return false;};
@@ -15,7 +15,7 @@ function post(endpoint,body){
   if(endpoint==='admin/update'&&rejectUpdate)return Promise.reject(Error('revision_conflict'));
   if(endpoint==='admin/read'&&rejectRead)return Promise.reject(Error('controlled_read_failure'));
   if(endpoint==='admin/read'&&holdRead||endpoint==='admin/update'&&holdUpdate)return new Promise((resolve,reject)=>pending.push({endpoint,resolve,reject}));
-  const responses={'admin/catalog':catalog(),'admin/read':values,'admin/credential-catalog':credentialCatalog(),'admin/credential-status':credentialStatus(),'admin/credential-readiness':{ready:false,state:'unavailable',reason_code:'secret_encryption_unavailable',diagnostics:{key_state:'not_provided',codec_state:'not_run'}},'admin/modules':status,'admin/module-unload':{module_id:'ff14/ff14',registry_revision:6,state:'unloaded',data_retained:true,reopen_required:true}};
+  const responses={'admin/catalog':catalog(),'admin/read':values,'admin/master-key-status':masterKeyReady(),'admin/credential-catalog':credentialCatalog(),'admin/credential-status':credentialStatus(),'admin/credential-readiness':{ready:false,state:'unavailable',reason_code:'secret_encryption_unavailable',diagnostics:{key_state:'not_provided',codec_state:'not_run'}},'admin/modules':status,'admin/module-unload':{module_id:'ff14/ff14',registry_revision:6,state:'unloaded',data_retained:true,reopen_required:true}};
   assert.ok(endpoint in responses,endpoint);return Promise.resolve(responses[endpoint]);
 }
 const realm=vm.createContext({window,document:window.document,navigator:window.navigator,location:window.location,console,TextEncoder,TextDecoder,AbortController,URL,setTimeout,clearTimeout,setInterval,clearInterval,getComputedStyle:window.getComputedStyle.bind(window),requestAnimationFrame:window.requestAnimationFrame.bind(window),cancelAnimationFrame:window.cancelAnimationFrame.bind(window),post,shellData:shellCatalog()});

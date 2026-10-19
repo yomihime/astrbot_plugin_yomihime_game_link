@@ -59,7 +59,7 @@ from ..extensions.factory_resolver import (
     ReviewedSupportLease,
 )
 from ..infrastructure.http_transport import AioHttpTransport
-from ..infrastructure.key_provider import EnvironmentKeyProvider
+from ..infrastructure.managed_key_manager import ManagedKeyManager
 from ..infrastructure.secret_codec import AESGCMSecretCodec
 from ..infrastructure.sqlite.database import SQLiteDatabase
 from ..infrastructure.sqlite.repositories_admin_credentials import (
@@ -143,12 +143,15 @@ def _new_core(
     inventory,
 ):
     transport = AioHttpTransport()
+    database = SQLiteDatabase(data_dir / "runtime.sqlite3")
+    managed_keys = ManagedKeyManager(database, data_dir, data_dir / "secrets")
     core = CoreRuntime(
-        database=SQLiteDatabase(data_dir / "runtime.sqlite3"),
+        database=database,
         extension_root=extension_root,
         file_root=data_dir / "files",
         secret_root=data_dir / "secrets",
-        secret_codec=AESGCMSecretCodec(EnvironmentKeyProvider("YGL_SECRET_KEY")),
+        secret_codec=AESGCMSecretCodec(managed_keys),
+        managed_key_manager=managed_keys,
         http_transport=transport,
         renderer=GenericDisplayRenderer(
             RenderingBounds(
@@ -243,9 +246,11 @@ async def _configure(
             ):
                 raise PermissionError("operator authentication failed")
             session = authority.issue(state.generation)
+            key_status = await core.managed_keys.startup()
 
             if action == "set":
-                EnvironmentKeyProvider("YGL_SECRET_KEY").get_key()
+                if not key_status["ready"]:
+                    raise RuntimeError("master key is not ready")
                 if client_id is None:
                     client_id = _read_hidden(
                         "FFLogs client ID (hidden): ", prompt=prompt

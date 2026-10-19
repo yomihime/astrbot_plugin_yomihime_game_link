@@ -33,6 +33,7 @@ _ALL_FILE_RIGHTS = 0x001F01FF
 _MUTATION = 0x000D0156
 _ANCESTOR_MUTATION = 0x000D0152
 _TRUSTED_INSTALLER = "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464"
+_OWNER_RIGHTS_SID = bytes.fromhex("010100000000000304000000")  # S-1-3-4
 
 
 class WindowsMaintenanceError(fs.WindowsScanError):
@@ -90,7 +91,11 @@ def _validate_descriptor(
         forbidden = _ANCESTOR_MUTATION if role == "ancestor" else _MUTATION
         if role == "data":
             forbidden |= 0x0001 | 0x0008  # contents/listing and extended attributes
-        if ace.sid not in trusted and mask & forbidden:
+        # OWNER_RIGHTS represents this descriptor's verified owner. It is not
+        # a permanently privileged SID and must never stand in for a foreign
+        # owner. The exact binary SID avoids wildcard authority matching.
+        owner_rights = ace.sid == _OWNER_RIGHTS_SID and owner in owners
+        if ace.sid not in trusted and not owner_rights and mask & forbidden:
             raise WindowsMaintenanceError("untrusted_access")
 
 

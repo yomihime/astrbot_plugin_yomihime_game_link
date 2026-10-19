@@ -6,6 +6,7 @@ import {JSDOM} from '../../../pages/frontend/node_modules/jsdom/lib/api.js';
 import {root} from './compile.mjs';
 import {catalog as shellCatalog} from './fixtures.mjs';
 import {themeCatalog,themeSnapshot} from './theme-settings-fixtures.mjs';
+import {masterKeyReady} from '../management/fixtures.mjs';
 const dom=new JSDOM('<div id="app"></div>',{pretendToBeVisual:true,url:process.argv.includes('--cold-module')?'http://localhost/#/module/ff14%2Fff14':'http://localhost/#/settings'}),window=dom.window,document=window.document,calls=[];
 window.Element.prototype.scrollTo=function(){};window.scrollTo=()=>{};window.matchMedia=()=>({matches:false,addEventListener(){},removeEventListener(){}});
 window.confirm=()=>{throw Error('Unexpected native confirmation');};
@@ -17,7 +18,7 @@ function post(endpoint,body){
  calls.push({endpoint,body:structuredClone(body)});
  if(endpoint==='admin/font-retry')return new Promise(resolve=>deferredRetry=resolve);
  if(endpoint==='admin/font-upload')return new Promise(resolve=>deferredUpload=resolve);
- const responses={'admin/catalog':declarations,'admin/read':values,'admin/credential-catalog':{schema_version:1,fields:[]},'admin/credential-status':{},'admin/credential-readiness':{ready:true,state:'ready',reason_code:'ready',diagnostics:{key_state:'valid_format',codec_state:'available'}},'admin/font-status':font,'admin/modules':status};
+ const responses={'admin/catalog':declarations,'admin/read':values,'admin/master-key-status':masterKeyReady(),'admin/credential-catalog':{schema_version:1,fields:[]},'admin/credential-status':{},'admin/credential-readiness':{ready:true,state:'ready',reason_code:'ready',diagnostics:{key_state:'valid_format',codec_state:'available'}},'admin/font-status':font,'admin/modules':status};
  assert.ok(endpoint in responses,endpoint);return Promise.resolve(responses[endpoint]);
 }
 const realm=vm.createContext({window,document,navigator:window.navigator,location:window.location,console,TextEncoder,TextDecoder,AbortController,URL,setTimeout,clearTimeout,setInterval,clearInterval,getComputedStyle:window.getComputedStyle.bind(window),requestAnimationFrame:window.requestAnimationFrame.bind(window),cancelAnimationFrame:window.cancelAnimationFrame.bind(window),post,registry});

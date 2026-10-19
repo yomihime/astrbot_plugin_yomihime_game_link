@@ -17,6 +17,7 @@ from ...core.contracts.administration import (
 from ...core.contracts.services import ConfigFieldUpdate, ConfigPatch
 from ...core.contracts.validation_boundary import validate_contract
 from ...core.ports import RevisionConflict
+from ...infrastructure.managed_key_manager import ManagedKeyConflict
 from ...infrastructure.secret_store import SecretStoreUnavailable
 from .runtime import PLUGIN_NAME
 from .web_admin import bounded_body, bounded_font_upload, verified_dashboard_request
@@ -34,6 +35,10 @@ _OPERATIONS = {
     "credential-status": AdminOperation.READ_CONFIG,
     "credential-update": AdminOperation.UPDATE_CONFIG,
     "credential-readiness": AdminOperation.READ_CONFIG,
+    "master-key-status": AdminOperation.READ_CONFIG,
+    "master-key-retry": AdminOperation.UPDATE_CONFIG,
+    "master-key-restore": AdminOperation.UPDATE_CONFIG,
+    "master-key-reset": AdminOperation.UPDATE_CONFIG,
     "modules": AdminOperation.LIST_MODULES,
     "module-enabled": AdminOperation.SET_ENABLED,
     "module-unload": AdminOperation.UNLOAD_MODULE,
@@ -103,12 +108,15 @@ class AdminPages:
                 concrete = request._get_current()
                 raw, subject, expiry = verified_dashboard_request(concrete, legacy)
                 credentials = endpoint.startswith("credential-")
+                master_key = endpoint.startswith("master-key-")
                 modules = endpoint.startswith("module")
                 core, source = self.runtime.management_entry(
-                    credentials=credentials, modules=modules
+                    credentials=credentials, modules=modules, master_key=master_key
                 )
                 resources = (
-                    core.admin_operations.credential_resources()
+                    core.admin_operations.master_key_resources()
+                    if master_key
+                    else core.admin_operations.credential_resources()
                     if credentials
                     else core.admin_operations.module_resources()
                     if modules
@@ -171,6 +179,22 @@ class AdminPages:
                 code, status = "admin_authorization_denied", 403
             except SecretStoreUnavailable:
                 code, status = "secret_encryption_unavailable", 503
+            except ManagedKeyConflict as error:
+                code = error.code
+                status = (
+                    409
+                    if code
+                    in {
+                        "stale_inventory",
+                        "operation_changed",
+                        "operation_incomplete",
+                        "environment_key_conflict",
+                        "key_conflict",
+                    }
+                    else 400
+                    if code in {"invalid_key", "confirmation_required"}
+                    else 503
+                )
             except (ValueError, TypeError):
                 code, status = "invalid_config", 400
             except Exception:
@@ -281,6 +305,40 @@ class AdminPages:
                 raise ValueError("invalid readiness parameters")
             return await ops.credential_readiness(
                 authorization=context, diagnostics=bool(data)
+            )
+        if endpoint == "master-key-status":
+            if data:
+                raise ValueError("invalid master key status parameters")
+            return await ops.master_key_status(authorization=context)
+        if endpoint in {"master-key-retry", "master-key-restore", "master-key-reset"}:
+            common = {"expected_revision", "expected_generation", "inventory_digest"}
+            extra = (
+                {"encoded_key"}
+                if endpoint == "master-key-restore"
+                else {"confirmation"}
+                if endpoint == "master-key-reset"
+                else set()
+            )
+            if set(data) != common | extra:
+                raise ValueError("invalid master key parameters")
+            if (
+                type(data["expected_revision"]) is not int
+                or data["expected_revision"] < 1
+                or type(data["expected_generation"]) is not int
+                or data["expected_generation"] < 0
+                or type(data["inventory_digest"]) is not str
+                or len(data["inventory_digest"]) != 64
+                or any(c not in "0123456789abcdef" for c in data["inventory_digest"])
+            ):
+                raise ValueError("invalid master key fence")
+            return await ops.master_key_change(
+                authorization=context,
+                action=endpoint.removeprefix("master-key-"),
+                expected_revision=data["expected_revision"],
+                expected_generation=data["expected_generation"],
+                inventory_digest=data["inventory_digest"],
+                encoded_key=data.get("encoded_key"),
+                confirmation=data.get("confirmation"),
             )
         if endpoint in ("credential-catalog", "credential-status"):
             if data:

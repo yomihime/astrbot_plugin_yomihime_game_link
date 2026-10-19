@@ -14,6 +14,8 @@ The work root must not exist. The canonical font hash is checked before startup;
 
 Coverage: real host lifecycle and plugin ZIP installation; plugin-local SDK bootstrap; Core ready and active FF14 module without `YGL_SECRET_KEY`; ordinary Dashboard JWT management requests and rejection of missing/API-key/forged/cross-origin requests; native view-title localization; new scoped `/views/.../_t/...` HTML and nested assets; cross-view token rejection; safe credential/font/module status; actual PNG help rendering with a fixed canonical font and captured exact-event send; host shutdown.
 
+This is the original non-credential smoke baseline. An absent environment key and a ready Core do not prove managed-key readiness, saved credential decryptability or persistence after restart. The managed-key follow-up must additionally use a qualified private persistent data path and synthetic credentials, verify fresh initialization, save/read and restart/read, and walk recovery/reconfiguration through the authorized settings page. Record those results separately for the exact candidate; see [the current handoff](alpha-cleanup-handoff.md) and [PR #8](https://github.com/yomihime/astrbot_plugin_yomihime_game_link/pull/8). Never send synthetic FFLogs credentials upstream.
+
 Outputs: `zip-smoke.json` (ZIP hash, host commit, results and sanitized blocked HTTP destinations), `help.png`, and disposable runtime files. Capture stdout/stderr externally if logs are desired.
 
 ## Explicit offline fixtures and limits

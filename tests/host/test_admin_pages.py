@@ -24,7 +24,9 @@ from tests.host.test_ff14_pages import _Context, _token
 
 class AdminPagesTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        self.temp = tempfile.TemporaryDirectory(dir=Path.cwd())
+        self.temp = tempfile.TemporaryDirectory(
+            dir=getattr(self, "fixture_parent", Path.cwd())
+        )
         self.context = _Context()
         self.transport = _IdleTransport()
         plugin_root = Path(self.temp.name) / "plugin"

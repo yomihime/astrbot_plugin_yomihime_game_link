@@ -5,7 +5,7 @@ import vm from 'node:vm';
 import {JSDOM} from '../../../pages/frontend/node_modules/jsdom/lib/api.js';
 import {root} from './compile.mjs';
 import {catalog as shellCatalog} from './fixtures.mjs';
-import {catalog,snapshot,credentialCatalog,credentialStatus} from '../management/fixtures.mjs';
+import {catalog,snapshot,credentialCatalog,credentialStatus,masterKeyReady} from '../management/fixtures.mjs';
 const sources=new Map([['/runtime.js',await readFile(root+'pages/shell/runtime.js','utf8')],['/app.js',await readFile(root+'pages/shell/app.js','utf8')],['/module-loader.js',"export function loadPage(){throw Error('No business load in navigation test')}"]]);
 async function fixture(hash='#/settings',denied=''){
  const dom=new JSDOM('<div id="app"></div>',{pretendToBeVisual:true,url:'http://localhost/'+hash}),window=dom.window,calls=[];
@@ -13,7 +13,7 @@ async function fixture(hash='#/settings',denied=''){
  let nativeCalls=0;window.confirm=()=>{nativeCalls++;return false;};
  const realm=vm.createContext({window,document:window.document,navigator:window.navigator,location:window.location,console,TextEncoder,TextDecoder,AbortController,URL,setTimeout,clearTimeout,setInterval,clearInterval,getComputedStyle:window.getComputedStyle.bind(window),requestAnimationFrame:window.requestAnimationFrame.bind(window),cancelAnimationFrame:window.cancelAnimationFrame.bind(window),record:endpoint=>calls.push(endpoint)});
  for(const name of ['HTMLElement','Element','SVGElement','Node','MutationObserver','Event','MouseEvent','KeyboardEvent','InputEvent'])realm[name]=window[name];
- const responses={'admin/catalog':catalog(),'admin/read':snapshot(12),'admin/credential-catalog':credentialCatalog(),'admin/credential-status':credentialStatus(),'admin/credential-readiness':{ready:true,state:'ready',reason_code:'ready',diagnostics:{key_state:'valid_format',codec_state:'available'}},'admin/modules':{registry_revision:5,modules:[{module_id:'ff14/ff14',enabled:true,lifecycle:'ready',health:'ready',epoch:2,registry_revision:5,reason_code:null}]}};
+ const responses={'admin/catalog':catalog(),'admin/read':snapshot(12),'admin/master-key-status':masterKeyReady(),'admin/credential-catalog':credentialCatalog(),'admin/credential-status':credentialStatus(),'admin/credential-readiness':{ready:true,state:'ready',reason_code:'ready',diagnostics:{key_state:'valid_format',codec_state:'available'}},'admin/modules':{registry_revision:5,modules:[{module_id:'ff14/ff14',enabled:true,lifecycle:'ready',health:'ready',epoch:2,registry_revision:5,reason_code:null}]}};
  const registry=shellCatalog();registry.modules[0].display={default_name:'最终幻想 XIV'};
  vm.runInContext(`const context={pluginName:'astrbot_plugin_yomihime_game_link',pageName:'shell',session:'navigation'},responses=${JSON.stringify(responses)};window.AstrBotPluginView={onContext(fn){fn(context);return()=>{}},ready:()=>Promise.resolve(context),apiGet:()=>Promise.resolve(${JSON.stringify(registry)}),apiPost(endpoint){record(endpoint);if(endpoint===${JSON.stringify(denied)})return Promise.reject(Error('admin_authorization_denied'));if(endpoint in responses)return Promise.resolve(responses[endpoint]);return new Promise(()=>{});}};`,realm);
  const cache=new Map();function module(path){if(cache.has(path))return cache.get(path);assert.ok(sources.has(path));const value=new vm.SourceTextModule(sources.get(path),{context:realm,identifier:'http://localhost'+path});cache.set(path,value);return value;}

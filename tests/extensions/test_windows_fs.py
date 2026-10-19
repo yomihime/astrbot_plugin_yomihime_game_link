@@ -1167,10 +1167,16 @@ class WindowsMaintenanceNativeTests(unittest.TestCase):
             self.assertTrue(
                 profile(wintypes.HANDLE(handle.value), buffer, ctypes.byref(length))
             )
-        private_temp = Path(buffer.value) / "AppData" / "Local" / "Temp"
-        self.assertTrue(private_temp.is_dir())
+        # Temp can have effective mutation grants on an ancestor even when a
+        # child fixture receives a protected DACL. Keep the whole fixture
+        # chain subject to the guard, with an optional pre-verified test root.
+        fixture_parent = Path(
+            os.environ.get("YGL_WINDOWS_MAINTENANCE_TEST_ROOT")
+            or Path(buffer.value) / "AppData" / "Local"
+        )
+        self.assertTrue(fixture_parent.is_dir())
         self.temporary = tempfile.TemporaryDirectory(
-            prefix="ygl-maintenance-native-", dir=private_temp
+            prefix="ygl-maintenance-native-", dir=fixture_parent
         )
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name).resolve()

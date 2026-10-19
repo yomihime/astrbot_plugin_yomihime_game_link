@@ -159,6 +159,7 @@ class SQLiteConfigRepository:
         *,
         subscription_gate_fields: Mapping[ConfigTarget, tuple[str, ...]] | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+        key_manager=None,
     ) -> None:
         validate_contract(subscription_gate_fields)
         self.database = _database(database)
@@ -182,6 +183,7 @@ class SQLiteConfigRepository:
         # this repository. No module-supplied patch can extend this policy.
         self._subscription_gate_fields = MappingProxyType(policy)
         self._clock = clock
+        self._key_manager = key_manager
 
     def _subscription_timestamp(self) -> str:
         value = self._clock()
@@ -411,6 +413,23 @@ class SQLiteConfigRepository:
         validate_contract(target)
 
         def apply(unit: SQLiteUnitOfWork) -> ConfigSnapshot:
+            if self._key_manager is not None and any(
+                update.mode is not ConfigUpdateMode.KEEP
+                and next(
+                    field
+                    for field in patch.declared_fields
+                    if field.name == update.field
+                ).sensitive
+                for update in patch.updates
+            ):
+                if (
+                    unit.execute(
+                        "SELECT 1 FROM managed_master_key_operations "
+                        "WHERE state='preparing' LIMIT 1"
+                    ).fetchone()
+                    is not None
+                ):
+                    raise AdminAuthorizationDenied from None
             if grant is not None:
                 assert_generation_current(unit, grant, AdminOperation.UPDATE_CONFIG)
                 grant._effect.check_resource(
@@ -422,7 +441,7 @@ class SQLiteConfigRepository:
                         continue
                     row = unit.execute(
                         "SELECT principal_id, module_id, field, operation_id, "
-                        "expected_config_revision, ledger_revision, state "
+                        "expected_config_revision, ledger_revision, state, key_generation "
                         "FROM secret_receipts WHERE secret_token=?",
                         (receipt.secret_ref.token,),
                     ).fetchone()
@@ -436,6 +455,24 @@ class SQLiteConfigRepository:
                         != patch.expected_revision
                         or int(row["ledger_revision"]) != receipt.ledger_revision + 1
                         or row["state"] != "claimed"
+                    ):
+                        raise AdminAuthorizationDenied from None
+                    selected = unit.execute(
+                        "SELECT generation,revision,source FROM managed_master_key WHERE singleton=1"
+                    ).fetchone()
+                    if (
+                        selected is None
+                        or self._key_manager is not None
+                        and (
+                            selected["source"] == "unselected"
+                            or (int(selected["generation"]), int(selected["revision"]))
+                            != (
+                                self._key_manager._generation,
+                                self._key_manager._revision,
+                            )
+                        )
+                        or selected["source"] != "unselected"
+                        and int(row["key_generation"]) != int(selected["generation"])
                     ):
                         raise AdminAuthorizationDenied from None
             snapshot = self._update_in_unit(unit, target, patch)

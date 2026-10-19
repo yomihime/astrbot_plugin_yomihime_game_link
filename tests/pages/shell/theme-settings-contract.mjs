@@ -6,6 +6,7 @@ import {JSDOM} from '../../../pages/frontend/node_modules/jsdom/lib/api.js';
 import {root} from './compile.mjs';
 import {catalog as shellCatalog} from './fixtures.mjs';
 import {themeCatalog,themeSnapshot} from './theme-settings-fixtures.mjs';
+import {masterKeyReady} from '../management/fixtures.mjs';
 const dom=new JSDOM('<div id="app"></div>',{pretendToBeVisual:true,url:'http://localhost/#/settings'}),window=dom.window,document=window.document,calls=[];
 window.Element.prototype.scrollTo=function(){};window.scrollTo=()=>{};window.matchMedia=()=>({matches:false,addEventListener(){},removeEventListener(){}});
 let nativeCalls=0,conflict=false;window.confirm=()=>{nativeCalls++;return false;};
@@ -22,7 +23,7 @@ function post(endpoint,body){
    row.fields[update.field]={value:update.mode==='clear'?field.default:update.value,state:'valid',present:update.mode!=='clear',source:update.mode==='clear'?'default':'sqlite'};
   }row.revision++;return Promise.resolve({module_id:body.module_id,revision:row.revision});
  }
- const responses={'admin/catalog':declarations,'admin/read':values,'admin/credential-catalog':{schema_version:1,fields:[]},'admin/credential-status':{},'admin/credential-readiness':{ready:true,state:'ready',reason_code:'ready',diagnostics:{key_state:'valid_format',codec_state:'available'}},'admin/modules':status};
+ const responses={'admin/catalog':declarations,'admin/read':values,'admin/master-key-status':masterKeyReady(),'admin/credential-catalog':{schema_version:1,fields:[]},'admin/credential-status':{},'admin/credential-readiness':{ready:true,state:'ready',reason_code:'ready',diagnostics:{key_state:'valid_format',codec_state:'available'}},'admin/modules':status};
  assert.ok(endpoint in responses,endpoint);return Promise.resolve(responses[endpoint]);
 }
 const realm=vm.createContext({window,document,navigator:window.navigator,location:window.location,console,TextEncoder,TextDecoder,AbortController,URL,setTimeout,clearTimeout,setInterval,clearInterval,getComputedStyle:window.getComputedStyle.bind(window),requestAnimationFrame:window.requestAnimationFrame.bind(window),cancelAnimationFrame:window.cancelAnimationFrame.bind(window),post,registry});

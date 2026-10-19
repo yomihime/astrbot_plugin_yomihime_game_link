@@ -7,7 +7,7 @@ import {pathToFileURL} from 'node:url';
 import {JSDOM} from '../../../pages/frontend/node_modules/jsdom/lib/api.js';
 import {catalog as moduleCatalog} from './fixtures.mjs';
 import {root} from './compile.mjs';
-import {catalog,snapshot,credentialCatalog,credentialStatus} from '../management/fixtures.mjs';
+import {catalog,snapshot,credentialCatalog,credentialStatus,masterKeyReady} from '../management/fixtures.mjs';
 
 test('built mobile navigation opens module home and exposes only declared inner pages',async()=>{
  const dom=new JSDOM('<html data-page-name="shell"><body><template id="module-style-assets"></template><div id="app"></div></body></html>',{pretendToBeVisual:true,url:'http://localhost/#/settings/module/ff14%2Fff14'}),window=dom.window;
@@ -16,7 +16,7 @@ test('built mobile navigation opens module home and exposes only declared inner 
  window.matchMedia=()=>({matches:false,addEventListener(){},removeEventListener(){}});window.scrollTo=()=>{};window.confirm=()=>true;
  const data=moduleCatalog();data.modules.push({...data.modules[0],module_id:'example/demo',route:'demo',category:'platform',pages:[],resources:[]},{...data.modules[0],module_id:'empty/none',route:'none',pages:[],resources:[]});
  const binding={pluginName:'astrbot_plugin_yomihime_game_link',pageName:'shell',binding:1},calls=[];
- window.AstrBotPluginView={ready:()=>Promise.resolve(binding),onContext(fn){fn(binding);return()=>{};},apiGet:()=>Promise.resolve(data),apiPost(endpoint,body){calls.push({endpoint,body});if(endpoint==='admin/catalog')return Promise.resolve(catalog());if(endpoint==='admin/read')return Promise.resolve(snapshot());if(endpoint==='admin/credential-catalog')return Promise.resolve(credentialCatalog());if(endpoint==='admin/credential-status')return Promise.resolve(credentialStatus());if(endpoint==='admin/credential-readiness')return Promise.resolve(null);if(endpoint==='admin/modules')return Promise.resolve({registry_revision:1,modules:[]});return Promise.reject(Error('unexpected_write'));}};
+ window.AstrBotPluginView={ready:()=>Promise.resolve(binding),onContext(fn){fn(binding);return()=>{};},apiGet:()=>Promise.resolve(data),apiPost(endpoint,body){calls.push({endpoint,body});if(endpoint==='admin/catalog')return Promise.resolve(catalog());if(endpoint==='admin/read')return Promise.resolve(snapshot());if(endpoint==='admin/master-key-status')return Promise.resolve(masterKeyReady());if(endpoint==='admin/credential-catalog')return Promise.resolve(credentialCatalog());if(endpoint==='admin/credential-status')return Promise.resolve(credentialStatus());if(endpoint==='admin/credential-readiness')return Promise.resolve(null);if(endpoint==='admin/modules')return Promise.resolve({registry_revision:1,modules:[]});return Promise.reject(Error('unexpected_write'));}};
  const directory=resolve(root,'.architecture-refactor/management-home-settings-ux/tests/backend/shell-navigation-'+process.pid);await mkdir(directory,{recursive:true});for(const name of ['app.js','runtime.js'])await copyFile(resolve(root,'pages/shell',name),resolve(directory,name));
  // The loader exists only in release-builder projection. This navigation test
  // injects asset failure, while production.test.mjs covers literal module loads.

@@ -6,7 +6,7 @@ import {JSDOM} from '../../../pages/frontend/node_modules/jsdom/lib/api.js';
 const runtimeDOM=new JSDOM('<html><body></body></html>',{pretendToBeVisual:true});
 for(const name of ['window','document','Element','HTMLElement','SVGElement','Node','MutationObserver'])globalThis[name]=runtimeDOM.window[name];
 const {createManagementPage,validateCatalog,validateSnapshot,updateBody}=await import('../../../pages/management/app.js');
-import {catalog,snapshot,context,credentialCatalog,credentialStatus} from './fixtures.mjs';
+import {catalog,snapshot,context,credentialCatalog,credentialStatus,masterKeyReady} from './fixtures.mjs';
 const html=await readFile(new URL('../../../pages/management/index.html',import.meta.url),'utf8');
 const flush=async()=>{for(let i=0;i<35;i++)await Promise.resolve();};
 const deferred=()=>{let resolve,reject;const promise=new Promise((a,b)=>{resolve=a;reject=b;});return {promise,resolve,reject};};
@@ -14,7 +14,7 @@ function fixture(initial=context,resolveReady=true,options={}){
   const dom=new JSDOM(html,{pretendToBeVisual:true,url:'http://localhost/management/'}),calls=[],ready=deferred();let callback=null;
   // Ordinary request counts remain scoped to ordinary endpoints;
   // independent credential tests capture their own requests and assertions.
-  const bridge={onContext(fn){callback=fn;if(initial)fn(initial);return()=>{callback=null;};},ready:()=>ready.promise,apiPost(endpoint,body){if(endpoint==='admin/credential-readiness')return Promise.resolve({ready:true,state:'ready',reason_code:'ready',diagnostics:{key_state:'valid_format',codec_state:'available'}});if(endpoint==='admin/credential-catalog')return Promise.resolve(credentialCatalog());if(endpoint==='admin/credential-status')return Promise.resolve(credentialStatus());const d=deferred(),call={endpoint,body,settled:false,promise:d.promise,resolve(value){this.settled=true;d.resolve(value);},reject(value){this.settled=true;d.reject(value);}};calls.push(call);return d.promise;}};
+  const bridge={onContext(fn){callback=fn;if(initial)fn(initial);return()=>{callback=null;};},ready:()=>ready.promise,apiPost(endpoint,body){if(endpoint==='admin/master-key-status')return Promise.resolve(masterKeyReady());if(endpoint==='admin/credential-readiness')return Promise.resolve({ready:true,state:'ready',reason_code:'ready',diagnostics:{key_state:'valid_format',codec_state:'available'}});if(endpoint==='admin/credential-catalog')return Promise.resolve(credentialCatalog());if(endpoint==='admin/credential-status')return Promise.resolve(credentialStatus());const d=deferred(),call={endpoint,body,settled:false,promise:d.promise,resolve(value){this.settled=true;d.resolve(value);},reject(value){this.settled=true;d.reject(value);}};calls.push(call);return d.promise;}};
   const app=createManagementPage(dom.window.document,bridge,dom.window,options);app.start();if(resolveReady)ready.resolve(initial||context);
   return {dom,app,calls,ready,context(value){callback?.(value);},get document(){return dom.window.document;},close(){app.close();dom.window.close();}};
 }
@@ -186,7 +186,7 @@ test('ungranted metadata beside an authorized field is never read or submitted a
 
 test('embedded shell management keeps exact context and scoped container; resume clears pending status',async()=>{
  const dom=new JSDOM('<div id="management-root">outside</div><div id="embedded"></div>',{pretendToBeVisual:true}),calls=[];const binding={...context,pageName:'00-game-link'};
- const bridge={onContext(fn){fn(binding);return()=>{};},ready:()=>Promise.resolve(binding),apiPost(endpoint){calls.push(endpoint);return Promise.resolve(endpoint==='admin/catalog'?catalog():endpoint==='admin/read'?snapshot():endpoint==='admin/credential-catalog'?credentialCatalog():endpoint==='admin/credential-status'?credentialStatus():{ready:false,state:'unavailable',reason_code:'secret_encryption_unavailable',diagnostics:{key_state:'not_provided',codec_state:'not_run'}});}};
+ const bridge={onContext(fn){fn(binding);return()=>{};},ready:()=>Promise.resolve(binding),apiPost(endpoint){calls.push(endpoint);return Promise.resolve(endpoint==='admin/catalog'?catalog():endpoint==='admin/read'?snapshot():endpoint==='admin/master-key-status'?masterKeyReady():endpoint==='admin/credential-catalog'?credentialCatalog():endpoint==='admin/credential-status'?credentialStatus():{ready:false,state:'unavailable',reason_code:'secret_encryption_unavailable',diagnostics:{key_state:'not_provided',codec_state:'not_run'}});}};
  const container=dom.window.document.getElementById('embedded'),page=createManagementPage(dom.window.document,bridge,dom.window,{expectedPage:'00-game-link',container});page.start();await flush();try{assert.equal(dom.window.document.getElementById('management-root').textContent,'outside');assert.ok(container.querySelector('[data-owner="game_link/core"]'));page.selectOwner('game_link/core');await flush();assert.equal(container.querySelector('#fields [data-owner="ff14/ff14"]').hidden,true);page.suspend();page.resume();await flush();assert.doesNotMatch(container.querySelector('#status').textContent,/正在执行/);assert.equal(container.querySelector('#status').textContent,'');assert.equal(calls.filter(x=>x==='admin/catalog').length,2);}finally{page.dispose();dom.window.close();}
 });
 
