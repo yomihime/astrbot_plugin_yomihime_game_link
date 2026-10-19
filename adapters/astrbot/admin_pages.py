@@ -191,6 +191,8 @@ class AdminPages:
                         "environment_key_conflict",
                         "key_conflict",
                     }
+                    else 422
+                    if code == "key_does_not_decrypt_inventory"
                     else 400
                     if code in {"invalid_key", "confirmation_required"}
                     else 503
@@ -214,6 +216,12 @@ class AdminPages:
                     "code": code,
                     "message": "配置版本冲突，请刷新并重新核对后修改。"
                     if code == "revision_conflict"
+                    else "原密钥格式无效，请输入标准 Base64 编码的 32 字节密钥；旧凭据未更改。"
+                    if code == "invalid_key"
+                    else "所填密钥与当前密钥不一致；旧凭据未更改，请核对后重试。"
+                    if code == "key_conflict"
+                    else "所填密钥未能解开现有凭据；旧凭据未被替换，请核对原密钥后重试。"
+                    if code == "key_does_not_decrypt_inventory"
                     else "未取得成功确认，请刷新核对配置与版本后重试。",
                     "data": {},
                 },

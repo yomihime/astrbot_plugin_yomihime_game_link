@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import shutil
 import tempfile
 import unittest
@@ -227,8 +228,10 @@ class _OwnerHandler:
 
 class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
+        private_parent = os.environ.get("YGL_MANAGED_KEY_TEST_ROOT")
         self.temporary = tempfile.TemporaryDirectory(
-            prefix="ygl-astrbot-runtime-", dir=ROOT
+            prefix="ygl-astrbot-runtime-",
+            dir=Path(private_parent) if private_parent else ROOT,
         )
         # Registered first, so later async runtime termination runs before the
         # directory is deleted (unittest cleanups are LIFO, after tearDown).

@@ -6,6 +6,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from ygl_test_subject.infrastructure.managed_key_file import (
     ManagedKeyFileError,
@@ -97,11 +98,13 @@ class ManagedKeyFilesTests(unittest.TestCase):
         self.assertEqual(self.store.entries(), ())
         self.store.create(self.first, bytes(range(32)))
         self.assertEqual(self.store.read(self.first), bytes(range(32)))
+        self.assertEqual(self.store.confirm_durable(self.first), bytes(range(32)))
         self.assertEqual(self.store.entries(), (f"master-{self.first}.key",))
         with self.assertRaises(ManagedKeyFileError) as caught:
             self.store.create(self.first, b"z" * 32)
         self.assertEqual(caught.exception.code, "key_file_exists")
         self.assertEqual(self.store.read(self.first), bytes(range(32)))
+        self.assertEqual(self.store.confirm_durable(self.first), bytes(range(32)))
         self.store.create(self.second, b"z" * 32)
         self.assertEqual(self.store.read(self.second), b"z" * 32)
 
@@ -123,12 +126,40 @@ class ManagedKeyFilesTests(unittest.TestCase):
         os.link(original, link)
         with self.assertRaises(ManagedKeyFileError):
             self.store.read(self.first)
+        with self.assertRaises(ManagedKeyFileError):
+            self.store.confirm_durable(self.first)
         link.unlink()
         self.assertEqual(self.store.read(self.first), b"s" * 32)
         # A candidate interrupted before a complete write must not be adopted.
         (self.store.root / f"master-{self.second}.key").write_bytes(b"YGLK\x01")
         with self.assertRaises(ManagedKeyFileError):
             self.store.read(self.second)
+        with self.assertRaises(ManagedKeyFileError):
+            self.store.confirm_durable(self.second)
+
+    @unittest.skipIf(os.name == "nt", "POSIX directory fsync injection")
+    def test_existing_keys_directory_rechecks_parent_fsync(self):
+        original_fsync = os.fsync
+        parent_identity = (self.data.stat().st_dev, self.data.stat().st_ino)
+
+        def fail_parent(handle):
+            info = os.fstat(handle)
+            if (info.st_dev, info.st_ino) == parent_identity:
+                raise OSError("synthetic parent sync failure")
+            return original_fsync(handle)
+
+        with patch("os.fsync", side_effect=fail_parent):
+            with self.assertRaises(ManagedKeyFileError):
+                self.store.create(self.first, b"x" * 32)
+        self.assertTrue(self.store.root.is_dir())
+        with patch("os.fsync", side_effect=fail_parent):
+            with self.assertRaises(ManagedKeyFileError):
+                self.store.create(self.first, b"x" * 32)
+        self.store.create(self.first, b"x" * 32)
+        with patch("os.fsync", side_effect=fail_parent):
+            with self.assertRaises(ManagedKeyFileError):
+                self.store.confirm_durable(self.first)
+        self.assertEqual(self.store.confirm_durable(self.first), b"x" * 32)
 
     def test_private_directory_and_existing_link_rejected(self):
         external = self.data / "external"

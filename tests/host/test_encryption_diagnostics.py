@@ -9,10 +9,7 @@ from ygl_test_subject.core.contracts.administration import (
     AdminAuthorizationDenied,
     AdminOperation,
 )
-from ygl_test_subject.infrastructure.key_provider import (
-    EnvironmentKeyProvider,
-    SecretKeyUnavailable,
-)
+from ygl_test_subject.infrastructure.key_provider import SecretKeyUnavailable
 
 from tests.host import test_admin_pages as admin_fixture
 from tests.host.test_ff14_pages import _token
@@ -22,6 +19,10 @@ class EncryptionDiagnosticsHostTests(unittest.IsolatedAsyncioTestCase):
     asyncSetUp = admin_fixture.AdminPagesTests.asyncSetUp
     asyncTearDown = admin_fixture.AdminPagesTests.asyncTearDown
     call = admin_fixture.AdminPagesTests.call
+
+    @property
+    def key_manager(self):
+        return self.runtime.core_runtime.managed_keys
 
     def issue(self, **overrides):
         ops = self.runtime.core_runtime.admin_operations
@@ -37,8 +38,9 @@ class EncryptionDiagnosticsHostTests(unittest.IsolatedAsyncioTestCase):
         return self.runtime._credential_admin_source.issue(**arguments)
 
     async def test_opt_in_only_preserves_default_and_returns_safe_categories(self):
+        active_key = self.key_manager.get_key()
         with patch.object(
-            EnvironmentKeyProvider, "get_key", return_value=bytes(range(32))
+            self.key_manager, "get_key", return_value=active_key
         ) as provider:
             ordinary = await self.call("credential-readiness", {})
             self.assertEqual(ordinary.status_code, 200)
@@ -72,7 +74,7 @@ class EncryptionDiagnosticsHostTests(unittest.IsolatedAsyncioTestCase):
             with (
                 self.subTest(case=index),
                 patch.object(
-                    EnvironmentKeyProvider, "get_key", side_effect=error
+                    self.key_manager, "get_key", side_effect=error
                 ) as provider,
             ):
                 response = await self.call(
@@ -92,7 +94,7 @@ class EncryptionDiagnosticsHostTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_bad_body_and_identity_origin_denials_never_read_provider(self):
         with patch.object(
-            EnvironmentKeyProvider,
+            self.key_manager,
             "get_key",
             side_effect=AssertionError("must not read"),
         ) as provider:
@@ -157,7 +159,7 @@ class EncryptionDiagnosticsHostTests(unittest.IsolatedAsyncioTestCase):
     async def test_wrong_resource_expired_and_revoked_proofs_never_probe(self):
         ops = self.runtime.core_runtime.admin_operations
         source = self.runtime._credential_admin_source
-        with patch.object(EnvironmentKeyProvider, "get_key") as provider:
+        with patch.object(self.key_manager, "get_key") as provider:
             with self.assertRaises(AdminAuthorizationDenied):
                 self.issue(resources=ops.ordinary_resources())
             context = self.issue()
@@ -175,7 +177,7 @@ class EncryptionDiagnosticsHostTests(unittest.IsolatedAsyncioTestCase):
             provider.assert_not_called()
         context = self.issue()
         source.end(context)
-        with patch.object(EnvironmentKeyProvider, "get_key") as provider:
+        with patch.object(self.key_manager, "get_key") as provider:
             with self.assertRaises(AdminAuthorizationDenied):
                 await ops.credential_readiness(authorization=context, diagnostics=True)
             provider.assert_not_called()
@@ -196,7 +198,7 @@ class EncryptionDiagnosticsHostTests(unittest.IsolatedAsyncioTestCase):
         try:
             with (
                 patch.object(ops.authorization, "authorize", observe),
-                patch.object(EnvironmentKeyProvider, "get_key") as provider,
+                patch.object(self.key_manager, "get_key") as provider,
             ):
                 task = asyncio.create_task(
                     ops.credential_readiness(authorization=context, diagnostics=True)
@@ -218,25 +220,22 @@ class EncryptionDiagnosticsHostTests(unittest.IsolatedAsyncioTestCase):
             self.runtime._credential_admin_source,
         )
         context = self.issue()
+        active_key = self.key_manager.get_key()
 
         def revoke():
             source.end(context)
-            return bytes(range(32))
+            return active_key
 
-        with patch.object(
-            EnvironmentKeyProvider, "get_key", side_effect=revoke
-        ) as provider:
+        with patch.object(self.key_manager, "get_key", side_effect=revoke) as provider:
             with self.assertRaises(AdminAuthorizationDenied):
                 await ops.credential_readiness(authorization=context, diagnostics=True)
             provider.assert_called_once()
 
         def detach():
             self.pages.close()
-            return bytes(range(32))
+            return active_key
 
-        with patch.object(
-            EnvironmentKeyProvider, "get_key", side_effect=detach
-        ) as provider:
+        with patch.object(self.key_manager, "get_key", side_effect=detach) as provider:
             response = await self.call("credential-readiness", {"diagnostics": True})
             self.assertEqual(response.status_code, 403)
             self.assertNotIn("diagnostics", response.text)
@@ -249,7 +248,7 @@ class EncryptionDiagnosticsHostTests(unittest.IsolatedAsyncioTestCase):
         )
         context = self.issue()
         try:
-            with patch.object(EnvironmentKeyProvider, "get_key", Mock()) as provider:
+            with patch.object(self.key_manager, "get_key", Mock()) as provider:
                 for value in [1, None, "true", {}]:
                     with self.assertRaises(ValueError):
                         await ops.credential_readiness(
@@ -284,7 +283,7 @@ class EncryptionDiagnosticsHostTests(unittest.IsolatedAsyncioTestCase):
         try:
             with (
                 patch.object(ops.authorization, "authorize", observe),
-                patch.object(EnvironmentKeyProvider, "get_key") as provider,
+                patch.object(self.key_manager, "get_key") as provider,
             ):
                 task = asyncio.create_task(request())
                 await asyncio.wait_for(authorized.wait(), 2)

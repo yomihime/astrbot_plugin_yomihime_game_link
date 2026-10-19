@@ -9,6 +9,11 @@ const identifier=/^[a-z][a-z0-9_]*(?:[.-][a-z0-9_]+)*$/;
 const fail=(code='invalid_config')=>{throw Error(code);};
 // Exact bridge codes only; free-form messages never establish authorization.
 const managementAccessLost=error=>[error?.code,error?.error_code,error?.message].some(code=>['admin_authorization_denied','stale_context','page_revoked','asset_revoked'].includes(code))||[error?.status,error?.response?.status].some(status=>status===401||status===403);
+const knownMasterKeyRejections=new Set([
+  '原密钥格式无效，请输入标准 Base64 编码的 32 字节密钥；旧凭据未更改。',
+  '所填密钥与当前密钥不一致；旧凭据未更改，请核对后重试。',
+  '所填密钥未能解开现有凭据；旧凭据未被替换，请核对原密钥后重试。',
+]);
 const key=f=>JSON.stringify([f.module_id,f.name]);
 const ownedFields=(catalog,target)=>catalog.fields.filter(f=>f.module_id===target);
 const textLength=value=>[...value].length;
@@ -233,7 +238,9 @@ export function createManagementPage(document,bridge,window,{expectedPage='manag
     clearMasterDraft();
     run(async attempt=>{
       if(!current(attempt)||masterKeyStatus!==source)fail('stale_context');
-      const result=await post('master-key-'+action,body,attempt);
+      let result;
+      try{result=await post('master-key-'+action,body,attempt);}
+      catch(error){if(!current(attempt))throw error;if(action==='restore'&&knownMasterKeyRejections.has(error?.message)){notice(error.message);return;}throw error;}
       try{await refresh(attempt);}catch(error){if(!current(attempt))throw error;stale=true;fail(managementAccessLost(error)?'write_ack_authorization_denied':'write_ack_readback_unverified');}
       if(!masterKeyStatus||masterKeyStatus.revision!==result.revision||masterKeyStatus.generation!==result.generation){stale=true;fail('write_ack_readback_unverified');}
       notice(result.ready?'主密钥状态已就绪。':'操作已记录；请根据主密钥状态继续处理。',result.ready?'success':'warning');

@@ -1,5 +1,6 @@
 """Fixed real Host auth/dispatch AST, synthetic tokens and isolated Core storage."""
 
+import os
 import shutil
 import sys
 import tempfile
@@ -24,8 +25,13 @@ from tests.host.test_ff14_pages import _Context, _token
 
 class AdminPagesTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
+        private_parent = os.environ.get("YGL_MANAGED_KEY_TEST_ROOT")
         self.temp = tempfile.TemporaryDirectory(
-            dir=getattr(self, "fixture_parent", Path.cwd())
+            dir=getattr(
+                self,
+                "fixture_parent",
+                Path(private_parent) if private_parent else Path.cwd(),
+            )
         )
         self.context = _Context()
         self.transport = _IdleTransport()

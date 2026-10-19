@@ -19,9 +19,12 @@ from collections import defaultdict
 from collections.abc import Callable
 from pathlib import Path
 
+from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
 from .key_provider import EnvironmentKeyProvider, SecretKeyUnavailable
 from .managed_key_file import ManagedKeyFileError, ManagedKeyFiles
-from .secret_codec import AESGCMSecretCodec
+from .secret_codec import _MAGIC, _NONCE_BYTES, _TAG_BYTES, AESGCMSecretCodec
 from .sqlite.database import SQLiteDatabase, SQLiteUnitOfWork
 
 _CHECK_CONTEXT = b"yomihime:managed-master-key:check:v1"
@@ -285,11 +288,10 @@ class ManagedKeyManager:
         }
 
     def _decrypt_all(self, key: bytes, inventory: dict) -> None:
-        class _Key:
-            def get_key(self) -> bytes:
-                return key
-
-        codec = AESGCMSecretCodec(_Key())
+        try:
+            cipher = AESGCM(key)
+        except Exception:
+            raise ManagedKeyConflict("encryption_component_unavailable") from None
         for name in inventory["live"]:
             if name not in inventory["names"]:
                 raise ManagedKeyConflict("inventory_unknown")
@@ -306,11 +308,22 @@ class ManagedKeyManager:
                     after.st_size,
                 ):
                     raise ManagedKeyConflict("inventory_unknown")
-                codec.decrypt(raw)
             except ManagedKeyConflict:
                 raise
             except Exception:
+                raise ManagedKeyConflict("inventory_unknown") from None
+            if (
+                type(raw) is not bytes
+                or not raw.startswith(_MAGIC)
+                or len(raw) < len(_MAGIC) + _NONCE_BYTES + _TAG_BYTES
+            ):
+                raise ManagedKeyConflict("inventory_unknown")
+            try:
+                AESGCMSecretCodec._decrypt_payload(raw, cipher)
+            except InvalidTag:
                 raise ManagedKeyConflict("key_does_not_decrypt_inventory") from None
+            except Exception:
+                raise ManagedKeyConflict("encryption_component_unavailable") from None
 
     def _status_in(self, unit: SQLiteUnitOfWork) -> dict:
         row = self._selection(unit)
@@ -363,8 +376,14 @@ class ManagedKeyManager:
         if state == "ready" and selected_key is not None:
             try:
                 self._decrypt_all(selected_key, inventory)
-            except ManagedKeyConflict:
-                state, reason = "needs_restore", "inventory_decryption_failed"
+            except ManagedKeyConflict as error:
+                if error.code == "key_does_not_decrypt_inventory":
+                    state, reason = "needs_restore", "inventory_decryption_failed"
+                elif error.code == "inventory_unknown":
+                    state, reason = "unknown", "inventory_unknown"
+                    inventory["unknown"] += 1
+                else:
+                    state, reason = "initialization_failed", error.code
         return {
             "state": state,
             "reason_code": reason,
@@ -626,7 +645,7 @@ class ManagedKeyManager:
                 raise ManagedKeyConflict("stale_inventory")
             key_id = str(pending["candidate_key_id"])
             if f"master-{key_id}.key" in inventory["key_names"]:
-                key = self.files.read(key_id)
+                key = self.files.confirm_durable(key_id)
             else:
                 key = secrets.token_bytes(32)
                 self.files.create(key_id, key)
@@ -688,6 +707,7 @@ class ManagedKeyManager:
                     inventory_digest,
                 ):
                     raise ManagedKeyConflict("operation_incomplete")
+                self._decrypt_all(key, self._inventory(unit))
                 return "candidate", str(pending["operation_id"])
             inventory = self._inventory(unit)
             self._decrypt_all(key, inventory)
@@ -767,7 +787,7 @@ class ManagedKeyManager:
                 self._decrypt_all(key, inventory)
                 key_id = str(pending["candidate_key_id"])
                 if f"master-{key_id}.key" in inventory["key_names"]:
-                    durable_key = self.files.read(key_id)
+                    durable_key = self.files.confirm_durable(key_id)
                     if not hmac.compare_digest(durable_key, key):
                         raise ManagedKeyConflict("key_conflict")
                 else:
@@ -911,7 +931,7 @@ class ManagedKeyManager:
                 raise ManagedKeyConflict("environment_managed_externally")
             key_id = str(pending["candidate_key_id"])
             if f"master-{key_id}.key" in inventory["key_names"]:
-                key = self.files.read(key_id)
+                key = self.files.confirm_durable(key_id)
             else:
                 key = secrets.token_bytes(32)
                 self.files.create(key_id, key)

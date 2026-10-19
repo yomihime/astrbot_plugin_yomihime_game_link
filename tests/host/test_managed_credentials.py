@@ -204,7 +204,12 @@ class ManagedCredentialPagesTests(unittest.IsolatedAsyncioTestCase):
         self,
     ):
         with patch.dict(
-            os.environ, {"YGL_SECRET_KEY": base64.b64encode(b"s" * 32).decode()}
+            os.environ,
+            {
+                "YGL_SECRET_KEY": base64.b64encode(
+                    self.runtime.core_runtime.managed_keys.get_key()
+                ).decode()
+            },
         ):
             revision = (await self.status())["ff14/ff14"]["revision"]
             responses = await asyncio.gather(
@@ -336,7 +341,12 @@ class ManagedCredentialPagesTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotIn("default", fields[0])
         with patch.dict(
-            os.environ, {"YGL_SECRET_KEY": base64.b64encode(b"s" * 32).decode()}
+            os.environ,
+            {
+                "YGL_SECRET_KEY": base64.b64encode(
+                    self.runtime.core_runtime.managed_keys.get_key()
+                ).decode()
+            },
         ):
             for alias in ("credential_fflogs_cn", "credential_fflogs_global"):
                 revision = (await self.status())["ff14/ff14"]["revision"]

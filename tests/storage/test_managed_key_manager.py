@@ -23,6 +23,7 @@ from ygl_test_subject.infrastructure.sqlite.database import SQLiteDatabase
 class _Files:
     def __init__(self) -> None:
         self.saved: dict[str, bytes] = {}
+        self.confirm_fails = False
 
     def entries(self) -> tuple[str, ...]:
         return tuple(sorted(f"master-{key_id}.key" for key_id in self.saved))
@@ -40,6 +41,11 @@ class _Files:
         if len(value) != 32:
             raise ManagedKeyFileError("key_file_invalid")
         return value
+
+    def confirm_durable(self, key_id: str) -> bytes:
+        if self.confirm_fails:
+            raise ManagedKeyFileError()
+        return self.read(key_id)
 
 
 class _Key:
@@ -314,6 +320,102 @@ class ManagedKeyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(recovered["unknown_count"], 0)
         self.assertIn(b"partial", self.files.saved.values())
 
+    async def test_full_initialize_candidate_needs_fresh_durability_ack(self) -> None:
+        original_create = self.files.create
+
+        def unacknowledged_create(key_id: str, key: bytes) -> None:
+            original_create(key_id, key)
+            raise ManagedKeyFileError()
+
+        with patch.object(self.files, "create", side_effect=unacknowledged_create):
+            with self.assertRaises(ManagedKeyFileError):
+                await self.manager.startup()
+        candidate_id, candidate_key = next(iter(self.files.saved.items()))
+        self.files.confirm_fails = True
+        with self.assertRaises(ManagedKeyFileError):
+            await self.manager.startup()
+        self.assertEqual(
+            (await self.manager.status())["reason_code"], "operation_incomplete"
+        )
+        self.assertEqual(self.files.saved, {candidate_id: candidate_key})
+        with self.assertRaises(SecretKeyUnavailable):
+            self.manager.get_key()
+        self.files.confirm_fails = False
+        self.assertEqual((await self.manager.startup())["state"], "ready")
+        self.assertEqual(self.files.saved, {candidate_id: candidate_key})
+        self.assertEqual(self.manager.get_key(), candidate_key)
+
+    async def test_full_reset_candidate_needs_fresh_durability_ack(self) -> None:
+        ready = await self.manager.startup()
+        old_ids = set(self.files.saved)
+        arguments = {
+            "expected_revision": ready["revision"],
+            "expected_generation": ready["generation"],
+            "inventory_digest": ready["inventory_digest"],
+            "confirmation": "RESET ENCRYPTED CREDENTIALS",
+        }
+        original_create = self.files.create
+
+        def unacknowledged_create(key_id: str, key: bytes) -> None:
+            original_create(key_id, key)
+            raise ManagedKeyFileError()
+
+        with patch.object(self.files, "create", side_effect=unacknowledged_create):
+            with self.assertRaises(ManagedKeyFileError):
+                await self.manager.reset(**arguments)
+        candidate_id = next(
+            key_id for key_id in self.files.saved if key_id not in old_ids
+        )
+        candidate_key = self.files.saved[candidate_id]
+        self.files.confirm_fails = True
+        with self.assertRaises(ManagedKeyFileError):
+            await self.manager.reset(**arguments)
+        self.assertEqual(
+            (await self.manager.status())["reason_code"], "operation_incomplete"
+        )
+        self.assertEqual(self.files.saved[candidate_id], candidate_key)
+        with self.assertRaises(SecretKeyUnavailable):
+            self.manager.get_key()
+        self.files.confirm_fails = False
+        self.assertEqual((await self.manager.reset(**arguments))["state"], "ready")
+        self.assertEqual(self.files.saved[candidate_id], candidate_key)
+        self.assertEqual(len(self.files.saved), 2)
+        self.assertEqual(self.manager.get_key(), candidate_key)
+
+    async def test_full_restore_candidate_needs_fresh_durability_ack(self) -> None:
+        key = bytes(range(32))
+        self._insert_secret(key)
+        status = await self.manager.startup()
+        arguments = {
+            "expected_revision": status["revision"],
+            "expected_generation": status["generation"],
+            "inventory_digest": status["inventory_digest"],
+        }
+        encoded = base64.b64encode(key).decode()
+        original_create = self.files.create
+
+        def unacknowledged_create(key_id: str, candidate: bytes) -> None:
+            original_create(key_id, candidate)
+            raise ManagedKeyFileError()
+
+        with patch.object(self.files, "create", side_effect=unacknowledged_create):
+            with self.assertRaises(ManagedKeyFileError):
+                await self.manager.restore(encoded, **arguments)
+        candidate_id, candidate_key = next(iter(self.files.saved.items()))
+        self.files.confirm_fails = True
+        with self.assertRaises(ManagedKeyFileError):
+            await self.manager.restore(encoded, **arguments)
+        self.assertEqual(
+            (await self.manager.status())["reason_code"], "operation_incomplete"
+        )
+        self.assertEqual(self.files.saved, {candidate_id: candidate_key})
+        self.files.confirm_fails = False
+        self.assertEqual(
+            (await self.manager.restore(encoded, **arguments))["state"], "ready"
+        )
+        self.assertEqual(self.files.saved, {candidate_id: candidate_key})
+        self.assertEqual(self.manager.get_key(), key)
+
     async def test_durable_initialize_candidate_is_reused_by_concurrent_retry(
         self,
     ) -> None:
@@ -497,6 +599,181 @@ class ManagedKeyTests(unittest.IsolatedAsyncioTestCase):
         status = await self.manager.status()
         self.assertEqual(status["state"], "unknown")
         self.assertGreater(status["unknown_count"], 0)
+
+    async def test_restore_classifies_io_and_crypto_failure_without_writing(
+        self,
+    ) -> None:
+        original_key = bytes(range(32))
+        self._insert_secret(original_key)
+        status = await self.manager.startup()
+        arguments = {
+            "expected_revision": status["revision"],
+            "expected_generation": status["generation"],
+            "inventory_digest": status["inventory_digest"],
+        }
+        encoded = base64.b64encode(original_key).decode()
+        for patched, target, failure, expected in (
+            (
+                "read",
+                "pathlib.Path.read_bytes",
+                PermissionError("synthetic-denied"),
+                "inventory_unknown",
+            ),
+            (
+                "cipher",
+                "ygl_test_subject.infrastructure.managed_key_manager.AESGCM",
+                RuntimeError("synthetic-unavailable"),
+                "encryption_component_unavailable",
+            ),
+            (
+                "decrypt_value_error",
+                "ygl_test_subject.infrastructure.managed_key_manager.AESGCMSecretCodec._decrypt_payload",
+                ValueError("synthetic-component-failure"),
+                "encryption_component_unavailable",
+            ),
+        ):
+            with self.subTest(fault=patched), patch(target, side_effect=failure):
+                with self.assertRaises(ManagedKeyConflict) as raised:
+                    await self.manager.restore(encoded, **arguments)
+                self.assertEqual(raised.exception.code, expected)
+            self.assertEqual(self.files.saved, {})
+            connection = self.database.connect()
+            try:
+                selector = connection.execute(
+                    "SELECT source,generation,revision FROM managed_master_key"
+                ).fetchone()
+                pending = connection.execute(
+                    "SELECT count(*) FROM managed_master_key_operations"
+                ).fetchone()[0]
+            finally:
+                connection.close()
+            self.assertEqual(tuple(selector), ("unselected", 0, 1))
+            self.assertEqual(pending, 0)
+
+    async def test_invalid_ciphertext_envelope_is_unknown_not_a_wrong_key(self) -> None:
+        key = bytes(range(32))
+        self._insert_secret(key)
+        blob = self.root / "secrets" / "secret_synthetic_01.blob"
+        blob.write_bytes(b"synthetic-malformed")
+        status = await self.manager.startup()
+        with self.assertRaises(ManagedKeyConflict) as raised:
+            await self.manager.restore(
+                base64.b64encode(key).decode(),
+                expected_revision=status["revision"],
+                expected_generation=status["generation"],
+                inventory_digest=status["inventory_digest"],
+            )
+        self.assertEqual(raised.exception.code, "inventory_unknown")
+        self.assertEqual(self.files.saved, {})
+
+    async def test_selected_status_distinguishes_io_and_component_from_bad_cipher(
+        self,
+    ) -> None:
+        key = bytes(range(32))
+        self._insert_secret(key)
+        initial = await self.manager.startup()
+        await self.manager.restore(
+            base64.b64encode(key).decode(),
+            expected_revision=initial["revision"],
+            expected_generation=initial["generation"],
+            inventory_digest=initial["inventory_digest"],
+        )
+        with patch("pathlib.Path.read_bytes", side_effect=PermissionError()):
+            blocked = await self.manager.status()
+        self.assertEqual(
+            (blocked["state"], blocked["reason_code"]), ("unknown", "inventory_unknown")
+        )
+        self.assertGreater(blocked["unknown_count"], 0)
+        with patch(
+            "ygl_test_subject.infrastructure.managed_key_manager.AESGCM",
+            side_effect=RuntimeError("synthetic-unavailable"),
+        ):
+            unavailable = await self.manager.status()
+        self.assertEqual(
+            (unavailable["state"], unavailable["reason_code"]),
+            ("initialization_failed", "encryption_component_unavailable"),
+        )
+
+    async def test_pending_restore_rejects_wrong_key_before_candidate_changes(
+        self,
+    ) -> None:
+        original_key = bytes(range(32))
+        self._insert_secret(original_key)
+        status = await self.manager.startup()
+        arguments = {
+            "expected_revision": status["revision"],
+            "expected_generation": status["generation"],
+            "inventory_digest": status["inventory_digest"],
+        }
+        blob = self.root / "secrets" / "secret_synthetic_01.blob"
+        original_blob = blob.read_bytes()
+
+        def interrupted_partial_create(key_id: str, key: bytes) -> None:
+            self.files.saved[key_id] = b"partial"
+            raise ManagedKeyFileError("key_file_invalid")
+
+        with patch.object(self.files, "create", side_effect=interrupted_partial_create):
+            with self.assertRaises(ManagedKeyFileError):
+                await self.manager.restore(
+                    base64.b64encode(original_key).decode(), **arguments
+                )
+        saved = dict(self.files.saved)
+        connection = self.database.connect()
+        try:
+            before = tuple(
+                connection.execute(
+                    "SELECT source,generation,revision,key_id FROM managed_master_key"
+                ).fetchone()
+            )
+            journal = tuple(
+                tuple(row)
+                for row in connection.execute(
+                    "SELECT operation_id,state,candidate_key_id FROM managed_master_key_operations"
+                )
+            )
+            receipt = tuple(
+                connection.execute(
+                    "SELECT state,payload_name,key_generation FROM secret_receipts"
+                ).fetchone()
+            )
+        finally:
+            connection.close()
+        with self.assertRaises(ManagedKeyConflict) as raised:
+            await self.manager.restore(
+                base64.b64encode(b"x" * 32).decode(), **arguments
+            )
+        self.assertEqual(raised.exception.code, "key_does_not_decrypt_inventory")
+        connection = self.database.connect()
+        try:
+            self.assertEqual(
+                tuple(
+                    connection.execute(
+                        "SELECT source,generation,revision,key_id FROM managed_master_key"
+                    ).fetchone()
+                ),
+                before,
+            )
+            self.assertEqual(
+                tuple(
+                    tuple(row)
+                    for row in connection.execute(
+                        "SELECT operation_id,state,candidate_key_id FROM managed_master_key_operations"
+                    )
+                ),
+                journal,
+            )
+            self.assertEqual(
+                tuple(
+                    connection.execute(
+                        "SELECT state,payload_name,key_generation FROM secret_receipts"
+                    ).fetchone()
+                ),
+                receipt,
+            )
+        finally:
+            connection.close()
+        self.assertEqual(self.files.saved, saved)
+        self.assertEqual(blob.read_bytes(), original_blob)
 
 
 if __name__ == "__main__":

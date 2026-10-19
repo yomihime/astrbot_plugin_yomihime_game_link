@@ -73,10 +73,12 @@ class AlphaReleaseTests(unittest.TestCase):
     def test_fresh_assembly_has_no_legacy_migration_input(self):
         import json
 
-        descriptor = json.loads((ROOT / "modules/ff14/assembly.json").read_text())
+        descriptor = json.loads(
+            (ROOT / "modules/ff14/assembly.json").read_text(encoding="utf-8")
+        )
         self.assertNotIn("migration", descriptor)
-        schema = json.loads((ROOT / "_conf_schema.json").read_text())
+        schema = json.loads((ROOT / "_conf_schema.json").read_text(encoding="utf-8"))
         self.assertEqual(set(schema), {"web_public_origin"})
-        runtime = (ROOT / "adapters/astrbot/runtime.py").read_text()
+        runtime = (ROOT / "adapters/astrbot/runtime.py").read_text(encoding="utf-8")
         self.assertNotIn("load_prepared_input", runtime)
         self.assertNotIn("ordinary_migration", runtime)

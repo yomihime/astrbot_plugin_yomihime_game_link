@@ -359,6 +359,57 @@ def read_key(data_root: Path, root: Path, name: str, limit: int) -> bytes:
         raise ManagedKeyFileError() from None
 
 
+def confirm_key_durable(data_root: Path, root: Path, name: str, limit: int) -> bytes:
+    """Flush a previously written candidate through its verified file handle."""
+    try:
+        with _pin(root, data_root) as (
+            native,
+            root_path,
+            serial,
+            operator,
+            trusted,
+            _handle,
+            _maximum,
+        ):
+            expected = root_path + "\\" + name
+            value = fs._handle_value(
+                native.CreateFileW(
+                    expected,
+                    _GENERIC_READ
+                    | _GENERIC_WRITE
+                    | READ_CONTROL
+                    | fs.FILE_READ_ATTRIBUTES,
+                    fs.FILE_SHARE_READ,
+                    None,
+                    fs.OPEN_EXISTING,
+                    fs.FILE_FLAG_OPEN_REPARSE_POINT | _WRITE_THROUGH,
+                    None,
+                )
+            )
+            if value is None:
+                raise ManagedKeyFileError()
+            with fs._Handle(native, value) as handle:
+                _file_check(native, handle, expected, serial, operator, trusted)
+                buffer = ctypes.create_string_buffer(limit)
+                read = wintypes.DWORD()
+                if not native.ReadFile(
+                    wintypes.HANDLE(handle.value),
+                    buffer,
+                    limit,
+                    ctypes.byref(read),
+                    None,
+                ):
+                    raise ManagedKeyFileError()
+                if not native.dll.FlushFileBuffers(wintypes.HANDLE(handle.value)):
+                    raise ManagedKeyFileError()
+                _file_check(native, handle, expected, serial, operator, trusted)
+                return bytes(buffer.raw[: read.value])
+    except ManagedKeyFileError:
+        raise
+    except (OSError, ValueError, fs.WindowsScanError):
+        raise ManagedKeyFileError() from None
+
+
 def list_keys(data_root: Path, root: Path) -> tuple[str, ...]:
     try:
         with _pin(data_root, data_root) as (

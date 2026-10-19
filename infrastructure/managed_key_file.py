@@ -57,6 +57,18 @@ class ManagedKeyFiles:
             raise ManagedKeyFileError("key_file_invalid")
         return raw[len(_MAGIC) :]
 
+    def confirm_durable(self, key_id: str) -> bytes:
+        """Reconfirm a pre-commit candidate before publishing its selector."""
+        name = self._name(key_id)
+        raw = (
+            self._windows_confirm(name)
+            if os.name == "nt"
+            else self._posix_confirm(name)
+        )
+        if len(raw) != _SIZE or not raw.startswith(_MAGIC):
+            raise ManagedKeyFileError("key_file_invalid")
+        return raw[len(_MAGIC) :]
+
     def entries(self) -> tuple[str, ...]:
         """Return bounded names, including unexpected files, for full inventory."""
         if os.name == "nt":
@@ -73,7 +85,7 @@ class ManagedKeyFiles:
             except OSError:
                 raise ManagedKeyFileError() from None
 
-    def _posix_directory(self, *, create: bool):
+    def _posix_directory(self, *, create: bool, sync_parent: bool = False):
         from contextlib import contextmanager
 
         @contextmanager
@@ -105,7 +117,6 @@ class ManagedKeyFiles:
                 if create:
                     try:
                         os.mkdir("keys", mode=0o700, dir_fd=parent)
-                        os.fsync(parent)
                     except FileExistsError:
                         pass
                 directory = os.open("keys", flags, dir_fd=parent)
@@ -117,6 +128,9 @@ class ManagedKeyFiles:
                     or info.st_nlink < 2
                 ):
                     raise ManagedKeyFileError()
+                if create or sync_parent:
+                    # Also re-acknowledge a keys name left by a failed fsync.
+                    os.fsync(parent)
                 yield directory
             except ManagedKeyFileError:
                 raise
@@ -187,6 +201,28 @@ class ManagedKeyFiles:
             except OSError:
                 raise ManagedKeyFileError() from None
 
+    def _posix_confirm(self, name: str) -> bytes:
+        with self._posix_directory(create=False, sync_parent=True) as directory:
+            try:
+                handle = os.open(
+                    name, os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=directory
+                )
+                try:
+                    self._check_posix_file(directory, name, handle)
+                    raw = os.read(handle, _SIZE + 1)
+                    if len(raw) != _SIZE or not raw.startswith(_MAGIC):
+                        raise ManagedKeyFileError("key_file_invalid")
+                    os.fsync(handle)
+                    self._check_posix_file(directory, name, handle)
+                    os.fsync(directory)
+                    return raw
+                finally:
+                    os.close(handle)
+            except ManagedKeyFileError:
+                raise
+            except OSError:
+                raise ManagedKeyFileError() from None
+
     def _windows_create(self, name: str, key: bytes) -> None:
         from .windows.managed_key_io import create_key
 
@@ -196,6 +232,11 @@ class ManagedKeyFiles:
         from .windows.managed_key_io import read_key
 
         return read_key(self.data_root, self.root, name, _SIZE + 1)
+
+    def _windows_confirm(self, name: str) -> bytes:
+        from .windows.managed_key_io import confirm_key_durable
+
+        return confirm_key_durable(self.data_root, self.root, name, _SIZE + 1)
 
     def _windows_entries(self) -> tuple[str, ...]:
         from .windows.managed_key_io import list_keys

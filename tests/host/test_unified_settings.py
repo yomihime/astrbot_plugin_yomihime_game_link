@@ -112,7 +112,12 @@ class UnifiedManagementHostTests(unittest.IsolatedAsyncioTestCase):
         await self.configure_ready_core()
         core = self.runtime.core_runtime
         with patch.dict(
-            os.environ, {"YGL_SECRET_KEY": base64.b64encode(bytes(range(32))).decode()}
+            os.environ,
+            {
+                "YGL_SECRET_KEY": base64.b64encode(
+                    self.runtime.core_runtime.managed_keys.get_key()
+                ).decode()
+            },
         ):
             credential = (await self.call("credential-status", {})).json()["data"][
                 "ff14/ff14"
@@ -297,13 +302,33 @@ class UnifiedManagementHostTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(result.status_code, 200, result.text)
 
     async def test_preflight_current_codec_only_and_no_credential_projection(self):
+        key = self.runtime.core_runtime.managed_keys.get_key()
         with patch.dict(os.environ, {}, clear=True):
             response = await self.call("credential-readiness", {})
             self.assertEqual(response.status_code, 200)
-            self.assertEqual(response.json()["data"]["state"], "unavailable")
+            self.assertEqual(
+                response.json()["data"],
+                {"ready": True, "state": "ready", "reason_code": "ready"},
+            )
+        conflicting = bytes([key[0] ^ 1]) + key[1:]
         with patch.dict(
-            os.environ, {"YGL_SECRET_KEY": base64.b64encode(bytes(range(32))).decode()}
+            os.environ, {"YGL_SECRET_KEY": base64.b64encode(conflicting).decode()}
         ):
+            self.assertEqual(
+                (await self.runtime.core_runtime.managed_keys.status())["state"],
+                "source_conflict",
+            )
+            response = await self.call("credential-readiness", {})
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(
+                response.json()["data"],
+                {
+                    "ready": False,
+                    "state": "unavailable",
+                    "reason_code": "secret_encryption_unavailable",
+                },
+            )
+        with patch.dict(os.environ, {"YGL_SECRET_KEY": base64.b64encode(key).decode()}):
             response = await self.call("credential-readiness", {})
             self.assertEqual(response.status_code, 200)
             self.assertEqual(

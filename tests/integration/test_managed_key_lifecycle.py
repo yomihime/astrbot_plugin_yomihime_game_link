@@ -67,6 +67,9 @@ class _SyntheticFiles:
             raise ManagedKeyFileError("key_file_invalid")
         return value
 
+    def confirm_durable(self, key_id):
+        return self.read(key_id)
+
 
 class ManagedKeyLifecycleTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
@@ -290,16 +293,46 @@ class ManagedKeyLifecycleTests(unittest.IsolatedAsyncioTestCase):
             self.manager.get_key()
         os.environ.pop("YGL_SECRET_KEY")
         self.assertEqual(self.manager.get_key(), key)
-        (self.root / "secrets" / "secret_ff14.blob").write_bytes(b"damaged")
+        active = await self.manager.status()
+        before_files = dict(self.files.saved)
+        blob_path = self.root / "secrets" / "secret_ff14.blob"
+        blob_path.write_bytes(b"damaged")
+        connection = self.database.connect()
+        try:
+            before_rows = (
+                tuple(connection.execute("SELECT * FROM config_entries")),
+                tuple(connection.execute("SELECT * FROM secret_receipts")),
+            )
+        finally:
+            connection.close()
         restarted = self._manager(SQLiteDatabase(self.db_path))
         try:
             result = await restarted.startup()
-            self.assertEqual(result["state"], "needs_restore")
-            self.assertEqual(result["reason_code"], "inventory_decryption_failed")
-            self.assertEqual(len(self.files.saved), 1)
+            self.assertEqual(result["state"], "unknown")
+            self.assertEqual(result["reason_code"], "inventory_unknown")
+            self.assertGreater(result["unknown_count"], 0)
+            self.assertEqual(result["impact"], active["impact"])
+            self.assertEqual(result["revision"], ready["revision"])
+            self.assertEqual(self.files.saved, before_files)
             self.assertEqual(ready["generation"], result["generation"])
+            self.assertEqual(blob_path.read_bytes(), b"damaged")
+            connection = restarted.database.connect()
+            try:
+                self.assertEqual(
+                    (
+                        tuple(connection.execute("SELECT * FROM config_entries")),
+                        tuple(connection.execute("SELECT * FROM secret_receipts")),
+                    ),
+                    before_rows,
+                )
+            finally:
+                connection.close()
             with self.assertRaises(SecretKeyUnavailable):
                 restarted.get_key()
+            with self.assertRaisesRegex(ManagedKeyConflict, "inventory_unknown"):
+                await restarted.reset(
+                    **self._cas(result), confirmation="RESET ENCRYPTED CREDENTIALS"
+                )
         finally:
             await restarted.database.executor.close()
 
