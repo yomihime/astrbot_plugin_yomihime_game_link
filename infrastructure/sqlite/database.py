@@ -29,6 +29,23 @@ class SQLiteBusyError(SQLiteDatabaseError):
     """SQLite could not obtain a lock before the configured timeout."""
 
 
+class StorageEpochChangedError(SQLiteDatabaseError):
+    """This source is fenced, replaced, or belongs to a newer storage epoch."""
+
+
+class _GuardedConnection(sqlite3.Connection):
+    """Carries the database's private transaction fence, never crosses SDK."""
+
+    storage_guard = None
+
+    def commit(self):
+        # Startup migrations use the synchronous connection directly, while
+        # normal repository jobs use UnitOfWork. Both must fence actual COMMIT.
+        if self.storage_guard is not None and self.in_transaction:
+            self.storage_guard(self)
+        return super().commit()
+
+
 def _translate_sqlite_error(exc: sqlite3.Error) -> SQLiteDatabaseError | None:
     if isinstance(exc, sqlite3.OperationalError) and any(
         marker in str(exc).lower()
@@ -77,6 +94,7 @@ class SQLiteDatabase:
         self._sync_initialized = False
         self._executor_lock = threading.Lock()
         self._executor: Any = None
+        self._storage_epoch: int | None = None
 
     def _validate_existing_file(self) -> None:
         if not self.path.exists():
@@ -103,11 +121,13 @@ class SQLiteDatabase:
                 timeout=self.timeout,
                 isolation_level=None,
                 check_same_thread=True,
+                factory=_GuardedConnection,
             )
             connection.row_factory = sqlite3.Row
             connection.execute("PRAGMA foreign_keys = ON")
             connection.execute(f"PRAGMA busy_timeout = {self.busy_timeout_ms}")
             connection.execute("PRAGMA schema_version")
+            connection.storage_guard = self._assert_storage_epoch
             return connection
         except sqlite3.DatabaseError as exc:
             if connection is not None:
@@ -125,7 +145,32 @@ class SQLiteDatabase:
         synchronous callers must explicitly call ``initialize`` first.
         """
 
-        return self._connect()
+        connection = self._connect()
+        try:
+            self._assert_storage_epoch(connection)
+        except BaseException:
+            connection.close()
+            raise
+        return connection
+
+    def _assert_storage_epoch(self, connection):
+        present = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='private_storage_epoch'"
+        ).fetchone()
+        if present is None:
+            if self._storage_epoch is not None:
+                raise StorageEpochChangedError("storage epoch unavailable")
+            return
+        row = connection.execute(
+            "SELECT epoch,state FROM private_storage_epoch WHERE singleton=1"
+        ).fetchone()
+        if row is None or row[1] not in {"active", "activated"}:
+            raise StorageEpochChangedError("storage source fenced")
+        epoch = int(row[0])
+        if self._storage_epoch is None:
+            self._storage_epoch = epoch
+        if epoch != self._storage_epoch:
+            raise StorageEpochChangedError("storage epoch changed")
 
     @staticmethod
     def _check_integrity(connection: sqlite3.Connection) -> None:
@@ -142,10 +187,12 @@ class SQLiteDatabase:
         with self._init_lock:
             connection = self._connect()
             try:
+                self._assert_storage_epoch(connection)
                 self._check_integrity(connection)
                 version = MigrationRunner(
                     connection, directory=self.migrations_dir
                 ).apply()
+                self._assert_storage_epoch(connection)
             except sqlite3.DatabaseError as exc:
                 if (
                     "malformed" in str(exc).lower()
@@ -266,6 +313,12 @@ class SQLiteUnitOfWork:
                     raise translated from None
                 raise
             self._entered = True
+            self._check_storage()
+
+    def _check_storage(self):
+        guard = getattr(self._connection, "storage_guard", None)
+        if guard is not None:
+            guard(self._connection)
 
     async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
         try:
@@ -278,6 +331,7 @@ class SQLiteUnitOfWork:
 
     def execute(self, sql: str, parameters: Iterable[Any] = ()) -> sqlite3.Cursor:
         self._ensure_open()
+        self._check_storage()
         try:
             return self._connection.execute(sql, tuple(parameters))
         except sqlite3.IntegrityError as exc:
@@ -294,6 +348,7 @@ class SQLiteUnitOfWork:
         self, sql: str, parameters: Iterable[Sequence[Any]]
     ) -> sqlite3.Cursor:
         self._ensure_open()
+        self._check_storage()
         try:
             return self._connection.executemany(sql, parameters)
         except sqlite3.IntegrityError as exc:
@@ -336,6 +391,7 @@ class SQLiteUnitOfWork:
             with ExitStack() as stack:
                 for guard in self._commit_guards:
                     stack.enter_context(guard())
+                self._check_storage()
                 self._connection.commit()
         except sqlite3.Error as exc:
             translated = _translate_sqlite_error(exc)
@@ -411,6 +467,7 @@ __all__ = [
     "SQLiteBusyError",
     "SQLiteDatabase",
     "SQLiteDatabaseError",
+    "StorageEpochChangedError",
     "SQLiteUnitOfWork",
     "SQLiteUnitOfWorkFactory",
     "UnitOfWork",

@@ -108,12 +108,7 @@ class FF14CalendarRuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.transport = _CalendarTransport(self.event_date)
         self._evidence = {actor: object() for actor in ("alice", "bob", "mallory")}
         self._admin_context = _AdminContext()
-        self.runtime = await self._open_runtime(
-            use_reviewed_calendar_budget=(
-                self._testMethodName
-                == "test_background_outcomes_validate_and_never_advance_last_good_on_failure"
-            )
-        )
+        self.runtime = await self._open_runtime()
 
     async def asyncTearDown(self) -> None:
         await self._close_owned_resources()
@@ -126,9 +121,7 @@ class FF14CalendarRuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(runtime.database.executor._outstanding, 0)
         self._temporary.cleanup()
 
-    async def _open_runtime(
-        self, *, trusted_gate: bool = True, use_reviewed_calendar_budget: bool = False
-    ) -> CoreRuntime:
+    async def _open_runtime(self, *, trusted_gate: bool = True) -> CoreRuntime:
         def validate_ingress(_origin, ingress: HostIngress) -> bool:
             return ingress.evidence is self._evidence.get(ingress.actor_id)
 
@@ -143,19 +136,16 @@ class FF14CalendarRuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(package.package_id, "ff14")
         self.assertEqual(len(package.manifest.modules), 1)
         manifest = package.manifest.modules[0]
-        execution_kwargs = {}
-        if use_reviewed_calendar_budget:
-            assembly = selected_assembly(principal_id="ff14-runtime-config")
-            self.assertEqual(assembly.manifests[GLOBAL_MODULE_ID], manifest)
-            self.assertEqual(
-                set(assembly.collector_timeouts),
-                {(GLOBAL_MODULE_ID, "ff14.calendar.sync")},
-            )
-            self.assertNotIn(
-                (GLOBAL_MODULE_ID, "ff14.calendar.collect"),
-                assembly.collector_timeouts,
-            )
-            execution_kwargs["collector_timeouts"] = assembly.collector_timeouts
+        assembly = selected_assembly(principal_id="ff14-runtime-config")
+        self.assertEqual(assembly.manifests[GLOBAL_MODULE_ID], manifest)
+        self.assertEqual(
+            dict(assembly.collector_timeouts),
+            {(GLOBAL_MODULE_ID, "ff14.calendar.sync"): 45},
+        )
+        self.assertNotIn(
+            (GLOBAL_MODULE_ID, "ff14.calendar.collect"),
+            assembly.collector_timeouts,
+        )
         runtime = CoreRuntime(
             database=SQLiteDatabase(self.root / "core.sqlite3"),
             extension_root=self.extension_root,
@@ -204,15 +194,15 @@ class FF14CalendarRuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
             utc_clock=self.clock,
             pump_interval=3600,
             cleanup_timeout=0.5,
-            **execution_kwargs,
+            diagnostic_policies=assembly.diagnostic_policies,
+            collector_timeouts=assembly.collector_timeouts,
         )
         self._runtimes.append(runtime)
-        if use_reviewed_calendar_budget:
-            self.assertEqual(runtime.scheduler.quotas.collection_timeout_seconds, 10)
-            self.assertEqual(runtime._budget_policy.command_timeout, 90)
-            self.assertEqual(
-                runtime.scheduler.collector_timeouts, assembly.collector_timeouts
-            )
+        self.assertEqual(runtime.scheduler.quotas.collection_timeout_seconds, 10)
+        self.assertEqual(runtime._budget_policy.command_timeout, 90)
+        self.assertEqual(
+            runtime.scheduler.collector_timeouts, assembly.collector_timeouts
+        )
         startup = await runtime.start()
         self.assertEqual(startup.extension_failures, ())
         self.assertEqual(len(runtime.extension_runtime.candidates()), 1)

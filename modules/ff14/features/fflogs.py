@@ -22,6 +22,7 @@ from yomihime_game_link_sdk.display import (
     TextBlock,
 )
 from yomihime_game_link_sdk.errors import (
+    CacheUnavailable,
     ParameterError,
     ServiceUnavailable,
     SourceHttpError,
@@ -290,29 +291,7 @@ class FFLogsCharacterLookup:
             if self._lifecycle is not lifecycle:
                 raise ServiceUnavailable()
 
-        async def cache_backend_guard():
-            nonlocal scope, cache
-            # The public cache facade deliberately collapses backend failures.
-            # Rebind via the existing authority, never infer authority from errors.
-            active()
-            if cache_owner is None or self._services is None:
-                raise ServiceUnavailable()
-            async with asyncio.timeout(max(0, stop_at - monotonic())):
-                renewed = await self._services.scopes.bind(cache_owner)
-            # Binding rotates the exact caller proof. Never reuse an older facade.
-            from types import SimpleNamespace
-
-            scope = SimpleNamespace(
-                http=metrics.wrap(renewed.http)
-                if metrics is not None
-                else renewed.http,
-                cache=getattr(renewed, "cache", None),
-            )
-            cache = scope.cache
-            active()
-
-        # Resolve optional public menu metadata sequentially, before cache rebinds
-        # and history workers. Retain only pure directory data, never a facade.
+        # Cache recovery and authority remain owned by Core.
         duty_order = None
         if any(target[2] == "ultimate" for target in targets):
             duty_order = await self._duty_order.load(
@@ -373,10 +352,9 @@ class FFLogsCharacterLookup:
                     loaded[index] = snapshots
                     cached.update(selections)
                     dates.update(times)
-                except ServiceUnavailable:
-                    await cache_backend_guard()
+                except CacheUnavailable:
                     loaded[index] = {}
-                except PermissionError:
+                except (PermissionError, ServiceUnavailable):
                     raise
                 except TimeoutError:
                     break
@@ -441,10 +419,9 @@ class FFLogsCharacterLookup:
                         ttl_seconds=HISTORY_CACHE_TTL,
                     )
                 saved.update(updates)
-            except ServiceUnavailable:
-                await cache_backend_guard()
+            except CacheUnavailable:
                 unsaved.update(updates)
-            except PermissionError:
+            except (PermissionError, ServiceUnavailable):
                 raise
             except TimeoutError:
                 unsaved.update(prepared.keys() - saved)
@@ -793,6 +770,8 @@ class FFLogsCharacterLookup:
         finally:
             if metrics is not None:
                 metrics.finish()
+                if metrics.evidence is not None:
+                    await metrics.evidence.flush()
 
     async def _execute(
         self,
@@ -833,6 +812,7 @@ class FFLogsCharacterLookup:
 
             if scope is None:
                 scope = await self._services.scopes.bind(context)
+            metrics.diagnostics = scope.diagnostics
             observed_http = metrics.wrap(scope.http)
             scope = SimpleNamespace(
                 http=observation.wrap(observed_http)
@@ -867,7 +847,11 @@ class FFLogsCharacterLookup:
         source_id, host = _realm_source(realm)
         from .fflogs_evidence import Evidence
 
-        evidence = Evidence(source_id) if capture_evidence else None
+        evidence = (
+            Evidence(source_id, getattr(metrics, "diagnostics", None))
+            if capture_evidence
+            else None
+        )
         if metrics is not None:
             metrics.evidence = evidence
         credential_state = await _credential_state(self._services, realm)

@@ -373,10 +373,14 @@ class ThemeSettingsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             (await services.config.current()).values["reply_theme"], "cool_white"
         )
+        owner_field = validate_contract(ConfigField("default_region"))
+        self.assertEqual(
+            module_configuration_fields((owner_field,)),
+            (owner_field, MODULE_REPLY_THEME),
+        )
         for reserved in (
             "reply_theme",
             "image_theme",
-            "default_region",
             "core_defaults",
         ):
             with self.assertRaises(ValueError):

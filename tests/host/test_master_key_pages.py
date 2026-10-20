@@ -60,6 +60,10 @@ class MasterKeyPagesTests(unittest.IsolatedAsyncioTestCase):
                 "inventory_digest",
                 "unknown_count",
                 "impact",
+                "storage_security",
+                "environment_present",
+                "environment_matches",
+                "recovery_action",
             },
         )
         self.assertNotIn("key_id", response.text)

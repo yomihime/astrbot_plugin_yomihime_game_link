@@ -1444,10 +1444,8 @@ class CoreRuntimeTests(unittest.IsolatedAsyncioTestCase):
                         runtime.public_module_catalog()["runtime"], {"state": "ready"}
                     )
                     self.assertEqual(
-                        (await runtime.core_defaults.current()).values[
-                            "default_region"
-                        ],
-                        "cn",
+                        (await runtime.theme_settings.current()).core_theme,
+                        "warm_paper",
                     )
                     self.assertFalse(
                         runtime.secret_store.encryption_readiness()["ready"]
@@ -1471,10 +1469,8 @@ class CoreRuntimeTests(unittest.IsolatedAsyncioTestCase):
                         await runtime.start()
                     self.assertTrue(runtime.accepting)
                     self.assertEqual(
-                        (await runtime.core_defaults.current()).values[
-                            "default_region"
-                        ],
-                        "cn",
+                        (await runtime.theme_settings.current()).core_theme,
+                        "warm_paper",
                     )
                 finally:
                     self.assertTrue(await runtime.close(timeout=0.5))

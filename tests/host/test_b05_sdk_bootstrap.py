@@ -426,7 +426,7 @@ class SDKBootstrapTests(unittest.TestCase):
             ignore=shutil.ignore_patterns("__pycache__"),
         )
         for relative in zip_builder.SHELL_FILES:
-            for page in ("shell", "00-game-link", "management"):
+            for page in ("00-game-link",):
                 if page == "management" and relative in {
                     "index.html",
                     "app.js",

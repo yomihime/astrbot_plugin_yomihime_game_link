@@ -10,7 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from ygl_test_subject.adapters.astrbot.bundled import install_bundled_ff14
+from ygl_test_subject.adapters.astrbot.bundled import install_bundled_package
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -26,7 +26,7 @@ class TrustedAssemblyTests(unittest.TestCase):
         shutil.copytree(ROOT / "modules/ff14", self.plugin / "modules/ff14")
 
     def test_descriptor_is_part_of_immutable_inventory(self):
-        installed = install_bundled_ff14(self.plugin, self.data)
+        installed = install_bundled_package(self.plugin, self.data)
         self.assertTrue(installed.trusted)
         captured = installed.inventory
         self.assertIn("assembly.json", captured.files)
@@ -37,15 +37,15 @@ class TrustedAssemblyTests(unittest.TestCase):
             captured.files["assembly.json"] = b"{}"
 
     def test_installed_descriptor_tamper_or_extra_file_never_inherits_trust(self):
-        installed = install_bundled_ff14(self.plugin, self.data)
+        installed = install_bundled_package(self.plugin, self.data)
         path = installed.package_dir / "assembly.json"
         before = path.read_bytes()
         path.write_bytes(b"{}")
-        self.assertFalse(install_bundled_ff14(self.plugin, self.data).trusted)
+        self.assertFalse(install_bundled_package(self.plugin, self.data).trusted)
         path.write_bytes(before)
         extra = installed.package_dir / "unexpected.json"
         extra.write_bytes(b"{}")
-        self.assertFalse(install_bundled_ff14(self.plugin, self.data).trusted)
+        self.assertFalse(install_bundled_package(self.plugin, self.data).trusted)
 
     def test_adapter_requires_explicit_reviewed_selection_and_closed_refs(self):
         from ygl_test_subject.modules.ff14.assembly import SUPPORT
@@ -53,7 +53,7 @@ class TrustedAssemblyTests(unittest.TestCase):
             assemble_reviewed,
         )
 
-        installed = install_bundled_ff14(self.plugin, self.data)
+        installed = install_bundled_package(self.plugin, self.data)
         inventory = installed.inventory
         assembly = assemble_reviewed(
             inventory, principal_id="host", support=SUPPORT, selected=True
@@ -112,7 +112,7 @@ class TrustedAssemblyTests(unittest.TestCase):
 
         with patch.object(bundled, "_read_stable_file", side_effect=replacement):
             with self.assertRaisesRegex(ValueError, "bundled_assembly_changed"):
-                install_bundled_ff14(self.plugin, self.data)
+                install_bundled_package(self.plugin, self.data)
         self.assertEqual(list(self.data.iterdir()), [])
 
     def test_execution_budgets_are_required_selected_closed_and_typed(
@@ -121,7 +121,7 @@ class TrustedAssemblyTests(unittest.TestCase):
         from ygl_test_subject.modules.ff14.assembly import SUPPORT
         from ygl_test_subject.services.trusted_assembly import assemble_reviewed
 
-        inventory = install_bundled_ff14(self.plugin, self.data).inventory
+        inventory = install_bundled_package(self.plugin, self.data).inventory
         descriptor = json.loads(inventory.files["assembly.json"])
 
         def assemble(value):
@@ -183,7 +183,7 @@ class TrustedAssemblyTests(unittest.TestCase):
     def test_support_lease_imports_captured_code_and_disposes_exact_namespace(self):
         from ygl_test_subject.extensions.factory_resolver import ReviewedSupportLease
 
-        installed = install_bundled_ff14(self.plugin, self.data)
+        installed = install_bundled_package(self.plugin, self.data)
         files = dict(installed.inventory.files)
         # Exercise import side effects, without constructing a factory instance.
         files["__init__.py"] = (
@@ -284,6 +284,12 @@ class TrustedAssemblyTests(unittest.TestCase):
             "page_sources": ["api"],
             "credential_regions": ["test"],
             "execution_budgets": {"capabilities": {}, "collectors": {}},
+            "diagnostics": {
+                "events": [],
+                "max_events": 48,
+                "max_bytes": 524288,
+                "event_limits": {},
+            },
         }
         support = SimpleNamespace(module_id="neutral/mod", validators={})
         support.with_metadata = lambda _: support
@@ -296,6 +302,9 @@ class TrustedAssemblyTests(unittest.TestCase):
             assemble_reviewed(inventory, principal_id="host", support=support)
         assembly = assemble_reviewed(
             inventory, principal_id="host", support=support, selected=True
+        )
+        self.assertEqual(
+            assembly.diagnostic_policies["neutral/mod"].event_ids, frozenset()
         )
         self.assertEqual(
             assembly.credential_policies[0].token_host, "auth.example.test"
@@ -332,7 +341,7 @@ class ReviewedFactoryInventoryTests(unittest.IsolatedAsyncioTestCase):
             plugin, data = Path(name) / "plugin", Path(name) / "data"
             shutil.copytree(ROOT / "modules/ff14", plugin / "modules/ff14")
             data.mkdir()
-            installed = install_bundled_ff14(plugin, data)
+            installed = install_bundled_package(plugin, data)
             source = ReviewedInventoryFactorySource(installed.inventory, selected=True)
             package = discover_packages(installed.extension_root)[0]
             candidate = ExtensionCandidate(package, CandidateState.READY)

@@ -127,9 +127,7 @@ class MarketScopeTests(unittest.IsolatedAsyncioTestCase):
                 outer.config_calls += 1
                 return SimpleNamespace(
                     revision=3,
-                    values={
-                        "core_defaults": {"default_region": "global", "revision": 2}
-                    },
+                    values={"ff14_default_region": "global"},
                 )
 
         self.handler = MarketQueryHandler(Services(), clock=lambda: self.now[0])
@@ -217,7 +215,7 @@ class MarketScopeTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             (query.quality, query.intent, query.core_revision, query.module_revision),
-            ("hq", "min", 2, 3),
+            ("hq", "min", 3, 3),
         )
         self.assertEqual((self.catalog_calls, self.config_calls), before)
         self.assertIs(
@@ -308,7 +306,7 @@ class MarketScopeTests(unittest.IsolatedAsyncioTestCase):
                 query.core_revision,
                 query.module_revision,
             ),
-            ("Synthetic Ore", "hq", "min", 2, 3),
+            ("Synthetic Ore", "hq", "min", 3, 3),
         )
         return {key: selection[key] for key in ("batch_id", "generation")}, state
 
@@ -541,8 +539,8 @@ class MarketScopeTests(unittest.IsolatedAsyncioTestCase):
                 http = market_fixture.FakeHttp(payload)
                 original_bind = self.handler.services.bind
 
-                async def bind(ctx):
-                    scope = await original_bind(ctx)
+                async def bind(ctx, _original_bind=original_bind):
+                    scope = await _original_bind(ctx)
                     return SimpleNamespace(message=scope.message, http=http, cache=None)
 
                 self.handler.services.bind = bind
@@ -591,7 +589,7 @@ class MarketScopeTests(unittest.IsolatedAsyncioTestCase):
                         facts["core_revision"],
                         facts["module_revision"],
                     ),
-                    ("hq", "min", 2, 3),
+                    ("hq", "min", 3, 3),
                 )
                 self.assertEqual(
                     len([r for r in http.requests if "/aggregated/" in r.path]), 1

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import re
 from time import time
@@ -36,13 +37,31 @@ def verified_dashboard_request(request, exact_path):
     if match is None or len(match[1]) > 8192:
         raise AdminAuthorizationDenied
     try:
-        server = raw.app.state.dashboard_app_adapter._dashboard_server
-        verifier = getattr(server, "_validate_dashboard_token", None)
-        if not callable(verifier) or getattr(verifier, "__self__", None) is not server:
+        adapter = raw.app.state.dashboard_app_adapter
+        if adapter._app is not raw.app:
             raise AdminAuthorizationDenied
-        payload, error = verifier(match[1], exact_path)
+        server = adapter._dashboard_server
+        verifier = getattr(server, "_validate_dashboard_token", None)
         if (
-            error
+            not inspect.ismethod(verifier)
+            or verifier.__self__ is not server
+            or inspect.iscoroutinefunction(verifier)
+            or inspect.isgeneratorfunction(verifier)
+            or inspect.isasyncgenfunction(verifier)
+        ):
+            raise AdminAuthorizationDenied
+        inspect.signature(verifier).bind(match[1], exact_path)
+        verification = verifier(match[1], exact_path)
+        if inspect.isawaitable(verification):
+            if inspect.iscoroutine(verification):
+                verification.close()
+            raise AdminAuthorizationDenied
+        if type(verification) is not tuple or len(verification) != 2:
+            raise AdminAuthorizationDenied
+        payload, error = verification
+        if (
+            type(error) is not str
+            or error != ""
             or type(payload) is not dict
             or "token_type" in payload
             or type(payload.get("exp")) is not int

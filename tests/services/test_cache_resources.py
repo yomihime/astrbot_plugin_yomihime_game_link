@@ -386,6 +386,61 @@ class CacheResourcesServiceTests(unittest.IsolatedAsyncioTestCase):
         )
         self._views: list[tuple[object, object]] = []
 
+    async def test_backend_cache_failure_is_safe_but_post_authority_wins(self):
+        import sqlite3
+
+        from yomihime_game_link_sdk import CacheUnavailable, InvalidInvocation
+
+        view = self._invocation("alice")
+
+        class Broken:
+            def __getattr__(inner, name):
+                return getattr(self.cache_repository, name)
+
+            async def get(inner, request):
+                raise sqlite3.OperationalError("private database path")
+
+        with self.assertRaises(CacheUnavailable) as caught:
+            await self._cache(view, repository=Broken()).get("entry")
+        self.assertEqual(str(caught.exception), "service is unavailable")
+        self.assertIsNone(caught.exception.__context__)
+
+        class Revoked:
+            def __getattr__(inner, name):
+                return getattr(self.cache_repository, name)
+
+            async def get(inner, request):
+                self.issuer.release(view)
+                raise sqlite3.OperationalError("private database path")
+
+        with self.assertRaises(InvalidInvocation):
+            await self._cache(view, repository=Revoked()).get("entry")
+
+    async def test_cache_cancellation_and_permission_are_not_backend_outages(self):
+        from yomihime_game_link_sdk import AccessDenied
+
+        view = self._invocation("alice")
+
+        class Cancelled:
+            def __getattr__(inner, name):
+                return getattr(self.cache_repository, name)
+
+            async def get(inner, request):
+                raise asyncio.CancelledError()
+
+        with self.assertRaises(asyncio.CancelledError):
+            await self._cache(view, repository=Cancelled()).get("entry")
+
+        class Denied:
+            def __getattr__(inner, name):
+                return getattr(self.cache_repository, name)
+
+            async def get(inner, request):
+                raise PermissionError("denied")
+
+        with self.assertRaises(AccessDenied):
+            await self._cache(view, repository=Denied()).get("entry")
+
     async def asyncTearDown(self) -> None:
         for view, lease in self._views:
             try:

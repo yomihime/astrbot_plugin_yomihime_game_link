@@ -25,12 +25,6 @@ from ygl_test_subject.core.invocation import Gateway
 from ygl_test_subject.core.lifecycle import _ServiceLifetime
 from ygl_test_subject.extensions.disk_manifest import parse_manifest
 from ygl_test_subject.modules.ff14.module import Factory
-from ygl_test_subject.services.configuration.defaults import (
-    CORE_CONFIG_FIELDS,
-    CoreDefaultsView,
-    core_config_target,
-)
-from ygl_test_subject.services.configuration.operations import ConfigurationService
 from ygl_test_subject.services.core_runtime import _HostIngressAuthority
 from ygl_test_subject.services.identity import InvocationPrincipalResolver
 from ygl_test_subject.services.output import (
@@ -336,13 +330,6 @@ class ControlledMessageTests(unittest.IsolatedAsyncioTestCase):
             },
         )
         runtime.services._http_transport = self.transport
-        defaults = ConfigurationService(
-            core_config_target("host-config"),
-            CORE_CONFIG_FIELDS,
-            runtime.repositories.config,
-            runtime.repositories.secret_store,
-        )
-        runtime.services._core_defaults = CoreDefaultsView(defaults)
         lifetime = _ServiceLifetime(("ff14", "ff14/ff14", "c-ff14-install"))
         candidate_services = runtime.services.for_candidate(
             "ff14/ff14", manifest, service_lifetime=lifetime

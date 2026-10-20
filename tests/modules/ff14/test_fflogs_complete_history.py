@@ -33,7 +33,6 @@ from yomihime_game_link_sdk.contexts import InvocationOrigin
 from yomihime_game_link_sdk.display import DisplayAudience, Privacy
 from yomihime_game_link_sdk.errors import (
     InvalidInvocation,
-    ServiceUnavailable,
     SourceHttpError,
 )
 from yomihime_game_link_sdk.storage import CacheLookup, CacheLookupStatus
@@ -389,7 +388,7 @@ class CompleteHistoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(presentation.bitmap)
         self.assertIn("100.0%", presentation.text)
 
-    async def test_cache_backend_unavailable_rechecks_real_binder_and_revocation(self):
+    async def test_cache_backend_unavailable_preserves_scope_and_revocation(self):
         contract = bound_fixture.BoundPublicContractTests(methodName="runTest")
         await contract.asyncSetUp()
         self.addAsyncCleanup(contract.asyncTearDown)
@@ -422,19 +421,23 @@ class CompleteHistoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result.catalog_complete)
         self.assertEqual(len(self.requested(self.calls)), 111)
         self.assertEqual(events[-1][1]["cache_unsaved"], 111)
-        self.assertGreater(len(rebindings), 1)
+        self.assertEqual(rebindings, [])
         before = len(self.calls)
 
-        async def revoked_lookup(query):
+        async def revoked_lookup(*args, **kwargs):
             contract.runtime.issuer.release(owner)
-            raise ServiceUnavailable()
+            raise OSError("synthetic backend failure after revocation")
 
-        self.scope.cache = SimpleNamespace(lookup=revoked_lookup)
-        with self.assertRaises(InvalidInvocation):
-            await self.collect()
+        with patch.object(
+            type(contract.runtime.repositories.cache), "get", revoked_lookup
+        ):
+            with self.assertRaises(InvalidInvocation):
+                await self.collect()
         self.assertEqual(len(self.calls), before)
 
-    async def test_production_invoke_refreshes_every_consumer_after_cache_rebind(self):
+    async def test_production_invoke_preserves_exact_scope_after_cache_backend_failure(
+        self,
+    ):
         self.shared_history()
         contract = bound_fixture.BoundPublicContractTests(methodName="runTest")
         await contract.asyncSetUp()
@@ -453,7 +456,7 @@ class CompleteHistoryTests(unittest.IsolatedAsyncioTestCase):
 
             class GuardedHttp:
                 async def fetch(self, request):
-                    # Real exact-caller proof rejects any stale pre-rebind consumer.
+                    # Every HTTP consumer retains the exact initial Core scope.
                     bound.tasks.deadline_monotonic
                     used.append(bound)
                     if "FF14CatalogCharacter" in json.loads(request.body)["query"]:
@@ -486,13 +489,13 @@ class CompleteHistoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(result.error)
         Gateway._valid_result(result, expected_privacy=Privacy.PUBLIC)
         self.assertEqual(len(self.requested(self.calls)), 111)
-        self.assertGreater(len(versions), 2)
-        self.assertIn(
-            versions[11], used
-        )  # Full cache read phase was rebound before HTTP.
+        self.assertEqual(len(versions), 1)
+        self.assertTrue(used)
+        self.assertTrue(all(item is versions[0] for item in used))
+        self.assertIsNone(versions[0].tasks.deadline_monotonic)
+        contract.runtime.issuer.release(owner)
         with self.assertRaises(InvalidInvocation):
             versions[0].tasks.deadline_monotonic
-        self.assertIsNone(versions[-1].tasks.deadline_monotonic)
 
     def test_history_summary_is_closed_and_identity_free(self):
         value = project(

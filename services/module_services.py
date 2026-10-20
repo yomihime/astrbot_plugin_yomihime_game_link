@@ -91,12 +91,12 @@ from .configuration.defaults import (
     CORE_DEFAULTS_FIELD,
     CORE_MODULE_ID,
     MODULE_REPLY_THEME,
-    CoreDefaultsConfigView,
-    CoreDefaultsView,
     module_configuration_fields,
 )
+from .configuration.legacy_copy import LegacyConfigProjection
 from .configuration.operations import ConfigurationCoordinator
 from .dependency_calls import DependencyInvoker
+from .diagnostics import BoundDiagnostics, DiagnosticPolicy, DiagnosticStore
 from .identity import IdentityResolverService, InvocationPrincipalResolver
 from .module_storage import ModuleStorageRouter
 from .records import ModuleRecordsService, _collection_name
@@ -755,21 +755,33 @@ class _BoundCache:
     @public_boundary("service")
     async def get(self, key: str) -> CacheEntry | None:
         await self.__check()
-        result = await self.__cache.get(key)
+        try:
+            result = await self.__cache.get(key)
+        except Exception:
+            await self.__check()
+            raise
         await self.__check()
         return result
 
     @public_boundary("service")
     async def lookup(self, request: CacheQuery) -> CacheLookup:
         await self.__check()
-        result = await self.__cache.lookup(request)
+        try:
+            result = await self.__cache.lookup(request)
+        except Exception:
+            await self.__check()
+            raise
         await self.__check()
         return result
 
     @public_boundary("service")
     async def put(self, key: str, payload: Mapping[str, object], *, ttl_seconds: float):
         await self.__check()
-        result = await self.__cache.put(key, payload, ttl_seconds=ttl_seconds)
+        try:
+            result = await self.__cache.put(key, payload, ttl_seconds=ttl_seconds)
+        except Exception:
+            await self.__check()
+            raise
         await self.__check()
         return result
 
@@ -990,6 +1002,7 @@ class _BoundMessage:
 class _InvocationServices(InvocationServices):
     invocation: InvocationView
     message: _BoundMessage
+    diagnostics: BoundDiagnostics
     records: _BoundRecords
     cache: _BoundCache
     http: _BoundHttp
@@ -1014,6 +1027,9 @@ class InvocationServiceBinder:
         "_http",
         "_clock",
         "_utc_clock",
+        "_diagnostic_policy",
+        "_diagnostics",
+        "_service_lifetime",
     )
 
     def __init__(
@@ -1029,9 +1045,16 @@ class InvocationServiceBinder:
         *,
         principal_resolver: InvocationPrincipalResolver,
         owner_authority: object | None = None,
+        service_lifetime: _ServiceLifetime | None = None,
+        diagnostic_policy: DiagnosticPolicy | None = None,
+        diagnostics: DiagnosticStore | None = None,
         clock: Callable[[], float] = monotonic,
         utc_clock: Callable[[], datetime] | None = None,
     ) -> None:
+        self._service_lifetime = service_lifetime
+        self._diagnostic_policy = diagnostic_policy
+        self._diagnostics = diagnostics or DiagnosticStore()
+        self._diagnostics.bind_issuer(issuer)
         self._module_id = module_id
         self._registry = registry
         self._issuer = issuer
@@ -1057,6 +1080,8 @@ class InvocationServiceBinder:
         invocation: InvocationView,
     ) -> RegisteredModule:
         proof(validate_contract, invocation)
+        if self._service_lifetime is not None:
+            self._service_lifetime.check()
         try:
             view = self._issuer.require(invocation)
             if view.module_id != self._module_id:
@@ -1330,6 +1355,13 @@ class InvocationServiceBinder:
         bound = _InvocationServices(
             invocation=invocation,
             message=_BoundMessage(self._issuer, invocation, check_sync, check),
+            diagnostics=BoundDiagnostics(
+                invocation,
+                module.manifest.diagnostics,
+                self._diagnostic_policy,
+                self._diagnostics,
+                check,
+            ),
             records=_BoundRecords(
                 collection_for_invocation,
                 check_sync,
@@ -1352,6 +1384,8 @@ class ModuleServicesFactory:
     """Construct one module-scoped service bundle from explicit host inputs."""
 
     __slots__ = (
+        "_diagnostic_policies",
+        "_diagnostics",
         "_registry",
         "_issuer",
         "_lifecycle",
@@ -1374,7 +1408,7 @@ class ModuleServicesFactory:
         "_clock",
         "_utc_clock",
         "_module_host_config_snapshots",
-        "_core_defaults",
+        "_legacy_config_policies",
         "_module_config_validators",
         "_storage_router",
     )
@@ -1389,6 +1423,8 @@ class ModuleServicesFactory:
         *,
         config_principal_id: str,
         identity_namespace: str,
+        diagnostic_policies: Mapping[str, DiagnosticPolicy] | None = None,
+        diagnostics: DiagnosticStore | None = None,
         subscriptions: SubscriptionOperations | None = None,
         principal_resolver: InvocationPrincipalResolver | None = None,
         owner_authority: object | None = None,
@@ -1398,10 +1434,13 @@ class ModuleServicesFactory:
         clock: Callable[[], float] = monotonic,
         utc_clock: Callable[[], datetime] | None = None,
         module_host_config_snapshots: Mapping[str, Mapping[str, object]] | None = None,
-        core_defaults: CoreDefaultsView | None = None,
+        legacy_config_policies: Sequence[object] = (),
         module_config_validators: Mapping[str, Mapping[str, object]] | None = None,
         storage_router: ModuleStorageRouter | None = None,
     ) -> None:
+        self._diagnostic_policies = MappingProxyType(dict(diagnostic_policies or {}))
+        self._diagnostics = diagnostics or DiagnosticStore()
+        self._diagnostics.bind_issuer(issuer)
         validate_contract(subscriptions)
         if not isinstance(registry, Registry) or not isinstance(issuer, ContextIssuer):
             raise TypeError("module services require the host Registry and issuer")
@@ -1492,7 +1531,7 @@ class ModuleServicesFactory:
         self._module_host_config_snapshots = _freeze_host_config_snapshots(
             module_host_config_snapshots
         )
-        self._core_defaults = core_defaults
+        self._legacy_config_policies = tuple(legacy_config_policies)
         self._module_config_validators = MappingProxyType(
             {
                 module_id: MappingProxyType(dict(checks))
@@ -1572,6 +1611,7 @@ class ModuleServicesFactory:
         """
 
         self._services_closed = True
+        self._diagnostics.close()
         for lifetime in tuple(self._service_lifetimes):
             lifetime.revoke()
         services = tuple(self._credential_services)
@@ -1637,9 +1677,18 @@ class ModuleServicesFactory:
             )
         if host_values:
             config = _HostConfigView(config, host_values)
-        if self._core_defaults is not None:
-            config = CoreDefaultsConfigView(
-                config, self._core_defaults, self._lifecycle.admission
+        copies = tuple(
+            policy
+            for policy in self._legacy_config_policies
+            if policy.target_owner == module_id
+        )
+        if copies:
+            config = LegacyConfigProjection(
+                config,
+                self._repositories.config,
+                copies,
+                self._lifecycle.admission,
+                fields,
             )
         identities = IdentityResolverService(
             self._repositories.identities,
@@ -1709,6 +1758,9 @@ class ModuleServicesFactory:
                 http,
                 principal_resolver=self._principal_resolver,
                 owner_authority=self._owner_authority,
+                service_lifetime=service_lifetime,
+                diagnostic_policy=self._diagnostic_policies.get(module_id),
+                diagnostics=self._diagnostics,
                 clock=self._clock,
                 utc_clock=self._utc_clock,
             )

@@ -140,6 +140,14 @@ class B04SubscriptionRepositoryTests(unittest.IsolatedAsyncioTestCase):
             "config_entries",
             "module_runtime_intents",
         }
+        metadata_columns = {
+            "sqlite_master": {"type", "name"},
+            "private_storage_epoch": {"epoch", "state", "singleton"},
+        }
+        epoch_queries = {
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='private_storage_epoch'",
+            "SELECT epoch,state FROM private_storage_epoch WHERE singleton=1",
+        }
         statements = []
         original = self.db.executor.run_read
 
@@ -149,8 +157,11 @@ class B04SubscriptionRepositoryTests(unittest.IsolatedAsyncioTestCase):
 
                 def authorize(action, table, column, *_):
                     if action == sqlite3.SQLITE_READ:
-                        self.assertIn(table, allowed)
-                        self.assertNotIn("secret", column)
+                        if table in metadata_columns:
+                            self.assertIn(column, metadata_columns[table])
+                        else:
+                            self.assertIn(table, allowed)
+                            self.assertNotIn("secret", column)
                     if action in (
                         sqlite3.SQLITE_INSERT,
                         sqlite3.SQLITE_UPDATE,
@@ -162,7 +173,9 @@ class B04SubscriptionRepositoryTests(unittest.IsolatedAsyncioTestCase):
                 unit.connection.set_authorizer(authorize)
                 unit.connection.set_trace_callback(statements.append)
                 try:
+                    self.assertTrue(unit.connection.in_transaction)
                     result = callback(unit)
+                    self.assertTrue(unit.connection.in_transaction)
                     self.assertEqual(unit.connection.total_changes, changes)
                     return result
                 finally:
@@ -178,7 +191,11 @@ class B04SubscriptionRepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result.intent_enabled)
         self.assertIsNone(result.reason)
         self.assertEqual(reads.call_count, 1)
-        self.assertEqual(sum(s.startswith("SELECT") for s in statements), 4)
+        self.assertEqual(
+            sum(s.startswith("SELECT") and s not in epoch_queries for s in statements),
+            4,
+        )
+        self.assertTrue(any(s in epoch_queries for s in statements))
         self.assertEqual(
             (
                 await SQLiteSubscriptionLifecycleRepository(
@@ -939,11 +956,11 @@ class B04SubscriptionRepositoryTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(await self.scheduler.is_current(lease, now=self.now))
 
     async def test_r01_real_full_migration_reopens_at_0120(self) -> None:
-        self.assertEqual(self.db.initialize(), 120)
-        self.assertEqual(self.db.initialize(), 120)
-        self.assertEqual(self.db.schema_version(), 120)
+        self.assertEqual(self.db.initialize(), 130)
+        self.assertEqual(self.db.initialize(), 130)
+        self.assertEqual(self.db.schema_version(), 130)
         reopened = SQLiteDatabase(self.path)
-        self.assertEqual(reopened.schema_version(), 120)
+        self.assertEqual(reopened.schema_version(), 130)
 
     async def test_repository_sql_callbacks_run_on_worker_thread(self) -> None:
         caller_thread = threading.get_ident()

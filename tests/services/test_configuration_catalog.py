@@ -14,6 +14,7 @@ from ygl_test_subject.modules.ff14.config import DELIVERY_TIME, TIMEZONE
 from ygl_test_subject.services.configuration.catalog import (
     project_configuration_catalog,
 )
+from ygl_test_subject.services.configuration.defaults import IMAGE_THEME
 
 from tests.fixtures.configuration import write_value
 from tests.services import test_ordinary_admin as ordinary_fixture
@@ -108,7 +109,18 @@ class CatalogRuntimeTests(unittest.IsolatedAsyncioTestCase):
             )
         self.source.end(context)
         allowed = [field for field in result["fields"] if field["readable"]]
-        self.assertEqual(len(allowed), 5)
+        expected_names = {
+            ("game_link/core", IMAGE_THEME.name),
+            ("ff14/ff14", "ff14_default_region"),
+            ("ff14/ff14", "ff14_calendar_default_days"),
+            ("ff14/ff14", "ff14_calendar_default_timezone"),
+            ("ff14/ff14", "ff14_calendar_default_delivery_time"),
+            ("ff14/ff14", "ff14_calendar_sync_interval_seconds"),
+        }
+        self.assertEqual(
+            {(field["module_id"], field["name"]) for field in allowed}, expected_names
+        )
+        self.assertEqual(len(allowed), len(expected_names))
         self.assertTrue(all(field["editable"] for field in allowed))
         sync_interval = next(
             field
@@ -206,7 +218,9 @@ class CatalogRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(self.core.configuration_blocked)
         # Only the affected fields are gated: the Core default remains repairable.
         with patch.object(ops, "_module_config_validators", {}):
-            result = await self.update(self.coretarget, {"default_region": "global"})
+            result = await self.update(
+                self.coretarget, {IMAGE_THEME.name: IMAGE_THEME.default}
+            )
             self.assertEqual(result.revision, 2)
 
     async def test_semantic_values_and_cas_keep_atomic_write_contract(self):
@@ -231,7 +245,7 @@ class CatalogRuntimeTests(unittest.IsolatedAsyncioTestCase):
             )
 
     async def test_runtime_start_missing_binding_preserves_recovery_foundation(self):
-        await self.update(self.coretarget, {"default_region": "cn"})
+        await self.update(self.coretarget, {IMAGE_THEME.name: IMAGE_THEME.default})
         with patch.object(self.core.admin_operations, "_module_config_validators", {}):
             with self.assertRaisesRegex(ValueError, "semantic validator"):
                 await self.core.start()

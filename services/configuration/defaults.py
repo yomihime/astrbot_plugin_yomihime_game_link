@@ -14,14 +14,6 @@ from .operations import validate_configuration_value
 
 CORE_MODULE_ID = "game_link/core"
 CORE_DEFAULTS_FIELD = "core_defaults"
-DEFAULT_REGION = validate_contract(
-    ConfigField(
-        "default_region",
-        default="cn",
-        description="默认查询区域",
-        value_schema={"type": "string", "enum": ["cn", "global"]},
-    )
-)
 _THEME_IDS = tuple(option.id for option in list_themes())
 IMAGE_THEME = validate_contract(
     ConfigField(
@@ -41,7 +33,7 @@ MODULE_REPLY_THEME = validate_contract(
         value_schema={"type": "string", "enum": _THEME_IDS},
     )
 )
-CORE_CONFIG_FIELDS = (DEFAULT_REGION, IMAGE_THEME)
+CORE_CONFIG_FIELDS = (IMAGE_THEME,)
 
 
 def module_configuration_fields(
@@ -122,85 +114,6 @@ class ThemeSettingsView:
         if any(item.field == field.name for item in snapshot.secret_metadata):
             raise ValueError("theme configuration contains sensitive metadata")
         return snapshot
-
-
-class CoreDefaultsView:
-    """Read-only view of typed defaults plus the reserved target's own revision."""
-
-    __slots__ = ("__current",)
-
-    def __init__(self, configuration):
-        async def current():
-            raw = await configuration.current()
-            present = DEFAULT_REGION.name in raw.values
-            value = raw.values.get(DEFAULT_REGION.name, DEFAULT_REGION.default)
-            validate_configuration_value(DEFAULT_REGION, value)
-            return validate_contract(
-                ConfigSnapshot(
-                    raw.revision,
-                    {
-                        "default_region": value,
-                        "origin": "new" if present else "default",
-                        "conflict": False,
-                        "raw_present": present,
-                    },
-                    target=raw.target,
-                )
-            )
-
-        object.__setattr__(self, "_CoreDefaultsView__current", current)
-
-    async def current(self) -> ConfigSnapshot:
-        return await object.__getattribute__(self, "_CoreDefaultsView__current")()
-
-    def __getattribute__(self, name):
-        if name in {"current", "__class__", "__dir__"}:
-            return object.__getattribute__(self, name)
-        raise AttributeError("Core defaults expose only current")
-
-    def __dir__(self):
-        return ["current"]
-
-
-class CoreDefaultsConfigView:
-    """Read under the shared mutation gate; revisions remain separate."""
-
-    __slots__ = ("__current",)
-
-    def __init__(self, module_config, defaults: CoreDefaultsView, admission):
-        async def current():
-            async with admission.mutation("config-defaults-read"):
-                module = await module_config.current()
-                core = await defaults.current()
-                if CORE_DEFAULTS_FIELD in module.values:
-                    raise ValueError("module config contains a reserved field")
-                return validate_contract(
-                    ConfigSnapshot(
-                        module.revision,
-                        {
-                            **module.values,
-                            CORE_DEFAULTS_FIELD: {
-                                **core.values,
-                                "revision": core.revision,
-                            },
-                        },
-                        module.secret_metadata,
-                        module.target,
-                    )
-                )
-
-        object.__setattr__(self, "_CoreDefaultsConfigView__current", current)
-
-    async def current(self) -> ConfigSnapshot:
-        return await object.__getattribute__(self, "_CoreDefaultsConfigView__current")()
-
-    def __getattribute__(self, name):
-        if name in {"current", "__class__", "__dir__"}:
-            return object.__getattribute__(self, name)
-        raise AttributeError("config defaults expose only current")
-
-    def __dir__(self):
-        return ["current"]
 
 
 def core_config_target(principal_id: str) -> ConfigTarget:

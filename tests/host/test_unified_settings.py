@@ -14,6 +14,7 @@ from ygl_test_subject.adapters.astrbot.web_public import (
 from ygl_test_subject.core.contracts.validation_boundary import validate_contract
 from ygl_test_subject.infrastructure.secret_codec import AESGCMSecretCodec
 from ygl_test_subject.infrastructure.secret_store import SQLiteSecretStore
+from ygl_test_subject.services.configuration.defaults import IMAGE_THEME
 
 from tests.fixtures.managed_font import OfflineManagedFont
 from tests.host import test_admin_pages as admin_fixture
@@ -88,7 +89,11 @@ class UnifiedManagementHostTests(unittest.IsolatedAsyncioTestCase):
                 "module_id": "game_link/core",
                 "expected_revision": rows["game_link/core"]["revision"],
                 "updates": [
-                    {"field": "default_region", "mode": "replace", "value": "cn"}
+                    {
+                        "field": IMAGE_THEME.name,
+                        "mode": "replace",
+                        "value": IMAGE_THEME.default,
+                    }
                 ],
             },
         )

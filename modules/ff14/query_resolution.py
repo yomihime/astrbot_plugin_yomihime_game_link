@@ -138,15 +138,12 @@ class QueryDefaults:
 
     @classmethod
     async def capture(cls, services: ModuleServices) -> QueryDefaults:
-        # C1 already captures both authorities under its mutation gate. Read it
-        # once; do not fetch Core independently or read the obsolete Host values.
+        from .config import REGION
+
         snapshot = await services.config.current()
-        core = snapshot.values.get("core_defaults")
-        if not isinstance(core, Mapping):
-            raise QueryResolutionError(
-                "Core 默认配置不可用。", ErrorCode.MODULE_UNAVAILABLE
-            )
-        return cls(core.get("default_region"), core.get("revision"), snapshot.revision)
+        return cls(
+            snapshot.values.get(REGION, "cn"), snapshot.revision, snapshot.revision
+        )
 
 
 @dataclass(frozen=True, slots=True)

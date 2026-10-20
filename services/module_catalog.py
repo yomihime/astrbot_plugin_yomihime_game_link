@@ -31,6 +31,7 @@ def project_module_catalog(
     identities: Mapping[str, RunIdentity | None],
     *,
     runtime_state: str,
+    legacy_config_policies=(),
 ) -> dict:
     """Copy only fixed public metadata fields, without performing IO."""
     if runtime_state not in ("ready", "not_ready", "closing", "closed"):
@@ -117,6 +118,9 @@ def project_module_catalog(
                         "route_id": page.route_id,
                         "title": page.title,
                         "order": page.order,
+                        "role": page.role,
+                        "config_fields": list(page.config_fields),
+                        "credential_fields": list(page.credential_fields),
                         "access": page.access,
                         "capability_id": page.capability_id,
                         "entry": f"module-assets/{module_id}/{page.entry}",
@@ -167,6 +171,12 @@ def project_module_catalog(
         "catalog_revision": snapshot.revision,
         "runtime": {"state": runtime_state},
         "modules": modules,
+        "legacy_config_policies": [
+            {"policy_id": policy.policy_id, "target_owner": policy.target_owner}
+            for policy in legacy_config_policies
+            if policy.target_owner in snapshot.modules
+            and snapshot.modules[policy.target_owner].enabled
+        ],
     }
     if (
         len(json.dumps(result, ensure_ascii=False).encode("utf-8"))

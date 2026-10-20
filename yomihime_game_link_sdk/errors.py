@@ -72,6 +72,15 @@ class ServiceUnavailable(RuntimeError):
         super().__init__("service is unavailable")
 
 
+class CacheUnavailable(ServiceUnavailable):
+    """An authorized cache operation failed in its backend; safe to bypass.
+
+    Authority, epoch, invocation and cancellation failures are never this type.
+    """
+
+    code = "cache_unavailable"
+
+
 class OperationTimeout(TimeoutError):
     code = "operation_timeout"
 

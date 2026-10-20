@@ -1,0 +1,230 @@
+"""Finite data-only diagnostic schemas and bounded safe payloads."""
+
+from __future__ import annotations
+
+import json
+import math
+import re
+from collections.abc import Mapping
+from types import MappingProxyType
+
+_LABEL = re.compile(r"[a-zA-Z][a-zA-Z0-9_.-]{0,95}\Z")
+_TYPES = {"object", "array", "string", "integer", "number", "boolean", "null"}
+_SCHEMA_FIELDS = {
+    "object": frozenset(
+        {"type", "enum", "properties", "required", "additionalProperties"}
+    ),
+    "array": frozenset({"type", "enum", "items", "maxItems"}),
+    "string": frozenset({"type", "enum", "maxLength"}),
+    "integer": frozenset({"type", "enum", "minimum", "maximum"}),
+    "number": frozenset({"type", "enum", "minimum", "maximum"}),
+    "boolean": frozenset({"type", "enum"}),
+    "null": frozenset({"type", "enum"}),
+}
+_ROOT_SCHEMA_FIELDS = {
+    kind: allowed | {"$defs"} for kind, allowed in _SCHEMA_FIELDS.items()
+}
+_SECRET = re.compile(
+    r"authorization|bearer\s|client_secret|access_token|refresh_token|password|ciphertext|(?:^|_)proof(?:$|_)",
+    re.I,
+)
+
+
+def freeze_diagnostic_schema(schema):
+    nodes = 0
+    definitions = schema.get("$defs", {}) if isinstance(schema, Mapping) else {}
+    if not isinstance(definitions, Mapping) or len(definitions) > 128:
+        raise ValueError("invalid local diagnostic definitions")
+    cache, active = {}, set()
+
+    def walk(value, depth=0):
+        nonlocal nodes
+        nodes += 1
+        if nodes > 2048 or depth > 16 or not isinstance(value, Mapping):
+            raise ValueError("diagnostic schema budget exceeded")
+        if "$ref" in value:
+            ref = value["$ref"]
+            if (
+                set(value) != {"$ref"}
+                or type(ref) is not str
+                or not ref.startswith("#/$defs/")
+                or ref[8:] not in definitions
+                or ref in active
+            ):
+                raise ValueError("invalid diagnostic local reference")
+            if ref in cache:
+                return cache[ref]
+            active.add(ref)
+            try:
+                cache[ref] = walk(definitions[ref[8:]], depth)
+            finally:
+                active.remove(ref)
+            return cache[ref]
+        kind = value.get("type")
+        # Only canonical single builtin strings avoid repeated temporary sets.
+        # All caller-controlled subclasses and compound types keep the original
+        # checks; every node is still read, validated and detached on each call.
+        canonical = type(kind) is str or (
+            type(kind) is tuple and len(kind) == 1 and type(kind[0]) is str
+        )
+        if canonical:
+            types = (kind,) if type(kind) is str else kind
+            base = types[0]
+            if base not in _TYPES:
+                raise ValueError("invalid diagnostic schema type")
+            allowed = _ROOT_SCHEMA_FIELDS[base] if depth == 0 else _SCHEMA_FIELDS[base]
+        else:
+            types = (
+                (kind,)
+                if type(kind) is str
+                else tuple(kind)
+                if type(kind) in (tuple, list)
+                else ()
+            )
+            if not types or len(set(types)) != len(types) or not set(types) <= _TYPES:
+                raise ValueError("invalid diagnostic schema type")
+            base = next((item for item in types if item != "null"), "null")
+            if len(set(types) - {base, "null"}) > 0:
+                raise ValueError("only nullable diagnostic types are allowed")
+            allowed = {"type", "enum"}
+            if depth == 0:
+                allowed.add("$defs")
+        result = {"type": types}
+        if base == "object":
+            if not canonical:
+                allowed |= {"properties", "required", "additionalProperties"}
+            props = value.get("properties")
+            required = value.get("required", ())
+            if (
+                not isinstance(props, Mapping)
+                or len(props) > 128
+                or value.get("additionalProperties", False) is not False
+                or type(required) not in (tuple, list)
+                or len(set(required)) != len(required)
+                or not set(required) <= set(props)
+            ):
+                raise ValueError("diagnostic objects must be closed")
+            if any(type(key) is not str or not _LABEL.fullmatch(key) for key in props):
+                raise ValueError("invalid diagnostic field")
+            result.update(
+                properties=MappingProxyType(
+                    {key: walk(child, depth + 1) for key, child in props.items()}
+                ),
+                required=tuple(required),
+                additionalProperties=False,
+            )
+        elif base == "array":
+            if not canonical:
+                allowed |= {"items", "maxItems"}
+            limit = value.get("maxItems")
+            if type(limit) is not int or not 0 <= limit <= 512:
+                raise ValueError("diagnostic arrays require a finite limit")
+            result.update(items=walk(value.get("items"), depth + 1), maxItems=limit)
+        elif base == "string":
+            if not canonical:
+                allowed |= {"maxLength"}
+            limit = value.get("maxLength")
+            if type(limit) is not int or not 0 <= limit <= 4096:
+                raise ValueError("diagnostic strings require a finite limit")
+            result["maxLength"] = limit
+        elif base in {"number", "integer"}:
+            if not canonical:
+                allowed |= {"minimum", "maximum"}
+            for key in ("minimum", "maximum"):
+                limit = value.get(key)
+                if type(limit) not in (int, float) or not math.isfinite(limit):
+                    raise ValueError("diagnostic numbers require finite bounds")
+                result[key] = limit
+            if result["minimum"] > result["maximum"]:
+                raise ValueError("invalid diagnostic bounds")
+        if set(value) - allowed:
+            raise ValueError("unknown diagnostic schema fields")
+        if "enum" in value:
+            values = value["enum"]
+            if (
+                type(values) not in (tuple, list)
+                or not values
+                or len(values) > 128
+                or any(
+                    type(x) not in (str, int, float, bool, type(None)) for x in values
+                )
+            ):
+                raise ValueError("invalid diagnostic enum")
+            result["enum"] = tuple(values)
+        return MappingProxyType(result)
+
+    frozen = walk(schema)
+    for name, definition in definitions.items():
+        if type(name) is not str or not _LABEL.fullmatch(name):
+            raise ValueError("invalid local diagnostic definition name")
+        walk({"$ref": "#/$defs/" + name})
+    if frozen["type"] != ("object",):
+        raise ValueError("diagnostic root must be an object")
+    return frozen
+
+
+class DiagnosticLimitExceeded(ValueError):
+    pass
+
+
+def diagnostic_payload(schema, payload):
+    nodes = 0
+
+    def visit(rule, value, depth=0):
+        nonlocal nodes
+        nodes += 1
+        if nodes > 512 or depth > 8:
+            raise DiagnosticLimitExceeded("diagnostic payload budget exceeded")
+        types = rule["type"]
+        kind = {
+            dict: "object",
+            list: "array",
+            tuple: "array",
+            str: "string",
+            int: "integer",
+            float: "number",
+            bool: "boolean",
+            type(None): "null",
+        }.get(type(value))
+        if kind not in types and not (kind == "integer" and "number" in types):
+            raise ValueError("diagnostic type mismatch")
+        if kind == "string" and len(value) > rule["maxLength"]:
+            raise DiagnosticLimitExceeded("diagnostic string limit")
+        if "enum" in rule and value not in rule["enum"]:
+            raise ValueError("diagnostic enum mismatch")
+        if kind == "null":
+            return None
+        if kind == "object":
+            nodes += len(value)
+            if nodes > 512:
+                raise DiagnosticLimitExceeded("diagnostic node limit")
+            props = rule["properties"]
+            if not set(rule["required"]) <= set(value) or not set(value) <= set(props):
+                raise ValueError("diagnostic object mismatch")
+            if any(_SECRET.search(key) for key in value):
+                raise ValueError("sensitive diagnostic field rejected")
+            return {
+                key: visit(props[key], child, depth + 1) for key, child in value.items()
+            }
+        if kind == "array":
+            if len(value) > rule["maxItems"]:
+                raise DiagnosticLimitExceeded("diagnostic array limit")
+            return [visit(rule["items"], child, depth + 1) for child in value]
+        if kind == "string":
+            if any(ord(c) < 32 for c in value) or _SECRET.search(value):
+                raise ValueError("unsafe diagnostic string")
+        if kind in {"number", "integer"}:
+            if (
+                not math.isfinite(value)
+                or not rule["minimum"] <= value <= rule["maximum"]
+            ):
+                raise ValueError("diagnostic number limit")
+        return value
+
+    result = visit(schema, payload)
+    encoded = json.dumps(
+        result, ensure_ascii=True, separators=(",", ":"), allow_nan=False
+    ).encode("ascii")
+    if len(encoded) > 65536:
+        raise DiagnosticLimitExceeded("diagnostic byte limit")
+    return result, len(encoded)

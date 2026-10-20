@@ -7,7 +7,6 @@ import hashlib
 import json
 import logging
 import re
-from datetime import datetime, timezone
 from decimal import Decimal
 from secrets import token_hex
 from time import monotonic
@@ -748,7 +747,9 @@ def _exceeds_projection_limits(operation, payload):
 
 
 class Evidence:
-    def __init__(self, source):
+    def __init__(self, source, diagnostics=None):
+        self._diagnostics = diagnostics
+        self._pending = []
         self.source = source
         self.correlation = token_hex(12)
         self.bytes = 0
@@ -770,14 +771,7 @@ class Evidence:
             return
 
     def _observe(self, operation, payload, *, status, cached, filters):
-        if (
-            self.limited
-            or not _LOGGER.isEnabledFor(logging.INFO)
-            or not any(
-                getattr(handler, "fflogs_evidence_sink", False)
-                for handler in _LOGGER.handlers
-            )
-        ):
+        if self.limited or self._diagnostics is None:
             return
         if operation not in OPERATIONS or self.source not in {
             "fflogs_public_cn",
@@ -833,31 +827,45 @@ class Evidence:
                 self.summary_count += 1
             else:
                 self.low_chunks += len(pieces)
-        safe_filters = {
-            key: value
-            for key, value in (filters or {}).items()
-            if (
-                key in {"metric", "zoneId", "difficulty", "partition"}
-                or re.fullmatch(r"[zdp](?:[0-9]|1[01])", key)
+        if truncated:
+            return
+        from .diagnostic_declarations import PAYLOADS
+
+        def canonical(rule, value):
+            if value is None:
+                return None
+            kind = rule["type"]
+            kind = (
+                next((item for item in kind if item != "null"), "null")
+                if isinstance(kind, list)
+                else kind
             )
-            and (type(value) is int or value in {"rdps", "ndps", "cdps"})
-        }
-        for index, piece in enumerate(pieces):
-            event = {
-                "v": 1,
-                "correlation": self.correlation,
-                "source": self.source,
-                "operation": operation,
-                "time": datetime.now(timezone.utc).isoformat(),
-                "status": status,
-                "cached": cached,
-                "filters": safe_filters,
-                "chunk": index,
-                "chunks": len(pieces),
-                "truncated": truncated,
-                "payload": piece,
-            }
-            _LOGGER.info(
-                MARKER + " %s",
-                json.dumps(event, separators=(",", ":"), ensure_ascii=True),
+            if kind == "object":
+                return {
+                    key: canonical(rule["properties"][key], child)
+                    for key, child in value.items()
+                    if key in rule["properties"]
+                }
+            if kind == "array":
+                return [canonical(rule["items"], child) for child in value]
+            if kind == "string" and type(value) in (int, float):
+                return str(value)
+            return value
+
+        self._pending.append(
+            (
+                operation,
+                {
+                    "source": self.source,
+                    "status": status,
+                    "cached": cached,
+                    "payload": canonical(PAYLOADS[operation], safe),
+                },
             )
+        )
+
+    async def flush(self):
+        # No rebind, logging backchannel, or stored invocation beyond this call.
+        pending, self._pending = self._pending, []
+        for operation, payload in pending:
+            await self._diagnostics.emit(operation, payload)

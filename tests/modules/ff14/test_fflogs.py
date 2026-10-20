@@ -40,14 +40,27 @@ from yomihime_game_link_sdk.storage import (
 )
 
 
+class _Diagnostics:
+    """Record the public async port verbatim; real Core authority is tested elsewhere."""
+
+    def __init__(self) -> None:
+        self.events: list[dict[str, Any]] = []
+
+    async def emit(self, event_id: str, payload: dict[str, Any]) -> None:
+        # Detach JSON data without filtering fields that redaction tests must see.
+        value = json.loads(json.dumps(payload, allow_nan=False))
+        self.events.append({"event_id": event_id, "payload": value})
+
+
 class _Scope:
-    def __init__(self, http: "_FakeHttp") -> None:
+    def __init__(self, http: "_FakeHttp", diagnostics=None) -> None:
         self.http = http
+        self.diagnostics = diagnostics if diagnostics is not None else _Diagnostics()
 
 
 class _Scopes:
-    def __init__(self, http: "_FakeHttp") -> None:
-        self._scope = _Scope(http)
+    def __init__(self, http: "_FakeHttp", diagnostics=None) -> None:
+        self._scope = _Scope(http, diagnostics)
 
     async def bind(self, invocation):
         del invocation
@@ -80,7 +93,7 @@ class _FakeHttp:
         )
 
 
-def _services(http: _FakeHttp, *, configured=True):
+def _services(http: _FakeHttp, *, configured=True, diagnostics=None):
     class Config:
         async def current(self):
             aliases = ("credential_fflogs_cn", "credential_fflogs_global")
@@ -112,7 +125,9 @@ def _services(http: _FakeHttp, *, configured=True):
                 )
             )
 
-    return type("Services", (), {"scopes": _Scopes(http), "config": Config()})()
+    return type(
+        "Services", (), {"scopes": _Scopes(http, diagnostics), "config": Config()}
+    )()
 
 
 def _type(kind: str, name: str | None = None, of_type: dict | None = None) -> dict:

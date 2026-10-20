@@ -10,6 +10,7 @@ import io
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -21,8 +22,9 @@ from pathlib import Path
 from secrets import token_urlsafe
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
+from uuid import uuid4
 
-from ygl_test_subject.adapters.astrbot.bundled import install_bundled_ff14
+from ygl_test_subject.adapters.astrbot.bundled import install_bundled_package
 from ygl_test_subject.adapters.astrbot.runtime import PLUGIN_NAME
 from ygl_test_subject.core.contracts.administration import AdminOperation
 from ygl_test_subject.core.contracts.services import (
@@ -32,6 +34,11 @@ from ygl_test_subject.core.contracts.services import (
 )
 from ygl_test_subject.core.contracts.validation_boundary import validate_contract
 from ygl_test_subject.core.ports import RevisionConflict, SecretOwner
+from ygl_test_subject.infrastructure.private_storage import (
+    PrivateStorageError,
+    PrivateStorageLayout,
+    resolve_private_storage,
+)
 from ygl_test_subject.infrastructure.sqlite.repositories_admin_credentials import (
     AdminCredentialStatus,
 )
@@ -58,10 +65,22 @@ class SourceCredentialCliTests(unittest.IsolatedAsyncioTestCase):
             or (Path.home() / "AppData" / "Local" if os.name == "nt" else ROOT)
         )
         self.assertTrue(fixture_parent.is_dir())
-        self.temporary = tempfile.TemporaryDirectory(
-            prefix="ygl-source-credentials-", dir=fixture_parent
-        )
-        self.root = Path(self.temporary.name)
+        if os.name == "nt":
+            from ygl_test_subject.infrastructure.windows.private_storage import (
+                create_private_directory,
+                identity_private_base,
+            )
+
+            self.root = create_private_directory(
+                identity_private_base(), "ygl-source-credentials-" + uuid4().hex
+            )
+            self.temporary = SimpleNamespace(cleanup=lambda: shutil.rmtree(self.root))
+        else:
+            self.temporary = tempfile.TemporaryDirectory(
+                prefix="ygl-source-credentials-", dir=fixture_parent
+            )
+            self.root = Path(self.temporary.name)
+        self.addCleanup(self.temporary.cleanup)
         self.data_dir = self.root / "data"
         self.data_dir.mkdir()
         self.plugin_root = self.root / "plugin"
@@ -71,6 +90,18 @@ class SourceCredentialCliTests(unittest.IsolatedAsyncioTestCase):
             self.plugin_root / "modules" / "ff14",
             ignore=shutil.ignore_patterns("__pycache__"),
         )
+        staging = os.environ.get("YGL_TEST_FRONTEND_STAGING")
+        if staging:
+            staged = Path(staging) / "modules/ff14"
+            shutil.copytree(
+                staged / "pages/dist",
+                self.plugin_root / "modules/ff14/pages/dist",
+                dirs_exist_ok=True,
+            )
+            shutil.copyfile(
+                staged / "yomihime.manifest.json",
+                self.plugin_root / "modules/ff14/yomihime.manifest.json",
+            )
         self.key = base64.b64encode(bytes(range(32))).decode("ascii")
         # These are Core/configuration tests, not OS qualification. Their
         # shared-workspace fixtures deliberately lack private Windows ACLs.
@@ -79,17 +110,25 @@ class SourceCredentialCliTests(unittest.IsolatedAsyncioTestCase):
         )
         self.guard_patch.start()
         self.addCleanup(self.guard_patch.stop)
+        self.layout_patch = patch.object(cli, "resolve_private_storage", self._layout)
+        self.layout_patch.start()
+        self.addCleanup(self.layout_patch.stop)
 
-    def tearDown(self) -> None:
-        self.temporary.cleanup()
+    def _layout(self, data_dir=None):
+        return resolve_private_storage(
+            data_dir or self.data_dir, private_base=self.root
+        )
 
-    async def _seed_database(self) -> None:
-        installation = install_bundled_ff14(self.plugin_root, self.data_dir)
+    async def _seed_database(self, layout=None, *, initialize_keys=False) -> None:
+        installation = install_bundled_package(self.plugin_root, self.data_dir)
         self.assertTrue(installation.trusted)
         assembly = selected_assembly(self.plugin_root, PLUGIN_NAME)
         authority = cli._SessionAuthority()
         core, transport = cli._new_core(
-            self.data_dir,
+            layout
+            or PrivateStorageLayout(
+                self.data_dir, self.data_dir, None, "legacy_review_required"
+            ),
             installation.extension_root,
             authority,
             assembly,
@@ -98,6 +137,14 @@ class SourceCredentialCliTests(unittest.IsolatedAsyncioTestCase):
         try:
             await core.database.executor.initialize()
             await core.admin_credential_repository.bootstrap(_digest(_ADMIN))
+            if initialize_keys:
+                status = await core.managed_keys.startup()
+                if status["source"] == "environment":
+                    await core.managed_keys.adopt_environment(
+                        expected_revision=status["revision"],
+                        expected_generation=status["generation"],
+                        inventory_digest=status["inventory_digest"],
+                    )
             self.assertIs(await core.close(), True)
             self.assertFalse(transport.closed)
             await transport.close()
@@ -109,11 +156,11 @@ class SourceCredentialCliTests(unittest.IsolatedAsyncioTestCase):
                 await transport.close()
 
     async def _read_config_state(self, alias: str) -> tuple[str, int]:
-        installation = install_bundled_ff14(self.plugin_root, self.data_dir)
+        installation = install_bundled_package(self.plugin_root, self.data_dir)
         assembly = selected_assembly(self.plugin_root, PLUGIN_NAME)
         authority = cli._SessionAuthority()
         core, transport = cli._new_core(
-            self.data_dir,
+            self._layout(),
             installation.extension_root,
             authority,
             assembly,
@@ -144,11 +191,11 @@ class SourceCredentialCliTests(unittest.IsolatedAsyncioTestCase):
         return (await self._read_config_state(alias))[0]
 
     async def _read_secret_payload(self, alias: str) -> bytes:
-        installation = install_bundled_ff14(self.plugin_root, self.data_dir)
+        installation = install_bundled_package(self.plugin_root, self.data_dir)
         assembly = selected_assembly(self.plugin_root, PLUGIN_NAME)
         authority = cli._SessionAuthority()
         core, transport = cli._new_core(
-            self.data_dir,
+            self._layout(),
             installation.extension_root,
             authority,
             assembly,
@@ -260,7 +307,7 @@ class SourceCredentialCliTests(unittest.IsolatedAsyncioTestCase):
                 before = set(self.root.rglob("*"))
                 with (
                     patch.object(cli, "local_maintenance_guard") as guard,
-                    patch.object(cli, "install_bundled_ff14") as install,
+                    patch.object(cli, "install_bundled_package") as install,
                     patch.object(cli, "_new_core") as new_core,
                     patch.object(cli, "SQLiteDatabase") as database,
                     patch.object(cli, "ManagedKeyManager") as keys,
@@ -343,6 +390,198 @@ class SourceCredentialCliTests(unittest.IsolatedAsyncioTestCase):
             self.assertGreater(cleared.revision, updated.revision)
             self.assertNotEqual(cleared.fields[alias], "configured")
             self.assertNotEqual(await self._read_config_status(alias), "configured")
+
+    @unittest.skipUnless(os.name == "nt", "native Windows selected private layout")
+    async def test_logical_root_uses_existing_private_database_key_and_secret_roots(
+        self,
+    ):
+        layout = self._layout()
+        self.assertNotEqual(layout.storage_root, self.data_dir)
+        await self._seed_database(layout)
+        with patch.dict(os.environ, {"YGL_SECRET_KEY": self.key}):
+            updated = await cli._configure(
+                self.data_dir,
+                "set",
+                "cn",
+                plugin_root=self.plugin_root,
+                current_credential=_ADMIN,
+                client_id=_CLIENT_ID,
+                client_secret=_CLIENT_SECRET,
+            )
+            self.assertEqual(updated.fields["credential_fflogs_cn"], "configured")
+            self.assertEqual(
+                json.loads(await self._read_secret_payload("credential_fflogs_cn"))[
+                    "client_id"
+                ],
+                _CLIENT_ID,
+            )
+        self.assertFalse((self.data_dir / "runtime.sqlite3").exists())
+        self.assertFalse((self.data_dir / "secrets").exists())
+        self.assertTrue(any(layout.secret_root.glob("*.blob")))
+
+    @unittest.skipUnless(os.name == "nt", "native Windows committed selector")
+    async def test_selector_cold_load_updates_target_and_preserves_fenced_source(self):
+        from ygl_test_subject.infrastructure.private_storage_migration import (
+            execute_storage_migration,
+            plan_storage_migration,
+        )
+        from ygl_test_subject.infrastructure.windows.private_storage import (
+            WindowsPrivateStorageGuard,
+        )
+        from ygl_test_subject.services.storage_migration_supervisor import (
+            SyntheticSourceSupervisor,
+        )
+
+        supervisor = SyntheticSourceSupervisor.create_synthetic(self.root)
+        self.addAsyncCleanup(supervisor.close)
+        self.data_dir = supervisor.source_root
+        with patch.dict(os.environ, {"YGL_SECRET_KEY": self.key}):
+            await self._seed_database(initialize_keys=True)
+            layout = self._layout()
+            plan = plan_storage_migration(layout)
+            writer = await supervisor.start_delayed_writer()
+            await writer.stop_normally()
+            async with supervisor.acquire_offline_source(plan) as proof:
+                with WindowsPrivateStorageGuard(layout.instance_root) as guard:
+                    self.assertEqual(
+                        execute_storage_migration(
+                            plan,
+                            source_proof=proof,
+                            private_guard=guard,
+                        ).state,
+                        "committed",
+                    )
+            selected = self._layout()
+            self.assertNotEqual(selected.storage_root, self.data_dir)
+            protected = [self.data_dir / "runtime.sqlite3"]
+            for name in ("keys", "secrets"):
+                protected.extend(
+                    path for path in (self.data_dir / name).rglob("*") if path.is_file()
+                )
+            source_bytes = {path: path.read_bytes() for path in protected}
+            updated = await cli._configure(
+                self.data_dir,
+                "set",
+                "global",
+                plugin_root=self.plugin_root,
+                current_credential=_ADMIN,
+                client_id=_CLIENT_ID,
+                client_secret=_CLIENT_SECRET,
+            )
+            self.assertEqual(updated.fields["credential_fflogs_global"], "configured")
+            self.assertEqual(
+                await self._read_config_status("credential_fflogs_global"), "configured"
+            )
+            self.assertEqual(
+                {path: path.read_bytes() for path in protected}, source_bytes
+            )
+
+    async def test_missing_database_never_constructs_core_or_initializes_storage(self):
+        layout = self._layout()
+        with (
+            patch.object(cli, "_new_core") as core,
+            patch.object(cli, "install_bundled_package") as install,
+        ):
+            with self.assertRaisesRegex(ValueError, "existing selected Core database"):
+                await cli._configure(
+                    self.data_dir, "set", "cn", plugin_root=self.plugin_root
+                )
+            core.assert_not_called()
+            install.assert_not_called()
+        self.assertFalse(layout.database_path.exists())
+        self.assertFalse((self.data_dir / "runtime.sqlite3").exists())
+        self.assertFalse(any(layout.secret_root.glob("*.blob")))
+
+    async def test_unknown_schema_is_read_only_and_never_auto_migrated(self):
+        layout = self._layout()
+        with (
+            contextlib.closing(sqlite3.connect(layout.database_path)) as connection,
+            connection,
+        ):
+            connection.execute("CREATE TABLE synthetic_unknown(value TEXT)")
+        before = layout.database_path.read_bytes()
+        with patch.object(cli, "_new_core") as core:
+            with self.assertRaisesRegex(
+                PrivateStorageError, "storage_database_unavailable"
+            ):
+                await cli._configure(
+                    self.data_dir, "clear", "cn", plugin_root=self.plugin_root
+                )
+            core.assert_not_called()
+        self.assertEqual(layout.database_path.read_bytes(), before)
+
+    async def test_fenced_existing_database_is_rejected_before_core_construction(self):
+        await self._seed_database()
+        layout = self._layout()
+        with (
+            contextlib.closing(sqlite3.connect(layout.database_path)) as connection,
+            connection,
+        ):
+            connection.execute(
+                "UPDATE private_storage_epoch SET state='fenced',epoch=epoch+1,operation_id=? WHERE singleton=1",
+                (uuid4().hex,),
+            )
+        before = layout.database_path.read_bytes()
+        with patch.object(cli, "_new_core") as core:
+            with self.assertRaisesRegex(
+                PrivateStorageError, "storage_epoch_unavailable"
+            ):
+                await cli._configure(
+                    self.data_dir, "clear", "cn", plugin_root=self.plugin_root
+                )
+            core.assert_not_called()
+        self.assertEqual(layout.database_path.read_bytes(), before)
+
+    @unittest.skipUnless(os.name == "nt", "native Windows layout conflict")
+    async def test_legacy_private_conflict_and_invalid_selector_never_fall_back(self):
+        from ygl_test_subject.infrastructure.windows.private_storage import (
+            create_private_directory,
+        )
+
+        await self._seed_database()
+        legacy = self._layout()
+        target = create_private_directory(legacy.instance_root, "storage")
+        (target / "runtime.sqlite3").write_bytes(b"SYNTHETIC CONFLICT")
+        original = legacy.database_path.read_bytes()
+        with patch.object(cli, "_new_core") as core:
+            with self.assertRaisesRegex(PrivateStorageError, "ambiguous_storage"):
+                await cli._configure(
+                    self.data_dir, "clear", "cn", plugin_root=self.plugin_root
+                )
+            (legacy.instance_root / "active.json").write_text("{}", encoding="utf-8")
+            with self.assertRaises(PrivateStorageError):
+                await cli._configure(
+                    self.data_dir, "clear", "cn", plugin_root=self.plugin_root
+                )
+            core.assert_not_called()
+        self.assertEqual(legacy.database_path.read_bytes(), original)
+        self.assertEqual(
+            (target / "runtime.sqlite3").read_bytes(), b"SYNTHETIC CONFLICT"
+        )
+
+    async def test_selected_storage_guard_failure_precedes_install_and_core(self):
+        layout = self._layout()
+        with (
+            patch.object(
+                cli, "local_maintenance_guard", return_value=contextlib.nullcontext()
+            ) as maintenance,
+            patch.object(
+                PrivateStorageLayout,
+                "open_guard",
+                side_effect=PermissionError("synthetic private guard refusal"),
+            ),
+            patch.object(cli, "_new_core") as core,
+            patch.object(cli, "install_bundled_package") as install,
+        ):
+            with self.assertRaises(PermissionError):
+                await cli._configure(
+                    self.data_dir, "clear", "cn", plugin_root=self.plugin_root
+                )
+            maintenance.assert_called_once_with(
+                layout.database_path, plugin_root=self.plugin_root
+            )
+            core.assert_not_called()
+            install.assert_not_called()
 
     async def test_wrong_admin_and_invalid_explicit_key_fail_without_change(
         self,
@@ -465,7 +704,7 @@ class SourceCredentialCliTests(unittest.IsolatedAsyncioTestCase):
                 "local_maintenance_guard",
                 side_effect=PermissionError("OS proof rejected"),
             ),
-            patch.object(cli, "install_bundled_ff14") as install,
+            patch.object(cli, "install_bundled_package") as install,
             patch.object(cli, "_new_core") as factory,
             self.assertRaises(PermissionError),
         ):
@@ -898,11 +1137,11 @@ class SourceCredentialCliTests(unittest.IsolatedAsyncioTestCase):
                 client_secret=_CLIENT_SECRET,
                 plugin_root=self.plugin_root,
             )
-            installation = install_bundled_ff14(self.plugin_root, self.data_dir)
+            installation = install_bundled_package(self.plugin_root, self.data_dir)
             assembly = selected_assembly(self.plugin_root, PLUGIN_NAME)
             authority = cli._SessionAuthority()
             core, transport = cli._new_core(
-                self.data_dir,
+                self._layout(),
                 installation.extension_root,
                 authority,
                 assembly,
@@ -1036,7 +1275,7 @@ elif mismatch == 'abi':
 elif mismatch == 'path':
     sdk.__file__ = str(Path(root).parent / 'foreign-sdk' / '__init__.py')
 elif mismatch == 'future':
-    sdk.__version__ = '0.1.0a10'
+    sdk.__version__ = '0.1.0a11'
 else:
     raise AssertionError('unknown probe')
 try:

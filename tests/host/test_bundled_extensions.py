@@ -12,7 +12,7 @@ from zipfile import ZipFile
 
 from ygl_test_subject.adapters.astrbot.bundled import (
     BundledExtensionError,
-    install_bundled_ff14,
+    install_bundled_package,
 )
 from ygl_test_subject.core.contracts.validation_boundary import validate_contract
 from ygl_test_subject.extensions.discovery import discover_packages
@@ -109,14 +109,14 @@ class BundledExtensionTests(unittest.IsolatedAsyncioTestCase):
         manifest_path.write_text(
             json.dumps(old, ensure_ascii=False, indent=2), encoding="utf8"
         )
-        previous = install_bundled_ff14(self.plugin_root, self.data_root)
+        previous = install_bundled_package(self.plugin_root, self.data_root)
         before = {
             str(path.relative_to(previous.extension_root)): path.read_bytes()
             for path in previous.extension_root.rglob("*")
             if path.is_file()
         }
         manifest_path.write_bytes(current_bytes)
-        replacement = install_bundled_ff14(self.plugin_root, self.data_root)
+        replacement = install_bundled_package(self.plugin_root, self.data_root)
         self.assertNotEqual(previous.extension_root, replacement.extension_root)
         self.assertEqual(
             before,
@@ -155,7 +155,7 @@ class BundledExtensionTests(unittest.IsolatedAsyncioTestCase):
         manifest_path.write_text(
             json.dumps(old, ensure_ascii=False, indent=2), encoding="utf8"
         )
-        legacy15 = install_bundled_ff14(self.plugin_root, self.data_root)
+        legacy15 = install_bundled_package(self.plugin_root, self.data_root)
         self.assertNotIn(
             legacy15.extension_root,
             (previous.extension_root, replacement.extension_root),
@@ -213,7 +213,7 @@ class BundledExtensionTests(unittest.IsolatedAsyncioTestCase):
                             values
                             if values is not None
                             else {
-                                "core_defaults": {"default_region": "cn"},
+                                "ff14_default_region": "cn",
                                 "ff14_calendar_default_days": 7,
                                 "ff14_calendar_default_timezone": "Asia/Shanghai",
                                 "ff14_calendar_default_delivery_time": "08:00",
@@ -226,7 +226,7 @@ class BundledExtensionTests(unittest.IsolatedAsyncioTestCase):
         return services
 
     async def test_factory_rejects_missing_and_invalid_config(self) -> None:
-        result = install_bundled_ff14(self.plugin_root, self.data_root)
+        result = install_bundled_package(self.plugin_root, self.data_root)
         package = discover_packages(result.extension_root)[0]
         lease = await FilesystemFactorySource().capture(
             ExtensionCandidate(package, CandidateState.DISABLED, "test")
@@ -241,7 +241,7 @@ class BundledExtensionTests(unittest.IsolatedAsyncioTestCase):
             lease.release()
 
     async def test_install_discovers_manifest_and_resolves_factory(self) -> None:
-        result = install_bundled_ff14(self.plugin_root, self.data_root)
+        result = install_bundled_package(self.plugin_root, self.data_root)
 
         self.assertTrue(result.installed)
         self.assertTrue(result.trusted)
@@ -292,7 +292,7 @@ class BundledExtensionTests(unittest.IsolatedAsyncioTestCase):
             with ZipFile(archive_path) as archive:
                 archive.extractall(plugin_root)
 
-            result = install_bundled_ff14(plugin_root, data_root)
+            result = install_bundled_package(plugin_root, data_root)
 
             self.assertTrue(result.installed)
             self.assertTrue(result.trusted)
@@ -312,14 +312,14 @@ class BundledExtensionTests(unittest.IsolatedAsyncioTestCase):
                 lease.release()
 
     async def test_exact_existing_package_is_trusted_without_rewrite(self) -> None:
-        first = install_bundled_ff14(self.plugin_root, self.data_root)
+        first = install_bundled_package(self.plugin_root, self.data_root)
         before = {
             path.relative_to(first.package_dir).as_posix(): path.read_bytes()
             for path in first.package_dir.rglob("*")
             if path.is_file()
         }
 
-        second = install_bundled_ff14(self.plugin_root, self.data_root)
+        second = install_bundled_package(self.plugin_root, self.data_root)
 
         self.assertFalse(second.installed)
         self.assertTrue(second.trusted)
@@ -333,12 +333,12 @@ class BundledExtensionTests(unittest.IsolatedAsyncioTestCase):
     async def test_existing_user_data_is_never_overwritten_or_trusted_on_mismatch(
         self,
     ) -> None:
-        first = install_bundled_ff14(self.plugin_root, self.data_root)
+        first = install_bundled_package(self.plugin_root, self.data_root)
         readme = first.package_dir / "README.md"
         readme.write_bytes(readme.read_bytes() + b"\nuser data\n")
         before = readme.read_bytes()
 
-        second = install_bundled_ff14(self.plugin_root, self.data_root)
+        second = install_bundled_package(self.plugin_root, self.data_root)
 
         self.assertFalse(second.installed)
         self.assertFalse(second.trusted)
@@ -346,7 +346,7 @@ class BundledExtensionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(readme.read_bytes(), before)
 
     async def test_source_upgrade_uses_a_new_slot_and_keeps_old_data(self) -> None:
-        first = install_bundled_ff14(self.plugin_root, self.data_root)
+        first = install_bundled_package(self.plugin_root, self.data_root)
         old_files = {
             path.relative_to(first.extension_root).as_posix(): path.read_bytes()
             for path in first.extension_root.rglob("*")
@@ -358,7 +358,7 @@ class BundledExtensionTests(unittest.IsolatedAsyncioTestCase):
             original_source_readme.read_bytes() + b"\nBundled source revision 2.\n"
         )
 
-        upgraded = install_bundled_ff14(self.plugin_root, self.data_root)
+        upgraded = install_bundled_package(self.plugin_root, self.data_root)
 
         self.assertTrue(upgraded.installed)
         self.assertTrue(upgraded.trusted)
@@ -387,7 +387,7 @@ class BundledExtensionTests(unittest.IsolatedAsyncioTestCase):
         database = self.data_root / "runtime.sqlite3"
         database.write_bytes(b"existing runtime state")
 
-        result = install_bundled_ff14(self.plugin_root, self.data_root)
+        result = install_bundled_package(self.plugin_root, self.data_root)
 
         self.assertTrue(result.trusted)
         self.assertEqual(legacy_file.read_text(encoding="utf-8"), "keep this")
@@ -401,7 +401,7 @@ class BundledExtensionTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(component_length, 0)
         data_dir = parent / ("d" * component_length)
         data_dir.mkdir()
-        first = install_bundled_ff14(self.plugin_root, data_dir)
+        first = install_bundled_package(self.plugin_root, data_dir)
         self.assertTrue(first.trusted, first.reason)
         self.assertEqual(len(str(data_dir / "bundled_extensions")), 179)
         self.assertEqual(
@@ -409,17 +409,17 @@ class BundledExtensionTests(unittest.IsolatedAsyncioTestCase):
             284,
         )
         self.assertEqual(len(discover_packages(first.extension_root)), 1)
-        second = install_bundled_ff14(self.plugin_root, data_dir)
+        second = install_bundled_package(self.plugin_root, data_dir)
         self.assertTrue(second.trusted, second.reason)
         self.assertFalse(second.installed)
         self.assertEqual(second.extension_root, first.extension_root)
 
     async def test_fingerprint_slot_with_extra_data_is_fail_closed(self) -> None:
-        first = install_bundled_ff14(self.plugin_root, self.data_root)
+        first = install_bundled_package(self.plugin_root, self.data_root)
         extra = first.extension_root / "unexpected.txt"
         extra.write_text("unknown slot content", encoding="utf-8")
 
-        second = install_bundled_ff14(self.plugin_root, self.data_root)
+        second = install_bundled_package(self.plugin_root, self.data_root)
 
         self.assertFalse(second.installed)
         self.assertFalse(second.trusted)
@@ -436,12 +436,12 @@ class BundledExtensionTests(unittest.IsolatedAsyncioTestCase):
         ):
 
             def fail_staging(path, *args, **kwargs):
-                if path.name.startswith(".ff14-") and path.name.endswith(".stage"):
+                if path.name.startswith(".bundle-") and path.name.endswith(".stage"):
                     raise failure
                 return original_mkdir(path, *args, **kwargs)
 
             with self.subTest(reason=reason), patch.object(Path, "mkdir", fail_staging):
-                outcome = install_bundled_ff14(self.plugin_root, self.data_root)
+                outcome = install_bundled_package(self.plugin_root, self.data_root)
             self.assertFalse(outcome.trusted)
             self.assertEqual(outcome.reason, reason)
 
@@ -456,7 +456,7 @@ class BundledExtensionTests(unittest.IsolatedAsyncioTestCase):
             ),
         ):
             with self.assertRaises(BundledExtensionError) as raised:
-                install_bundled_ff14(self.plugin_root, self.data_root)
+                install_bundled_package(self.plugin_root, self.data_root)
         self.assertEqual(raised.exception.code, "unsupported_environment")
         self.assertFalse((self.data_root / "bundled_extensions").exists())
 
@@ -470,7 +470,7 @@ class BundledExtensionTests(unittest.IsolatedAsyncioTestCase):
             self.skipTest(f"symlink creation is unavailable: {exc}")
 
         with self.assertRaisesRegex(BundledExtensionError, "bundled_source_invalid"):
-            install_bundled_ff14(self.plugin_root, self.data_root)
+            install_bundled_package(self.plugin_root, self.data_root)
         self.assertFalse((self.data_root / "bundled_extensions").exists())
         self.assertEqual(external.read_text(encoding="utf-8"), "EXTERNAL = True\n")
 
@@ -485,7 +485,7 @@ class BundledExtensionTests(unittest.IsolatedAsyncioTestCase):
             self.skipTest(f"symlink creation is unavailable: {exc}")
 
         with self.assertRaises(BundledExtensionError):
-            install_bundled_ff14(self.plugin_root, self.data_root)
+            install_bundled_package(self.plugin_root, self.data_root)
         self.assertEqual(tuple(outside.iterdir()), ())
 
 

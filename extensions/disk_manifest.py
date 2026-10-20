@@ -14,6 +14,7 @@ from yomihime_game_link_sdk.declarations import (
     CapabilityReference,
     CommandDescriptor,
     ConfigField,
+    DiagnosticDeclaration,
     InvocationPolicy,
     ModuleCategory,
     ModuleDisplay,
@@ -83,6 +84,17 @@ def _walk_budget(value: object) -> tuple[int, int]:
                     raise ManifestError("manifest object keys must be strings")
                 if len(key) > EXTENSION_MANIFEST_MAX_STRING_LENGTH:
                     raise ManifestError("manifest string budget exceeded")
+                if (
+                    key == "payload_schema"
+                    and depth == 4
+                    and set(item) == {"event_id", "payload_schema"}
+                ):
+                    from ..core.contracts.diagnostics import freeze_diagnostic_schema
+
+                    freeze_diagnostic_schema(child)
+                    # Diagnostic declarations have an independent finite schema
+                    # budget; existing capability schemas keep their old ceiling.
+                    continue
                 is_schema = in_schema or key in {
                     "input_schema",
                     "filter_schema",
@@ -271,6 +283,10 @@ def _map_module(value: object, contract_version: str) -> ModuleManifest:
             _shape(item["notification_modes"], "array", "notification_modes")
         )
         subscriptions.append(validate_contract(SubscriptionDescriptor(**item)))
+    diagnostics = []
+    for raw in _list(obj, "diagnostics"):
+        item = _keys(raw, "diagnostic", {"event_id", "payload_schema"})
+        diagnostics.append(validate_contract(DiagnosticDeclaration(**item)))
     config_fields = []
     for raw in _list(obj, "config_fields"):
         item = _keys(raw, "config_field", {"name"})
@@ -312,6 +328,7 @@ def _map_module(value: object, contract_version: str) -> ModuleManifest:
             "schedules",
             "subscriptions",
             "config_fields",
+            "diagnostics",
             "sources",
             "collections",
             "pages",
@@ -355,6 +372,7 @@ def _map_module(value: object, contract_version: str) -> ModuleManifest:
                 for item in _list(obj, "resources")
             ),
             display=display,
+            diagnostics=tuple(diagnostics),
         )
     )
 

@@ -18,6 +18,7 @@ from time import monotonic
 from typing import Callable, TypeVar
 
 from yomihime_game_link_sdk.contexts import InvocationOrigin, InvocationView
+from yomihime_game_link_sdk.errors import CacheUnavailable, ServiceUnavailable
 from yomihime_game_link_sdk.services import CacheAccess
 from yomihime_game_link_sdk.storage import (
     CacheEntry,
@@ -218,10 +219,23 @@ class _CacheAccessCoordinator:
             # Accepted SQLite jobs drain in their worker. Do not enqueue a
             # second authorization read while propagating caller cancellation.
             raise
-        except BaseException:
+        except Exception as error:
+            # Authority after the failed backend await wins over availability.
             self._check_admission()
             await self._assert_grant_current()
+            if isinstance(
+                error,
+                (PermissionError, TimeoutError, RevisionConflict, ServiceUnavailable),
+            ):
+                raise
+            failure = CacheUnavailable()
+        except BaseException:
+            self._check_admission()
             raise
+        else:
+            failure = None
+        if failure is not None:
+            raise failure
         self._check_admission()
         await self._assert_grant_current()
         return result

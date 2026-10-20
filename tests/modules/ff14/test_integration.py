@@ -19,6 +19,7 @@ from ygl_test_subject.core.ports import MessageReceipt, MessageStatus
 from ygl_test_subject.extensions.discovery import discover_packages
 from ygl_test_subject.infrastructure.http import TransportRequest
 from ygl_test_subject.infrastructure.sqlite.database import SQLiteDatabase
+from ygl_test_subject.modules.ff14.assembly import SUPPORT
 from ygl_test_subject.services.admin_authorization import _digest
 from ygl_test_subject.services.core_runtime import (
     CoreRuntime,
@@ -26,6 +27,10 @@ from ygl_test_subject.services.core_runtime import (
     TrustedSubscriptionGate,
 )
 from ygl_test_subject.services.source_credentials import SourceCredentialPolicy
+from ygl_test_subject.services.trusted_assembly import (
+    CapturedAssemblyInventory,
+    assemble_reviewed,
+)
 
 from yomihime_game_link_sdk.display import (
     DisplayLimits,
@@ -333,6 +338,7 @@ class FF14InstalledModuleTests(unittest.IsolatedAsyncioTestCase):
                 {
                     "credential_fflogs_cn",
                     "credential_fflogs_global",
+                    "ff14_default_region",
                     "ff14_subscriptions_enabled",
                     "ff14_calendar_sync_interval_seconds",
                     "ff14_calendar_default_days",
@@ -358,6 +364,28 @@ class FF14InstalledModuleTests(unittest.IsolatedAsyncioTestCase):
                     CapabilityHealth(HealthStatus.UNAVAILABLE, "source_unavailable")
                 )
 
+            assembly = assemble_reviewed(
+                CapturedAssemblyInventory(
+                    package.package_id,
+                    (installed_package / "yomihime.manifest.json").read_bytes(),
+                    {
+                        "assembly.json": (
+                            installed_package / "assembly.json"
+                        ).read_bytes()
+                    },
+                ),
+                principal_id="ff14-test-config",
+                support=SUPPORT,
+                selected=True,
+            )
+            self.assertEqual(assembly.manifests[GLOBAL_MODULE_ID], module_manifest)
+            policy = assembly.diagnostic_policies[GLOBAL_MODULE_ID]
+            self.assertIn("CalendarSync", policy.event_ids)
+            self.assertEqual(policy.event_limits["CalendarSync"], 48)
+            self.assertEqual(
+                dict(assembly.collector_timeouts),
+                {(GLOBAL_MODULE_ID, "ff14.calendar.sync"): 45},
+            )
             runtime = CoreRuntime(
                 database=SQLiteDatabase(root / "core.sqlite3"),
                 extension_root=extension_root,
@@ -380,6 +408,8 @@ class FF14InstalledModuleTests(unittest.IsolatedAsyncioTestCase):
                         discovered[0]._provenance.manifest_sha256,
                     )
                 },
+                diagnostic_policies=assembly.diagnostic_policies,
+                collector_timeouts=assembly.collector_timeouts,
                 source_health=source_health,
                 source_credential_policies=(
                     SourceCredentialPolicy(

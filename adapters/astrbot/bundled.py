@@ -1,9 +1,11 @@
-"""Install the reviewed FF14 source bundle into AstrBot's extension data root."""
+"""Install one trusted-selected source bundle into AstrBot's extension data root."""
 
 from __future__ import annotations
 
 import hashlib
+import json
 import os
+import re
 import secrets
 import stat
 from dataclasses import dataclass
@@ -22,8 +24,33 @@ from ...extensions.source_snapshot import (
 )
 from ...services.trusted_assembly import CapturedAssemblyInventory
 
-PACKAGE_ID = "ff14"
-PACKAGE_DIRECTORY = "ff14"
+
+@dataclass(frozen=True, slots=True)
+class ReviewedBundleSelection:
+    """Trusted Host construction only; declarations/clients cannot select code."""
+
+    package_id: str
+    source_directory: str = "modules"
+
+    def __post_init__(self):
+        if (
+            type(self.package_id) is not str
+            or re.fullmatch(r"[a-z][a-z0-9_.-]*", self.package_id) is None
+        ):
+            raise ValueError("invalid reviewed package identity")
+        if (
+            type(self.source_directory) is not str
+            or not self.source_directory
+            or any(
+                re.fullmatch(r"[A-Za-z0-9_-]+", part) is None
+                for part in self.source_directory.split("/")
+            )
+        ):
+            raise ValueError("invalid reviewed package source")
+
+
+# Release composition selection, not game business logic or a declaration grant.
+DEFAULT_BUNDLE_SELECTION = ReviewedBundleSelection("ff14")
 MANIFEST_FILENAME = "yomihime.manifest.json"
 README_FILENAME = "README.md"
 MAX_README_BYTES = 1 * 1024 * 1024
@@ -48,20 +75,24 @@ class BundledExtensionInstallation:
     trusted: bool
     reason: str | None = None
     inventory: CapturedAssemblyInventory | None = None
+    selected: bool = True
 
 
 class BundledExtensionError(ValueError):
-    """The packaged FF14 bundle cannot be validated or safely installed."""
+    """The selected package bundle cannot be validated or safely installed."""
 
     def __init__(self, code: str) -> None:
         self.code = code
         super().__init__(code)
 
 
-def install_bundled_ff14(
-    plugin_root: str | os.PathLike[str], data_dir: str | os.PathLike[str]
+def install_bundled_package(
+    plugin_root: str | os.PathLike[str],
+    data_dir: str | os.PathLike[str],
+    *,
+    selection: ReviewedBundleSelection | None = DEFAULT_BUNDLE_SELECTION,
 ) -> BundledExtensionInstallation:
-    """Install FF14 into an immutable content-addressed extension root.
+    """Install one selected package into an immutable content-addressed extension root.
 
     The package source is statically discovered and captured before any write.
     The fingerprint covers all runtime source plus the manifest and README.
@@ -78,12 +109,21 @@ def install_bundled_ff14(
         except WindowsScanError as exc:
             raise BundledExtensionError(exc.code) from None
     plugin_root_path = _require_directory(Path(plugin_root), "plugin_root")
-    source_root = _require_directory(plugin_root_path / "modules", "bundle_root")
     data_root = _require_directory(Path(data_dir), "data_root")
-
-    payload = _read_bundled_package(source_root)
+    if selection is None:
+        return BundledExtensionInstallation(
+            data_root, data_root, False, False, selected=False
+        )
+    if type(selection) is not ReviewedBundleSelection:
+        raise BundledExtensionError("bundle_selection_invalid")
+    source_root = _require_directory(
+        plugin_root_path / selection.source_directory, "bundle_root"
+    )
+    _validate_path(source_root, plugin_root_path)
+    payload = _read_bundled_package(source_root, selection)
+    package_directory = selection.package_id
     inventory = CapturedAssemblyInventory(
-        PACKAGE_ID, payload["manifest"], payload["sources"]
+        selection.package_id, payload["manifest"], payload["sources"]
     )
     fingerprint = _bundle_fingerprint(
         payload["sources"], payload["manifest"], payload["readme"]
@@ -91,7 +131,7 @@ def install_bundled_ff14(
     bundle_root = data_root / "bundled_extensions"
     _ensure_directory(bundle_root, data_root)
     extension_root = bundle_root / fingerprint
-    package_dir = extension_root / PACKAGE_DIRECTORY
+    package_dir = extension_root / package_directory
 
     if os.path.lexists(extension_root):
         matches, reason = _matches_existing_slot(bundle_root, extension_root, payload)
@@ -105,7 +145,7 @@ def install_bundled_ff14(
         )
 
     for _ in range(8):
-        staging = bundle_root / f".ff14-{fingerprint}-{secrets.token_hex(8)}.stage"
+        staging = bundle_root / f".bundle-{fingerprint}-{secrets.token_hex(8)}.stage"
         try:
             staging.mkdir()
             break
@@ -138,7 +178,7 @@ def install_bundled_ff14(
 
     try:
         _validate_path(staging, bundle_root)
-        staged_package_dir = staging / PACKAGE_DIRECTORY
+        staged_package_dir = staging / package_directory
         staged_package_dir.mkdir()
         _write_package(
             staged_package_dir,
@@ -211,7 +251,7 @@ def _bundle_fingerprint(
     records[MANIFEST_FILENAME] = manifest
     records[README_FILENAME] = readme
     digest = hashlib.sha256(b"yomihime-bundled-extension-v1\0")
-    package_id = PACKAGE_ID.encode("utf-8")
+    package_id = json.loads(manifest)["package_id"].encode("utf-8")
     digest.update(len(package_id).to_bytes(8, "big"))
     digest.update(package_id)
     for relative, content in sorted(records.items()):
@@ -231,7 +271,7 @@ def _matches_existing_slot(
         if not extension_root.is_dir():
             return False, "existing_bundle_slot_invalid"
         entries = tuple(extension_root.iterdir())
-        if len(entries) != 1 or entries[0].name != PACKAGE_DIRECTORY:
+        if len(entries) != 1 or entries[0].name != payload["package_directory"]:
             return False, "existing_bundle_slot_mismatch"
         _validate_path(entries[0], extension_root)
         if not entries[0].is_dir():
@@ -246,7 +286,10 @@ def _matches_existing_slot(
         if not matches:
             return False, reason
         final_entries = tuple(extension_root.iterdir())
-        if len(final_entries) != 1 or final_entries[0].name != PACKAGE_DIRECTORY:
+        if (
+            len(final_entries) != 1
+            or final_entries[0].name != payload["package_directory"]
+        ):
             return False, "existing_bundle_slot_changed"
         _validate_path(final_entries[0], extension_root)
         return True, None
@@ -254,16 +297,18 @@ def _matches_existing_slot(
         return False, "existing_bundle_slot_unavailable"
 
 
-def _read_bundled_package(source_root: Path) -> dict[str, object]:
+def _read_bundled_package(
+    source_root: Path, selection=DEFAULT_BUNDLE_SELECTION
+) -> dict[str, object]:
     packages = discover_packages(source_root)
     matches = tuple(
         package
         for package in packages
-        if package.package_id == PACKAGE_ID
-        and package.package_dir.name == PACKAGE_DIRECTORY
+        if package.package_id == selection.package_id
+        and package.package_dir.name == selection.package_id
         and package.valid
     )
-    if len(packages) != 1 or len(matches) != 1:
+    if len(matches) != 1:
         raise BundledExtensionError("bundled_manifest_invalid")
     package = matches[0]
     provenance = package._provenance
@@ -277,8 +322,10 @@ def _read_bundled_package(source_root: Path) -> dict[str, object]:
 
     resources = dict(capture_page_resources(provenance, package.manifest))
     source_paths = set(snapshot.files)
-    if "module.py" not in source_paths or "__init__.py" not in source_paths:
-        raise BundledExtensionError("bundled_factory_missing")
+    for module in package.manifest.modules:
+        factory_module = module.factory_entry.split(":", 1)[0].replace(".", "/")
+        if not {factory_module + ".py", factory_module + "/__init__.py"} & source_paths:
+            raise BundledExtensionError("bundled_factory_missing")
     inventory = _inventory_package(package.package_dir)
     python_paths = {relative for relative in inventory if relative.endswith(".py")}
     if python_paths != source_paths:
@@ -326,6 +373,7 @@ def _read_bundled_package(source_root: Path) -> dict[str, object]:
         ):
             raise BundledExtensionError("bundled_assembly_changed")
     return {
+        "package_directory": selection.package_id,
         "sources": MappingProxyType({**dict(snapshot.files), **resources, **auxiliary}),
         "manifest": manifest,
         "readme": readme,
@@ -349,7 +397,11 @@ def _matches_current_bundle(
             return False, "existing_package_mismatch"
 
         package = _find_package(extension_root, target)
-        if package is None or not package.valid or package.package_id != PACKAGE_ID:
+        if (
+            package is None
+            or not package.valid
+            or package.package_id != json.loads(manifest)["package_id"]
+        ):
             return False, "existing_manifest_invalid"
         provenance = package._provenance
         if provenance is None:
@@ -394,7 +446,11 @@ def _matches_current_bundle(
         # Re-scan once after all reads so a replaced manifest or package tree
         # cannot inherit trust from the first static discovery result.
         checked = _find_package(extension_root, target)
-        if checked is None or not checked.valid or checked.package_id != PACKAGE_ID:
+        if (
+            checked is None
+            or not checked.valid
+            or checked.package_id != json.loads(manifest)["package_id"]
+        ):
             return False, "existing_package_changed"
         checked_provenance = checked._provenance
         if checked_provenance is None:
@@ -611,5 +667,7 @@ def _safe_relative(relative: str) -> Path:
 __all__ = [
     "BundledExtensionError",
     "BundledExtensionInstallation",
-    "install_bundled_ff14",
+    "install_bundled_package",
+    "ReviewedBundleSelection",
+    "DEFAULT_BUNDLE_SELECTION",
 ]

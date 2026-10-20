@@ -6,6 +6,7 @@ starlette==0.52.1
 httpx==0.28.1
 Quart==0.20.0
 jsonschema==4.23.0
+packaging==26.3
 -r requirements-presentation-test.txt
 
 aiofiles==25.1.0

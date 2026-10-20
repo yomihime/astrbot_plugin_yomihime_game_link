@@ -23,8 +23,6 @@ from ygl_test_subject.modules.ff14.config import (
 from ygl_test_subject.services.configuration.defaults import (
     CORE_CONFIG_FIELDS,
     CORE_MODULE_ID,
-    CoreDefaultsConfigView,
-    CoreDefaultsView,
     core_config_target,
 )
 from ygl_test_subject.services.configuration.operations import (
@@ -38,6 +36,8 @@ from yomihime_game_link_sdk.services import ConfigTarget
 
 
 class CoreDefaultsRuntimeTests(unittest.IsolatedAsyncioTestCase):
+    # The retired game-default DTO has no compatibility shim. These tests keep
+    # current Core auth/CAS/repair and Module field isolation behavior.
     setUp = runtime_fixture.AdminOperationsRuntimeTests.setUp
     asyncTearDown = runtime_fixture.AdminOperationsRuntimeTests.asyncTearDown
     _runtime = runtime_fixture.AdminOperationsRuntimeTests._runtime
@@ -48,6 +48,21 @@ class CoreDefaultsRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
     async def _seed_invalid_defaults(self, target, values):
         runtime = self._runtime()
+        if "default_region" in values:
+            from ygl_test_subject.services.configuration.legacy_copy import (
+                LegacyConfigCopyPolicy,
+            )
+
+            runtime.admin_operations._legacy_config_policies = {
+                "sample.region": LegacyConfigCopyPolicy(
+                    "sample.region",
+                    target,
+                    "default_region",
+                    "admin/mod",
+                    "mode",
+                    {"type": "string"},
+                )
+            }
         await self._start_with_candidate(runtime)
         _, context = await self._bootstrap(runtime)
 
@@ -68,39 +83,166 @@ class CoreDefaultsRuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_core_admin_read_revision_invalid_safe_repair_and_no_auth(self):
         target = core_config_target("host-config")
         runtime, context = await self._seed_invalid_defaults(
-            target, {"default_region": "private-invalid-value"}
+            target,
+            {
+                "image_theme": "private-invalid-value",
+                "default_region": "legacy-preserved",
+            },
         )
         with self.assertRaises(AdminAuthorizationDenied):
             await runtime.admin_facade.config_snapshot(None, CORE_MODULE_ID)
         summary = await runtime.admin_facade.config_snapshot(
             None, CORE_MODULE_ID, authorization=context
         )
-        self.assertEqual(
-            (summary.revision, summary.state, summary.default_region),
-            (2, "invalid", None),
-        )
-        self.assertTrue(summary.raw_present)
+        self.assertEqual(summary.revision, 2)
+        self.assertEqual(set(summary.fields), {"image_theme"})
         self.assertNotIn("private-invalid-value", repr(summary))
-        await runtime.admin_facade.update_config(
-            None,
-            CORE_MODULE_ID,
-            ConfigPatch(
-                summary.revision,
-                (
-                    ConfigFieldUpdate(
-                        "default_region", ConfigUpdateMode.REPLACE, value="global"
-                    ),
+        patch = ConfigPatch(
+            2,
+            (
+                ConfigFieldUpdate(
+                    "image_theme", ConfigUpdateMode.REPLACE, value="warm_paper"
                 ),
-                CORE_CONFIG_FIELDS,
             ),
-            authorization=context,
+            CORE_CONFIG_FIELDS,
         )
-        current = await runtime.admin_facade.config_snapshot(
+        await runtime.admin_facade.update_config(
+            None, CORE_MODULE_ID, patch, authorization=context
+        )
+        raw = await runtime.config_repository.current(target)
+        self.assertEqual(raw.revision, 3)
+        self.assertEqual(
+            raw.values,
+            {"image_theme": "warm_paper", "default_region": "legacy-preserved"},
+        )
+
+    async def test_admin_can_replace_invalid_core_without_bypassing_patch_guards(self):
+        target = core_config_target("host-config")
+        runtime, context = await self._seed_invalid_defaults(
+            target, {"image_theme": None}
+        )
+
+        def patch(mode, value=None, revision=2):
+            return ConfigPatch(
+                revision,
+                (ConfigFieldUpdate("image_theme", mode, value=value),),
+                CORE_CONFIG_FIELDS,
+            )
+
+        for action, error in (
+            (patch(ConfigUpdateMode.REPLACE, True), ConfigurationValueError),
+            (patch(ConfigUpdateMode.KEEP), ConfigurationValueError),
+            (patch(ConfigUpdateMode.REPLACE, "warm_paper", 1), RevisionConflict),
+        ):
+            with self.assertRaises(error):
+                await runtime.admin_facade.update_config(
+                    None, CORE_MODULE_ID, action, authorization=context
+                )
+            self.assertEqual(
+                (await runtime.config_repository.current(target)).values,
+                {"image_theme": None},
+            )
+        valid = patch(ConfigUpdateMode.REPLACE, "warm_paper")
+        with self.assertRaises(AdminAuthorizationDenied):
+            await runtime.admin_facade.update_config(None, CORE_MODULE_ID, valid)
+        updated = await runtime.admin_facade.update_config(
+            None, CORE_MODULE_ID, valid, authorization=context
+        )
+        self.assertEqual(updated.revision, 3)
+        self.assertEqual(
+            (await runtime.config_repository.current(target)).values,
+            {"image_theme": "warm_paper"},
+        )
+
+    async def test_admin_can_clear_invalid_core_and_restore_missing_key_rules(self):
+        target = core_config_target("host-config")
+        runtime, context = await self._seed_invalid_defaults(
+            target, {"image_theme": None}
+        )
+        patch = ConfigPatch(
+            2,
+            (ConfigFieldUpdate("image_theme", ConfigUpdateMode.CLEAR),),
+            CORE_CONFIG_FIELDS,
+        )
+        updated = await runtime.admin_facade.update_config(
+            None, CORE_MODULE_ID, patch, authorization=context
+        )
+        self.assertEqual(updated.revision, 3)
+        self.assertEqual((await runtime.config_repository.current(target)).values, {})
+        self.assertEqual(
+            (await runtime.theme_settings.current()).core_theme, "warm_paper"
+        )
+
+    async def test_module_view_is_readonly_and_has_no_core_defaults_object(self):
+        runtime = self._runtime()
+        await self._start_with_candidate(runtime)
+        manifest = runtime.extension_runtime.candidate(
+            "admin"
+        ).package.manifest.modules[0]
+        services = runtime.module_services.for_candidate("admin/mod", manifest)
+        first = await services.config.current()
+        self.assertEqual(first.revision, 1)
+        self.assertNotIn("core_defaults", first.values)
+        for attr in (
+            "update",
+            "update_admin",
+            "clear",
+            "_core",
+            "_target",
+            "__current",
+        ):
+            self.assertFalse(hasattr(services.config, attr))
+        self.assertFalse(hasattr(runtime, "core_defaults"))
+        with self.assertRaises(TypeError):
+            first.values["fake"] = "new"
+        for name in ("core_defaults", "image_theme", "reply_theme"):
+            with self.assertRaises(ValueError):
+                runtime.module_services.for_candidate(
+                    "admin/mod", replace(manifest, config_fields=(ConfigField(name),))
+                )
+        with self.assertRaises(ValueError):
+            runtime.module_services.for_candidate(
+                CORE_MODULE_ID, replace(manifest, module_id="core")
+            )
+        self.assertEqual(
+            (
+                await runtime.config_repository.current(
+                    ConfigTarget("host-config", "admin/mod")
+                )
+            ).values,
+            {},
+        )
+
+    async def test_missing_raw_core_uses_theme_default_without_persistence(self):
+        runtime = self._runtime()
+        await self._start_with_candidate(runtime)
+        self.assertEqual(
+            (await runtime.theme_settings.current()).core_theme, "warm_paper"
+        )
+        self.assertEqual(
+            (
+                await runtime.config_repository.current(
+                    core_config_target("host-config")
+                )
+            ).values,
+            {},
+        )
+
+    async def test_invalid_legacy_region_is_preserved_without_entering_core_contract(
+        self,
+    ):
+        target = core_config_target("host-config")
+        runtime, context = await self._seed_invalid_defaults(
+            target, {"default_region": None}
+        )
+        summary = await runtime.admin_facade.config_snapshot(
             None, CORE_MODULE_ID, authorization=context
         )
+        self.assertEqual(summary.fields, {"image_theme": "unset"})
+        self.assertFalse(hasattr(summary, "default_region"))
         self.assertEqual(
-            (current.revision, current.default_region, current.state),
-            (3, "global", "valid"),
+            (await runtime.config_repository.current(target)).values,
+            {"default_region": None},
         )
 
     async def test_core_admin_read_fences_generation_after_repository_read(self):
@@ -123,82 +265,6 @@ class CoreDefaultsRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 await runtime.admin_facade.config_snapshot(
                     None, CORE_MODULE_ID, authorization=context
                 )
-
-    async def test_admin_can_replace_invalid_core_without_bypassing_patch_guards(self):
-        target = core_config_target("host-config")
-        runtime, context = await self._seed_invalid_defaults(
-            target, {"default_region": None}
-        )
-
-        def patch(mode, value=None, revision=2):
-            return ConfigPatch(
-                revision,
-                (ConfigFieldUpdate("default_region", mode, value=value),),
-                CORE_CONFIG_FIELDS,
-            )
-
-        for action, error in (
-            (patch(ConfigUpdateMode.REPLACE, True), ConfigurationValueError),
-            (patch(ConfigUpdateMode.KEEP), ConfigurationValueError),
-            (patch(ConfigUpdateMode.REPLACE, "global", revision=1), RevisionConflict),
-        ):
-            with self.assertRaises(error):
-                await runtime.admin_facade.update_config(
-                    None, CORE_MODULE_ID, action, authorization=context
-                )
-            raw = await runtime.config_repository.current(target)
-            self.assertEqual(
-                (raw.revision, dict(raw.values)), (2, {"default_region": None})
-            )
-        valid = patch(ConfigUpdateMode.REPLACE, "global")
-        with self.assertRaises(AdminAuthorizationDenied):
-            await runtime.admin_facade.update_config(None, CORE_MODULE_ID, valid)
-        with self.assertRaises(ConfigurationValueError):
-            await runtime.core_defaults.current()
-        updated = await runtime.admin_facade.update_config(
-            None, CORE_MODULE_ID, valid, authorization=context
-        )
-        self.assertEqual(updated.revision, 3)
-        raw = await runtime.config_repository.current(target)
-        self.assertEqual(
-            (raw.revision, dict(raw.values)), (3, {"default_region": "global"})
-        )
-        self.assertEqual(
-            (await runtime.core_defaults.current()).values["origin"], "new"
-        )
-
-    async def test_admin_can_clear_invalid_core_and_restore_missing_key_rules(self):
-        target = core_config_target("host-config")
-        runtime, context = await self._seed_invalid_defaults(
-            target, {"default_region": None}
-        )
-        legacy_view = CoreDefaultsView(
-            runtime.admin_operations._core_configuration().view(),
-        )
-        with self.assertRaises(ConfigurationValueError):
-            await legacy_view.current()
-        patch = ConfigPatch(
-            2,
-            (ConfigFieldUpdate("default_region", ConfigUpdateMode.CLEAR),),
-            CORE_CONFIG_FIELDS,
-        )
-        updated = await runtime.admin_facade.update_config(
-            None, CORE_MODULE_ID, patch, authorization=context
-        )
-        self.assertEqual(updated.revision, 3)
-        self.assertEqual((await runtime.config_repository.current(target)).values, {})
-        self.assertEqual(
-            (await runtime.core_defaults.current()).values["default_region"], "cn"
-        )
-        legacy = await legacy_view.current()
-        self.assertEqual(
-            (
-                legacy.values["default_region"],
-                legacy.values["origin"],
-                legacy.values["raw_present"],
-            ),
-            ("cn", "default", False),
-        )
 
     async def test_unrelated_or_keep_patch_cannot_hide_invalid_module_predecessor(self):
         target = validate_contract(ConfigTarget("host-config", "ff14/ff14"))
@@ -255,7 +321,7 @@ class CoreDefaultsRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 revision,
                 (
                     ConfigFieldUpdate(
-                        "default_region", ConfigUpdateMode.REPLACE, value=value
+                        "image_theme", ConfigUpdateMode.REPLACE, value=value
                     ),
                 ),
                 CORE_CONFIG_FIELDS,
@@ -264,13 +330,13 @@ class CoreDefaultsRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
         with self.assertRaises(AdminAuthorizationDenied):
             await runtime.admin_facade.update_config(
-                None, CORE_MODULE_ID, patch("global")
+                None, CORE_MODULE_ID, patch("warm_paper")
             )
         with self.assertRaises((AdminAuthorizationDenied, ValueError)):
             await runtime.admin_facade.update_config(
                 None,
                 CORE_MODULE_ID,
-                patch("global", target=core_config_target("other-principal")),
+                patch("warm_paper", target=core_config_target("other-principal")),
                 authorization=context,
             )
         with self.assertRaisesRegex(ValueError, "require a value"):
@@ -282,18 +348,18 @@ class CoreDefaultsRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 )
             self.assertNotIn("unsafe-input", str(caught.exception))
         updated = await runtime.admin_facade.update_config(
-            None, CORE_MODULE_ID, patch("global"), authorization=context
+            None, CORE_MODULE_ID, patch("warm_paper"), authorization=context
         )
         self.assertEqual(updated.revision, 2)
         raw = await runtime.config_repository.current(core_config_target("host-config"))
-        self.assertEqual(raw.values, {"default_region": "global"})
+        self.assertEqual(raw.values, {"image_theme": "warm_paper"})
         with self.assertRaises(RevisionConflict):
             await runtime.admin_facade.update_config(
-                None, CORE_MODULE_ID, patch("cn"), authorization=context
+                None, CORE_MODULE_ID, patch("cool_white"), authorization=context
             )
         with self.assertRaises(ValueError):
             await runtime.admin_facade.update_config(
-                None, "admin/mod", patch("cn"), authorization=context
+                None, "admin/mod", patch("cool_white"), authorization=context
             )
         with self.assertRaises(AdminAuthorizationDenied):
             await runtime.admin_facade.update_config(
@@ -321,137 +387,6 @@ class CoreDefaultsRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 )
             ).values,
             {},
-        )
-
-    async def test_combined_view_is_readonly_and_preserves_separate_revisions(self):
-        runtime = self._runtime()
-        await self._start_with_candidate(runtime)
-        _, context = await self._bootstrap(runtime)
-        services = runtime.module_services.for_candidate(
-            "admin/mod",
-            runtime.extension_runtime.candidate("admin").package.manifest.modules[0],
-        )
-        first = await services.config.current()
-        self.assertEqual(
-            (first.revision, first.values["core_defaults"]["revision"]), (1, 1)
-        )
-        for attr in (
-            "update",
-            "update_admin",
-            "clear",
-            "_core",
-            "_target",
-            "__current",
-        ):
-            self.assertFalse(hasattr(services.config, attr))
-            self.assertFalse(hasattr(runtime.core_defaults, attr))
-        await runtime.admin_facade.update_config(
-            None,
-            CORE_MODULE_ID,
-            ConfigPatch(
-                1,
-                (
-                    ConfigFieldUpdate(
-                        "default_region", ConfigUpdateMode.REPLACE, value="global"
-                    ),
-                ),
-                CORE_CONFIG_FIELDS,
-            ),
-            authorization=context,
-        )
-        after = await services.config.current()
-        self.assertEqual(after.revision, 1)
-        self.assertEqual(after.values["core_defaults"]["revision"], 2)
-        self.assertEqual(after.values["core_defaults"]["default_region"], "global")
-        with self.assertRaises(TypeError):
-            after.values["core_defaults"]["default_region"] = "cn"
-        self.assertEqual(first.values["core_defaults"]["default_region"], "cn")
-        manifest = runtime.extension_runtime.candidate(
-            "admin"
-        ).package.manifest.modules[0]
-        for name in ("core_defaults", "default_region"):
-            with self.assertRaises(ValueError):
-                runtime.module_services.for_candidate(
-                    "admin/mod",
-                    replace(
-                        manifest, config_fields=(validate_contract(ConfigField(name)),)
-                    ),
-                )
-        with self.assertRaises(ValueError):
-            runtime.module_services.for_candidate(
-                CORE_MODULE_ID, replace(manifest, module_id="core")
-            )
-        for name in ("core_defaults", "default_region"):
-            runtime.module_services._module_host_config_snapshots = {
-                "admin/mod": {name: "global"}
-            }
-            with self.assertRaises(ValueError):
-                runtime.module_services.for_candidate("admin/mod", manifest)
-        self.assertEqual(
-            (
-                await runtime.config_repository.current(
-                    validate_contract(ConfigTarget("host-config", "admin/mod"))
-                )
-            ).values,
-            {},
-        )
-
-    async def test_missing_raw_core_uses_declaration_default_without_persistence(self):
-        runtime = self._runtime()
-        await self._start_with_candidate(runtime)
-        view = CoreDefaultsView(
-            runtime.admin_operations._core_configuration().view(),
-        )
-        result = await view.current()
-        self.assertEqual(
-            result.values,
-            {
-                "default_region": "cn",
-                "origin": "default",
-                "conflict": False,
-                "raw_present": False,
-            },
-        )
-        self.assertEqual(
-            (
-                await runtime.config_repository.current(
-                    core_config_target("host-config")
-                )
-            ).values,
-            {},
-        )
-
-    async def test_explicit_null_raw_core_rejects_with_safe_error_without_fallback(
-        self,
-    ):
-        runtime = self._runtime()
-        await self._start_with_candidate(runtime)
-        target = core_config_target("host-config")
-
-        def seed(unit):
-            unit.execute(
-                "INSERT INTO config_state(principal_id,module_id,revision) VALUES (?,?,2)",
-                (target.principal_id, target.module_id),
-            )
-            unit.execute(
-                "INSERT INTO config_entries(principal_id,module_id,field,value_json,revision) VALUES (?,?,?,'null',2)",
-                (target.principal_id, target.module_id, "default_region"),
-            )
-
-        await runtime.database.executor.run_transaction(seed)
-        view = CoreDefaultsView(
-            runtime.admin_operations._core_configuration().view(),
-        )
-        with self.assertRaises(ConfigurationValueError) as caught:
-            await view.current()
-        self.assertEqual(
-            (caught.exception.field, caught.exception.code),
-            ("default_region", "invalid_configuration_value"),
-        )
-        self.assertNotIn("null", str(caught.exception))
-        self.assertEqual(
-            (await runtime.config_repository.current(target)).values,
-            {"default_region": None},
         )
 
     async def test_module_calendar_schema_isolation_and_invalid_writes(self):
@@ -520,7 +455,14 @@ class CoreDefaultsRuntimeTests(unittest.IsolatedAsyncioTestCase):
             grant,
         )
         self.assertEqual(result.values, valid)
-        self.assertEqual((await runtime.core_defaults.current()).revision, 1)
+        self.assertEqual(
+            (
+                await runtime.config_repository.current(
+                    core_config_target("host-config")
+                )
+            ).revision,
+            1,
+        )
         self.assertEqual(
             (
                 await runtime.config_repository.current(
@@ -529,9 +471,7 @@ class CoreDefaultsRuntimeTests(unittest.IsolatedAsyncioTestCase):
             ).values,
             {},
         )
-        combined = CoreDefaultsConfigView(
-            coordinator.view(), runtime.core_defaults, runtime.lifecycle.admission
-        )
+        combined = coordinator.view()
         self.assertEqual((await combined.current()).revision, 2)
         self.assertEqual(
             FF14ConfigSnapshot.from_values(
@@ -572,3 +512,55 @@ class CoreDefaultsRuntimeTests(unittest.IsolatedAsyncioTestCase):
             ).calendar_sync_interval_seconds,
             21600,
         )
+
+    async def test_retained_source_cannot_be_patched_or_cleared_or_leaked(self):
+        target = core_config_target("host-config")
+        runtime, context = await self._seed_invalid_defaults(
+            target, {"default_region": "legacy-value"}
+        )
+        coordinator = runtime.admin_operations._core_configuration()
+        view = await coordinator.current()
+        self.assertNotIn("default_region", view.values)
+        grant = await runtime.admin_authorization.authorize(
+            AdminOperation.UPDATE_CONFIG, invocation=None, context=context
+        )
+        for mode in (ConfigUpdateMode.CLEAR, ConfigUpdateMode.REPLACE):
+            update = ConfigFieldUpdate(
+                "default_region",
+                mode,
+                value="new" if mode is ConfigUpdateMode.REPLACE else None,
+            )
+            with self.assertRaises(ValueError):
+                ConfigPatch(2, (update,), CORE_CONFIG_FIELDS)
+            forged = ConfigPatch(
+                2, (update,), (ConfigField("default_region", False, "retained source"),)
+            )
+            with self.assertRaises((ValueError, AdminAuthorizationDenied)):
+                await coordinator.update_admin(target, forged, grant)
+        self.assertEqual(
+            (await runtime.config_repository.current(target)).values,
+            {"default_region": "legacy-value"},
+        )
+        from yomihime_game_link_sdk import (
+            ConfigSnapshot,
+            SecretMetadata,
+            SecretMetadataState,
+        )
+
+        with self.assertRaises(ValueError):
+            coordinator._validate_snapshot_fields(
+                ConfigSnapshot(
+                    2,
+                    {},
+                    (
+                        SecretMetadata(
+                            "default_region", None, 2, SecretMetadataState.TOMBSTONED
+                        ),
+                    ),
+                    target,
+                )
+            )
+        with self.assertRaises(ValueError):
+            coordinator._validate_snapshot_fields(
+                ConfigSnapshot(2, {"unknown_row": "private"}, target=target)
+            )
