@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {spawnSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 import {readFile} from 'node:fs/promises';
-import {validateCatalog,validateSnapshot,updateBody} from '../../../pages/management/app.js';
+import {validateCatalog,validateSnapshot,updateBody} from '../management/source-management.mjs';
 import {themeCatalog,themeSnapshot} from './theme-settings-fixtures.mjs';
 const field=(catalog,owner='ff14/ff14')=>catalog.fields.find(f=>f.module_id===owner&&f.group==='reply_style');
 test('Core theme choices validate exact enum projection and immutable catalog labels',()=>{
@@ -35,7 +35,7 @@ test('theme update conversion preserves owner/CAS, explicit themes and inheritan
 test('theme labels/palette are never copied into frontend implementation',async()=>{
  for(const name of ['management.js','management-view.ts','setting-choices.ts','ui/presentation.ts'])assert.doesNotMatch(await readFile(new URL('../../../pages/frontend/src/'+name,import.meta.url),'utf8'),/warm_paper|cool_white|deep_indigo|暖桃纸|冷白|深靛/);
 });
-test('built shell theme controls retain drafts, Core/module isolation, clear semantics and refresh fences',()=>{
+test('public Module theme choices retain null inheritance, owner isolation and CAS fences',()=>{
  const result=spawnSync(process.execPath,['--experimental-vm-modules',fileURLToPath(new URL('./theme-settings-contract.mjs',import.meta.url))],{encoding:'utf8'});
  assert.equal(result.status,0,result.stdout+'\n'+result.stderr);assert.match(result.stdout,/theme settings passed/);
 });

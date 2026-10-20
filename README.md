@@ -2,7 +2,7 @@
 
 面向 AstrBot 的游戏信息插件，当前仍处于开发阶段。插件介绍、安装包和开发说明也可查看[仓库](https://github.com/yomihime/astrbot_plugin_yomihime_game_link)。
 
-> Windows 安装限制：当前托管密钥保护会检查整个插件数据根目录的 READ/LIST 权限，继承的 `Users` 等非受信主体读取 ACE 也可能阻断初始化。普通继承 ACL 环境尚未证明开箱即用；Windows 本地证据与 Ubuntu CI 分开，详见下方[Windows 资格](#windows-原生文件系统资格)。
+> Windows 存储：全新且没有旧库存的实例会在运行身份的 KnownFolder LocalAppData 下选择专属私密存储，不要求先修改整个 AstrBot 数据目录的 ACL。发现旧库存时保留原位并核对安全条件，生产旧库迁移适配仍延期；Windows 本地证据与 Ubuntu CI 分开，详见下方[Windows 资格](#windows-原生文件系统资格)。
 
 ## FF14 功能
 
@@ -68,19 +68,21 @@ FFLogs 输出统计尚未实现，当前不提供；旧 `output` 指令不再注
 
 以下是独立认证的离线运维入口，不是 AstrBot 管理页的必需前置，也不能在运行中的实例上执行。它保留文件所有权、安全目录与独立管理员凭据校验。
 
-先停止 AstrBot，并确认插件数据目录中已有 `runtime.sqlite3`。在安装包目录 `astrbot_plugin_yomihime_game_link/` 的父目录，用具备本地文件所有者权限的交互终端运行；`--data-dir` 须为绝对路径且不得含 `..` 路径分量，平台验证边界见下文。不要从源码工作树或聊天命令执行：
+先停止 AstrBot，并确认该逻辑插件实例已经由 Host 初始化。在安装包目录 `astrbot_plugin_yomihime_game_link/` 的父目录，用具备本地文件所有者权限的交互终端运行；`--data-dir` 是逻辑插件数据根目录，须为绝对路径且不得含 `..` 路径分量。工具通过与运行时相同的私密存储选择器找到现有数据库、密钥和密文目录；Windows 新实例的数据库可能不在逻辑根下。平台验证边界见下文。不要从源码工作树或聊天命令执行：
 
 ```text
-python -m astrbot_plugin_yomihime_game_link.scripts.admin_credentials --database <existing-data-dir>/runtime.sqlite3 bootstrap
+python -m astrbot_plugin_yomihime_game_link.scripts.admin_credentials --database <selected-existing-database> bootstrap
 python -m astrbot_plugin_yomihime_game_link.scripts.configure_source_credentials --data-dir <existing-data-dir> --realm cn set
 python -m astrbot_plugin_yomihime_game_link.scripts.configure_source_credentials --data-dir <existing-data-dir> --realm global set
 ```
 
-首次使用先 bootstrap 独立管理员凭据；凭据仅通过隐藏提示输入。FFLogs 客户端 ID 和密钥也使用隐藏提示，可按区域分别设置；清除区域凭据使用对应命令并将 `set` 改为 `clear`。维护命令使用同一插件数据目录中的持久主密钥选择器；托管来源无需另设环境变量，高级环境来源必须在 AstrBot 与维护命令中显式提供同一份 `YGL_SECRET_KEY`（base64 编码的 32 字节密钥）。缺失、错误或冲突的环境来源不会自动切换。不要把密钥或凭据放在命令行参数中。工具要求数据库、脚本和父目录权限受限。维护进程本身不启动业务 Core，也不执行网络查询；完成配置后由管理员重新启动 AstrBot。
+首次使用先对 Host 已选中的现有数据库 bootstrap 独立管理员凭据；不要把保留的旧 source 数据库当成迁移后的当前库。凭据仅通过隐藏提示输入。FFLogs 客户端 ID 和密钥也使用隐藏提示，可按区域分别设置；清除区域凭据使用对应命令并将 `set` 改为 `clear`。凭据维护命令持有选中存储的本地维护锁和私密目录 guard，使用其持久主密钥；托管来源无需另设环境变量，高级环境来源必须在 AstrBot 与维护命令中显式提供同一份 `YGL_SECRET_KEY`（base64 编码的 32 字节密钥）。缺失、错误或冲突的来源、选择器冲突、未知／旧 schema、fenced epoch 或权限不足均拒绝，不创建空数据库、不自动迁移、重置或回退到旧 source。Windows 存储解析可能建立空私密目录脚手架，不会因此创建数据库或密钥。未知旧部署的生产迁移 supervisor 尚未实现，停止 Host 本身不足以使迁移 execute 可用；见[存储迁移监督边界](docs/storage-migration-supervision.md)。不要把密钥或凭据放在命令行参数中。工具要求数据库、脚本和父目录权限受限。维护进程本身不启动业务 Core，也不执行网络查询；完成配置后由管理员重新启动 AstrBot。
 
 POSIX 入口保留交互终端和文件所有者检查；Windows 仅接受已资格的运行环境与受限 NTFS 目录。身份、权限或文件状态无法确认时拒绝执行。操作者须先停止 AstrBot，工具不负责停止宿主；本次云验证没有在用户 Windows 或生产凭据上操作。环境范围见下方资格说明及[贡献指南](https://github.com/yomihime/astrbot_plugin_yomihime_game_link/blob/master/CONTRIBUTING.md)。
 
 ## 安装
+
+运行依赖由 `requirements.txt` 声明最低版本，不额外设置上限或精确锁定；宿主已有满足下限的较新版本无需为插件降级。实际依赖组合仍须验证，不能据此推定所有未来版本均兼容。SDK 完整性 pin、构建工具和测试依赖分别固定。
 
 请安装 Actions 构建出的插件 ZIP：
 
@@ -108,10 +110,12 @@ Core、Host、SDK、FF14 的职责与模块入口见[模块维护速查](https:/
 
 最低宿主版本通过官方 `astrbot_version: ">=4.29.1"` 元数据声明，当前以 AstrBot 4.29.1 的正式插件页面接口验证。只安装构建生成的 ZIP；源码 checkout 缺少构建页面和已校验 SDK 载荷，不能直接加载。外部运行依赖声明最低版本，构建工具和 SDK 完整性 pin 单独固定。
 
+管理入口要求当前请求应用自有 adapter 上绑定的同步 Dashboard token 验证方法，并逐次检查同源、身份、有效期、POST 与精确路径；接口缺失或返回合同不匹配时拒绝授权。宿主版本标签不代替接口验证，离线源码合同回归不代表已在目标实例安装验收。
+
 全新空库存会在受限插件数据目录建立持久托管主密钥，普通用户可从设置页配置 FFLogs；设置页“凭据存储”只显示安全状态，不显示密钥。备份和迁移须连同一致的 `runtime.sqlite3`、`secrets` 与私有 `keys` 目录保存，不能只复制数据库。已有密文若缺少原密钥，须先从“凭据存储”面板验证恢复，不能自动生成新钥覆盖。高级环境来源 `YGL_SECRET_KEY` 需要标准 Base64 编码的 32 字节 AES 密钥；显式提供空值、坏值或与已选托管密钥冲突时保持阻断。普通设置、帮助和无需凭据的功能可继续使用。不要把密钥写入聊天或日志。
 
 ### Windows 原生文件系统资格
 
 宿主 4.29.1 兼容与 Windows 原生底层资格分别验证。当前限定 Windows 10.0.26200/10.0.26300、x64 CPython（GIL）3.13.9、3.12.10 或 3.12.14；数据/插件目录须为本地 NTFS 的盘符绝对路径。UNC、junction/reparse 和硬链接拒绝。未资格环境会显示 `unsupported_environment`，不会降低句柄身份与竞态保护。其它 Windows/Python 组合需要对应原生安全测试，Linux 云回归不能代替实机资格。
 
-当前托管密钥实现拒绝非受信主体对整个插件数据根目录的 READ/LIST 访问，并非只保护 `keys` 子目录。继承的 `Users` 等读取 ACE 可能使符合 OS/Python 资格的安装仍无法初始化。已有 Windows 本地验证使用受限私有根，不证明普通继承 ACL 环境开箱即用；Ubuntu CI 成功也不证明这一点。遇到阻断，先查看设置页凭据存储状态及安全错误码；确有授权时由操作者检查该根目录 ACL，或请系统管理员协助。不要通过递归放宽权限、删除数据或关闭安全检查排障。
+全新且无旧数据库、密钥或秘密库存的 Windows 实例由存储选择器在运行身份的 KnownFolder LocalAppData 下建立实例专属私密目录，敏感数据库、密钥及相关临时和恢复文件使用选中的布局；不信任 `LOCALAPPDATA` 环境变量，也不先改整个 AstrBot 数据目录的 ACL。发现旧库存时沿原路径保留并审核安全资格，不自动复制、迁移、改 ACL 或降级；旧根的非受信读取权限仍可能阻止秘密操作，生产迁移适配明确延期。已有 Windows 原生验证覆盖私密目录选择及父目录边界，不代表所有用户安装或真实 Host 已验收，Ubuntu CI 也不能代替原生资格。遇到阻断先查看设置页凭据存储状态及安全错误码；不要通过递归放宽权限、删除数据或关闭安全检查排障。

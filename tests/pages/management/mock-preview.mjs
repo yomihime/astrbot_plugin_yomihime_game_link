@@ -39,4 +39,4 @@ window.mockManagementControl=Object.freeze({kind:'private mock management; not H
   failNext(endpoint,code='operation_unavailable'){failures.set(normalized(endpoint),code);},
 });
 document.body.insertAdjacentHTML('afterbegin','<p class="mock-banner" role="note">隔离 Mock 管理预览 · 内存数据 · 无真实宿主授权或写入</p>');
-await import('../../../pages/management/app.js');
+const {createManagementPage}=await import('./source-management.mjs');createManagementPage(document,window.AstrBotPluginView,window).start();

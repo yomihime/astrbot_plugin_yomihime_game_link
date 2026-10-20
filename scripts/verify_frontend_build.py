@@ -3,24 +3,29 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-GENERATED = (
-    "pages/shell",
-    "pages/management",
-    "pages/00-game-link",
-    "modules/ff14/pages/dist",
-)
+GENERATED = ("pages/00-game-link", ".build/frontend")
 
 
 def snapshot():
-    files = [
-        ROOT / "modules/ff14/pages/resources.json",
-        ROOT / "modules/ff14/yomihime.manifest.json",
-    ]
-    for name in GENERATED:
+    files = []
+    directories = list(GENERATED)
+    for path in sorted((ROOT / "modules").glob("*/yomihime.manifest.json")):
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+        files.extend((path, path.parent / "pages/resources.json"))
+        if any(
+            page["entry"].startswith("pages/dist/")
+            for module in manifest["modules"]
+            for page in module.get("pages", ())
+        ):
+            directories.append(
+                (path.parent / "pages/dist").relative_to(ROOT).as_posix()
+            )
+    for name in directories:
         directory = ROOT / name
         if not directory.is_dir():
             raise ValueError("frontend must be built before verification")

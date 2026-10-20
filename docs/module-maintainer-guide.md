@@ -26,7 +26,7 @@
 | 稳定持久目录 | [存储路由](../services/module_storage.py)；Core 选择 module_id，用户输入不能选择路径 |
 | 正式包与 SDK | [发布构建](../scripts/build_release.py)、[插件包清单](../scripts/build_dashboard_zip.py)；核对实际 wheel、pin、资源和许可证，不只测试源码副本 |
 
-配置按 `module_id` 命名空间保存。Core 的 cn/global 是游戏服务区域；FF14 日历默认值由模块定义。普通字段目录只提供声明，实际读取、写入和服务端语义校验另行授权。敏感配置不能声明普通 `value_schema`，不能出现在普通值或公开页；需要受信任、受限的管理策略和加密通道。管理请求还须通过来源、操作、资源、生命周期和 revision 校验。
+配置按 `module_id` 命名空间保存。FF14 default region and calendar defaults belong to the Module.普通字段目录只提供声明，实际读取、写入和服务端语义校验另行授权。敏感配置不能声明普通 `value_schema`，不能出现在普通值或公开页；需要受信任、受限的管理策略和加密通道。管理请求还须通过来源、操作、资源、生命周期和 revision 校验。
 
 图片主题属于 Core 管理的通用呈现偏好：全局 `game_link/core.image_theme` 默认 `warm_paper`；各模块的保留字段 `reply_theme` 默认跟随 Core。两处设置位于「回复样式 → 图片主题」，预设 ID 和名称均来自 Core 渲染器的 `list_themes()`。`reply_theme` 由 Core 注入配置服务与管理目录，不写入模块 manifest，也不是 FF14 业务字段；模块和 Host 配置均不能重新声明这些保留名称。可信装配另行授予具体字段的管理权限，声明或目录本身不授信。
 
@@ -34,7 +34,7 @@
 
 来源声明约束主机与超时，受控 HTTP 校验路径格式及请求/响应预算；凭据消费另受可信策略的精确资源/token 路径约束。FFLogs 客户端凭据按国服/国际服分开，OAuth token 由 Core 消费通道持有，模块只发公开 API 请求。市场单价、品质、服务器和时间由验证后的结构化响应共同投影；接口刚获取不代表实时可买，区域请求成功不代表全部 World 完整覆盖。最多 5 条挂牌是样本。
 
-页面源码与发布投影必须贯通构建、资源清单摘要和固定 Host 的重写规则。共享 Vue/Naive 运行时在各合法页面根发布一致字节，不能跨出 management 根导入 shell 运行时。模块资产按 owner/版本登记：同模块切页保留已加载资源；真正卸载、版本或安全失效清理自有样式/视图/浮层并封锁旧异步结果，再通过正式入口重新投影。`cleanup_pending` 不是重新启用许可。
+页面源码与发布投影必须贯通构建、资源清单摘要和固定 Host 的重写规则。正式构建仅在 `pages/00-game-link` 发布共享 Vue/Naive 运行时；全局管理嵌入该根，模块入口与资源按受信 manifest 投影，不发布独立 `shell` 或 `management` 页面根。模块资产按 owner/版本登记：同模块切页保留已加载资源；真正卸载、版本或安全失效清理自有样式/视图/浮层并封锁旧异步结果，再通过正式入口重新投影。`cleanup_pending` 不是重新启用许可。
 
 `runtime_id + module_epoch` 标识运行 owner，页面本地请求序号隔离迟到结果，`catalog_revision` 是 Registry 投影版本。声明的 `module_version` 与根据 resource(path,sha256) 计算的 `asset_version` 不同；配置 revision 用于持久化 CAS。这些字段不能互相替代，也不是客户端自授权或安全热替换完成的证明。资源投影的短期访问证明只允许读取已授权资源，不授予业务调用或管理权限。
 
@@ -50,7 +50,7 @@
 
 | 需求 | 当前正式能力 | 验收边界 |
 | --- | --- | --- |
-| REQ01 | 壳底部固定全局设置，空目录或 FF14 未加载仍可进入 Core 设置 | 真实 monitor 入口、Core 往返/CAS、解除挂载 FF14 后全局设置可用已验证 |
+| REQ01 | 壳底部固定全局设置，空目录或 FF14 未加载仍可进入 Core 设置 | 隔离浏览器与合成 Host/Core 夹具已验证正式页面组件、Core 往返/CAS 及解除挂载 FF14 后全局设置可用；不代表本轮已在真实 Host monitor 安装验收 |
 | REQ02 | 公共表单按 owner/group 显示；全局只选 Core，各模块导航有自己的设置入口；普通值与凭据接口分离，保存采用 revision CAS | schema/catalog 只描述 UI；资源权来自显式部署政策和逐请求鉴权，不能从声明自动获得 |
 | REQ03 | Core 持久记录主密钥来源、代际与库存；全域空库存时可自动建立私有托管密钥，旧密文须验证原密钥可解后恢复；未就绪或未知时禁止填写/替换；已受权 clear 仍须确认并通过最新 catalog/CAS，keep 零写；FFLogs cn/global 独立操作 | 高级环境来源 `YGL_SECRET_KEY` 显式提供时不回退；全域重置须明确确认并使所有模块的旧加密配置/授权凭据失效，普通配置与授权记录保留。诊断不回读密钥，主密钥就绪不证明上游 OAuth 有效 |
 | REQ04 | 公共调用使用闭合 owner/page/capability_id/parameters 信封；Host 不分派行情业务，FF14 解释输入并验证行情事实 | 保留受信 allowlist、epoch、准入、只读/隐私检查与 32 blocks/512 nodes 总预算 |
@@ -62,9 +62,9 @@ Core 与模块的命名空间配置是当前读写权威；Core 目录不依赖 
 
 `disable` 关闭业务准入，继续允许模块设置与启用管理。显式 `unload` 退出 active 普通/凭据目录、页面、来源、工具和 owner 注册，但模块管理仍显示可信恢复候选；保留最大部署政策不允许旧请求在卸载后提交。精确 owner、epoch 和生命周期检查不授予配置字段读写权。
 
-当前薄 SDK 发布构建使用 `yomihime_game_link_sdk-0.1.0a9-py3-none-any.whl`，实际摘要与 pin 由构建核对。SDK 发行编号、模块 ABI `2.0`、输出/展示/存储合同 `1.8.0` 及磁盘/工厂协议 `1` 独立判断；旧模块接口在开发期不兼容，不能将旧 1.x SDK 作为当前发行加载。已发布旧工件字节及受限旧展示记录读取边界保留，不迁移配置、凭据或数据库。升级固定 SDK 需要保留数据的宿主卸载与冷加载，以退出旧进程中已导入的 SDK；不能以同壳恢复模拟该步骤。此前 SDK 1.7 的独立实例安装、首次冷加载、最小公开查询、普通管理读写及保留数据解除挂载/恢复，以及先前隔离 AstrBot 4.29.1 ZIP 冒烟，均为历史实机证据；本轮 Windows、用户实例、真实凭据查询、IM 平台和模型调用分别验收。
+当前薄 SDK 发布构建使用 `yomihime_game_link_sdk-0.1.0a10-py3-none-any.whl`，实际摘要与 pin 由构建核对。SDK 发行编号、模块 ABI `2.0`、输出/展示/存储合同 `1.8.0` 及磁盘/工厂协议 `1` 独立判断；旧模块接口在开发期不兼容，不能将旧 1.x SDK 作为当前发行加载。已发布旧工件字节及受限旧展示记录读取边界保留，不迁移配置、凭据或数据库。升级固定 SDK 需要保留数据的宿主卸载与冷加载，以退出旧进程中已导入的 SDK；不能以同壳恢复模拟该步骤。此前 SDK 1.7 的独立实例安装、首次冷加载、最小公开查询、普通管理读写及保留数据解除挂载/恢复，以及先前隔离 AstrBot 4.29.1 ZIP 冒烟，均为历史实机证据；本轮 Windows、用户实例、真实凭据查询、IM 平台和模型调用分别验收。
 
-SDK a8 引入的 PUBLIC `BACKGROUND` 调度与 1–32 组固定 `background_parameters` 继续包含在 a9；详情见[SDK 说明](module-sdk.md#background-collectors)。PR #8 固定候选 a9 wheel 为 42,636 bytes，SHA-256 `4d8d71c4ab04805c3a1edbd9e194b5228e66c9e0290caf01daae9374d65a74e5`；本轮 Windows 构建和宿主验收以对应原始记录为准。历史 a7/a8 工件及测试不作为当前候选的验收。
+SDK a8 引入的 PUBLIC `BACKGROUND` 调度与 1–32 组固定 `background_parameters` 继续包含在 a10；详情见[SDK 说明](module-sdk.md#background-collectors)。PR #8 固定候选 a9 wheel 为 42,636 bytes，SHA-256 `4d8d71c4ab04805c3a1edbd9e194b5228e66c9e0290caf01daae9374d65a74e5`；本轮 Windows 构建和宿主验收以对应原始记录为准。历史 a7/a8 工件及测试不作为当前候选的验收。
 
 固定宿主 iframe 不允许原生 `confirm` 或顶层导航。现有草稿与模块生命周期守卫使用有归属的页面内确认，保留操作、owner、revision 与生命周期检查；取消等待按钮解除禁用后才安全恢复焦点，不抢新页面或用户已转移的焦点。需要新资源投影时，使用宿主左侧“插件”菜单和目标 monitor 正式重开；页面内文字指引不承诺自动跳转、无刷新热加载或资源授权续期。
 
@@ -97,3 +97,23 @@ SDK a7 可在 `DisplayDocument.card` 附带纯 `cards.Document`，文本块仍�
 Core 全局「回复样式 → 图片字体」的状态、重试、上传复用正式管理身份/来源/资源/生命周期检查；只接受准确大小和 SHA 的同一固定字体，客户端文件名不决定目标路径。它不是主题配置草稿，不使用配置 CAS；状态 revision 也不授权写入。切页只忽略迟到回执，不保证取消已提交上传。
 
 仓库与轻量插件只分发字体 OFL 与 NOTICE；固定哈希的原版 OTF 是由 `scripts/prepare_test_font.py` 准备的开发夹具，不随源码或插件包分发。不能因包内有 NOTICE 就声称运行时已有字体。后台网络不等待启动完成，但文件/哈希/Pillow 检查有同步开销；系统回退字体渲染不声明为与标准字体完全同图。实际安装和渲染状态须按对应候选单独验收。
+
+
+## Backend boundaries and module pages
+
+Modules import only the SDK, the standard library and their own package. Core, Host, infrastructure, internal repositories, dynamic loaders and service private fields are forbidden. The enforced rule is tested in [dependency checks](../tests/contracts/test_module_dependency_boundary.py); direct fixture Registry registration is not formal discovery/capture/trusted selection/load evidence.
+
+Business diagnostics use scope.diagnostics.emit(event_id, payload) with module-owned closed schemas and separately selected trusted policies. See the [SDK contract](module-sdk.md#invocation-bound-diagnostics-a10) for bounds and authority/cancellation behavior. Calendar sources/warnings and FFLogs fields belong to FF14, not Host log handlers or Core. Only CacheUnavailable permits uncached fallback; do not swallow generic ServiceUnavailable or rebind to rotate proof.
+
+Frontend modules consume only [the public contract](../pages/public-contract.ts). Page roles home/config/aux are declared in manifests, with at most one home and one config per module. Owner and entry assets are captured by trusted assembly. Config and credential services are limited to current owner/page/runtime/epoch and trusted declared fields, with independent READ/UPDATE authority and CAS. A single 00-game-link page token does not grant management authority. Credential snapshots contain only configured/decryptable/upstream=unverified.
+
+Reviewed LegacyConfigCopyPolicy accepts only a policy ID and revisions from clients. Source owner/field/value/schema are server-selected. Existing target values are preserved, missing source is a no-op, invalid/secret source is refused. Temporary effective projection uses only the destination field name until explicit target configuration exists; no core_defaults object or arbitrary Core read port is exposed. Explicit copy keeps source rows.
+
+
+### Diagnostic and configuration maintenance
+
+Calendar diagnostics omit absent HTTP status metadata; an ordinary source transport failure must still commit its failure state and try the existing fallback. Awaited diagnostic size ceilings (including strings) only drop optional output. Schema/type/unsafe-content errors remain strict, and cancellation, authorization and stale-epoch failures always propagate. The generic Host sink never imports FF14 schemas.
+
+Use effective module-page configuration values and their controlled source/migration_pending metadata; do not substitute declaration defaults for a pending legacy destination. Source rows remain retained. Generic retained source fields do not appear in ordinary snapshots and cannot be patched/cleared through the active field list.
+
+Module config pages preserve reply_theme with null meaning follow Core. Read choices from the authorized descriptors supplied by Core; never hardcode the Core palette or import its implementation. Config descriptors contain only the selected page's authorized ordinary fields and a bounded approved schema subset. Opaque page sessions bind real Host management authority across awaits and commit, without claiming DOM attestation.

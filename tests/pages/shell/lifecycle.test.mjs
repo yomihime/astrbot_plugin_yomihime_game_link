@@ -25,15 +25,15 @@ test('explicit skip focuses without implicit scroll then reveals the main start'
  skipToMain(null);assert.equal(calls.length,0);skipToMain(main);
  assert.deepEqual(calls,[['focus',{preventScroll:true}],['scroll',{block:'start',inline:'nearest',behavior:'instant'}]]);dom.window.close();
 });
-function harness({data=catalog(),loader,initialContext,readyTask,expectedPage='shell',assetEvent=()=> 'load',hash='#/module/ff14%2Fff14/items'}={}) {
+function harness({data=catalog(),loader,initialContext,readyTask,expectedPage='00-game-link',assetEvent=()=> 'load',hash='#/module/ff14%2Fff14/items'}={}) {
   const dom=new JSDOM('<template id="module-style-assets"></template><div id="container"></div>',{url:'http://localhost/'+hash}),window=dom.window,container=window.document.getElementById('container');
   for(const module of data.modules || []) for(const page of module.pages) for(const path of page.styles) {const link=window.document.createElement('link');link.rel='stylesheet';link.dataset.resource=path;link.setAttribute('href','./'+path+'?fixture-authorized');window.document.getElementById('module-style-assets').content.append(link);}
   const styleRequests=[],imports=[],append=window.document.head.append.bind(window.document.head);
   window.document.head.append=(...nodes)=>{append(...nodes);for(const node of nodes)if(node.matches?.('link[data-module-style]')){styleRequests.push(node);const event=assetEvent(node);if(event)queueMicrotask(()=>node.dispatchEvent(new window.Event(event)));}};
   const gets=[],posts=[],mounts=[]; let callback;
   window.scrollTo=()=>{};
-  const context={pluginName:'astrbot_plugin_yomihime_game_link',pageName:'shell',binding:1,isDark:false,locale:'zh-CN'};
-  const bridge={ready:()=>readyTask?.promise || Promise.resolve(initialContext === undefined ? context : initialContext),onContext(fn){callback=fn;return()=>{callback=null;};},apiGet(path){const p=deferred();gets.push({path,...p});return p.promise;},apiPost(path,body){const p=deferred();posts.push({path,body,...p});return p.promise;}};
+  const context={pluginName:'astrbot_plugin_yomihime_game_link',pageName:'00-game-link',binding:1,isDark:false,locale:'zh-CN'};
+  const bridge={ready:()=>readyTask?.promise || Promise.resolve(initialContext === undefined ? context : initialContext),onContext(fn){callback=fn;return()=>{callback=null;};},apiGet(path){const p=deferred();gets.push({path,...p});return p.promise;},apiPost(path,body){if(path==='admin/module-page-session')return Promise.resolve({page_session:'synthetic-proof',expires_at:Date.now()/1000+30});if(path==='admin/module-page-session-close')return Promise.resolve({closed:true});const p=deferred();posts.push({path,body,...p});return p.promise;}};
   const loadPage=loader||(async(entry)=>({mount(view,options){const input=window.document.createElement('input');input.value='draft';view.append(input);const mount={view,input,options,updates:[],disposed:0};mounts.push(mount);return{update(context){mount.updates.push(context);},dispose(){mount.disposed++;view.replaceChildren();}};}}));
   const shell=createShell({bridge,container,window,expectedPage,loadPage:entry=>{imports.push(entry);return loadPage(entry);},changed(){},timeoutMs:100}); shell.start();
   return {shell,dom,container,gets,posts,mounts,styleRequests,imports,context,emit:c=>callback?.(c),async start(){await flush();gets[0].resolve(data);await flush();},close(){shell.dispose();dom.window.close();}};
@@ -89,7 +89,7 @@ test('query deadline permits manual recovery and no automatic post; invalid inpu
 });
 
 test('draft persistence is isolated by true context boundary runtime and epoch',()=>{const h=queryHarness('items');h.controller.edit('query','private previous draft');h.scope.dispose();const scope=createScope(()=>true);const next=createQueryController({routeId:'items',context:{...h.context,boundary:'new',runtimeId:'new-runtime',epoch:2},scope,services:{invoke(){throw Error('unused');}}},()=>{});assert.equal(next.state.draft.query,'');scope.dispose();});
-test('wrong plugin/page contexts fence active view and late ready cannot restore it',async()=>{const h=harness();try {await h.start();h.emit({...h.context,pageName:'management'});await flush();assert.equal(h.shell.state.mounted,false);assert.equal(h.container.children.length,0);assert.equal(h.gets.length,1);}finally{h.close();}});
+test('wrong plugin/page contexts fence active view and late ready cannot restore it',async()=>{const h=harness();try {await h.start();h.emit({...h.context,pageName:'shell'});await flush();assert.equal(h.shell.state.mounted,false);assert.equal(h.container.children.length,0);assert.equal(h.gets.length,1);}finally{h.close();}});
 test('canonical default binding accepts its own name and rejects shell/default cross-binding',async()=>{
   const context={pluginName:'astrbot_plugin_yomihime_game_link',pageName:'00-game-link',binding:1};
   const valid=harness({expectedPage:'00-game-link',initialContext:context});try{await valid.start();assert.equal(valid.shell.state.mounted,true);}finally{valid.close();}
@@ -105,8 +105,8 @@ test('route navigation focuses main with preventScroll then explicitly scrolls t
 test('refresh completion cannot revive a query started before refresh began',async()=>{const h=queryHarness('items');try{h.controller.edit('query','44091');const pending=h.controller.submit();h.controller.update({...h.context,available:false});assert.equal(h.controller.state.phase,'idle');assert.equal(h.controller.state.draft.query,'44091');h.controller.update({...h.context,available:true});h.requests[0].resolve(success);await pending;assert.equal(h.controller.state.result,null);assert.equal(h.requests.length,1);const retry=h.controller.submit();h.requests[1].resolve(success);await retry;assert.equal(h.controller.state.result.status,'partial_success');}finally{h.scope.dispose();}});
 
 test('missing page binding fails closed through ready and onContext; late ready cannot undo the event',async()=>{
- const valid={pluginName:'astrbot_plugin_yomihime_game_link',pageName:'shell',binding:1};
- const invalid=[{}, {pluginName:valid.pluginName}, {pageName:'shell'}, {...valid,pluginName:null}, {...valid,pageName:undefined}, {...valid,pluginName:4}, {...valid,pageName:'management'}];
+ const valid={pluginName:'astrbot_plugin_yomihime_game_link',pageName:'00-game-link',binding:1};
+ const invalid=[{}, {pluginName:valid.pluginName}, {pageName:'00-game-link'}, {...valid,pluginName:null}, {...valid,pageName:undefined}, {...valid,pluginName:4}, {...valid,pageName:'management'}];
  for(const context of invalid){const h=harness({initialContext:context});try{await flush();assert.equal(h.gets.length,0);assert.equal(h.mounts.length,0);assert.equal(h.posts.length,0);assert.equal(h.shell.state.mounted,false);}finally{h.close();}}
  for(const context of invalid){const readyTask=deferred(),h=harness({readyTask});try{h.emit(context);readyTask.resolve(valid);await flush();assert.equal(h.gets.length,0);assert.equal(h.mounts.length,0);assert.equal(h.posts.length,0);}finally{h.close();}}
  const h=harness();try{await h.start();h.emit({binding:1});await flush();assert.equal(h.shell.state.mounted,false);assert.equal(h.gets.length,1);}finally{h.close();}
@@ -116,7 +116,7 @@ test('failed scope callback is retried while successful callbacks are not repeat
 test('resource registered after revocation retains a failed cleanup for retry',()=>{const scope=createScope(()=>true);scope.dispose();let fail=true,attempts=0;assert.throws(()=>scope.onDispose(()=>{attempts++;if(fail)throw Error('late-owned-cleanup');}));fail=false;scope.dispose();scope.dispose();assert.equal(attempts,2);assert.equal(scope.isCurrent(),false);});
 test('missing binding revokes an active query and delayed import even when names previously matched',async()=>{
  const h=harness();try{await h.start();const pending=h.mounts[0].options.services.invoke('item.lookup',{query:'44091'});h.emit({pluginName:h.context.pluginName,binding:1});h.posts[0].resolve(success);await assert.rejects(pending,/revoked/);assert.equal(h.gets.length,1);assert.equal(h.shell.state.mounted,false);}finally{h.close();}
- const task=deferred(),slow=harness({loader:()=>task.promise});try{await slow.start();slow.emit({pageName:'shell',binding:1});let mounts=0;task.resolve({mount(){mounts++;return{update(){},dispose(){}};}});await flush();assert.equal(mounts,0);assert.equal(slow.gets.length,1);}finally{slow.close();}
+ const task=deferred(),slow=harness({loader:()=>task.promise});try{await slow.start();slow.emit({pageName:'00-game-link',binding:1});let mounts=0;task.resolve({mount(){mounts++;return{update(){},dispose(){}};}});await flush();assert.equal(mounts,0);assert.equal(slow.gets.length,1);}finally{slow.close();}
 });
 
 test('shell DOM cleanup failure retains its stage without repeating successful page cleanup',async()=>{const h=harness();try{await h.start();const first=h.mounts[0],replace=h.container.replaceChildren.bind(h.container);let fail=true;h.container.replaceChildren=(...nodes)=>{if(fail)throw Error('deterministic-shell-DOM-cleanup');replace(...nodes);};h.shell.select('ff14/ff14','market');await flush();assert.equal(h.shell.state.cleanupPending,true);assert.equal(h.mounts.length,1);assert.equal(first.disposed,1);fail=false;h.shell.retryCleanup();await flush();assert.equal(h.shell.state.cleanupPending,false);assert.equal(h.mounts.length,2);assert.equal(first.disposed,1);}finally{h.close();}});

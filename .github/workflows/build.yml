@@ -83,7 +83,7 @@ jobs:
       - name: Run shell, management and FF14 page tests
         run: |
           npm test --prefix pages/frontend
-          node --test tests/pages/management/*.test.mjs tests/pages/management/test_management.mjs tests/pages/management/test_credentials.mjs tests/pages/ff14/test_ui_a.mjs tests/pages/ff14/test_item_display.mjs tests/pages/ff14/test_market_projection.mjs tests/pages/ff14/test_market_ui.mjs
+          node --test tests/pages/management/*.test.mjs tests/pages/management/test_management.mjs tests/pages/management/test_credentials.mjs tests/pages/ff14/*.test.mjs tests/pages/ff14/test_ui_a.mjs tests/pages/ff14/test_item_display.mjs tests/pages/ff14/test_market_projection.mjs tests/pages/ff14/test_market_ui.mjs tests/modules/minimal/*.test.mjs
 
       - name: Check documentation links
         run: python scripts/check_doc_links.py
@@ -97,7 +97,7 @@ jobs:
 
       - name: Run unit tests
         env:
-          YGL_TEST_SDK_WHEEL: ${{ github.workspace }}/dist/yomihime_game_link_sdk-0.1.0a9-py3-none-any.whl
+          YGL_TEST_SDK_WHEEL: ${{ github.workspace }}/dist/yomihime_game_link_sdk-0.1.0a10-py3-none-any.whl
         run: python -m unittest discover -s tests -t . -v
 
       - name: Check lint
@@ -180,11 +180,14 @@ jobs:
           python -m unittest -v
           tests.host.test_b05_sdk_bootstrap
           tests.host.test_astrbot_contract
+          tests.host.test_admin_pages
+          tests.host.test_global_admin_commit_fence
           tests.host.test_ff14_pages
           tests.host.test_astrbot_runtime
           tests.host.test_item_display_contract
           tests.packaging.test_sdk_artifact_install
           tests.packaging.test_release_build
+          tests.packaging.test_runtime_dependencies
 
       - name: Build plugin and SDK artifacts
         env:

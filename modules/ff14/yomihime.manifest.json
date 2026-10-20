@@ -698,6 +698,18 @@
       ],
       "config_fields": [
         {
+          "name": "ff14_default_region",
+          "default": "cn",
+          "description": "默认查询区域",
+          "value_schema": {
+            "type": "string",
+            "enum": [
+              "cn",
+              "global"
+            ]
+          }
+        },
+        {
           "name": "ff14_subscriptions_enabled",
           "sensitive": false,
           "required": false,
@@ -995,6 +1007,41 @@
           "styles": [
             "pages/dist/styles.css"
           ]
+        },
+        {
+          "route_id": "home",
+          "title": "FF14",
+          "entry": "pages/dist/entry.js",
+          "order": -20,
+          "access": "public_web",
+          "styles": [
+            "pages/dist/styles.css"
+          ],
+          "role": "home"
+        },
+        {
+          "route_id": "config",
+          "title": "FF14 Settings",
+          "entry": "pages/dist/entry.js",
+          "order": -10,
+          "access": "public_web",
+          "styles": [
+            "pages/dist/styles.css"
+          ],
+          "role": "config",
+          "config_fields": [
+            "ff14_default_region",
+            "ff14_subscriptions_enabled",
+            "ff14_calendar_default_days",
+            "ff14_calendar_default_timezone",
+            "ff14_calendar_default_delivery_time",
+            "ff14_calendar_sync_interval_seconds",
+            "reply_theme"
+          ],
+          "credential_fields": [
+            "credential_fflogs_cn",
+            "credential_fflogs_global"
+          ]
         }
       ],
       "resources": [
@@ -1004,11 +1051,2460 @@
         },
         {
           "path": "pages/dist/entry.js",
-          "sha256": "711cb1fd124a901028e2cec5c070b7f3f54e72c85b9513e4c7a75c5f21999cd1"
+          "sha256": "5b06d60e707ef360fab77eb325954d24795808c12f1d5c124d9036bf0b0e3599"
         },
         {
           "path": "pages/dist/styles.css",
-          "sha256": "7277ccfc270360e4df8a889815b20beac99840f9911369dd8ff090cc84cc7557"
+          "sha256": "7c35f99ac101b4bf42e7312fa7d3662f09c64bfd585e93801ce89f5f13cc1a40"
+        }
+      ],
+      "diagnostics": [
+        {
+          "event_id": "FF14OutputMetadataShape",
+          "payload_schema": {
+            "type": "object",
+            "properties": {
+              "source": {
+                "$ref": "#/$defs/s1"
+              },
+              "status": {
+                "$ref": "#/$defs/s2"
+              },
+              "cached": {
+                "$ref": "#/$defs/s3"
+              },
+              "payload": {
+                "$ref": "#/$defs/s4"
+              }
+            },
+            "required": [
+              "source",
+              "status",
+              "cached",
+              "payload"
+            ],
+            "additionalProperties": false,
+            "$defs": {
+              "s1": {
+                "type": "string",
+                "maxLength": 160,
+                "enum": [
+                  "fflogs_public_cn",
+                  "fflogs_public_global"
+                ]
+              },
+              "s2": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 100,
+                "maximum": 599
+              },
+              "s3": {
+                "type": "boolean"
+              },
+              "s6": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "maxLength": 128
+              },
+              "s9": {
+                "type": "string",
+                "maxLength": 128
+              },
+              "s11": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "maxLength": 32
+              },
+              "s16": {
+                "type": [
+                  "object",
+                  "null"
+                ],
+                "properties": {
+                  "kind": {
+                    "$ref": "#/$defs/s11"
+                  },
+                  "name": {
+                    "$ref": "#/$defs/s6"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "name"
+                ],
+                "additionalProperties": false
+              },
+              "s15": {
+                "type": [
+                  "object",
+                  "null"
+                ],
+                "properties": {
+                  "kind": {
+                    "$ref": "#/$defs/s11"
+                  },
+                  "name": {
+                    "$ref": "#/$defs/s6"
+                  },
+                  "ofType": {
+                    "$ref": "#/$defs/s16"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "name"
+                ],
+                "additionalProperties": false
+              },
+              "s14": {
+                "type": [
+                  "object",
+                  "null"
+                ],
+                "properties": {
+                  "kind": {
+                    "$ref": "#/$defs/s11"
+                  },
+                  "name": {
+                    "$ref": "#/$defs/s6"
+                  },
+                  "ofType": {
+                    "$ref": "#/$defs/s15"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "name"
+                ],
+                "additionalProperties": false
+              },
+              "s13": {
+                "type": [
+                  "object",
+                  "null"
+                ],
+                "properties": {
+                  "kind": {
+                    "$ref": "#/$defs/s11"
+                  },
+                  "name": {
+                    "$ref": "#/$defs/s6"
+                  },
+                  "ofType": {
+                    "$ref": "#/$defs/s14"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "name"
+                ],
+                "additionalProperties": false
+              },
+              "s12": {
+                "type": [
+                  "object",
+                  "null"
+                ],
+                "properties": {
+                  "kind": {
+                    "$ref": "#/$defs/s11"
+                  },
+                  "name": {
+                    "$ref": "#/$defs/s6"
+                  },
+                  "ofType": {
+                    "$ref": "#/$defs/s13"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "name"
+                ],
+                "additionalProperties": false
+              },
+              "s10": {
+                "type": [
+                  "object",
+                  "null"
+                ],
+                "properties": {
+                  "kind": {
+                    "$ref": "#/$defs/s11"
+                  },
+                  "name": {
+                    "$ref": "#/$defs/s6"
+                  },
+                  "ofType": {
+                    "$ref": "#/$defs/s12"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "name"
+                ],
+                "additionalProperties": false
+              },
+              "s19": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "maxLength": 256
+              },
+              "s18": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "$ref": "#/$defs/s9"
+                  },
+                  "type": {
+                    "$ref": "#/$defs/s10"
+                  },
+                  "defaultValue": {
+                    "$ref": "#/$defs/s19"
+                  }
+                },
+                "required": [
+                  "name",
+                  "type",
+                  "defaultValue"
+                ],
+                "additionalProperties": false
+              },
+              "s17": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/s18"
+                },
+                "maxItems": 64
+              },
+              "s8": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "$ref": "#/$defs/s9"
+                  },
+                  "type": {
+                    "$ref": "#/$defs/s10"
+                  },
+                  "args": {
+                    "$ref": "#/$defs/s17"
+                  }
+                },
+                "required": [
+                  "name",
+                  "type",
+                  "args"
+                ],
+                "additionalProperties": false
+              },
+              "s7": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/s8"
+                },
+                "maxItems": 256
+              },
+              "s5": {
+                "type": [
+                  "object",
+                  "null"
+                ],
+                "properties": {
+                  "name": {
+                    "$ref": "#/$defs/s6"
+                  },
+                  "fields": {
+                    "$ref": "#/$defs/s7"
+                  }
+                },
+                "required": [
+                  "name",
+                  "fields"
+                ],
+                "additionalProperties": false
+              },
+              "s4": {
+                "type": "object",
+                "properties": {
+                  "queryType": {
+                    "$ref": "#/$defs/s5"
+                  },
+                  "worldDataType": {
+                    "$ref": "#/$defs/s5"
+                  },
+                  "zoneType": {
+                    "$ref": "#/$defs/s5"
+                  },
+                  "difficultyType": {
+                    "$ref": "#/$defs/s5"
+                  },
+                  "encounterType": {
+                    "$ref": "#/$defs/s5"
+                  },
+                  "gameDataType": {
+                    "$ref": "#/$defs/s5"
+                  },
+                  "gameClassType": {
+                    "$ref": "#/$defs/s5"
+                  },
+                  "gameSpecType": {
+                    "$ref": "#/$defs/s5"
+                  },
+                  "expansionType": {
+                    "$ref": "#/$defs/s5"
+                  },
+                  "partitionType": {
+                    "$ref": "#/$defs/s5"
+                  }
+                },
+                "required": [
+                  "queryType",
+                  "worldDataType",
+                  "zoneType",
+                  "difficultyType",
+                  "encounterType",
+                  "gameDataType",
+                  "gameClassType",
+                  "gameSpecType",
+                  "expansionType",
+                  "partitionType"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        {
+          "event_id": "FF14CharacterMetadata",
+          "payload_schema": {
+            "type": "object",
+            "properties": {
+              "source": {
+                "$ref": "#/$defs/s1"
+              },
+              "status": {
+                "$ref": "#/$defs/s2"
+              },
+              "cached": {
+                "$ref": "#/$defs/s3"
+              },
+              "payload": {
+                "$ref": "#/$defs/s4"
+              }
+            },
+            "required": [
+              "source",
+              "status",
+              "cached",
+              "payload"
+            ],
+            "additionalProperties": false,
+            "$defs": {
+              "s1": {
+                "type": "string",
+                "maxLength": 160,
+                "enum": [
+                  "fflogs_public_cn",
+                  "fflogs_public_global"
+                ]
+              },
+              "s2": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 100,
+                "maximum": 599
+              },
+              "s3": {
+                "type": "boolean"
+              },
+              "s8": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "maxLength": 160
+              },
+              "s12": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 2147483647
+              },
+              "s11": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "$ref": "#/$defs/s12"
+                },
+                "maxItems": 32
+              },
+              "s10": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "$ref": "#/$defs/s8"
+                  },
+                  "name": {
+                    "$ref": "#/$defs/s8"
+                  },
+                  "sizes": {
+                    "$ref": "#/$defs/s11"
+                  }
+                },
+                "required": [
+                  "id",
+                  "name"
+                ],
+                "additionalProperties": false
+              },
+              "s9": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/s10"
+                },
+                "maxItems": 32
+              },
+              "s15": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "$ref": "#/$defs/s8"
+                  }
+                },
+                "required": [
+                  "id"
+                ],
+                "additionalProperties": false
+              },
+              "s14": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "$ref": "#/$defs/s8"
+                  },
+                  "name": {
+                    "$ref": "#/$defs/s8"
+                  },
+                  "zone": {
+                    "$ref": "#/$defs/s15"
+                  }
+                },
+                "required": [
+                  "id",
+                  "name"
+                ],
+                "additionalProperties": false
+              },
+              "s13": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/s14"
+                },
+                "maxItems": 512
+              },
+              "s16": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "s18": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "$ref": "#/$defs/s8"
+                  },
+                  "name": {
+                    "$ref": "#/$defs/s8"
+                  },
+                  "default": {
+                    "$ref": "#/$defs/s16"
+                  }
+                },
+                "required": [
+                  "id",
+                  "name",
+                  "default"
+                ],
+                "additionalProperties": false
+              },
+              "s17": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/s18"
+                },
+                "maxItems": 64
+              },
+              "s7": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "$ref": "#/$defs/s8"
+                  },
+                  "name": {
+                    "$ref": "#/$defs/s8"
+                  },
+                  "difficulties": {
+                    "$ref": "#/$defs/s9"
+                  },
+                  "encounters": {
+                    "$ref": "#/$defs/s13"
+                  },
+                  "frozen": {
+                    "$ref": "#/$defs/s16"
+                  },
+                  "partitions": {
+                    "$ref": "#/$defs/s17"
+                  }
+                },
+                "required": [
+                  "id",
+                  "name",
+                  "difficulties",
+                  "encounters"
+                ],
+                "additionalProperties": false
+              },
+              "s6": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/s7"
+                },
+                "maxItems": 512
+              },
+              "s21": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/s15"
+                },
+                "maxItems": 512
+              },
+              "s20": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "$ref": "#/$defs/s8"
+                  },
+                  "name": {
+                    "$ref": "#/$defs/s8"
+                  },
+                  "zones": {
+                    "$ref": "#/$defs/s21"
+                  }
+                },
+                "required": [
+                  "id",
+                  "name",
+                  "zones"
+                ],
+                "additionalProperties": false
+              },
+              "s19": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/s20"
+                },
+                "maxItems": 64
+              },
+              "s5": {
+                "type": "object",
+                "properties": {
+                  "zones": {
+                    "$ref": "#/$defs/s6"
+                  },
+                  "expansions": {
+                    "$ref": "#/$defs/s19"
+                  }
+                },
+                "required": [
+                  "zones"
+                ],
+                "additionalProperties": false
+              },
+              "s4": {
+                "type": "object",
+                "properties": {
+                  "worldData": {
+                    "$ref": "#/$defs/s5"
+                  }
+                },
+                "required": [
+                  "worldData"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        {
+          "event_id": "FF14OutputMetadata",
+          "payload_schema": {
+            "type": "object",
+            "properties": {
+              "source": {
+                "$ref": "#/$defs/s1"
+              },
+              "status": {
+                "$ref": "#/$defs/s2"
+              },
+              "cached": {
+                "$ref": "#/$defs/s3"
+              },
+              "payload": {
+                "$ref": "#/$defs/s4"
+              }
+            },
+            "required": [
+              "source",
+              "status",
+              "cached",
+              "payload"
+            ],
+            "additionalProperties": false,
+            "$defs": {
+              "s1": {
+                "type": "string",
+                "maxLength": 160,
+                "enum": [
+                  "fflogs_public_cn",
+                  "fflogs_public_global"
+                ]
+              },
+              "s2": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 100,
+                "maximum": 599
+              },
+              "s3": {
+                "type": "boolean"
+              },
+              "s8": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "maxLength": 160
+              },
+              "s12": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 2147483647
+              },
+              "s11": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "$ref": "#/$defs/s12"
+                },
+                "maxItems": 32
+              },
+              "s10": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "$ref": "#/$defs/s8"
+                  },
+                  "name": {
+                    "$ref": "#/$defs/s8"
+                  },
+                  "sizes": {
+                    "$ref": "#/$defs/s11"
+                  }
+                },
+                "required": [
+                  "id",
+                  "name"
+                ],
+                "additionalProperties": false
+              },
+              "s9": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/s10"
+                },
+                "maxItems": 32
+              },
+              "s15": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "$ref": "#/$defs/s8"
+                  }
+                },
+                "required": [
+                  "id"
+                ],
+                "additionalProperties": false
+              },
+              "s14": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "$ref": "#/$defs/s8"
+                  },
+                  "name": {
+                    "$ref": "#/$defs/s8"
+                  },
+                  "zone": {
+                    "$ref": "#/$defs/s15"
+                  }
+                },
+                "required": [
+                  "id",
+                  "name"
+                ],
+                "additionalProperties": false
+              },
+              "s13": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/s14"
+                },
+                "maxItems": 512
+              },
+              "s16": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "s18": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "$ref": "#/$defs/s8"
+                  },
+                  "name": {
+                    "$ref": "#/$defs/s8"
+                  },
+                  "default": {
+                    "$ref": "#/$defs/s16"
+                  }
+                },
+                "required": [
+                  "id",
+                  "name",
+                  "default"
+                ],
+                "additionalProperties": false
+              },
+              "s17": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/s18"
+                },
+                "maxItems": 64
+              },
+              "s7": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "$ref": "#/$defs/s8"
+                  },
+                  "name": {
+                    "$ref": "#/$defs/s8"
+                  },
+                  "difficulties": {
+                    "$ref": "#/$defs/s9"
+                  },
+                  "encounters": {
+                    "$ref": "#/$defs/s13"
+                  },
+                  "frozen": {
+                    "$ref": "#/$defs/s16"
+                  },
+                  "partitions": {
+                    "$ref": "#/$defs/s17"
+                  }
+                },
+                "required": [
+                  "id",
+                  "name",
+                  "difficulties",
+                  "encounters"
+                ],
+                "additionalProperties": false
+              },
+              "s6": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/s7"
+                },
+                "maxItems": 512
+              },
+              "s21": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/s15"
+                },
+                "maxItems": 512
+              },
+              "s20": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "$ref": "#/$defs/s8"
+                  },
+                  "name": {
+                    "$ref": "#/$defs/s8"
+                  },
+                  "zones": {
+                    "$ref": "#/$defs/s21"
+                  }
+                },
+                "required": [
+                  "id",
+                  "name",
+                  "zones"
+                ],
+                "additionalProperties": false
+              },
+              "s19": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/s20"
+                },
+                "maxItems": 64
+              },
+              "s5": {
+                "type": "object",
+                "properties": {
+                  "zones": {
+                    "$ref": "#/$defs/s6"
+                  },
+                  "expansions": {
+                    "$ref": "#/$defs/s19"
+                  }
+                },
+                "required": [
+                  "zones"
+                ],
+                "additionalProperties": false
+              },
+              "s4": {
+                "type": "object",
+                "properties": {
+                  "worldData": {
+                    "$ref": "#/$defs/s5"
+                  }
+                },
+                "required": [
+                  "worldData"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        {
+          "event_id": "FF14PublicCharacter",
+          "payload_schema": {
+            "type": "object",
+            "properties": {
+              "source": {
+                "$ref": "#/$defs/s1"
+              },
+              "status": {
+                "$ref": "#/$defs/s2"
+              },
+              "cached": {
+                "$ref": "#/$defs/s3"
+              },
+              "payload": {
+                "$ref": "#/$defs/s4"
+              }
+            },
+            "required": [
+              "source",
+              "status",
+              "cached",
+              "payload"
+            ],
+            "additionalProperties": false,
+            "$defs": {
+              "s1": {
+                "type": "string",
+                "maxLength": 160,
+                "enum": [
+                  "fflogs_public_cn",
+                  "fflogs_public_global"
+                ]
+              },
+              "s2": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 100,
+                "maximum": 599
+              },
+              "s3": {
+                "type": "boolean"
+              },
+              "s8": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "maxLength": 160
+              },
+              "s9": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "maxLength": 32
+              },
+              "s13": {
+                "type": "string",
+                "maxLength": 128
+              },
+              "s12": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/s13"
+                },
+                "maxItems": 64
+              },
+              "s14": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "$ref": "#/$defs/s8"
+                  },
+                  "name": {
+                    "$ref": "#/$defs/s8"
+                  }
+                },
+                "required": [
+                  "id",
+                  "name"
+                ],
+                "additionalProperties": false
+              },
+              "s15": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "maxLength": 80
+              },
+              "s11": {
+                "type": "object",
+                "properties": {
+                  "raw_field_names": {
+                    "$ref": "#/$defs/s12"
+                  },
+                  "raw_field_names_truncated": {
+                    "$ref": "#/$defs/s3"
+                  },
+                  "encounter": {
+                    "$ref": "#/$defs/s14"
+                  },
+                  "rankPercent": {
+                    "$ref": "#/$defs/s8"
+                  },
+                  "bestAmount": {
+                    "$ref": "#/$defs/s8"
+                  },
+                  "totalKills": {
+                    "$ref": "#/$defs/s8"
+                  },
+                  "bestSpec": {
+                    "$ref": "#/$defs/s15"
+                  },
+                  "spec": {
+                    "$ref": "#/$defs/s15"
+                  }
+                },
+                "required": [
+                  "raw_field_names",
+                  "raw_field_names_truncated",
+                  "encounter",
+                  "rankPercent",
+                  "bestAmount",
+                  "totalKills",
+                  "bestSpec",
+                  "spec"
+                ],
+                "additionalProperties": false
+              },
+              "s10": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/s11"
+                },
+                "maxItems": 500
+              },
+              "s7": {
+                "type": [
+                  "object",
+                  "null"
+                ],
+                "properties": {
+                  "zone": {
+                    "$ref": "#/$defs/s8"
+                  },
+                  "difficulty": {
+                    "$ref": "#/$defs/s8"
+                  },
+                  "partition": {
+                    "$ref": "#/$defs/s8"
+                  },
+                  "size": {
+                    "$ref": "#/$defs/s8"
+                  },
+                  "metric": {
+                    "$ref": "#/$defs/s9"
+                  },
+                  "rankings": {
+                    "$ref": "#/$defs/s10"
+                  }
+                },
+                "required": [
+                  "zone",
+                  "difficulty",
+                  "partition",
+                  "size",
+                  "metric",
+                  "rankings"
+                ],
+                "additionalProperties": false
+              },
+              "s6": {
+                "type": [
+                  "object",
+                  "null"
+                ],
+                "properties": {
+                  "rankings": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "z0": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "z1": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "z2": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "z3": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "z4": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "z5": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "z6": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "z7": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "z8": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "z9": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "z10": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "z11": {
+                    "$ref": "#/$defs/s7"
+                  }
+                },
+                "required": [],
+                "additionalProperties": false
+              },
+              "s5": {
+                "type": "object",
+                "properties": {
+                  "character": {
+                    "$ref": "#/$defs/s6"
+                  }
+                },
+                "required": [
+                  "character"
+                ],
+                "additionalProperties": false
+              },
+              "s4": {
+                "type": "object",
+                "properties": {
+                  "characterData": {
+                    "$ref": "#/$defs/s5"
+                  }
+                },
+                "required": [
+                  "characterData"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        {
+          "event_id": "FF14PublicCharacterZone",
+          "payload_schema": {
+            "type": "object",
+            "properties": {
+              "source": {
+                "$ref": "#/$defs/s1"
+              },
+              "status": {
+                "$ref": "#/$defs/s2"
+              },
+              "cached": {
+                "$ref": "#/$defs/s3"
+              },
+              "payload": {
+                "$ref": "#/$defs/s4"
+              }
+            },
+            "required": [
+              "source",
+              "status",
+              "cached",
+              "payload"
+            ],
+            "additionalProperties": false,
+            "$defs": {
+              "s1": {
+                "type": "string",
+                "maxLength": 160,
+                "enum": [
+                  "fflogs_public_cn",
+                  "fflogs_public_global"
+                ]
+              },
+              "s2": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 100,
+                "maximum": 599
+              },
+              "s3": {
+                "type": "boolean"
+              },
+              "s8": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "maxLength": 160
+              },
+              "s9": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "maxLength": 32
+              },
+              "s13": {
+                "type": "string",
+                "maxLength": 128
+              },
+              "s12": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/s13"
+                },
+                "maxItems": 64
+              },
+              "s14": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "$ref": "#/$defs/s8"
+                  },
+                  "name": {
+                    "$ref": "#/$defs/s8"
+                  }
+                },
+                "required": [
+                  "id",
+                  "name"
+                ],
+                "additionalProperties": false
+              },
+              "s15": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "maxLength": 80
+              },
+              "s11": {
+                "type": "object",
+                "properties": {
+                  "raw_field_names": {
+                    "$ref": "#/$defs/s12"
+                  },
+                  "raw_field_names_truncated": {
+                    "$ref": "#/$defs/s3"
+                  },
+                  "encounter": {
+                    "$ref": "#/$defs/s14"
+                  },
+                  "rankPercent": {
+                    "$ref": "#/$defs/s8"
+                  },
+                  "bestAmount": {
+                    "$ref": "#/$defs/s8"
+                  },
+                  "totalKills": {
+                    "$ref": "#/$defs/s8"
+                  },
+                  "bestSpec": {
+                    "$ref": "#/$defs/s15"
+                  },
+                  "spec": {
+                    "$ref": "#/$defs/s15"
+                  }
+                },
+                "required": [
+                  "raw_field_names",
+                  "raw_field_names_truncated",
+                  "encounter",
+                  "rankPercent",
+                  "bestAmount",
+                  "totalKills",
+                  "bestSpec",
+                  "spec"
+                ],
+                "additionalProperties": false
+              },
+              "s10": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/s11"
+                },
+                "maxItems": 500
+              },
+              "s7": {
+                "type": [
+                  "object",
+                  "null"
+                ],
+                "properties": {
+                  "zone": {
+                    "$ref": "#/$defs/s8"
+                  },
+                  "difficulty": {
+                    "$ref": "#/$defs/s8"
+                  },
+                  "partition": {
+                    "$ref": "#/$defs/s8"
+                  },
+                  "size": {
+                    "$ref": "#/$defs/s8"
+                  },
+                  "metric": {
+                    "$ref": "#/$defs/s9"
+                  },
+                  "rankings": {
+                    "$ref": "#/$defs/s10"
+                  }
+                },
+                "required": [
+                  "zone",
+                  "difficulty",
+                  "partition",
+                  "size",
+                  "metric",
+                  "rankings"
+                ],
+                "additionalProperties": false
+              },
+              "s6": {
+                "type": [
+                  "object",
+                  "null"
+                ],
+                "properties": {
+                  "rankings": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "z0": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "z1": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "z2": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "z3": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "z4": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "z5": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "z6": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "z7": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "z8": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "z9": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "z10": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "z11": {
+                    "$ref": "#/$defs/s7"
+                  }
+                },
+                "required": [],
+                "additionalProperties": false
+              },
+              "s5": {
+                "type": "object",
+                "properties": {
+                  "character": {
+                    "$ref": "#/$defs/s6"
+                  }
+                },
+                "required": [
+                  "character"
+                ],
+                "additionalProperties": false
+              },
+              "s4": {
+                "type": "object",
+                "properties": {
+                  "characterData": {
+                    "$ref": "#/$defs/s5"
+                  }
+                },
+                "required": [
+                  "characterData"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        {
+          "event_id": "FF14CatalogCharacter",
+          "payload_schema": {
+            "type": "object",
+            "properties": {
+              "source": {
+                "$ref": "#/$defs/s1"
+              },
+              "status": {
+                "$ref": "#/$defs/s2"
+              },
+              "cached": {
+                "$ref": "#/$defs/s3"
+              },
+              "payload": {
+                "$ref": "#/$defs/s4"
+              }
+            },
+            "required": [
+              "source",
+              "status",
+              "cached",
+              "payload"
+            ],
+            "additionalProperties": false,
+            "$defs": {
+              "s1": {
+                "type": "string",
+                "maxLength": 160,
+                "enum": [
+                  "fflogs_public_cn",
+                  "fflogs_public_global"
+                ]
+              },
+              "s2": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 100,
+                "maximum": 599
+              },
+              "s3": {
+                "type": "boolean"
+              },
+              "s8": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "maxLength": 160
+              },
+              "s9": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "maxLength": 32
+              },
+              "s13": {
+                "type": "string",
+                "maxLength": 128
+              },
+              "s12": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/s13"
+                },
+                "maxItems": 64
+              },
+              "s14": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "$ref": "#/$defs/s8"
+                  },
+                  "name": {
+                    "$ref": "#/$defs/s8"
+                  }
+                },
+                "required": [
+                  "id",
+                  "name"
+                ],
+                "additionalProperties": false
+              },
+              "s15": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "maxLength": 80
+              },
+              "s11": {
+                "type": "object",
+                "properties": {
+                  "raw_field_names": {
+                    "$ref": "#/$defs/s12"
+                  },
+                  "raw_field_names_truncated": {
+                    "$ref": "#/$defs/s3"
+                  },
+                  "encounter": {
+                    "$ref": "#/$defs/s14"
+                  },
+                  "rankPercent": {
+                    "$ref": "#/$defs/s8"
+                  },
+                  "bestAmount": {
+                    "$ref": "#/$defs/s8"
+                  },
+                  "totalKills": {
+                    "$ref": "#/$defs/s8"
+                  },
+                  "bestSpec": {
+                    "$ref": "#/$defs/s15"
+                  },
+                  "spec": {
+                    "$ref": "#/$defs/s15"
+                  }
+                },
+                "required": [
+                  "raw_field_names",
+                  "raw_field_names_truncated",
+                  "encounter",
+                  "rankPercent",
+                  "bestAmount",
+                  "totalKills",
+                  "bestSpec",
+                  "spec"
+                ],
+                "additionalProperties": false
+              },
+              "s10": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/s11"
+                },
+                "maxItems": 500
+              },
+              "s7": {
+                "type": [
+                  "object",
+                  "null"
+                ],
+                "properties": {
+                  "zone": {
+                    "$ref": "#/$defs/s8"
+                  },
+                  "difficulty": {
+                    "$ref": "#/$defs/s8"
+                  },
+                  "partition": {
+                    "$ref": "#/$defs/s8"
+                  },
+                  "size": {
+                    "$ref": "#/$defs/s8"
+                  },
+                  "metric": {
+                    "$ref": "#/$defs/s9"
+                  },
+                  "rankings": {
+                    "$ref": "#/$defs/s10"
+                  }
+                },
+                "required": [
+                  "zone",
+                  "difficulty",
+                  "partition",
+                  "size",
+                  "metric",
+                  "rankings"
+                ],
+                "additionalProperties": false
+              },
+              "s6": {
+                "type": [
+                  "object",
+                  "null"
+                ],
+                "properties": {
+                  "rankings": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "z0": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "z1": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "z2": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "z3": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "z4": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "z5": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "z6": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "z7": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "z8": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "z9": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "z10": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "z11": {
+                    "$ref": "#/$defs/s7"
+                  }
+                },
+                "required": [],
+                "additionalProperties": false
+              },
+              "s5": {
+                "type": "object",
+                "properties": {
+                  "character": {
+                    "$ref": "#/$defs/s6"
+                  }
+                },
+                "required": [
+                  "character"
+                ],
+                "additionalProperties": false
+              },
+              "s4": {
+                "type": "object",
+                "properties": {
+                  "characterData": {
+                    "$ref": "#/$defs/s5"
+                  }
+                },
+                "required": [
+                  "characterData"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        {
+          "event_id": "FF14MetadataState",
+          "payload_schema": {
+            "type": "object",
+            "properties": {
+              "source": {
+                "$ref": "#/$defs/s1"
+              },
+              "status": {
+                "$ref": "#/$defs/s2"
+              },
+              "cached": {
+                "$ref": "#/$defs/s3"
+              },
+              "payload": {
+                "$ref": "#/$defs/s4"
+              }
+            },
+            "required": [
+              "source",
+              "status",
+              "cached",
+              "payload"
+            ],
+            "additionalProperties": false,
+            "$defs": {
+              "s1": {
+                "type": "string",
+                "maxLength": 160,
+                "enum": [
+                  "fflogs_public_cn",
+                  "fflogs_public_global"
+                ]
+              },
+              "s2": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 100,
+                "maximum": 599
+              },
+              "s3": {
+                "type": "boolean"
+              },
+              "s5": {
+                "type": "string",
+                "maxLength": 160,
+                "enum": [
+                  "verified_catalog",
+                  "base_catalog",
+                  "unavailable_source",
+                  "unavailable_graphql",
+                  "unavailable_payload",
+                  "unavailable_service",
+                  "unavailable_permission",
+                  "unavailable_timeout",
+                  "unavailable_internal"
+                ]
+              },
+              "s4": {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "$ref": "#/$defs/s5"
+                  }
+                },
+                "required": [
+                  "state"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        {
+          "event_id": "FF14RequestSummary",
+          "payload_schema": {
+            "type": "object",
+            "properties": {
+              "source": {
+                "$ref": "#/$defs/s1"
+              },
+              "status": {
+                "$ref": "#/$defs/s2"
+              },
+              "cached": {
+                "$ref": "#/$defs/s3"
+              },
+              "payload": {
+                "$ref": "#/$defs/s4"
+              }
+            },
+            "required": [
+              "source",
+              "status",
+              "cached",
+              "payload"
+            ],
+            "additionalProperties": false,
+            "$defs": {
+              "s1": {
+                "type": "string",
+                "maxLength": 160,
+                "enum": [
+                  "fflogs_public_cn",
+                  "fflogs_public_global"
+                ]
+              },
+              "s2": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 100,
+                "maximum": 599
+              },
+              "s3": {
+                "type": "boolean"
+              },
+              "s5": {
+                "type": "string",
+                "maxLength": 160,
+                "enum": [
+                  "module_source_http_fetch"
+                ]
+              },
+              "s8": {
+                "type": "string",
+                "maxLength": 160,
+                "enum": [
+                  "UniversalisWorlds",
+                  "UniversalisDataCenters",
+                  "OtherBusinessRead",
+                  "FF14WorldRegions",
+                  "FF14WorldServers",
+                  "FF14PublicCharacter",
+                  "FF14PublicCharacterZone",
+                  "FF14OutputMetadataShape",
+                  "FF14CharacterMetadata",
+                  "FF14OutputMetadata",
+                  "FF14CatalogCharacter"
+                ]
+              },
+              "s9": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 2147483647
+              },
+              "s10": {
+                "type": "string",
+                "maxLength": 160,
+                "enum": [
+                  "module_hit",
+                  "module_miss",
+                  "unknown"
+                ]
+              },
+              "s7": {
+                "type": "object",
+                "properties": {
+                  "operation": {
+                    "$ref": "#/$defs/s8"
+                  },
+                  "attempts": {
+                    "$ref": "#/$defs/s9"
+                  },
+                  "returned": {
+                    "$ref": "#/$defs/s9"
+                  },
+                  "failed": {
+                    "$ref": "#/$defs/s9"
+                  },
+                  "cancelled": {
+                    "$ref": "#/$defs/s9"
+                  },
+                  "elapsed_ms": {
+                    "$ref": "#/$defs/s9"
+                  },
+                  "cache": {
+                    "$ref": "#/$defs/s10"
+                  }
+                },
+                "required": [
+                  "operation",
+                  "attempts",
+                  "returned",
+                  "failed",
+                  "cancelled",
+                  "elapsed_ms",
+                  "cache"
+                ],
+                "additionalProperties": false
+              },
+              "s6": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/s7"
+                },
+                "maxItems": 11
+              },
+              "s11": {
+                "type": "string",
+                "maxLength": 160,
+                "enum": [
+                  "unknown"
+                ]
+              },
+              "s12": {
+                "type": "string",
+                "maxLength": 160,
+                "enum": [
+                  "unobserved"
+                ]
+              },
+              "s4": {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "$ref": "#/$defs/s5"
+                  },
+                  "operations": {
+                    "$ref": "#/$defs/s6"
+                  },
+                  "elapsed_ms": {
+                    "$ref": "#/$defs/s9"
+                  },
+                  "underlying_http_cache": {
+                    "$ref": "#/$defs/s11"
+                  },
+                  "host_oauth": {
+                    "$ref": "#/$defs/s12"
+                  },
+                  "network_attempts": {
+                    "$ref": "#/$defs/s11"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "operations",
+                  "elapsed_ms",
+                  "underlying_http_cache",
+                  "host_oauth",
+                  "network_attempts"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        {
+          "event_id": "FF14HistorySummary",
+          "payload_schema": {
+            "type": "object",
+            "properties": {
+              "source": {
+                "$ref": "#/$defs/s1"
+              },
+              "status": {
+                "$ref": "#/$defs/s2"
+              },
+              "cached": {
+                "$ref": "#/$defs/s3"
+              },
+              "payload": {
+                "$ref": "#/$defs/s4"
+              }
+            },
+            "required": [
+              "source",
+              "status",
+              "cached",
+              "payload"
+            ],
+            "additionalProperties": false,
+            "$defs": {
+              "s1": {
+                "type": "string",
+                "maxLength": 160,
+                "enum": [
+                  "fflogs_public_cn",
+                  "fflogs_public_global"
+                ]
+              },
+              "s2": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 100,
+                "maximum": 599
+              },
+              "s3": {
+                "type": "boolean"
+              },
+              "s5": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 2147483647
+              },
+              "s6": {
+                "type": "string",
+                "maxLength": 64
+              },
+              "s9": {
+                "type": "string",
+                "maxLength": 160,
+                "enum": [
+                  "ultimate",
+                  "savage"
+                ]
+              },
+              "s10": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 2147483647
+              },
+              "s11": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": -1,
+                "maximum": 2147483647
+              },
+              "s12": {
+                "type": "string",
+                "maxLength": 160,
+                "enum": [
+                  "standard",
+                  "nonstandard",
+                  "unknown"
+                ]
+              },
+              "s13": {
+                "type": "string",
+                "maxLength": 160,
+                "enum": [
+                  "excluded",
+                  "not_echo",
+                  "unknown"
+                ]
+              },
+              "s14": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "maxLength": 160
+              },
+              "s15": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "minimum": 0,
+                "maximum": 1000000000
+              },
+              "s16": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "maxLength": 80
+              },
+              "s17": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 0,
+                "maximum": 2147483647
+              },
+              "s18": {
+                "type": "string",
+                "maxLength": 160,
+                "enum": [
+                  "record",
+                  "no_records",
+                  "failed",
+                  "not_queried",
+                  "excluded_echo"
+                ]
+              },
+              "s8": {
+                "type": "object",
+                "properties": {
+                  "category": {
+                    "$ref": "#/$defs/s9"
+                  },
+                  "zone": {
+                    "$ref": "#/$defs/s10"
+                  },
+                  "difficulty": {
+                    "$ref": "#/$defs/s10"
+                  },
+                  "requested_partition": {
+                    "$ref": "#/$defs/s11"
+                  },
+                  "partition": {
+                    "$ref": "#/$defs/s11"
+                  },
+                  "encounter": {
+                    "$ref": "#/$defs/s10"
+                  },
+                  "composition": {
+                    "$ref": "#/$defs/s12"
+                  },
+                  "echo": {
+                    "$ref": "#/$defs/s13"
+                  },
+                  "rankPercent_exact": {
+                    "$ref": "#/$defs/s14"
+                  },
+                  "bestAmount_model": {
+                    "$ref": "#/$defs/s15"
+                  },
+                  "spec": {
+                    "$ref": "#/$defs/s16"
+                  },
+                  "totalKills": {
+                    "$ref": "#/$defs/s17"
+                  },
+                  "state": {
+                    "$ref": "#/$defs/s18"
+                  },
+                  "history_complete": {
+                    "$ref": "#/$defs/s3"
+                  }
+                },
+                "required": [
+                  "category",
+                  "zone",
+                  "difficulty",
+                  "requested_partition",
+                  "partition",
+                  "encounter",
+                  "composition",
+                  "echo",
+                  "rankPercent_exact",
+                  "bestAmount_model",
+                  "spec",
+                  "totalKills",
+                  "state",
+                  "history_complete"
+                ],
+                "additionalProperties": false
+              },
+              "s7": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/s8"
+                },
+                "maxItems": 40
+              },
+              "s19": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 40
+              },
+              "s20": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 10000
+              },
+              "s4": {
+                "type": "object",
+                "properties": {
+                  "planned": {
+                    "$ref": "#/$defs/s5"
+                  },
+                  "eligible": {
+                    "$ref": "#/$defs/s5"
+                  },
+                  "cache_hit": {
+                    "$ref": "#/$defs/s5"
+                  },
+                  "cache_positive": {
+                    "$ref": "#/$defs/s5"
+                  },
+                  "cache_empty": {
+                    "$ref": "#/$defs/s5"
+                  },
+                  "attempted": {
+                    "$ref": "#/$defs/s5"
+                  },
+                  "fresh_positive": {
+                    "$ref": "#/$defs/s5"
+                  },
+                  "fresh_empty": {
+                    "$ref": "#/$defs/s5"
+                  },
+                  "missing_alias": {
+                    "$ref": "#/$defs/s5"
+                  },
+                  "invalid": {
+                    "$ref": "#/$defs/s5"
+                  },
+                  "request_failed": {
+                    "$ref": "#/$defs/s5"
+                  },
+                  "not_queried": {
+                    "$ref": "#/$defs/s5"
+                  },
+                  "cache_unsaved": {
+                    "$ref": "#/$defs/s5"
+                  },
+                  "batches_attempted": {
+                    "$ref": "#/$defs/s5"
+                  },
+                  "max_inflight": {
+                    "$ref": "#/$defs/s5"
+                  },
+                  "read_ms": {
+                    "$ref": "#/$defs/s5"
+                  },
+                  "fetch_ms": {
+                    "$ref": "#/$defs/s5"
+                  },
+                  "write_ms": {
+                    "$ref": "#/$defs/s5"
+                  },
+                  "total_ms": {
+                    "$ref": "#/$defs/s5"
+                  },
+                  "history_budget_ms": {
+                    "$ref": "#/$defs/s5"
+                  },
+                  "invocation_budget_ms": {
+                    "$ref": "#/$defs/s5"
+                  },
+                  "output_reserve_ms": {
+                    "$ref": "#/$defs/s5"
+                  },
+                  "metadata_sha256": {
+                    "$ref": "#/$defs/s6"
+                  },
+                  "winners": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "displayed": {
+                    "$ref": "#/$defs/s19"
+                  },
+                  "total": {
+                    "$ref": "#/$defs/s20"
+                  },
+                  "complete": {
+                    "$ref": "#/$defs/s3"
+                  },
+                  "partition_eligible": {
+                    "$ref": "#/$defs/s20"
+                  },
+                  "partition_echo_excluded": {
+                    "$ref": "#/$defs/s20"
+                  },
+                  "partition_unknown": {
+                    "$ref": "#/$defs/s20"
+                  },
+                  "diagnostic_low_omitted": {
+                    "$ref": "#/$defs/s3"
+                  }
+                },
+                "required": [
+                  "planned",
+                  "eligible",
+                  "cache_hit",
+                  "cache_positive",
+                  "cache_empty",
+                  "attempted",
+                  "fresh_positive",
+                  "fresh_empty",
+                  "missing_alias",
+                  "invalid",
+                  "request_failed",
+                  "not_queried",
+                  "cache_unsaved",
+                  "batches_attempted",
+                  "max_inflight",
+                  "read_ms",
+                  "fetch_ms",
+                  "write_ms",
+                  "total_ms",
+                  "history_budget_ms",
+                  "invocation_budget_ms",
+                  "output_reserve_ms"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        {
+          "event_id": "FF14DutyOrderState",
+          "payload_schema": {
+            "type": "object",
+            "properties": {
+              "source": {
+                "$ref": "#/$defs/s1"
+              },
+              "status": {
+                "$ref": "#/$defs/s2"
+              },
+              "cached": {
+                "$ref": "#/$defs/s3"
+              },
+              "payload": {
+                "$ref": "#/$defs/s4"
+              }
+            },
+            "required": [
+              "source",
+              "status",
+              "cached",
+              "payload"
+            ],
+            "additionalProperties": false,
+            "$defs": {
+              "s1": {
+                "type": "string",
+                "maxLength": 160,
+                "enum": [
+                  "fflogs_public_cn",
+                  "fflogs_public_global"
+                ]
+              },
+              "s2": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 100,
+                "maximum": 599
+              },
+              "s3": {
+                "type": "boolean"
+              },
+              "s5": {
+                "type": "string",
+                "maxLength": 160,
+                "enum": [
+                  "complete",
+                  "incomplete",
+                  "unavailable",
+                  "deadline"
+                ]
+              },
+              "s6": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 2
+              },
+              "s7": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 200
+              },
+              "s8": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 10000
+              },
+              "s4": {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "$ref": "#/$defs/s5"
+                  },
+                  "complete": {
+                    "$ref": "#/$defs/s3"
+                  },
+                  "pages": {
+                    "$ref": "#/$defs/s6"
+                  },
+                  "rows": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "matched": {
+                    "$ref": "#/$defs/s8"
+                  },
+                  "unmatched": {
+                    "$ref": "#/$defs/s8"
+                  }
+                },
+                "required": [
+                  "state",
+                  "complete",
+                  "pages",
+                  "rows",
+                  "matched",
+                  "unmatched"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        {
+          "event_id": "CalendarSync",
+          "payload_schema": {
+            "type": "object",
+            "properties": {
+              "stage": {
+                "type": "string",
+                "maxLength": 160,
+                "enum": [
+                  "bind",
+                  "sync_start",
+                  "sync_end",
+                  "source_start",
+                  "records_read",
+                  "records_claim",
+                  "records_commit",
+                  "source_skip",
+                  "source_end",
+                  "decode",
+                  "parse"
+                ]
+              },
+              "region": {
+                "type": "string",
+                "maxLength": 160,
+                "enum": [
+                  "cn",
+                  "global"
+                ]
+              },
+              "source": {
+                "type": "string",
+                "maxLength": 160,
+                "enum": [
+                  "ff14_calendar_primary",
+                  "ff14_calendar_fallback"
+                ]
+              },
+              "trigger": {
+                "type": "string",
+                "maxLength": 160,
+                "enum": [
+                  "due",
+                  "cold",
+                  "manual"
+                ]
+              },
+              "code": {
+                "type": "string",
+                "maxLength": 160,
+                "enum": [
+                  "ok",
+                  "unknown",
+                  "error",
+                  "cancelled",
+                  "stale",
+                  "source_deadline",
+                  "invalid_utf8",
+                  "call_error_commit_unknown",
+                  "revision_conflict",
+                  "source_not_declared",
+                  "request_rejected",
+                  "rate_limited",
+                  "credentials_unavailable",
+                  "redirect_disallowed",
+                  "upstream_error",
+                  "response_too_large",
+                  "invalid_response",
+                  "transport_failed",
+                  "timeout",
+                  "complete",
+                  "partial",
+                  "failed",
+                  "interrupted",
+                  "due",
+                  "cold",
+                  "manual",
+                  "cooldown",
+                  "cached",
+                  "not_due",
+                  "committed",
+                  "not_committed"
+                ]
+              },
+              "completeness": {
+                "type": "string",
+                "maxLength": 160,
+                "enum": [
+                  "complete",
+                  "partial",
+                  "failed"
+                ]
+              },
+              "warnings": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "maxLength": 160,
+                  "enum": [
+                    "INPUT_TOO_LARGE",
+                    "INVALID_UTF8",
+                    "LINE_LIMIT",
+                    "MALFORMED_SOURCE",
+                    "EVENT_LIMIT",
+                    "PROPERTY_LIMIT",
+                    "INVALID_EVENT",
+                    "INVALID_TIMEZONE",
+                    "FLOATING_TIME_UNSUPPORTED",
+                    "UNSUPPORTED_RECURRENCE",
+                    "RECURRENCE_BUDGET",
+                    "SOURCE_BUDGET",
+                    "OUTPUT_LIMIT",
+                    "CONFLICTING_REVISION",
+                    "ORPHAN_OVERRIDE"
+                  ]
+                },
+                "maxItems": 16
+              },
+              "occurrence_count": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 1000000
+              },
+              "warning_count": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 1000000
+              },
+              "budget_ms": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 1000000
+              },
+              "http_status": {
+                "type": "integer",
+                "minimum": 100,
+                "maximum": 599
+              }
+            },
+            "required": [
+              "stage"
+            ],
+            "additionalProperties": false
+          }
         }
       ],
       "display": {

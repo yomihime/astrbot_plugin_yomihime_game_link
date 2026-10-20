@@ -1,3 +1,4 @@
+import {sourceRuntimeURL} from './source-build.mjs';
 // Offline Vue/JSDOM test: a sandboxed Host has no native modal permission.
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
@@ -9,7 +10,7 @@ import {JSDOM} from '../../../pages/frontend/node_modules/jsdom/lib/api.js';
 const root=new URL('../../../',import.meta.url);
 const dom=new JSDOM('<html><body></body></html>',{pretendToBeVisual:true,url:'http://localhost/'});
 for(const name of ['window','document','Element','HTMLElement','SVGElement','Node','MutationObserver'])globalThis[name]=name==='window'?dom.window:name==='document'?dom.window.document:dom.window[name];
-const runtimeURL=new URL('pages/shell/runtime.js',root).href;
+const runtimeURL=await sourceRuntimeURL();
 const runtime=await import(runtimeURL);
 let confirmationSource=stripTypeScriptTypes(await readFile(new URL('pages/frontend/src/confirmation.ts',root),'utf8'),{mode:'strip'}).replace("from 'vue'",'from '+JSON.stringify(runtimeURL)).replace("from 'naive-ui'",'from '+JSON.stringify(runtimeURL));
 const confirmationURL='data:text/javascript;base64,'+Buffer.from(confirmationSource).toString('base64');
@@ -18,7 +19,7 @@ let source=stripTypeScriptTypes(await readFile(new URL('pages/frontend/src/modul
 source=source.replace("from 'vue'",'from '+JSON.stringify(runtimeURL)).replace("from 'naive-ui'",'from '+JSON.stringify(runtimeURL)).replace("from './lifecycle'",'from '+JSON.stringify(new URL('pages/frontend/src/lifecycle.ts',root).href)).replace("from './confirmation'",'from '+JSON.stringify(confirmationURL));
 source=source.replace("from './ui/notice'",'from '+JSON.stringify(new URL('pages/frontend/src/ui/notice.ts',root).href));
 const {createModuleManagement}=await import('data:text/javascript;base64,'+Buffer.from(source).toString('base64'));
-const {validateCatalog:configurationCatalog,validateSnapshot:configurationSnapshot}=await import(new URL('pages/management/app.js',root));
+const {validateCatalog:configurationCatalog,validateSnapshot:configurationSnapshot}=await import('../management/source-management.mjs');
 const configurationFixture=await import('../management/fixtures.mjs');
 const flush=async()=>{for(let i=0;i<20;i++){await Promise.resolve();await runtime.nextTick();}};
 const deferred=()=>{let resolve,reject;const promise=new Promise((a,b)=>{resolve=a;reject=b;});return {promise,resolve,reject};};

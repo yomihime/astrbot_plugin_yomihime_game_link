@@ -1,15 +1,28 @@
+import {createModuleServices} from './module-services';
 import {validateCatalog, readRoute, routeHash} from './catalog';
 import {createScope, contextBoundary, mountIdentity} from './lifecycle';
 import {createModuleAssets, assetIdentity} from './module-assets';
 import type {Bridge, Catalog, ModuleDescriptor, PageDescriptor, PageContext, PageModule, MountedPage} from './contracts';
-export function createShell({bridge, container, window, loadPage, changed, timeoutMs = 8000, expectedPlugin = 'astrbot_plugin_yomihime_game_link', expectedPage = 'shell'}: {bridge: Bridge; container: HTMLElement; window: Window; loadPage(entry: string): Promise<PageModule>; changed(): void; timeoutMs?: number; expectedPlugin?: string; expectedPage?: string}) {
-  const state = {catalog: null as Catalog | null, busy: false, stale: false, message: '正在连接宿主。', theme: 'light' as 'light'|'dark', locale: 'zh-CN', selected: null as {owner: string; route: string}|null, mounted: false, cleanupPending: false, home: true, settings: false, settingsOwner: null as string|null, moduleOwner:null as string|null, moduleSection:null as 'home'|'queries'|null};
+export function createShell({bridge, container, window, loadPage, changed, timeoutMs = 8000, expectedPlugin = 'astrbot_plugin_yomihime_game_link', expectedPage = '00-game-link', confirmClear = async () => false}: {bridge: Bridge; container: HTMLElement; window: Window; loadPage(entry: string): Promise<PageModule>; changed(): void; timeoutMs?: number; expectedPlugin?: string; expectedPage?: string; confirmClear?(owner:string,field:string,revision:number,isCurrent:()=>boolean):Promise<boolean>}) {
+  const state = {catalog: null as Catalog | null, busy: false, stale: false, message: '正在连接宿主。', theme: 'light' as 'light'|'dark', locale: 'zh-CN', selected: null as {owner: string; route: string}|null, mounted: false, cleanupPending: false, home: true, modules: false, settings: false, settingsOwner: null as string|null, moduleOwner:null as string|null, moduleSection:null as 'home'|'config'|'queries'|null};
   let closed = false, ready = false, sequence = 0, generation = 0, boundary = '', contextSeen = false;
   let off: (() => void) | undefined, mounted: MountedPage | null = null, identity = '', pendingIdentity = '';
   let scope: ReturnType<typeof createScope> | null = null;
   const assets = createModuleAssets(container.ownerDocument, loadPage, timeoutMs), bindings = new Map<string, string>(), revokedOwners = new Set<string>();
   const reopenMessage = '模块资源已失效。请关闭此页，并从宿主插件详情重新打开页面。';
   let projectionRevoked = false, catalogSeen = false, activeOwner = '';
+  let navigationVersion=0,lastPageNavigationVersion=-1;
+  function navigationImpact(){
+    if(!mounted||!scope?.isCurrent()||!activeOwner)return null;
+    try{
+      if(mounted.navigationImpact===undefined)return null;
+      if(typeof mounted.navigationImpact!=='function')throw Error();
+      const value=mounted.navigationImpact();
+      if(!value||typeof value!=='object'||Object.keys(value).sort().join(',')!=='credentials,ordinary,pending,version'||typeof value.ordinary!=='boolean'||typeof value.credentials!=='boolean'||typeof value.pending!=='boolean'||!Number.isSafeInteger(value.version)||value.version<0||value.version<lastPageNavigationVersion)throw Error();
+      lastPageNavigationVersion=value.version;
+      return Object.freeze({owner:activeOwner,ordinary:value.ordinary,credentials:value.credentials,pending:value.pending,version:value.version,notification:navigationVersion,blocked:false});
+    }catch{return Object.freeze({owner:activeOwner,ordinary:false,credentials:false,pending:false,version:0,notification:navigationVersion,blocked:true});}
+  }
   let retiring: {scope: ReturnType<typeof createScope> | null; page: MountedPage | null; scopeDone: boolean; pageDone: boolean; domDone: boolean} | null = null;
   const timers = new Set<ReturnType<typeof setTimeout>>();
   const deadline = <T>(promise: Promise<T>): Promise<T> => new Promise((resolve,reject) => {const timer = setTimeout(() => {timers.delete(timer); reject(Error('timeout'));}, timeoutMs); timers.add(timer); promise.then(resolve,reject).finally(() => {clearTimeout(timer); timers.delete(timer);});});
@@ -28,7 +41,7 @@ export function createShell({bridge, container, window, loadPage, changed, timeo
   }
   function disposePage() {
     if (!retiring) {
-      generation++; pendingIdentity=''; identity=''; state.mounted=false;
+      generation++; navigationVersion++;lastPageNavigationVersion=-1;pendingIdentity=''; identity=''; state.mounted=false;
       retiring={scope,page:mounted,scopeDone:scope===null,pageDone:mounted===null,domDone:false};
     }
     const owner=retiring!, errors: unknown[]=[];
@@ -55,13 +68,9 @@ export function createShell({bridge, container, window, loadPage, changed, timeo
       if (!ownScope.isCurrent() || pendingIdentity !== target) return;
       if (!code || typeof code.mount !== 'function') throw Error('invalid_page_entry');
       const view = container.ownerDocument.createElement('div'); view.className = 'module-view'; view.dataset.owner = module.module_id; container.append(view);
-      const services = Object.freeze({async invoke(capabilityId: string, parameters: unknown) {
-        if (!ownScope.isCurrent() || state.stale || state.busy || !ready || capabilityId !== page.capability_id) throw Error('page_unavailable');
-        const result = await bridge.apiPost('invoke', {owner: module.module_id, page: page.route_id, capability_id: capabilityId, parameters});
-        if (!ownScope.isCurrent() || state.stale || state.busy || !ready) throw Error('page_revoked');
-        return result;
-      }});
-      const instance = code.mount(view, Object.freeze({routeId: page.route_id, context: pageContext(module), services, scope: ownScope}));
+      const services = await createModuleServices({onDispose:callback=>ownScope.onDispose(callback),bridge, binding:{owner:module.module_id,page:page.route_id,runtime_id:module.runtime_id!,module_epoch:module.module_epoch}, capabilityId:page.capability_id, isCurrent:()=>ownScope.isCurrent() && !state.stale && !state.busy && ready, confirmClear:(field,revision,isCurrent)=>confirmClear(module.module_id,field,revision,isCurrent)});
+      if (!ownScope.isCurrent() || pendingIdentity !== target) return;
+      const instance = code.mount(view, Object.freeze({routeId: page.route_id, context: pageContext(module), services, scope: ownScope,onNavigationStateChange:()=>{if(ownScope.isCurrent()){navigationVersion++;changed();}}}));
       if (!instance || typeof instance.update !== 'function' || typeof instance.dispose !== 'function') throw Error('invalid_page_instance');
       mounted = instance; identity = target; pendingIdentity = ''; state.mounted = true; changed();
     } catch {if (!closed && !projectionRevoked && !revokedOwners.has(module.module_id)) {
@@ -70,13 +79,17 @@ export function createShell({bridge, container, window, loadPage, changed, timeo
     }}
   }
   function pickRoute() {
-    const hash=window.location.hash;state.settings=hash==='#/settings'||hash.startsWith('#/settings/module/');state.home=!hash||hash==='#/'||hash==='#';state.settingsOwner=null;state.moduleOwner=null;state.moduleSection=null;
-    if(state.settings){if(hash.startsWith('#/settings/module/'))try{state.settingsOwner=decodeURIComponent(hash.slice('#/settings/module/'.length));state.moduleOwner=state.settingsOwner;}catch{}state.selected=null;return;}
+    const hash=window.location.hash;state.settings=hash==='#/settings';state.modules=hash==='#/modules';state.home=!hash||hash==='#/'||hash==='#';state.settingsOwner=null;state.moduleOwner=null;state.moduleSection=null;state.selected=null;
+    if(state.settings||state.home||state.modules)return;
     const landing=/^#\/module\/([^/]+)(\/\-\/queries)?$/.exec(hash);
-    if(landing){try{state.moduleOwner=decodeURIComponent(landing[1]);state.moduleSection=landing[2]?'queries':'home';}catch{}state.selected=null;return;}
+    if(landing){try{state.moduleOwner=decodeURIComponent(landing[1]);state.moduleSection=landing[2]?'queries':'home';
+      const module=state.catalog?.modules?.find(m=>m.module_id===state.moduleOwner),home=module?.pages.find(p=>p.role==='home');
+      if(!landing[2]&&home)state.selected={owner:module!.module_id,route:home.route_id};
+    }catch{}return;}
     state.selected=readRoute(hash);state.moduleOwner=state.selected?.owner||null;
-  }
-  async function refresh() {
+    const page=state.catalog?.modules?.find(m=>m.module_id===state.moduleOwner)?.pages.find(p=>p.route_id===state.selected?.route);
+    state.moduleSection=page?.role==='config'?'config':page?.role==='home'?'home':page?'queries':null;
+  }  async function refresh() {
     if (closed || !ready || state.busy) return;
     const version = ++sequence; state.busy = true; state.stale = state.catalog !== null; state.message = state.stale ? '正在刷新；当前为上次目录，暂不可提交查询。' : '正在读取模块目录。';
     const old = selected(); if (old && mounted) mounted.update(pageContext(old.module)); changed();
@@ -93,7 +106,7 @@ export function createShell({bridge, container, window, loadPage, changed, timeo
     contextSeen = true; boundary = next; ready = true; void refresh();
   }
   const hashChanged = () => {pickRoute(); void syncPage(); const main = container.ownerDocument.getElementById('page-root'); main?.focus({preventScroll:true}); window.scrollTo({top:0,left:0,behavior:'instant'});};
-  return {state, selected, refresh, selectHome() {window.location.hash='#/'; pickRoute(); void syncPage();}, selectModule(owner:string,section:'home'|'queries'='home'){window.location.hash='#/module/'+encodeURIComponent(owner)+(section==='queries'?'/-/queries':'');pickRoute();void syncPage();}, selectSettings(owner?:string) {window.location.hash=owner?'#/settings/module/'+encodeURIComponent(owner):'#/settings'; pickRoute(); void syncPage();}, select(owner: string, route: string) {window.location.hash = routeHash(owner,route); pickRoute(); void syncPage();},
+  return {state, selected, refresh,navigationImpact,refuseNavigation(){state.message='无法核对当前模块的离页状态，请重新打开页面。';changed();}, selectModules(){window.location.hash='#/modules';pickRoute();void syncPage();}, selectHome() {window.location.hash='#/'; pickRoute(); void syncPage();}, selectModule(owner:string,section:'home'|'queries'='home'){window.location.hash='#/module/'+encodeURIComponent(owner)+(section==='queries'?'/-/queries':'');pickRoute();void syncPage();}, selectSettings(owner?:string) {const config=state.catalog?.modules?.find(m=>m.module_id===owner)?.pages.find(p=>p.role==='config');window.location.hash=owner?(config?routeHash(owner,config.route_id):'#/module/'+encodeURIComponent(owner)):'#/settings'; pickRoute(); void syncPage();}, select(owner: string, route: string) {window.location.hash = routeHash(owner,route); pickRoute(); void syncPage();},
     retryCleanup() {if (!state.cleanupPending) return; if (retiring) disposePage(); assets.retryCleanup(); cleanupState(); if (!state.cleanupPending) {state.message=projectionRevoked || revokedOwners.has(state.selected?.owner || '') ? reopenMessage : '页面清理完成，请手动刷新状态。'; if (!closed) void syncPage();} changed();},
     start() {if (closed) return; window.addEventListener('hashchange',hashChanged); if (!bridge?.ready || !bridge?.onContext || !bridge?.apiGet || !bridge?.apiPost) {state.message = '宿主连接尚未就绪，请重新打开页面。'; changed(); return;} off = bridge.onContext(context => accept(context,true)); deadline(Promise.resolve(bridge.ready())).then(context => accept(context)).catch(() => {if (!ready && !closed) {state.message = '连接宿主失败，请重新打开页面。'; changed();}});},
     dispose() {if (closed) return; closed = true; sequence++; ready = false; off?.(); window.removeEventListener('hashchange',hashChanged); for (const timer of timers) clearTimeout(timer); timers.clear(); disposePage(); assets.invalidateAll(); cleanupState();},

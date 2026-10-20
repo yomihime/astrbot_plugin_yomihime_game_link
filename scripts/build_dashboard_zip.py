@@ -17,7 +17,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 ARCHIVE = ROOT / "dist" / "astrbot_plugin_yomihime_game_link-local.zip"
 EXPECTED_WHEEL_SHA256 = (
-    "4d8d71c4ab04805c3a1edbd9e194b5228e66c9e0290caf01daae9374d65a74e5"
+    "545415bbfd979caa7a7bd69ea1648a9f2612c7cd443c04e95b6915fe1b59944e"
 )
 EXPECTED_WHEEL_ENTRIES = {
     "yomihime_game_link_sdk/cards.py",
@@ -31,17 +31,17 @@ EXPECTED_WHEEL_ENTRIES = {
     "yomihime_game_link_sdk/version.py",
     "yomihime_game_link_sdk/results.py",
     "yomihime_game_link_sdk/_examples/empty_module/README.md",
-    "yomihime_game_link_sdk-0.1.0a9.dist-info/licenses/SDK-LICENSE",
-    "yomihime_game_link_sdk-0.1.0a9.dist-info/METADATA",
+    "yomihime_game_link_sdk-0.1.0a10.dist-info/licenses/SDK-LICENSE",
+    "yomihime_game_link_sdk-0.1.0a10.dist-info/METADATA",
     "yomihime_game_link_sdk/_examples/empty_module/module.py",
     "yomihime_game_link_sdk/storage.py",
-    "yomihime_game_link_sdk-0.1.0a9.dist-info/top_level.txt",
+    "yomihime_game_link_sdk-0.1.0a10.dist-info/top_level.txt",
     "yomihime_game_link_sdk/subscriptions.py",
     "yomihime_game_link_sdk/contexts.py",
-    "yomihime_game_link_sdk-0.1.0a9.dist-info/WHEEL",
+    "yomihime_game_link_sdk-0.1.0a10.dist-info/WHEEL",
     "yomihime_game_link_sdk/py.typed",
     "yomihime_game_link_sdk/__init__.py",
-    "yomihime_game_link_sdk-0.1.0a9.dist-info/RECORD",
+    "yomihime_game_link_sdk-0.1.0a10.dist-info/RECORD",
     "yomihime_game_link_sdk/_examples/empty_module/manifest.json",
 }
 PACKAGE_ENTRY_NAMES = {
@@ -69,13 +69,9 @@ OPERATOR_SCRIPT_FILES = (
     "scripts/__init__.py",
     "scripts/admin_credentials.py",
     "scripts/configure_source_credentials.py",
+    "scripts/migrate_private_storage.py",
 )
 MAINTENANCE_HELPER_FILES = ("infrastructure/windows/maintenance.py",)
-PAGE_FILES = (
-    "pages/management/index.html",
-    "pages/management/app.js",
-    "pages/management/styles.css",
-)
 SHELL_FILES = (
     "index.html",
     "app.js",
@@ -102,25 +98,67 @@ SHELL_FILES = (
     "licenses/vue.txt",
     "licenses/vueuc.txt",
 )
+PAGE_FILES = tuple("pages/00-game-link/" + name for name in SHELL_FILES)
 FF14_BUNDLE_ROOT = Path("modules") / "ff14"
-FF14_BUNDLE_REQUIRED_FILES = {
-    "__init__.py",
-    "config.py",
-    "assembly.py",
+# Trusted release composition metadata, reviewed independently of candidate
+# source trees and manifests. New source files require an explicit review.
+REVIEWED_BUNDLE_SOURCES = {
+    ("modules", "ff14"): frozenset(
+        {
+            "__init__.py",
+            "assembly.py",
+            "config.py",
+            "features/__init__.py",
+            "features/calendar.py",
+            "features/calendar_diagnostics.py",
+            "features/calendar_evaluator.py",
+            "features/calendar_ics.py",
+            "features/calendar_models.py",
+            "features/calendar_snapshots.py",
+            "features/calendar_subscriptions.py",
+            "features/chat_context.py",
+            "features/diagnostic_declarations.py",
+            "features/duty_order.py",
+            "features/fflogs.py",
+            "features/fflogs_cards.py",
+            "features/fflogs_catalog.py",
+            "features/fflogs_chat.py",
+            "features/fflogs_evidence.py",
+            "features/fflogs_history_cache.py",
+            "features/fflogs_jobs.py",
+            "features/fflogs_models.py",
+            "features/fflogs_scope_contract.py",
+            "features/fflogs_server.py",
+            "features/item_cards.py",
+            "features/item_chat.py",
+            "features/item_resolution.py",
+            "features/item_sources.py",
+            "features/items.py",
+            "features/market.py",
+            "features/market_cards.py",
+            "features/market_handler.py",
+            "features/market_models.py",
+            "features/market_scope_chat.py",
+            "features/market_sources.py",
+            "features/public_projection.py",
+            "features/status_cards.py",
+            "models.py",
+            "module.py",
+            "presentation.py",
+            "query_resolution.py",
+        }
+    ),
+    ("examples/modules", "minimal"): frozenset(
+        {
+            "assembly.py",
+            "module.py",
+        }
+    ),
+}
+FF14_BUNDLE_REQUIRED_FILES = set(REVIEWED_BUNDLE_SOURCES[("modules", "ff14")]) | {
     "assembly.json",
-    "module.py",
-    "models.py",
-    "presentation.py",
-    "query_resolution.py",
     "yomihime.manifest.json",
     "README.md",
-    "features/__init__.py",
-    "features/item_resolution.py",
-    "features/market.py",
-    "features/market_handler.py",
-    "features/public_projection.py",
-    "features/market_sources.py",
-    "features/market_models.py",
 }
 FF14_BUNDLE_ROOT_FILES = FF14_BUNDLE_REQUIRED_FILES - {"features/__init__.py"}
 FF14_BUNDLE_ALLOWED_DIRS = {Path("features"), Path("assets")}
@@ -306,11 +344,11 @@ def validate_wheel(path: Path) -> dict[str, bytes]:
                 "SDK wheel entry manifest differs from the reviewed artifact"
             )
         metadata_lines = set(
-            wheel.read("yomihime_game_link_sdk-0.1.0a9.dist-info/METADATA")
+            wheel.read("yomihime_game_link_sdk-0.1.0a10.dist-info/METADATA")
             .decode("utf-8")
             .splitlines()
         )
-        if not {"Name: yomihime-game-link-sdk", "Version: 0.1.0a9"} <= metadata_lines:
+        if not {"Name: yomihime-game-link-sdk", "Version: 0.1.0a10"} <= metadata_lines:
             raise ValueError("SDK wheel distribution metadata is unsupported")
         package = {name: wheel.read(name) for name in sorted(PACKAGE_ENTRY_NAMES)}
     return package
@@ -350,81 +388,57 @@ def _font_asset_snapshot(path: Path, repository_root: Path) -> bytes:
     return content
 
 
-def _ff14_bundle_files(repository_root: Path) -> list[Path]:
-    """Include the reviewed FF14 package through a separate, closed input root."""
-    package_root = validate_source_path(
-        repository_root / FF14_BUNDLE_ROOT, repository_root, "FF14 bundle root"
-    )
-    if not package_root.is_dir():
-        raise ValueError("FF14 bundle root must be a directory")
-
-    found: list[Path] = []
-    pending = [package_root]
-    while pending:
-        current = pending.pop()
-        for entry in sorted(current.iterdir(), key=lambda item: item.name):
-            resolved = validate_source_path(entry, repository_root, "FF14 bundle")
-            metadata = resolved.stat()
-            if stat.S_ISDIR(metadata.st_mode):
-                relative_directory = resolved.relative_to(package_root)
-                if relative_directory == Path("pages"):
-                    continue
-                if entry.name in FF14_BUNDLE_CACHE_DIRS:
-                    continue
-                if relative_directory not in FF14_BUNDLE_ALLOWED_DIRS:
-                    raise ValueError(
-                        f"Unsupported FF14 bundle directory: {relative_directory}"
-                    )
-                pending.append(resolved)
-                continue
-            if not stat.S_ISREG(metadata.st_mode):
-                raise ValueError(f"FF14 bundle entry is not a regular file: {entry}")
-
-            relative = resolved.relative_to(package_root).as_posix()
-            is_root_file = len(Path(relative).parts) == 1 and relative in (
-                FF14_BUNDLE_ROOT_FILES
-            )
-            is_feature_file = (
-                len(Path(relative).parts) == 2
-                and Path(relative).parts[0] == "features"
-                and resolved.suffix == ".py"
-            )
-            if relative in FF14_BUNDLE_ASSET_FILES:
-                # Captured below only through the manifest's hash-checked resource set.
-                continue
-            if is_root_file or is_feature_file:
-                found.append(resolved)
-            else:
-                raise ValueError(f"Unsupported FF14 bundle file: {relative}")
-
-    found_names = {path.relative_to(package_root).as_posix() for path in found}
-    missing = FF14_BUNDLE_REQUIRED_FILES - found_names
-    if missing:
-        raise ValueError(f"FF14 bundle is missing required files: {sorted(missing)}")
-    parse_manifest, read_page_resources = _bundle_readers()
-
-    manifest = parse_manifest(
-        _read_snapshot(
-            package_root / "yomihime.manifest.json", repository_root, "FF14 manifest"
+def _reviewed_bundle_payloads(repository_root: Path, *, bundle_roots=("modules",)):
+    """Read trusted build-selected source roots; manifests never choose imports."""
+    parent = str(ROOT.parent)
+    sys.path.insert(0, parent)
+    try:
+        adapter = import_module(f"{ROOT.name}.adapters.astrbot.bundled")
+    finally:
+        sys.path.remove(parent)
+    payloads = []
+    identities = set()
+    for relative in bundle_roots:
+        # Use the same typed trusted selection path validation as runtime.
+        adapter.ReviewedBundleSelection("validation", relative)
+        source_root = validate_source_path(
+            repository_root / relative, repository_root, "Reviewed bundle root"
         )
-    )
-    resources = read_page_resources(package_root, manifest)
-    present_assets = (
-        {
-            path.relative_to(package_root).as_posix()
-            for path in (package_root / "assets").iterdir()
-        }
-        if (package_root / "assets").is_dir()
-        else set()
-    )
-    if not present_assets <= set(resources):
-        raise ValueError("FF14 static asset is not a declared, hash-pinned resource")
-    found.extend(
-        validate_source_path(
-            package_root / path, repository_root, "Module page resource"
-        )
-        for path in resources
-    )
+        for child in sorted(source_root.iterdir(), key=lambda item: item.name):
+            checked = validate_source_path(child, repository_root, "Reviewed package")
+            if (
+                not checked.is_dir()
+                or not (checked / "yomihime.manifest.json").exists()
+            ):
+                continue
+            selection = adapter.ReviewedBundleSelection(child.name, relative)
+            expected_sources = REVIEWED_BUNDLE_SOURCES.get(
+                (selection.source_directory, selection.package_id)
+            )
+            if expected_sources is None:
+                raise ValueError("Unsupported reviewed release composition")
+            payload = adapter._read_bundled_package(source_root, selection)
+            actual_sources = {
+                name for name in payload["sources"] if name.endswith(".py")
+            }
+            if actual_sources != expected_sources:
+                raise ValueError("Unsupported reviewed bundle source inventory")
+            if child.name in identities:
+                raise ValueError("Duplicate reviewed package identity")
+            identities.add(child.name)
+            payloads.append((checked, payload))
+    return payloads
+
+
+def _reviewed_bundle_files(repository_root: Path) -> list[Path]:
+    found = []
+    for package_root, payload in _reviewed_bundle_payloads(repository_root):
+        for relative in (*payload["sources"], "yomihime.manifest.json", "README.md"):
+            found.append(
+                validate_source_path(
+                    package_root / relative, repository_root, "Reviewed bundle input"
+                )
+            )
     return found
 
 
@@ -447,63 +461,54 @@ def _bundle_readers():
     return parse_manifest, read_page_resources
 
 
-def projected_page_assets(repository_root: Path) -> dict[str, bytes]:
-    """Publish trusted, hash-verified bundle assets below the Host's page root."""
+def projected_page_assets(
+    repository_root: Path, *, bundle_roots=("modules",)
+) -> dict[str, bytes]:
+    """Project declared hash-pinned resources into the sole authenticated page root."""
     parse_manifest, read_page_resources = _bundle_readers()
-
-    package_root = repository_root / FF14_BUNDLE_ROOT
-    manifest = parse_manifest(
-        _read_snapshot(
-            package_root / "yomihime.manifest.json", repository_root, "FF14 manifest"
-        )
-    )
-    resources = read_page_resources(package_root, manifest)
     payload = {}
     branches = []
     styles = set()
-    for module in manifest.modules:
-        owner = manifest.global_module_id(module.module_id)
-        for resource in module.resources:
-            name = f"pages/shell/module-assets/{owner}/{resource.path}"
-            payload[name] = resources[resource.path]
-            payload[f"modules/ff14/{resource.path}"] = resources[resource.path]
-        for page in module.pages:
-            entry = f"module-assets/{owner}/{page.entry}"
-            branches.append(
-                f"case {json.dumps(entry)}: return import({json.dumps('./' + entry)});"
-            )
-            styles.update(f"module-assets/{owner}/{style}" for style in page.styles)
-    if branches:
-        payload["pages/shell/module-loader.js"] = (
-            "export async function loadPage(entry) {\nswitch (entry) {\n"
-            + "\n".join(sorted(set(branches)))
-            + "\ndefault: throw new Error('Unknown module page');\n}\n}\n"
-        ).encode()
-        index = _read_snapshot(
-            repository_root / "pages/shell/index.html", repository_root, "Shell index"
-        ).decode("utf-8")
-        marker = '<template id="module-style-assets"></template>'
-        if index.count(marker) != 1:
-            raise ValueError("Shell index must declare one inert module style template")
-        links = "".join(
-            f'<link rel="stylesheet" data-resource="{html.escape(path, quote=True)}" href="./{html.escape(path, quote=True)}">'
-            for path in sorted(styles)
-        )
-        payload["pages/shell/index.html"] = index.replace(
-            marker, '<template id="module-style-assets">' + links + "</template>"
-        ).encode("utf-8")
-    # A separate legal page root is the first entry in pinned Host discovery.
-    # Keep the literal loader and module assets local to each root so the Host
-    # can attach that page's asset proof to every import and stylesheet.
-    shell_prefix = "pages/shell/"
-    for name, content in list(payload.items()):
-        if name.startswith(shell_prefix):
-            target = "pages/00-game-link/" + name.removeprefix(shell_prefix)
-            if name == shell_prefix + "index.html":
-                content = content.replace(
-                    b"<html ", b'<html data-page-name="00-game-link" '
+    prefix = "pages/00-game-link/"
+    for package_root, bundle in _reviewed_bundle_payloads(
+        repository_root, bundle_roots=bundle_roots
+    ):
+        manifest = parse_manifest(bundle["manifest"])
+        resources = read_page_resources(package_root, manifest)
+        for module in manifest.modules:
+            owner = manifest.global_module_id(module.module_id)
+            for resource in module.resources:
+                payload[f"{prefix}module-assets/{owner}/{resource.path}"] = resources[
+                    resource.path
+                ]
+            for page in module.pages:
+                entry = f"module-assets/{owner}/{page.entry}"
+                branches.append(
+                    f"case {json.dumps(entry)}: return import({json.dumps('./' + entry)});"
                 )
-            payload[target] = content
+                styles.update(f"module-assets/{owner}/{style}" for style in page.styles)
+    payload[prefix + "module-loader.js"] = (
+        "export async function loadPage(entry) {\nswitch (entry) {\n"
+        + "\n".join(sorted(set(branches)))
+        + "\ndefault: throw new Error('Unknown module page');\n}\n}\n"
+    ).encode()
+    index = _read_snapshot(
+        repository_root / (prefix + "index.html"), repository_root, "Page index"
+    ).decode("utf-8")
+    import re
+
+    marker = re.compile(r'<template id="module-style-assets">.*?</template>', re.DOTALL)
+    if len(marker.findall(index)) != 1 or 'data-page-name="00-game-link"' not in index:
+        raise ValueError(
+            "Page index must declare one inert module style template and exact page identity"
+        )
+    links = "".join(
+        f'<link rel="stylesheet" data-resource="{html.escape(path, quote=True)}" href="./{html.escape(path, quote=True)}">'
+        for path in sorted(styles)
+    )
+    payload[prefix + "index.html"] = marker.sub(
+        lambda _: '<template id="module-style-assets">' + links + "</template>", index
+    ).encode("utf-8")
     return payload
 
 
@@ -544,27 +549,7 @@ def included_files(root: Path = ROOT) -> list[Path]:
         )
         _font_asset_snapshot(path, repository_root)
         files.append(path)
-    files.extend(_ff14_bundle_files(repository_root))
-    has_pages = "pages/shell/module-loader.js" in projected_page_assets(repository_root)
-    for name in SHELL_FILES:
-        path = repository_root / "pages" / "shell" / name
-        if has_pages or path.exists():
-            files.append(validate_source_path(path, repository_root, "Shell asset"))
-        default_path = repository_root / "pages" / "00-game-link" / name
-        if has_pages or default_path.exists():
-            files.append(
-                validate_source_path(
-                    default_path, repository_root, "Default page asset"
-                )
-            )
-        if name not in {"index.html", "app.js", "styles.css"}:
-            management_path = repository_root / "pages" / "management" / name
-            if has_pages or management_path.exists():
-                files.append(
-                    validate_source_path(
-                        management_path, repository_root, "Management runtime asset"
-                    )
-                )
+    files.extend(_reviewed_bundle_files(repository_root))
 
     return sorted(
         set(files), key=lambda path: path.relative_to(repository_root).as_posix()

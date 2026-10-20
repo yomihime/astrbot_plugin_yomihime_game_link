@@ -6,7 +6,7 @@ import {catalog,snapshot,context,credentialCatalog,credentialStatus} from '../ma
 
 const host=new JSDOM('<body></body>',{pretendToBeVisual:true});
 for(const name of ['window','document','Element','HTMLElement','SVGElement','Node','MutationObserver'])globalThis[name]=host.window[name];
-const {createManagementPage}=await import('../../../pages/management/app.js');
+const {createManagementPage}=await import('../management/source-management.mjs');
 const flush=async()=>{for(let i=0;i<80;i++)await Promise.resolve();await new Promise(resolve=>setTimeout(resolve,0));};
 const digest='a'.repeat(64);
 const old=()=>({state:'needs_restore',reason_code:'key_unselected',ready:false,source:'unselected',generation:0,revision:1,inventory_digest:digest,unknown_count:0,impact:[{module_id:'ff14/ff14',config_count:1,grant_count:0}]});
@@ -17,7 +17,7 @@ const messages=[
 ];
 
 async function harness(failures,initial=old()){
-  const html=await readFile(new URL('../../../pages/management/index.html',import.meta.url),'utf8');
+  const html=await readFile(new URL('../management/embedded-fixture.html',import.meta.url),'utf8');
   const dom=new JSDOM(html,{pretendToBeVisual:true}),calls=[];
   let current=initial;
   const bridge={ready:()=>Promise.resolve(context),onContext(){return()=>{};},async apiPost(endpoint,body){calls.push({endpoint,body});
@@ -59,23 +59,23 @@ test('component outage offers retry without suggesting key replacement; unknown 
   }
 });
 
-function submit(h){
+async function submit(h){
   const doc=h.dom.window.document,input=doc.getElementById('master-key-restore-input'),button=doc.getElementById('master-key-restore');
   assert.equal(button.disabled,false);
-  input.value=Buffer.alloc(32,4).toString('base64');button.click();
+  input.value=Buffer.alloc(32,4).toString('base64');button.click();await flush();doc.querySelector('[data-action=confirm-key-restore]').click();
 }
 
 test('bounded wrong-key refusals explain unchanged credentials and allow correction without refresh',async()=>{
   for(const message of messages){
     const h=await harness([message]);
     try{
-      submit(h);await flush();
+      await submit(h);await flush();
       const doc=h.dom.window.document;
       assert.equal(doc.getElementById('status').textContent,message);
       assert.equal(doc.getElementById('master-key-restore').disabled,false);
       assert.equal(doc.getElementById('master-key-restore-input').value,'');
       assert.equal(h.calls.filter(c=>c.endpoint==='admin/master-key-status').length,1);
-      submit(h);await flush();
+      await submit(h);await flush();
       assert.equal(h.calls.filter(c=>c.endpoint==='admin/master-key-restore').length,2);
       assert.match(doc.getElementById('master-key-status').textContent,/已就绪/);
       assert.equal(h.calls.filter(c=>c.endpoint==='admin/master-key-status').length,2);
@@ -87,7 +87,7 @@ test('unknown storage or component result still fences retry until a fresh statu
   for(const message of ['未取得成功确认，请刷新核对配置与版本后重试。','synthetic-unexpected-fault']){
     const h=await harness([message]);
     try{
-      submit(h);await flush();
+      await submit(h);await flush();
       const doc=h.dom.window.document;
       assert.equal(doc.getElementById('status').textContent,'未取得成功确认，请刷新核对配置与版本后重试。');
       assert.equal(doc.getElementById('master-key-restore').disabled,true);
@@ -102,7 +102,7 @@ test('revision conflict and lost management authority do not enter known-refusal
   for(const message of ['配置版本冲突，请刷新并重新核对后修改。','admin_authorization_denied']){
     const h=await harness([message]);
     try{
-      submit(h);await flush();
+      await submit(h);await flush();
       const button=h.dom.window.document.getElementById('master-key-restore');
       assert.ok(button===null||button.disabled);
       assert.notEqual(h.dom.window.document.getElementById('status').textContent,messages[2]);
@@ -115,7 +115,7 @@ test('uncertain reset result clears consent and stays fenced until a fresh statu
   try{
     const doc=h.dom.window.document,consent=doc.getElementById('master-key-reset-consent'),reset=doc.getElementById('master-key-reset');
     consent.click();await flush();assert.equal(reset.disabled,false);
-    reset.click();await flush();
+    reset.click();await flush();doc.querySelector('[data-action=confirm-key-reset]').click();await flush();
     assert.equal(h.calls.filter(c=>c.endpoint==='admin/master-key-reset').length,1);
     assert.equal(consent.checked,false);assert.equal(reset.disabled,true);
     assert.equal(doc.getElementById('status').textContent,'未取得成功确认，请刷新核对配置与版本后重试。');
@@ -130,7 +130,7 @@ test('reset authorization loss revokes the page confirmation without a second wr
   const h=await harness(['admin_authorization_denied']);
   try{
     const doc=h.dom.window.document,consent=doc.getElementById('master-key-reset-consent');
-    consent.click();await flush();doc.getElementById('master-key-reset').click();await flush();
+    consent.click();await flush();doc.getElementById('master-key-reset').click();await flush();doc.querySelector('[data-action=confirm-key-reset]').click();await flush();
     assert.equal(h.calls.filter(c=>c.endpoint==='admin/master-key-reset').length,1);
     assert.equal(doc.getElementById('master-key-reset-consent'),null);
     assert.equal(doc.getElementById('master-key-reset'),null);

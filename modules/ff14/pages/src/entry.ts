@@ -1,6 +1,7 @@
 import {createApp, defineComponent, h, withDirectives, ref} from 'vue';
 import {NConfigProvider,NButton,NInput,NSelect,NCard,NTag,darkTheme,zhCN,enUS,dateZhCN,dateEnUS} from 'naive-ui';
-import type {PageOptions, MountedPage} from '../../../../pages/frontend/src/contracts';
+import type {PageOptions, MountedPage} from '../../../../pages/public-contract';
+import {mountSettings} from './settings-page';
 import {createQueryController,fields,queryTimeoutMs} from './query-controller';
 import './styles.css';
 import {createSelectA11y} from './select-a11y';
@@ -25,6 +26,7 @@ function blocks(result:any) {
   return nodes;
 }
 export function mount(container:HTMLElement,options:PageOptions):MountedPage {
+  if (options.routeId==='home' || options.routeId==='config') return mountSettings(container,options);
   const headStyles = new Set(Array.from(container.ownerDocument.head.querySelectorAll('style')));
   const selectA11y=createSelectA11y(container), expanded=ref<Record<string,boolean>>({});
   const revision=ref(0), controller=createQueryController(options,()=>{revision.value++;},queryTimeoutMs(options.routeId));

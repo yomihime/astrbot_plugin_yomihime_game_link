@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdtemp,mkdir,writeFile,readFile,rm,symlink} from 'node:fs/promises';
+import {mkdtemp,mkdir,writeFile,readFile,rm,symlink,realpath} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {createHash} from 'node:crypto';
@@ -26,11 +26,22 @@ test('resource merge rejects missing and malformed package assets',async()=>{
   await assert.rejects(mergeManifestResources(root,[],[generated[0],{...generated[0],path:'pages/dist/ENTRY.js'}]));
  }finally{await rm(root,{recursive:true,force:true});}
 });
-test('resource merge rejects a symlink escaping the package',async()=>{
+test('resource merge rejects a real path escaping through a platform-supported link',async()=>{
  const root=await mkdtemp(join(tmpdir(),'ygl-theme-resource-link-failure-'));
  try{
-  await mkdir(join(root,'package'));await writeFile(join(root,'outside.svg'),'<svg/>');await symlink(join(root,'outside.svg'),join(root,'package/escape.svg'));
-  await assert.rejects(mergeManifestResources(join(root,'package'),[{path:'escape.svg',sha256:'a'.repeat(64)}],generated));
+  await mkdir(join(root,'package'));
+  let resource;
+  if(process.platform==='win32'){
+   // Directory junctions do not require the file-symlink creation privilege.
+   // This proves the same realpath containment guard, not Windows file-symlink behavior.
+   await mkdir(join(root,'outside-dir'));await writeFile(join(root,'outside-dir/asset.svg'),'<svg/>');
+   await symlink(join(root,'outside-dir'),join(root,'package/escape'),'junction');resource='escape/asset.svg';
+   assert.equal(await realpath(join(root,'package',resource)),await realpath(join(root,'outside-dir/asset.svg')));
+  }else{
+   await writeFile(join(root,'outside.svg'),'<svg/>');await symlink(join(root,'outside.svg'),join(root,'package/escape.svg'));resource='escape.svg';
+   assert.equal(await realpath(join(root,'package',resource)),await realpath(join(root,'outside.svg')));
+  }
+  await assert.rejects(mergeManifestResources(join(root,'package'),[{path:resource,sha256:'a'.repeat(64)}],generated),/Manifest resource escapes package/);
  }finally{await rm(root,{recursive:true,force:true});}
 });
 test('published FF14 manifest includes its logo and generated page resource contract',async()=>{

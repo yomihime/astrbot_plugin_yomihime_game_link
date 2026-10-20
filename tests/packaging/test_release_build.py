@@ -24,8 +24,10 @@ from scripts.build_dashboard_zip import (
     MAINTENANCE_HELPER_FILES,
     OPERATOR_SCRIPT_FILES,
     PAGE_FILES,
+    REVIEWED_BUNDLE_SOURCES,
     ROOT_FILES,
     RUNTIME_DIRS,
+    _reviewed_bundle_payloads,
     included_files,
 )
 from scripts.build_release import (
@@ -277,7 +279,7 @@ class ReleaseBuildTests(unittest.TestCase):
                     if filename == "yomihime.manifest.json"
                     else b"FF14 package input"
                 )
-            (root / "pages/management/private.json").write_bytes(b"must not ship")
+            (root / "pages/00-game-link/private.json").write_bytes(b"must not ship")
             (root / ".astrbot-plugin/i18n/private.json").write_bytes(b"must not ship")
             (root / "pages/unreviewed").mkdir()
             (root / "pages/unreviewed/index.html").write_bytes(b"must not ship")
@@ -330,7 +332,9 @@ class ReleaseBuildTests(unittest.TestCase):
                 )
             (ff14_root / "unexpected.json").write_bytes(b"must not ship")
 
-            with self.assertRaisesRegex(ValueError, "Unsupported FF14 bundle file"):
+            with self.assertRaisesRegex(
+                ValueError, "unsupported page resource extension"
+            ):
                 included_files(root)
 
     def test_ff14_bundle_rejects_unreviewed_source_directories(self) -> None:
@@ -338,6 +342,7 @@ class ReleaseBuildTests(unittest.TestCase):
             "fixtures/sample.py",
             "tests/private.py",
             "sample/helper.py",
+            "unregistered.py",
         ):
             with (
                 self.subTest(path=unreviewed_path),
@@ -362,13 +367,84 @@ class ReleaseBuildTests(unittest.TestCase):
                         else b"FF14 package input"
                     )
                 unexpected = ff14_root / unreviewed_path
-                unexpected.parent.mkdir(parents=True)
+                unexpected.parent.mkdir(parents=True, exist_ok=True)
                 unexpected.write_bytes(b"must not ship")
 
                 with self.assertRaisesRegex(
-                    ValueError, "Unsupported FF14 bundle directory"
+                    ValueError, "Unsupported reviewed bundle source inventory"
                 ):
                     included_files(root)
+
+    def test_reviewed_release_compositions_have_exact_source_inventory(self) -> None:
+        for bundle_roots, identity in (
+            (("modules",), ("modules", "ff14")),
+            (("examples/modules",), ("examples/modules", "minimal")),
+        ):
+            with self.subTest(identity=identity):
+                payloads = _reviewed_bundle_payloads(ROOT, bundle_roots=bundle_roots)
+                self.assertEqual(len(payloads), 1)
+                _, payload = payloads[0]
+                self.assertEqual(
+                    {name for name in payload["sources"] if name.endswith(".py")},
+                    REVIEWED_BUNDLE_SOURCES[identity],
+                )
+
+    def test_reviewed_nested_package_is_allowed_but_missing_source_is_rejected(
+        self,
+    ) -> None:
+        import json
+
+        identity = ("examples/modules", "minimal")
+        reviewed = REVIEWED_BUNDLE_SOURCES[identity] | {
+            "helpers/__init__.py",
+            "helpers/facts.py",
+        }
+        with tempfile.TemporaryDirectory(prefix="yomihime-reviewed-layout-") as work:
+            root = Path(work).resolve()
+            package = root / "examples/modules/minimal"
+            for name in reviewed:
+                path = package / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"# reviewed fixture source\n")
+            original = ROOT / "examples/modules/minimal"
+            manifest = json.loads((original / "yomihime.manifest.json").read_bytes())
+            for module in manifest["modules"]:
+                module.pop("pages", None)
+                module.pop("resources", None)
+            (package / "yomihime.manifest.json").write_bytes(
+                json.dumps(manifest).encode()
+            )
+            (package / "assembly.json").write_bytes(
+                (original / "assembly.json").read_bytes()
+            )
+            (package / "README.md").write_bytes(b"reviewed fixture")
+            with patch.dict(REVIEWED_BUNDLE_SOURCES, {identity: frozenset(reviewed)}):
+                payloads = _reviewed_bundle_payloads(root, bundle_roots=(identity[0],))
+                self.assertEqual(len(payloads), 1)
+                self.assertEqual(
+                    {
+                        name
+                        for name in payloads[0][1]["sources"]
+                        if name.endswith(".py")
+                    },
+                    reviewed,
+                )
+                (package / "helpers/facts.py").unlink()
+                with self.assertRaisesRegex(
+                    ValueError, "Unsupported reviewed bundle source inventory"
+                ):
+                    _reviewed_bundle_payloads(root, bundle_roots=(identity[0],))
+
+    def test_unknown_release_composition_is_rejected_before_capture(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="yomihime-unselected-package-") as work:
+            root = Path(work).resolve()
+            package = root / "modules/unselected"
+            package.mkdir(parents=True)
+            (package / "yomihime.manifest.json").write_bytes(b"{}")
+            with self.assertRaisesRegex(
+                ValueError, "Unsupported reviewed release composition"
+            ):
+                _reviewed_bundle_payloads(root)
 
     def test_ff14_bundle_rejects_external_links(self) -> None:
         with tempfile.TemporaryDirectory(prefix="yomihime-release-link-") as work:
@@ -420,7 +496,7 @@ class ReleaseBuildTests(unittest.TestCase):
     def test_reused_sdk_wheel_still_requires_the_independent_pin(self) -> None:
         with tempfile.TemporaryDirectory(prefix="yomihime-release-wheel-") as work:
             root = Path(work)
-            wheel = root / "yomihime_game_link_sdk-0.1.0a9-py3-none-any.whl"
+            wheel = root / "yomihime_game_link_sdk-0.1.0a10-py3-none-any.whl"
             wheel.write_bytes(b"not the reviewed wheel")
             output = root / "artifacts"
 
