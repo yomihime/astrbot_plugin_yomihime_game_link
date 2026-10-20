@@ -121,6 +121,87 @@ def _fixture_manifest():
 
 
 class ReleaseBuildTests(unittest.TestCase):
+    def test_reviewed_bundle_capture_loads_checkout_sdk_in_isolated_process(
+        self,
+    ) -> None:
+        import json
+        import subprocess
+        import sys
+        import textwrap
+        from importlib.util import find_spec
+
+        dependency_paths = {}
+        for name in ("cryptography", "_cffi_backend"):
+            spec = find_spec(name)
+            self.assertIsNotNone(spec)
+            self.assertIsNotNone(spec.origin)
+            location = Path(spec.origin).resolve().parent
+            dependency_paths[name] = str(
+                location.parent if name == "cryptography" else location
+            )
+        script = textwrap.dedent(
+            """            import json
+            import runpy
+            import sys
+            from importlib.machinery import PathFinder
+            from importlib.util import find_spec
+            from pathlib import Path
+
+            root = Path(sys.argv[1]).resolve()
+            assert str(root) not in sys.path
+            assert "yomihime_game_link_sdk" not in sys.modules
+
+            dependency_paths = json.loads(sys.argv[2])
+
+            class BuildDependencyFinder:
+                def find_spec(self, fullname, path=None, target=None):
+                    if fullname in dependency_paths:
+                        return PathFinder.find_spec(
+                            fullname, [dependency_paths[fullname]]
+                        )
+                    return None
+
+            sys.meta_path.insert(0, BuildDependencyFinder())
+            assert find_spec("yomihime_game_link_sdk") is None
+            tool = runpy.run_path(str(root / "scripts" / "build_dashboard_zip.py"))
+            initial_path = list(sys.path)
+            try:
+                payloads = tool["_reviewed_bundle_payloads"](root)
+            finally:
+                assert sys.path == initial_path
+            assert len(payloads) == 1
+            package_root, payload = payloads[0]
+            assert package_root == root / "modules" / "ff14"
+            assert {
+                name for name in payload["sources"] if name.endswith(".py")
+            } == tool["REVIEWED_BUNDLE_SOURCES"][("modules", "ff14")]
+            sdk = sys.modules["yomihime_game_link_sdk"]
+            assert Path(sdk.__file__).resolve() == (
+                root / "yomihime_game_link_sdk" / "__init__.py"
+            )
+            print("checkout SDK capture verified")
+            """
+        )
+        with tempfile.TemporaryDirectory(prefix="yomihime-build-sdk-import-") as work:
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-I",
+                    "-S",
+                    "-B",
+                    "-c",
+                    script,
+                    str(ROOT),
+                    json.dumps(dependency_paths),
+                ],
+                cwd=work,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.strip(), "checkout SDK capture verified")
+
     def test_font_assets_are_exact_and_required_with_link_protection(self) -> None:
         from scripts.build_dashboard_zip import _font_asset_snapshot
 

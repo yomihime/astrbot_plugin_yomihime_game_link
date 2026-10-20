@@ -392,9 +392,11 @@ def _reviewed_bundle_payloads(repository_root: Path, *, bundle_roots=("modules",
     """Read trusted build-selected source roots; manifests never choose imports."""
     parent = str(ROOT.parent)
     sys.path.insert(0, parent)
+    sys.path.insert(0, str(ROOT))
     try:
         adapter = import_module(f"{ROOT.name}.adapters.astrbot.bundled")
     finally:
+        sys.path.remove(str(ROOT))
         sys.path.remove(parent)
     payloads = []
     identities = set()

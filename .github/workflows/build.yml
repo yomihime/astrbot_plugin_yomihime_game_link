@@ -80,10 +80,11 @@ jobs:
       - name: Prepare verified test font
         run: python scripts/prepare_test_font.py
 
-      - name: Verify release link rejection before full regression
+      - name: Verify release source capture before full regression
         run: >-
           python -m unittest -v
           tests.packaging.test_release_build.ReleaseBuildTests.test_ff14_bundle_rejects_external_links
+          tests.packaging.test_release_build.ReleaseBuildTests.test_reviewed_bundle_capture_loads_checkout_sdk_in_isolated_process
 
       - name: Run shell, management and FF14 page tests
         run: |
