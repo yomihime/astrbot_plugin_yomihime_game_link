@@ -80,6 +80,11 @@ jobs:
       - name: Prepare verified test font
         run: python scripts/prepare_test_font.py
 
+      - name: Verify release link rejection before full regression
+        run: >-
+          python -m unittest -v
+          tests.packaging.test_release_build.ReleaseBuildTests.test_ff14_bundle_rejects_external_links
+
       - name: Run shell, management and FF14 page tests
         run: |
           npm test --prefix pages/frontend

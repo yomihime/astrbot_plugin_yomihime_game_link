@@ -447,7 +447,12 @@ class ReleaseBuildTests(unittest.TestCase):
                 _reviewed_bundle_payloads(root)
 
     def test_ff14_bundle_rejects_external_links(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="yomihime-release-link-") as work:
+        with (
+            tempfile.TemporaryDirectory(prefix="yomihime-release-link-") as work,
+            tempfile.TemporaryDirectory(
+                prefix="yomihime-release-outside-"
+            ) as outside_work,
+        ):
             root = Path(work).resolve()
             for filename in ROOT_FILES:
                 (root / filename).write_bytes(b"runtime root asset")
@@ -464,18 +469,28 @@ class ReleaseBuildTests(unittest.TestCase):
                     if filename == "yomihime.manifest.json"
                     else b"FF14 package input"
                 )
-            outside = root.parent / f"{root.name}-outside.py"
+            baseline = included_files(root)
+            self.assertTrue(
+                {ff14_root / filename for filename in FF14_BUNDLE_REQUIRED_FILES}
+                <= set(baseline)
+            )
+            outside = Path(outside_work).resolve() / "outside.py"
             outside.write_bytes(b"external source")
+            link = ff14_root / "external.py"
             try:
-                (ff14_root / "external.py").symlink_to(outside)
+                link.symlink_to(outside)
             except (NotImplementedError, OSError) as exc:
                 self.skipTest(f"symlink creation is unavailable: {exc}")
 
             try:
-                with self.assertRaisesRegex(ValueError, "symlink|reparse point"):
+                self.assertTrue(link.is_symlink())
+                self.assertTrue(link.exists())
+                self.assertEqual(link.resolve(), outside)
+                with self.assertRaisesRegex(ValueError, "^bundled_source_invalid$"):
                     included_files(root)
             finally:
-                outside.unlink(missing_ok=True)
+                link.unlink(missing_ok=True)
+            self.assertEqual(included_files(root), baseline)
 
     def test_sha256sums_lists_artifact_names_and_digests_in_order(self) -> None:
         with tempfile.TemporaryDirectory(prefix="yomihime-release-sums-") as work:
