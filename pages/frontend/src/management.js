@@ -26,7 +26,7 @@ export function createManagementPage(document,bridge,window,{expectedPage='00-ga
   let catalog=null,snapshot=null,masterKeyStatus=null,migrationPlan=null,ready=false,closed=false,stale=true,generation=0,boundary=null,contextSeen=false,off=null,active=null;
   const view=createManagementView(document,container,scope),cards=new Map(),controls=new Map(),status=element('status');
   let suspended=initiallySuspended;let legacyPolicies=[],legacyGeneration=0;const legacyPlans=new Map();
-  const fonts=createFontSettings(bridge,window,panel=>view.font(panel),()=>loseAccess());
+  const fonts=createFontSettings(bridge,window,panel=>view.font(panel),()=>loseAccess(),()=>{view.cancelConfirmation();clearMasterDraft();});
   let savedFocus=null,selectedOwner='game_link/core';
   const emptyDraft='[[],[]]';let draftState=emptyDraft;
   const statusNotice=createNotice(window,(message,tone)=>{status.textContent=message;status.dataset.tone=tone;});
@@ -175,7 +175,7 @@ export function createManagementPage(document,bridge,window,{expectedPage='00-ga
     buttons();
   }
   async function refresh(attempt){migrationPlan=null;legacyPlans.clear();view.cancelConfirmation();view.resetConfirmation();stale=true;buttons();const declarations=await post('catalog',{},attempt),values=validateSnapshot(await post('read',{},attempt),declarations);if(!current(attempt))fail('stale_context');catalog=declarations;snapshot=values;
-    if(scope==='settings'){try{masterKeyStatus=await post('master-key-status',{},attempt);}catch(error){masterKeyStatus=null;if(!current(attempt)||managementAccessLost(error))throw error;}}
+    if(scope==='settings'){try{masterKeyStatus=await post('master-key-status',{},attempt);}catch(error){if(current(attempt))masterKeyStatus=null;throw error;}}
     stale=false;if(scope==='settings')await render();buttons();if(!current(attempt))fail('stale_context');onCapabilities([...new Set(catalog.fields.map(f=>f.module_id))],true);return {};
   }
   async function run(action){
@@ -185,12 +185,12 @@ export function createManagementPage(document,bridge,window,{expectedPage='00-ga
       if(error?.message==='revision_conflict'||error?.message==='配置版本冲突，请刷新并重新核对后修改。'){stale=true;notice('配置已变化，请刷新并重新核对后修改。');}
       else if(error?.message==='select_changes')notice('请选择需要修改的字段。');
       else if(error?.message==='confirm_clear')notice('请勾选清除确认后再提交；保持选项不会写入。');
-      else if(error?.message==='write_ack_readback_unverified')notice('已提交，状态暂未核实，请刷新确认。','warning');
+      else if(error?.message==='write_ack_readback_unverified'){clearMasterDraft();notice('已提交，状态暂未核实，请刷新确认。','warning');}
       else if(error?.message==='write_ack_authorization_denied')loseAccess('已提交，但管理授权不可用，状态暂未核实。请重新打开宿主管理页面确认。','warning');
       else if(['requires_stopped_host','source_exclusivity_unproven','offline_supervisor_unavailable'].includes(error?.code)||['requires_stopped_host','source_exclusivity_unproven','offline_supervisor_unavailable'].includes(error?.message)){migrationPlan=null;notice('尚未迁移：需要受控维护窗口和完整停写证明。仅停止当前页面或刷新不能完成迁移。','warning');}
       else if(error?.message==='invalid_config')notice('配置或输入未通过校验，请核对字段要求后刷新重试。');
       else if(managementAccessLost(error))loseAccess();
-      else {stale=true;notice('未取得成功确认，请刷新核对配置与版本后重试。');}
+      else {clearMasterDraft();stale=true;notice('未取得成功确认，请刷新核对配置与版本后重试。');}
     }finally{if(active===operation){active=null;buttons();}}
   }
   const revisions=()=>Object.fromEntries(Object.entries(snapshot).map(([target,row])=>[target,row.revision]));

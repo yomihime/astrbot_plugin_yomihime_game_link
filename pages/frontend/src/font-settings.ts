@@ -36,7 +36,7 @@ export function fontStatusText(status:FontStatus|null):string {
 }
 
 /** Font actions use the existing authenticated bridge, separately from config drafts. */
-export function createFontSettings(bridge:Bridge,window:Window,changed:(panel:FontPanel)=>void,accessLost:()=>void){
+export function createFontSettings(bridge:Bridge,window:Window,changed:(panel:FontPanel)=>void,accessLost:()=>void,readFailed:()=>void=()=>{}){
   let epoch=0,closed=false,timer:number|undefined;
   const panel:FontPanel={visible:false,busy:false,enabled:false,message:'',status:null,progress:'',uploadAvailable:typeof bridge?.upload==='function',refresh:()=>void refresh(),retry:()=>void retry(),upload:file=>void upload(file)};
   const publish=()=>changed({...panel});
@@ -45,13 +45,13 @@ export function createFontSettings(bridge:Bridge,window:Window,changed:(panel:Fo
   const denied=(error:unknown)=>{const e=error as {message?:string;code?:string;status?:number};return ['admin_authorization_denied','stale_context','page_revoked','asset_revoked'].some(code=>e?.message===code||e?.code===code)||e?.status===401||e?.status===403;};
   function failure(error:unknown){panel.progress='';panel.message=denied(error)?'管理授权已失效，请重新打开页面':(error as Error)?.message==='revision_conflict'?'字体状态已变化，请刷新后重试':'字体操作未确认，请刷新状态后重试；可继续使用现有字体';panel.status=null;if(denied(error)){panel.enabled=false;accessLost();}}
   function schedule(){stopTimer();if(panel.enabled&&['checking','downloading'].includes(panel.status?.state||''))timer=window.setTimeout(()=>void refresh(),2000);}
-  async function perform(action:()=>Promise<unknown>,progress:string){
+  async function perform(action:()=>Promise<unknown>,progress:string,reading=false){
     if(closed||!panel.enabled||panel.busy)return;const version=epoch;panel.busy=true;panel.message='';panel.progress=progress;stopTimer();publish();
     try{const result=validateFontStatus(await action());if(!current(version))return;panel.status=result;panel.progress='';}
-    catch(error){if(current(version))failure(error);}
+    catch(error){if(current(version)){if(reading)readFailed();failure(error);}}
     finally{if(current(version)){panel.busy=false;publish();schedule();}else if(epoch===version){panel.busy=false;publish();}}
   }
-  async function refresh(){await perform(()=>bridge.apiPost('admin/font-status',{}),'正在读取字体状态…');}
+  async function refresh(){await perform(()=>bridge.apiPost('admin/font-status',{}),'正在读取字体状态…',true);}
   async function retry(){if(!panel.status||['checking','downloading'].includes(panel.status.state))return;await perform(()=>bridge.apiPost('admin/font-retry',{}),'正在请求重新下载…');}
   async function upload(file:File|null){
     if(!file||!panel.enabled||panel.busy||!panel.status||!bridge.upload||['checking','downloading'].includes(panel.status.state))return;
