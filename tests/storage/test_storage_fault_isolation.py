@@ -146,12 +146,18 @@ class SelectorFailureTests(unittest.TestCase):
 
     def test_resolver_preserves_bounded_selector_failure(self):
         from contextlib import nullcontext
+        from types import SimpleNamespace
+
+        fixture_root = Path(__file__).resolve().parent
 
         with (
-            patch("ygl_test_subject.infrastructure.private_storage.os.name", "nt"),
+            patch(
+                "ygl_test_subject.infrastructure.private_storage.os",
+                SimpleNamespace(name="nt", path=os.path),
+            ),
             patch(
                 "ygl_test_subject.infrastructure.windows.private_storage.identity_private_base",
-                return_value=Path("C:/synthetic-only"),
+                return_value=fixture_root / "synthetic-only",
             ),
             patch(
                 "ygl_test_subject.infrastructure.windows.private_storage.create_private_directory",
@@ -170,7 +176,7 @@ class SelectorFailureTests(unittest.TestCase):
             ) as inventory,
         ):
             with self.assertRaises(PrivateStorageError) as error:
-                resolve_private_storage(Path("C:/synthetic-data"))
+                resolve_private_storage(fixture_root / "synthetic-data")
             self.assertEqual(error.exception.code, "ambiguous_storage")
             inventory.assert_not_called()
 

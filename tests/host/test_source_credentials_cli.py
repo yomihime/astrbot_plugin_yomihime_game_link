@@ -1275,7 +1275,9 @@ elif mismatch == 'abi':
 elif mismatch == 'path':
     sdk.__file__ = str(Path(root).parent / 'foreign-sdk' / '__init__.py')
 elif mismatch == 'future':
-    sdk.__version__ = '0.1.0a11'
+    # An independent unsupported release, not the next alpha that may be current.
+    assert sdk.__version__ != '99.0.0', 'negative fixture must differ from current release'
+    sdk.__version__ = '99.0.0'
 else:
     raise AssertionError('unknown probe')
 try:
