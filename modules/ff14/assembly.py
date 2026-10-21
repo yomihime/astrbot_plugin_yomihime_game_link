@@ -11,6 +11,7 @@ from .config import (
     CALENDAR_VALUE_VALIDATORS,
     ORDINARY_FIELDS,
     REGION,
+    REGION_CONFIG_FIELD,
     FF14ConfigSnapshot,
 )
 
@@ -74,17 +75,23 @@ def query_parameters(endpoint: str, body: bytes) -> dict:
         raise ValueError("request_rejected") from None
 
 
-def ordinary_snapshot(values, defaults):
-    # Only explicitly supplied ordinary values enter this pure callback.
+def ordinary_snapshot(values, defaults=None):
     return FF14ConfigSnapshot.from_values(
+        {name: value for name, value in values.items() if name in ORDINARY_FIELDS}
+    )
+
+
+def legacy_config_copies(principal_id):
+    # Reviewed Host assembly consumes this pure declaration, never ModuleServices.
+    return (
         {
-            **{
-                name: value
-                for name, value in values.items()
-                if name in ORDINARY_FIELDS - {REGION}
-            },
-            "core_defaults": defaults,
-        }
+            "policy_id": "ff14.default-region",
+            "source_owner": "game_link/core",
+            "source_field": "default_region",
+            "target_owner": "ff14/ff14",
+            "target_field": REGION,
+            "target_schema": dict(REGION_CONFIG_FIELD.value_schema),
+        },
     )
 
 
@@ -101,6 +108,7 @@ class ReviewedSupport:
         return replace(self, metadata=metadata)
 
     ordinary_snapshot = staticmethod(ordinary_snapshot)
+    legacy_config_copies = staticmethod(legacy_config_copies)
     query_parameters = staticmethod(query_parameters)
 
 

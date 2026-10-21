@@ -263,6 +263,16 @@ class MessageAccess(Protocol):
     async def read(self) -> MessageContext: ...
 
 
+class DiagnosticAccess(Protocol):
+    """Emit only declared, trusted-policy-selected events for this invocation.
+
+    Identity and trace are derived by Core. Ordinary sink failures or limits
+    drop diagnostics; authority, expiry and cancellation failures propagate.
+    """
+
+    async def emit(self, event_id: str, payload: JsonObject) -> None: ...
+
+
 class InvocationServices(Protocol):
     """Scope-sensitive handles bound by the core to one issued invocation."""
 
@@ -271,6 +281,9 @@ class InvocationServices(Protocol):
 
     @property
     def message(self) -> MessageAccess: ...
+
+    @property
+    def diagnostics(self) -> DiagnosticAccess: ...
 
     @property
     def records(self) -> ModuleRecords: ...

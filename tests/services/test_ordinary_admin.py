@@ -24,7 +24,7 @@ from ygl_test_subject.modules.ff14.config import (
     TIMEZONE,
 )
 from ygl_test_subject.services.configuration.defaults import (
-    DEFAULT_REGION,
+    IMAGE_THEME,
     core_config_target,
 )
 from ygl_test_subject.services.core_runtime import CoreRuntime
@@ -49,7 +49,7 @@ class OrdinaryAdminTests(unittest.IsolatedAsyncioTestCase):
         self.coretarget = core_config_target("fixture")
         self.ff14target = validate_contract(ConfigTarget("fixture", "ff14/ff14"))
         self.fields = (
-            field_binding(self.coretarget, DEFAULT_REGION),
+            field_binding(self.coretarget, IMAGE_THEME),
             *(
                 field_binding(
                     self.ff14target,
@@ -76,7 +76,7 @@ class OrdinaryAdminTests(unittest.IsolatedAsyncioTestCase):
             config_principal_id="fixture",
             identity_namespace="fixture",
             ordinary_config_resources={
-                self.coretarget: {DEFAULT_REGION.name},
+                self.coretarget: {IMAGE_THEME.name},
                 self.ff14target: {field.name for field in CALENDAR_CONFIG_FIELDS},
             },
             module_config_validators={"ff14/ff14": CALENDAR_VALUE_VALIDATORS},
@@ -87,7 +87,7 @@ class OrdinaryAdminTests(unittest.IsolatedAsyncioTestCase):
         await self.core.config_repository.current(self.coretarget)
         await self.core.database.executor.run_transaction(
             lambda unit: write_value(
-                unit, self.coretarget, "default_region", "INVALID-PRIVATE-RAW", 1
+                unit, self.coretarget, "image_theme", "INVALID-PRIVATE-RAW", 1
             )
         )
         with self.assertRaises(ValueError):
@@ -167,7 +167,7 @@ class OrdinaryAdminTests(unittest.IsolatedAsyncioTestCase):
         read = await self.read()
         self.assertEqual(set(read), {"game_link/core", "ff14/ff14"})
         self.assertNotIn("INVALID-PRIVATE-RAW", json.dumps(read))
-        self.assertTrue(read["game_link/core"]["fields"]["default_region"]["present"])
+        self.assertTrue(read["game_link/core"]["fields"]["image_theme"]["present"])
         self.assertEqual(
             (await self.core.admin_credential_repository.current()).generation, 0
         )
@@ -178,28 +178,28 @@ class OrdinaryAdminTests(unittest.IsolatedAsyncioTestCase):
             lambda unit: write_value(
                 unit,
                 self.coretarget,
-                "default_region",
+                "image_theme",
                 "PRIVATE-INVALID",
                 snapshot.revision,
             )
         )
         result = await self.read()
-        field = result["game_link/core"]["fields"]["default_region"]
+        field = result["game_link/core"]["fields"]["image_theme"]
         self.assertEqual(
             field,
             {"value": None, "state": "invalid", "present": True, "source": "sqlite"},
         )
         revision = result["game_link/core"]["revision"]
         repaired = await self.update(
-            self.coretarget, {"default_region": "global"}, revision
+            self.coretarget, {"image_theme": "warm_paper"}, revision
         )
         self.assertEqual(repaired.revision, revision + 1)
         self.assertFalse(self.core.started)
         with self.assertRaises(RevisionConflict):
-            await self.update(self.coretarget, {"default_region": "cn"}, revision)
+            await self.update(self.coretarget, {"image_theme": "cool_white"}, revision)
         self.assertEqual(
-            (await self.read())["game_link/core"]["fields"]["default_region"]["value"],
-            "global",
+            (await self.read())["game_link/core"]["fields"]["image_theme"]["value"],
+            "warm_paper",
         )
 
     async def test_repair_unrelated_invalid_field_is_not_silently_repaired(self):
@@ -225,7 +225,7 @@ class OrdinaryAdminTests(unittest.IsolatedAsyncioTestCase):
                 revisions,
                 authorization=context,
             )
-        await self.update(self.coretarget, {"default_region": "global"})
+        await self.update(self.coretarget, {"image_theme": "warm_paper"})
         await self.update(
             self.ff14target, {DAYS: 3, TIMEZONE: "UTC", DELIVERY_TIME: "10:30"}
         )
@@ -252,7 +252,7 @@ class OrdinaryAdminTests(unittest.IsolatedAsyncioTestCase):
     async def test_recovery_rechecks_revision_after_releasing_initial_mutation_lease(
         self,
     ):
-        await self.update(self.coretarget, {"default_region": "global"})
+        await self.update(self.coretarget, {"image_theme": "warm_paper"})
         revisions = {
             target: (await self.core.config_repository.current(target)).revision
             for target in self.resources
@@ -260,7 +260,7 @@ class OrdinaryAdminTests(unittest.IsolatedAsyncioTestCase):
         original_start = self.core.start
 
         async def interleaved_start(**kwargs):
-            await self.update(self.coretarget, {"default_region": "cn"})
+            await self.update(self.coretarget, {"image_theme": "cool_white"})
             return await original_start(**kwargs)
 
         self.core.start = interleaved_start

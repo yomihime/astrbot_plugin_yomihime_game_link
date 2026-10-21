@@ -24,8 +24,10 @@ from scripts.build_dashboard_zip import (
     MAINTENANCE_HELPER_FILES,
     OPERATOR_SCRIPT_FILES,
     PAGE_FILES,
+    REVIEWED_BUNDLE_SOURCES,
     ROOT_FILES,
     RUNTIME_DIRS,
+    _reviewed_bundle_payloads,
     included_files,
 )
 from scripts.build_release import (
@@ -119,6 +121,90 @@ def _fixture_manifest():
 
 
 class ReleaseBuildTests(unittest.TestCase):
+    def test_reviewed_bundle_capture_loads_checkout_sdk_in_isolated_process(
+        self,
+    ) -> None:
+        import json
+        import subprocess
+        import sys
+        import textwrap
+        from importlib.util import find_spec
+
+        dependency_paths = {}
+        for name in ("cryptography", "_cffi_backend"):
+            spec = find_spec(name)
+            self.assertIsNotNone(spec)
+            self.assertIsNotNone(spec.origin)
+            location = Path(spec.origin).resolve().parent
+            dependency_paths[name] = str(
+                location.parent if name == "cryptography" else location
+            )
+        script = textwrap.dedent(
+            """            import json
+            import runpy
+            import sys
+            from importlib.machinery import PathFinder
+            from importlib.util import find_spec
+            from pathlib import Path
+
+            root = Path(sys.argv[1]).resolve()
+            assert str(root) not in sys.path
+            assert "yomihime_game_link_sdk" not in sys.modules
+
+            dependency_paths = json.loads(sys.argv[2])
+
+            class BuildDependencyFinder:
+                def find_spec(self, fullname, path=None, target=None):
+                    if fullname in dependency_paths:
+                        return PathFinder.find_spec(
+                            fullname, [dependency_paths[fullname]]
+                        )
+                    return None
+
+            sys.meta_path.insert(0, BuildDependencyFinder())
+            assert find_spec("yomihime_game_link_sdk") is None
+            tool = runpy.run_path(str(root / "scripts" / "build_dashboard_zip.py"))
+            initial_path = list(sys.path)
+            with tool["_checkout_imports"]():
+                sdk = sys.modules["yomihime_game_link_sdk"]
+                assert Path(sdk.__file__).resolve() == (
+                    root / "yomihime_game_link_sdk" / "__init__.py"
+                )
+            try:
+                payloads = tool["_reviewed_bundle_payloads"](root)
+            finally:
+                assert sys.path == initial_path
+                assert "yomihime_game_link_sdk" not in sys.modules
+                assert not any(name.startswith("_ygl_release_build") for name in sys.modules)
+            assert len(payloads) == 1
+            package_root, payload = payloads[0]
+            assert package_root == root / "modules" / "ff14"
+            assert {
+                name for name in payload["sources"] if name.endswith(".py")
+            } == tool["REVIEWED_BUNDLE_SOURCES"][("modules", "ff14")]
+            print("checkout SDK capture verified")
+            """
+        )
+        with tempfile.TemporaryDirectory(prefix="yomihime-build-sdk-import-") as work:
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-I",
+                    "-S",
+                    "-B",
+                    "-c",
+                    script,
+                    str(ROOT),
+                    json.dumps(dependency_paths),
+                ],
+                cwd=work,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.strip(), "checkout SDK capture verified")
+
     def test_font_assets_are_exact_and_required_with_link_protection(self) -> None:
         from scripts.build_dashboard_zip import _font_asset_snapshot
 
@@ -277,7 +363,7 @@ class ReleaseBuildTests(unittest.TestCase):
                     if filename == "yomihime.manifest.json"
                     else b"FF14 package input"
                 )
-            (root / "pages/management/private.json").write_bytes(b"must not ship")
+            (root / "pages/00-game-link/private.json").write_bytes(b"must not ship")
             (root / ".astrbot-plugin/i18n/private.json").write_bytes(b"must not ship")
             (root / "pages/unreviewed").mkdir()
             (root / "pages/unreviewed/index.html").write_bytes(b"must not ship")
@@ -300,15 +386,27 @@ class ReleaseBuildTests(unittest.TestCase):
                     asset = root / filename
                     original = asset.read_bytes()
                     asset.unlink()
-                    with self.assertRaises(FileNotFoundError):
-                        included_files(root)
-                    os.link(sentinel, asset)
-                    with self.assertRaisesRegex(
-                        ValueError, label + " must not be a hard link"
-                    ):
-                        included_files(root)
-                    asset.unlink()
-                    asset.write_bytes(original)
+                    try:
+                        if filename in PAGE_FILES:
+                            with self.assertRaises(FileNotFoundError) as raised:
+                                included_files(root)
+                            self.assertIn(filename, str(raised.exception))
+                            self.assertIn(
+                                "npm run build --prefix pages/frontend",
+                                str(raised.exception),
+                            )
+                        else:
+                            with self.assertRaises(FileNotFoundError):
+                                included_files(root)
+                        os.link(sentinel, asset)
+                        with self.assertRaisesRegex(
+                            ValueError, label + " must not be a hard link"
+                        ):
+                            included_files(root)
+                        self.assertEqual(sentinel.read_bytes(), b"private")
+                    finally:
+                        asset.unlink(missing_ok=True)
+                        asset.write_bytes(original)
 
     def test_ff14_bundle_rejects_unreviewed_files(self) -> None:
         with tempfile.TemporaryDirectory(prefix="yomihime-release-bundle-") as work:
@@ -330,7 +428,9 @@ class ReleaseBuildTests(unittest.TestCase):
                 )
             (ff14_root / "unexpected.json").write_bytes(b"must not ship")
 
-            with self.assertRaisesRegex(ValueError, "Unsupported FF14 bundle file"):
+            with self.assertRaisesRegex(
+                ValueError, "unsupported page resource extension"
+            ):
                 included_files(root)
 
     def test_ff14_bundle_rejects_unreviewed_source_directories(self) -> None:
@@ -338,6 +438,7 @@ class ReleaseBuildTests(unittest.TestCase):
             "fixtures/sample.py",
             "tests/private.py",
             "sample/helper.py",
+            "unregistered.py",
         ):
             with (
                 self.subTest(path=unreviewed_path),
@@ -362,16 +463,92 @@ class ReleaseBuildTests(unittest.TestCase):
                         else b"FF14 package input"
                     )
                 unexpected = ff14_root / unreviewed_path
-                unexpected.parent.mkdir(parents=True)
+                unexpected.parent.mkdir(parents=True, exist_ok=True)
                 unexpected.write_bytes(b"must not ship")
 
                 with self.assertRaisesRegex(
-                    ValueError, "Unsupported FF14 bundle directory"
+                    ValueError, "Unsupported reviewed bundle source inventory"
                 ):
                     included_files(root)
 
+    def test_reviewed_release_compositions_have_exact_source_inventory(self) -> None:
+        for bundle_roots, identity in (
+            (("modules",), ("modules", "ff14")),
+            (("examples/modules",), ("examples/modules", "minimal")),
+        ):
+            with self.subTest(identity=identity):
+                payloads = _reviewed_bundle_payloads(ROOT, bundle_roots=bundle_roots)
+                self.assertEqual(len(payloads), 1)
+                _, payload = payloads[0]
+                self.assertEqual(
+                    {name for name in payload["sources"] if name.endswith(".py")},
+                    REVIEWED_BUNDLE_SOURCES[identity],
+                )
+
+    def test_reviewed_nested_package_is_allowed_but_missing_source_is_rejected(
+        self,
+    ) -> None:
+        import json
+
+        identity = ("examples/modules", "minimal")
+        reviewed = REVIEWED_BUNDLE_SOURCES[identity] | {
+            "helpers/__init__.py",
+            "helpers/facts.py",
+        }
+        with tempfile.TemporaryDirectory(prefix="yomihime-reviewed-layout-") as work:
+            root = Path(work).resolve()
+            package = root / "examples/modules/minimal"
+            for name in reviewed:
+                path = package / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"# reviewed fixture source\n")
+            original = ROOT / "examples/modules/minimal"
+            manifest = json.loads((original / "yomihime.manifest.json").read_bytes())
+            for module in manifest["modules"]:
+                module.pop("pages", None)
+                module.pop("resources", None)
+            (package / "yomihime.manifest.json").write_bytes(
+                json.dumps(manifest).encode()
+            )
+            (package / "assembly.json").write_bytes(
+                (original / "assembly.json").read_bytes()
+            )
+            (package / "README.md").write_bytes(b"reviewed fixture")
+            with patch.dict(REVIEWED_BUNDLE_SOURCES, {identity: frozenset(reviewed)}):
+                payloads = _reviewed_bundle_payloads(root, bundle_roots=(identity[0],))
+                self.assertEqual(len(payloads), 1)
+                self.assertEqual(
+                    {
+                        name
+                        for name in payloads[0][1]["sources"]
+                        if name.endswith(".py")
+                    },
+                    reviewed,
+                )
+                (package / "helpers/facts.py").unlink()
+                with self.assertRaisesRegex(
+                    ValueError, "Unsupported reviewed bundle source inventory"
+                ):
+                    _reviewed_bundle_payloads(root, bundle_roots=(identity[0],))
+
+    def test_unknown_release_composition_is_rejected_before_capture(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="yomihime-unselected-package-") as work:
+            root = Path(work).resolve()
+            package = root / "modules/unselected"
+            package.mkdir(parents=True)
+            (package / "yomihime.manifest.json").write_bytes(b"{}")
+            with self.assertRaisesRegex(
+                ValueError, "Unsupported reviewed release composition"
+            ):
+                _reviewed_bundle_payloads(root)
+
     def test_ff14_bundle_rejects_external_links(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="yomihime-release-link-") as work:
+        with (
+            tempfile.TemporaryDirectory(prefix="yomihime-release-link-") as work,
+            tempfile.TemporaryDirectory(
+                prefix="yomihime-release-outside-"
+            ) as outside_work,
+        ):
             root = Path(work).resolve()
             for filename in ROOT_FILES:
                 (root / filename).write_bytes(b"runtime root asset")
@@ -388,18 +565,28 @@ class ReleaseBuildTests(unittest.TestCase):
                     if filename == "yomihime.manifest.json"
                     else b"FF14 package input"
                 )
-            outside = root.parent / f"{root.name}-outside.py"
+            baseline = included_files(root)
+            self.assertTrue(
+                {ff14_root / filename for filename in FF14_BUNDLE_REQUIRED_FILES}
+                <= set(baseline)
+            )
+            outside = Path(outside_work).resolve() / "outside.py"
             outside.write_bytes(b"external source")
+            link = ff14_root / "external.py"
             try:
-                (ff14_root / "external.py").symlink_to(outside)
+                link.symlink_to(outside)
             except (NotImplementedError, OSError) as exc:
                 self.skipTest(f"symlink creation is unavailable: {exc}")
 
             try:
-                with self.assertRaisesRegex(ValueError, "symlink|reparse point"):
+                self.assertTrue(link.is_symlink())
+                self.assertTrue(link.exists())
+                self.assertEqual(link.resolve(), outside)
+                with self.assertRaisesRegex(ValueError, "^bundled_source_invalid$"):
                     included_files(root)
             finally:
-                outside.unlink(missing_ok=True)
+                link.unlink(missing_ok=True)
+            self.assertEqual(included_files(root), baseline)
 
     def test_sha256sums_lists_artifact_names_and_digests_in_order(self) -> None:
         with tempfile.TemporaryDirectory(prefix="yomihime-release-sums-") as work:
@@ -420,7 +607,7 @@ class ReleaseBuildTests(unittest.TestCase):
     def test_reused_sdk_wheel_still_requires_the_independent_pin(self) -> None:
         with tempfile.TemporaryDirectory(prefix="yomihime-release-wheel-") as work:
             root = Path(work)
-            wheel = root / "yomihime_game_link_sdk-0.1.0a9-py3-none-any.whl"
+            wheel = root / "yomihime_game_link_sdk-0.1.0a11-py3-none-any.whl"
             wheel.write_bytes(b"not the reviewed wheel")
             output = root / "artifacts"
 

@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 import tempfile
 import weakref
 from collections.abc import Mapping
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
 from secrets import token_urlsafe
@@ -43,30 +44,43 @@ from ...extensions.factory_resolver import (
 )
 from ...infrastructure.key_provider import EnvironmentKeyProvider
 from ...infrastructure.managed_key_manager import ManagedKeyManager
+from ...infrastructure.private_storage import resolve_private_storage
 from ...infrastructure.secret_codec import AESGCMSecretCodec
 from ...infrastructure.sqlite.database import SQLiteDatabase
 from ...presentation.command_card import CommandCardRenderer
 from ...presentation.command_text import project_command_heading
 from ...presentation.rendering import GenericDisplayRenderer, RenderingBounds
 from ...services.admin_authorization import AdminAuthorizationService
-from ...services.configuration.defaults import CORE_CONFIG_FIELDS, core_config_target
+from ...services.configuration.defaults import (
+    CORE_CONFIG_FIELDS,
+    core_config_target,
+    presentation_choices,
+)
 from ...services.configuration.operations import ConfigurationValueError
 from ...services.core_runtime import (
     CoreRuntime,
     CoreRuntimeCleanupPending,
     HostIngress,
 )
+from ...services.diagnostics import DiagnosticStore
 from ...services.managed_font import ManagedFont
 from ...services.source_credentials import SourceCredentialPolicy
 from ...services.trusted_assembly import assemble_reviewed
-from .bundled import BundledExtensionError, install_bundled_ff14
+from .bundled import (
+    DEFAULT_BUNDLE_SELECTION,
+    BundledExtensionError,
+    ReviewedBundleSelection,
+    install_bundled_package,
+)
 from .command_bridge import AstrBotCommandBridge, CommandHelp, CommandInvocation
+from .diagnostics import forward_diagnostic
 from .message_port import (
     AstrBotMessagePort,
     ImageFactory,
     MessageChainFactory,
     PlainFactory,
 )
+from .page_sessions import HostModulePageSessions
 from .web_public import (
     HostPublicWebValidator,
     WebPublicRejected,
@@ -76,6 +90,17 @@ from .web_public import (
 )
 
 PLUGIN_NAME = "astrbot_plugin_yomihime_game_link"
+
+
+def _merge_resources(*policies):
+    """Union only trusted server-selected resource maps."""
+    merged = {}
+    for policy in policies:
+        for target, names in policy.items():
+            merged[target] = frozenset(merged.get(target, ())) | frozenset(names)
+    return merged
+
+
 _INITIALIZING = "服务正在初始化，请稍后重试。"
 _UNTRUSTED_EVENT = "无法确认消息来源，命令未执行。"
 _OWNER_DIRECT_HINT = "该本人管理命令仅支持私聊，请前往私聊继续。"
@@ -506,10 +531,17 @@ class AstrBotRuntime:
         core_factory: Callable[..., CoreRuntime] = CoreRuntime,
         http_transport_factory: Callable[[], object] | None = None,
         font_manager_factory=ManagedFont,
+        bundled_selection: ReviewedBundleSelection | None = DEFAULT_BUNDLE_SELECTION,
     ) -> None:
         if context is None:
             raise TypeError("AstrBot Context is required")
         self._context = context
+        if (
+            bundled_selection is not None
+            and type(bundled_selection) is not ReviewedBundleSelection
+        ):
+            raise TypeError("trusted reviewed bundle selection required")
+        self._bundled_selection = bundled_selection
         self._web_state, self._web_origin = origin_configuration(config)
         self._web_validator: HostPublicWebValidator | None = None
         self._config_snapshot = None
@@ -542,9 +574,8 @@ class AstrBotRuntime:
         self._core: CoreRuntime | None = None
         self._bridge: AstrBotCommandBridge | None = None
         self._tool_publisher = None
-        from .fflogs_diagnostics import FFLogsDiagnostics
-
-        self._fflogs_diagnostics = FFLogsDiagnostics()
+        self._private_storage_guard = None
+        self._page_sessions = HostModulePageSessions()
         self._http_transport: object | None = None
         self._transport_closed = False
         self._trusted_bundle = False
@@ -589,6 +620,319 @@ class AstrBotRuntime:
             raise AdminAuthorizationDenied
         return self._core, source
 
+    async def module_page_operation(self, action, data, *, request):
+        """Bind a real Dashboard session to a current, selected module page.
+
+        AstrBot's parent bridge sends an ordinary Dashboard JWT, not a signed
+        originating-DOM claim. The server selects its sole published root;
+        body owner/page are selectors intersected with current trusted policy.
+        No asset token, client pageName, Referer, or API key grants authority.
+        """
+        from yomihime_game_link_sdk import ConfigTarget
+
+        from ...services.module_pages import ModulePageGrant, module_page_operation
+        from .admin_pages import _DashboardRequestFence
+        from .web_admin import verified_dashboard_request
+
+        actions = {
+            "module-config-current",
+            "module-config-save",
+            "module-config-clear",
+            "module-credential-status",
+            "module-credential-replace",
+            "module-credential-clear",
+            "module-page-session",
+            "module-page-session-close",
+        }
+        if action not in actions or type(data) is not dict:
+            raise AdminAuthorizationDenied
+        path = f"/api/plug/{PLUGIN_NAME}/admin/{action}"
+        raw, subject, expiry = verified_dashboard_request(request, path)
+        dashboard_fence = _DashboardRequestFence(request, path, raw, subject, expiry)
+        bearer_digest = self._page_sessions.bearer_digest(
+            request.headers.getlist("authorization")[0].split(" ", 1)[1]
+        )
+        credential = action.startswith("module-credential-")
+        core, source = self.management_entry(credentials=credential)
+        generation = self._generation
+        alive = True
+
+        def request_current():
+            return (
+                alive
+                and generation == self._generation
+                and self._ready
+                and self.management_current(core, source)
+                and dashboard_fence.current(raw)
+            )
+
+        bootstrap = action == "module-page-session"
+        if action == "module-page-session-close":
+            if set(data) != {"page_session"}:
+                raise ValueError("invalid page session close")
+            self._page_sessions.revoke(
+                data["page_session"], subject=subject, bearer_digest=bearer_digest
+            )
+            if not request_current():
+                raise AdminAuthorizationDenied
+            return {"closed": True}
+        if bootstrap:
+            if set(data) not in (
+                {"owner", "page", "runtime_id", "module_epoch"},
+                {"owner", "page", "runtime_id", "module_epoch", "previous_session"},
+            ):
+                raise ValueError("invalid page session request")
+        elif type(data.get("page_session")) is not str:
+            raise AdminAuthorizationDenied
+        operation = (
+            AdminOperation.READ_CONFIG
+            if action in {"module-config-current", "module-credential-status"}
+            else AdminOperation.UPDATE_CONFIG
+        )
+
+        def binding_now(owner, page, epoch):
+            if (
+                type(owner) is not str
+                or type(page) is not str
+                or type(epoch) is not int
+            ):
+                raise AdminAuthorizationDenied
+            module = core.registry.snapshot().modules.get(owner)
+            if (
+                module is None
+                or not module.enabled
+                or module.epoch != epoch
+                or not core.registry.is_active(module)
+            ):
+                raise AdminAuthorizationDenied
+            state = core.lifecycle.state(owner)
+            identity = core.lifecycle.current_identity(owner)
+            declared = next(
+                (item for item in module.manifest.pages if item.route_id == page), None
+            )
+            if (
+                identity is None
+                or identity is not state.identity
+                or identity.module_epoch != epoch
+                or state.lifecycle.value != "active"
+                or declared is None
+                or declared.access != "public_web"
+            ):
+                raise AdminAuthorizationDenied
+            target = ConfigTarget(core.admin_operations.config_principal_id, owner)
+            ordinary = core.admin_operations.ordinary_resources().get(target, ())
+            credentials = core.admin_operations.credential_resources(active=True).get(
+                target, ()
+            )
+            return ModulePageGrant(
+                owner,
+                page,
+                identity.runtime_id,
+                epoch,
+                frozenset(declared.config_fields) & frozenset(ordinary),
+                frozenset(declared.credential_fields) & frozenset(credentials),
+            )
+
+        async def check_page_binding(owner, page, epoch, actual_action):
+            if actual_action != action or not request_current():
+                raise AdminAuthorizationDenied
+            if await raw.is_disconnected() or not request_current():
+                raise AdminAuthorizationDenied
+            binding = binding_now(owner, page, epoch)
+            if not bootstrap:
+                self._page_sessions.require(
+                    data["page_session"],
+                    subject=subject,
+                    bearer_digest=bearer_digest,
+                    binding=binding,
+                    generation=generation,
+                )
+            return binding
+
+        binding = await check_page_binding(
+            data.get("owner"), data.get("page"), data.get("module_epoch"), action
+        )
+        if data.get("runtime_id") != binding.runtime_id:
+            raise AdminAuthorizationDenied
+        target = ConfigTarget(core.admin_operations.config_principal_id, binding.owner)
+        if bootstrap:
+            # Authentication alone does not establish field rights. Mint only
+            # after ordinary and credential resources independently authorize.
+            for fields, source_credentials in (
+                (binding.config_fields, False),
+                (binding.credential_fields, True),
+            ):
+                if not fields:
+                    continue
+                current_core, field_source = self.management_entry(
+                    credentials=source_credentials
+                )
+                if current_core is not core:
+                    raise AdminAuthorizationDenied
+                context = field_source.issue(
+                    subject=subject,
+                    request=raw,
+                    expiry=expiry,
+                    operations={
+                        AdminOperation.READ_CONFIG,
+                        AdminOperation.UPDATE_CONFIG,
+                    },
+                    resources={target: fields},
+                    live=lambda actual: actual is raw
+                    and alive
+                    and generation == self._generation
+                    and self._ready
+                    and self.management_current(core, field_source),
+                )
+                try:
+                    for granted_operation in (
+                        AdminOperation.READ_CONFIG,
+                        AdminOperation.UPDATE_CONFIG,
+                    ):
+                        await core.admin_authorization.authorize(
+                            granted_operation,
+                            invocation=None,
+                            context=context,
+                            resources={target: fields},
+                        )
+                    current_binding = await check_page_binding(
+                        binding.owner, binding.page, binding.module_epoch, action
+                    )
+                    if current_binding != binding:
+                        raise AdminAuthorizationDenied
+                finally:
+                    field_source.end(context)
+            result = self._page_sessions.issue(
+                subject=subject,
+                bearer_digest=bearer_digest,
+                binding=binding,
+                generation=generation,
+                expiry=expiry,
+                previous_session=data.get("previous_session"),
+            )
+            try:
+                if (
+                    not request_current()
+                    or binding_now(binding.owner, binding.page, binding.module_epoch)
+                    != binding
+                ):
+                    raise AdminAuthorizationDenied
+                self._page_sessions.require(
+                    result["page_session"],
+                    subject=subject,
+                    bearer_digest=bearer_digest,
+                    binding=binding,
+                    generation=generation,
+                )
+            except BaseException:
+                self._page_sessions.revoke(
+                    result["page_session"], subject=subject, bearer_digest=bearer_digest
+                )
+                raise
+            return result
+
+        resources = {
+            target: binding.credential_fields if credential else binding.config_fields
+        }
+
+        def still_current(actual):
+            if actual is not raw or not request_current():
+                return False
+            try:
+                current = binding_now(binding.owner, binding.page, binding.module_epoch)
+                self._page_sessions.require(
+                    data["page_session"],
+                    subject=subject,
+                    bearer_digest=bearer_digest,
+                    binding=current,
+                    generation=generation,
+                )
+                return current == binding
+            except Exception:
+                return False
+
+        authorization = source.issue(
+            subject=subject,
+            request=raw,
+            expiry=expiry,
+            operations={operation},
+            resources=resources,
+            live=still_current,
+        )
+        task = asyncio.current_task()
+        watcher_stop = False
+
+        async def disconnect():
+            nonlocal alive
+            while alive and not watcher_stop:
+                disconnected = await raw.is_disconnected()
+                if watcher_stop:
+                    return
+                if disconnected:
+                    alive = False
+                    source.end(authorization)
+                    task.cancel()
+                    return
+                await asyncio.sleep(0.02)
+
+        watcher = asyncio.create_task(disconnect(), name="ygl:module-page-disconnect")
+        try:
+            result = await module_page_operation(
+                core.admin_operations,
+                action,
+                {key: value for key, value in data.items() if key != "page_session"},
+                authorization=authorization,
+                runtime_id=binding.runtime_id,
+                check_page_binding=check_page_binding,
+                descriptor_choices=presentation_choices,
+            )
+            await check_page_binding(
+                binding.owner, binding.page, binding.module_epoch, action
+            )
+            source.check(authorization, operation, resources)
+            return result
+        except Exception:
+            # A coordinator may wrap a rejected SQLite CAS as a configuration
+            # failure after rolling it back. Recheck the same Host proof on the
+            # error path as well; its commit fence remains the write authority.
+            if not still_current(raw):
+                raise AdminAuthorizationDenied from None
+            raise
+        finally:
+            # Joining can await after a result or a primary failure. Keep its
+            # proof live until the final synchronous check, while stopping the
+            # monitor independently when AnyIO consumes its cancellation.
+            primary_error = sys.exception()
+            watcher_stop = True
+            cancellation_pending = False
+            watcher_error = None
+            try:
+                watcher.cancel()
+                try:
+                    await watcher
+                except asyncio.CancelledError:
+                    cancellation_pending = task is not None and task.cancelling() > 0
+                except Exception as error:
+                    watcher_error = error
+                cancellation_pending = cancellation_pending or (
+                    task is not None and task.cancelling() > 0
+                )
+                if not cancellation_pending and not isinstance(
+                    primary_error, asyncio.CancelledError
+                ):
+                    if not still_current(raw):
+                        raise AdminAuthorizationDenied from None
+                    source.check(authorization, operation, resources)
+                    if primary_error is None and watcher_error is not None:
+                        raise watcher_error
+            finally:
+                try:
+                    alive = False
+                    source.end(authorization)
+                finally:
+                    if cancellation_pending:
+                        raise asyncio.CancelledError
+
     async def recover_management(
         self, core, revisions, *, authorization
     ) -> ManagementRecoveryProjection:
@@ -621,7 +965,6 @@ class AstrBotRuntime:
                 ),
             )
             self._ready = True
-            self._fflogs_diagnostics.start()
             await self._publish_tools_or_close(core)
             return result
 
@@ -765,6 +1108,7 @@ class AstrBotRuntime:
         return tuple(self._assembly.public_bindings) if self._assembly else ()
 
     def _cleanup_module_owner(self, owner):
+        self._page_sessions.revoke_owner(owner)
         if self._web_validator is not None:
             self._web_validator.revoke_owner(owner)
         if self._tool_publisher is not None:
@@ -793,6 +1137,8 @@ class AstrBotRuntime:
             if self._ready and self._core is not None:
                 return
             self._generation += 1
+            self._page_sessions.close()
+            self._page_sessions = HostModulePageSessions()
             if self._web_validator is not None:
                 self._web_validator.close()
             generation = self._generation
@@ -810,14 +1156,16 @@ class AstrBotRuntime:
             self._trusted_bundle = False
             self._bundle_failure_reason = None
             try:
-                installation = install_bundled_ff14(self._plugin_root, self._data_dir)
+                installation = install_bundled_package(
+                    self._plugin_root, self._data_dir, selection=self._bundled_selection
+                )
             except BundledExtensionError as exc:
                 self._bundle_failure_reason = self._safe_bundle_reason(exc.code)
                 raise RuntimeError(self._bundle_failure_diagnostic()) from None
             self._trusted_bundle = installation.trusted
             self._bundle_failure_reason = (
                 None
-                if installation.trusted
+                if installation.trusted or not installation.selected
                 else self._safe_bundle_reason(installation.reason)
             )
             if installation.trusted:
@@ -890,18 +1238,28 @@ class AstrBotRuntime:
                     max_blocks_per_document=32,
                     max_members_per_batch=8,
                 )
-                database = SQLiteDatabase(self._data_dir / "runtime.sqlite3")
+                layout = resolve_private_storage(self._data_dir)
+                storage_guard = layout.open_guard(isolate_credentials=True)
+                storage_guard.__enter__()
+                self._private_storage_guard = storage_guard
+                database = SQLiteDatabase(layout.database_path)
                 managed_keys = ManagedKeyManager(
                     database,
-                    self._data_dir,
-                    self._data_dir / "secrets",
+                    layout.key_data_root,
+                    layout.secret_root,
                     environment=EnvironmentKeyProvider("YGL_SECRET_KEY"),
+                    storage_security=layout.security_status,
+                    storage_write_guard=layout.assert_credential_writable,
+                    storage_read_guard=getattr(
+                        storage_guard, "assert_credentials_readable", None
+                    ),
+                    storage_layout=layout,
                 )
                 core = self._core_factory(
                     database=database,
                     extension_root=extension_root,
                     file_root=self._data_dir / "files",
-                    secret_root=self._data_dir / "secrets",
+                    secret_root=layout.secret_root,
                     secret_codec=AESGCMSecretCodec(managed_keys),
                     managed_key_manager=managed_keys,
                     http_transport=self._http_transport,
@@ -947,6 +1305,13 @@ class AstrBotRuntime:
                     if self._assembly
                     else (),
                     owner_cleanup=self._cleanup_module_owner,
+                    diagnostic_policies=self._assembly.diagnostic_policies
+                    if self._assembly
+                    else {},
+                    diagnostics=DiagnosticStore(sink=forward_diagnostic),
+                    legacy_config_policies=self._assembly.legacy_config_policies
+                    if self._assembly
+                    else (),
                     public_web_validator=validator,
                     public_web_capabilities=self._assembly.public_capabilities
                     if self._assembly
@@ -962,6 +1327,9 @@ class AstrBotRuntime:
                 try:
                     await self._close_http_transport()
                 finally:
+                    if self._private_storage_guard is not None:
+                        self._private_storage_guard.__exit__(None, None, None)
+                        self._private_storage_guard = None
                     self._cleanup_isolated_extension_dir()
                     if self._assembly_lease is not None:
                         self._assembly_lease.release()
@@ -974,7 +1342,10 @@ class AstrBotRuntime:
             ):
                 self._admin_source = core.admin_authorization.register_source(
                     "astrbot-dashboard",
-                    resources=core.admin_operations.ordinary_resources(),
+                    resources=_merge_resources(
+                        core.admin_operations.ordinary_resources(),
+                        core.admin_operations.legacy_config_resources(),
+                    ),
                     operations={
                         AdminOperation.READ_CONFIG,
                         AdminOperation.UPDATE_CONFIG,
@@ -1045,6 +1416,9 @@ class AstrBotRuntime:
                     raise
                 if closed:
                     self._core = None
+                    if self._private_storage_guard is not None:
+                        self._private_storage_guard.__exit__(None, None, None)
+                        self._private_storage_guard = None
                     if self._assembly_lease is not None:
                         self._assembly_lease.release()
                         self._assembly_lease = None
@@ -1069,7 +1443,6 @@ class AstrBotRuntime:
                 ),
             )
             self._ready = True
-            self._fflogs_diagnostics.start()
             await self._publish_tools_or_close(core)
 
     async def _publish_tools_or_close(self, core) -> None:
@@ -1095,7 +1468,7 @@ class AstrBotRuntime:
 
     async def terminate(self) -> None:
         """Stop ingress and close the owned pump/modules/database once."""
-        self._fflogs_diagnostics.close()
+        self._page_sessions.close()
         self._generation += 1
         self._message_receipts.close()
         if self._tool_publisher is not None:
@@ -1122,7 +1495,6 @@ class AstrBotRuntime:
             self._closing = False
 
     async def _close_owned_runtime(self) -> None:
-        self._fflogs_diagnostics.close()
         await self._managed_font.close()
         self._message_receipts.close()
         pending = []
@@ -1195,6 +1567,13 @@ class AstrBotRuntime:
         # its existing retry contract; failed tool removal alone does not block
         # transport/directory closure once Core is quiet.
         if self._core is None:
+            if self._private_storage_guard is not None:
+                try:
+                    self._private_storage_guard.__exit__(None, None, None)
+                except BaseException as exc:
+                    pending.append(("private_storage_guard", exc))
+                else:
+                    self._private_storage_guard = None
             if self._assembly_lease is not None:
                 self._assembly_lease.release()
                 self._assembly_lease = None
@@ -1334,7 +1713,7 @@ class AstrBotRuntime:
     def _bundle_failure_diagnostic(self) -> str:
         reason = self._safe_bundle_reason(self._bundle_failure_reason)
         return (
-            f"FF14 内置模块未能安全加载 [{reason}]。"
+            f"所选内置模块未能安全加载 [{reason}]。"
             + _BUNDLE_FAILURE_DIAGNOSTICS[reason]
         )
 
@@ -1342,7 +1721,7 @@ class AstrBotRuntime:
         """Return host help/errors, or dispatch once through the Core output port."""
         if self._config_error is not None:
             return (
-                f"FF14 普通配置无效 [{self._config_error}]，插件尚未启动。"
+                f"插件普通配置无效 [{self._config_error}]，插件尚未启动。"
                 "请在已登录的插件设置页修正对应字段，再到配置维护重新校验。"
                 "已有订阅及其它数据保留；不会自动覆盖无效值。"
             )
@@ -1355,29 +1734,6 @@ class AstrBotRuntime:
         except Exception:
             return "命令暂时不可用。"
         if isinstance(action, str):
-            if isinstance(action, CommandHelp):
-                try:
-                    region = (await self._core.core_defaults.current()).values[
-                        "default_region"
-                    ]
-                except ConfigurationValueError as exc:
-                    return (
-                        f"Core 普通配置无效 [{exc.field}]。"
-                        "请通过合法 Core 配置管理权限修复；已有订阅记录保留。"
-                    )
-                except Exception:
-                    return "命令暂时不可用。"
-                hint = (
-                    f"默认区域提示：{region}；缺省区域与显式参数的具体规则见模块帮助。"
-                )
-                return CommandHelp(
-                    action + "\n" + hint,
-                    source=(
-                        replace(action.source, hints=(*action.source.hints, hint))
-                        if action.source is not None
-                        else None
-                    ),
-                )
             return action
         if not isinstance(action, CommandInvocation):
             return "命令暂时不可用。"

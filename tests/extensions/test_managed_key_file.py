@@ -85,6 +85,31 @@ class ManagedKeyAclTests(unittest.TestCase):
 class ManagedKeyFilesTests(unittest.TestCase):
     def setUp(self):
         secure_parent = os.environ.get("YGL_MANAGED_KEY_TEST_ROOT")
+        if os.name == "nt":
+            from uuid import uuid4
+
+            from ygl_test_subject.infrastructure.windows.managed_key_io import _pin
+            from ygl_test_subject.infrastructure.windows.private_storage import (
+                create_private_directory,
+                identity_private_base,
+            )
+
+            if secure_parent is None:
+                self.owned_parent = create_private_directory(
+                    identity_private_base(), "ygl-key-file-tests-" + uuid4().hex
+                )
+                # Only this new empty parent is removed after the owned temp
+                # child. Nonempty/failed cleanup is reported and retained.
+                self.addCleanup(self.owned_parent.rmdir)
+                secure_parent = self.owned_parent
+            parent = Path(secure_parent)
+            if not parent.is_absolute():
+                raise ManagedKeyFileError()
+            # Explicit caller-supplied parents must already qualify. Never
+            # change an existing ACL, silently choose another root or skip.
+            with _pin(parent, parent):
+                pass
+            secure_parent = parent
         self.temp = tempfile.TemporaryDirectory(
             prefix="ygl-key-file-", dir=secure_parent
         )

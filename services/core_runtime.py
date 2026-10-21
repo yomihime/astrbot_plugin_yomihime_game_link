@@ -7,6 +7,7 @@ import inspect
 import logging
 import re
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from math import isfinite
@@ -14,6 +15,7 @@ from pathlib import Path
 from time import monotonic
 from types import MappingProxyType
 from typing import Protocol
+from uuid import uuid4
 
 from yomihime_game_link_sdk.contexts import (
     InvocationOrigin,
@@ -78,14 +80,9 @@ from .admin_operations import (
     AdminStartupFailure,
 )
 from .b04_runtime import B04Repositories, SQLiteResourceVisibilityProbe
-from .configuration.defaults import (
-    CORE_CONFIG_FIELDS,
-    CoreDefaultsView,
-    ThemeSettingsView,
-    core_config_target,
-)
-from .configuration.operations import ConfigurationCoordinator
+from .configuration.defaults import ThemeSettingsView
 from .delivery import DeliveryService
+from .diagnostics import DiagnosticStore
 from .extension_runtime import (
     ExtensionRestoreFailure,
     ExtensionRuntime,
@@ -130,6 +127,29 @@ DEFAULT_CADENCE_REVISION = 1
 DEFAULT_SCHEDULER_QUOTAS = SchedulerQuotas(4, 2, 2, 20, 10.0, 1.0, 30)
 DEFAULT_RESCHEDULE_CONFIGURATION = RescheduleConfiguration(120.0, 0.05, 0.1, 0.0)
 _MODULE_IDENTIFIER = re.compile(r"[a-z][a-z0-9_]*(?:[.-][a-z0-9_]+)*\Z")
+
+
+class RuntimeStorageLease:
+    """Internal own-runtime drain receipt; NOT an OfflineSourceLease."""
+
+    def __init__(self, core, generation):
+        self._core = core
+        self._generation = generation
+        self._active = True
+
+    def assert_current(self):
+        core = self._core
+        if (
+            not self._active
+            or core._storage_lease is not self
+            or core._storage_generation != self._generation
+            or core._accepting
+            or core._closed
+        ):
+            raise RuntimeError("storage quiesce lease is stale")
+
+    def __reduce__(self):
+        raise TypeError("runtime authority cannot be serialized")
 
 
 class HostIngressValidator(Protocol):
@@ -482,6 +502,9 @@ class CoreRuntime:
         ordinary_config_resources=None,
         managed_module_owners=(),
         owner_cleanup=None,
+        diagnostic_policies=None,
+        diagnostics=None,
+        legacy_config_policies=(),
     ) -> None:
         validate_contract(renderer)
         validate_contract(display_limits)
@@ -566,6 +589,7 @@ class CoreRuntime:
 
         self.database = database
         self.managed_keys = managed_key_manager
+        self._legacy_config_policies = tuple(legacy_config_policies)
         self.module_host_config_snapshots = host_config_snapshots
         self.extension_root = Path(extension_root)
         self._trusted_bundled_defaults = bundled_defaults
@@ -668,21 +692,13 @@ class CoreRuntime:
             max_subscriptions_per_owner=max_subscriptions_per_owner,
         )
         # Build exactly one ModuleServicesFactory with the shared B04 service.
-        core_configuration = ConfigurationCoordinator(
-            core_config_target(config_principal_id),
-            CORE_CONFIG_FIELDS,
-            self.config_repository,
-            self.secret_store,
-        )
-        self.core_defaults = CoreDefaultsView(
-            core_configuration.view(),
-        )
         self.theme_settings = ThemeSettingsView(
             self.config_repository,
             self.lifecycle.admission,
             principal_id=config_principal_id,
         )
         self.sync_diagnostics = SyncDiagnostics()
+        self.diagnostics = diagnostics if diagnostics is not None else DiagnosticStore()
         self.module_services = ModuleServicesFactory(
             self.registry,
             self.issuer,
@@ -698,7 +714,9 @@ class CoreRuntime:
             clock=monotonic_clock,
             utc_clock=utc_clock,
             module_host_config_snapshots=host_config_snapshots,
-            core_defaults=self.core_defaults,
+            diagnostic_policies=diagnostic_policies,
+            diagnostics=self.diagnostics,
+            legacy_config_policies=legacy_config_policies,
             module_config_validators=module_config_validators,
             storage_router=self.module_storage,
         )
@@ -837,6 +855,7 @@ class CoreRuntime:
             ordinary_config_resources=ordinary_config_resources,
             managed_module_owners=managed_module_owners,
             owner_cleanup=owner_cleanup,
+            legacy_config_copy_policies=legacy_config_policies,
         )
         self.admin_facade = AdminFacade(self.admin_operations, self.admin_authorization)
         self.gateway = Gateway(
@@ -884,6 +903,10 @@ class CoreRuntime:
         self._close_lock = asyncio.Lock()
         self._startup_done = asyncio.Event()
         self._startup_done.set()
+        self._storage_runtime_id = uuid4().hex
+        self._storage_generation = 1
+        self._storage_lease = None
+        self._storage_quiesce_lock = asyncio.Lock()
 
     @property
     def started(self) -> bool:
@@ -943,7 +966,11 @@ class CoreRuntime:
             else "not_ready"
         )
         return project_module_catalog(
-            snapshot, states, identities, runtime_state=runtime_state
+            snapshot,
+            states,
+            identities,
+            runtime_state=runtime_state,
+            legacy_config_policies=self._legacy_config_policies,
         )
 
     def require_help_source_current(self, source) -> None:
@@ -1650,7 +1677,76 @@ class CoreRuntime:
             owned[1], target, payload, image_current=image_current
         )
 
+    @property
+    def storage_migration_identity(self):
+        return self._storage_runtime_id, self._storage_generation
+
+    @asynccontextmanager
+    async def quiesce_storage_migration(
+        self, expected_runtime_id, expected_generation, *, timeout=None
+    ):
+        """Drain only our runtime, excluding the exact requesting admin task.
+
+        The runtime remains parked for cold restart after this context, even
+        on failure. This method cannot prove any external old writer stopped.
+        """
+        bound = self._cleanup_timeout if timeout is None else timeout
+        _positive_finite(bound, "timeout")
+        async with self._storage_quiesce_lock:
+            if (
+                (expected_runtime_id, expected_generation)
+                != self.storage_migration_identity
+                or self._closed
+                or self._closing
+                or not self._started
+                or self._storage_lease is not None
+            ):
+                raise RuntimeError("storage quiesce identity changed")
+            self._accepting = False
+            self.gateway.fence_public_web()
+            self.extension_runtime.stop_accepting()
+            current = asyncio.current_task()
+            flights = self.admin_operations.stop_accepting(cancel_inflight=False)
+            others = {
+                task
+                for task in (*flights, *self._host_flights)
+                if task is not current and not task.done()
+            }
+            pump = self._pump_task
+            if pump is not None and pump is not current and not pump.done():
+                others.add(pump)
+            for task in others:
+                task.cancel()
+
+            async def drain():
+                if not await self.gateway.drain_public_web(float(bound)):
+                    raise CoreRuntimeCleanupPending("public_web")
+                if others:
+                    await asyncio.gather(*others, return_exceptions=True)
+                await self._quiesce_admission_gates()
+                await self.extension_runtime.close(timeout=float(bound))
+                await self.module_services.close_credentials()
+                await self.database.executor.quiesce_storage(timeout=float(bound))
+
+            try:
+                await asyncio.wait_for(drain(), float(bound))
+                self._storage_generation += 1
+                lease = RuntimeStorageLease(self, self._storage_generation)
+                self._storage_lease = lease
+                lease.assert_current()
+            except BaseException:
+                self._cleanup_pending = True
+                self._storage_generation += 1
+                raise
+            try:
+                yield lease
+            finally:
+                lease._active = False
+                self._storage_lease = None
+                self._storage_generation += 1
+
     async def close(self, *, timeout: float | None = None) -> bool:
+        self._storage_generation += 1
         bound = self._cleanup_timeout if timeout is None else timeout
         _positive_finite(bound, "timeout")
         self.gateway.fence_public_web()  # Web-only synchronous fence before first await.
@@ -1790,6 +1886,7 @@ class CoreRuntime:
         self._cleanup_pending = False
         self._closed = True
         self.sync_diagnostics.close()
+        self.diagnostics.close()
         self._started = False
         return True
 

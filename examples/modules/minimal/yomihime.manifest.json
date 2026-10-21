@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "package_id": "minimal",
+  "package_version": "1.0.0",
+  "contract_version": "2.0",
+  "author": "Yomihime SDK example",
+  "license": "MIT",
+  "source": "https://example.invalid/yomihime/minimal",
+  "modules": [{
+    "module_id": "demo",
+    "route": "minimal",
+    "category": "game",
+    "factory_entry": "module:Factory",
+    "module_version": "1.0.0",
+    "capabilities": [{
+      "capability_id": "status",
+      "input_schema": {"type": "object", "properties": {}, "required": [], "additionalProperties": false},
+      "invocation_policy": "command_and_public_web",
+      "effect": "read_only",
+      "privacy_floor": "public",
+      "required_sources": [],
+      "invocation_origins": ["command", "web_public"]
+    }],
+    "commands": [{"operation_path": "status", "capability_id": "status", "parameter_mapping": {}, "help_text": "Read a deterministic public status."}],
+    "config_fields": [{"name": "enabled", "sensitive": false, "required": false, "default": true, "description": "Enable the offline example.", "value_schema": {"type": "boolean"}}],
+    "sources": [],
+    "pages": [{"route_id": "home", "role": "home", "title": "Minimal module", "entry": "pages/entry.js", "order": 0, "access": "public_web", "capability_id": "status"}],
+    "resources": [{"path": "pages/entry.js", "sha256": "2da58438778e67b982929f85ce509b6c19c94440fd3c593912ca23bc423d982a"}]
+  }]
+}

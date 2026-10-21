@@ -8,7 +8,7 @@ import {sourceModule,root as repositoryRoot} from '../shell/compile.mjs';
 import {queryInput,validateQueryResult} from '../../../modules/ff14/pages/src/query-contract.js';
 const out=resolve(repositoryRoot,'.architecture-refactor/unified-settings/formal-vue-tests-'+process.pid);
 await mkdir(resolve(out,'module-assets/ff14/ff14/pages/dist'),{recursive:true});
-await copyFile(resolve(repositoryRoot,'pages/shell/runtime.js'),resolve(out,'runtime.js'));
+await copyFile(resolve(repositoryRoot,'pages/00-game-link/runtime.js'),resolve(out,'runtime.js'));
 await copyFile(resolve(repositoryRoot,'modules/ff14/pages/dist/entry.js'),resolve(out,'module-assets/ff14/ff14/pages/dist/entry.js'));
 const dom=new JSDOM('<body></body>',{pretendToBeVisual:true,url:'http://localhost/'}),window=dom.window;
 for(const key of ['window','document','HTMLElement','Element','SVGElement','Node','MutationObserver','Event','MouseEvent','KeyboardEvent','InputEvent'])globalThis[key]=key==='window'?window:key==='document'?window.document:window[key];

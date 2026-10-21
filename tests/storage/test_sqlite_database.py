@@ -196,10 +196,10 @@ class SQLiteDatabaseTests(unittest.IsolatedAsyncioTestCase):
             connection.close()
 
         # The historical fence upgrade remains v90; the current full migration
-        # advances to v120 without resetting the consumed gate or old data.
+        # advances to v130 without resetting the consumed gate or old data.
         current = SQLiteDatabase(path)
-        self.assertEqual(current.initialize(), 120)
-        self.assertEqual(current.initialize(), 120)
+        self.assertEqual(current.initialize(), 130)
+        self.assertEqual(current.initialize(), 130)
         connection = current.connect()
         try:
             self.assertEqual(

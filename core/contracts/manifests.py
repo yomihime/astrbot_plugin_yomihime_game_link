@@ -20,6 +20,9 @@ from yomihime_game_link_sdk.declarations import (
 from yomihime_game_link_sdk.declarations import CommandDescriptor as CommandDescriptor
 from yomihime_game_link_sdk.declarations import ConfigField as ConfigField
 from yomihime_game_link_sdk.declarations import ConfigUpdateMode as ConfigUpdateMode
+from yomihime_game_link_sdk.declarations import (
+    DiagnosticDeclaration as DiagnosticDeclaration,
+)
 from yomihime_game_link_sdk.declarations import InvocationPolicy as InvocationPolicy
 from yomihime_game_link_sdk.declarations import ModuleCategory as ModuleCategory
 from yomihime_game_link_sdk.declarations import ModuleDisplay as ModuleDisplay
@@ -91,8 +94,10 @@ EXTENSION_DESCRIPTOR_FIELDS: Mapping[str, frozenset[str]] = MappingProxyType(
                 "pages",
                 "resources",
                 "display",
+                "diagnostics",
             }
         ),
+        "diagnostic": frozenset({"event_id", "payload_schema"}),
         "module_display": frozenset(
             {"default_name", "localized_names", "short_name", "logo_resource"}
         ),
@@ -122,7 +127,18 @@ EXTENSION_DESCRIPTOR_FIELDS: Mapping[str, frozenset[str]] = MappingProxyType(
             }
         ),
         "page": frozenset(
-            {"route_id", "title", "entry", "order", "access", "capability_id", "styles"}
+            {
+                "route_id",
+                "title",
+                "entry",
+                "order",
+                "access",
+                "capability_id",
+                "styles",
+                "role",
+                "config_fields",
+                "credential_fields",
+            }
         ),
         "page_resource": frozenset({"path", "sha256"}),
         "tool": frozenset(
@@ -427,6 +443,19 @@ def check_PageResource(self) -> None:
 
 
 def check_PageDescriptor(self) -> None:
+    if self.role not in {"home", "config", "aux"}:
+        raise ValueError("invalid page role")
+    for names in (self.config_fields, self.credential_fields):
+        if (
+            type(names) is not tuple
+            or len(names) > 128
+            or len(set(names)) != len(names)
+        ):
+            raise ValueError("invalid page field declarations")
+        for name in names:
+            _identifier(name, "page field")
+    if set(self.config_fields) & set(self.credential_fields):
+        raise ValueError("ordinary and credential page fields overlap")
     _identifier(self.route_id, "page route_id")
     _text(self.title, "page title")
     validate_page_resource_path(self.entry)
@@ -508,6 +537,10 @@ def check_ModuleManifest(self) -> None:
     _version(self.module_version, "module_version")
     if self.display is not None and type(self.display) is not ModuleDisplay:
         raise TypeError("display must be a ModuleDisplay")
+    _descriptor_tuple(self.diagnostics, DiagnosticDeclaration, "diagnostics")
+    if len(self.diagnostics) > 32:
+        raise ValueError("diagnostic declaration budget exceeded")
+    _unique(tuple(item.event_id for item in self.diagnostics), "diagnostic events")
     _descriptor_tuple(self.capabilities, CapabilityDescriptor, "capabilities")
     _descriptor_tuple(self.commands, CommandDescriptor, "commands")
     _descriptor_tuple(self.tools, ToolDescriptor, "tools")
@@ -520,6 +553,9 @@ def check_ModuleManifest(self) -> None:
     _descriptor_tuple(self.resources, PageResource, "resources")
     if len(self.pages) > 128 or len(self.resources) > 128:
         raise ValueError("page declaration budget exceeded")
+    for role in ("home", "config"):
+        if sum(page.role == role for page in self.pages) > 1:
+            raise ValueError("duplicate primary module page role")
     _unique(tuple((item.route_id for item in self.pages)), "page routes")
     _unique(tuple((item.path.casefold() for item in self.resources)), "page resources")
     resources = {item.path for item in self.resources}
@@ -532,6 +568,16 @@ def check_ModuleManifest(self) -> None:
     for page in self.pages:
         if not {page.entry, *page.styles} <= resources:
             raise ValueError("page references an undeclared resource")
+        declared = {field.name: field for field in self.config_fields}
+        if any(
+            name != "reply_theme" and (name not in declared or declared[name].sensitive)
+            for name in page.config_fields
+        ) or any(
+            name not in declared or not declared[name].sensitive
+            for name in page.credential_fields
+        ):
+            raise ValueError("page fields mismatch module declarations")
+
     capabilities = {item.capability_id: item for item in self.capabilities}
     _unique(tuple((item.capability_id for item in self.capabilities)), "capabilities")
     _unique(tuple((item.operation_path for item in self.commands)), "commands")
@@ -821,3 +867,18 @@ def check_SourceDeclaration(self) -> None:
         or self.requests_per_minute < 1
     ):
         raise ValueError("source quota must be a positive integer")
+
+
+def check_DiagnosticDeclaration(self):
+    import re
+
+    from .diagnostics import freeze_diagnostic_schema
+
+    if (
+        type(self.event_id) is not str
+        or re.fullmatch(r"[a-zA-Z][a-zA-Z0-9_.-]{0,95}", self.event_id) is None
+    ):
+        raise ValueError("invalid diagnostic event ID")
+    object.__setattr__(
+        self, "payload_schema", freeze_diagnostic_schema(self.payload_schema)
+    )

@@ -131,22 +131,19 @@ class QueryDefaults:
 
     def __post_init__(self) -> None:
         if self.default_region not in ("cn", "global"):
-            raise QueryResolutionError("Core 默认区域无效。")
+            raise QueryResolutionError("FF14 默认区域无效。")
         for value in (self.core_revision, self.module_revision):
             if type(value) is not int or value < 0:
                 raise QueryResolutionError("配置 revision 无效。")
 
     @classmethod
     async def capture(cls, services: ModuleServices) -> QueryDefaults:
-        # C1 already captures both authorities under its mutation gate. Read it
-        # once; do not fetch Core independently or read the obsolete Host values.
+        from .config import REGION
+
         snapshot = await services.config.current()
-        core = snapshot.values.get("core_defaults")
-        if not isinstance(core, Mapping):
-            raise QueryResolutionError(
-                "Core 默认配置不可用。", ErrorCode.MODULE_UNAVAILABLE
-            )
-        return cls(core.get("default_region"), core.get("revision"), snapshot.revision)
+        return cls(
+            snapshot.values.get(REGION, "cn"), snapshot.revision, snapshot.revision
+        )
 
 
 @dataclass(frozen=True, slots=True)

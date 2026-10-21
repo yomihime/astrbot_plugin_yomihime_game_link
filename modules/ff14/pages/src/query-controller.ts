@@ -1,5 +1,5 @@
 import {queryInput, validateQueryResult} from './query-contract.js';
-import type {PageOptions, PageContext} from '../../../../pages/frontend/src/contracts';
+import type {PageOptions, PageContext} from '../../../../pages/public-contract';
 export const fields: Record<string, {name:string; label:string; placeholder?:string; limit?:number; options?:{label:string;value:string}[]}[]> = {
   items: [{name:'query',label:'物品名称或 ID',placeholder:'例如 犎牛牛排，或 44091',limit:120}],
   logs: [{name:'region',label:'区域',options:[{label:'国服',value:'cn'},{label:'国际服',value:'global'}]}, {name:'server',label:'服务器',limit:100},{name:'character',label:'角色名',limit:120}],
@@ -22,13 +22,13 @@ export function createQueryController(options: PageOptions, changed: () => void,
   const key = JSON.stringify([options.context.owner,route,options.context.boundary,options.context.runtimeId,options.context.epoch]);
   const draft = {...(drafts.get(key) || Object.fromEntries(fields[route].map(f=>[f.name,f.name==='quality'?'all':f.name==='intent'?'overview':f.name==='region'&&route!=='market'?'cn':f.name==='days'?'7':f.name==='timezone'?'Asia/Shanghai':''])))};
   const state = {draft,errors:{} as Record<string,string>,result:null as ReturnType<typeof validateQueryResult>|null, phase:'idle',message:'尚未提交查询。',context:options.context};
-  let disposed=false, sequence=0, timer:ReturnType<typeof setTimeout>|null=null;
+  let disposed=false, bindingRevoked=false, sequence=0, timer:ReturnType<typeof setTimeout>|null=null;
   function clearTimer() {if (timer) clearTimeout(timer); timer=null;}
-  const current = (version:number) => !disposed && options.scope.isCurrent() && version===sequence;
+  const current = (version:number) => !disposed && !bindingRevoked && options.scope.isCurrent() && version===sequence;
   function invalidate(clearResult=true) {sequence++; clearTimer(); state.phase='idle'; if (clearResult) state.result=null;}
-  function edit(name:string,value:string) {if (!(name in state.draft) || disposed) return; state.draft[name]=value; drafts.set(key,{...state.draft}); invalidate(); state.errors={}; state.message='输入已修改，请手动提交查询。'; changed();}
+  function edit(name:string,value:string) {if (!(name in state.draft) || disposed || bindingRevoked) return; state.draft[name]=value; drafts.set(key,{...state.draft}); invalidate(); state.errors={}; state.message='输入已修改，请手动提交查询。'; changed();}
   async function submit(selection?:{batch_id:string;generation:string;item_id:number}) {
-    if (disposed || !options.scope.isCurrent() || !state.context.available || state.phase==='loading') return;
+    if (disposed || bindingRevoked || !options.scope.isCurrent() || !state.context.available || state.phase==='loading') return;
     const clean = selection && route==='market' ? {body:{selection},errors:{}} : queryInput(route,state.draft);
     const errors = clean.errors as Record<string,string>; invalidate(); state.errors=errors;
     if (Object.keys(errors).length) {state.message='请先修正表单中标出的输入。'; changed(); return;}
@@ -38,8 +38,8 @@ export function createQueryController(options: PageOptions, changed: () => void,
     catch {if (!current(version)) return; clearTimer(); state.phase='error'; state.message='查询未完成，请检查登录、网页地址和输入后手动重试。可重新登录 Dashboard，检查插件配置齿轮中的网页地址，保存重载后重新打开本页。'; changed();}
   }
   function choose(item_id:number, result=state.result) {const selection = result?.model_facts?.selection; if (result!==state.result || !selection || state.phase==='loading' || !selection.candidates.some((c:{item_id:number})=>c.item_id===item_id)) return; return submit({batch_id:selection.batch_id,generation:selection.generation,item_id});}
-  function dispose() {if (disposed) return; drafts.set(key,{...state.draft}); disposed=true; invalidate();}
+  function dispose() {if (disposed) return; if(!bindingRevoked) drafts.set(key,{...state.draft}); disposed=true; invalidate();}
   options.scope.onDispose(dispose);
   return {state,edit,submit,choose,stop(){if (state.phase!=='loading') return; invalidate(); state.message=STOP_MESSAGE; changed();},
-    update(context:Readonly<PageContext>){if (disposed) return; if (context.owner!==state.context.owner || context.runtimeId!==state.context.runtimeId || context.epoch!==state.context.epoch || context.boundary!==state.context.boundary) {invalidate(); state.message='入口绑定已变化，请手动重新查询。';} else if (state.context.available && !context.available && state.phase==='loading') {invalidate(); state.message='状态刷新已停止待返回结果展示。本次请求可能仍在后台处理，请确认状态后手动重新查询。';} state.context=context; changed();},dispose};
+    update(context:Readonly<PageContext>){if (disposed) return; if (context.owner!==state.context.owner || context.runtimeId!==state.context.runtimeId || context.epoch!==state.context.epoch || context.boundary!==state.context.boundary) {drafts.set(key,{...state.draft});bindingRevoked=true;invalidate();for(const name of Object.keys(state.draft))state.draft[name]='';state.message='入口绑定已变化，请重新打开页面。';} else if (state.context.available && !context.available && state.phase==='loading') {invalidate(); state.message='状态刷新已停止待返回结果展示。本次请求可能仍在后台处理，请确认状态后手动重新查询。';} state.context=bindingRevoked?{...context,available:false}:context; changed();},dispose};
 }

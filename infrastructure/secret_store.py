@@ -69,6 +69,10 @@ class SQLiteSecretStore:
         manager = self.key_manager
         if manager is None:
             return 0
+        try:
+            manager.assert_storage_readable()
+        except Exception:
+            raise SecretStoreUnavailable() from None
         row = unit.execute(
             "SELECT generation,revision,source FROM managed_master_key WHERE singleton=1"
         ).fetchone()
@@ -193,6 +197,11 @@ class SQLiteSecretStore:
         return self.root / f"{token}.blob"
 
     def _write_payload(self, token: str, value: bytes) -> None:
+        if self.key_manager is not None:
+            try:
+                self.key_manager.assert_storage_writable()
+            except Exception:
+                raise SecretStoreUnavailable() from None
         if not isinstance(value, bytes):
             raise TypeError("secret payload must be bytes")
         try:
@@ -214,6 +223,8 @@ class SQLiteSecretStore:
                 handle.write(encrypted)
                 handle.flush()
                 os.fsync(handle.fileno())
+            if self.key_manager is not None:
+                self.key_manager.assert_storage_writable()
             os.replace(temporary, path)
         except (OSError, ValueError):
             try:

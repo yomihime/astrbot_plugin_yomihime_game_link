@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from dataclasses import field as _dataclass_field
 from dataclasses import field as dataclass_field
 from enum import StrEnum
 from types import MappingProxyType
@@ -407,27 +408,18 @@ class CoreConfigSummary:
     """Reserved Core config projection; this target has no module lifecycle."""
 
     revision: int
-    default_region: str | None
-    raw_present: bool
-    state: str = "valid"
+    fields: Mapping[str, str] = _dataclass_field(default_factory=dict)
     module_id: str = "game_link/core"
 
     def __post_init__(self):
-        if self.module_id != "game_link/core":
-            raise ValueError("Core config target is reserved")
-        if type(self.revision) is not int or self.revision < 1:
-            raise ValueError("Core config revision must be positive")
-        if self.state not in {"valid", "invalid"} or (
-            self.state == "invalid" and self.default_region is not None
+        if (
+            self.module_id != "game_link/core"
+            or type(self.revision) is not int
+            or self.revision < 1
         ):
-            raise ValueError("invalid Core config state")
-        if self.state == "valid" and (
-            type(self.default_region) is not str
-            or self.default_region not in {"cn", "global"}
-        ):
-            raise ValueError("invalid Core region")
-        if type(self.raw_present) is not bool:
-            raise TypeError("Core config presence must be bool")
+            raise ValueError("invalid Core config target or revision")
+        safe = ConfigSummary(self.module_id, self.revision, self.fields)
+        object.__setattr__(self, "fields", safe.fields)
 
 
 class AdminOperations(Protocol):

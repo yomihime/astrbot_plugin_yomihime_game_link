@@ -300,8 +300,16 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(catalog["schema_version"], 1)
         self.assertEqual(
-            set(catalog), {"schema_version", "catalog_revision", "runtime", "modules"}
+            set(catalog),
+            {
+                "schema_version",
+                "catalog_revision",
+                "runtime",
+                "modules",
+                "legacy_config_policies",
+            },
         )
+        self.assertEqual(catalog["legacy_config_policies"], [])
         projected = catalog["modules"][0]
         self.assertEqual(
             set(projected),

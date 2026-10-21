@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import logging
 import unittest
 from dataclasses import replace
 from decimal import Decimal
@@ -14,7 +13,6 @@ from ygl_test_subject.core.contracts.validation_boundary import validate_contrac
 from modules.ff14.features.fflogs_catalog import parse_graphql_envelope
 from modules.ff14.features.fflogs_chat import character_facts
 from modules.ff14.features.fflogs_evidence import (
-    LOGGER_NAME,
     MAX_CHUNKS,
     Evidence,
     project,
@@ -152,14 +150,13 @@ class EvidenceTests(unittest.TestCase):
         self.assertIn("args", safe["zoneType"]["fields"][0])
 
     def test_emitter_hard_limit_and_invalid_payload_cannot_break_business(self):
-        logger = logging.getLogger(LOGGER_NAME)
-        with self.assertLogs(logger, logging.INFO) as captured:
-            logger.handlers[0].fflogs_evidence_sink = True
-            evidence = Evidence("fflogs_public_cn")
-            evidence.chunks = MAX_CHUNKS - 1
-            evidence.observe("FF14OutputMetadataShape", {})
-            evidence.observe("FF14OutputMetadataShape", {})
-        self.assertEqual(len(captured.records), 1)
-        event = json.loads(captured.records[0].args[0])
-        self.assertTrue(event["truncated"])
+        evidence = Evidence(
+            "fflogs_public_cn", SimpleNamespace(emit=lambda *args: None)
+        )
+        evidence.chunks = MAX_CHUNKS - 1
+        evidence.observe("FF14OutputMetadataShape", {})
+        evidence.observe("FF14OutputMetadataShape", {})
+        self.assertTrue(evidence.limited)
+        self.assertEqual(evidence._pending, [])
+        self.assertLessEqual(evidence.chunks, MAX_CHUNKS)
         evidence.observe("FF14OutputMetadataShape", {"zoneType": {"fields": 7}})

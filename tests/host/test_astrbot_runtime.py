@@ -40,6 +40,7 @@ from ygl_test_subject.core.ports import (
 from ygl_test_subject.core.registry import Registry
 from ygl_test_subject.extensions.discovery import discover_packages
 from ygl_test_subject.infrastructure.http_transport import AioHttpTransport
+from ygl_test_subject.infrastructure.private_storage import resolve_private_storage
 from ygl_test_subject.infrastructure.sqlite.database import SQLiteDatabase
 from ygl_test_subject.infrastructure.sqlite.repositories_admin_credentials import (
     SQLiteAdminCredentialRepository,
@@ -643,7 +644,7 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
             "existing_manifest_mismatch",
         )
         with patch(
-            "ygl_test_subject.adapters.astrbot.runtime.install_bundled_ff14",
+            "ygl_test_subject.adapters.astrbot.runtime.install_bundled_package",
             return_value=installation,
         ):
             try:
@@ -691,7 +692,7 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
             await runtime.terminate()
         self.assertEqual(context.calls, [])
 
-    async def test_all_catalog_help_projections_read_core_defaults_without_dispatch(
+    async def test_catalog_help_does_not_read_legacy_region_or_dispatch(
         self,
     ):
         context = _Context()
@@ -715,7 +716,7 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 with self.subTest(text=text):
                     event = self._event(event.message_type, message=text)
                     response = await runtime.handle_event(event)
-                    self.assertIn("默认区域提示：global", response)
+                    self.assertNotIn("默认区域提示", response)
                     self.assertIn("帮助", response)
             for text in ('/ygl ff14 calendar "unclosed', '/ygl "invalid route" help'):
                 with self.subTest(text=text):
@@ -870,8 +871,19 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(catalog["schema_version"], 1)
             self.assertEqual(
                 set(catalog),
-                {"schema_version", "catalog_revision", "runtime", "modules"},
+                {
+                    "schema_version",
+                    "catalog_revision",
+                    "runtime",
+                    "modules",
+                    "legacy_config_policies",
+                },
             )
+            self.assertTrue(catalog["legacy_config_policies"])
+            for policy in catalog["legacy_config_policies"]:
+                self.assertEqual(set(policy), {"policy_id", "target_owner"})
+                self.assertIsInstance(policy["policy_id"], str)
+                self.assertEqual(policy["target_owner"], "ff14/ff14")
             self.assertEqual(module["module_id"], "ff14/ff14")
             self.assertEqual(module["state"], "loaded")
             self.assertEqual(
@@ -921,6 +933,9 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
                         "route_id",
                         "title",
                         "order",
+                        "role",
+                        "config_fields",
+                        "credential_fields",
                         "access",
                         "capability_id",
                         "entry",
@@ -1068,30 +1083,38 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(first_core.registry.snapshot().module("ff14/ff14").enabled)
         await runtime.terminate()
 
-        database = SQLiteDatabase(self.data_dir / "runtime.sqlite3")
-        runtime_repository = SQLiteModuleRuntimeRepository(database)
-        credentials = SQLiteAdminCredentialRepository(database)
-        await credentials.bootstrap(bytes(range(32)))
-        from tests.fixtures.admin_authorization import native_grant
+        layout = resolve_private_storage(self.data_dir)
+        self.assertEqual(layout.database_path, first_core.database.path)
+        self.assertTrue(layout.database_path.is_file())
+        with layout.open_guard():
+            database = SQLiteDatabase(layout.database_path)
+            try:
+                runtime_repository = SQLiteModuleRuntimeRepository(database)
+                credentials = SQLiteAdminCredentialRepository(database)
+                await credentials.bootstrap(bytes(range(32)))
+                from tests.fixtures.admin_authorization import native_grant
 
-        grant = await native_grant(credentials, AdminOperation.SET_ENABLED)
-        current = await runtime_repository.current_intent("ff14", "ff14")
-        self.assertIsNotNone(current)
-        prepared = await runtime_repository.prepare(
-            "test-disable-before-upgrade",
-            "ff14",
-            "ff14",
-            False,
-            expected_intent_revision=current.intent_revision,
-            expected_registry_revision=first_core.registry.snapshot().revision,
-            grant=grant,
-        )
-        disabled = await runtime_repository.commit_intent(prepared.operation_id, grant)
-        self.assertFalse(disabled.desired_enabled)
-        await runtime_repository.mark_phase(
-            prepared.operation_id, RuntimeJournalPhase.APPLIED
-        )
-        await database.executor.close()
+                grant = await native_grant(credentials, AdminOperation.SET_ENABLED)
+                current = await runtime_repository.current_intent("ff14", "ff14")
+                self.assertIsNotNone(current)
+                prepared = await runtime_repository.prepare(
+                    "test-disable-before-upgrade",
+                    "ff14",
+                    "ff14",
+                    False,
+                    expected_intent_revision=current.intent_revision,
+                    expected_registry_revision=first_core.registry.snapshot().revision,
+                    grant=grant,
+                )
+                disabled = await runtime_repository.commit_intent(
+                    prepared.operation_id, grant
+                )
+                self.assertFalse(disabled.desired_enabled)
+                await runtime_repository.mark_phase(
+                    prepared.operation_id, RuntimeJournalPhase.APPLIED
+                )
+            finally:
+                await database.executor.close()
 
         readme = self.plugin_root / "modules" / "ff14" / "README.md"
         readme.write_bytes(readme.read_bytes() + b"\nDisabled intent upgrade.\n")
@@ -1141,7 +1164,7 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
         for message in ("/ygl help", "/ygl ff14 status"):
             event = self._event(message=message)
             diagnostic = await runtime.handle_event(event)
-            self.assertIn("FF14 内置模块未能安全加载", diagnostic)
+            self.assertIn("所选内置模块未能安全加载", diagnostic)
             self.assertIn("[existing_manifest_mismatch]", diagnostic)
             self.assertIn("清单与发行包不一致", diagnostic)
             self.assertIn("重载插件", diagnostic)
@@ -1167,7 +1190,7 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
                     reason,
                 )
                 with patch(
-                    "ygl_test_subject.adapters.astrbot.runtime.install_bundled_ff14",
+                    "ygl_test_subject.adapters.astrbot.runtime.install_bundled_package",
                     return_value=outcome,
                 ):
                     await runtime.initialize()
@@ -1185,7 +1208,7 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_unsupported_bundle_environment_is_visible_on_startup_and_help(self):
         runtime = self._runtime(_Context(), http_transport_factory=_IdleTransport)
         with patch(
-            "ygl_test_subject.adapters.astrbot.runtime.install_bundled_ff14",
+            "ygl_test_subject.adapters.astrbot.runtime.install_bundled_package",
             side_effect=BundledExtensionError("unsupported_environment"),
         ):
             with self.assertRaises(RuntimeError) as raised:
@@ -1448,9 +1471,14 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(transport.calendar_ready.is_set())
             self.assertEqual(transport.requests, [])
         else:
+            # Observe the trusted collector budget used by the real scheduler.
+            observation_timeout = core.scheduler.collector_timeouts.get(
+                ("ff14/ff14", "ff14.calendar.sync"),
+                core.scheduler.quotas.collection_timeout_seconds,
+            )
             await asyncio.wait_for(
                 transport.calendar_ready.wait(),
-                timeout=core.scheduler.quotas.collection_timeout_seconds,
+                timeout=observation_timeout,
             )
             await asyncio.gather(*tuple(core.scheduler._active.values()))
             self.assertEqual(len(transport.requests), 2)

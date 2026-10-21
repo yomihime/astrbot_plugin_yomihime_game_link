@@ -105,7 +105,12 @@ class TrustedAdminSource:
                 operations,
             )
             self._proofs[id(context)] = proof
-            self._check(context, next(iter(operations)), requested)
+            try:
+                self._check(context, next(iter(operations)), requested)
+            except BaseException:
+                if self._proofs.get(id(context)) is proof:
+                    self._proofs.pop(id(context), None)
+                raise
             return context
 
     def _check(self, context, operation, resources):

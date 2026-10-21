@@ -1,6 +1,7 @@
 import {createApp, defineComponent, h, withDirectives, ref} from 'vue';
 import {NConfigProvider,NButton,NInput,NSelect,NCard,NTag,darkTheme,zhCN,enUS,dateZhCN,dateEnUS} from 'naive-ui';
-import type {PageOptions, MountedPage} from '../../../../pages/frontend/src/contracts';
+import type {PageOptions, MountedPage} from '../../../../pages/public-contract';
+import {mountSettings} from './settings-page';
 import {createQueryController,fields,queryTimeoutMs} from './query-controller';
 import './styles.css';
 import {createSelectA11y} from './select-a11y';
@@ -25,6 +26,7 @@ function blocks(result:any) {
   return nodes;
 }
 export function mount(container:HTMLElement,options:PageOptions):MountedPage {
+  if (options.routeId==='home' || options.routeId==='config') return mountSettings(container,options);
   const headStyles = new Set(Array.from(container.ownerDocument.head.querySelectorAll('style')));
   const selectA11y=createSelectA11y(container), expanded=ref<Record<string,boolean>>({});
   const revision=ref(0), controller=createQueryController(options,()=>{revision.value++;},queryTimeoutMs(options.routeId));
@@ -33,7 +35,7 @@ export function mount(container:HTMLElement,options:PageOptions):MountedPage {
     const candidates=result?.model_facts?.selection;
     const submit=async(event?:Event)=>{event?.preventDefault(); await controller.submit(); const name=Object.keys(state.errors)[0]; if (name) container.querySelector<HTMLInputElement>(`#ff14-${options.routeId}-${name}`)?.focus();};
     const market=result?.model_facts?.market;
-    return h(NConfigProvider,{theme:context.theme==='dark'?darkTheme:null,locale:context.locale.startsWith('en')?enUS:zhCN,dateLocale:context.locale.startsWith('en')?dateEnUS:dateZhCN,styleMountTarget:container,preflightStyleDisabled:true,inlineThemeDisabled:true}, {default:()=>h('section',{class:'ff14-page','data-theme':context.theme},[
+    return h(NConfigProvider,{theme:context.theme==='dark'?darkTheme:null,themeOverrides:{common:{heightMedium:'40px'}},locale:context.locale.startsWith('en')?enUS:zhCN,dateLocale:context.locale.startsWith('en')?dateEnUS:dateZhCN,styleMountTarget:container,preflightStyleDisabled:true,inlineThemeDisabled:true}, {default:()=>h('section',{class:'ff14-page','data-theme':context.theme},[
       h(NCard,{title:titles[options.routeId],bordered:false}, {default:()=>[
         h('p',{class:'ff14-hint'},hints[options.routeId]),
         h('form',{class:'ff14-form','aria-busy':pending,onSubmit:submit},[

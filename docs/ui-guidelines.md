@@ -6,7 +6,7 @@
 
 外层宿主导航保持原样。插件侧栏使用完整品牌、首页、当前目录中的模块，底部为全局设置。桌面宽度 258px，999px 以下为 220px，719px 以下使用移动导航。模块默认进入主页；内部配置按实际管理声明显示，辅助查询按模块现有页面 descriptor 显示，无能力不造空业务页。
 
-主页复用运行状态、已声明功能和管理入口；健康未知保持未知。查询名称只用 descriptor 标题。新入口为 `#/module/<encoded-owner>` 与 `#/module/<encoded-owner>/-/queries`；旧 `#/settings/module/<encoded-owner>`、`#/module/<encoded-owner>/<route>` 和全局 `#/settings` 均保留。浏览器前进、后退及刷新使用同一 hash 路由和离页确认。
+首页提供模块入口，`#/modules` 单独负责模块生命周期管理；健康未知保持未知。模块根 `#/module/<encoded-owner>` 按 home role 挂载，业务配置使用实际 config role 路由；`#/module/<encoded-owner>/-/queries` 只列 aux 页面。全局设置为 `#/settings`。旧 `#/settings/module/<encoded-owner>` 不再路由到壳内业务表单。浏览器前进、后退及刷新使用同一 hash 路由和离页确认。
 
 ## 密度与组件
 
@@ -39,10 +39,14 @@
 
 ## 模块呈现扩展
 
-模块可在 `modules/*/pages/src/presentation.json` 声明内部显示名、字段顺序、控件宽度、时间控件及凭据地区名称。构建期发现这些装饰，仅应用于管理目录实际返回的字段；它不注册模块、页面或权限，也不修改 schema、默认值和 SDK。未知模块用 descriptor / description / group 安全回退，业务标签不硬写进公共组件。Core 全局设置装饰由公共层持有。运行时外置模块无需这个可选文件仍能使用通用表单；新增包内装饰须重建前端。
+模块自己的页面负责业务标签、字段顺序、控件和凭据地区呈现；壳不再通过 `presentation.json` glob 读取模块装饰，也不渲染旧通用业务配置表单。模块只消费 [公开前端合同](../pages/public-contract.ts) 中受限的 owner 绑定服务，字段描述与主题选项来自被授权的安全 DTO；声明本身不授予权限。接入方式以 [前端模块合同](frontend-module-contract.md) 为准，FF14 的具体业务界面见 [模块说明](../modules/ff14/README.md)。Core 全局设置的通用呈现仍由公共层持有。
 
 ## 本地参考与检查
 
 仓库根运行 `npm.cmd run reference --prefix pages/frontend`，打开 `http://127.0.0.1:18762/reference.html`。这是轻量组件页，支持浅深主题和 loading / dirty / error / conflict / readonly / success 状态，无宿主连接和业务请求。
 
-运行 `npm.cmd run typecheck --prefix pages/frontend`、`npm.cmd run build --prefix pages/frontend` 与受影响测试。构建同时更新壳、独立设置入口和必要发布资源。视觉验收使用隔离 bridge 回放，记录 CSS 视口、缩放、DPR；比较桌面配置、窄屏和深色，再抽查主页/辅助查询。离线 DOM、真实浏览器、宿主 HTTP、真实上游分别记录，互不代替。
+运行 `npm.cmd run typecheck --prefix pages/frontend`、`npm.cmd run build --prefix pages/frontend` 与受影响测试。构建同时更新壳内设置视图和必要发布资源；设置仍通过壳内设置视图进入，不是独立页面入口。视觉验收使用隔离 bridge 回放，记录 CSS 视口、缩放、DPR；比较桌面配置、窄屏和深色，再抽查主页/辅助查询。离线 DOM、真实浏览器、宿主 HTTP、真实上游分别记录，互不代替。
+
+## 单入口职责
+
+正式页面根只有 `00-game-link`。首页、模块管理、全局设置及 Module 页面是该根内的视图；Module 按 home/config/aux 角色进入壳。管理与模块操作仍由各自后端授权合同约束，独立授权不表示另有页面根。接入合同见 [frontend-module-contract.md](frontend-module-contract.md)。保持现有紧凑紫金视觉和共用 SettingsGroup、SettingsRow、ActionBar、StatusHint。正常就绪时收起恢复与全域危险操作，异常时给出简短可执行路径；确认绑定当前 owner、revision 与生命周期。

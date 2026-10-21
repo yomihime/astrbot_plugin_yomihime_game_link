@@ -4,7 +4,7 @@ import {fileURLToPath,pathToFileURL} from 'node:url';
 import {resolve,dirname,extname} from 'node:path';
 const cache = new Map();
 export async function sourceModule(path) {
-  const full=resolve(path); if(cache.has(full)) return import(cache.get(full));
+  const full=resolve(root,path); if(cache.has(full)) return import(cache.get(full));
   const source=await readFile(full,'utf8');
   let output=stripTypeScriptTypes(source,{mode:'strip',sourceUrl:full});
   const matches=[...output.matchAll(/from\s+(['"])(\.[^'"]+)\1/g)];
@@ -14,5 +14,5 @@ export async function sourceModule(path) {
   }
   const url='data:text/javascript;base64,'+Buffer.from(output).toString('base64'); cache.set(full,url); return import(url);
 }
-async function sourceURL(path) {await sourceModule(path);return cache.get(resolve(path));}
+async function sourceURL(path) {await sourceModule(path);return cache.get(resolve(root,path));}
 export const root=fileURLToPath(new URL('../../../',import.meta.url));

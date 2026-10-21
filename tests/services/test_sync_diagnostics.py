@@ -4,25 +4,29 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
 import unittest
 from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 import aiohttp
+from ygl_test_subject.core.contracts.validation_boundary import validate_contract
 from ygl_test_subject.core.task_scope import ScopeDeadlineExceeded
 from ygl_test_subject.infrastructure.http import SourceHttpService
 from ygl_test_subject.infrastructure.http_transport import AioHttpTransport
 from ygl_test_subject.infrastructure.sync_diagnostics import (
-    LOGGER_NAME,
     MAX_ATTEMPTS,
     MAX_EVENTS,
     SyncDiagnostics,
     emit,
 )
+from ygl_test_subject.services.diagnostics import (
+    BoundDiagnostics,
+    DiagnosticPolicy,
+    DiagnosticStore,
+)
 
-from modules.ff14.features.calendar_snapshots import _diagnostic
+from modules.ff14.features.calendar_diagnostics import DECLARATION
 from tests.core import test_invocation as web_fixture
 from tests.modules.ff14 import test_calendar_snapshots as calendar_fixture
 from tests.modules.ff14.test_calendar import _ics
@@ -37,48 +41,57 @@ from yomihime_game_link_sdk.services import HttpRequest
 SECRET = "PRIVATE-SENTINEL-https://secret.invalid/?token=secret-C:/private/secret"
 
 
-class SyncDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
+class CalendarDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        self.store = SyncDiagnostics()
-        self.store.activate("a" * 32, "web_public")
+        self.store = DiagnosticStore()
 
     async def asyncTearDown(self):
         self.store.close()
 
-    def attempt(self):
-        return self.store.snapshot()["attempts"][-1]
-
-    def codes(self):
-        return [event.get("code") for event in self.attempt()["events"]]
-
     def calendar(self, responses):
+        self.store.close()
+        self.store = DiagnosticStore()
         fixture = calendar_fixture.CalendarSnapshotsTests()
         fixture.setup_services(responses)
+
+        async def current():
+            pass
+
+        view = SimpleNamespace(
+            invocation_id="a" * 32, module_id="ff14/ff14", module_epoch=1
+        )
+        fixture.scopes.bound.diagnostics = BoundDiagnostics(
+            view,
+            (validate_contract(DECLARATION),),
+            DiagnosticPolicy(frozenset({"CalendarSync"})),
+            self.store,
+            current,
+        )
         return fixture
+
+    def events(self):
+        return [event["payload"] for event in self.store.snapshot()]
+
+    def codes(self):
+        return [event.get("code") for event in self.events()]
 
     async def test_complete_and_legal_empty_have_persisted_success_metadata(self):
         for feed in (calendar_fixture.feed(), _ics()):
             fixture = self.calendar([feed])
             await fixture.sync()
-            trace = self.attempt()
+            events = self.events()
             parsed = next(
-                e
-                for e in trace["events"]
-                if e["stage"] == "parse" and "completeness" in e
+                e for e in events if e["stage"] == "parse" and "completeness" in e
             )
             self.assertEqual(parsed["completeness"], "complete")
             self.assertEqual(parsed["occurrence_count"] > 0, feed != _ics())
             self.assertTrue(
                 any(
                     e["stage"] == "records_commit" and e.get("code") == "ok"
-                    for e in trace["events"]
+                    for e in events
                 )
             )
-            self.assertEqual(
-                trace["network_attempts"], 0
-            )  # fake fetch isn't network proof
-            self.assertEqual(trace["wire_issued"], "unknown")
-            self.store.activate("b" * 32, "web_public")
+            self.assertFalse(any("network_attempts" in event for event in events))
 
     async def test_source_deadline_and_http_status_are_distinct(self):
         fixture = self.calendar([])
@@ -92,8 +105,7 @@ class SyncDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
         ):
             await fixture.sync()
         self.assertEqual(self.codes().count("source_deadline"), 2)
-        self.assertEqual(self.attempt()["network_attempts"], 0)
-        self.store.activate("b" * 32, "web_public")
+        self.assertFalse(any("network_attempts" in event for event in self.events()))
         fixture = self.calendar(
             [SourceHttpError("upstream_error", status_code=503), _ics()]
         )
@@ -101,7 +113,7 @@ class SyncDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(
             any(
                 e.get("http_status") == 503 and e.get("code") == "upstream_error"
-                for e in self.attempt()["events"]
+                for e in self.events()
             )
         )
 
@@ -109,9 +121,7 @@ class SyncDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
         fixture = self.calendar([b"\xff", ("bad calendar " + SECRET).encode()])
         await fixture.sync()
         self.assertIn("invalid_utf8", self.codes())
-        parsed = next(
-            e for e in self.attempt()["events"] if e.get("completeness") == "partial"
-        )
+        parsed = next(e for e in self.events() if e.get("completeness") == "partial")
         self.assertIn("MALFORMED_SOURCE", parsed["warnings"])
         self.assertNotIn(SECRET, json.dumps(self.store.snapshot()))
 
@@ -129,12 +139,8 @@ class SyncDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
             any(
                 e["stage"] == "records_commit"
                 and e.get("code") == "call_error_commit_unknown"
-                for e in self.attempt()["events"]
+                for e in self.events()
             )
-        )
-        self.assertEqual(
-            self.attempt()["records_evidence"],
-            "service_call_return_or_error_commit_unknown",
         )
         self.assertNotIn(SECRET, json.dumps(self.store.snapshot()))
 
@@ -153,13 +159,11 @@ class SyncDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(asyncio.CancelledError):
             await task
         self.assertIn("cancelled", self.codes())
-        self.assertFalse(
-            any(e["stage"] == "records_commit" for e in self.attempt()["events"])
-        )
+        self.assertFalse(any(e["stage"] == "records_commit" for e in self.events()))
 
     async def test_sink_exception_does_not_change_success_or_cancellation(self):
         fixture = self.calendar([_ics()])
-        with patch.object(self.store, "record", side_effect=RuntimeError(SECRET)):
+        with patch.object(self.store, "_sink", side_effect=RuntimeError(SECRET)):
             await fixture.sync()
         fixture = self.calendar([])
 
@@ -167,12 +171,26 @@ class SyncDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
             raise asyncio.CancelledError()
 
         fixture.http.fetch = cancelled
-        with patch.object(self.store, "record", side_effect=asyncio.CancelledError()):
+        with patch.object(self.store, "_sink", side_effect=asyncio.CancelledError()):
             with self.assertRaises(asyncio.CancelledError):
                 await fixture.sync()
 
+
+class SyncDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.store = SyncDiagnostics()
+        self.store.activate("a" * 32, "web_public")
+
+    async def asyncTearDown(self):
+        self.store.close()
+
+    def attempt(self):
+        return self.store.snapshot()["attempts"][-1]
+
+    def codes(self):
+        return [event.get("code") for event in self.attempt()["events"]]
+
     async def test_queued_request_is_not_counted_and_transport_entry_is_counted(self):
-        _diagnostic("sync_start", region="cn", trigger="manual")
         transport = _FakeTransport()
         service = SourceHttpService(
             (SourceDeclaration("calendar", "example.test", timeout_seconds=0.01),),
@@ -206,7 +224,6 @@ class SyncDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
     async def test_transport_exception_families_are_closed_and_business_code_unchanged(
         self,
     ):
-        _diagnostic("sync_start", region="cn", trigger="manual")
         for error, code in (
             (aiohttp.ClientConnectorDNSError(None, OSError(1, SECRET)), "dns_error"),
             (
@@ -257,7 +274,6 @@ class SyncDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
             connect.reset_mock()
             send.reset_mock()
             try:
-                _diagnostic("sync_start", region="cn", trigger="manual")
                 with (
                     patch.object(aiohttp.TCPConnector, "connect", connect),
                     patch.object(aiohttp.ClientRequest, "send", send),
@@ -273,58 +289,6 @@ class SyncDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
                 await production.close()
                 self.assertTrue(session.closed)
 
-    async def test_ring_and_terminal_are_bounded_public_opt_in_and_runtime_isolated(
-        self,
-    ):
-        emit("core_start", budget_ms=1234)
-        self.assertEqual(self.store.snapshot()["attempts"], [])
-        _diagnostic("sync_start", region=SECRET, trigger="manual")
-        _diagnostic("core_final", code="completed")
-        self.assertEqual(self.store.snapshot()["attempts"], [])
-        _diagnostic(
-            "sync_start", region="cn", trigger="manual", body=SECRET, actor_id=SECRET
-        )
-        for _ in range(1000):
-            _diagnostic(
-                "parse",
-                code=SECRET,
-                warnings=(SECRET, "MALFORMED_SOURCE"),
-                http_status=True,
-            )
-        emit("core_final", code="completed", capability_status="error")
-        trace = self.attempt()
-        self.assertEqual(len(trace["events"]), MAX_EVENTS)
-        self.assertEqual(trace["events"][-1]["stage"], "core_final")
-        self.assertEqual(trace["core_final"], "completed")
-        self.assertEqual(trace["capability_status"], "error")
-        self.assertEqual(trace["core_budget_ms"], 1234)
-        self.assertGreater(trace["dropped_events"], 0)
-        other = SyncDiagnostics()
-        try:
-            token = other.activate("f" * 32, "web_public")
-            _diagnostic("sync_start", region="global", trigger="cold")
-            self.assertEqual(len(other.snapshot()["attempts"]), 1)
-            self.assertEqual(len(self.store.snapshot()["attempts"]), 1)
-            other.reset(token)
-            self.store.activate("e" * 32, "command", public=False)
-            _diagnostic("sync_start", region="cn", trigger="manual")
-            self.assertEqual(len(self.store.snapshot()["attempts"]), 1)
-        finally:
-            other.close()
-            other.close()
-        for number in range(20):
-            self.store.activate(f"{number:032x}", "web_public")
-            _diagnostic("sync_start", region="cn", trigger="manual")
-        self.assertEqual(len(self.store.snapshot()["attempts"]), MAX_ATTEMPTS)
-        self.assertNotIn(SECRET, json.dumps(self.store.snapshot()))
-        self.store.close()
-        self.assertFalse(
-            any(
-                type(handler).__name__ == "_SignalHandler"
-                for handler in logging.getLogger(LOGGER_NAME).handlers
-            )
-        )
-
     async def test_actual_background_core_success_typed_deadline_timeout_cancel_and_commit_error(
         self,
     ):
@@ -339,7 +303,6 @@ class SyncDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
                     entered = asyncio.Event()
 
                     async def collect(context, parameters, previous):
-                        _diagnostic("sync_start", region="cn", trigger="due")
                         entered.set()
                         if mode == "deadline":
                             raise ScopeDeadlineExceeded(SECRET)
@@ -404,7 +367,6 @@ class SyncDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
 
         class Handler(web_fixture._Handler):
             async def invoke(inner, invocation, parameters):
-                _diagnostic("sync_start", region="cn", trigger="manual")
                 entered.set()
                 return await super().invoke(invocation, parameters)
 
@@ -440,7 +402,6 @@ class SyncDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
 
         class Handler(web_fixture._Handler):
             async def invoke(inner, invocation, parameters):
-                _diagnostic("sync_start", region="cn", trigger="manual")
                 await asyncio.Event().wait()
 
         await fixture._ready_web(Handler())
@@ -459,3 +420,39 @@ class SyncDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
         finally:
             fixture.gateway.fence_public_web()
             self.assertTrue(await fixture.gateway.drain_public_web(1))
+
+    async def test_ring_terminal_public_opt_in_and_runtime_isolated(self):
+        emit("core_start", budget_ms=1234)
+        for _ in range(1000):
+            emit(
+                "http_response",
+                http_status=200,
+                body=SECRET,
+                region="cn",
+                warnings=[SECRET],
+            )
+        emit("core_final", code="completed", capability_status="error")
+        trace = self.attempt()
+        self.assertEqual(len(trace["events"]), MAX_EVENTS)
+        self.assertEqual(trace["events"][-1]["stage"], "core_final")
+        self.assertEqual(trace["core_budget_ms"], 1234)
+        self.assertGreater(trace["dropped_events"], 0)
+        self.assertNotIn(SECRET, json.dumps(trace))
+        self.assertNotIn("region", json.dumps(trace))
+        other = SyncDiagnostics()
+        token = other.activate("f" * 32, "command")
+        try:
+            emit("core_start", budget_ms=10)
+            self.assertEqual(len(other.snapshot()["attempts"]), 1)
+            self.assertEqual(len(self.store.snapshot()["attempts"]), 1)
+        finally:
+            other.reset(token)
+            other.close()
+        token = self.store.activate("e" * 32, "command", public=False)
+        emit("core_start", budget_ms=10)
+        self.assertEqual(len(self.store.snapshot()["attempts"]), 1)
+        self.store.reset(token)
+        for number in range(20):
+            self.store.activate(f"{number:032x}", "command")
+            emit("core_start", budget_ms=10)
+        self.assertEqual(len(self.store.snapshot()["attempts"]), MAX_ATTEMPTS)

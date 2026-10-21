@@ -69,5 +69,25 @@
   "credential_regions": [
     "cn",
     "global"
-  ]
+  ],
+  "diagnostics": {
+    "events": [
+      "FF14OutputMetadataShape",
+      "FF14CharacterMetadata",
+      "FF14OutputMetadata",
+      "FF14PublicCharacter",
+      "FF14PublicCharacterZone",
+      "FF14CatalogCharacter",
+      "FF14MetadataState",
+      "FF14RequestSummary",
+      "FF14HistorySummary",
+      "FF14DutyOrderState",
+      "CalendarSync"
+    ],
+    "max_events": 64,
+    "max_bytes": 524288,
+    "event_limits": {
+      "CalendarSync": 48
+    }
+  }
 }

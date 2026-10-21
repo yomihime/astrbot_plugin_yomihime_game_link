@@ -112,6 +112,30 @@ class AdminFacade:
             invocation, module_id, authorization=context
         )
 
+    async def legacy_config_plan(self, policy_id, *, authorization=None):
+        context = self._require_context(authorization)
+        return await self._operations.legacy_config_plan(
+            policy_id, authorization=context
+        )
+
+    async def legacy_config_execute(
+        self,
+        policy_id,
+        *,
+        source_revision,
+        target_revision,
+        confirmed,
+        authorization=None,
+    ):
+        context = self._require_context(authorization)
+        return await self._operations.legacy_config_execute(
+            policy_id,
+            source_revision=source_revision,
+            target_revision=target_revision,
+            confirmed=confirmed,
+            authorization=context,
+        )
+
     async def set_enabled(
         self,
         invocation: InvocationView | None,

@@ -361,6 +361,101 @@ class SQLiteConfigRepository:
 
         return await self.database.executor.run_transaction(read)
 
+    @classmethod
+    def _current_in_unit(cls, unit, target: ConfigTarget) -> ConfigSnapshot:
+        """Read an absent target as revision one without creating source rows."""
+        state = unit.execute(
+            "SELECT revision FROM config_state WHERE principal_id=? AND module_id=?",
+            (target.principal_id, target.module_id),
+        ).fetchone()
+        rows = unit.execute(
+            "SELECT * FROM config_entries WHERE principal_id=? AND module_id=? "
+            "ORDER BY field",
+            (target.principal_id, target.module_id),
+        ).fetchall()
+        return cls._snapshot(target, 1 if state is None else int(state[0]), rows)
+
+    async def current_pair(self, source: ConfigTarget, target: ConfigTarget):
+        """Read two trusted configuration targets from one SQLite snapshot."""
+        source, target = _config_target(source), _config_target(target)
+
+        def read(unit):
+            return (
+                self._current_in_unit(unit, source),
+                self._current_in_unit(unit, target),
+            )
+
+        return await self.database.executor.run_read(read)
+
+    async def copy_legacy_if_absent(
+        self, policy, *, source_revision, target_revision, declaration, fence
+    ):
+        """Apply one closed trusted ordinary-field policy with dual revision CAS.
+
+        No caller value or source selector is accepted. Policy validation is
+        generic Core code, re-executed against this transaction's exact rows.
+        """
+        from ...services.configuration.legacy_copy import LegacyConfigCopyPolicy
+
+        if type(policy) is not LegacyConfigCopyPolicy or not callable(fence):
+            raise TypeError("trusted legacy policy and authority fence required")
+        if any(
+            type(value) is not int or value < 1
+            for value in (source_revision, target_revision)
+        ):
+            raise ValueError("invalid legacy copy revision")
+
+        def apply(unit):
+            fence(unit)
+            source = self._current_in_unit(unit, policy.source_target)
+            target = self._current_in_unit(unit, policy.target)
+            for label, actual, expected in (
+                ("legacy_source", source.revision, source_revision),
+                ("legacy_target", target.revision, target_revision),
+            ):
+                if actual != expected:
+                    raise RevisionConflict(label, expected, actual)
+            status, value = policy.validate(source, target, declaration)
+            if status != "migration_pending":
+                fence(unit)
+                return status, target.revision, False
+            self._ensure_state(unit, policy.target)
+            revision = target.revision + 1
+            unit.execute(
+                "UPDATE config_state SET revision=? WHERE principal_id=? "
+                "AND module_id=? AND revision=?",
+                (
+                    revision,
+                    policy.target.principal_id,
+                    policy.target.module_id,
+                    target.revision,
+                ),
+            )
+            unit.execute(
+                "INSERT INTO config_entries "
+                "(principal_id,module_id,field,value_json,revision) VALUES (?,?,?,?,?)",
+                (
+                    policy.target.principal_id,
+                    policy.target.module_id,
+                    policy.target_field,
+                    _json(value),
+                    revision,
+                ),
+            )
+            fence(unit)
+
+            @contextmanager
+            def guard_commit():
+                fence(unit)
+                yield
+
+            unit.add_commit_guard(guard_commit)
+            return "copied", revision, True
+
+        return await self.database.executor.run_transaction(
+            apply, begin_mode="IMMEDIATE"
+        )
+
     async def current_initialized(self, target: ConfigTarget) -> ConfigSnapshot | None:
         """Read existing Core configuration without lazily creating its state."""
         validate_contract(target)

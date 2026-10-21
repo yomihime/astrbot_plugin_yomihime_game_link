@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime, time, timedelta
 from typing import Callable
@@ -21,6 +20,8 @@ from yomihime_game_link_sdk.errors import (
 from yomihime_game_link_sdk.services import HttpRequest, ModuleServices
 from yomihime_game_link_sdk.subscriptions import ObservationCompleteness
 
+from .calendar_diagnostics import current_bound, diagnosed
+from .calendar_diagnostics import diagnostic as _diagnostic
 from .calendar_evaluator import CalendarSourceSpec, calendar_source_spec
 from .calendar_ics import MAX_BYTES, parse_ics
 from .calendar_models import CalendarOccurrence, Completeness
@@ -31,16 +32,6 @@ FALLBACK = "ff14_calendar_fallback"
 MANUAL_COOLDOWN_SECONDS = 300
 SOURCE_TIMEOUT_SECONDS = 15.0
 MAX_REMINDER_AGE = timedelta(hours=48)
-
-
-def _diagnostic(stage, **fields):
-    """Optional closed-metadata signal; no Core dependency or business effect."""
-    try:
-        logging.getLogger("yomihime_game_link.calendar_sync_diagnostic").debug(
-            "calendar_sync", extra={"ygl_sync": {"stage": stage, **fields}}
-        )
-    except BaseException:
-        pass
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,6 +84,7 @@ class CalendarSnapshots:
             raise ValueError("calendar clock must be aware")
         return value.astimezone(UTC)
 
+    @diagnosed
     async def synchronize(
         self, invocation, region: str, *, interval_seconds: int, mode: str = "due"
     ) -> bool:
@@ -104,10 +96,10 @@ class CalendarSnapshots:
             86400,
         ):
             raise ValueError("invalid calendar synchronization interval")
-        _diagnostic("sync_start", region=region, trigger=mode)
-        _diagnostic("bind")
-        bound = await self.services.scopes.bind(invocation)
-        _diagnostic("bind", code="ok")
+        await _diagnostic("sync_start", region=region, trigger=mode)
+        await _diagnostic("bind")
+        bound = current_bound()
+        await _diagnostic("bind", code="ok")
         records = await bound.records.collection(COLLECTION)
         return await self._synchronize_bound(
             records, bound.http, region, interval_seconds, mode
@@ -131,12 +123,12 @@ class CalendarSnapshots:
                 and value.get("complete")
             ):
                 break
-        _diagnostic("sync_end", code="ok")
+        await _diagnostic("sync_end", code="ok")
         return cooled_down
 
     async def _synchronize_source(self, records, http, region, spec, interval, mode):
         key = source_key(region, spec)
-        _diagnostic(
+        await _diagnostic(
             "source_start",
             source=spec.source_id,
             region=region,
@@ -158,17 +150,17 @@ class CalendarSnapshots:
                 next_due = anchor + timedelta(seconds=interval)
             retry_after = _instant(value.get("retry_after"))
             if mode == "due" and next_due is not None and now < next_due:
-                _diagnostic("source_skip", code="not_due")
+                await _diagnostic("source_skip", code="not_due")
                 return value, False
             if mode == "cold" and (value.get("complete") or value.get("partial")):
-                _diagnostic("source_skip", code="cached")
+                await _diagnostic("source_skip", code="cached")
                 return value, False
             if (
                 mode in ("cold", "manual")
                 and retry_after is not None
                 and now < retry_after
             ):
-                _diagnostic("source_skip", code="cooldown")
+                await _diagnostic("source_skip", code="cooldown")
                 return value, mode == "manual"
             # Claim before network IO. Restart and concurrent service instances
             # observe this durable bound even if the original task is cancelled.
@@ -191,7 +183,7 @@ class CalendarSnapshots:
                 }
             )
             try:
-                _diagnostic("records_claim")
+                await _diagnostic("records_claim")
                 claim = (
                     await records.create(key, value)
                     if current is None
@@ -199,15 +191,15 @@ class CalendarSnapshots:
                         key, value, expected_revision=current.revision
                     )
                 )
-                _diagnostic("records_claim", code="ok")
+                await _diagnostic("records_claim", code="ok")
             except (RevisionConflict, UniqueConstraintViolation):
-                _diagnostic("records_claim", code="revision_conflict")
+                await _diagnostic("records_claim", code="revision_conflict")
                 latest = await records.get(key)
                 return (
                     dict(latest.value) if latest is not None else {}
                 ), mode == "manual"
             except BaseException as exc:
-                _diagnostic(
+                await _diagnostic(
                     "records_claim",
                     code="cancelled"
                     if isinstance(exc, asyncio.CancelledError)
@@ -226,11 +218,11 @@ class CalendarSnapshots:
                 raw = response.body
                 if len(raw) > MAX_BYTES:
                     raise SourceHttpError("response_too_large")
-                _diagnostic("decode")
+                await _diagnostic("decode")
                 text = raw.decode("utf-8", errors="strict")
-                _diagnostic("decode", code="ok")
+                await _diagnostic("decode", code="ok")
                 start = datetime.combine(now.date() - timedelta(days=1), time.min, UTC)
-                _diagnostic("parse")
+                await _diagnostic("parse")
                 parsed = parse_ics(
                     raw,
                     window_start=start,
@@ -241,7 +233,7 @@ class CalendarSnapshots:
                 )
                 complete = parsed.completeness is Completeness.COMPLETE
                 field = "complete" if complete else "partial"
-                _diagnostic(
+                await _diagnostic(
                     "parse",
                     completeness=field,
                     warnings=tuple(w.code for w in parsed.warnings),
@@ -258,18 +250,20 @@ class CalendarSnapshots:
                     # Success makes the obsolete partial slot unnecessary.
                     value.pop("partial", None)
             except SourceHttpError as exc:
-                _diagnostic("source_end", code=exc.code, http_status=exc.status_code)
+                await _diagnostic(
+                    "source_end", code=exc.code, http_status=exc.status_code
+                )
                 if exc.code == "cancelled":
                     raise
                 value["last_status"] = "failed"
             except TimeoutError:
-                _diagnostic("source_end", code="source_deadline")
+                await _diagnostic("source_end", code="source_deadline")
                 value["last_status"] = "failed"
             except UnicodeError:
-                _diagnostic("decode", code="invalid_utf8")
+                await _diagnostic("decode", code="invalid_utf8")
                 value["last_status"] = "failed"
             except asyncio.CancelledError:
-                _diagnostic("source_end", code="cancelled")
+                await _diagnostic("source_end", code="cancelled")
                 raise
             # No catch for cancellation or authority/service errors: they must
             # propagate. The bound records service fences late module epochs.
@@ -277,25 +271,26 @@ class CalendarSnapshots:
                 "records_commit",
                 records.replace(key, value, expected_revision=claim.revision),
             )
-            _diagnostic("source_end", code=value["last_status"])
+            await _diagnostic("source_end", code=value["last_status"])
             return value, False
 
     @staticmethod
     async def _record_operation(stage, operation):
-        _diagnostic(stage)
+        await _diagnostic(stage)
         try:
             result = await operation
         except BaseException as exc:
-            _diagnostic(
+            await _diagnostic(
                 stage,
                 code="cancelled"
                 if isinstance(exc, asyncio.CancelledError)
                 else "call_error_commit_unknown",
             )
             raise
-        _diagnostic(stage, code="ok")
+        await _diagnostic(stage, code="ok")
         return result
 
+    @diagnosed
     async def read(
         self,
         invocation,
@@ -310,13 +305,13 @@ class CalendarSnapshots:
         manual: bool = False,
     ) -> CalendarSourceSnapshot:
         if manual or cold_sync:
-            _diagnostic(
+            await _diagnostic(
                 "sync_start", region=region, trigger="manual" if manual else "cold"
             )
-            _diagnostic("bind")
-        bound = await self.services.scopes.bind(invocation)
+            await _diagnostic("bind")
+        bound = current_bound()
         if manual or cold_sync:
-            _diagnostic("bind", code="ok")
+            await _diagnostic("bind", code="ok")
         records = await bound.records.collection(COLLECTION)
         values = [] if manual else await self._values(records, region)
         limited = False

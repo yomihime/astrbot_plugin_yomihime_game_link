@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "module_id": "minimal/demo",
+  "sources": {},
+  "credentials": [],
+  "gate": "enabled",
+  "public": {"status": "status"},
+  "page_sources": [],
+  "credential_regions": [],
+  "execution_budgets": {"capabilities": {}, "collectors": {}},
+  "diagnostics": {"events": [], "max_events": 64, "max_bytes": 524288, "event_limits": {}}
+}

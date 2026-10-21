@@ -1,43 +1,18 @@
-// Actual built shell DOM, with an isolated catalog/management bridge fixture.
+// Current source single-root navigation; production assets have a separate build gate.
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdir,copyFile,writeFile,readFile} from 'node:fs/promises';
+import {readFile} from 'node:fs/promises';
 import {resolve} from 'node:path';
-import {pathToFileURL} from 'node:url';
-import {JSDOM} from '../../../pages/frontend/node_modules/jsdom/lib/api.js';
-import {catalog as moduleCatalog} from './fixtures.mjs';
 import {root} from './compile.mjs';
-import {catalog,snapshot,credentialCatalog,credentialStatus,masterKeyReady} from '../management/fixtures.mjs';
-
-test('built mobile navigation opens module home and exposes only declared inner pages',async()=>{
- const dom=new JSDOM('<html data-page-name="shell"><body><template id="module-style-assets"></template><div id="app"></div></body></html>',{pretendToBeVisual:true,url:'http://localhost/#/settings/module/ff14%2Fff14'}),window=dom.window;
- for(const key of ['window','document','HTMLElement','Element','SVGElement','Node','MutationObserver','Event','MouseEvent','KeyboardEvent','InputEvent'])globalThis[key]=key==='window'?window:key==='document'?window.document:window[key];
- globalThis.getComputedStyle=window.getComputedStyle.bind(window);globalThis.requestAnimationFrame=window.requestAnimationFrame.bind(window);globalThis.cancelAnimationFrame=window.cancelAnimationFrame.bind(window);
- window.matchMedia=()=>({matches:false,addEventListener(){},removeEventListener(){}});window.scrollTo=()=>{};window.confirm=()=>true;
- const data=moduleCatalog();data.modules.push({...data.modules[0],module_id:'example/demo',route:'demo',category:'platform',pages:[],resources:[]},{...data.modules[0],module_id:'empty/none',route:'none',pages:[],resources:[]});
- const binding={pluginName:'astrbot_plugin_yomihime_game_link',pageName:'shell',binding:1},calls=[];
- window.AstrBotPluginView={ready:()=>Promise.resolve(binding),onContext(fn){fn(binding);return()=>{};},apiGet:()=>Promise.resolve(data),apiPost(endpoint,body){calls.push({endpoint,body});if(endpoint==='admin/catalog')return Promise.resolve(catalog());if(endpoint==='admin/read')return Promise.resolve(snapshot());if(endpoint==='admin/master-key-status')return Promise.resolve(masterKeyReady());if(endpoint==='admin/credential-catalog')return Promise.resolve(credentialCatalog());if(endpoint==='admin/credential-status')return Promise.resolve(credentialStatus());if(endpoint==='admin/credential-readiness')return Promise.resolve(null);if(endpoint==='admin/modules')return Promise.resolve({registry_revision:1,modules:[]});return Promise.reject(Error('unexpected_write'));}};
- const directory=resolve(root,'.architecture-refactor/management-home-settings-ux/tests/backend/shell-navigation-'+process.pid);await mkdir(directory,{recursive:true});for(const name of ['app.js','runtime.js'])await copyFile(resolve(root,'pages/shell',name),resolve(directory,name));
- // The loader exists only in release-builder projection. This navigation test
- // injects asset failure, while production.test.mjs covers literal module loads.
- await writeFile(resolve(directory,'module-loader.js'),"export async function loadPage(){throw Error('fixture_asset_unavailable');}\n");
- const flush=async()=>{for(let i=0;i<100;i++)await Promise.resolve();await new Promise(resolve=>setTimeout(resolve,5));};
- try{await import(pathToFileURL(resolve(directory,'app.js')));await flush();
-  const module=window.document.getElementById('module-select-mobile'),mobile=window.document.querySelector('.shell-mobile');
-  assert.equal(module.value,'ff14/ff14');assert.ok([...mobile.querySelectorAll('a')].some(link=>link.textContent==='全局设置'));
-  assert.equal(window.document.querySelector('.shell-settings[aria-current="page"]'),null);assert.equal(window.document.querySelectorAll('nav[aria-label="已挂载模块"] a[aria-current="page"]').length,1);
-  // Module switches enter home. A module without query pages gets no empty query tab.
-  module.value='example/demo';module.dispatchEvent(new window.Event('change',{bubbles:true}));await flush();assert.equal(module.value,'example/demo');assert.equal(window.location.hash,'#/module/example%2Fdemo');assert.equal(window.document.getElementById('page-title').textContent,'example/demo');assert.ok(window.document.querySelector('.module-tabs a[aria-current="page"]').textContent==='主页');assert.equal([...window.document.querySelectorAll('.module-tabs a')].some(node=>node.textContent==='辅助查询'),false);
-  window.document.querySelector('.module-tabs a[href="#/settings/module/example%2Fdemo"]').click();await flush();assert.equal(window.location.hash,'#/settings/module/example%2Fdemo');
-  module.value='empty/none';module.dispatchEvent(new window.Event('change',{bubbles:true}));await flush();assert.equal(window.location.hash,'#/module/empty%2Fnone');assert.deepEqual([...window.document.querySelectorAll('.module-tabs a')].map(node=>node.textContent),['主页']);
-  module.value='ff14/ff14';module.dispatchEvent(new window.Event('change',{bubbles:true}));await flush();assert.equal(module.value,'ff14/ff14');
-  const append=window.document.head.append.bind(window.document.head);window.document.head.append=(...nodes)=>{append(...nodes);for(const node of nodes)if(node.matches?.('link[data-module-style]'))queueMicrotask(()=>node.dispatchEvent(new window.Event('load')));};
-  const template=window.document.getElementById('module-style-assets');for(const path of data.modules[0].pages[0].styles){const link=window.document.createElement('link');link.rel='stylesheet';link.dataset.resource=path;link.href='./'+path;template.content.append(link);}
-  window.document.querySelector('.module-tabs a[href="#/module/ff14%2Fff14/-/queries"]').click();await flush();const query=window.document.querySelector('.query-links a[href="#/module/ff14%2Fff14/market"]');assert.ok(query,'module queries remain secondary reachable links');assert.equal(mobile.querySelectorAll('details a').length,0);query.click();await flush();assert.equal(window.location.hash,'#/module/ff14%2Fff14/market');assert.equal(module.value,'ff14/ff14');assert.equal(calls.filter(call=>call.endpoint==='admin/credential-update').length,0);
-  assert.equal(window.document.querySelector('#module-management-container [data-reopen-guidance]'),null);window.document.querySelector('.module-tabs a[href="#/module/ff14%2Fff14"]').click();await flush();const reopen=window.document.querySelector('#module-management-container [data-reopen-guidance]');assert.ok(reopen,'sandboxed management home must provide host menu instructions');assert.match(reopen.textContent,/宿主左侧.*插件.*astrbot_plugin_yomihime_game_link.*打开视图/);assert.equal(window.document.querySelector('#module-management-container a[target="_top"]'),null);assert.equal(window.document.querySelector('#module-management-container a[href="/#/extension/plugins"]'),null);
- }finally{window.dispatchEvent(new window.Event('pagehide'));dom.window.close();}
+import {harness,flush} from './single-root-fixture.mjs';
+test('mobile navigation opens only declared roles and empty modules have no invented config/query tabs',async()=>{
+ const h=await harness();try{
+  await h.go('#/module/ff14%2Fff14');const select=h.doc.getElementById('module-select-mobile');assert.equal(select.value,'ff14/ff14');assert.equal(h.doc.querySelector('.module-tabs [aria-current=page]').textContent,'\u4e3b\u9875');
+  h.doc.querySelector('.module-tabs a[href$="/config"]').click();await flush();assert.equal(h.window.location.hash,'#/module/ff14%2Fff14/config');assert.ok(h.doc.querySelector('[data-module-role=config]'));assert.equal(h.doc.querySelector('.query-links'),null);
+  await h.go('#/module/ff14%2Fff14/-/queries');assert.equal(h.doc.querySelectorAll('.query-links a').length,1);assert.equal(h.doc.querySelector('[data-module-role]'),null);
+  await h.go('#/modules');assert.equal(h.doc.querySelector('.module-dashboard').hidden,false);assert.equal(h.doc.querySelector('#module-management-container a[target="_top"]'),null);assert.equal(h.calls.some(call=>call.action==='admin/module-credential-replace'),false);
+ }finally{h.close();}
 });
-
 test('retired FF14 compatibility locator is absent from current source',async()=>{
  await assert.rejects(readFile(resolve(root,'modules/ff14/pages/compat/index.html'),'utf8'),{code:'ENOENT'});
  const builder=await readFile(resolve(root,'scripts/build_dashboard_zip.py'),'utf8');

@@ -321,6 +321,14 @@ class SQLiteExecutor:
             except TimeoutError:
                 pass
 
+    async def quiesce_storage(self, *, timeout: float = 5.0) -> None:
+        """Permanently fence new jobs and drain accepted work for cold restart.
+
+        This attests only this executor. It is never an external-writer lease.
+        A close timeout remains a failure; no source migration proof is issued.
+        """
+        await self.close(timeout=timeout)
+
 
 def _reject_sqlite_handles(
     value: Any,

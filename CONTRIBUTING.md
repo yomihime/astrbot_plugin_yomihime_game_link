@@ -10,7 +10,7 @@ CI 使用 Python 3.13.9，并固定以下构建与检查工具：
 - wheel 0.45.1
 - Ruff 0.12.0
 - 运行依赖按 `requirements.txt` 的最低版本约束由解析器选择兼容版本（含 tzdata），并非强制安装下限版本；已测试的具体组合不代表区间每个版本均已验证
-- 离线 Host 合同测试依赖单独放在 `requirements-test.txt`：PyJWT 2.10.1、FastAPI 0.135.2、Starlette 0.52.1、HTTPX 0.28.1、Quart 0.20.0、jsonschema 4.23.0；它们不加入插件运行依赖。其余传递依赖由 pip 解析，此文件不是完整依赖锁定文件
+- 离线 Host 合同测试依赖单独放在 `requirements-test.txt`：PyJWT 2.10.1、FastAPI 0.135.2、Starlette 0.52.1、HTTPX 0.28.1、Quart 0.20.0、jsonschema 4.23.0；运行依赖下限回归使用 packaging 26.3。它们不加入插件运行依赖。其余传递依赖由 pip 解析，此文件不是完整依赖锁定文件
 - Node.js 24 用于前端类型检查、构建及页面状态/DOM 合成测试；前端依赖由 `pages/frontend/package.json` 和锁文件声明，使用 `npm ci --prefix pages/frontend` 安装，不是插件运行依赖
 
 主测试与发布构建使用 Python 3.13.9。固定 AstrBot v4.29.1 的 Python 要求为 `>=3.12`，SDK 的要求为 `>=3.11`；Host 合同测试因此要求 Python 3.12 或以上，并不提高 SDK 的最低版本。可另建 Python 3.12.14 虚拟环境验证 FF14/Host 合同；发布构建仍使用 3.13.9。
@@ -45,9 +45,22 @@ Linux 可用相同 Git 命令，并设置 `export YGL_TEST_ASTRBOT_SOURCE="$PWD/
 
 helper 每次加载前检查 checkout 根目录、HEAD、两处版本声明、相关源文件的 SHA256（UTF-8、LF 换行）和相关文件的 Git 脏改。缺少环境变量、源码、Git 或固定测试依赖，以及版本、commit、摘要或依赖版本不匹配，均报告 `AstrBot contract test environment` 错误；不得用 skip 或 mock Host 合同绕过。无需安装 AstrBot 的完整依赖或访问任何真实实例。
 
+管理鉴权回归使用这份独立的 4.29.1 源码，不再复制另一份同版本 helper 或修改旧版本历史合同。可运行 `python -m unittest -v tests.host.test_admin_pages tests.host.test_global_admin_commit_fence tests.packaging.test_runtime_dependencies` 核对真实 auth/dispatch、严格验证器接口及依赖下限；完整 discover 也包含这些入口。验证器必须是当前请求应用自有 adapter 所绑定服务器的同步方法，可接受两个位置参数并返回精确二元 tuple，错误项必须为精确空字符串；重命名参数、兼容的可选参数与 varargs 不应误拒。异常、不兼容签名、异步或生成器接口均拒绝，不能按宿主版本标签代替接口合同。此回归不扩大元数据声明的宿主支持范围，也不替代真实 Host 验收。
+
 ## 构建插件包
 
-生成物不再跟踪入库。首次构建/测试前运行 `npm ci --prefix pages/frontend`、`npm run typecheck --prefix pages/frontend`、`npm run build --prefix pages/frontend` 和 `python scripts/prepare_test_font.py`。字体脚本仅下载经 SHA256/长度校验的官方固定测试资源；运行时字体仍由独立管理服务获取。各页面根在发行包内仍具有独立完整的运行时与第三方声明。
+前端编译目录 `modules/*/pages/dist/` 不跟踪入库；构建索引 `pages/resources.json` 与 manifest 资源摘要仍由仓库跟踪。按依赖顺序执行前端安装、类型检查、构建、测试字体准备、前端构建验证，最后执行发行构建：
+
+```powershell
+npm ci --prefix pages/frontend
+npm run typecheck --prefix pages/frontend
+npm run build --prefix pages/frontend
+python scripts/prepare_test_font.py
+python scripts/verify_frontend_build.py
+python scripts/build_release.py
+```
+
+前端 build 会从模块源码生成 `modules/*/pages/dist/` 与 `pages/resources.json`，更新 manifest 中对应资源摘要，再生成唯一正式页面根 `pages/00-game-link` 及构建检查清单。它先在临时 staging 树完整生成，完成目标目录的链接检查后逐文件原子替换。正式发行资产按受审 manifest 投影模块入口、样式和资源。缺少 Vite 等依赖时先执行 `npm ci`；缺少待校验的 frontend 生成物时运行前端 build。`verify_frontend_build.py` 要求正式构建产物已存在，不会代替 build。隔离构建可用 `node pages/frontend/build.mjs --out-root=<absolute-task-directory>`，不作为正式发行资产。字体脚本仅下载经 SHA-256 和长度校验的官方固定测试资源；运行时字体仍由独立管理服务获取。发行 ZIP 注入经过内容摘要校验的 SDK a11 wheel 中的运行时成员字节，不把 `.whl` 文件本身放入插件 ZIP，也不依赖尚未发布的远端下载地址。`--sdk-wheel` 可复用校验通过的现有 wheel，包括 `dist/` 中与目标内容完全相同的 wheel；复用时按摘要及文件系统链接边界验证，再直接从 wheel 打包运行时成员。
 
 
 从仓库根目录运行：
@@ -59,12 +72,18 @@ python scripts/build_release.py
 脚本要求 Python 3.13 和固定版本的 setuptools、wheel。它从临时 SDK 源码副本构建并验证固定的 SDK wheel，然后生成：
 
 - `dist/astrbot_plugin_yomihime_game_link-v0.1.2.zip`：上传到 AstrBot WebUI 的插件包；
-- `dist/yomihime_game_link_sdk-0.1.0a9-py3-none-any.whl`：独立 SDK 工件，不是插件 ZIP；
+- `dist/yomihime_game_link_sdk-0.1.0a11-py3-none-any.whl`：独立 SDK 工件，不是插件 ZIP；
 - `dist/SHA256SUMS`：上述工件的摘要。
 
 可用 `--tag v0.1.2` 校验 tag 必须与 `metadata.yaml` 中的版本相同。该参数只做版本校验，不创建 tag。发布工件的下载和安装步骤见[README](https://github.com/yomihime/astrbot_plugin_yomihime_game_link/blob/master/README.md)。
 
 不要直接把未经构建的仓库快照安装到 AstrBot：SDK 运行文件由已验证的 wheel 注入插件 ZIP。SDK 契约与工件细节见[模块 SDK 说明](https://github.com/yomihime/astrbot_plugin_yomihime_game_link/blob/master/docs/module-sdk.md)。
+
+### SDK 发行版本或 ABI 变化
+
+只有 SDK 发行版本或模块 ABI 变化时才需要以下冷升级流程；SDK 版本/ABI 未变的普通插件更新继续使用 README 所述的 AstrBot WebUI 上传。Host 可能在检查模块是否禁用前已导入 SDK，导致上传自动回滚；禁用模块并重启旧文件仍会加载旧 SDK graph。
+
+已验证的升级方式是：完全停止同一 AstrBot Host 并确认进程退出；停机时仅按该 Host 部署方式安装受信候选插件代码，不改动配置、数据库、密钥或其他用户数据；再冷启动，并核对实际加载的插件版本、SDK 发行版本及运行时内容。如果上传发生回滚，保留旧插件文件时单纯重启不会完成升级。不要据此推广任意 ZIP 覆盖或卸载重装流程为通用支持；若具体部署没有明确的停机替换步骤，先确认该部署支持的离线安装方式。
 
 ## 验证
 
@@ -89,19 +108,25 @@ node tests/pages/ff14/test_item_display.mjs
 全量测试需要明确指定刚构建并验证的 SDK wheel：
 
 ```powershell
-$env:YGL_TEST_SDK_WHEEL = (Resolve-Path dist/yomihime_game_link_sdk-0.1.0a9-py3-none-any.whl).Path
+$env:YGL_TEST_SDK_WHEEL = (Resolve-Path dist/yomihime_game_link_sdk-0.1.0a11-py3-none-any.whl).Path
 python -m unittest discover -s tests -t . -v
-python scripts/verify_frontend_build.py
 python scripts/check_doc_links.py
 ```
 
-Linux 对应 `export YGL_TEST_SDK_WHEEL="$PWD/dist/yomihime_game_link_sdk-0.1.0a9-py3-none-any.whl"`。真实宿主 ZIP 冒烟测试使用独立完整宿主环境，步骤见[真实宿主验证](docs/real-host-smoke.md)。
+上述 unittest 前，先按“构建插件包”完成前端 build 和 `verify_frontend_build.py`。页面输出、安全与发行包边界专项回归可运行：
 
-Ubuntu job 保留全量 unittest，不过滤已知历史失败；回归记录必须保留最终 passed/failed/skipped 汇总，并区分历史失败与本次新增回归。局部测试通过不等于全量通过。
+```text
+python -m unittest -v tests.storage.test_windows_ci_boundaries tests.integration.test_managed_key_acl_boundaries tests.packaging.test_build_output_safety
+node --test tests/packaging/build-output.test.mjs
+```
+
+Linux 对应 `export YGL_TEST_SDK_WHEEL="$PWD/dist/yomihime_game_link_sdk-0.1.0a11-py3-none-any.whl"`。真实宿主 ZIP 冒烟测试使用独立完整宿主环境，步骤见[真实宿主验证](docs/real-host-smoke.md)。
+
+Ubuntu job 运行全量 unittest 与 Ruff。每次验证应报告实际 passed/failed/skipped 汇总；局部测试通过不等于全量通过。
 
 全量验证通过后，独立 Ubuntu 构建 job 运行限定的宿主 bootstrap、固定源码合同、FF14 页面与 runtime、物品展示合同和打包回归测试，然后构建并上传工件。离线源码/AST/ASGI 测试、宿主 HTTP、浏览器视觉与交互、实际 IM 投递是不同证据层；这些 CI 结果不代表真实实例已安装、加载或完成消息收发验收，也不能用 HTTP 200 或 activated 状态替代后续功能验收。
 
-原生 Windows 文件系统扫描器的资格矩阵保持为 Windows 10.0 build 26200/26300 与 CPython 3.12.10、3.12.14、3.13.9 的 x64、启用 GIL、本地 NTFS 环境。[GitHub 托管 Windows Server 2025 镜像](https://github.com/actions/runner-images/blob/main/images/windows/Windows2025-Readme.md)使用 26100 系列，不在此矩阵内；因此 CI 使用已验证的 Linux 路径构建通用 ZIP，不放宽原生护栏，也不声称 CI 验证了 Windows。
+原生 Windows 文件系统扫描器的资格矩阵为 Windows 10.0 build 26200/26300 与 CPython 3.12.10、3.12.14、3.13.9 的 x64、启用 GIL、本地 NTFS 环境。[GitHub 托管 Windows Server 2025 镜像](https://github.com/actions/runner-images/blob/main/images/windows/Windows2025-Readme.md)使用 26100 系列，不在此矩阵内。Windows CI 仅运行指定的 Win32 ACL、selector/迁移权限拒绝和输出路径安全边界测试；不覆盖资格矩阵，也不证明生产存储路径通过原生资格门禁。该 CI 结果不能替代目标系统资格验证或真实宿主验收。
 
 Windows 部署前，在目标系统的可用本地 NTFS 开发目录、已准备的测试环境中单独执行以下资格门禁。首先必须确认资格为真，不能把自动 skip 算作通过；随后仍需用同一 ZIP 做真实宿主冷启动、页面和关闭验收：
 

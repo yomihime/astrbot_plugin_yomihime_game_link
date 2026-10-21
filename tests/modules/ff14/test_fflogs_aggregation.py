@@ -738,27 +738,7 @@ class BatchTests(unittest.IsolatedAsyncioTestCase):
     async def test_command_metrics_count_module_fetches_without_identity_or_network_claims(
         self,
     ):
-        import logging
-
-        from modules.ff14.features.fflogs_evidence import LOGGER_NAME
-
-        events = []
-
-        class Sink(logging.Handler):
-            fflogs_evidence_sink = True
-
-            def emit(self, record):
-                events.append(json.loads(record.args[0]))
-
-        logger = logging.getLogger(LOGGER_NAME)
-        sink = Sink()
-        old_level, old_propagate = logger.level, logger.propagate
-        logger.addHandler(sink)
-        logger.setLevel(logging.INFO)
-        logger.propagate = False
-        self.addCleanup(logger.removeHandler, sink)
-        self.addCleanup(logger.setLevel, old_level)
-        self.addCleanup(setattr, logger, "propagate", old_propagate)
+        diagnostics = fixture._Diagnostics()
         metadata = catalog_fixture.expanded_metadata()
         http = fixture._FakeHttp(
             [
@@ -770,14 +750,21 @@ class BatchTests(unittest.IsolatedAsyncioTestCase):
                 catalog_fixture.catalog_rankings(metadata),
             ]
         )
-        handler = FFLogsCharacterLookup(fixture._services(http))
+        handler = FFLogsCharacterLookup(
+            fixture._services(http, diagnostics=diagnostics)
+        )
         self.addCleanup(handler.close)
         result = await handler.invoke(None, {"command": 'Cerberus "Synthetic Hero"'})
         self.assertIsNone(result.error)
         summary_event = next(
-            item for item in events if item["operation"] == "FF14RequestSummary"
+            item
+            for item in diagnostics.events
+            if item["event_id"] == "FF14RequestSummary"
         )
-        summary = json.loads(summary_event["payload"])
+        summary = summary_event["payload"]["payload"]
+        self.assertEqual(summary_event["payload"]["source"], "fflogs_public_cn")
+        self.assertIsNone(summary_event["payload"]["status"])
+        self.assertFalse(summary_event["payload"]["cached"])
         self.assertEqual(
             sum(item["attempts"] for item in summary["operations"]),
             len(http.requests) + len(http.duty_requests),

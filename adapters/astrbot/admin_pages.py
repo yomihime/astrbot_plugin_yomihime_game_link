@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import suppress
+import hmac
+import inspect
+import secrets
+from math import isfinite
 from time import time
 
 from yomihime_game_link_sdk.declarations import ConfigUpdateMode
@@ -18,6 +21,7 @@ from ...core.contracts.services import ConfigFieldUpdate, ConfigPatch
 from ...core.contracts.validation_boundary import validate_contract
 from ...core.ports import RevisionConflict
 from ...infrastructure.managed_key_manager import ManagedKeyConflict
+from ...infrastructure.private_storage import PrivateStorageError
 from ...infrastructure.secret_store import SecretStoreUnavailable
 from .runtime import PLUGIN_NAME
 from .web_admin import bounded_body, bounded_font_upload, verified_dashboard_request
@@ -39,10 +43,108 @@ _OPERATIONS = {
     "master-key-retry": AdminOperation.UPDATE_CONFIG,
     "master-key-restore": AdminOperation.UPDATE_CONFIG,
     "master-key-reset": AdminOperation.UPDATE_CONFIG,
+    "master-key-adopt-environment": AdminOperation.UPDATE_CONFIG,
+    "master-key-migration-plan": AdminOperation.READ_CONFIG,
+    "master-key-migration-execute": AdminOperation.UPDATE_CONFIG,
+    "legacy-config-plan": AdminOperation.READ_CONFIG,
+    "legacy-config-execute": AdminOperation.UPDATE_CONFIG,
     "modules": AdminOperation.LIST_MODULES,
     "module-enabled": AdminOperation.SET_ENABLED,
     "module-unload": AdminOperation.UNLOAD_MODULE,
+    "module-config-current": AdminOperation.READ_CONFIG,
+    "module-config-save": AdminOperation.UPDATE_CONFIG,
+    "module-config-clear": AdminOperation.UPDATE_CONFIG,
+    "module-credential-status": AdminOperation.READ_CONFIG,
+    "module-credential-replace": AdminOperation.UPDATE_CONFIG,
+    "module-credential-clear": AdminOperation.UPDATE_CONFIG,
+    "module-page-session": AdminOperation.READ_CONFIG,
+    "module-page-session-close": AdminOperation.READ_CONFIG,
 }
+
+_MODULE_PAGE_OPERATIONS = frozenset(
+    {
+        "module-config-current",
+        "module-config-save",
+        "module-config-clear",
+        "module-credential-status",
+        "module-credential-replace",
+        "module-credential-clear",
+        "module-page-session",
+        "module-page-session-close",
+    }
+)
+
+
+class _DashboardRequestFence:
+    """Reverify one real Host session at synchronous source/commit boundaries.
+
+    Only an ephemeral keyed digest of Authorization is retained. The initial
+    proof deadline is fixed; successful rechecks never renew request authority.
+    """
+
+    def __init__(self, request, path, raw, subject, expiry):
+        self.request, self.path, self.raw = request, path, raw
+        self.subject, self.expiry = subject, expiry
+        self.key = secrets.token_bytes(32)
+        try:
+            if (
+                raw is None
+                or type(subject) is not str
+                or not subject.strip()
+                or type(expiry) not in (int, float)
+                or not isfinite(expiry)
+                or expiry <= time()
+            ):
+                raise ValueError
+            self.authorization, self.origin, self.server, self.verifier_function = (
+                self._identity()
+            )
+        except Exception:
+            raise AdminAuthorizationDenied from None
+
+    def _identity(self):
+        authorizations = self.request.headers.getlist("authorization")
+        origins = self.request.headers.getlist("origin")
+        if (
+            len(authorizations) != 1
+            or type(authorizations[0]) is not str
+            or len(origins) != 1
+            or type(origins[0]) is not str
+        ):
+            raise AdminAuthorizationDenied
+        server = self.request._request.app.state.dashboard_app_adapter._dashboard_server
+        verifier = getattr(server, "_validate_dashboard_token", None)
+        if not callable(verifier) or getattr(verifier, "__self__", None) is not server:
+            raise AdminAuthorizationDenied
+        digest = hmac.digest(self.key, authorizations[0].encode("utf-8"), "sha256")
+        return digest, origins[0], server, getattr(verifier, "__func__", None)
+
+    def current(self, actual):
+        if actual is not self.raw or time() >= self.expiry:
+            return False
+        try:
+            checked = verified_dashboard_request(self.request, self.path)
+            if inspect.isawaitable(checked):
+                if inspect.iscoroutine(checked):
+                    checked.close()
+                return False
+            if type(checked) is not tuple or len(checked) != 3:
+                return False
+            raw, subject, expiry = checked
+            digest, origin, server, function = self._identity()
+            return (
+                raw is self.raw
+                and subject == self.subject
+                and type(expiry) in (int, float)
+                and isfinite(expiry)
+                and time() < min(expiry, self.expiry)
+                and hmac.compare_digest(digest, self.authorization)
+                and origin == self.origin
+                and server is self.server
+                and function is self.verifier_function
+            )
+        except Exception:
+            return False
 
 
 class AdminPages:
@@ -95,6 +197,8 @@ class AdminPages:
             from astrbot.api.web import json_response, request
 
             context, watcher, source = None, None, None
+            watcher_stop = {"value": False}
+            result, code, status = None, None, None
             task = asyncio.current_task()
             try:
                 if self.closed or self.generation != generation:
@@ -107,14 +211,43 @@ class AdminPages:
                     )
                 concrete = request._get_current()
                 raw, subject, expiry = verified_dashboard_request(concrete, legacy)
+                dashboard_fence = _DashboardRequestFence(
+                    concrete, legacy, raw, subject, expiry
+                )
+                if endpoint in _MODULE_PAGE_OPERATIONS:
+                    runtime_generation = self.runtime._generation
+                    data = await asyncio.wait_for(
+                        bounded_body(concrete), timeout=max(0.001, expiry - time())
+                    )
+                    # The runtime establishes the actual page/session grant.
+                    # Client owner/epoch fields never issue a management proof.
+                    result = await self.runtime.module_page_operation(
+                        endpoint, data, request=concrete
+                    )
+                    if (
+                        self.closed
+                        or self.generation != generation
+                        or self.runtime._generation != runtime_generation
+                        or not self.runtime._ready
+                        or self.runtime._closing
+                        or not dashboard_fence.current(raw)
+                    ):
+                        raise AdminAuthorizationDenied
+                    return json_response(
+                        {"status": "ok", "data": result, "message": ""},
+                        headers={"Cache-Control": "no-store"},
+                    )
                 credentials = endpoint.startswith("credential-")
                 master_key = endpoint.startswith("master-key-")
+                legacy_copy = endpoint.startswith("legacy-config-")
                 modules = endpoint.startswith("module")
                 core, source = self.runtime.management_entry(
                     credentials=credentials, modules=modules, master_key=master_key
                 )
                 resources = (
-                    core.admin_operations.master_key_resources()
+                    core.admin_operations.legacy_config_resources()
+                    if legacy_copy
+                    else core.admin_operations.master_key_resources()
                     if master_key
                     else core.admin_operations.credential_resources()
                     if credentials
@@ -127,7 +260,12 @@ class AdminPages:
                     subject=subject,
                     request=raw,
                     expiry=expiry,
-                    operations={_OPERATIONS[endpoint], AdminOperation.SET_ENABLED}
+                    operations={
+                        AdminOperation.READ_CONFIG,
+                        AdminOperation.UPDATE_CONFIG,
+                    }
+                    if legacy_copy
+                    else {_OPERATIONS[endpoint], AdminOperation.SET_ENABLED}
                     if endpoint == "module-unload"
                     else {_OPERATIONS[endpoint]},
                     resources=resources,
@@ -135,7 +273,8 @@ class AdminPages:
                     and actual is raw
                     and not self.closed
                     and self.generation == generation
-                    and self.runtime.management_current(core, source),
+                    and self.runtime.management_current(core, source)
+                    and dashboard_fence.current(actual),
                 )
                 self.requests[id(context)] = (source, context)
                 data = await asyncio.wait_for(
@@ -151,8 +290,11 @@ class AdminPages:
                 )
 
                 async def disconnect():
-                    while alive["value"]:
-                        if await raw.is_disconnected():
+                    while alive["value"] and not watcher_stop["value"]:
+                        disconnected = await raw.is_disconnected()
+                        if watcher_stop["value"]:
+                            return
+                        if disconnected:
                             alive["value"] = False
                             source.end(context)
                             task.cancel()
@@ -163,15 +305,12 @@ class AdminPages:
                 if await raw.is_disconnected():
                     alive["value"] = False
                     raise AdminAuthorizationDenied
+                source.check(context, _OPERATIONS[endpoint], resources)
                 result = await self._invoke(endpoint, core, data, context)
                 source.check(
                     context,
                     _OPERATIONS[endpoint],
                     resources,
-                )
-                return json_response(
-                    {"status": "ok", "data": result, "message": ""},
-                    headers={"Cache-Control": "no-store"},
                 )
             except RevisionConflict:
                 code, status = "revision_conflict", 409
@@ -179,7 +318,7 @@ class AdminPages:
                 code, status = "admin_authorization_denied", 403
             except SecretStoreUnavailable:
                 code, status = "secret_encryption_unavailable", 503
-            except ManagedKeyConflict as error:
+            except (ManagedKeyConflict, PrivateStorageError) as error:
                 code = error.code
                 status = (
                     409
@@ -190,6 +329,8 @@ class AdminPages:
                         "operation_incomplete",
                         "environment_key_conflict",
                         "key_conflict",
+                        "requires_stopped_host",
+                        "source_exclusivity_unproven",
                     }
                     else 422
                     if code == "key_does_not_decrypt_inventory"
@@ -202,19 +343,63 @@ class AdminPages:
             except Exception:
                 code, status = "operation_unavailable", 503
             finally:
-                if context is not None:
-                    alive["value"] = False
-                    source.end(context)
-                    self.requests.pop(id(context), None)
-                if watcher is not None:
-                    watcher.cancel()
-                    with suppress(asyncio.CancelledError):
-                        await watcher
+                # Cancellation may be consumed inside Starlette/AnyIO receive.
+                # Stop the monitor independently of the still-live authority.
+                watcher_stop["value"] = True
+                cancellation_pending = False
+                try:
+                    if watcher is not None:
+                        watcher.cancel()
+                        try:
+                            await watcher
+                        except asyncio.CancelledError:
+                            cancellation_pending = (
+                                task is not None and task.cancelling() > 0
+                            )
+                        except Exception:
+                            if code is None:
+                                code, status = "operation_unavailable", 503
+                    cancellation_pending = cancellation_pending or (
+                        task is not None and task.cancelling() > 0
+                    )
+                    if context is not None:
+                        # Recheck after the final await, including wrapped error
+                        # paths. The same callback also guards the SQLite COMMIT.
+                        try:
+                            source.check(context, _OPERATIONS[endpoint], resources)
+                        except Exception:
+                            code, status = "admin_authorization_denied", 403
+                finally:
+                    # Exact request ownership is released without another await,
+                    # even when joining the monitor or checking authority fails.
+                    if context is not None:
+                        alive["value"] = False
+                        try:
+                            source.end(context)
+                        finally:
+                            entry = self.requests.get(id(context))
+                            if (
+                                entry is not None
+                                and entry[0] is source
+                                and entry[1] is context
+                            ):
+                                self.requests.pop(id(context), None)
+                if cancellation_pending:
+                    raise asyncio.CancelledError
+            if code is None:
+                return json_response(
+                    {"status": "ok", "data": result, "message": ""},
+                    headers={"Cache-Control": "no-store"},
+                )
             return json_response(
                 {
                     "status": "error",
                     "code": code,
-                    "message": "配置版本冲突，请刷新并重新核对后修改。"
+                    # The official Host bridge forwards only message, then
+                    # rejects with Error(message). Preserve this exact marker.
+                    "message": "admin_authorization_denied"
+                    if code == "admin_authorization_denied"
+                    else "配置版本冲突，请刷新并重新核对后修改。"
                     if code == "revision_conflict"
                     else "原密钥格式无效，请输入标准 Base64 编码的 32 字节密钥；旧凭据未更改。"
                     if code == "invalid_key"
@@ -233,6 +418,21 @@ class AdminPages:
 
     async def _invoke(self, endpoint, core, data, context):
         ops = core.admin_operations
+        if endpoint == "legacy-config-plan":
+            if set(data) != {"policy_id"}:
+                raise ValueError("invalid legacy plan parameters")
+            return await ops.legacy_config_plan(
+                data["policy_id"], authorization=context
+            )
+        if endpoint == "legacy-config-execute":
+            if set(data) != {
+                "policy_id",
+                "source_revision",
+                "target_revision",
+                "confirmed",
+            }:
+                raise ValueError("invalid legacy execute parameters")
+            return await ops.legacy_config_execute(authorization=context, **data)
         if endpoint == "sync-diagnostics":
             if data:
                 raise ValueError("diagnostic parameters must be empty")
@@ -314,11 +514,22 @@ class AdminPages:
             return await ops.credential_readiness(
                 authorization=context, diagnostics=bool(data)
             )
+        if endpoint == "master-key-migration-plan":
+            if data:
+                raise ValueError("invalid migration plan parameters")
+            return await ops.storage_migration_plan(authorization=context)
+        if endpoint == "master-key-migration-execute":
+            return await ops.storage_migration_execute(data, authorization=context)
         if endpoint == "master-key-status":
             if data:
                 raise ValueError("invalid master key status parameters")
             return await ops.master_key_status(authorization=context)
-        if endpoint in {"master-key-retry", "master-key-restore", "master-key-reset"}:
+        if endpoint in {
+            "master-key-retry",
+            "master-key-restore",
+            "master-key-reset",
+            "master-key-adopt-environment",
+        }:
             common = {"expected_revision", "expected_generation", "inventory_digest"}
             extra = (
                 {"encoded_key"}

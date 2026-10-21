@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {validateCatalog,validateSnapshot,updateBody} from '../../../pages/management/app.js';
+import {validateCatalog,validateSnapshot,updateBody} from './source-management.mjs';
 import {catalog,snapshot} from './fixtures.mjs';
 test('catalog owns fields and value access; registration grants no read or write',()=>{
   const declarations=validateCatalog(catalog());assert.equal(declarations.fields.length,5);

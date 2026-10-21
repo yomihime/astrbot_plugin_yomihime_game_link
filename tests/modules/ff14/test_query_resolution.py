@@ -61,12 +61,7 @@ class _Config:
         self.calls += 1
         return SimpleNamespace(
             revision=self.module_revision,
-            values={
-                "core_defaults": {
-                    "default_region": self.region,
-                    "revision": self.core_revision,
-                }
-            },
+            values={"ff14_default_region": self.region},
         )
 
 
@@ -668,13 +663,13 @@ class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
                 selected.core_revision,
                 selected.module_revision,
             ),
-            (("China",), "hq", "min", 2, 3),
+            (("China",), "hq", "min", 3, 3),
         )
         self.assertEqual(self.config.calls, 1)
         fresh = await self.resolve({"query": "44091"})
         self.assertEqual(
             (fresh.scope.regions, fresh.core_revision, fresh.module_revision),
-            (GLOBAL_REGIONS, 4, 5),
+            (GLOBAL_REGIONS, 5, 5),
         )
         self.assertEqual(self.config.calls, 2)
 

@@ -128,10 +128,15 @@ class PageDescriptor:
     access: str = "public_web"
     capability_id: str | None = None
     styles: tuple[str, ...] = ()
+    role: str = "aux"
+    config_fields: tuple[str, ...] = ()
+    credential_fields: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.styles is not None:
             object.__setattr__(self, "styles", tuple(self.styles))
+        object.__setattr__(self, "config_fields", tuple(self.config_fields))
+        object.__setattr__(self, "credential_fields", tuple(self.credential_fields))
 
 
 @dataclass(frozen=True, slots=True)
@@ -167,6 +172,20 @@ class ModuleDisplay:
 
 
 @dataclass(frozen=True, slots=True)
+class DiagnosticDeclaration:
+    """Closed finite JSON event schema; a declaration alone grants no access."""
+
+    event_id: str
+    payload_schema: Mapping[str, object]
+
+    def __post_init__(self) -> None:
+        if isinstance(self.payload_schema, Mapping):
+            object.__setattr__(
+                self, "payload_schema", MappingProxyType(dict(self.payload_schema))
+            )
+
+
+@dataclass(frozen=True, slots=True)
 class ModuleManifest:
     module_id: str
     route: str
@@ -184,8 +203,11 @@ class ModuleManifest:
     pages: tuple[PageDescriptor, ...] = ()
     resources: tuple[PageResource, ...] = ()
     display: ModuleDisplay | None = None
+    diagnostics: tuple[DiagnosticDeclaration, ...] = ()
 
     def __post_init__(self) -> None:
+        if self.diagnostics is not None:
+            object.__setattr__(self, "diagnostics", tuple(self.diagnostics))
         if self.capabilities is not None:
             object.__setattr__(self, "capabilities", tuple(self.capabilities))
         if self.commands is not None:

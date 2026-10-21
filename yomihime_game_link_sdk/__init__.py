@@ -12,6 +12,7 @@ from .declarations import CapabilityReference as CapabilityReference
 from .declarations import CommandDescriptor as CommandDescriptor
 from .declarations import ConfigField as ConfigField
 from .declarations import ConfigUpdateMode as ConfigUpdateMode
+from .declarations import DiagnosticDeclaration as DiagnosticDeclaration
 from .declarations import InvocationPolicy as InvocationPolicy
 from .declarations import ModuleCategory as ModuleCategory
 from .declarations import ModuleDisplay as ModuleDisplay
@@ -48,6 +49,7 @@ from .display import TextBlock as TextBlock
 from .display import TimeValue as TimeValue
 from .display import UnknownBlock as UnknownBlock
 from .errors import AccessDenied as AccessDenied
+from .errors import CacheUnavailable as CacheUnavailable
 from .errors import InvalidInvocation as InvalidInvocation
 from .errors import OperationTimeout as OperationTimeout
 from .errors import ParameterError as ParameterError
@@ -70,6 +72,7 @@ from .services import ConfigSnapshot as ConfigSnapshot
 from .services import ConfigTarget as ConfigTarget
 from .services import ConfigView as ConfigView
 from .services import DependencyInvoker as DependencyInvoker
+from .services import DiagnosticAccess as DiagnosticAccess
 from .services import HealthReport as HealthReport
 from .services import HealthStatus as HealthStatus
 from .services import HttpRequest as HttpRequest
@@ -271,3 +274,6 @@ from .storage import CacheQuery as CacheQuery
 __all__.append("CacheQuery")
 
 __all__.extend(["MessageContext", "MessageAccess"])
+
+
+__all__.extend(["DiagnosticDeclaration", "DiagnosticAccess", "CacheUnavailable"])

@@ -19,7 +19,15 @@ CALENDAR_SYNC_INTERVALS = (21600, 43200, 86400)
 ORDINARY_FIELDS = frozenset((REGION, DAYS, TIMEZONE, DELIVERY_TIME, SYNC_INTERVAL))
 
 # Current manifest declarations and constructor defaults are checked together.
+REGION_CONFIG_FIELD = ConfigField(
+    REGION,
+    default="cn",
+    description="默认查询区域",
+    value_schema={"type": "string", "enum": ["cn", "global"]},
+)
+
 CALENDAR_CONFIG_FIELDS = (
+    REGION_CONFIG_FIELD,
     ConfigField(
         DAYS,
         description="日历默认天数",
@@ -123,9 +131,7 @@ class FF14ConfigSnapshot:
         if not isinstance(values, Mapping):
             raise FF14ConfigError("ordinary_config")
         return cls(
-            values["core_defaults"]["default_region"]
-            if "core_defaults" in values
-            else values.get(REGION, "cn"),
+            values.get(REGION, "cn"),
             values.get(DAYS, 7),
             values.get(TIMEZONE, "Asia/Shanghai"),
             values.get(DELIVERY_TIME, "08:00"),

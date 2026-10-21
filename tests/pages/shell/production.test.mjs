@@ -1,6 +1,7 @@
-import {test} from 'node:test';
+import {tmpdir} from 'node:os';
+import {test,after} from 'node:test';
 import assert from 'node:assert/strict';
-import {readFile,mkdir,copyFile} from 'node:fs/promises';
+import {readFile,mkdir,copyFile,mkdtemp,rm} from 'node:fs/promises';
 import {resolve} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {spawnSync} from 'node:child_process';
@@ -9,9 +10,9 @@ import {sourceModule,root} from './compile.mjs';
 import {catalog,success,selection,flush} from './fixtures.mjs';
 const {createScope}=await sourceModule(root+'pages/frontend/src/lifecycle.ts');
 const {createShell}=await sourceModule(root+'pages/frontend/src/controller.ts');
-const out=resolve(root,'.build/frontend/production-module-test');
+const out=await mkdtemp(resolve(tmpdir(),'ygl-p3-production-'));
 await mkdir(resolve(out,'module-assets/ff14/ff14/pages/dist'),{recursive:true});
-await copyFile(resolve(root,'pages/shell/runtime.js'),resolve(out,'runtime.js'));
+await copyFile(resolve(root,'pages/00-game-link/runtime.js'),resolve(out,'runtime.js'));
 await copyFile(resolve(root,'modules/ff14/pages/dist/entry.js'),resolve(out,'module-assets/ff14/ff14/pages/dist/entry.js'));
 const dom=new JSDOM('<div id="module"></div>',{pretendToBeVisual:true,url:'http://localhost/'}),window=dom.window;
 for(const key of ['window','document','HTMLElement','Element','SVGElement','Node','MutationObserver','Event','MouseEvent','KeyboardEvent','InputEvent']) globalThis[key]=key==='window'?window:key==='document'?window.document:window[key];
@@ -52,7 +53,7 @@ test('production module header rules outrank locked Naive transitions and shell 
   const classes=selector=>(selector.match(/\.[\w-]+/g)||[]).length;
   for(const rule of nativeTransitions)assert.ok(classes(overrides[0].selector)>classes(rule.selector),`${overrides[0].selector} must outrank ${rule.selector}`);
   assert.equal(overrides[0].style.getPropertyValue('color'),'var(--ff14-text)');assert.equal(overrides[0].style.getPropertyPriority('transition'),'');
-  const shellStyle=window.document.createElement('style');shellStyle.textContent=await readFile(resolve(root,'pages/shell/styles.css'),'utf8');window.document.head.append(shellStyle);
+  const shellStyle=window.document.createElement('style');shellStyle.textContent=await readFile(resolve(root,'pages/00-game-link/styles.css'),'utf8');window.document.head.append(shellStyle);
   try {const html=[...shellStyle.sheet.cssRules].find(rule=>rule.selectorText==='html');assert.equal(html.style.getPropertyValue('overflow-anchor'),'none');assert.equal(html.style.getPropertyValue('overflow-y'),'auto');} finally {shellStyle.remove();}
  } finally {stylesheet.remove();scope.dispose();page.dispose();}
 });
@@ -78,7 +79,7 @@ test('production independently built module renders unchanged public projection,
   } finally {scope.dispose();page.dispose();assert.equal(container.children.length,0);assert.equal(window.document.head.querySelectorAll('style').length,1);assert.equal(window.document.head.querySelector('style'),shellStyle);shellStyle.remove();}
 });
 test('production runtime graph and module remain local and share one Vue/UI implementation',async()=>{
-  const module=await readFile(resolve(root,'modules/ff14/pages/dist/entry.js'),'utf8'),shell=await readFile(resolve(root,'pages/shell/app.js'),'utf8'),runtimeBytes=await readFile(resolve(root,'pages/shell/runtime.js'),'utf8');
+  const module=await readFile(resolve(root,'modules/ff14/pages/dist/entry.js'),'utf8'),shell=await readFile(resolve(root,'pages/00-game-link/app.js'),'utf8'),runtimeBytes=await readFile(resolve(root,'pages/00-game-link/runtime.js'),'utf8');
   assert.match(module,/\.\.\/\.\.\/\.\.\/\.\.\/\.\.\/runtime\.js/);assert.match(shell,/\.\/runtime\.js/);assert.match(shell,/\.\/module-loader\.js/);assert.ok(module.length<30000);assert.ok(runtimeBytes.length>100000);assert.ok(!/https?:\/\/[^\s'"]+\.(?:js|css)/.test(module));
   for(const source of [module,shell,runtimeBytes]) {
     assert.doesNotMatch(source,/\bprocess\s*\.\s*env\b/,'production NODE_ENV must be folded');
@@ -89,7 +90,7 @@ test('production runtime graph and module remain local and share one Vue/UI impl
   for(const name of audit.packages) assert.ok(audit.licenseFiles.includes(`licenses/${name.replaceAll('/','_')}.txt`));
   assert.ok(audit.packages.includes('css-render'));assert.ok(audit.packages.includes('lodash-es'));assert.ok(audit.packages.includes('vue'));assert.ok(audit.packages.includes('naive-ui'));
 });
-process.on('exit',()=>dom.window.close());
+after(async()=>{dom.window.close();await rm(out,{recursive:true,force:true});});
 
 test('public error metadata remains visible and empty results differ from authorization/upstream failures',async()=>{
  for(const [code,label] of [['not_found','无匹配结果'],['no_records','没有可展示记录'],['auth_expired','查询失败'],['upstream_error','查询失败']]) {
@@ -118,7 +119,7 @@ test('shell retains production cleanup owner and blocks new mount until the popu
  for(const path of data.modules[0].pages[0].styles){const link=window.document.createElement('link');link.rel='stylesheet';link.dataset.resource=path;link.href='./'+path;template.content.append(link);}window.document.body.append(template);
  const append=window.document.head.append.bind(window.document.head);window.document.head.append=(...nodes)=>{append(...nodes);for(const node of nodes)if(node.matches?.('link[data-module-style]'))queueMicrotask(()=>node.dispatchEvent(new window.Event('load')));};
  const outer=window.document.createElement('div');window.document.body.append(outer);window.location.hash='#/module/ff14%2Fff14/market';window.scrollTo=()=>{};
- let loads=0;const options=[];const bridge={ready:()=>Promise.resolve({pluginName:'astrbot_plugin_yomihime_game_link',pageName:'shell',binding:1}),onContext(){return()=>{};},apiGet:()=>Promise.resolve(data),apiPost:()=>Promise.resolve(success)};
+ let loads=0;const options=[];const bridge={ready:()=>Promise.resolve({pluginName:'astrbot_plugin_yomihime_game_link',pageName:'00-game-link',binding:1}),onContext(){return()=>{};},apiGet:()=>Promise.resolve(data),apiPost:async endpoint=>{if(endpoint==='admin/module-page-session')return {page_session:'synthetic-production-page-proof',expires_at:Date.now()/1000+30};if(endpoint==='admin/module-page-session-close')return {closed:true};if(endpoint==='invoke')return success;throw Error('unexpected fixture endpoint');}};
  const shell=createShell({bridge,container:outer,window,loadPage:async()=>{loads++;return{mount(view,option){options.push(option);return mount(view,option);}};},changed(){}});shell.start();await flush();await runtime.nextTick();
  outer.querySelector('.n-base-selection').click();await runtime.nextTick();await new Promise(resolve=>setTimeout(resolve,25));const style=window.document.head.querySelector('style[cssr-id="vueuc/binder"]');assert.ok(style);
  const remove=style.remove.bind(style);let fail=true;style.remove=()=>{if(fail)throw Error('deterministic-owner-retirement');remove();};

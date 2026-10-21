@@ -2,7 +2,7 @@
 import {themeCatalog,themeSnapshot} from '../shell/theme-settings-fixtures.mjs';
 import {catalog as shellCatalog} from '../shell/fixtures.mjs';
 import {credentialCatalog,credentialStatus,masterKeyReady} from './fixtures.mjs';
-export function installAsyncFixture(window,pageName='management'){
+export function installAsyncFixture(window,pageName='00-game-link'){
  const clone=value=>JSON.parse(JSON.stringify(value)),calls=[],held=new Set(),pending=[],failures=new Map(),handlers=new Set();
  let context={pluginName:'astrbot_plugin_yomihime_game_link',pageName,session:'async-one'};
  const declarations=themeCatalog(),values=themeSnapshot(),registry=shellCatalog();registry.modules.push(...shellCatalog('example/demo').modules);

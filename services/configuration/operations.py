@@ -10,6 +10,7 @@ encryption implementation.
 from __future__ import annotations
 
 import asyncio
+import re
 import secrets
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from typing import Any, Protocol
@@ -156,6 +157,7 @@ class _ConfigurationCoordinator:
         "__publish_config",
         "__subscription_gate_fields",
         "__value_validators",
+        "__retained_ordinary_fields",
     )
 
     def __init__(
@@ -171,12 +173,28 @@ class _ConfigurationCoordinator:
         publish_config: ConfigPublisher | None = None,
         subscription_gate_fields: tuple[str, ...] = (),
         value_validators: Mapping[str, ConfigValueValidator] | None = None,
+        retained_ordinary_fields: Iterable[str] = (),
     ) -> None:
         validate_contract(target)
         validate_contract(fields)
         target = ConfigTarget_validate(target)
         fields = _fields(fields)
         declarations = {field.name: field for field in fields}
+        retained = frozenset(retained_ordinary_fields)
+        if (
+            retained & set(declarations)
+            or len(retained) > 32
+            or any(
+                type(name) is not str
+                or re.fullmatch(r"[a-z][a-z0-9_]{0,95}", name) is None
+                or re.search(r"secret|token|password|credential|key", name, re.I)
+                for name in retained
+            )
+        ):
+            raise ValueError("invalid retained ordinary policy fields")
+        object.__setattr__(
+            self, "_ConfigurationCoordinator__retained_ordinary_fields", retained
+        )
         validators = dict(value_validators or {})
         if any(
             name not in declarations
@@ -267,7 +285,16 @@ class _ConfigurationCoordinator:
         ):
             raise ValueError("configuration snapshot target does not match service")
         self._validate_snapshot_fields(snapshot)
-        return snapshot
+        return ConfigSnapshot(
+            snapshot.revision,
+            {
+                name: value
+                for name, value in snapshot.values.items()
+                if name not in self.__retained_ordinary_fields
+            },
+            snapshot.secret_metadata,
+            snapshot.target,
+        )
 
     async def update(
         self, patch: ConfigPatch | str, supplied_patch: ConfigPatch | None = None
@@ -824,12 +851,17 @@ class _ConfigurationCoordinator:
     ) -> None:
         validate_contract(snapshot)
         declared = {field.name: field for field in self.__fields}
-        if any(field not in declared for field in snapshot.values):
+        if any(
+            field not in declared and field not in self.__retained_ordinary_fields
+            for field in snapshot.values
+        ):
             raise ValueError("configuration snapshot contains an undeclared field")
-        if any(declared[field].sensitive for field in snapshot.values):
+        if any(
+            declared[field].sensitive for field in snapshot.values if field in declared
+        ):
             raise ValueError("configuration snapshot contains a sensitive value")
         for name, value in snapshot.values.items():
-            if name in repaired_fields:
+            if name in repaired_fields or name in self.__retained_ordinary_fields:
                 continue
             validate_configuration_value(
                 declared[name], value, self.__value_validators.get(name)

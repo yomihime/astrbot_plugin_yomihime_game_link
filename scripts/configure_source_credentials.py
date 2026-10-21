@@ -15,6 +15,7 @@ import asyncio
 import getpass
 import importlib
 import json
+import sqlite3
 import sys
 import time
 from dataclasses import dataclass
@@ -25,7 +26,7 @@ from uuid import uuid4
 # outside the plugin directory. Pin imports to this package's own SDK before
 # importing any host/Core code; never inherit a process-global SDK by accident.
 _PLUGIN_ROOT = Path(__file__).resolve().parents[1]
-_SDK_VERSION = "0.1.0a9"
+_SDK_VERSION = "0.1.0a11"
 _SDK_MODULE_ABI_VERSION = "2.0"
 if str(_PLUGIN_ROOT) not in sys.path:
     sys.path.insert(0, str(_PLUGIN_ROOT))
@@ -45,7 +46,7 @@ except Exception:
 from yomihime_game_link_sdk.declarations import ConfigUpdateMode
 from yomihime_game_link_sdk.display import DisplayLimits
 
-from ..adapters.astrbot.bundled import install_bundled_ff14
+from ..adapters.astrbot.bundled import install_bundled_package
 from ..adapters.astrbot.runtime import PLUGIN_NAME
 from ..core.contracts.administration import (
     AdminAuthorizationContext,
@@ -60,8 +61,14 @@ from ..extensions.factory_resolver import (
 )
 from ..infrastructure.http_transport import AioHttpTransport
 from ..infrastructure.managed_key_manager import ManagedKeyManager
+from ..infrastructure.private_storage import (
+    PrivateStorageError,
+    PrivateStorageLayout,
+    resolve_private_storage,
+)
 from ..infrastructure.secret_codec import AESGCMSecretCodec
 from ..infrastructure.sqlite.database import SQLiteDatabase
+from ..infrastructure.sqlite.migrations import discover_migrations
 from ..infrastructure.sqlite.repositories_admin_credentials import (
     AdminCredentialStatus,
 )
@@ -137,20 +144,29 @@ class _NoMessagePort:
 
 
 def _new_core(
-    data_dir: Path,
+    layout: PrivateStorageLayout,
     extension_root: Path,
     authority: _SessionAuthority,
     assembly,
     inventory,
 ):
+    if type(layout) is not PrivateStorageLayout:
+        raise TypeError("resolved private storage layout is required")
     transport = AioHttpTransport()
-    database = SQLiteDatabase(data_dir / "runtime.sqlite3")
-    managed_keys = ManagedKeyManager(database, data_dir, data_dir / "secrets")
+    database = SQLiteDatabase(layout.database_path)
+    managed_keys = ManagedKeyManager(
+        database,
+        layout.key_data_root,
+        layout.secret_root,
+        storage_security=layout.security_status,
+        storage_write_guard=layout.assert_credential_writable,
+        storage_layout=layout,
+    )
     core = CoreRuntime(
         database=database,
         extension_root=extension_root,
-        file_root=data_dir / "files",
-        secret_root=data_dir / "secrets",
+        file_root=layout.data_root / "files",
+        secret_root=layout.secret_root,
         secret_codec=AESGCMSecretCodec(managed_keys),
         managed_key_manager=managed_keys,
         http_transport=transport,
@@ -183,6 +199,47 @@ def _new_core(
     return core, transport
 
 
+def _require_existing_storage(layout: PrivateStorageLayout) -> None:
+    """Read only: never initialize an empty/old/fenced database as maintenance.
+
+    The Host must have initialized this selected database at this schema. The
+    common resolver verifies committed selectors, while the lifetime guards
+    below retain the selected objects through all asynchronous cleanup.
+    """
+    database = layout.database_path
+    if not database.is_file():
+        raise ValueError("existing selected Core database is required")
+    connection = sqlite3.connect(database.as_uri() + "?mode=ro", uri=True)
+    try:
+        expected = tuple(
+            (migration.version, migration.name, migration.checksum)
+            for migration in discover_migrations(
+                _PLUGIN_ROOT / "infrastructure/sqlite/migrations"
+            )
+        )
+        actual = tuple(
+            connection.execute(
+                "SELECT version,name,checksum FROM schema_migrations ORDER BY version"
+            ).fetchall()
+        )
+        if actual != expected:
+            raise PrivateStorageError("storage_schema_unavailable")
+        row = connection.execute(
+            "SELECT epoch,state FROM private_storage_epoch WHERE singleton=1"
+        ).fetchone()
+        if (
+            row is None
+            or type(row[0]) is not int
+            or row[0] < 1
+            or row[1] not in {"active", "activated"}
+        ):
+            raise PrivateStorageError("storage_epoch_unavailable")
+    except sqlite3.Error:
+        raise PrivateStorageError("storage_database_unavailable") from None
+    finally:
+        connection.close()
+
+
 async def _configure(
     data_dir: Path,
     action: str,
@@ -199,14 +256,18 @@ async def _configure(
     data_dir = _data_directory(data_dir)
     if action not in {"set", "clear"} or realm not in _REALMS:
         raise ValueError("unsupported operation")
-    database_path = data_dir / "runtime.sqlite3"
-    with local_maintenance_guard(database_path, plugin_root=plugin_root):
-        if not data_dir.is_dir():
-            raise ValueError("existing data directory is required")
-        if not database_path.is_file():
-            raise ValueError("existing Core database is required")
+    if not data_dir.is_dir():
+        raise ValueError("existing logical data directory is required")
+    layout = resolve_private_storage(data_dir)
+    if layout.data_root != data_dir:
+        raise PrivateStorageError("storage_selection_changed")
+    with (
+        local_maintenance_guard(layout.database_path, plugin_root=plugin_root),
+        layout.open_guard(),
+    ):
+        _require_existing_storage(layout)
 
-        installation = install_bundled_ff14(plugin_root, data_dir)
+        installation = install_bundled_package(plugin_root, data_dir)
         if not installation.trusted:
             raise ValueError("trusted FF14 package is unavailable")
         support_lease = ReviewedSupportLease(
@@ -226,7 +287,7 @@ async def _configure(
         authority = _SessionAuthority()
         try:
             core, transport = _new_core(
-                data_dir,
+                layout,
                 installation.extension_root,
                 authority,
                 assembly,
@@ -397,7 +458,7 @@ def _parser() -> argparse.ArgumentParser:
         "--data-dir",
         required=True,
         type=_data_directory,
-        help="Existing AstrBot plugin data directory (absolute path, no '..' components)",
+        help="Logical AstrBot plugin data root; resolves its active private storage (absolute path, no '..')",
     )
     parser.add_argument(
         "--realm",

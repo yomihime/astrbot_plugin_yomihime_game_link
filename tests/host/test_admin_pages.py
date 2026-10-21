@@ -7,7 +7,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
-from types import ModuleType, SimpleNamespace
+from types import MethodType, ModuleType, SimpleNamespace
 from unittest.mock import patch
 
 import httpx
@@ -84,7 +84,7 @@ class AdminPagesTests(unittest.IsolatedAsyncioTestCase):
             )
 
         astrbot = ModuleType("astrbot")
-        astrbot.__version__ = "4.28.2"
+        astrbot.__version__ = "4.29.1"
         self.modules = patch.dict(
             sys.modules, {"astrbot": astrbot, "astrbot.api.web": self.web}
         )
@@ -113,6 +113,213 @@ class AdminPagesTests(unittest.IsolatedAsyncioTestCase):
             follow_redirects=True,
         )
 
+    def direct_request(self):
+        from starlette.requests import Request as StarletteRequest
+
+        path = f"/api/plug/{PLUGIN_NAME}/admin/read"
+        raw = StarletteRequest(
+            {
+                "type": "http",
+                "method": "POST",
+                "path": path,
+                "scheme": "https",
+                "query_string": b"",
+                "headers": [
+                    (k.lower().encode(), v.encode()) for k, v in self.headers.items()
+                ],
+                "app": self.app,
+                "server": ("ui.test", 443),
+            }
+        )
+        raw.state.dashboard_g = SimpleNamespace(username="synthetic")
+        return self.web.PluginRequest(raw, username="synthetic"), path
+
+    async def test_bound_host_verifier_receives_exact_token_and_path(self):
+        facade, path = self.direct_request()
+        original = self.auth._validate_dashboard_token
+        calls = []
+
+        def observed(server, token, path):
+            self.assertIs(server, self.auth)
+            calls.append((token, path))
+            return original(token, path)
+
+        with patch.object(
+            self.auth, "_validate_dashboard_token", MethodType(observed, self.auth)
+        ):
+            raw, username, expires = verified_dashboard_request(facade, path)
+        self.assertIs(raw, facade._request)
+        self.assertEqual(username, "synthetic")
+        self.assertGreater(expires, time.time())
+        self.assertLessEqual(expires, time.time() + 30)
+        self.assertEqual(calls, [(self.headers["Authorization"][7:], path)])
+
+    async def test_unsupported_host_verifier_contracts_fail_closed(self):
+        facade, path = self.direct_request()
+        calls = []
+
+        def missing_path(server, token):
+            calls.append("missing_path")
+            raise AssertionError("unsupported verifier must not run")
+
+        def extra_required(server, token, path, required):
+            calls.append("extra_required")
+            raise AssertionError("unsupported verifier must not run")
+
+        def keyword_only(server, token, *, path):
+            calls.append("keyword_only")
+            raise AssertionError("unsupported verifier must not run")
+
+        async def asynchronous(server, token, path):
+            raise AssertionError("unsupported verifier must not run")
+
+        def generator(server, token, path):
+            yield None
+
+        async def asynchronous_generator(server, token, path):
+            yield None
+
+        class SpoofedBoundCallable:
+            def __init__(self, server):
+                self.__self__ = server
+
+            def __call__(self, token, request_path):
+                calls.append("spoofed_callable")
+                return {"username": "synthetic", "exp": int(time.time()) + 60}, ""
+
+        incompatible = [
+            SpoofedBoundCallable(self.auth),
+            None,
+            lambda token, path: ({}, ""),
+            self.ns["HostAuth"]()._validate_dashboard_token,
+            *(
+                MethodType(method, self.auth)
+                for method in (
+                    missing_path,
+                    extra_required,
+                    keyword_only,
+                    asynchronous,
+                    generator,
+                    asynchronous_generator,
+                )
+            ),
+        ]
+        for verifier in incompatible:
+            with (
+                self.subTest(verifier=verifier),
+                patch.object(self.auth, "_validate_dashboard_token", verifier),
+            ):
+                with self.assertRaises(AdminAuthorizationDenied):
+                    verified_dashboard_request(facade, path)
+        self.assertEqual(calls, [])
+        for adapter in (
+            None,
+            SimpleNamespace(_app=object(), _dashboard_server=self.auth),
+        ):
+            with patch.object(self.app.state, "dashboard_app_adapter", adapter):
+                with self.assertRaises(AdminAuthorizationDenied):
+                    verified_dashboard_request(facade, path)
+        with patch.object(self.adapter, "_dashboard_server", None):
+            with self.assertRaises(AdminAuthorizationDenied):
+                verified_dashboard_request(facade, path)
+
+    async def test_compatible_positional_verifier_does_not_depend_on_parameter_names(
+        self,
+    ):
+        facade, path = self.direct_request()
+        original = self.auth._validate_dashboard_token
+
+        def renamed(server, credential, request_path, optional=None):
+            return original(credential, request_path)
+
+        def variadic(server, *args):
+            return original(*args)
+
+        for method in (renamed, variadic):
+            with (
+                self.subTest(method=method),
+                patch.object(
+                    self.auth,
+                    "_validate_dashboard_token",
+                    MethodType(method, self.auth),
+                ),
+            ):
+                self.assertEqual(
+                    verified_dashboard_request(facade, path)[1], "synthetic"
+                )
+
+    async def test_host_verifier_invalid_results_and_raw_identity_fail_closed(self):
+        facade, path = self.direct_request()
+        valid = {"username": "synthetic", "exp": int(time.time()) + 60}
+
+        class EmptyError(str):
+            pass
+
+        results = [
+            None,
+            [],
+            [valid, ""],
+            (valid,),
+            (valid, "", "extra"),
+            (valid, None),
+            (valid, False),
+            (valid, 0),
+            (valid, []),
+            (valid, {}),
+            (valid, b""),
+            (valid, EmptyError("")),
+            (valid, "rejected"),
+            (None, ""),
+            ([], ""),
+            ({}, ""),
+            *(
+                ({**valid, "exp": expires}, "")
+                for expires in (
+                    None,
+                    True,
+                    float(time.time() + 60),
+                    int(time.time()) - 1,
+                )
+            ),
+            *(
+                ({**valid, "username": username}, "")
+                for username in (None, "", " ", "other", 123)
+            ),
+            ({**valid, "token_type": "plugin_page_asset"}, ""),
+            ({**valid, "token_type": None}, ""),
+        ]
+        for result in results:
+
+            def invalid(server, token, path):
+                return result
+
+            with (
+                self.subTest(result=result),
+                patch.object(
+                    self.auth,
+                    "_validate_dashboard_token",
+                    MethodType(invalid, self.auth),
+                ),
+            ):
+                with self.assertRaises(AdminAuthorizationDenied):
+                    verified_dashboard_request(facade, path)
+        for key, value in (("method", "GET"), ("path", path + "/other")):
+            facade, path = self.direct_request()
+            facade._request.scope[key] = value
+            if hasattr(facade._request, "_url"):
+                del facade._request._url
+            with self.assertRaises(AdminAuthorizationDenied):
+                verified_dashboard_request(facade, path)
+        for key, value in (("method", "GET"), ("path", path + "/other")):
+            facade, path = self.direct_request()
+            setattr(facade, key, value)
+            with self.assertRaises(AdminAuthorizationDenied):
+                verified_dashboard_request(facade, path)
+        facade, path = self.direct_request()
+        facade._request.state.dashboard_g.username = "other"
+        with self.assertRaises(AdminAuthorizationDenied):
+            verified_dashboard_request(facade, path)
+
     async def test_recover_ready_core_is_rejected_without_shutdown(self):
         core = self.runtime.core_runtime
         rows = (await self.call("read", {})).json()["data"]
@@ -125,6 +332,20 @@ class AdminPagesTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.runtime.ready)
         self.assertTrue(core.started)
         self.assertEqual((await self.call("read", {})).status_code, 200)
+        self.assertEqual(self.runtime._admin_source._proofs, {})
+
+    async def test_authorization_marker_survives_message_only_host_bridge(self):
+        response = await self.call(
+            "read", {}, headers={**self.headers, "Origin": "https://other.test"}
+        )
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.headers["cache-control"], "no-store")
+        body = response.json()
+        self.assertEqual(body["code"], "admin_authorization_denied")
+        # PluginViewPage forwards only data.message; plugin_page_bridge rejects
+        # with Error(message). The controlled marker must survive both hops.
+        self.assertEqual(body["message"], "admin_authorization_denied")
+        self.assertEqual(body["data"], {})
         self.assertEqual(self.runtime._admin_source._proofs, {})
 
     async def test_catalog_uses_existing_host_proof_redirect_and_empty_body(self):
@@ -163,15 +384,22 @@ class AdminPagesTests(unittest.IsolatedAsyncioTestCase):
         from ygl_test_subject.infrastructure.sync_diagnostics import emit
 
         diagnostics = self.runtime._core.sync_diagnostics
-        token = diagnostics.activate("a" * 32, "web_public")
+        trace_id = "a" * 32
+        token = diagnostics.activate(trace_id, "web_public")
         try:
             emit(
-                "sync_start",
-                region="cn",
-                trigger="manual",
+                "core_start",
+                budget_ms=10000,
                 body="PRIVATE-DIAGNOSTIC-SENTINEL",
             )
             emit("core_final", code="completed", capability_status="error")
+        finally:
+            diagnostics.reset(token)
+        # A legitimate later job can be the newest rolling trace at request time.
+        competing_id = "b" * 32
+        token = diagnostics.activate(competing_id, "scheduler")
+        try:
+            emit("core_start", budget_ms=10000)
         finally:
             diagnostics.reset(token)
         response = await self.call("sync-diagnostics", {})
@@ -180,8 +408,21 @@ class AdminPagesTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.headers["cache-control"], "no-store")
         data = response.json()["data"]
         self.assertEqual(data["retention"], "memory_only")
-        self.assertEqual(data["attempts"][-1]["core_final"], "completed")
-        self.assertEqual(data["attempts"][-1]["capability_status"], "error")
+        by_id = {item["invocation_id"]: item for item in data["attempts"]}
+        self.assertIn(trace_id, by_id)
+        self.assertIn(competing_id, by_id)
+        trace = by_id[trace_id]
+        self.assertEqual(trace["core_final"], "completed")
+        self.assertEqual(trace["capability_status"], "error")
+        self.assertEqual(
+            [event["stage"] for event in trace["events"]],
+            ["core_start", "core_final"],
+        )
+        self.assertEqual(trace["core_budget_ms"], 10000)
+        self.assertEqual(trace["events"][0]["budget_ms"], 10000)
+        self.assertNotIn("body", trace["events"][0])
+        self.assertEqual(by_id[competing_id]["origin"], "scheduler")
+        self.assertEqual(by_id[competing_id]["core_final"], "in_progress")
         self.assertNotIn("PRIVATE-DIAGNOSTIC-SENTINEL", response.text)
         self.assertEqual(
             (await self.call("sync-diagnostics", {"region": "cn"})).status_code, 400
@@ -355,6 +596,7 @@ class AdminPagesTests(unittest.IsolatedAsyncioTestCase):
             {
                 gate,
                 "reply_theme",
+                "ff14_default_region",
                 "ff14_calendar_default_days",
                 "ff14_calendar_default_timezone",
                 "ff14_calendar_default_delivery_time",

@@ -1,16 +1,16 @@
 # Game Link module SDK
 
-The independently installable distribution is `yomihime-game-link-sdk==0.1.0a9`. Import its public declarations with `import yomihime_game_link_sdk as ygl`. It requires Python 3.11 or newer and has no third-party runtime dependencies.
+The independently installable distribution is `yomihime-game-link-sdk==0.1.0a11`. Import its public declarations with `import yomihime_game_link_sdk as ygl`. It requires Python 3.11 or newer and has no third-party runtime dependencies.
 
-The SDK (including its packaged examples) is licensed under MIT; see `SDK-LICENSE`. The AstrBot plugin implementation remains AGPL-3.0 under `LICENSE`. Third-party notices retain their own terms. Version a9 corrects the SDK license payload without changing module ABI 2.0.
+The SDK (including its packaged examples) is licensed under MIT; see `SDK-LICENSE`. The AstrBot plugin implementation remains AGPL-3.0 under `LICENSE`. Third-party notices retain their own terms. The a10 source contract adds invocation-bound diagnostics, CacheUnavailable and generic page roles without changing module ABI 2.0. Built wheel identity and installation evidence are recorded separately; editing these declarations does not prove a published or installed wheel.
 
 ## Install and import
 
 Install the reviewed wheel into your module development environment:
 
 ```powershell
-python -m pip install --no-deps ./yomihime_game_link_sdk-0.1.0a9-py3-none-any.whl
-python -I -c "import yomihime_game_link_sdk as ygl; assert ygl.__version__ == '0.1.0a9'; assert ygl.MODULE_ABI_VERSION == '2.0'"
+python -m pip install --no-deps ./yomihime_game_link_sdk-0.1.0a11-py3-none-any.whl
+python -I -c "import yomihime_game_link_sdk as ygl; assert ygl.__version__ == '0.1.0a11'; assert ygl.MODULE_ABI_VERSION == '2.0'"
 ```
 
 The plugin release contains the exact content-pinned SDK from that wheel. Its bootstrap rejects changed contents, foreign package origins, partial preload graphs, and any preloaded retired `yomihime_sdk` graph. The retired root `api` and `yomihime_sdk.api` modules have no compatibility redirects. Historical stored-data readers are separate from module import compatibility.
@@ -20,6 +20,8 @@ The plugin release contains the exact content-pinned SDK from that wheel. Its bo
 Package manifests use `contract_version: "2.0"` as the current module ABI selector. Disk manifest schema remains 1 and factory ABI remains 1. Old or unknown module ABI versions are rejected before factory resolution or registration. SDK release, module ABI and output formats are distinct: current display, facts and persisted B04 documents remain at output version 1.8.0. An output version of 2.0 is not admitted.
 
 SDK constructors describe data and freeze supported containers; they do not establish permissions or perform Core receiving validation. Core checks the current canonical types and nested invariants at registration, invocation, service, renderer and storage boundaries. Constructing or copying an InvocationView, OwnerScope or grant reference grants no authority. Only the exact issued invocation with its current lifetime and admission proof can bind services.
+
+Core admits exact canonical nominal dataclasses and rejects their subclasses, including nested instances made without constructors. Its internal ancestry-based type classification preserves recursive validation, existing nesting/schema limits and original invocation deadlines; it neither grants a validation bypass nor changes the SDK contract/version. Contract catalogs cannot add virtual ABC or custom metaclass instance checks.
 
 ## Declarative cards
 
@@ -84,7 +86,7 @@ or display/facts/storage format `1.8.0`.
 
 ## Injected services and public failures
 
-Factories receive `ModuleServices` with config, identities, accounts, subscriptions and scopes. The SDK exposes no Core repository, storage router, host administration or filesystem container. Use `await services.scopes.bind(invocation)` for invocation-bound records, cache, HTTP, resources, dependencies, tasks and message access. Binding and operations check authority before and after awaits.
+Factories receive `ModuleServices` with config, identities, accounts, subscriptions and scopes. The SDK exposes no Core repository, storage router, host administration or filesystem container. Use `await services.scopes.bind(invocation)` for invocation-bound records, cache, HTTP, resources, dependencies, tasks, diagnostics and message access. Binding and operations check authority before and after awaits.
 
 Cache lookup accepts `ygl.CacheQuery(key, visibility=None)`. Core derives user, module and grant partitions from the bound invocation. HIT includes a complete `CacheEntry` with key, payload, expiry and revision; MISS, EXPIRED and REJECTED expose no entry or payload. `get(key)` uses the same default partition and returns that complete HIT entry or `None` for the three nonhit states. It discards their status distinction, not HIT metadata. Default visibility is PUBLIC for Tool, AUTHORIZED with a current grant, USER with an actor, and PUBLIC otherwise. Explicit visibility still requires current origin, identity and grant authority. Stored-row REJECTED (for example an older grant revision) is distinct from current permission revocation, which raises `AccessDenied`. Invalid query, released/copied invocation, deadline, unavailable service and cancellation remain errors; `get` does not turn them into `None`. Public `put(key, payload, *, ttl_seconds)` exposes no internal owner, visibility, revision or invalidation controls. Module cache keys use a private namespace; earlier raw rows remain stored but produce MISS through the new bound route, with no cross-owner fallback or migration.
 
@@ -238,3 +240,51 @@ This Core exercise does not claim native AstrBot startup, model or IM delivery,
 global Core Ready, or a process sandbox.
 
 ModuleDisplay metadata remains optional, bounded and localized; it never changes module IDs, owner identities, command routing or storage. Unloading a module preserves its existing persisted data. Existing 1.7 display read adaptation retains the historical codec, tags and identities; no data-format migration is included in this SDK change.
+
+
+## Invocation-bound diagnostics (a10)
+
+Declare optional `ModuleManifest.diagnostics: tuple[DiagnosticDeclaration, ...]` with an event ID and a closed finite JSON `payload_schema`. Event IDs are 1-96 ASCII label characters; at most 32 unique events are admitted. Only a separately selected trusted deployment policy enables events. Scanning a manifest never enables diagnostics.
+
+SDK a10 adds `diagnostics` to the invocation-scoped `InvocationServices` protocol. Existing modules that only consume injected services remain compatible. A Host or test double that implements the provider side of `InvocationServices` must supply this member to satisfy the current protocol; modules that require a10 are not promised to run on older Hosts without it. The module ABI remains `2.0` because this adds a service to the current SDK contract without changing manifest/factory ABI selection.
+
+```python
+import yomihime_game_link_sdk as ygl
+
+EVENT = ygl.DiagnosticDeclaration("ReadSummary", {
+    "type": "object", "additionalProperties": False,
+    "properties": {"count": {"type": "integer", "minimum": 0, "maximum": 100}},
+    "required": ["count"],
+})
+
+async def report(services, invocation):
+    scope = await services.scopes.bind(invocation)
+    await scope.diagnostics.emit("ReadSummary", {"count": 1})
+```
+
+The data-only schema vocabulary supports closed objects, finite arrays (`maxItems` at most 512), bounded strings (`maxLength` at most 4096), bounded finite numbers/integers, booleans, null and scalar enums. A type may be nullable. Local `#/$defs/name` references can reuse finite schema nodes; external references, cycles, callbacks, imports and unknown schema constraints are rejected. Schema validation has an independent 2048-node / depth-16 ceiling per event, within the unchanged 262-KiB manifest byte bound; capability schemas retain their existing limits.
+
+Core derives owner, epoch and invocation trace; modules supply neither identity nor sinks. Each payload has at most 512 nodes including object keys, depth 8, 4096 characters per string and a 64-KiB event envelope. Limits only drop diagnostics. Per invocation the trusted policy cannot exceed 64 events / 512 KiB; retained payloads cannot exceed 64 events / 512 KiB and eight traces. Retention is a rolling memory limit, not a runtime lifetime acceptance quota. Accounting has at most eight live invocation slots; when full, new invocations drop optional diagnostics until an exact Core issuer release frees a slot. Released invocations cannot regain authority, and retention eviction never resets a still-live invocation budget. Events too large for the selected per-invocation byte budget allocate no counter metadata. FF14 calendar events retain a 48-event per-invocation cap. Closing the sink and ordinary sink faults are optional; every emit still checks current invocation, owner/epoch, deadline, admission, grant and instance lifetime. Authorization, lifecycle and cancellation failures propagate and cannot be treated as dropped diagnostics.
+
+Business field selection belongs to the module. Never copy headers, chat, exception bodies, raw arbitrary responses, credentials or proof. Closed field whitelists are the publication basis; sensitive-shape rejection is an additional guard and cannot detect every possible secret. A keyword or pattern scan cannot certify arbitrary plaintext as secret-free, and Host forwarding only validates the generic envelope; it does not interpret or sanitize module meaning. Prefer bounded typed values and finite enums over free-form strings. Reviewed status fields such as `client_secret_configured: bool` and `authorization_status` with a closed enum are suitable when declared by the module schema and enabled by trusted policy. Malformed schema/payload uses a fixed public error, with no rejected values in the error.
+
+## Cache backend availability (a10)
+
+`CacheUnavailable` is a public subclass of `ServiceUnavailable`. It means an actual cache backend fault after current authority checks. It is the only service-availability type that a module may downgrade to uncached computation. Current permission, grant/epoch, deadline, copied/released invocation and cancellation failures are never converted to it. Post-await authority failure takes precedence over the backend error. No `CacheAccess.recover` or `rebind` method exists; cache recovery stays inside Core.
+
+## Generic page roles (a10)
+
+`PageDescriptor.role` is `"home"`, `"config"` or `"aux"` (default). Each module may have one home and one config page; multiple auxiliary pages are allowed. Unknown roles and duplicate primary roles are rejected by the receiving boundary. Roles are descriptive, not permission or an arbitrary code loader. Owner and entry resources come from trusted captured manifests. The actual frontend interfaces, page services and mount lifecycle are in [the frontend contract](frontend-module-contract.md), never shipped as TypeScript application code in the Python wheel.
+
+PageDescriptor also declares config_fields and credential_fields as separate bounded name tuples. They must match ordinary and sensitive fields in the owning manifest, without overlap. The reserved generic reply_theme field may appear in config_fields; its declaration and palette are injected by Core, never overridden by a module. The receiving page service requires the current page declaration, trusted deployment policy and actual management authority; adding a field name never grants access.
+
+
+### Effective page configuration and safe descriptors
+
+Module page current configuration uses the same trusted effective ordinary-field reader as ModuleServices. A destination absent from storage may have `source: "legacy"` and `migration_pending: true`; only the validated destination field value is exposed, without the Core source owner, field, revision or object. The response revision remains the destination CAS revision. Existing destination values immediately stop projection. Invalid or secret legacy values fail rather than silently becoming defaults.
+
+Current config may also contain `descriptors` for the exact authorized page fields: description, default and a closed approved value_schema subset, plus optional bounded value/label choices supplied by trusted Core composition. Private schema annotations and unbounded JSON are rejected. This metadata never grants field rights. Core injects the generic reply_theme field and palette; modules must not declare its schema or hardcode theme choices. A missing override projects null as valid follow-Core; saving null maps to CLEAR. An explicitly persisted null remains invalid data.
+
+Host module page requests require a short-lived opaque page_session after actual Dashboard JWT/Origin authentication. Host validates current subject/session, owner/page/runtime/epoch, field grants and generation on each request and commit, then removes the proof before the strict Core helper body. The proof demonstrates scoped Host authority; AstrBot does not attest the originating DOM. Asset tokens, client labels and page names alone grant no management rights.
+
+Trusted legacy policies may register retained ordinary source names with a configuration coordinator. Such rows remain stored but are hidden from ordinary current snapshots and cannot be patched or cleared through current declarations. Unknown fields and secret metadata still fail. A bad legacy source value is independently rejected by destination-schema projection and does not prevent unrelated valid Core theme updates.

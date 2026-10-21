@@ -18,7 +18,9 @@ from .configuration.defaults import (
     MODULE_REPLY_THEME,
     module_configuration_fields,
 )
+from .configuration.legacy_copy import LegacyConfigCopyPolicy
 from .core_runtime import TrustedSubscriptionGate
+from .diagnostics import DiagnosticPolicy
 from .managed_source_credentials import ManagedSourceCredentialPolicy
 from .source_credentials import (
     SourceCredentialPolicy,
@@ -55,6 +57,8 @@ class ReviewedAssembly:
     support: object
     capability_timeouts: Mapping | None = None
     collector_timeouts: Mapping | None = None
+    diagnostic_policies: Mapping | None = None
+    legacy_config_policies: tuple = ()
 
     @property
     def public_capabilities(self):
@@ -169,6 +173,7 @@ def assemble_reviewed(inventory, *, principal_id, support, selected=False):
             "page_sources",
             "credential_regions",
             "execution_budgets",
+            "diagnostics",
         ),
     )
     if (
@@ -177,6 +182,25 @@ def assemble_reviewed(inventory, *, principal_id, support, selected=False):
         or descriptor["module_id"] != owner
     ):
         raise ValueError("assembly version or owner mismatch")
+    raw_diagnostics = descriptor["diagnostics"]
+    _keys(raw_diagnostics, {"events", "max_events", "max_bytes", "event_limits"})
+    events = raw_diagnostics["events"]
+    if (
+        type(events) is not list
+        or len(set(events)) != len(events)
+        or not set(events) <= {item.event_id for item in module.diagnostics}
+    ):
+        raise ValueError("diagnostic policy declaration mismatch")
+    diagnostic_policies = MappingProxyType(
+        {
+            owner: DiagnosticPolicy(
+                frozenset(events),
+                raw_diagnostics["max_events"],
+                raw_diagnostics["max_bytes"],
+                raw_diagnostics["event_limits"],
+            )
+        }
+    )
     timeouts = {}
     raw_budgets = descriptor["execution_budgets"]
     _keys(raw_budgets, ("capabilities", "collectors"))
@@ -345,4 +369,18 @@ def assemble_reviewed(inventory, *, principal_id, support, selected=False):
         ),
         timeouts["capabilities"],
         timeouts["collectors"],
+        diagnostic_policies,
+        tuple(
+            LegacyConfigCopyPolicy(
+                item["policy_id"],
+                ConfigTarget(principal_id, item["source_owner"]),
+                item["source_field"],
+                item["target_owner"],
+                item["target_field"],
+                item["target_schema"],
+            )
+            for item in support.legacy_config_copies(principal_id)
+        )
+        if callable(getattr(support, "legacy_config_copies", None))
+        else (),
     )

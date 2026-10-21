@@ -1,8 +1,6 @@
-> 本文包含历史 SDK a7 工件和验收记录，勿作为当前版本或包摘要。当前 SDK 见 [模块 SDK](../module-sdk.md)，当前交接见 [alpha 清理说明](../alpha-cleanup-handoff.md)。
-
 # 声明式图片渲染契约与四类设计样例
 
-日期：2026-10-16。状态：**四类内容、五张图片的当前视觉设计已获用户确认**（Help、Item、Logs 浅/深、Market）。声明式卡片阶段已接入 SDK 纯声明、Core 共用渲染、Host 命令发送、两级主题设置和 FF14 事实投影。本轮进一步将正式命令字体改为 Core 持久资源管理，轻量插件包不再附带 OTF；源码已接入，当前字体片离线验收及新包登记见第 8 节。本轮字体片尚未安装到真实 Local Test，不能与正在本地安装的前一阶段 `8139d724…` 包混同。视觉确认不等于真实上游、Windows 或当前会话显示验收，标签语法仍待评审。
+模块使用公开 SDK 声明，Core 统一渲染，Host 负责平台授权和消息发送。本文描述当前代码合同和设计约束；SDK 版本以[模块 SDK](../module-sdk.md)为准，当前文档索引见[docs/README](../README.md)。历史候选、逐批测试与本机交付记录不作为当前安装指导。
 
 ## 1. 交付范围与职责
 
@@ -11,14 +9,14 @@
 - **Module**：事实查询、数据来源、可用性、字段含义、数字格式、百分位/评价映射、内容顺序、结构组合、图片资源。不得借渲染器推断业务结论
 - **Core presentation**：通用声明结构、固定主题槽、受限标签解析、可信静态素材处理、测量与绘制、已有 A/B 字效、预算及明确失败。不得包含 FF14 物品查询、FFLogs 阈值或名称表
 - **Host**：渠道能力、权限、发送、提交状态及纯文本回退。Core 渲染函数不发消息，也不判断消息是否已送达
-- **SDK**：`yomihime_game_link_sdk.cards` 提供冻结纯数据定义，`DisplayDocument.card` 承载可选卡片，`ModuleDisplay.logo_resource` 声明模块资源。候选 wheel 为 `0.1.0a7`；ABI `2.0`、Display schema `1.8.0` 不变。SDK 不依赖 Core、Host、Pillow、素材解码器或标签 parser
+- **SDK**：`yomihime_game_link_sdk.cards` 提供冻结纯数据定义，`DisplayDocument.card` 承载可选卡片，`ModuleDisplay.logo_resource` 声明模块资源。当前 SDK、模块 ABI 与 Display schema 版本见[模块 SDK 合同](../module-sdk.md)。SDK 不依赖 Core、Host、Pillow、素材解码器或标签 parser
 - **LLM**：继续使用同一事实生成的现有结构化结果，不增加图片、品牌随机文案或样式标签。展示转换不得改动事实模型
 
 模块使用 SDK 声明；`presentation/layout_document.py` 仅重导出同一组 SDK 类型。Core 的 `layout_renderer.py`、`layout_assets.py`、`layout_markup.py` 负责实现。`CommandCardRenderer` 将 `DisplayDocument.card` 交给该 renderer，未提供 card 的既有文档继续走旧投影；`ordered_blocks` 保留完整确定性文本回退。以下分别记录源码实现、离线证据和待实测项，不把它们合并为生产验收。
 
 ## 2. SDK 声明与 Core 实现入口
 
-以下冻结声明已进入 SDK `0.1.0a7` 候选。模块只导入 `yomihime_game_link_sdk.cards`；渲染、测量和主题目录函数属于 Core，不是 SDK 功能。
+以下冻结声明属于 SDK 的公开 cards 合同。模块只导入 `yomihime_game_link_sdk.cards`；渲染、测量和主题目录函数属于 Core，不是 SDK 功能。
 
 ```python
 Content = str | Inline | TaggedText
@@ -74,7 +72,7 @@ apply_theme_selection(document, core_theme: str,
 - 文字居中与容器居中是不同层次。垂直居中按实际字形范围校验，不能用某字体的估算基线代替；右对齐也不能只按字符串长度估计
 - `PropertyGrid` 用于紧凑属性组。材料清单可以用两列 `Row(Text(...), Text(...))`，不必把每个材料名降成细小属性标签
 - `Image.align` 控制素材盒的位置；`fit="contain"` 保持比例完整显示，`cover` 保持比例覆盖盒并裁边。正文事实不裁剪；图片裁边必须由调用方明确选择
-- 表格所有数据行使用同一 `panel` 背景，表头用 `panel_alt`。不按分数改变单元格底色，不做绿/金色专属深底徽章
+- 表格数据行按 `panel` / `panel_alt` 交替整行背景，表头用 `panel_alt`。不按分数改变单元格底色，不做绿/金色专属深底徽章
 - `measure_document` 的带路径边界用于测试/诊断，不是模块自己画图的坐标 API；测量成功也不保证解码、PNG 字节预算或 Host 发送成功
 
 ## 3. 主题与文字样式
@@ -99,7 +97,7 @@ SDK 声明及直接 `render_document` 接受预设名 `warm_paper`、`cool_white
 
 ### 3.2 Core 默认主题与模块覆盖
 
-用户确认两级配置：**Core 配置选择主题，模块颜色选择器提供 `跟随核心` 或显式覆盖**。Core 自身卡片（包括 `/ygl help`）使用 Core 配色。候选的管理页、配置存储和 OutputService 已接线；当前证据为离线页面及真实代码路径测试，尚未在用户 Local Test 操作页面。
+用户确认两级配置：**Core 配置选择主题，模块颜色选择器提供 `跟随核心` 或显式覆盖**。Core 自身卡片（包括 `/ygl help`）使用 Core 配色。Core 与模块设置由各自配置字段、owner 和 revision/CAS 维护；管理与配置操作受当前 Host 授权合同约束。代码与离线测试不代表具体实例的部署或验收。
 
 - 全局设置中的 `回复样式 → 图片主题` 对应 Core `image_theme`，默认 `warm_paper`（暖桃纸）。保存一个有效 Core 预设 ID；不能从传入文档的默认主题猜出配置
 - 模块同名设置由 Core 通用注入 `reply_theme`，不要求每个模块重复声明字段。首项及默认模式为 `跟随核心`，运行快照对应 `module_theme=None`；其余选项是 Core 目录里的预设。选择跟随核心使用 `CLEAR` 删除覆盖，未存储才表示继承；显式存储 null、空字符串或未知 ID 不合法。它不是新色板，也不是全局空主题
@@ -107,7 +105,7 @@ SDK 声明及直接 `render_document` 接受预设名 `warm_paper`、`cool_white
 - `apply_theme_selection(document, core_theme, module_theme=None)` 先验证两级配置。`None` 使用 `core_theme`，**不会保留输入 `document.theme`**；显式模块预设或合法 `ThemePalette` 只覆盖本次模块文档，不改全局设置、Core 帮助或其他模块
 - Core 卡片只传 `core_theme`，不传模块覆盖。模块卡片传入该模块获授权的设置快照；没有覆盖时传 `None`。纯函数不负责认证、配置读取/保存、数据库迁移或消息发送
 - 未知 Core ID、未知模块 ID、非法类型或格式错误的自定义配色均抛 `BitmapUnavailable("invalid_input")`，不静默回退。即使模块有覆盖，Core 配置仍须有效；空字符串不代替 `None`
-- 本轮模块 UI 是 `跟随核心 + Core 预设` 下拉框，不包含任意颜色编辑器。完整 `ThemePalette` 只在直接 renderer 或纯 `apply_theme_selection` 函数收到受控显式参数时可用；当前正式持久化/管理页只接受目录 ID 或清除覆盖。OutputService 使用该设置快照覆盖 `Document.theme`，不会读取模块文档色板作为隐藏配置。来源业务文本不能变成配置权限；SDK 仍只承载纯数据定义
+- 模块 UI 是 `跟随核心 + Core 预设` 下拉框，不包含任意颜色编辑器。完整 `ThemePalette` 只在直接 renderer 或纯 `apply_theme_selection` 函数收到受控显式参数时可用；当前正式持久化/管理页只接受目录 ID 或清除覆盖。OutputService 使用该设置快照覆盖 `Document.theme`，不会读取模块文档色板作为隐藏配置。来源业务文本不能变成配置权限；SDK 仍只承载纯数据定义
 - 设置复用 `config_entries` / `config_state`、现有合法管理入口、授权检查和 revision/CAS 保存规则，无新增 SQL 存储。Core 恢复默认清除配置并回到暖桃纸，模块恢复默认清除覆盖并继承 Core。进入、读取、切走再返回及从基线继承切换后再选继承不会制造脏草稿。主题专用写入不进入模块业务健康字段，但继续递增共用配置 revision
 - `ThemeSettingsView.current(module_id)` 在同一闸门内读取 `core_theme`、`module_theme` 和两级 revision；Core 帮助使用 `current()`。OutputService 每次公共命令图片使用一次该快照，按上述优先级解析实际主题，再绘制整张图片；不会在绘制途中反复读取设置
 - 若启用渲染缓存，key 必须纳入**解析后的实际主题**（包括自定义槽值或稳定摘要），不能只包含模块名或可变的 `跟随核心` 标签
@@ -181,8 +179,8 @@ Core parser 的直接调用失败抛 `MarkupError`，内容固定为 `Invalid bo
 - `currentColor` 明确替换为本次主题 `accent`，保持透明孔洞；显式填色保持显式颜色
 - 不支持 text/font、CSS/style、script/event、动画、foreignObject、filter、use、href/url 引用、外部资源、DTD/entity/declaration。拒绝任何需要联网或执行内容的素材
 - PNG/JPEG 限静态单帧、受限尺寸与 bytes；格式不匹配或损坏报错。既有素材颜色/透明度不由业务等级改写
-- Core 根运行依赖固定 `resvg_py==0.5.0`（底层 resvg `0.48.1`）和 `Pillow==12.3.0`；SVG 使用前者的预编译 wheel，位图使用后者。所选 SVG 后端不要求手动安装 Cairo/DLL，不自行安装、不使用 CLI 或在线转换器后备。没有所需依赖时明确报错
-- [官方 PyPI 0.5.0 文件](https://pypi.org/project/resvg_py/0.5.0/)包含 Windows `cp310-abi3` 的 amd64/arm64/win32 wheel；[官方安装说明](https://resvg-py.readthedocs.io/en/latest/installation.html)说明不需系统库。本轮实际执行只验证 Linux/Python 3.12，Windows 尚未实机运行，发布 wheel 不等于 Windows 验收通过
+- Core 根运行依赖按 `requirements.txt` 使用 `resvg_py>=0.5.0`（底层 resvg `0.48.1`）和 `Pillow>=12.3.0`；SVG 使用前者的预编译 wheel，位图使用后者。样例环境在独立 requirements 中固定版本。所选 SVG 后端不要求手动安装 Cairo/DLL，不自行安装、不使用 CLI 或在线转换器后备。没有所需依赖时明确报错
+- [官方 PyPI 0.5.0 文件](https://pypi.org/project/resvg_py/0.5.0/)包含 Windows `cp310-abi3` 的 amd64/arm64/win32 wheel；[官方安装说明](https://resvg-py.readthedocs.io/en/latest/installation.html)说明不需系统库。发布 wheel 的存在本身不构成目标宿主环境的运行验收
 - 该白名单和预算是输入格式护栏，不宣称 native decoder 的安全沙箱。只用于经审查的静态模块资源；不作为任意用户上传 SVG 服务
 - `required=True` 的素材失败使整张渲染失败。`required=False` 可在原素材盒里显示有界 `alt` 文字占位；占位也必须测量，装不下仍失败，不能静默删掉原本需要的信息
 - `rasterize_asset` 返回调用方负责关闭的 RGBA 图像，不缓存；样例不调用它绘图，只调用顶层 `render_document`
@@ -226,19 +224,19 @@ Image 声明 width 为 16–2048 或自动，height 为 16–1024；还须满足
 
 ### 5.1 Core 受管字体与轻量发布
 
-正式命令的字体由 `ManagedFont` 管理，独立于插件安装目录和业务模块。SDK a7、ABI、Display schema 与模块声明均不增加字体选择接口。固定标准资源为 Noto Sans CJK SC Regular **2.004 / face 0**：
+正式命令的字体由 `ManagedFont` 管理，独立于插件安装目录和业务模块。SDK 当前版本、ABI、Display schema 与模块声明均不增加字体选择接口。固定标准资源为 Noto Sans CJK SC Regular **2.004 / face 0**：
 
 - 文件名 `NotoSansCJKsc-Regular.otf`，准确大小 **16,437,364 bytes**
 - SHA-256 `2c76254f6fc379fddfce0a7e84fb5385bb135d3e399294f6eeb6680d0365b74b`
 - 固定上游 revision `523d033d6cb47f4a80c58a35753646f5c3608a78`；[指定字体下载](https://raw.githubusercontent.com/notofonts/noto-cjk/523d033d6cb47f4a80c58a35753646f5c3608a78/Sans/OTF/SimplifiedChinese/NotoSansCJKsc-Regular.otf)，许可与来源见 [NOTICE](../../presentation/assets/fonts/NOTICE.md) / [OFL](../../presentation/assets/fonts/OFL.txt)
 - 持久位置由 Core 固定为 `data_dir/resources/fonts/NotoSansCJKsc-Regular.otf`。模块、请求参数和上传文件名不能选择目标路径
-- 轻量插件 ZIP 只保留 OFL 与 NOTICE，**不包含 OTF**。源码仓库中的原版 OTF 保留作离线可复现字体；出现许可说明不代表运行环境已经取得字体
+- 轻量插件 ZIP 只保留 OFL 与 NOTICE，**不包含 OTF**。源码样例运行前由 `scripts/prepare_test_font.py` 从固定官方来源下载并校验 OTF；字体文件不跟踪入库。出现许可说明不代表运行环境已经取得字体
 
 启动与使用顺序：
 
 1. 运行时启动字体任务后继续 Core 启动，不等待网络下载。已有持久字体须先通过准确大小、SHA 和 Pillow 实际加载验证，之后才发布为标准字体；缺失或不匹配不作为有效缓存使用
 2. 标准字体尚不可用时尝试有限、固定的系统字体候选，同时后台取得固定 URL 的标准资源。系统字体只作尽力回退，实际 face 0 的 Unicode cmap 决定支持范围；不能因为文件能打开就声称支持所有中文
-3. 每个系统候选最多 16 MiB，超过预算的 TTC 可能被跳过。Core 不递归扫描磁盘、不执行 fontconfig/PATH 命令、不接受模块/用户指定路径。Windows 固定顺序先尝试 `msyh.ttc/msyh.ttf`、`simhei.ttf`、`simsun.ttc`、`simkai.ttf`、`simfang.ttf`，再尝试 Arial；其他平台也仅有代码中的有限固定位置。是否已安装、是否在预算内均需实际确认，本轮未实机验证 Windows。系统字体以同一不可变 bytes 解析覆盖并交给 Pillow，不复制进持久字体目录、不重新分发；本轮不是任意上传字体服务或 native 解码器安全沙箱
+3. 每个系统候选最多 16 MiB，超过预算的 TTC 可能被跳过。Core 不递归扫描磁盘、不执行 fontconfig/PATH 命令、不接受模块/用户指定路径。Windows 固定顺序先尝试 `msyh.ttc/msyh.ttf`、`simhei.ttf`、`simsun.ttc`、`simkai.ttf`、`simfang.ttf`，再尝试 Arial；其他平台也仅有代码中的有限固定位置。是否已安装、是否在预算内均需在目标环境确认。系统字体以同一不可变 bytes 解析覆盖并交给 Pillow，不复制进持久字体目录、不重新分发；这不是任意上传字体服务或 native 解码器安全沙箱
 4. 正式渲染获取当时的不可变 provider 快照，不逐命令下载或重新读盘。一次渲染不会中途换字体；标准字体下载/上传成功只影响之后开始的图片。系统字体布局不保证与标准字体样图逐字节一致
 5. 没有可用字体，或选中字体不覆盖本次文字时，继续既有完整文字回退，不输出方框/缺字图片、不缩减事实。下载成功不会追补历史命令或重发旧图片
 
@@ -255,7 +253,7 @@ Image 声明 width 为 16–2048 或自动，height 为 16–1024；还须满足
 - 状态字段为 `state=checking/downloading/ready/unavailable/stopped`、`source=canonical/system/none`，安全错误为 `null/download_failed/resource_unavailable`。`unavailable` 可以同时有 `source=system`，意为标准字体取得失败但系统回退仍可用；是否能画本次文字还要实际覆盖检查
 - 字体控件独立于主题草稿；取消选文件不提交，重复操作受 busy 门控。只在控件可见且 checking/downloading 时轮询，切页/换上下文丢弃迟到观察。正式 bridge 没有取消已提交上传的接口，**切页不承诺撤销后端上传**；后端仍按授权与生命周期完成或拒绝同一固定资源，不能把前端忽略回执说成已回滚
 
-## 6. 四个内容样例与验收
+## 6. 四类内容样例
 
 可运行文件：[declarative_samples.py](../../examples/command_cards/declarative_samples.py)。它仅组合声明和调用共用 renderer，没有 Pillow 或旧参考 renderer import。五张 PNG 表达四个内容样例（Help、Item、Logs 浅/深、Market）：
 
@@ -275,33 +273,22 @@ Image 声明 width 为 16–2048 或自动，height 为 16–1024；还须满足
 - 从用户截图转录任务 `缇姨家的塔可饼的老主顾`，材料 `图拉尔玉米油×1、高山食盐×1、犎牛肩肉×1、龙息椒×1、亚斯拉尼蒜头×2、黑夜醋×1、物品 ID 8×8、物品 ID 13×8`
 - 不猜缺失材料名，不未经核验把职业 ID 转成职业名；保留简短 `Garland 制作关联信息不完整` 提示
 - 图内来源收敛为一行；完整原始链接保留在样例旁的 provenance.json：`https://xivapi-v2.xivcdn.com/api/sheet/Item/44091` 与 `https://garlandtools.cn/db/#item/44091`
-- 数据是已提供截图的展示 fixture，不代表本轮重新查询，不能把截图日期说成数据更新时间。本轮物品详情卡视觉已单独获用户确认。实际模块另将本次 `ItemRecord` 映射成 SDK 卡片，不把截图事实塞进生产结果；真实上游和当前会话仍待实测
+- 数据是截图转录的展示 fixture，不代表实时查询，不能把截图日期说成数据更新时间。生产模块将实际 `ItemRecord` 映射成 SDK 卡片，不把截图事实写入查询结果
 
 ### 6.3 Logs 长卡（浅色 + 深色）
 
-- `ChatGPT @ OpenAI`，一张长图包括绝境战及当前资料片零式两个组；沿用历史离线 fixture 的 7 + 13 行，主图 M12S 本体保持 `99.7`
-- fixture 的角色、数字、版本、开放目录均为合成排版数据。图外明确说明，不增加图内调试墙、样式图例、“13 条记录”或真实查询时间
-- 五列依次是 `副本 / 记录版本`、`职业`、`最高 rDPS`、`过本次数`、`最佳百分位`；记录版本在副本名下方，不独立占第六列
-- 百分位固定一位小数、右对齐、实际字形垂直居中；rDPS 为整数千位逗号。`ROUND_HALF_UP` 是参考展示选择，不擅自宣称最终业务取整标准已确认
-- 先用原值映射等级再显示：`99.96 → 100.0%` 仍粉色，专门边界测试保留；原始 `100` 且 MAX 证据成立才金色 + A
-- 精确标准色依次为灰 `#666666`、绿 `#1eff00`、蓝 `#0070ff`、紫 `#a335ee`、橙 `#ff8000`、粉 `#e268a8`、金 `#e5cc80`
-- 缺失用普通色 `—`，有效零正常显示，不可评价文字原样普通色，只有无效/异常值红色 `ERR`。高分不红；不强行给无证据数据授金
-- `totalKills` 显示为普通色非负整数，不从 `len(ranks)` 或样本数推断；最高 rDPS 与最佳百分位独立，职业/版本属于后者的记录
-- 页脚逐字为 `Powered by yomihime/astrbot_plugin_yomihime_game_link`；来源只显示实际区域对应 `数据源：cn.fflogs.com` 或 `数据源：www.fflogs.com`
+样图使用合成角色与排名数据，展示模块交付事实、Core 排版和浅/深主题。它不证明地区目录完整、真实角色查询、上游字段解释或平台投递。
 
-目标范围仍由 FF14 业务模块负责：全部已开放绝境战 + 查询地区当前资料片全部已开放零式；仅当前资料片尚无开放零式才允许回退上一资料片，空成绩/查询失败不是回退依据。当前候选不宣称已证明该完整目标：
+当前 Logs 分组、范围、分区、记录版本、选优与缺失状态的合同见 [FFLogs 表格规范](../fflogs-table-presentation.md)。FFLogs 请求、地区凭据和业务事实由 FF14 模块负责；Core renderer 只排版声明内容。生产规则不由离线卡片 fixture 推导，也不在 Core 中维护 FF14 目录。
 
-- 既有默认命令先取得实际默认 zone，再尝试固定 schema/catalog 查询；仅在 introspection 确认 `WorldData.expansions`、`Expansion { id, name, zones }`、`Encounter.zone` 后使用关系，按精确 Ultimate/绝境战、Savage/零式标签选取。零式只取实际默认 zone 所属资料片；以 canonical `Encounter.zone` 和 ID 排除旧重复
-- 图片使用诚实范围名 `FFLogs目录及默认副本所属资料片`，不把目录等同于地区当前游戏版本或已开放列表。关系/标签证据不足则保留已知单 zone 成绩并显示简短限制，不用离线名单补齐；没有顺序/发布证据就不回退上一资料片。当前聚合文本说明绝境按标准阵容历史分区查询，零式在明确合格的标准及非标准非 Echo 分区中按原始百分位整行选优，不再声称使用各 zone 默认分区；版本及完整查询合同见 [Logs 表格交接](../fflogs-table-presentation.md)。返回的 encounter ID 若不在整份已验证缓存目录中，图片显示带数量的不完整目录警告。已知 canonical alias 继续去重，不猜归属、不增加刷新请求
-- 元数据最多 2 请求、每来源缓存 15 分钟、单请求 5 秒；成绩 alias 批次最多 12 zone/15 秒、总流程 30 秒。命令沿用 40 行上限及完整文本分块回退；LLM 工具仍是原请求与 20 行事实结果
-- 真实上游仍须验证新增关系字段、精确难度标签、国服/国际服支持、每记录版本与 bestSpec 含义。无证据版本显示 `—`；击杀数只用真实响应 `totalKills`，不以样本数量代替。合成 handler 测试不能关闭这些待验项
+样图来源、结构与固定字节见 [`examples/command_cards/samples/declarative/`](../../examples/command_cards/samples/declarative/) 及其 provenance。更新样图时按该来源记录同步更新 fixture 说明，不把合成数据写入生产查询结果。
 
 ### 6.4 市场价格卡
 
 - 新增 `build_market_document()`，继承历史市场样张的暖桃纸方向与离线示意数据；与其余样例一样，只组装 `Document` / `Section` / `Row` / `Text`，调用同一 Core renderer
 - 品牌 `游戏连结 · FF14 · 市场`、右上陨石、突出 `犎牛牛排`，范围 `物品 44091 · 中国全区`
 - 两个清晰 NQ/HQ 面板：NQ `30 Gil / 件`、`静语庄园`、`世界上传于 12 分钟前`；HQ `500 Gil / 件`、`神拳痕`、`世界上传于 2 小时前`。价格大字且不拆行，不增加未提供的库存、销量或品质档位
-- 这些价格和相对时间复用 [历史样图](../../examples/command_cards/samples/01_market_warm_paper.png)，是合成/示意 fixture，没有本轮实时查询。图外 provenance 明确来源与范围，图内不加入调试标签或用新生成时间冒充报价时间
+- 这些价格和相对时间复用 [样图](../../examples/command_cards/samples/01_market_warm_paper.png)，属于合成/示意 fixture，不是实时查询结果。图外 provenance 明确来源与范围，图内不加入调试标签或用新生成时间冒充报价时间
 - 保留简短 `有限返回样本中的最低价；非实时全量报价，不保证此刻仍可买到`，并说明时间属于对应世界上传时间，**不是单条挂牌时间**
 - 来源 `数据源：Universalis`，统一左下 Powered by 页脚。展示“样本最低价”不代表全量市场最低价、当前仍有货或可以据此立即成交
 - CLI 追加 `05_market_warm_paper.png`，原有四张名称/内容不变；批量输出仍要求仓库外的新目录，不能覆盖旧图。实际市场命令另从已验证 query/outcomes/listings/minimums/observed_at/catalog 投影，支持 min/overview/listings；缺少某品质报价不制造零价或假面板，来源上传时间不冒充挂牌时间。两者都调用同一 renderer，没有新增市场 endpoint
@@ -379,72 +366,8 @@ python -m unittest examples.command_cards.test_declarative_samples -v
 python -m unittest discover -s tests/presentation -t . -p 'test_layout*.py' -v
 ```
 
-源码样例继续读取仓库原版 OTF，不通过 Host 自动下载；下面的离线入口要求该 fixture 存在。轻量发布包不附带 OTF，不能把它当成完整源码样例环境。
+源码样例读取由 `scripts/prepare_test_font.py` 下载并校验的本地 OTF fixture；运行前先按[准备步骤](../../examples/command_cards/README.md#运行)获取。字体文件不跟踪入库，也不通过 Host 自动下载。轻量发布包不附带 OTF，不能把它当成完整源码样例环境。
 
-样例的独立 requirements 与 Core 根运行依赖都固定 `Pillow==12.3.0`、`resvg_py==0.5.0`；SDK wheel 没有运行依赖。新 renderer 不要求 fontTools，字体维护专项测试如使用它遵循各自依赖。CLI 默认创建系统临时目录；显式输出必须在仓库外，文件独占创建，不覆盖旧 `samples/`。配套 `provenance.json` 记录来源、fixture 范围、尺寸、字节数和 SHA-256。
+样例独立 requirements 固定 `Pillow==12.3.0`、`resvg_py==0.5.0`；Core 根运行依赖的下限见 `requirements.txt`。SDK wheel 没有运行依赖。新 renderer 不要求 fontTools，字体维护专项测试如使用它遵循各自依赖。CLI 默认创建系统临时目录；显式输出必须在仓库外，文件独占创建，不覆盖旧 `samples/`。配套 `provenance.json` 记录来源、fixture 范围、尺寸、字节数和 SHA-256。
 
-获准归档的五张样图在 [samples/declarative](../../examples/command_cards/samples/declarative)，附统一 provenance。迁移到纯 SDK 后五张 PNG 字节不变。历史样图保留；视觉确认不改变 Help 可用性、Logs、Market 为离线 fixture、Item 为截图转录的数据性质。
-
-## 8. 当前证据与本地 Codex 交接
-
-### 8.1 本轮字体片状态与本地交接
-
-本轮实现 §5.1/5.2 的受管资源与 Core 页面，固定 SDK a7 wheel 字节不变，不扩展模块权限或新建字体 SDK。轻量候选为 **285 成员、1,474,301 bytes**，SHA-256 `5b745694b4da35e6cb4be8a9dd914a2f147891442d718fdc9ee64c57daf04395`；准确 SDK/Core payload、OTF 排除、OFL/NOTICE 已核验；最终 **13 项解包检查通过（5.100 秒，0 失败/错误/跳过）**，bootstrap/工厂通过。测试使用真正 Host 默认 ManagedFont，覆盖当前系统字体渲染/文字回退、授权状态/重试/上传、上传后标准字体帮助 PNG、持久资源复用且不再次下载；仅 aiohttp 传输为合成响应，外部网络被阻断。全部 285 个 payload 与 259 个源码输入逐项匹配；源码提交以最终 PR 交接为准。
-
-字体片验证分批记录：作者 108 项定向通过（126 秒，该批启动时含 9 项管理器），最新管理器 11 项另过，presentation 74 项另过；前端 typecheck/build、相关 16 项与字体 6 项重验分别通过。独立六套相关检查 114 项通过（137.453 秒，启动早于新增 Windows 候选测试），最新管理器 11 项、UI 6 项、正式管理入口 7 项另验通过。独立范围内未发现阻断项；这不是一次全仓检查，不叠加为单一总数，也不证明真实网络下载、Windows 字体或 Local Test 页面。
-
-前一阶段 `8139d724…` 为包含 OTF 的全量包；其摘要、体积和前轮通过范围均不适用于本轮轻量候选。
-
-当前本地任务正在安装前一阶段 `8139d724…` 包；本文件不据此宣称其安装、页面或四条真实命令已经成功，也不要求中断该任务换包。完成现有本地任务后，后续字体片安装/验证须另有用户对目标和操作的明确授权：
-
-1. 核对本轮轻量包、提交与摘要；本轮不改 SDK。若目标已经正确冷加载 a7，无需仅为本片再次执行 a6→a7 的卸载步骤；使用正式插件更新流程，并保留 Core 数据资源
-2. 启动后在 Core 全局设置观察检查/下载/就绪或系统回退。已有有效缓存时不为演示失败而删除或破坏文件；网络下载和系统字体覆盖分别下结论
-3. 需要手动恢复时，只经页面下载指定版本，再上传同一固定文件或重试。不要输入任意 URL、修改字体摘要、改 OS 网络安全设置或读取凭据；上传操作本身仍按实际本地授权执行
-4. 用获准的命令预算检查无字体/缺字时的完整文字回退，以及标准字体就绪后新命令的 PNG；不要自动重发早先命令。此前四条消息预算不因本片自动重置，先记录已执行次数
-5. 保持已安装新版和用户选择的配置，不自动回滚、清空字体缓存或动 LLM/其他插件。真实 Windows、上游下载、当前页面和 IM 图片可见性仍由本地实测分别证明
-
-### 8.2 前一阶段声明式卡片证据（8139 包）
-
-以下保留前一阶段候选及各批检查的原范围，尚不包含本轮字体管理。其“随包字体”核验针对当时包含 OTF 的包；当前轻量包以本轮登记为准。
-
-
-- SDK `0.1.0a7` 候选 wheel 为 **53,256 bytes**，SHA-256 `b6eaefee0045b91a4cc4ab71acd6b3f86824dcfcf5ea6fad574087106b937cb1`。纯声明、TaggedText/Cell、card/logo_resource 已接入；ABI `2.0`、Display `1.8.0` 未改
-- 修后插件候选 `astrbot_plugin_yomihime_game_link-v0.1.2.zip`：**284 成员、15,054,948 bytes**，SHA-256 `8139d724d2c6027bd43e5e6ca102cf7709b90d34aad177bfa3914e063ae86284`。精确成员/字节、CRC、SDK/字体/SVG 固定摘要和解包后的 5 种 bootstrap 模式已验证；仅 `modules/ff14/features/fflogs.py` 相比前包改变，其他 283 个 payload 逐字节相同。受影响的解包 Logs 检查 **2/2 通过（14.820 秒，0 失败/错误/跳过）**，149 个产品模块来源确认为新解包目录；5 种 bootstrap 与 SDK 样例工厂重验通过。测试后全部 284 个 payload、258 个包内源码输入稳定；最终源码提交以 PR 交接记录为准
-- 返修前包 **15,054,822 bytes**、SHA-256 `6eb65a6bd8d04e1e4f7f62857dfe74c39a1f70d5577ee30bdb1f3970c7936e55` 仅保留为历史证据。其包内代码路径 **8 项通过（54.734 秒，0 失败/错误/跳过）**，核验 151 个产品模块从解包目录加载，覆盖 help/item/market/国服与国际服 Logs、回退和主题/过期边界；SDK 样例工厂也通过。随后发现并修正聚合文本“全部分区”误标及未知 encounter 目录警告；旧 8 项结果不能冒充修后包完整重跑。所有包内测试使用合成传输并阻断外部网络，无真实平台或上游调用
-- 五张固定样图已获用户视觉确认；共享 renderer 的限额、素材、标签、几何、A/B 字效、数字对齐和无裁剪有离线检查。当前真实命令输出使用实际事实，不能要求它与合成样图逐字节一致
-- Core/Host 作者最终相关 **83 项通过**；既有 Output/CoreRuntime/AstrBotRuntime 回归按初次 111 项及 pinned Host 补验 2 项分批通过。覆盖精确 event、同一 renderer 字节、PNG 解码、manifest logo、主题拒绝/覆盖/清除、帮助不受模块覆盖、过期/重复/发送前回退。全部使用隔离环境和合成上游
-- 配置作者最终 Python 组合 **183 项通过（50.065 秒）**，含 pinned Host、管理授权、CAS 和已加载模块主题写入/健康状态回归；前端 shell **85 项**、management **146 项** 分批通过，typecheck/build 通过。实际页面读写已接线；真实浏览器 Local Test 操作仍待验
-- FFLogs 作者初批 **52 项通过**；分区标签和未知 encounter 警告修正后另跑 **64 项通过（60.654 秒）**，含 56 项模块/卡片/工具合同、2 项声明卡 Host 和 6 项既有工具 Host 检查，覆盖真实 handler 的合成 7+13 行、21 行增长、局部错误/缺失、原值满分与来源计数；这不证明真实 FFLogs schema/目录或地区开放状态。物品/市场作者最终定向 **99 项**、实际注册入口与 Host PNG 集成 **2 项**分批通过，使用合成传输；最终独审结果见[交接入口](README.md)
-- 独立广回归原批次实际运行 **1012 项：954 通过、58 项环境错误**（验证命令遗漏 Host overlay，触发 PyJWT 版本前置错误；无断言失败）。原错误保留；正确环境下精确 58 项补验为 **57 通过、1 断言失败、0 环境错误（415.140 秒）**：既有显式 `/ygl ff14 status` 检查预期 1 次发送，实际 0 次，provider trace 为空；该 method 单独重跑仍失败（9.461 秒）。独立最终 Logs 另 **56 项通过（0.353 秒）**，该检查批次 559 份选定源码哈希稳定。独审随后确认旧测试 Event 夹具缺少 `send` / `chain_result`，真实状态 PNG 已生成，精确事件路径因此安全返回 FAILED。仅迁移该测试函数的 pinned Host 发送观测，保留 Context 广播零次及 provider 零次断言；作者单项 **1 通过（9.878 秒）**，独立最终 **5 项通过（30.872 秒，0 失败/错误/跳过）**，包括原失败项和 4 项真实声明式命令链路。559 份选定源码哈希稳定，生产文件/当前 ZIP 未变。该遗漏已关闭；限定源码与离线交付审查为 **0 Blocker / 0 Important**，不代表真实平台或完整授权审计。不能将各批次拼成“1012 项全绿”或把重复范围相加。
-- 上述为不同批次，不加总成一次“全量全绿”。旧 string/CardSpec 路径、历史图片、既有全仓失败/环境失败原样记录；限定源码与打包独审已闭环。未安装新候选，未运行 Windows、真实 FFLogs 或真实 LLM
-
-### 8.3 前一阶段安装准备（a6 → a7）
-
-本地 Codex 的主任务是安装固定候选、检查正式设置页并实测命令，**不是重新开发 SDK、Core、主题页面或再做一套绘图**。从最终交接提交取得本文件、候选 ZIP/摘要、SDK wheel 摘要、五图/provenance、各批测试和独审结果；先核对候选确切字节。本段的候选和离线独审指 §8.2 的前一阶段 `8139d724…` 包，实际操作以其本地任务最新授权为准；不用返修前包或旧 `737bc643…` 候选替代。
-
-实际本地操作尚未执行，须由用户向本地 Codex 明确授权目标 Local Test、game-link 正式卸载/上传/启用、冷重启、主题检查及下述最多四条消息。复用已经提供的本地角色目标，不再次索取或把账户/角色资料写进公开仓库。
-
-1. 确认是指定的可丢弃 Local Test，仅处理 game-link。用户已取消自动备份、回退包、旧安装溯源及 backup helper 完整性前置；已有材料保留，不重启这些门槛，也不把旧缺口记为修复
-2. SDK 从 a6 升为 a7，需要协调一次**正式卸载旧 game-link 测试插件 → 目标 Local Test 冷重启 → 正式上传固定候选 → 启用**。冷重启会暂时中断该宿主的其他插件运行，须纳入授权；不更改 LLM、其他插件、模型、凭据或网络安全设置，不用热更新冒充 SDK 冷加载
-3. 依赖按候选根 requirements 安装。所选 resvg wheel 无需手动 Cairo DLL；实际 Windows 可用性仍须此次机器验证，失败记录原异常及目标环境。不要临时换在线转换器、字体或另一绘图实现来掩盖问题
-4. 使用既有正式管理/登录流程。已有凭据无需读取、导出或预先重新配置；需要登录或敏感输入时交由用户安全完成。Logs 凭据不可用单列为该项阻塞，不阻止 help/item/market 或插件安装核验
-5. 页面核验 Core `回复样式 → 图片主题` 与模块同名设置：同一目录、模块跟随核心、正常权限/CAS、切换后读回及清除覆盖。记录用户授权的最终配置，不随意永久改动其他字段
-
-### 8.4 前一阶段四条命令预算与验收
-
-拟议预算为 **4 条真实用户命令，各一次，无 LLM**；尚未执行，也不自动视为用户已经批准。专用会话复用用户已经提供的本地目标，公开文档只保留占位符：
-
-```text
-/ygl help
-/ygl ff14 item 44091
-/ygl ff14 market 44091 region=cn quality=all intent=min
-/ygl ff14 logs 国服 <服务器> <角色>
-```
-
-Logs 参数依当前命令 parser 分词，含空格的角色名按正式帮助格式引用。本地执行方替换为已知目标；不发送占位符、不添加探针/重试命令，不为失败自动消耗额外预算。
-
-逐条保留：请求、完整 SSE/正常终态、机器人记录数、图或明确文字回退、实际附件 HTTP/媒体类型/PNG 解码、当前会话可见性、原尺寸和聊天缩放截图。图片应为单次回复，不出现重复图片或额外文字补发；若按既有合同退回完整分块文本，单列实际块数。UNKNOWN 不盲目补发。Help 核对实际可用模块和 Core 主题；Item 核对当前来源/缺项；Market 核对本次价格、范围和世界上传时间（不是要求仍为示意的 30/500）；Logs 核对实际来源、条件目录覆盖、缺失/错误和现有局限，不把单 zone 或无凭据称为完整聚合成功。
-
-主题切换可在四条命令前后按获授权的页面步骤安排，不增加命令预算。图片以本次设置快照为准，切换不改写历史消息。对登录、SDK 加载、图片依赖、来源数据、页面状态、PNG 发送分别下结论；没看到真实 UI/图片就记未验。实际 Windows、真实上游、非管理员身份或其他 IM 平台未覆盖的项明确列出。
-
-测试后保持新 game-link 版本安装并启用，不自动卸载、回滚、清理会话/图片或改回旧版；只按用户指定保留主题值。失败时报告确切步骤、目标、证据与剩余授权，不绕过拒绝，不以样图替代真实返回。提交、推送、PR 发布与 Local Test 安装是不同动作，各按当前用户授权执行；本文不授予额外权限。
+保存的五张样图在 [samples/declarative](../../examples/command_cards/samples/declarative)，附统一 provenance。样图字节由 provenance 单独记录。视觉参考不改变 Help 可用性、Logs、Market 为离线 fixture、Item 为截图转录的数据性质。

@@ -46,7 +46,7 @@ from ..core.ports import RevisionConflict
 from ..core.registry import RegisteredModule, Registry, RegistrySnapshot
 from ..extensions.discovery import DiscoveredPackage
 from ..extensions.loader import ExtensionCandidate
-from ..infrastructure.managed_key_manager import ManagedKeyManager
+from ..infrastructure.managed_key_manager import ManagedKeyConflict, ManagedKeyManager
 from ..infrastructure.secret_store import SQLiteSecretStore
 from ..infrastructure.sqlite.database import SQLiteDatabase
 from ..infrastructure.sqlite.repositories_config import SQLiteConfigRepository
@@ -55,11 +55,11 @@ from .configuration.defaults import (
     CORE_CONFIG_FIELDS,
     CORE_DEFAULTS_FIELD,
     CORE_MODULE_ID,
-    DEFAULT_REGION,
     MODULE_REPLY_THEME,
     core_config_target,
     module_configuration_fields,
 )
+from .configuration.legacy_copy import LegacyConfigCopyPolicy
 from .configuration.operations import (
     ConfigurationCoordinator,
     validate_configuration_value,
@@ -128,6 +128,7 @@ class AdminOperationsService(AdminOperations):
         ordinary_config_resources=None,
         managed_module_owners=(),
         owner_cleanup=None,
+        legacy_config_copy_policies=(),
     ) -> None:
         validate_contract(subscription_gate_fields)
         if not isinstance(authorization, AdminAuthorizationService):
@@ -157,6 +158,19 @@ class AdminOperationsService(AdminOperations):
         self._config_repository = config_repository
         self.secret_store = secret_store
         self.managed_keys = managed_key_manager
+        self._storage_migration_plans = {}
+        policies = tuple(legacy_config_copy_policies)
+        if (
+            len(policies) > 32
+            or any(
+                type(policy) is not LegacyConfigCopyPolicy
+                or policy.source_target.principal_id != config_principal_id
+                for policy in policies
+            )
+            or len({policy.policy_id for policy in policies}) != len(policies)
+        ):
+            raise ValueError("invalid legacy copy policies")
+        self._legacy_config_policies = {policy.policy_id: policy for policy in policies}
         self.config_principal_id = config_principal_id
         self._subscription_gate_fields = MappingProxyType(
             dict(subscription_gate_fields or {})
@@ -287,10 +301,16 @@ class AdminOperationsService(AdminOperations):
             else:
                 try:
                     result = await manager.status()
-                except Exception:
+                except Exception as error:
+                    blocked = (
+                        isinstance(error, ManagedKeyConflict)
+                        and error.code == "unsafe_storage_layout"
+                    )
                     result = {
                         "state": "unknown",
-                        "reason_code": "inventory_unavailable",
+                        "reason_code": "unsafe_storage_layout"
+                        if blocked
+                        else "inventory_unavailable",
                         "ready": False,
                         "source": "unselected",
                         "generation": 0,
@@ -299,6 +319,15 @@ class AdminOperationsService(AdminOperations):
                         "unknown_count": 1,
                         "impact": (),
                     }
+                    if blocked:
+                        # No inventory, key or environment read is safe here.
+                        # Null means unobserved, never falsely absent/matching.
+                        result.update(
+                            storage_security="blocked",
+                            environment_present=None,
+                            environment_matches=None,
+                            recovery_action=None,
+                        )
             await self.authorization.validate_generation(
                 grant, operation=AdminOperation.READ_CONFIG
             )
@@ -317,7 +346,7 @@ class AdminOperationsService(AdminOperations):
         encoded_key: str | None = None,
         confirmation: str | None = None,
     ):
-        if action not in {"retry", "restore", "reset"}:
+        if action not in {"retry", "restore", "reset", "adopt-environment"}:
             raise ValueError("invalid master-key action")
         grant = await self.authorization.authorize(
             AdminOperation.UPDATE_CONFIG,
@@ -349,6 +378,8 @@ class AdminOperationsService(AdminOperations):
                 result = await manager.retry(**arguments)
             elif action == "restore":
                 result = await manager.restore(encoded_key, **arguments)
+            elif action == "adopt-environment":
+                result = await manager.adopt_environment(**arguments)
             else:
                 result = await manager.reset(confirmation=confirmation, **arguments)
             await self.authorization.validate_generation(
@@ -356,6 +387,192 @@ class AdminOperationsService(AdminOperations):
             )
             self._require_accepting()
             return result
+
+    @_tracked_admin_request
+    async def storage_migration_plan(self, *, authorization):
+        from ..infrastructure.private_storage_migration import plan_storage_migration
+
+        grant = await self.authorization.authorize(
+            AdminOperation.READ_CONFIG,
+            invocation=None,
+            context=authorization,
+            resources=self.master_key_resources(),
+        )
+        async with self.lifecycle.admission.mutation("admin-storage-migration-plan"):
+            manager = self.managed_keys
+            if manager is None or manager.storage_layout is None:
+                raise ManagedKeyConflict("storage_layout_unavailable")
+            plan = await asyncio.to_thread(
+                plan_storage_migration, manager.storage_layout
+            )
+            await self.authorization.validate_generation(
+                grant, operation=AdminOperation.READ_CONFIG
+            )
+            self._require_accepting()
+            if len(self._storage_migration_plans) >= 8:
+                self._storage_migration_plans.pop(
+                    next(iter(self._storage_migration_plans))
+                )
+            self._storage_migration_plans[plan.operation_id] = plan
+            return plan.safe_projection()
+
+    @_tracked_admin_request
+    async def storage_migration_execute(self, data, *, authorization):
+        grant = await self.authorization.authorize(
+            AdminOperation.UPDATE_CONFIG,
+            invocation=None,
+            context=authorization,
+            resources=self.master_key_resources(),
+        )
+        async with self.lifecycle.admission.mutation("admin-storage-migration-request"):
+            await self.authorization.validate_generation(
+                grant, operation=AdminOperation.UPDATE_CONFIG
+            )
+            self._require_accepting()
+            if data.get("confirmation") != "MIGRATE PRIVATE STORAGE":
+                raise ManagedKeyConflict("confirmation_required")
+            plan = self._storage_migration_plans.get(data.get("operation_id"))
+            if (
+                plan is None
+                or {k: v for k, v in data.items() if k != "confirmation"}
+                != plan.safe_projection()
+            ):
+                raise ManagedKeyConflict("stale_inventory")
+            # This running Host cannot prove unknown pre-protocol consumers
+            # have stopped. Only the supervised offline runner can obtain the
+            # exact source lease accepted by the shared migration executor.
+            raise ManagedKeyConflict("requires_stopped_host")
+
+    def legacy_config_resources(self):
+        resources = {}
+        for policy in self._legacy_config_policies.values():
+            if policy.target_owner in self.extension_runtime.unloaded_owners:
+                continue
+            resources.setdefault(policy.source_target, set()).add(policy.source_field)
+            resources.setdefault(policy.target, set()).add(policy.target_field)
+        return resources
+
+    def _legacy_config_policy(self, policy_id):
+        if type(policy_id) is not str or policy_id not in self._legacy_config_policies:
+            raise AdminAuthorizationDenied
+        policy = self._legacy_config_policies[policy_id]
+        if policy.target_owner in self.extension_runtime.unloaded_owners:
+            raise AdminAuthorizationDenied
+        selection = self._selection(policy.target_owner, self.registry.snapshot())
+        declaration = next(
+            (
+                field
+                for field in self.ordinary_declarations(policy.target)
+                if field.name == policy.target_field
+            ),
+            None,
+        )
+        if (
+            declaration is None
+            or declaration.sensitive
+            or declaration.value_schema != policy.target_schema
+        ):
+            raise AdminAuthorizationDenied
+        return policy, selection, declaration
+
+    async def _legacy_config_grants(self, policy, authorization):
+        source = await self.authorization.authorize(
+            AdminOperation.READ_CONFIG,
+            invocation=None,
+            context=authorization,
+            resources={policy.source_target: {policy.source_field}},
+        )
+        target = await self.authorization.authorize(
+            AdminOperation.UPDATE_CONFIG,
+            invocation=None,
+            context=authorization,
+            resources={policy.target: {policy.target_field}},
+        )
+        return source, target
+
+    @_tracked_admin_request
+    async def legacy_config_plan(self, policy_id, *, authorization):
+        policy, selection, declaration = self._legacy_config_policy(policy_id)
+        source_grant, target_grant = await self._legacy_config_grants(
+            policy, authorization
+        )
+        async with self.lifecycle.admission.mutation("admin-legacy-copy-plan"):
+            source, target = await self._config_repository.current_pair(
+                policy.source_target, policy.target
+            )
+            status, _value = policy.validate(source, target, declaration)
+            await self.authorization.validate_generation(
+                source_grant, operation=AdminOperation.READ_CONFIG
+            )
+            await self.authorization.validate_generation(
+                target_grant, operation=AdminOperation.UPDATE_CONFIG
+            )
+            self._require_same_selection(selection)
+            self._require_accepting()
+            return {
+                "policy_id": policy.policy_id,
+                "status": status,
+                "source_revision": source.revision,
+                "target_revision": target.revision,
+                "migration_pending": status == "migration_pending",
+                "written": False,
+            }
+
+    @_tracked_admin_request
+    async def legacy_config_execute(
+        self, policy_id, *, source_revision, target_revision, confirmed, authorization
+    ):
+        if confirmed is not True:
+            raise ValueError("legacy copy requires confirmation")
+        if any(
+            type(revision) is not int or revision < 0
+            for revision in (source_revision, target_revision)
+        ):
+            raise ValueError("invalid legacy copy revision")
+        policy, selection, declaration = self._legacy_config_policy(policy_id)
+        source_grant, target_grant = await self._legacy_config_grants(
+            policy, authorization
+        )
+        async with self.lifecycle.admission.mutation("admin-legacy-copy-execute"):
+
+            def fence(unit):
+                self._require_accepting()
+                self._require_same_selection(selection)
+                if self._legacy_config_policies.get(policy_id) is not policy:
+                    raise AdminAuthorizationDenied
+                self.authorization.assert_generation_current(
+                    unit, source_grant, AdminOperation.READ_CONFIG
+                )
+                self.authorization.assert_generation_current(
+                    unit, target_grant, AdminOperation.UPDATE_CONFIG
+                )
+
+            (
+                status,
+                revision,
+                written,
+            ) = await self._config_repository.copy_legacy_if_absent(
+                policy,
+                source_revision=source_revision,
+                target_revision=target_revision,
+                declaration=declaration,
+                fence=fence,
+            )
+            await self.authorization.validate_generation(
+                source_grant, operation=AdminOperation.READ_CONFIG
+            )
+            await self.authorization.validate_generation(
+                target_grant, operation=AdminOperation.UPDATE_CONFIG
+            )
+            self._require_same_selection(selection)
+            self._require_accepting()
+            return {
+                "policy_id": policy.policy_id,
+                "status": status,
+                "target_revision": revision,
+                "migration_pending": False,
+                "written": written,
+            }
 
     def _active_credential_policies(self):
         return tuple(
@@ -522,6 +739,8 @@ class AdminOperationsService(AdminOperations):
         )
         self._require_accepting()
         selection = self._selection(target.module_id, self.registry.snapshot())
+        if self.managed_keys is not None:
+            self.managed_keys.assert_storage_writable()
         for name in names:
             policies[name].validate_declaration(selection.manifest)
         updates = tuple(
@@ -714,6 +933,11 @@ class AdminOperationsService(AdminOperations):
             admission=self.lifecycle.admission,
             validate_admin_grant=validate,
             publish_config=lambda *_args, **_kwargs: (),
+            retained_ordinary_fields=tuple(
+                policy.source_field
+                for policy in self._legacy_config_policies.values()
+                if policy.source_target == core_config_target(self.config_principal_id)
+            ),
         )
 
     def stop_accepting(
@@ -1140,15 +1364,16 @@ class AdminOperationsService(AdminOperations):
             snapshot = await self._config_repository.current(
                 core_config_target(self.config_principal_id)
             )
-            value = snapshot.values.get(DEFAULT_REGION.name, DEFAULT_REGION.default)
-            valid = type(value) is str and value in {"cn", "global"}
-            if snapshot.secret_metadata or set(snapshot.values) - {DEFAULT_REGION.name}:
-                raise ValueError("Core config contains undeclared metadata")
+            # Only active generic declarations are projected. Legacy rows
+            # remain stored and are available solely through reviewed policies.
             result = CoreConfigSummary(
                 snapshot.revision,
-                value if valid else None,
-                DEFAULT_REGION.name in snapshot.values,
-                "valid" if valid else "invalid",
+                {
+                    field.name: "configured"
+                    if field.name in snapshot.values
+                    else "unset"
+                    for field in CORE_CONFIG_FIELDS
+                },
             )
             await self.authorization.validate_generation(
                 grant, operation=AdminOperation.MODULE_SNAPSHOT

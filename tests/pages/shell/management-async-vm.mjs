@@ -1,81 +1,40 @@
-// Actual production bundles in JSDOM; browser verification is a separate layer.
+// Current source boundary scenarios. Historical VM name retained for the test entrypoint.
 import assert from 'node:assert/strict';
-import vm from 'node:vm';
-import {readFile} from 'node:fs/promises';
-import {JSDOM} from '../../../pages/frontend/node_modules/jsdom/lib/api.js';
-import {installAsyncFixture} from '../management/async-fixture.mjs';
-import {root} from './compile.mjs';
-const [surface,scenario]=process.argv.slice(2),shell=surface==='shell';
-const fontScenario=scenario.startsWith('font-');
-const dom=new JSDOM(shell?'<div id="app"></div>':'<div id="management-root"></div>',{pretendToBeVisual:true,url:'http://localhost/'+(shell&&!fontScenario?'#/settings/module/ff14%2Fff14':'#/settings')}),window=dom.window,document=window.document;
-window.Element.prototype.scrollTo=function(){};window.scrollTo=()=>{};window.matchMedia=()=>({matches:false,addEventListener(){},removeEventListener(){}});
-const fixture=installAsyncFixture(window,surface),realm=vm.createContext({window,document,navigator:window.navigator,location:window.location,console,TextEncoder,TextDecoder,AbortController,URL,setTimeout,clearTimeout,setInterval,clearInterval,getComputedStyle:window.getComputedStyle.bind(window),requestAnimationFrame:window.requestAnimationFrame.bind(window),cancelAnimationFrame:window.cancelAnimationFrame.bind(window)});
-for(const name of ['HTMLElement','Element','SVGElement','Node','MutationObserver','Event','MouseEvent','KeyboardEvent','InputEvent'])realm[name]=window[name];
-// Cross-realm DTOs must have the same plain-object prototype as bridge JSON.
-realm.hostBridge=window.AstrBotPluginView;
-vm.runInContext(`const raw=hostBridge;window.AstrBotPluginView={ready:()=>raw.ready().then(v=>JSON.parse(JSON.stringify(v))),onContext:fn=>raw.onContext(v=>fn(JSON.parse(JSON.stringify(v)))),apiGet:(...args)=>raw.apiGet(...args).then(v=>JSON.parse(JSON.stringify(v))),apiPost:(...args)=>raw.apiPost(...args).then(v=>JSON.parse(JSON.stringify(v)),e=>{throw Error(e.message)})};`,realm);
-const sources=new Map([['/runtime.js',await readFile(root+`pages/${surface}/runtime.js`,'utf8')],['/app.js',await readFile(root+`pages/${surface}/app.js`,'utf8')],['/module-loader.js',"export function loadPage(){throw Error('Business loading forbidden in fixture')} "]]),cache=new Map();
-function module(path){if(cache.has(path))return cache.get(path);assert.ok(sources.has(path),path);const mod=new vm.SourceTextModule(sources.get(path),{context:realm,identifier:'http://localhost'+path});cache.set(path,mod);return mod;}
-const flush=async()=>{for(let i=0;i<10;i++){await new Promise(resolve=>setTimeout(resolve,0));await cache.get('/runtime.js').namespace.nextTick();}};
-const field=(name='reply_theme',owner='ff14/ff14')=>document.querySelector(`[data-field="${name}"][data-owner="${owner}"]`),input=()=>field().querySelector('[data-role=value]'),mode=()=>field().querySelector('[data-role=mode]').value;
-const save=()=>document.querySelector(`section[data-owner="${fontScenario?'game_link/core':'ff14/ff14'}"] [data-action=save]`),refresh=()=>document.querySelector((shell?'#settings-container ':'')+'#refresh'),action=name=>document.querySelector(`[data-action="${name}"]`);
-const edit=(node,value,event='input')=>{assert.ok(node);node.value=value;node.dispatchEvent(new window.Event(event,{bubbles:true}));},click=node=>{assert.ok(node);node.click();};
-const writes=()=>fixture.calls.filter(c=>c.endpoint==='admin/update');
-function secrets(){return [...document.querySelectorAll('[data-role=client_id],[data-role=client_secret]')];}
-async function draftSecrets(){for(const card of document.querySelectorAll('[data-credential]')){edit(card.querySelector('select'),'replace','change');for(const node of card.querySelectorAll('[data-role=client_id],[data-role=client_secret]'))edit(node,'synthetic-test-pair');for(const node of card.querySelectorAll('[data-action=reveal]'))click(node);}edit(field('default_region','game_link/core').querySelector('[data-role=value]'),'1');await flush();assert.ok(secrets().every(n=>n.value&&n.type==='text'));}
+import {consumer,flush} from '../management/module-consumer-fixture.mjs';
+const [, ,surface,scenario]=process.argv;
+const h=await consumer();
 try{
- const app=module('/app.js');await app.link((specifier,ref)=>module(new URL(specifier,ref.identifier).pathname));await app.evaluate();await flush();assert.ok(input());
- if(scenario.startsWith('after-failure-')){
-  const conflict=scenario==='after-failure-conflict',denied=scenario==='after-failure-denied',unchanged=scenario==='after-failure-unchanged';
-  edit(input(),'2','change');
-  if(conflict)fixture.failNext('admin/update','revision_conflict');
-  else fixture.failNext('admin/read',denied?'admin_authorization_denied':'fixture_network_failure');
-  click(save());await flush();assert.equal(writes().length,1);assert.equal(save().getAttribute('aria-disabled'),'true');
-  if(!unchanged){
-   if(scenario==='after-failure-default')click(field().querySelector('[data-action=default]'));else edit(input(),'0','change');
-   await flush();assert.equal(input().value,'0');assert.equal(mode(),'clear','a failed verification must not make the old inherited baseline authoritative');
-  }
-  // A second failed read must not consume the uncertainty or newer draft.
-  fixture.failNext('admin/read','fixture_network_failure');click(refresh());await flush();assert.equal(save().getAttribute('aria-disabled'),'true');assert.equal(input().value,unchanged?'2':'0');
-  click(refresh());await flush();assert.equal(input().value,unchanged?'2':'0');assert.equal(save().getAttribute('aria-disabled'),'false');
-  if(unchanged){assert.equal(mode(),'replace');click(document.querySelector('section[data-owner="ff14/ff14"] [data-action=discard]'));await flush();assert.equal(mode(),'keep');assert.equal(input().value,'2');}
-  else{
-   assert.equal(mode(),'clear');
-   if(scenario==='after-failure-owner'){
-    const other=field('reply_theme','example/demo');assert.equal(other.querySelector('[data-role=value]').value,'3');assert.equal(other.querySelector('[data-role=mode]').value,'keep');
-   }
-   click(save());await flush();assert.deepEqual(writes().at(-1).body,{module_id:'ff14/ff14',expected_revision:conflict?7:8,updates:[{field:'reply_theme',mode:'clear'}]});assert.equal(input().value,'0');assert.equal(mode(),'keep');
-   // Once verified, inherited absence is again a no-op, not a permanent clear.
-   edit(input(),'0','change');await flush();assert.equal(mode(),'keep');assert.equal(writes().length,2);
-  }
- }else if(['inherit','default','unchanged','conflict','read-failure'].includes(scenario)){
-  edit(input(),'2','change');if(scenario==='conflict')fixture.failNext('admin/update','revision_conflict');fixture.hold('admin/update');click(save());await flush();assert.equal(writes().length,1);
-  if(scenario!=='unchanged'){if(scenario==='default')click(field().querySelector('[data-action=default]'));else edit(input(),'0','change');}
-  if(scenario==='read-failure')fixture.failNext('admin/read','fixture_network_failure');fixture.release('admin/update');await flush();
-  assert.equal(input().value,scenario==='unchanged'?'2':'0','late readback must preserve post-submit inheritance/default');
-  if(scenario==='unchanged')assert.equal(mode(),'keep');
-  else if(scenario==='conflict'||scenario==='read-failure'){
-   assert.equal(save().getAttribute('aria-disabled'),'true');click(refresh());await flush();assert.equal(input().value,'0');
-   click(document.querySelector('section[data-owner="ff14/ff14"] [data-action=discard]'));await flush();assert.equal(mode(),'keep');assert.equal(input().value,scenario==='conflict'?'0':'2');
-  }else{assert.equal(mode(),'clear');click(save());await flush();assert.deepEqual(writes().at(-1).body,{module_id:'ff14/ff14',expected_revision:8,updates:[{field:'reply_theme',mode:'clear'}]});assert.equal(input().value,'0');assert.equal(mode(),'keep');}
+ if(['after-failure-inherit','after-failure-default','after-failure-unchanged'].includes(scenario)){
+  h.controller.edit('reply_theme','one');h.state.hold='admin/module-config-save';const pending=h.controller.save();await flush();h.state.failure='admin/module-config-save';h.state.error=Error('lost-write-receipt');h.release();await pending;
+  // The server may have committed even though the caller received no receipt.
+  h.state.fields.reply_theme={value:'one',state:'valid',present:true,source:'sqlite'};h.state.revision++;
+  if(!scenario.endsWith('unchanged')){h.controller.edit('reply_theme','');assert.equal(h.controller.state.draft.reply_theme,'');assert.equal(h.controller.state.dirty,true,'unknown write keeps explicit inherited/default intent even against old absence');}
+  const count=h.writes().length;await h.controller.save();assert.equal(h.writes().length,count);
+  h.state.failure='';h.state.hold='';await h.controller.load();assert.equal(h.controller.state.draft.reply_theme,scenario.endsWith('unchanged')?'one':'');
+  if(!scenario.endsWith('unchanged')){await h.controller.save();assert.equal(h.writes().at(-1).body.values.reply_theme,null);}
+ }else if(scenario.startsWith('font-')){
+  h.editPair();h.controller.edit('reply_theme','one');
+  if(scenario==='font-network'){h.state.failure='admin/module-config-current';h.state.error=Error('network');await h.controller.load();assert.equal(h.controller.state.draft.reply_theme,'one');assert.equal(h.writes().length,0);}
+  else if(scenario==='font-late'){
+   h.state.hold='admin/module-config-current';const read=h.controller.load();await flush();h.dispose();h.release();await read;assert.equal(h.writes().length,0);assert.ok(Object.values(h.controller.state.pairs).every(pair=>pair.client_secret===''));
+  }else{h.invalidate();await h.controller.save();assert.ok(Object.values(h.controller.state.pairs).every(pair=>pair.client_secret===''));assert.equal(h.writes().length,0);}
  }else{
-  await draftSecrets();const old=action('font-refresh');
-  if(scenario==='font-late'){
-   fixture.hold('admin/font-status');fixture.failNext('admin/font-status','admin_authorization_denied');click(old);await flush();fixture.context({session:'async-two'});await flush();await draftSecrets();fixture.release('admin/font-status');await flush();assert.ok(secrets().every(n=>n.value==='synthetic-test-pair'&&n.type==='text'),'obsolete font denial must not clear new owner drafts');
-  }else{
-   if(scenario==='font-fence'){fixture.hold('admin/update');click(save());await flush();}
-   fixture.failNext('admin/font-status',scenario==='font-network'?'fixture_network_failure':'admin_authorization_denied');click(old);await flush();
-   if(scenario==='font-network'){assert.ok(secrets().every(n=>n.value==='synthetic-test-pair'&&n.type==='text'));assert.equal(save().getAttribute('aria-disabled'),'false');}
-   else{
-    assert.ok(secrets().every(n=>n.value===''&&n.type==='password'),'font access loss must erase and mask every owner secret');
-    assert.ok([...document.querySelectorAll('[data-role=credential-mode]')].every(n=>n.value==='keep'&&n.disabled));assert.ok([...document.querySelectorAll('[data-role=credential-clear-confirm]')].every(n=>!n.checked));
-    assert.equal(field('default_region','game_link/core').querySelector('[data-role=value]').value,'1');assert.equal(save().getAttribute('aria-disabled'),'true');assert.match(document.querySelector((shell?'#settings-container ':'')+'#status').textContent,/管理授权/);
-    if(scenario==='font-fence'){fixture.release('admin/update');await flush();assert.equal(save().getAttribute('aria-disabled'),'true');assert.ok(secrets().every(n=>n.value===''));}
-    fixture.failNext('admin/credential-readiness','admin_authorization_denied');click(refresh());await flush();assert.equal(save().getAttribute('aria-disabled'),'true');assert.ok(secrets().every(n=>n.value===''));
-    click(refresh());await flush();assert.equal(save().getAttribute('aria-disabled'),'false');assert.ok(secrets().every(n=>n.value===''));
-   }
+  h.controller.edit('reply_theme','one');h.state.hold='admin/module-config-save';
+  const pending=h.controller.save();await flush();assert.equal(h.writes().length,1);if(scenario.includes('conflict'))h.state.revision++;
+  if(!scenario.includes('unchanged'))h.controller.edit('reply_theme','');
+  if(scenario==='after-failure-owner'){h.controller.update({...h.context,owner:'example/demo'});h.release();await pending;assert.deepEqual(h.controller.state.draft,{});assert.equal(h.controller.state.ready,false);}
+  else if(scenario==='after-failure-denied'){h.invalidate();h.release();await pending;assert.equal(h.controller.state.ready,false);assert.equal(h.writes().length,1);}
+  else{
+   h.release();await pending;
+   if(scenario.includes('conflict'))assert.equal(h.controller.state.ready,false);
+   assert.equal(h.controller.state.draft.reply_theme,scenario.includes('unchanged')?'one':'');
+   // Root repair-2 decision: a rejected CAS cannot verify the old baseline.
+   // Keep a newer explicit clear dirty and forbid resubmission until refresh.
+   if(!scenario.includes('unchanged'))assert.equal(h.controller.state.dirty,true);
+   if(scenario.includes('conflict')){const count=h.writes().length;await h.controller.save();assert.equal(h.writes().length,count);assert.equal(h.controller.state.draft.reply_theme,'');}
+   h.state.hold='';await h.controller.load();assert.equal(h.controller.state.draft.reply_theme,scenario.includes('unchanged')?'one':'');
+   if(!scenario.includes('unchanged')){await h.controller.save();assert.equal(h.writes().at(-1).body.values.reply_theme,null);assert.equal(h.controller.state.dirty,false);}
   }
-  assert.equal(fixture.calls.some(c=>c.endpoint==='admin/credential-update'),false);
  }
- window.dispatchEvent(new window.Event('pagehide'));await flush();console.log(`${surface} ${scenario} passed`);
-}finally{window.dispatchEvent(new window.Event('pagehide'));dom.window.close();}
+ console.log(surface+' '+scenario+' passed');
+}finally{h.dispose();}

@@ -403,10 +403,19 @@ class MarketHostIntegrationTests(unittest.IsolatedAsyncioTestCase):
     ):
         await self.start()
         from tests.modules.ff14.test_query_resolution import _Config
+        from yomihime_game_link_sdk.services import ConfigSnapshot
 
-        config = (
-            _Config()
-        )  # Explicit synthetic composite snapshot, not a Host admin path.
+        captures = []
+
+        class Config(_Config):
+            async def current(self):
+                current = await super().current()
+                snapshot = ConfigSnapshot(current.revision, current.values)
+                captures.append(snapshot)
+                return snapshot
+
+        config = Config()
+        config.core_revision, config.module_revision = 13, 19
         handler = (
             self.runtime.core_runtime.registry.snapshot()
             .module("ff14/ff14")
@@ -417,7 +426,11 @@ class MarketHostIntegrationTests(unittest.IsolatedAsyncioTestCase):
             {"query": "Synthetic Item", "quality": "hq", "intent": "min"}
         )
         choice = candidate["model_facts"]["selection"]
-        config.region, config.core_revision, config.module_revision = "global", 7, 8
+        captured = captures[0]
+        self.assertIsInstance(captured, ConfigSnapshot)
+        self.assertEqual(len(captures), 1)
+        frozen_scope = copy.deepcopy(candidate["model_facts"]["market"]["scope"])
+        config.region, config.core_revision, config.module_revision = "global", 23, 31
         selected = await self.public(
             {
                 "selection": dict(
@@ -434,15 +447,29 @@ class MarketHostIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 facts["core_revision"],
                 facts["module_revision"],
             ),
-            (["China"], 2, 3),
+            (["China"], captured.revision, captured.revision),
         )
+        self.assertEqual(facts["scope"], frozen_scope)
+        self.assertEqual(facts["scope"]["source"], "default")
+        self.assertEqual((facts["quality"], facts["intent"]), ("hq", "min"))
         self.assertEqual(config.calls, 1)
+        self.assertEqual(len(captures), 1)
+        self.assertIs(captures[0], captured)
         fresh = (await self.public({"query": "44091"}))["model_facts"]["market"]
         self.assertEqual(
             (fresh["core_revision"], fresh["module_revision"], len(fresh["coverage"])),
-            (7, 8, 4),
+            (captures[1].revision, captures[1].revision, 4),
         )
+        self.assertEqual(
+            fresh["scope"]["regions"],
+            ["North-America", "Europe", "Japan", "Oceania"],
+        )
+        self.assertEqual(fresh["scope"]["source"], "default")
         self.assertEqual(config.calls, 2)
+        self.assertEqual(len(captures), 2)
+        self.assertIs(captures[0], captured)
+        self.assertIsNot(captures[1], captured)
+        self.assertNotEqual(captures[1].revision, captured.revision)
 
     async def test_handler_deadline_includes_config_and_no_late_market_request(self):
         await self.start()
@@ -548,6 +575,7 @@ class MarketHostIntegrationTests(unittest.IsolatedAsyncioTestCase):
         from ygl_test_subject.services.configuration.defaults import (
             CORE_CONFIG_FIELDS,
             CORE_MODULE_ID,
+            IMAGE_THEME,
             core_config_target,
         )
 
@@ -555,7 +583,10 @@ class MarketHostIntegrationTests(unittest.IsolatedAsyncioTestCase):
         from yomihime_game_link_sdk.declarations import ConfigUpdateMode
 
         target = core_config_target(PLUGIN_NAME)
-        await core.admin_credential_repository.bootstrap(_digest(token_urlsafe(32)))
+        credential_state = await core.admin_credential_repository.bootstrap(
+            _digest(token_urlsafe(32))
+        )
+        self.assertEqual(credential_state.status.value, "ACTIVE")
         before = await core.config_repository.current(target)
         for forged in (
             SimpleNamespace(
@@ -582,9 +613,9 @@ class MarketHostIntegrationTests(unittest.IsolatedAsyncioTestCase):
                         before.revision,
                         (
                             ConfigFieldUpdate(
-                                "default_region",
+                                IMAGE_THEME.name,
                                 ConfigUpdateMode.REPLACE,
-                                value="global",
+                                value=IMAGE_THEME.default,
                             ),
                         ),
                         CORE_CONFIG_FIELDS,

@@ -11,7 +11,7 @@ from dataclasses import replace
 from pathlib import Path
 from urllib.parse import urljoin, urlsplit
 
-from ygl_test_subject.adapters.astrbot.bundled import install_bundled_ff14
+from ygl_test_subject.adapters.astrbot.bundled import install_bundled_package
 from ygl_test_subject.extensions.discovery import discover_packages
 from ygl_test_subject.extensions.page_resources import capture_page_resources
 
@@ -47,10 +47,11 @@ class ModulePageAssetTests(unittest.TestCase):
             pages = asyncio.run(service.discover_plugin_pages(None))
             self.assertEqual(
                 [page.name for page in pages],
-                ["00-game-link", "management", "shell"],
+                ["00-game-link"],
             )
-            self.assertFalse((staged / "pages/ff14").exists())
-        for page in ("00-game-link", "shell", "management"):
+            for retired in ("ff14", "shell", "management"):
+                self.assertFalse((staged / "pages" / retired).exists())
+        for page in ("00-game-link",):
             root = ROOT / "pages" / page
             html = assets.get(
                 f"pages/{page}/index.html", (root / "index.html").read_bytes()
@@ -70,13 +71,10 @@ class ModulePageAssetTests(unittest.TestCase):
                 "THIRD_PARTY_NOTICES.txt",
                 *[
                     "licenses/" + p.name
-                    for p in (ROOT / "pages/shell/licenses").iterdir()
+                    for p in (ROOT / "pages/00-game-link/licenses").iterdir()
                 ],
             ]:
-                self.assertEqual(
-                    (root / name).read_bytes(),
-                    (ROOT / "pages/shell" / name).read_bytes(),
-                )
+                self.assertGreater(len((root / name).read_bytes()), 0, name)
             for name in ("app.js", "styles.css", "runtime.js"):
                 self.assertTrue(
                     urlsplit(
@@ -92,13 +90,13 @@ class ModulePageAssetTests(unittest.TestCase):
         service, _ = page_asset_contract()
         assets = projected_page_assets(ROOT)
         base = service.build_plugin_page_view_content_path(
-            "fixture-plugin", "shell", "offline-proof"
+            "fixture-plugin", "00-game-link", "offline-proof"
         )
         prefix = base.rsplit("/", 1)[0] + "/"
-        html = assets["pages/shell/index.html"].decode()
+        html = assets["pages/00-game-link/index.html"].decode()
         self.assertIn('<template id="module-style-assets"><link ', html)
         for path in re.findall(r'data-resource="([^"]+)"', html):
-            self.assertIn("pages/shell/" + path, assets)
+            self.assertIn("pages/00-game-link/" + path, assets)
             self.assertTrue(
                 urlsplit(urljoin("https://host" + base, "./" + path)).path.startswith(
                     prefix
@@ -110,9 +108,9 @@ class ModulePageAssetTests(unittest.TestCase):
             "module-loader.js",
             "module-assets/ff14/ff14/pages/dist/entry.js",
         ):
-            source = assets.get("pages/shell/" + path)
+            source = assets.get("pages/00-game-link/" + path)
             if source is None:
-                source = (ROOT / "pages/shell" / path).read_bytes()
+                source = (ROOT / "pages/00-game-link" / path).read_bytes()
             # The host no longer rewrites JavaScript/CSS. Native browser URL
             # resolution carries the view's path token through relative imports.
             for reference in re.findall(
@@ -125,8 +123,8 @@ class ModulePageAssetTests(unittest.TestCase):
                 self.assertTrue(resolved.startswith(prefix), reference)
                 relative = resolved.removeprefix(prefix)
                 self.assertTrue(
-                    "pages/shell/" + relative in assets
-                    or (ROOT / "pages/shell" / relative).is_file(),
+                    "pages/00-game-link/" + relative in assets
+                    or (ROOT / "pages/00-game-link" / relative).is_file(),
                     relative,
                 )
                 observed.add(relative)
@@ -145,21 +143,21 @@ class ModulePageAssetTests(unittest.TestCase):
         # Use the published package inputs only, never authoring/node_modules.
         import shutil
 
-        from scripts.build_dashboard_zip import _ff14_bundle_files
+        from scripts.build_dashboard_zip import _reviewed_bundle_files
 
         with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
             root = Path(temporary)
             plugin = root / "plugin"
             package_root = plugin / "modules/ff14"
             package_root.mkdir(parents=True)
-            for source in _ff14_bundle_files(ROOT):
-                relative = source.relative_to(ROOT / "modules/ff14")
-                target = package_root / relative
+            for source in _reviewed_bundle_files(ROOT):
+                relative = source.relative_to(ROOT)
+                target = plugin / relative
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(source, target)
             data = root / "data"
             data.mkdir()
-            installed = install_bundled_ff14(plugin, data)
+            installed = install_bundled_package(plugin, data)
             self.assertTrue(installed.trusted, installed.reason)
             package = discover_packages(installed.extension_root)[0]
             resources = capture_page_resources(package._provenance, package.manifest)
@@ -179,5 +177,5 @@ class ModulePageAssetTests(unittest.TestCase):
                 capture_page_resources(package._provenance, wrong)
             first = next(iter(resources))
             (installed.package_dir / first).write_bytes(b"modified")
-            repeated = install_bundled_ff14(plugin, data)
+            repeated = install_bundled_package(plugin, data)
             self.assertFalse(repeated.trusted)

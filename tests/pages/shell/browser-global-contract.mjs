@@ -1,3 +1,4 @@
+import {sourceBundle} from './source-build.mjs';
 // Production ESM runs in a browser-like VM realm with no Node globals.
 // This is an offline build contract, not browser/Host acceptance.
 import assert from 'node:assert/strict';
@@ -21,11 +22,11 @@ const realm=vm.createContext({window,document:window.document,navigator:window.n
   record:(kind,endpoint,body)=>calls.push({kind,endpoint,body})});
 for(const key of ['HTMLElement','Element','SVGElement','Node','MutationObserver','Event','MouseEvent','KeyboardEvent','InputEvent']) realm[key]=window[key];
 assert.equal(vm.runInContext('[typeof process, typeof global, typeof require, typeof Buffer].join(",")',realm),'undefined,undefined,undefined,undefined');
-vm.runInContext(`window.AstrBotPluginView={ready:()=>Promise.resolve({pluginName:'astrbot_plugin_yomihime_game_link',pageName:'shell'}),onContext(){return()=>{}},apiGet(endpoint){record('get',endpoint);return Promise.resolve(${JSON.stringify(data)})},apiPost(endpoint,body){record('post',endpoint,body);return Promise.resolve(${JSON.stringify(success)})}}`,realm);
+vm.runInContext(`window.AstrBotPluginView={ready:()=>Promise.resolve({pluginName:'astrbot_plugin_yomihime_game_link',pageName:'00-game-link'}),onContext(){return()=>{}},apiGet(endpoint){record('get',endpoint);return Promise.resolve(${JSON.stringify(data)})},apiPost(endpoint,body){record('post',endpoint,body);if(endpoint==='admin/module-page-session')return Promise.resolve({page_session:'synthetic-proof',expires_at:Date.now()/1000+30});if(endpoint==='admin/module-page-session-close')return Promise.resolve({closed:true});return Promise.resolve(${JSON.stringify(success)})}}`,realm);
 for(const path of data.modules[0].pages[0].styles){const link=window.document.createElement('link');link.rel='stylesheet';link.dataset.resource=path;link.href='./'+path;window.document.getElementById('module-style-assets').content.append(link);}
 const sources=new Map([
-  ['/runtime.js',await readFile(root+'pages/shell/runtime.js','utf8')],
-  ['/app.js',await readFile(root+'pages/shell/app.js','utf8')],
+  ['/runtime.js',await readFile(root+'pages/00-game-link/runtime.js','utf8')],
+  ['/app.js',await readFile(root+'pages/00-game-link/app.js','utf8')],
   ['/module-assets/ff14/ff14/pages/dist/entry.js',await readFile(root+'modules/ff14/pages/dist/entry.js','utf8')],
   ['/module-loader.js',`export function loadPage(entry){if(entry==='module-assets/ff14/ff14/pages/dist/entry.js')return import('./module-assets/ff14/ff14/pages/dist/entry.js');throw Error('unknown_page')}`],
 ]);
@@ -48,7 +49,7 @@ try{
   input.value='44091';input.dispatchEvent(new window.InputEvent('input',{bubbles:true}));await runtime.nextTick();
   window.document.querySelector('form').dispatchEvent(new window.Event('submit',{bubbles:true,cancelable:true}));
   for(let i=0;i<12;i++){await Promise.resolve();await runtime.nextTick();}
-  assert.equal(calls.filter(c=>c.kind==='post'&&c.endpoint==='invoke').length,1);assert.ok(window.document.querySelector('.ff14-result'));assert.ok(calls.filter(c=>c.kind==='post').every(c=>['invoke','admin/catalog','admin/modules','admin/read','admin/master-key-status','admin/credential-catalog','admin/credential-status','admin/credential-readiness'].includes(c.endpoint)));
+  assert.equal(calls.filter(c=>c.kind==='post'&&c.endpoint==='invoke').length,1);assert.ok(window.document.querySelector('.ff14-result'));assert.ok(calls.filter(c=>c.kind==='post'&&c.endpoint==='invoke').every(c=>['invoke','admin/catalog','admin/modules','admin/read','admin/master-key-status','admin/credential-catalog','admin/credential-status','admin/credential-readiness'].includes(c.endpoint)));
   window.dispatchEvent(new window.Event('pagehide'));await runtime.nextTick();
   console.log('production shell/runtime/module: cold evaluation, mount, query, disposal without Node globals passed');
 }finally{dom.window.close();}

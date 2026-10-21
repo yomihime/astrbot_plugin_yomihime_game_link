@@ -77,14 +77,36 @@ class ManagedKeyManager:
         *,
         environment: EnvironmentKeyProvider | None = None,
         files: ManagedKeyFiles | None = None,
+        storage_security: str = "legacy_review_required",
+        storage_write_guard: Callable[[], None] | None = None,
+        storage_read_guard: Callable[[], None] | None = None,
+        storage_layout=None,
     ) -> None:
         self.database = database
         self.data_root = Path(data_root)
         self.secret_root = Path(secret_root)
         self.environment = environment or EnvironmentKeyProvider("YGL_SECRET_KEY")
         self.files = files or ManagedKeyFiles(self.data_root)
+        self.storage_security = storage_security
+        self.storage_write_guard = storage_write_guard
+        self.storage_read_guard = storage_read_guard
+        self.storage_layout = storage_layout
         self._generation: int | None = None
         self._revision: int | None = None
+
+    def assert_storage_writable(self) -> None:
+        if self.storage_write_guard is not None:
+            try:
+                self.storage_write_guard()
+            except Exception:
+                raise ManagedKeyConflict("unsafe_storage_layout") from None
+
+    def assert_storage_readable(self) -> None:
+        if self.storage_read_guard is not None:
+            try:
+                self.storage_read_guard()
+            except Exception:
+                raise ManagedKeyConflict("unsafe_storage_layout") from None
 
     @staticmethod
     def _selection(unit: SQLiteUnitOfWork):
@@ -135,6 +157,7 @@ class ManagedKeyManager:
             raise ManagedKeyConflict("inventory_unknown") from None
 
     def _inventory(self, unit: SQLiteUnitOfWork) -> dict:
+        self.assert_storage_readable()
         receipts = unit.execute(
             "SELECT secret_token,principal_id,module_id,field,operation_id,state,"
             "payload_name,key_generation "
@@ -394,6 +417,24 @@ class ManagedKeyManager:
             "inventory_digest": inventory["digest"],
             "unknown_count": inventory["unknown"],
             "impact": inventory["impact"],
+            "storage_security": self.storage_security,
+            "environment_present": present,
+            "environment_matches": bool(
+                env_key is not None
+                and row["key_check"] is not None
+                and hmac.compare_digest(_check(env_key), row["key_check"])
+            ),
+            "recovery_action": (
+                "adopt_environment"
+                if pending is not None and pending["purpose"] == "environment_adoption"
+                else "resume_migration"
+                if pending is not None and pending["purpose"] == "storage_migration"
+                else "retry"
+                if pending is not None and pending["kind"] == "initialize"
+                else "restore"
+                if not state == "ready"
+                else None
+            ),
         }
 
     async def status(self) -> dict:
@@ -401,9 +442,10 @@ class ManagedKeyManager:
 
     def get_key(self) -> bytes:
         """Read current authority on every use so other processes cannot keep an old key."""
-        if self._generation is None or self._revision is None:
-            raise SecretKeyUnavailable()
         try:
+            self.assert_storage_readable()
+            if self._generation is None or self._revision is None:
+                raise SecretKeyUnavailable()
             connection = self.database.connect()
             try:
                 row = connection.execute(
@@ -493,7 +535,7 @@ class ManagedKeyManager:
         unit.execute(
             "INSERT INTO managed_master_key_operations "
             "(operation_id,kind,state,candidate_key_id,expected_generation,"
-            "expected_revision,inventory_digest) VALUES(?,?,'preparing',?,?,?,?)",
+            "expected_revision,inventory_digest,purpose) VALUES(?,?,'preparing',?,?,?,?,?)",
             (
                 operation_id,
                 pending["kind"],
@@ -501,6 +543,7 @@ class ManagedKeyManager:
                 pending["expected_generation"],
                 pending["expected_revision"],
                 refreshed["digest"],
+                pending["purpose"],
             ),
         )
         return self._pending(unit), refreshed
@@ -556,6 +599,8 @@ class ManagedKeyManager:
                 return "blocked", status
             pending = self._pending(unit)
             if pending is not None:
+                if pending["purpose"] != "legacy":
+                    return "blocked", status
                 if (
                     pending["kind"] == "initialize"
                     and row["source"] == "unselected"
@@ -622,6 +667,7 @@ class ManagedKeyManager:
             return
 
         def activate(unit: SQLiteUnitOfWork) -> None:
+            self.assert_storage_writable()
             if fence is not None:
                 fence(unit)
             row = self._selection(unit)
@@ -674,6 +720,7 @@ class ManagedKeyManager:
         inventory_digest: str,
         fence: Callable[[SQLiteUnitOfWork], None] | None = None,
     ) -> dict:
+        self.assert_storage_writable()
         key = _decode_key(encoded_key)
 
         def prepare(unit: SQLiteUnitOfWork):
@@ -695,6 +742,8 @@ class ManagedKeyManager:
                 raise ManagedKeyConflict("key_conflict")
             pending = self._pending(unit)
             if pending is not None:
+                if pending["purpose"] != "legacy":
+                    raise ManagedKeyConflict("operation_requires_confirmation")
                 if (
                     pending["kind"],
                     pending["expected_revision"],
@@ -821,6 +870,142 @@ class ManagedKeyManager:
             self._generation, self._revision = status["generation"], status["revision"]
         return status
 
+    async def adopt_environment(
+        self,
+        *,
+        expected_revision: int,
+        expected_generation: int,
+        inventory_digest: str,
+        fence: Callable[[SQLiteUnitOfWork], None] | None = None,
+    ) -> dict:
+        """Explicitly persist the selected environment key, without rotating it.
+
+        The durable operation purpose makes a restart distinguish adoption from
+        a restore or a storage migration. Removing the environment variable is
+        safe only after the immutable candidate and selector are committed.
+        """
+
+        self.assert_storage_writable()
+
+        def prepare(unit: SQLiteUnitOfWork):
+            if fence is not None:
+                fence(unit)
+            status = self._status_in(unit)
+            self._expect(
+                status, expected_revision, expected_generation, inventory_digest
+            )
+            row, pending = self._selection(unit), self._pending(unit)
+            if status["unknown_count"]:
+                raise ManagedKeyConflict("inventory_unknown")
+            if row["source"] == "managed" and pending is None:
+                if not status["ready"]:
+                    raise ManagedKeyConflict(status["reason_code"])
+                return None
+            if row["source"] != "environment":
+                raise ManagedKeyConflict("environment_key_missing")
+            present, key, error = self._environment_key()
+            if not present or key is None:
+                raise ManagedKeyConflict(
+                    "environment_key_missing"
+                    if error is None
+                    else "environment_key_conflict"
+                )
+            if error is not None or not hmac.compare_digest(
+                _check(key), row["key_check"]
+            ):
+                raise ManagedKeyConflict("environment_key_conflict")
+            inventory = self._inventory(unit)
+            self._decrypt_all(key, inventory)
+            if pending is not None:
+                if pending["purpose"] != "environment_adoption" or (
+                    pending["expected_generation"],
+                    pending["expected_revision"],
+                    pending["inventory_digest"],
+                ) != (expected_generation, expected_revision, inventory_digest):
+                    raise ManagedKeyConflict("operation_incomplete")
+                return str(pending["operation_id"])
+            operation_id = secrets.token_hex(16)
+            unit.execute(
+                "INSERT INTO managed_master_key_operations "
+                "(operation_id,kind,state,candidate_key_id,expected_generation,expected_revision,inventory_digest,purpose) "
+                "VALUES(?,'restore','preparing',?,?,?,?,'environment_adoption')",
+                (
+                    operation_id,
+                    secrets.token_hex(16),
+                    expected_generation,
+                    expected_revision,
+                    inventory_digest,
+                ),
+            )
+            return operation_id
+
+        operation_id = await self.database.executor.run_transaction(
+            prepare, begin_mode="IMMEDIATE"
+        )
+        if operation_id is not None:
+            operation_id = await self._prepare_candidate(operation_id, fence=fence)
+
+            def activate(unit: SQLiteUnitOfWork):
+                if fence is not None:
+                    fence(unit)
+                row, pending = self._selection(unit), self._pending(unit)
+                if (
+                    pending is None
+                    or pending["operation_id"] != operation_id
+                    or pending["purpose"] != "environment_adoption"
+                ):
+                    raise ManagedKeyConflict("operation_changed")
+                inventory = self._inventory(unit)
+                if (row["generation"], row["revision"], inventory["digest"]) != (
+                    expected_generation,
+                    expected_revision,
+                    pending["inventory_digest"],
+                ) or inventory["unknown"]:
+                    raise ManagedKeyConflict("stale_inventory")
+                present, key, error = self._environment_key()
+                if not present or key is None:
+                    raise ManagedKeyConflict(
+                        "environment_key_missing"
+                        if error is None
+                        else "environment_key_conflict"
+                    )
+                if error is not None or not hmac.compare_digest(
+                    _check(key), row["key_check"]
+                ):
+                    raise ManagedKeyConflict("environment_key_conflict")
+                self._decrypt_all(key, inventory)
+                key_id = str(pending["candidate_key_id"])
+                if f"master-{key_id}.key" in inventory["key_names"]:
+                    if not hmac.compare_digest(self.files.confirm_durable(key_id), key):
+                        raise ManagedKeyConflict("key_conflict")
+                else:
+                    self.files.create(key_id, key)
+                    if not hmac.compare_digest(self.files.confirm_durable(key_id), key):
+                        raise ManagedKeyConflict("key_conflict")
+                # Recheck the environment after filesystem I/O as well.
+                current = self._environment_key()
+                if not current[0] or current[2] is not None or current[1] != key:
+                    raise ManagedKeyConflict("environment_key_conflict")
+                if fence is not None:
+                    fence(unit)
+                unit.execute(
+                    "UPDATE managed_master_key SET source='managed',revision=revision+1,key_id=? "
+                    "WHERE singleton=1 AND source='environment' AND generation=? AND revision=?",
+                    (key_id, expected_generation, expected_revision),
+                )
+                unit.execute(
+                    "UPDATE managed_master_key_operations SET state='committed' WHERE operation_id=? AND state='preparing'",
+                    (operation_id,),
+                )
+
+            await self.database.executor.run_transaction(
+                activate, begin_mode="IMMEDIATE"
+            )
+        status = await self.status()
+        if status["ready"]:
+            self._generation, self._revision = status["generation"], status["revision"]
+        return status
+
     async def retry(
         self,
         *,
@@ -839,7 +1024,7 @@ class ManagedKeyManager:
             pending = self._pending(unit)
             if pending is None:
                 return None
-            if pending["kind"] != "initialize":
+            if pending["kind"] != "initialize" or pending["purpose"] != "legacy":
                 raise ManagedKeyConflict("operation_requires_confirmation")
             return str(pending["operation_id"])
 
@@ -866,6 +1051,8 @@ class ManagedKeyManager:
     ) -> dict:
         if confirmation != _RESET_CONFIRMATION:
             raise ManagedKeyConflict("confirmation_required")
+
+        self.assert_storage_writable()
 
         def prepare(unit: SQLiteUnitOfWork):
             if fence is not None:

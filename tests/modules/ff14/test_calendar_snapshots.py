@@ -309,3 +309,101 @@ class CalendarSnapshotsTests(unittest.IsolatedAsyncioTestCase):
         self.setup_services([])
         self.assertIs((await self.query_cn(refresh="true")).status, ResultStatus.ERROR)
         self.assertEqual(self.http.requests, [])
+
+
+class CalendarRealDiagnosticPortTests(unittest.IsolatedAsyncioTestCase):
+    setup_services = CalendarSnapshotsTests.setup_services
+    sync = CalendarSnapshotsTests.sync
+    query_cn = CalendarSnapshotsTests.query_cn
+
+    async def test_transport_failure_without_status_preserves_committed_fallback(self):
+        from types import SimpleNamespace
+
+        from ygl_test_subject.core.contracts.validation_boundary import (
+            validate_contract,
+        )
+        from ygl_test_subject.services.diagnostics import (
+            BoundDiagnostics,
+            DiagnosticPolicy,
+            DiagnosticStore,
+        )
+
+        from modules.ff14.features.calendar_diagnostics import DECLARATION
+
+        self.setup_services([SourceHttpError("transport_failed"), feed("Fallback")])
+
+        async def current():
+            pass
+
+        sink = DiagnosticStore()
+        view = SimpleNamespace(
+            invocation_id="d" * 32, module_id="ff14/ff14", module_epoch=1
+        )
+        self.scopes.bound.diagnostics = BoundDiagnostics(
+            view,
+            (validate_contract(DECLARATION),),
+            DiagnosticPolicy(frozenset({"CalendarSync"})),
+            sink,
+            current,
+        )
+        await self.sync()
+        collection = await self.records.collection("calendar_snapshots")
+        primary = calendar_source_spec("cn", "ff14_calendar_primary")
+        row = await collection.get(source_key("cn", primary))
+        self.assertEqual(row.value["last_status"], "failed")
+        self.assertEqual(len(self.http.requests), 2)
+        result = await self.query_cn()
+        self.assertIn("Fallback", repr(result.document))
+        self.assertEqual(len(self.http.requests), 2)
+        events = sink.snapshot()
+        self.assertTrue(
+            any(event["payload"].get("code") == "transport_failed" for event in events)
+        )
+
+    async def test_real_diagnostic_control_failure_stops_without_fallback(self):
+        from types import SimpleNamespace
+
+        from ygl_test_subject.core.contracts.validation_boundary import (
+            validate_contract,
+        )
+        from ygl_test_subject.services.diagnostics import (
+            BoundDiagnostics,
+            DiagnosticPolicy,
+            DiagnosticStore,
+        )
+
+        from modules.ff14.features.calendar_diagnostics import DECLARATION
+        from yomihime_game_link_sdk import InvalidInvocation
+
+        for failure in (InvalidInvocation(), asyncio.CancelledError()):
+            with self.subTest(control=type(failure).__name__):
+                self.setup_services(
+                    [SourceHttpError("transport_failed"), feed("Must not fetch")]
+                )
+                active = True
+
+                async def current():
+                    if not active:
+                        raise failure
+
+                original = self.http.fetch
+
+                async def revoked(request):
+                    nonlocal active
+                    active = False
+                    return await original(request)
+
+                self.http.fetch = revoked
+                port = BoundDiagnostics(
+                    SimpleNamespace(
+                        invocation_id="e" * 32, module_id="ff14/ff14", module_epoch=1
+                    ),
+                    (validate_contract(DECLARATION),),
+                    DiagnosticPolicy(frozenset({"CalendarSync"})),
+                    DiagnosticStore(),
+                    current,
+                )
+                self.scopes.bound.diagnostics = port
+                with self.assertRaises(type(failure)):
+                    await self.sync()
+                self.assertEqual(len(self.http.requests), 1)

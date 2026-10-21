@@ -12,9 +12,9 @@ from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[2]
 CLIS = ("scripts/configure_source_credentials.py", "scripts/admin_credentials.py")
-REVIEWED_RELEASE = "0.1.0a9"
+REVIEWED_RELEASE = "0.1.0a11"
 REVIEWED_WHEEL_SHA256 = (
-    "4d8d71c4ab04805c3a1edbd9e194b5228e66c9e0290caf01daae9374d65a74e5"
+    "466f10824c4a40a9046a982db06cdcf0d3b193c87b393e8868e7b7f7c95e1b24"
 )
 
 
@@ -138,7 +138,7 @@ class SDKReleasePinTests(unittest.TestCase):
                 else build_sdk_wheel(Path(temporary) / "build", ROOT)
             )
             self.assertEqual(
-                wheel.name, "yomihime_game_link_sdk-0.1.0a9-py3-none-any.whl"
+                wheel.name, "yomihime_game_link_sdk-0.1.0a11-py3-none-any.whl"
             )
             self.assertEqual(
                 hashlib.sha256(wheel.read_bytes()).hexdigest(), REVIEWED_WHEEL_SHA256

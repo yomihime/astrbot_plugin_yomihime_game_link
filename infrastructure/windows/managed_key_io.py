@@ -137,7 +137,7 @@ def _private_descriptor(native: _SecurityNative):
 
 
 @contextmanager
-def _pin(path: Path, data_root: Path):
+def _pin(path: Path, data_root: Path, *, private_data: bool = True):
     """Hold no-delete handles for each ancestor, validating ACL and FileID."""
     handles: list[fs._Handle] = []
     proofs: list[tuple[fs._Handle, int, str, str]] = []
@@ -166,7 +166,11 @@ def _pin(path: Path, data_root: Path):
         for index, component in enumerate(spec.components):
             fs._validate_component(component, maximum)
             expected += "\\" + component
-            role = "data" if index >= len(data.components) - 1 else "ancestor"
+            role = (
+                "data"
+                if private_data and index >= len(data.components) - 1
+                else "ancestor"
+            )
             value = fs._handle_value(
                 native.CreateFileW(
                     expected,

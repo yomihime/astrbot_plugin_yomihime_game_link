@@ -688,10 +688,13 @@ class CalendarRealCoreTimeout15Tests(unittest.IsolatedAsyncioTestCase):
         original = integration_fixture.CoreRuntime
 
         def create(**kwargs):
+            self.assertEqual(
+                dict(kwargs["collector_timeouts"]),
+                {("ff14/ff14", "ff14.calendar.sync"): 45},
+            )
             return original(
                 **kwargs,
                 capability_timeouts={("ff14/ff14", "ff14.calendar.query"): 45},
-                collector_timeouts={("ff14/ff14", "ff14.calendar.sync"): 45},
                 monotonic_clock=lambda: self.mono[0],
             )
 

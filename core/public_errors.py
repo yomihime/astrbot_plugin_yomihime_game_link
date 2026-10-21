@@ -9,6 +9,7 @@ from inspect import iscoroutinefunction
 
 from yomihime_game_link_sdk.errors import (
     AccessDenied,
+    CacheUnavailable,
     InvalidInvocation,
     OperationTimeout,
     ParameterError,
@@ -35,6 +36,8 @@ def public_failure(error, phase="service"):
         return InvalidInvocation()
     if isinstance(error, ParameterError):
         return ParameterError("parameters are invalid")
+    if isinstance(error, CacheUnavailable):
+        return CacheUnavailable()
     if isinstance(error, ServiceUnavailable):
         return ServiceUnavailable()
     if isinstance(error, RevisionConflict):
