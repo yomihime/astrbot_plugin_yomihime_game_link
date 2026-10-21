@@ -301,10 +301,16 @@ class AdminOperationsService(AdminOperations):
             else:
                 try:
                     result = await manager.status()
-                except Exception:
+                except Exception as error:
+                    blocked = (
+                        isinstance(error, ManagedKeyConflict)
+                        and error.code == "unsafe_storage_layout"
+                    )
                     result = {
                         "state": "unknown",
-                        "reason_code": "inventory_unavailable",
+                        "reason_code": "unsafe_storage_layout"
+                        if blocked
+                        else "inventory_unavailable",
                         "ready": False,
                         "source": "unselected",
                         "generation": 0,
@@ -313,6 +319,15 @@ class AdminOperationsService(AdminOperations):
                         "unknown_count": 1,
                         "impact": (),
                     }
+                    if blocked:
+                        # No inventory, key or environment read is safe here.
+                        # Null means unobserved, never falsely absent/matching.
+                        result.update(
+                            storage_security="blocked",
+                            environment_present=None,
+                            environment_matches=None,
+                            recovery_action=None,
+                        )
             await self.authorization.validate_generation(
                 grant, operation=AdminOperation.READ_CONFIG
             )

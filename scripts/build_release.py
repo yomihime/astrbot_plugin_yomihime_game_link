@@ -16,10 +16,18 @@ from pathlib import Path
 
 if __package__:
     from .build_dashboard_zip import build as build_dashboard_zip
-    from .build_dashboard_zip import validate_wheel
+    from .build_dashboard_zip import (
+        publish_artifacts,
+        validate_output_paths,
+        validate_wheel,
+    )
 else:
     from build_dashboard_zip import build as build_dashboard_zip
-    from build_dashboard_zip import validate_wheel
+    from build_dashboard_zip import (
+        publish_artifacts,
+        validate_output_paths,
+        validate_wheel,
+    )
 
 ROOT = Path(__file__).resolve().parents[1]
 EXPECTED_PYTHON = (3, 13)
@@ -152,10 +160,7 @@ def write_checksums(artifacts: tuple[Path, ...], destination: Path) -> Path:
         digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
         entries.append(f"{digest}  {artifact.name}\n")
     destination = Path(destination)
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    temporary = destination.with_name(f"{destination.name}.tmp")
-    temporary.write_text("".join(entries), encoding="ascii", newline="\n")
-    temporary.replace(destination)
+    publish_artifacts({destination: "".join(entries).encode("ascii")}, artifacts)
     return destination
 
 
@@ -177,7 +182,28 @@ def build_release(
         Path(output_dir) if output_dir is not None else repository_root / "dist"
     )
     zip_name = f"{plugin_name}-{metadata_version}.zip"
-    wheel_name = "yomihime_game_link_sdk-0.1.0a10-py3-none-any.whl"
+    wheel_name = "yomihime_game_link_sdk-0.1.0a11-py3-none-any.whl"
+    output_artifacts = (output_dir / zip_name, output_dir / wheel_name)
+    sums_path = output_dir / "SHA256SUMS"
+    protected = (repository_root / "metadata.yaml",)
+    retain_wheel = False
+    if sdk_wheel is not None:
+        protected += (Path(sdk_wheel),)
+        try:
+            retain_wheel = os.path.samefile(sdk_wheel, output_artifacts[1])
+        except FileNotFoundError:
+            pass
+        if retain_wheel:
+            # Same-file reuse is a no-op, never an exemption from source or
+            # destination link/reparse/hardlink and independently pinned checks.
+            validate_wheel(Path(sdk_wheel))
+            validate_output_paths((output_artifacts[1],))
+    destinations = (
+        (output_artifacts[0], sums_path)
+        if retain_wheel
+        else (*output_artifacts, sums_path)
+    )
+    validate_output_paths(destinations, protected)
 
     with tempfile.TemporaryDirectory(prefix="yomihime-release-build-") as temporary:
         work_root = Path(temporary)
@@ -189,19 +215,29 @@ def build_release(
         if source_wheel.name != wheel_name:
             raise RuntimeError(f"Unexpected SDK wheel filename: {source_wheel.name}")
         validate_wheel(source_wheel)
-        staged_wheel = work_root / wheel_name
-        shutil.copyfile(source_wheel, staged_wheel)
+        staged_wheel = source_wheel if retain_wheel else work_root / wheel_name
+        if not retain_wheel:
+            shutil.copyfile(source_wheel, staged_wheel)
         staged_zip = work_root / zip_name
         build_dashboard_zip(staged_wheel, staged_zip, repository_root)
 
         staged_artifacts = (staged_zip, staged_wheel)
-        output_artifacts = tuple(
-            output_dir / artifact.name for artifact in staged_artifacts
-        )
-        output_dir.mkdir(parents=True, exist_ok=True)
-        for staged, output in zip(staged_artifacts, output_artifacts, strict=True):
-            shutil.copyfile(staged, output)
-        sums_path = write_checksums(output_artifacts, output_dir / "SHA256SUMS")
+        payloads = {
+            destination: source.read_bytes()
+            for source, destination in zip(
+                staged_artifacts, output_artifacts, strict=True
+            )
+        }
+        checksums = "".join(
+            f"{hashlib.sha256(data).hexdigest()}  {destination.name}\n"
+            for destination, data in sorted(
+                payloads.items(), key=lambda item: item[0].name
+            )
+        ).encode("ascii")
+        if retain_wheel:
+            del payloads[output_artifacts[1]]
+        payloads[sums_path] = checksums
+        publish_artifacts(payloads, protected)
     return output_artifacts[0], output_artifacts[1], sums_path
 
 

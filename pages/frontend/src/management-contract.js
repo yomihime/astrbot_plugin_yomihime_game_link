@@ -113,6 +113,7 @@ export function validateMasterKeyStatus(value){
     typeof value.inventory_digest!=='string'||!(/^[0-9a-f]{64}$/.test(value.inventory_digest)||value.inventory_digest==='')||
     !Number.isSafeInteger(value.unknown_count)||value.unknown_count<0||!Array.isArray(value.impact)||value.impact.length>128)fail('operation_unavailable');
   for(const row of value.impact)if(!exact(row,['module_id','config_count','grant_count'])||typeof row.module_id!=='string'||row.module_id.length>128||!row.module_id.split('/').every(part=>identifier.test(part))||!Number.isSafeInteger(row.config_count)||row.config_count<0||!Number.isSafeInteger(row.grant_count)||row.grant_count<0)fail('operation_unavailable');
-  if(hasExtended&&(!['private','legacy_review_required','blocked'].includes(value.storage_security)||typeof value.environment_present!=='boolean'||typeof value.environment_matches!=='boolean'||![null,'adopt_environment','resume_migration','retry','restore'].includes(value.recovery_action)))fail('operation_unavailable');
+  const environmentUnknown=value.storage_security==='blocked'&&value.environment_present===null&&value.environment_matches===null;
+  if(hasExtended&&(!['private','legacy_review_required','blocked'].includes(value.storage_security)||!environmentUnknown&&(typeof value.environment_present!=='boolean'||typeof value.environment_matches!=='boolean')||![null,'adopt_environment','resume_migration','retry','restore'].includes(value.recovery_action)))fail('operation_unavailable');
   return value;
 }

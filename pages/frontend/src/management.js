@@ -44,7 +44,7 @@ export function createManagementPage(document,bridge,window,{expectedPage='00-ga
   function showMasterStatus(){
     if(scope!=='settings')return;
     view.masterKey(masterKeyStatus?{
-      storageSecurity:masterKeyStatus.storage_security||'unknown',environmentPresent:masterKeyStatus.environment_present===true,environmentMatches:masterKeyStatus.environment_matches===true,recoveryAction:masterKeyStatus.recovery_action||null,migrationPlan,onAdopt:()=>changeMasterKey('adopt-environment'),onPlanMigration:planMigration,onExecuteMigration:executeMigration,
+      storageSecurity:masterKeyStatus.storage_security||'unknown',environmentPresent:masterKeyStatus.environment_present===true,environmentMatches:masterKeyStatus.environment_matches===true,recoveryAction:masterKeyStatus.recovery_action||null,inventoryKnown:masterKeyStatus.unknown_count===0&&masterKeyStatus.inventory_digest.length===64,migrationPlan,onAdopt:()=>changeMasterKey('adopt-environment'),onPlanMigration:planMigration,
       state:masterKeyStatus.state,reason:masterKeyStatus.reason_code,source:masterKeyStatus.source,
       generation:masterKeyStatus.generation,unknown:masterKeyStatus.unknown_count,impact:masterKeyStatus.impact,
       enabled:!closed&&ready&&!suspended&&!stale&&masterKeyStatus.storage_security!=='blocked'&&masterKeyStatus.inventory_digest.length===64&&masterKeyStatus.unknown_count===0,
@@ -144,15 +144,7 @@ export function createManagementPage(document,bridge,window,{expectedPage='00-ga
     if(suspended||active||stale||masterKeyStatus?.storage_security!=='legacy_review_required')return;
     run(async attempt=>{migrationPlan=await post('master-key-migration-plan',{},attempt);notice('迁移计划已读取；尚未迁移，源数据保留。','warning');});
   }
-  function executeMigration(){
-    const plan=migrationPlan;
-    if(suspended||active||stale||!plan)return;
-    run(async attempt=>{
-      if(!await view.confirm({kind:'storage-migration',title:'确认申请私密存储迁移？',message:'源数据保留。只有完整停写证明可执行；在线旧来源未知时将拒绝，需要受控维护。',confirmLabel:'确认申请',isCurrent:()=>current(attempt)&&migrationPlan===plan&&!suspended}))return;
-      await post('master-key-migration-execute',{...plan,confirmation:'MIGRATE PRIVATE STORAGE'},attempt);
-      migrationPlan=null;stale=true;notice('迁移请求已返回，请从宿主重新打开并核对存储；当前结果不替代冷加载验收。','warning');
-    });
-  }  async function render(){
+  async function render(){
     const owners=[...new Set(catalog.fields.filter(f=>f.module_id==='game_link/core').map(f=>f.module_id))],wanted=new Set(catalog.fields.map(key));
     for(const k of controls.keys())if(!wanted.has(k))controls.delete(k);
     for(const target of cards.keys())if(!owners.includes(target))cards.delete(target);
@@ -187,7 +179,7 @@ export function createManagementPage(document,bridge,window,{expectedPage='00-ga
       else if(error?.message==='confirm_clear')notice('请勾选清除确认后再提交；保持选项不会写入。');
       else if(error?.message==='write_ack_readback_unverified'){clearMasterDraft();notice('已提交，状态暂未核实，请刷新确认。','warning');}
       else if(error?.message==='write_ack_authorization_denied')loseAccess('已提交，但管理授权不可用，状态暂未核实。请重新打开宿主管理页面确认。','warning');
-      else if(['requires_stopped_host','source_exclusivity_unproven','offline_supervisor_unavailable'].includes(error?.code)||['requires_stopped_host','source_exclusivity_unproven','offline_supervisor_unavailable'].includes(error?.message)){migrationPlan=null;notice('尚未迁移：需要受控维护窗口和完整停写证明。仅停止当前页面或刷新不能完成迁移。','warning');}
+      else if(['requires_stopped_host','source_exclusivity_unproven','offline_supervisor_unavailable'].includes(error?.code)||['requires_stopped_host','source_exclusivity_unproven','offline_supervisor_unavailable'].includes(error?.message)){migrationPlan=null;notice('尚未迁移：当前版本没有旧部署执行适配器。请保留原数据，参阅存储维护说明；停止宿主或刷新页面不会补齐该能力。','warning');}
       else if(error?.message==='invalid_config')notice('配置或输入未通过校验，请核对字段要求后刷新重试。');
       else if(managementAccessLost(error))loseAccess();
       else {clearMasterDraft();stale=true;notice('未取得成功确认，请刷新核对配置与版本后重试。');}

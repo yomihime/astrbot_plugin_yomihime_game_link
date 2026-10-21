@@ -45,8 +45,8 @@
 
 仓库根运行 `npm.cmd run reference --prefix pages/frontend`，打开 `http://127.0.0.1:18762/reference.html`。这是轻量组件页，支持浅深主题和 loading / dirty / error / conflict / readonly / success 状态，无宿主连接和业务请求。
 
-运行 `npm.cmd run typecheck --prefix pages/frontend`、`npm.cmd run build --prefix pages/frontend` 与受影响测试。构建同时更新壳、独立设置入口和必要发布资源。视觉验收使用隔离 bridge 回放，记录 CSS 视口、缩放、DPR；比较桌面配置、窄屏和深色，再抽查主页/辅助查询。离线 DOM、真实浏览器、宿主 HTTP、真实上游分别记录，互不代替。
+运行 `npm.cmd run typecheck --prefix pages/frontend`、`npm.cmd run build --prefix pages/frontend` 与受影响测试。构建同时更新壳内设置视图和必要发布资源；设置仍通过壳内设置视图进入，不是独立页面入口。视觉验收使用隔离 bridge 回放，记录 CSS 视口、缩放、DPR；比较桌面配置、窄屏和深色，再抽查主页/辅助查询。离线 DOM、真实浏览器、宿主 HTTP、真实上游分别记录，互不代替。
 
 ## 单入口职责
 
-正式根为 `00-game-link`。首页、模块管理、全局设置及 Module 页面分别组织，Module 按 home/config/aux 角色进入壳。接入合同见 [frontend-module-contract.md](frontend-module-contract.md)。保持现有紧凑紫金视觉和共用 SettingsGroup、SettingsRow、ActionBar、StatusHint。正常就绪时收起恢复与全域危险操作，异常时给出简短可执行路径；确认绑定当前 owner、revision 与生命周期。
+正式页面根只有 `00-game-link`。首页、模块管理、全局设置及 Module 页面是该根内的视图；Module 按 home/config/aux 角色进入壳。管理与模块操作仍由各自后端授权合同约束，独立授权不表示另有页面根。接入合同见 [frontend-module-contract.md](frontend-module-contract.md)。保持现有紧凑紫金视觉和共用 SettingsGroup、SettingsRow、ActionBar、StatusHint。正常就绪时收起恢复与全域危险操作，异常时给出简短可执行路径；确认绑定当前 owner、revision 与生命周期。

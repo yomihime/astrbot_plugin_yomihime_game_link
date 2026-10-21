@@ -10,10 +10,11 @@ type Field={module_id:string;name:string;description:string;group?:string|null;e
 type Control={field:Field;signature:string;problem?:string;inheritBaseline?:boolean;writePending?:boolean;baselineUnverified?:boolean;draftVersion:number;mode:HTMLInputElement|HTMLSelectElement|null;input:HTMLInputElement|HTMLSelectElement|null;reset?:HTMLButtonElement|null};
 type Card={target:string;controls:Control[];save:HTMLButtonElement|null;discard?:HTMLButtonElement|null;onSave():void;onDiscard?():void};
 type LegacyPanel={policy_id:string;target_owner:string;status:string|null;busy:boolean;enabled:boolean;plan():void;execute():void};
-type MasterKeyPanel={storageSecurity:string;environmentPresent:boolean;environmentMatches:boolean;recoveryAction:string|null;migrationPlan:{file_count:number;source_retained:boolean;requires_stopped_host:boolean}|null;onAdopt():void;onPlanMigration():void;onExecuteMigration():void;state:string;reason:string;source:string;generation:number;unknown:number;impact:{module_id:string;config_count:number;grant_count:number}[];enabled:boolean;busy:boolean;onDraft():void;onRetry():void;onRestore():void;onReset():void;onCancelReset():void};
+type MasterKeyPanel={storageSecurity:string;environmentPresent:boolean;environmentMatches:boolean;recoveryAction:string|null;migrationPlan:{file_count:number;source_retained:boolean;requires_stopped_host:boolean}|null;onAdopt():void;onPlanMigration():void;state:string;reason:string;source:string;generation:number;unknown:number;inventoryKnown:boolean;impact:{module_id:string;config_count:number;grant_count:number}[];enabled:boolean;busy:boolean;onDraft():void;onRetry():void;onRestore():void;onReset():void;onCancelReset():void};
 const masterReason:Record<string,string>={key_missing:'原密钥缺失',key_unselected:'检测到旧数据，需要恢复原密钥',environment_key_missing:'部署环境密钥缺失',environment_key_invalid:'部署环境密钥格式无效',environment_key_conflict:'部署环境密钥与已选密钥冲突',managed_key_missing:'托管密钥文件缺失',managed_key_unreadable:'托管密钥文件无法安全读取',managed_key_conflict:'托管密钥文件与记录不匹配',inventory_decryption_failed:'原密钥无法解开全部旧凭据',inventory_unknown:'凭据库存无法安全确认',operation_incomplete:'上次操作未完成，可重试或按提示恢复',inventory_unavailable:'凭据库存暂不可用',manager_unavailable:'凭据存储暂不可用'};
 masterReason.inventory_unknown='凭据库存无法安全确认，请检查存储后重试';
 masterReason.encryption_component_unavailable='加密组件暂不可用，请检查宿主环境后重试';
+masterReason.unsafe_storage_layout='凭据存储无法安全访问。请部署者检查运行身份与存储权限，修复后正常重启同一宿主；保留数据库、selector 和原密钥，不要清库或重填凭据。';
 function groups(controls:Control[]){const map=new Map<string,Control[]>();for(const c of controls){const key=c.field.group||'';if(!map.has(key))map.set(key,[]);map.get(key)!.push(c);}return [...map].map(([group,items])=>({group,items:items.sort((a,b)=>(fieldPresentation(a.field).order||0)-(fieldPresentation(b.field).order||0))}));}
 export function createManagementView(document:Document,container:HTMLElement=document.getElementById('management-root')!,scope:'settings'|'maintenance'='settings'){
  const confirmation=createInlineConfirmation(document);
@@ -50,8 +51,8 @@ export function createManagementView(document:Document,container:HTMLElement=doc
    ]);})) : null,
    scope==='settings'?h(SettingsGroup,{title:'凭据存储',class:'master-key-panel',hidden:owner.value!==null&&owner.value!=='game_link/core'},{default:()=>{const panel=masterKey.value,canReset=Boolean(panel?.enabled&&!panel.busy&&panel.state!=='unknown'&&panel.reason!=='encryption_component_unavailable'&&panel.source!=='environment');if(!panel)return [h(StatusHint,{id:'master-key-status',tone:'warning'},{default:()=> '尚未读取凭据存储状态。'})];
     const recovery=()=>[
-      h('p',{class:'field-hint',id:'master-key-reset-impact'},`全域影响：配置凭据 ${panel.impact.reduce((sum,item)=>sum+item.config_count,0)} 项，授权凭据 ${panel.impact.reduce((sum,item)=>sum+item.grant_count,0)} 项。`),
-      ...panel.impact.map(item=>h('p',{class:'field-hint',key:item.module_id},`${item.module_id}：配置凭据 ${item.config_count} 项，授权凭据 ${item.grant_count} 项`)),
+      panel.inventoryKnown?h('p',{class:'field-hint',id:'master-key-reset-impact'},`全域影响：配置凭据 ${panel.impact.reduce((sum,item)=>sum+item.config_count,0)} 项，授权凭据 ${panel.impact.reduce((sum,item)=>sum+item.grant_count,0)} 项。`):h('p',{class:'field-hint',id:'master-key-reset-impact'},'影响范围暂不可确认，请保留原数据。'),
+      ...(panel.inventoryKnown?panel.impact:[]).map(item=>h('p',{class:'field-hint',key:item.module_id},`${item.module_id}：配置凭据 ${item.config_count} 项，授权凭据 ${item.grant_count} 项`)),
       h(ActionBar,{}, {default:()=>[h('button',{id:'master-key-retry',type:'button',disabled:!panel.enabled||panel.busy,onClick:panel.onRetry},'重新核对存储')]}),
       h(SettingsRow,{}, {default:()=>[h('label',{for:'master-key-restore-input'},'恢复原密钥（标准 Base64，32 字节）'),h('input',{id:'master-key-restore-input',type:'password',autocomplete:'off',maxlength:128,disabled:!panel.enabled||panel.busy,'data-role':'master-key-restore',onInput:panel.onDraft}),h('button',{id:'master-key-restore',type:'button',disabled:!panel.enabled||panel.busy||panel.state==='unknown'||panel.reason==='encryption_component_unavailable',onClick:panel.onRestore},'验证并恢复原密钥')]}),
       h('p',{class:'field-hint'},'全域重配会使已保存的加密凭据逻辑失效，需重新配置凭据与授权。普通配置保留；这不代表密码学擦除。'),
@@ -64,9 +65,9 @@ export function createManagementView(document:Document,container:HTMLElement=doc
       panel.source==='environment'?h(ActionBar,{}, {default:()=>[h('button',{id:'master-key-adopt-environment',type:'button',disabled:!panel.enabled||panel.busy||!panel.environmentMatches,onClick:panel.onAdopt},'将当前环境密钥转为托管')]}):null,
       panel.source==='managed'&&panel.environmentPresent?h(StatusHint,{tone:panel.environmentMatches?'neutral':'warning'},{default:()=>panel.environmentMatches?'托管密钥已保存；可由部署者移除环境密钥配置后冷重启同一宿主。刷新不会修改进程环境。':'部署环境密钥冲突，请核对后冷重启；页面不会静默换钥。'}):null,
       panel.storageSecurity==='legacy_review_required'?h('section',{'aria-label':'旧存储迁移'},[
-        h('p',{class:'field-hint'},'可先读取迁移计划。旧来源执行需要完整停写证明；在线未知来源会拒绝并要求受控维护。'),
+        h('p',{class:'field-hint'},'当前版本仅支持读取计划，没有旧部署执行适配器。请保留原数据；停止宿主或刷新页面不会使迁移可用。'),
         h('button',{id:'storage-migration-plan',type:'button',disabled:!panel.enabled||panel.busy,onClick:panel.onPlanMigration},'读取迁移计划'),
-        panel.migrationPlan?h('div',[h('p',`计划包含 ${panel.migrationPlan.file_count} 个文件；源保留。尚未迁移。`),h('button',{id:'storage-migration-execute',type:'button',disabled:!panel.enabled||panel.busy,onClick:panel.onExecuteMigration},'申请执行迁移')]):null,
+        panel.migrationPlan?h('p',`计划包含 ${panel.migrationPlan.file_count} 个文件；源保留。尚未迁移。`):null,
       ]):null,
       panel.state==='ready'?h('details',{class:'advanced-config'},[h('summary','恢复与全域重配'),...recovery()]):recovery(),
       panel.state==='ready'?null:h('details',{class:'advanced-config'},[h('summary','状态详情'),h('p',{class:'field-hint'},`来源：${panel.source}；代际：${panel.generation}；未知项：${panel.unknown}；原因代码：${panel.reason}`)]),

@@ -12,8 +12,6 @@
 - [存储迁移来源监督](storage-migration-supervision.md)
 - [UI 规范](ui-guidelines.md)
 
-## 历史索引
+## 版本与验证
 
-- [PR8 alpha清理与本地验证交接](alpha-cleanup-handoff.md)
-
-`history/` 保存历史设计和执行快照。其版本、接口、时间及测试结论不代表当前状态。
+模块 ABI、SDK 版本、构建和验证入口以[模块 SDK](module-sdk.md)、[贡献指南](../CONTRIBUTING.md)及仓库 CI 工作流为准。历史提交仍保存在 Git 历史中，不作为当前安装或验收指导。

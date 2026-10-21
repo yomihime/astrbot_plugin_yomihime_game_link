@@ -35,7 +35,7 @@ export function mount(container:HTMLElement,options:PageOptions):MountedPage {
     const candidates=result?.model_facts?.selection;
     const submit=async(event?:Event)=>{event?.preventDefault(); await controller.submit(); const name=Object.keys(state.errors)[0]; if (name) container.querySelector<HTMLInputElement>(`#ff14-${options.routeId}-${name}`)?.focus();};
     const market=result?.model_facts?.market;
-    return h(NConfigProvider,{theme:context.theme==='dark'?darkTheme:null,locale:context.locale.startsWith('en')?enUS:zhCN,dateLocale:context.locale.startsWith('en')?dateEnUS:dateZhCN,styleMountTarget:container,preflightStyleDisabled:true,inlineThemeDisabled:true}, {default:()=>h('section',{class:'ff14-page','data-theme':context.theme},[
+    return h(NConfigProvider,{theme:context.theme==='dark'?darkTheme:null,themeOverrides:{common:{heightMedium:'40px'}},locale:context.locale.startsWith('en')?enUS:zhCN,dateLocale:context.locale.startsWith('en')?dateEnUS:dateZhCN,styleMountTarget:container,preflightStyleDisabled:true,inlineThemeDisabled:true}, {default:()=>h('section',{class:'ff14-page','data-theme':context.theme},[
       h(NCard,{title:titles[options.routeId],bordered:false}, {default:()=>[
         h('p',{class:'ff14-hint'},hints[options.routeId]),
         h('form',{class:'ff14-form','aria-busy':pending,onSubmit:submit},[

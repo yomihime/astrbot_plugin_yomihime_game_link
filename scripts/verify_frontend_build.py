@@ -30,10 +30,16 @@ def snapshot():
         if not directory.is_dir():
             raise ValueError("frontend must be built before verification")
         files.extend(p for p in directory.rglob("*") if p.is_file())
-    return {
-        p.relative_to(ROOT).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
-        for p in files
-    }
+    return {p.relative_to(ROOT).as_posix(): _digest(p) for p in files}
+
+
+def _digest(path):
+    if not path.is_file():
+        raise ValueError(
+            f"Missing frontend projection {path.relative_to(ROOT).as_posix()}; "
+            "run npm run build --prefix pages/frontend before verification"
+        )
+    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def main():

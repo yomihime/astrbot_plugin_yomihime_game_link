@@ -88,6 +88,7 @@ jobs:
 
       - name: Run shell, management and FF14 page tests
         run: |
+          node --test tests/packaging/build-output.test.mjs
           npm test --prefix pages/frontend
           node --test tests/pages/management/*.test.mjs tests/pages/management/test_management.mjs tests/pages/management/test_credentials.mjs tests/pages/ff14/*.test.mjs tests/pages/ff14/test_ui_a.mjs tests/pages/ff14/test_item_display.mjs tests/pages/ff14/test_market_projection.mjs tests/pages/ff14/test_market_ui.mjs tests/modules/minimal/*.test.mjs
 
@@ -103,7 +104,7 @@ jobs:
 
       - name: Run unit tests
         env:
-          YGL_TEST_SDK_WHEEL: ${{ github.workspace }}/dist/yomihime_game_link_sdk-0.1.0a10-py3-none-any.whl
+          YGL_TEST_SDK_WHEEL: ${{ github.workspace }}/dist/yomihime_game_link_sdk-0.1.0a11-py3-none-any.whl
         run: python -m unittest discover -s tests -t . -v
 
       - name: Check lint
@@ -121,8 +122,56 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+  windows-boundaries:
+    # Hosted Server is outside the production workstation qualification matrix.
+    # Run real Win32 ACL decoding and filesystem refusals without changing it.
+    runs-on: windows-2025
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Set up Python 3.13.9
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13.9"
+
+      - name: Set up Node.js 24
+        uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          package-manager-cache: false
+
+      - name: Install pinned build and runtime dependencies
+        run: >-
+          python -m pip install --disable-pip-version-check
+          setuptools==80.9.0 wheel==0.45.1 -r requirements.txt
+
+      - name: Verify native primitives, selector retention and migration authority refusal
+        # Hosted Server qualification remains refused by the native contract.
+        run: >-
+          python -m unittest -v
+          tests.storage.test_windows_ci_boundaries
+          tests.integration.test_managed_key_acl_boundaries
+
+      - name: Verify output filesystem safety without bypassing workstation qualification
+        # Actual module projection runs in verify and qualified workstation tests.
+        # These destination checks do not need the workstation-only module scanner.
+        run: >-
+          python -m unittest -v
+          tests.packaging.test_build_output_safety.BuildOutputSafetyTests.test_release_reuses_same_path_wheel_without_copy_or_write
+          tests.packaging.test_build_output_safety.BuildOutputSafetyTests.test_same_path_wheel_exception_rejects_hardlink_without_changes
+          tests.packaging.test_build_output_safety.BuildOutputSafetyTests.test_missing_frontend_projection_has_actionable_prerequisite
+          tests.packaging.test_build_output_safety.BuildOutputSafetyTests.test_failed_archive_capture_preserves_previous_artifact
+          tests.packaging.test_build_output_safety.BuildOutputSafetyTests.test_output_parent_junction_is_rejected_without_target_write
+          tests.packaging.test_build_output_safety.BuildOutputSafetyTests.test_dashboard_rejects_input_destination_before_truncation
+          tests.packaging.test_build_output_safety.BuildOutputSafetyTests.test_release_preflights_entire_output_batch
+          tests.packaging.test_build_output_safety.BuildOutputSafetyTests.test_checksums_reject_artifact_overlap
+
+      - name: Verify atomic frontend output and native junction refusal
+        run: node --test tests/packaging/build-output.test.mjs
+
   build:
-    needs: verify
+    needs: [verify, windows-boundaries]
     # Hosted Windows Server images are outside the native NTFS qualification matrix.
     # Build the same platform-neutral ZIP through the reviewed POSIX path.
     runs-on: ubuntu-latest

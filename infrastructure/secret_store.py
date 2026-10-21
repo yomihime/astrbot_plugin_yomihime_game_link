@@ -69,6 +69,10 @@ class SQLiteSecretStore:
         manager = self.key_manager
         if manager is None:
             return 0
+        try:
+            manager.assert_storage_readable()
+        except Exception:
+            raise SecretStoreUnavailable() from None
         row = unit.execute(
             "SELECT generation,revision,source FROM managed_master_key WHERE singleton=1"
         ).fetchone()

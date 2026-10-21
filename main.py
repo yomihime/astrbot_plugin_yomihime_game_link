@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 from types import ModuleType
 
-SDK_VERSION = "0.1.0a10"
+SDK_VERSION = "0.1.0a11"
 SDK_MODULE_ABI_VERSION = "2.0"
 
 
@@ -18,7 +18,7 @@ SDK_PACKAGE_MANIFEST = {
     "_examples/empty_module/README.md": "c1150018aa2eb2bfb9f9129ba753f6f26d132a0a245d245eb8a62f3c6debc1d7",
     "_examples/empty_module/manifest.json": "9de2d0e3cbb7e32acf029677e59381d1bb8893c6cae84a45f9a606b6e3a7e965",
     "_examples/empty_module/module.py": "21fdb6428bd422804ad00e98038b032c25b1d2488b3df5f17e3be855e0c8198f",
-    "_examples/offline_sample/README.md": "948ab435100048e6e2503c413a7e3e4387514729ffd62ec4c1cd53a9c504d5b2",
+    "_examples/offline_sample/README.md": "f8dc79bb4e1e933b8254da8b44b774d6e60aedd281c40629381b0458b850b79f",
     "_examples/offline_sample/manifest.json": "2f0583a18c43501625ca47d94af7f9173c1b706413ae810b768edf309518c34d",
     "_examples/offline_sample/module.py": "6a3971d633d947671fdbcb9b6b0025a871ab21e615c0d0f57edc2b0e2be30f32",
     "cards.py": "1a3176dcd7ddab7ccb3e7a84f6d555ed164265297793f387b70ccdb9f109e915",
@@ -31,7 +31,7 @@ SDK_PACKAGE_MANIFEST = {
     "services.py": "aba7d3a83a0621c101388ecdedb1354fe9123e41691ebb270af7b8c528599291",
     "storage.py": "6311b4754da6e37616debd68003d6993cf89c0b060845387288e2de575313260",
     "subscriptions.py": "526b8b42f05ff92931f27ebe27fb8b09b526ad3fea2f599111cc0b1d8889677c",
-    "version.py": "bf07b69615eb849980ccae42373c815a2ad98407f05f4d16a90da96231fb2a4f",
+    "version.py": "1e553e46430998086265142ce2b689a78eb21fe98be91c8fb6740ae37ea21060",
 }
 
 SDK_MODULES = {
@@ -189,6 +189,14 @@ def bootstrap_sdk(plugin_root: str | Path | None = None) -> ModuleType:
         sys.path.insert(0, inserted_entry)
     try:
         return _validate_sdk_tree(root)
+    except SDKBootstrapError as exc:
+        raise SDKBootstrapError(
+            f"{exc}. Fully stop this same AstrBot Host process; while it is stopped, "
+            "install the trusted new plugin code, then cold-start the Host. "
+            "Disabling or hot-reloading the plugin does not unload the in-memory SDK. "
+            "If the updater rolled back to the old plugin files, restarting those "
+            "old files alone will not upgrade the plugin."
+        ) from exc
     finally:
         if inserted_entry is not None:
             for index, entry in enumerate(sys.path):

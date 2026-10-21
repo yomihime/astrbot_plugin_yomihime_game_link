@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
 import math
 import re
 from dataclasses import replace
@@ -89,7 +88,6 @@ METADATA_FAILURE_CACHE_SECONDS = 60
 CATALOG_BATCH_SIZE = 12
 MAX_CHARACTER_ROWS = 40
 CATALOG_DIAGNOSTIC_BYTES = 16_384
-_LOGGER = logging.getLogger(__name__)
 _NUMBER = re.compile(r"(?:[0-9]{1,3}(?:,[0-9]{3})+|[0-9]+)(?:\.[0-9]+)?\Z", re.ASCII)
 
 _CHARACTER_DEFAULT_QUERY = """query FF14PublicCharacter(

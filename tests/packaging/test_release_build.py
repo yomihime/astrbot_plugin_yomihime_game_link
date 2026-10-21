@@ -165,20 +165,23 @@ class ReleaseBuildTests(unittest.TestCase):
             assert find_spec("yomihime_game_link_sdk") is None
             tool = runpy.run_path(str(root / "scripts" / "build_dashboard_zip.py"))
             initial_path = list(sys.path)
+            with tool["_checkout_imports"]():
+                sdk = sys.modules["yomihime_game_link_sdk"]
+                assert Path(sdk.__file__).resolve() == (
+                    root / "yomihime_game_link_sdk" / "__init__.py"
+                )
             try:
                 payloads = tool["_reviewed_bundle_payloads"](root)
             finally:
                 assert sys.path == initial_path
+                assert "yomihime_game_link_sdk" not in sys.modules
+                assert not any(name.startswith("_ygl_release_build") for name in sys.modules)
             assert len(payloads) == 1
             package_root, payload = payloads[0]
             assert package_root == root / "modules" / "ff14"
             assert {
                 name for name in payload["sources"] if name.endswith(".py")
             } == tool["REVIEWED_BUNDLE_SOURCES"][("modules", "ff14")]
-            sdk = sys.modules["yomihime_game_link_sdk"]
-            assert Path(sdk.__file__).resolve() == (
-                root / "yomihime_game_link_sdk" / "__init__.py"
-            )
             print("checkout SDK capture verified")
             """
         )
@@ -383,15 +386,27 @@ class ReleaseBuildTests(unittest.TestCase):
                     asset = root / filename
                     original = asset.read_bytes()
                     asset.unlink()
-                    with self.assertRaises(FileNotFoundError):
-                        included_files(root)
-                    os.link(sentinel, asset)
-                    with self.assertRaisesRegex(
-                        ValueError, label + " must not be a hard link"
-                    ):
-                        included_files(root)
-                    asset.unlink()
-                    asset.write_bytes(original)
+                    try:
+                        if filename in PAGE_FILES:
+                            with self.assertRaises(FileNotFoundError) as raised:
+                                included_files(root)
+                            self.assertIn(filename, str(raised.exception))
+                            self.assertIn(
+                                "npm run build --prefix pages/frontend",
+                                str(raised.exception),
+                            )
+                        else:
+                            with self.assertRaises(FileNotFoundError):
+                                included_files(root)
+                        os.link(sentinel, asset)
+                        with self.assertRaisesRegex(
+                            ValueError, label + " must not be a hard link"
+                        ):
+                            included_files(root)
+                        self.assertEqual(sentinel.read_bytes(), b"private")
+                    finally:
+                        asset.unlink(missing_ok=True)
+                        asset.write_bytes(original)
 
     def test_ff14_bundle_rejects_unreviewed_files(self) -> None:
         with tempfile.TemporaryDirectory(prefix="yomihime-release-bundle-") as work:
@@ -592,7 +607,7 @@ class ReleaseBuildTests(unittest.TestCase):
     def test_reused_sdk_wheel_still_requires_the_independent_pin(self) -> None:
         with tempfile.TemporaryDirectory(prefix="yomihime-release-wheel-") as work:
             root = Path(work)
-            wheel = root / "yomihime_game_link_sdk-0.1.0a10-py3-none-any.whl"
+            wheel = root / "yomihime_game_link_sdk-0.1.0a11-py3-none-any.whl"
             wheel.write_bytes(b"not the reviewed wheel")
             output = root / "artifacts"
 

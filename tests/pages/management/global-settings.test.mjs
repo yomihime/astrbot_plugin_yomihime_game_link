@@ -1,11 +1,28 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {harness,keyStatus,plan,flush,digest,context} from './global-settings-fixture.mjs';
+import {harness,keyStatus,flush,digest,context} from './global-settings-fixture.mjs';
 test('global settings has independent storage security and no retired Module credential forms',async()=>{
  const h=await harness(keyStatus({storage_security:'legacy_review_required'}));try{
   assert.match(h.doc.getElementById('master-key-status').textContent,/就绪/);assert.match(h.doc.getElementById('storage-security').textContent,/旧布局/);
   assert.equal(h.doc.querySelector('[data-role=client_secret]'),null);assert.equal(h.calls.some(call=>call.endpoint.startsWith('admin/credential-')),false);
   assert.equal(h.doc.querySelector('details.advanced-config').open,false);
+ }finally{h.close();}
+});
+test('known blocked storage gives restart guidance while ordinary settings remain available',async()=>{
+ const fields=[{module_id:'game_link/core',name:'sample',description:'Sample',group:null,value_schema:{type:'string'},default:'old',required:false,readable:true,editable:true,blocked_reason:null}];
+ const h=await harness(keyStatus({state:'unknown',ready:false,reason_code:'unsafe_storage_layout',source:'unselected',storage_security:'blocked',generation:0,revision:0,inventory_digest:'',unknown_count:1,impact:[],environment_present:null,environment_matches:null}),endpoint=>endpoint==='admin/catalog'?{schema_version:1,fields}:endpoint==='admin/read'?{'game_link/core':{revision:1,fields:{sample:{value:'old',state:'valid',present:false,source:'default'}}}}:undefined);try{
+  assert.match(h.doc.querySelector('.master-key-panel').textContent,/修复后正常重启同一宿主/);
+  assert.match(h.doc.querySelector('.master-key-panel').textContent,/影响范围暂不可确认/);
+  assert.doesNotMatch(h.doc.querySelector('.master-key-panel').textContent,/配置凭据 0 项|授权凭据 0 项/);
+  assert.equal(h.doc.getElementById('master-key-retry').disabled,true);
+  const ordinary=h.doc.querySelector('[data-field=sample] [data-role=value]');assert.equal(ordinary.disabled,false);ordinary.value='ordinary draft';ordinary.dispatchEvent(new h.dom.window.Event('input'));assert.equal(ordinary.value,'ordinary draft');
+  assert.equal(h.writes('master-key-reset').length,0);
+ }finally{h.close();}
+});
+test('verified empty inventory can accurately report zero impact',async()=>{
+ const h=await harness(keyStatus({impact:[]}));try{
+  assert.match(h.doc.querySelector('.master-key-panel').textContent,/配置凭据 0 项，授权凭据 0 项/);
+  assert.doesNotMatch(h.doc.querySelector('.master-key-panel').textContent,/影响范围暂不可确认/);
  }finally{h.close();}
 });
 test('reset needs shared confirmation; cancel writes nothing and exact CAS submits only once',async()=>{
@@ -31,10 +48,10 @@ test('restore secret draft is scrubbed before confirmation and suspension cancel
 test('invalid page context cancels confirmation and cannot reuse the old ready result',async()=>{
  const h=await harness();try{await h.click('#master-key-reset-consent');await h.click('#master-key-reset');const old=h.doc.querySelector('[data-action=confirm-key-reset]');h.emit({...context,pageName:'shell'});await flush();old.click();await flush();assert.equal(h.writes('master-key-reset').length,0);assert.equal(h.doc.querySelector('[data-confirmation]'),null);assert.equal(h.doc.getElementById('refresh').disabled,true);}finally{h.close();}
 });
-test('storage plan is read-only; online unknown execute retains data and reports stopped-host requirement',async()=>{
+test('storage plan is read-only and unavailable production execution is not offered',async()=>{
  const h=await harness(keyStatus({storage_security:'legacy_review_required'}));try{
   await h.click('#storage-migration-plan');assert.equal(h.writes('master-key-migration-execute').length,0);assert.match(h.doc.querySelector('.master-key-panel').textContent,/尚未迁移/);
-  await h.click('#storage-migration-execute');await h.click('[data-action=confirm-storage-migration]');assert.deepEqual(h.writes('master-key-migration-execute')[0].body,{...plan,confirmation:'MIGRATE PRIVATE STORAGE'});assert.match(h.doc.getElementById('status').textContent,/尚未迁移.*完整停写证明/);assert.equal(h.doc.querySelector('#storage-migration-execute'),null);
+  assert.equal(h.doc.querySelector('#storage-migration-execute'),null);assert.match(h.doc.querySelector('.master-key-panel').textContent,/仅支持.*计划.*没有.*执行适配器/);assert.equal(h.writes('master-key-migration-execute').length,0);
  }finally{h.close();}
 });
 test('registered policy copy uses dual revisions and never sends source value, owner or path',async()=>{

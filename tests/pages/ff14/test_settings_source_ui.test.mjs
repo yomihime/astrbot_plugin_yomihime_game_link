@@ -1,4 +1,4 @@
-import {test} from 'node:test';
+import {test,after} from 'node:test';
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import {stripTypeScriptTypes} from 'node:module';
@@ -18,6 +18,7 @@ const source=stripTypeScriptTypes(await readFile('modules/ff14/pages/src/setting
 const {mountSettings}=await import(url(source));
 const {nextTick}=await import(pathToFileURL(resolve('pages/frontend/node_modules/vue/index.mjs')));
 async function flush(){for(let i=0;i<20;i++)await Promise.resolve();await nextTick();}
+after(()=>window.close());
 test('actual source settings UI preserves mask/choices and editable fenced drafts after CAS/UNKNOWN',async()=>{
  let revision=4,confirmation=0,storedTheme=null,writeError='',heldWrite=false,releaseWrite;const calls=[],callbacks=[],container=window.document.createElement('main');window.document.body.append(container);
  const context={owner:'ff14/ff14',runtimeId:'source-ui',epoch:1,boundary:'source-ui',available:true,theme:'light',locale:'zh-CN'};
@@ -41,5 +42,23 @@ test('actual source settings UI preserves mask/choices and editable fenced draft
    container.querySelector('form').dispatchEvent(new window.Event('submit',{bubbles:true,cancelable:true}));await flush();assert.equal(calls.at(-1)[1].reply_theme,null);
   }
   page.update({...context,owner:'other/demo'});await flush();assert.equal(theme.disabled,true);const before=calls.length;theme.value='host-choice';theme.dispatchEvent(new window.Event('change',{bubbles:true}));container.querySelector('form').dispatchEvent(new window.Event('submit',{bubbles:true,cancelable:true}));await flush();assert.equal(calls.length,before);
- }finally{page.dispose();callbacks.forEach(f=>f());container.remove();window.close();}
+ }finally{page.dispose();callbacks.forEach(f=>f());container.remove();}
+});
+
+test('ordinary discard follows actual auth classification and recovers without writes',async()=>{
+ let denied=false,writes=0;const callbacks=[],container=window.document.createElement('main');window.document.body.append(container);
+ const context={owner:'ff14/ff14',runtimeId:'discard-auth-ui',epoch:1,boundary:'discard-auth-ui',available:true,theme:'light',locale:'zh-CN'};
+ const page=mountSettings(container,{routeId:'config',context,scope:{isCurrent:()=>true,onDispose:f=>callbacks.push(f)},services:{
+  config:{current:async()=>{if(denied)throw Error('admin_authorization_denied');return{revision:9,fields:{ff14_calendar_default_days:{value:7,state:'valid',present:true,source:'sqlite'}}};},save:async()=>{writes++;return{revision:10};}},
+  credentials:{status:async()=>({revision:9,fields:{}}),replace:async()=>{writes++;return{revision:10};},clear:async()=>{writes++;return{revision:10};}},
+ }});
+ const button=text=>[...container.querySelectorAll('button')].find(b=>b.textContent.includes(text));
+ try{
+  await flush();const days=container.querySelector('#ff14-config-ff14_calendar_default_days');assert.ok(days);assert.equal(days.value,'7');
+  days.value='17';days.dispatchEvent(new window.Event('input',{bubbles:true}));await flush();assert.equal(button('放弃修改').disabled,false);
+  denied=true;button('重新读取状态').click();await flush();assert.match(container.textContent,/管理授权或模块绑定已失效/);assert.equal(days.value,'17');assert.equal(days.disabled,true);
+  assert.equal(button('放弃修改').disabled,true);button('放弃修改').click();await flush();assert.equal(days.value,'17');assert.equal(writes,0);
+  denied=false;button('重新读取状态').click();await flush();assert.equal(days.value,'17');assert.equal(days.disabled,false);assert.equal(button('放弃修改').disabled,false);
+  button('放弃修改').click();await flush();assert.equal(days.value,'7');assert.equal(button('放弃修改').disabled,true);assert.equal(writes,0);
+ }finally{page.dispose();callbacks.forEach(f=>f());container.remove();}
 });

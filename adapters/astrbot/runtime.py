@@ -1239,7 +1239,7 @@ class AstrBotRuntime:
                     max_members_per_batch=8,
                 )
                 layout = resolve_private_storage(self._data_dir)
-                storage_guard = layout.open_guard()
+                storage_guard = layout.open_guard(isolate_credentials=True)
                 storage_guard.__enter__()
                 self._private_storage_guard = storage_guard
                 database = SQLiteDatabase(layout.database_path)
@@ -1250,6 +1250,9 @@ class AstrBotRuntime:
                     environment=EnvironmentKeyProvider("YGL_SECRET_KEY"),
                     storage_security=layout.security_status,
                     storage_write_guard=layout.assert_credential_writable,
+                    storage_read_guard=getattr(
+                        storage_guard, "assert_credentials_readable", None
+                    ),
                     storage_layout=layout,
                 )
                 core = self._core_factory(

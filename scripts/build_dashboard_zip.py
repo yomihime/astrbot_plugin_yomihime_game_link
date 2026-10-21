@@ -9,15 +9,18 @@ import json
 import os
 import stat
 import sys
+import tempfile
 import zipfile
+from contextlib import contextmanager
 from importlib import import_module
+from importlib.util import module_from_spec, spec_from_file_location
 from io import BytesIO
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 ARCHIVE = ROOT / "dist" / "astrbot_plugin_yomihime_game_link-local.zip"
 EXPECTED_WHEEL_SHA256 = (
-    "545415bbfd979caa7a7bd69ea1648a9f2612c7cd443c04e95b6915fe1b59944e"
+    "466f10824c4a40a9046a982db06cdcf0d3b193c87b393e8868e7b7f7c95e1b24"
 )
 EXPECTED_WHEEL_ENTRIES = {
     "yomihime_game_link_sdk/cards.py",
@@ -31,17 +34,17 @@ EXPECTED_WHEEL_ENTRIES = {
     "yomihime_game_link_sdk/version.py",
     "yomihime_game_link_sdk/results.py",
     "yomihime_game_link_sdk/_examples/empty_module/README.md",
-    "yomihime_game_link_sdk-0.1.0a10.dist-info/licenses/SDK-LICENSE",
-    "yomihime_game_link_sdk-0.1.0a10.dist-info/METADATA",
+    "yomihime_game_link_sdk-0.1.0a11.dist-info/licenses/SDK-LICENSE",
+    "yomihime_game_link_sdk-0.1.0a11.dist-info/METADATA",
     "yomihime_game_link_sdk/_examples/empty_module/module.py",
     "yomihime_game_link_sdk/storage.py",
-    "yomihime_game_link_sdk-0.1.0a10.dist-info/top_level.txt",
+    "yomihime_game_link_sdk-0.1.0a11.dist-info/top_level.txt",
     "yomihime_game_link_sdk/subscriptions.py",
     "yomihime_game_link_sdk/contexts.py",
-    "yomihime_game_link_sdk-0.1.0a10.dist-info/WHEEL",
+    "yomihime_game_link_sdk-0.1.0a11.dist-info/WHEEL",
     "yomihime_game_link_sdk/py.typed",
     "yomihime_game_link_sdk/__init__.py",
-    "yomihime_game_link_sdk-0.1.0a10.dist-info/RECORD",
+    "yomihime_game_link_sdk-0.1.0a11.dist-info/RECORD",
     "yomihime_game_link_sdk/_examples/empty_module/manifest.json",
 }
 PACKAGE_ENTRY_NAMES = {
@@ -160,16 +163,6 @@ FF14_BUNDLE_REQUIRED_FILES = set(REVIEWED_BUNDLE_SOURCES[("modules", "ff14")]) |
     "yomihime.manifest.json",
     "README.md",
 }
-FF14_BUNDLE_ROOT_FILES = FF14_BUNDLE_REQUIRED_FILES - {"features/__init__.py"}
-FF14_BUNDLE_ALLOWED_DIRS = {Path("features"), Path("assets")}
-FF14_BUNDLE_ASSET_FILES = {"assets/ff14-meteor.svg"}
-FF14_BUNDLE_CACHE_DIRS = {
-    "__pycache__",
-    ".cache",
-    ".mypy_cache",
-    ".pytest_cache",
-    ".ruff_cache",
-}
 RUNTIME_DIRS = (
     "adapters",
     "core",
@@ -237,6 +230,85 @@ def _path_parts(path: Path) -> list[Path]:
     parts = [path]
     parts.extend(path.parents)
     return list(reversed(parts))
+
+
+def validate_output_paths(paths, inputs=()) -> tuple[Path, ...]:
+    """Preflight every destination before any artifact is published."""
+    outputs = tuple(Path(os.path.abspath(path)) for path in paths)
+    protected = {Path(os.path.abspath(path)) for path in inputs}
+    if len(outputs) != len(set(outputs)):
+        raise ValueError("Build outputs must be distinct")
+    for path in outputs:
+        if path in protected:
+            raise ValueError("Build output overlaps an input")
+        for component in _path_parts(path):
+            try:
+                metadata = component.lstat()
+            except FileNotFoundError:
+                continue
+            _reject_link(component, metadata, "Build output")
+            if component != path and not stat.S_ISDIR(metadata.st_mode):
+                raise ValueError("Build output parent must be a directory")
+            if component == path and not stat.S_ISREG(metadata.st_mode):
+                raise ValueError("Build output must be a regular file")
+    return outputs
+
+
+def publish_artifacts(payloads: dict[Path, bytes], inputs=()) -> None:
+    """Stage bytes beside their destinations; never truncate an existing file."""
+    outputs = validate_output_paths(payloads, inputs)
+    staged = []
+    try:
+        for destination, content in zip(outputs, payloads.values(), strict=True):
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            descriptor, temporary = tempfile.mkstemp(
+                prefix=f".{destination.name}.", suffix=".tmp", dir=destination.parent
+            )
+            temporary = Path(temporary)
+            staged.append((temporary, destination))
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(content)
+        validate_output_paths(outputs, inputs)
+        for temporary, destination in staged:
+            temporary.replace(destination)
+    finally:
+        for temporary, _ in staged:
+            temporary.unlink(missing_ok=True)
+
+
+@contextmanager
+def _checkout_imports():
+    """Load trusted checkout code independently of its directory's spelling."""
+    prefix = "_ygl_release_build"
+    namespaces = (prefix, "yomihime_game_link_sdk")
+
+    def owned(name):
+        return any(name == base or name.startswith(base + ".") for base in namespaces)
+
+    previous = {name: module for name, module in sys.modules.items() if owned(name)}
+    for name in previous:
+        del sys.modules[name]
+    try:
+        for name, directory in (
+            (prefix, ROOT),
+            ("yomihime_game_link_sdk", ROOT / "yomihime_game_link_sdk"),
+        ):
+            spec = spec_from_file_location(
+                name,
+                directory / "__init__.py",
+                submodule_search_locations=[str(directory)],
+            )
+            if spec is None or spec.loader is None:
+                raise RuntimeError("Cannot load trusted build validators")
+            module = module_from_spec(spec)
+            sys.modules[name] = module
+            spec.loader.exec_module(module)
+        yield prefix
+    finally:
+        for name in tuple(sys.modules):
+            if owned(name):
+                del sys.modules[name]
+        sys.modules.update(previous)
 
 
 def validate_source_path(
@@ -344,11 +416,11 @@ def validate_wheel(path: Path) -> dict[str, bytes]:
                 "SDK wheel entry manifest differs from the reviewed artifact"
             )
         metadata_lines = set(
-            wheel.read("yomihime_game_link_sdk-0.1.0a10.dist-info/METADATA")
+            wheel.read("yomihime_game_link_sdk-0.1.0a11.dist-info/METADATA")
             .decode("utf-8")
             .splitlines()
         )
-        if not {"Name: yomihime-game-link-sdk", "Version: 0.1.0a10"} <= metadata_lines:
+        if not {"Name: yomihime-game-link-sdk", "Version: 0.1.0a11"} <= metadata_lines:
             raise ValueError("SDK wheel distribution metadata is unsupported")
         package = {name: wheel.read(name) for name in sorted(PACKAGE_ENTRY_NAMES)}
     return package
@@ -390,14 +462,12 @@ def _font_asset_snapshot(path: Path, repository_root: Path) -> bytes:
 
 def _reviewed_bundle_payloads(repository_root: Path, *, bundle_roots=("modules",)):
     """Read trusted build-selected source roots; manifests never choose imports."""
-    parent = str(ROOT.parent)
-    sys.path.insert(0, parent)
-    sys.path.insert(0, str(ROOT))
-    try:
-        adapter = import_module(f"{ROOT.name}.adapters.astrbot.bundled")
-    finally:
-        sys.path.remove(str(ROOT))
-        sys.path.remove(parent)
+    with _checkout_imports() as namespace:
+        adapter = import_module(f"{namespace}.adapters.astrbot.bundled")
+        return _capture_reviewed_bundles(adapter, repository_root, bundle_roots)
+
+
+def _capture_reviewed_bundles(adapter, repository_root, bundle_roots):
     payloads = []
     identities = set()
     for relative in bundle_roots:
@@ -444,22 +514,15 @@ def _reviewed_bundle_files(repository_root: Path) -> list[Path]:
     return found
 
 
-def _bundle_readers():
-    # Load validators through the plugin package so their Core-relative imports
-    # retain the same package boundary in both CLI and imported build execution.
-    parent = str(ROOT.parent)
-    sys.path.insert(0, parent)
-    sys.path.insert(0, str(ROOT))
-    try:
-        parse_manifest = import_module(
-            f"{ROOT.name}.extensions.disk_manifest"
-        ).parse_manifest
-        read_page_resources = import_module(
-            f"{ROOT.name}.extensions.page_resources"
-        ).read_page_resources
-    finally:
-        sys.path.remove(str(ROOT))
-        sys.path.remove(parent)
+def _bundle_readers(namespace):
+    # The caller owns this namespace until every validator invocation completes,
+    # including delayed relative imports and strict SDK DTO identity checks.
+    parse_manifest = import_module(
+        f"{namespace}.extensions.disk_manifest"
+    ).parse_manifest
+    read_page_resources = import_module(
+        f"{namespace}.extensions.page_resources"
+    ).read_page_resources
     return parse_manifest, read_page_resources
 
 
@@ -467,13 +530,19 @@ def projected_page_assets(
     repository_root: Path, *, bundle_roots=("modules",)
 ) -> dict[str, bytes]:
     """Project declared hash-pinned resources into the sole authenticated page root."""
-    parse_manifest, read_page_resources = _bundle_readers()
+    with _checkout_imports() as namespace:
+        return _projected_page_assets(repository_root, bundle_roots, namespace)
+
+
+def _projected_page_assets(repository_root, bundle_roots, namespace):
+    parse_manifest, read_page_resources = _bundle_readers(namespace)
+    adapter = import_module(f"{namespace}.adapters.astrbot.bundled")
     payload = {}
     branches = []
     styles = set()
     prefix = "pages/00-game-link/"
-    for package_root, bundle in _reviewed_bundle_payloads(
-        repository_root, bundle_roots=bundle_roots
+    for package_root, bundle in _capture_reviewed_bundles(
+        adapter, repository_root, bundle_roots
     ):
         manifest = parse_manifest(bundle["manifest"])
         resources = read_page_resources(package_root, manifest)
@@ -522,6 +591,27 @@ def included_files(root: Path = ROOT) -> list[Path]:
         )
         for name in ROOT_FILES
     ]
+    for name in PAGE_FILES:
+        if not (repository_root / name).exists():
+            raise FileNotFoundError(
+                f"Missing frontend projection {name}; run npm ci --prefix pages/frontend "
+                "then npm run build --prefix pages/frontend before packaging"
+            )
+    for path in sorted((repository_root / "modules").glob("*/yomihime.manifest.json")):
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+        generated = [
+            resource["path"]
+            for module in manifest.get("modules", ())
+            for resource in module.get("resources", ())
+            if resource["path"].startswith("pages/dist/")
+        ]
+        if generated:
+            for name in ("pages/resources.json", *generated):
+                if not (path.parent / name).exists():
+                    raise FileNotFoundError(
+                        f"Missing frontend projection {path.parent.name}/{name}; "
+                        "run npm run build --prefix pages/frontend before packaging"
+                    )
     files.extend(
         validate_source_path(repository_root / name, repository_root, "Host metadata")
         for name in HOST_METADATA_FILES
@@ -567,10 +657,10 @@ def build(
     repository_root = Path(repository_root).resolve(strict=True)
     files = included_files(repository_root)
     page_assets = projected_page_assets(repository_root)
-    archive_path.parent.mkdir(parents=True, exist_ok=True)
-    with zipfile.ZipFile(
-        archive_path, "w", compression=zipfile.ZIP_DEFLATED
-    ) as archive:
+    inputs = (*files, sdk_wheel)
+    validate_output_paths((archive_path,), inputs)
+    output = BytesIO()
+    with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         for path in files:
             name = path.relative_to(repository_root).as_posix()
             content = (
@@ -589,7 +679,7 @@ def build(
             }:
                 _write_entry(archive, name, data)
 
-    with zipfile.ZipFile(archive_path) as result:
+    with zipfile.ZipFile(BytesIO(output.getvalue())) as result:
         names = result.namelist()
         expected_names = (
             {path.relative_to(repository_root).as_posix() for path in files}
@@ -606,6 +696,7 @@ def build(
                 raise RuntimeError(f"Module asset differs from verified bundle: {name}")
         if result.testzip() is not None:
             raise RuntimeError("The generated ZIP failed its integrity check")
+    publish_artifacts({archive_path: output.getvalue()}, inputs)
     return archive_path
 
 

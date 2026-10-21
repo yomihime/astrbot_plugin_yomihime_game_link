@@ -7,6 +7,7 @@ import unittest
 from contextlib import ExitStack
 from pathlib import Path
 from secrets import token_urlsafe
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from ygl_test_subject.core.contracts.administration import AdminAuthorizationDenied
@@ -19,6 +20,7 @@ from ygl_test_subject.core.contracts.storage import SecretReceiptState, SecretTa
 from ygl_test_subject.core.contracts.validation_boundary import validate_contract
 from ygl_test_subject.core.ports import MessageReceipt, MessageStatus
 from ygl_test_subject.extensions.discovery import discover_packages
+from ygl_test_subject.infrastructure.managed_key_manager import ManagedKeyConflict
 from ygl_test_subject.infrastructure.sqlite.database import SQLiteDatabase
 from ygl_test_subject.services.admin_authorization import _digest
 from ygl_test_subject.services.core_runtime import (
@@ -66,6 +68,38 @@ class _AdminContext:
 
 
 class AdminOperationsRuntimeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_master_status_preserves_known_blocked_boundary_without_inventory(
+        self,
+    ):
+        runtime = self._runtime()
+        await runtime.start()
+        _, context = await self._bootstrap(runtime)
+        manager = SimpleNamespace(
+            status=AsyncMock(side_effect=ManagedKeyConflict("unsafe_storage_layout"))
+        )
+        runtime.admin_operations.managed_keys = manager
+        result = await runtime.admin_operations.master_key_status(authorization=context)
+        self.assertEqual(result["reason_code"], "unsafe_storage_layout")
+        self.assertEqual(result["storage_security"], "blocked")
+        self.assertFalse(result["ready"])
+        self.assertEqual(result["inventory_digest"], "")
+        self.assertEqual(result["impact"], ())
+        self.assertEqual(result["source"], "unselected")
+        self.assertIsNone(result["environment_present"])
+        self.assertIsNone(result["environment_matches"])
+        manager.status.assert_awaited_once_with()
+
+    async def test_master_status_does_not_label_unknown_failure_as_known_blocked(self):
+        runtime = self._runtime()
+        await runtime.start()
+        _, context = await self._bootstrap(runtime)
+        runtime.admin_operations.managed_keys = SimpleNamespace(
+            status=AsyncMock(side_effect=RuntimeError("synthetic unknown"))
+        )
+        result = await runtime.admin_operations.master_key_status(authorization=context)
+        self.assertEqual(result["reason_code"], "inventory_unavailable")
+        self.assertNotIn("storage_security", result)
+
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory(dir=Path.cwd())
         self.root = Path(self.temp.name)

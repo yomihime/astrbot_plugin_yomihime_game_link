@@ -97,7 +97,7 @@ for name, module in {
 }.items():
     sys.modules[name] = module
 
-if mode in {"same", "partial", "unsupported", "mixed", "abi"}:
+if mode in {"same", "partial", "unsupported", "mixed", "abi", "old-release"}:
     sys.path.insert(0, str(plugin_root))
     import yomihime_game_link_sdk
     sys.path.pop(0)
@@ -105,6 +105,8 @@ if mode in {"same", "partial", "unsupported", "mixed", "abi"}:
         del sys.modules["yomihime_game_link_sdk.results"]
     elif mode == "unsupported":
         yomihime_game_link_sdk.__version__ = "9.9.9"
+    elif mode == "old-release":
+        yomihime_game_link_sdk.__version__ = "0.1.0a10"
     elif mode == "abi":
         sys.modules["yomihime_game_link_sdk.version"].MODULE_ABI_VERSION = "9.0"
     elif mode == "mixed":
@@ -131,8 +133,16 @@ module = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = module
 try:
     spec.loader.exec_module(module)
-except module.SDKBootstrapError:
-    assert mode in {"different", "partial", "unsupported", "mixed", "root-escape", "abi", "retired", "hash"}, mode
+except module.SDKBootstrapError as error:
+    assert mode in {"different", "partial", "unsupported", "mixed", "root-escape", "abi", "retired", "hash", "old-release"}, mode
+    if mode == "old-release":
+        message = str(error)
+        assert "Fully stop this same AstrBot Host process" in message, message
+        assert "while it is stopped, install the trusted new plugin code" in message, message
+        assert "cold-start the Host" in message, message
+        assert "Disabling or hot-reloading" in message, message
+        assert "rolled back" in message and "old files alone will not upgrade" in message, message
+        assert sys.modules["yomihime_game_link_sdk"].__version__ == "0.1.0a10"
 else:
     assert mode in {"cold", "same", "root-check", "entry-text", "entry-none", "lifecycle"}, mode
     if mode == "root-check":
@@ -269,6 +279,9 @@ class SDKBootstrapTests(unittest.TestCase):
 
     def test_page_registration_and_cleanup_surround_runtime_lifecycle(self) -> None:
         self._run_bootstrap(self._plugin("page-lifecycle"), "lifecycle")
+
+    def test_old_in_memory_sdk_error_gives_safe_cold_upgrade_steps(self) -> None:
+        self._run_bootstrap(self._plugin("old-release"), "old-release")
 
     def test_cold_and_identical_preload_work_under_arbitrary_plugin_names(self) -> None:
         self._run_bootstrap(self._plugin("plugin-one"), "cold")

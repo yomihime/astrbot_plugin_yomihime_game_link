@@ -75,11 +75,13 @@ class PrivateStorageLayout:
     def recovery_root(self):
         return self.storage_root / "recovery"
 
-    def open_guard(self):
+    def open_guard(self, *, isolate_credentials=False):
         if os.name == "nt" and self.security_status == "private":
             from .windows.private_storage import WindowsPrivateStorageGuard
 
-            return WindowsPrivateStorageGuard(self.storage_root)
+            return WindowsPrivateStorageGuard(
+                self.storage_root, isolate_credentials=isolate_credentials
+            )
         # Legacy safety checks remain in the original key I/O; failure must
         # not prevent unrelated Core/global settings from starting.
         return nullcontext(self)
@@ -128,7 +130,7 @@ def _read_selector(instance: Path, data_root: Path):
         ):
             raise ValueError
         return value
-    except (OSError, ValueError, TypeError, KeyError):
+    except (OSError, ValueError, TypeError, KeyError, ManagedKeyFileError):
         raise PrivateStorageError("ambiguous_storage") from None
 
 

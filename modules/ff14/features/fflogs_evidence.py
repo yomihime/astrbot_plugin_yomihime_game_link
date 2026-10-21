@@ -5,13 +5,11 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-import logging
 import re
 from decimal import Decimal
 from secrets import token_hex
 from time import monotonic
 
-LOGGER_NAME = "yomihime_game_link.ff14.evidence"
 MARKER = "FF14_LOGS_EVIDENCE"
 MAX_BYTES = 512 * 1024
 MAX_CHUNKS = 64
@@ -36,7 +34,6 @@ OPERATIONS = frozenset(
     }
 )
 _NAME = re.compile(r"[_A-Za-z][_0-9A-Za-z]{0,127}\Z")
-_LOGGER = logging.getLogger(LOGGER_NAME)
 REQUEST_OPERATIONS = frozenset(
     {
         "UniversalisWorlds",

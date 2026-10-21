@@ -42,7 +42,7 @@
 
 第二模块的现有证据是隔离 fixture：通用导航、页面挂载/失效、配置声明拒绝未授权读写，以及非 FF14 工具的正式 Core/Host 调用。它不证明第二个生产包、任意来源或新管理权限已验收。模块声明、受信装配与实际部署能力应分别检查。
 
-当前 Host 仍明确选择内置 FF14 发布包。装配描述及源码 fingerprint 证明选定输入的一致性，不是独立发布签名，也不让扫描到的模块自动获得来源、网页或管理权限。旧业务 renderer、专属业务状态装配及旧定位页均已删除。物品、市场、Logs 和日历由正式 Vue 模块页执行。共享存储与旧安装槽的清理由独立迁移/恢复方案处理。
+当前 Host 仍明确选择内置 FF14 发布包。装配描述及源码 fingerprint 证明选定输入的一致性，不是独立发布签名，也不让扫描到的模块自动获得来源、网页或管理权限。旧业务 renderer、专属业务状态装配及旧定位页均已删除。物品、市场、Logs 和日历由正式 Vue 模块页执行。共享存储与旧安装槽的处理遵守[存储与迁移合同](credential-storage.md)。
 
 旧 Host `config_adapter.py` 与 `ff14_pages.py` 兼容别名已删除；普通配置使用 Core 当前设置服务，页面使用 `PublicPages`。已退役的 FF14 定位页及其兼容投影也已删除；所有 FF14 业务界面由当前模块页承载。
 
@@ -50,21 +50,21 @@
 
 | 需求 | 当前正式能力 | 验收边界 |
 | --- | --- | --- |
-| REQ01 | 壳底部固定全局设置，空目录或 FF14 未加载仍可进入 Core 设置 | 隔离浏览器与合成 Host/Core 夹具已验证正式页面组件、Core 往返/CAS 及解除挂载 FF14 后全局设置可用；不代表本轮已在真实 Host monitor 安装验收 |
+| REQ01 | 壳底部固定全局设置，空目录或 FF14 未加载仍可进入 Core 设置 | 全局设置不依赖 FF14 模块生命周期；管理授权仍按 Host/Core 合同逐请求检查 |
 | REQ02 | 公共表单按 owner/group 显示；全局只选 Core，各模块导航有自己的设置入口；普通值与凭据接口分离，保存采用 revision CAS | schema/catalog 只描述 UI；资源权来自显式部署政策和逐请求鉴权，不能从声明自动获得 |
 | REQ03 | Core 持久记录主密钥来源、代际与库存；全域空库存时可自动建立私有托管密钥，旧密文须验证原密钥可解后恢复；未就绪或未知时禁止填写/替换；已受权 clear 仍须确认并通过最新 catalog/CAS，keep 零写；FFLogs cn/global 独立操作 | 高级环境来源 `YGL_SECRET_KEY` 显式提供时不回退；全域重置须明确确认并使所有模块的旧加密配置/授权凭据失效，普通配置与授权记录保留。诊断不回读密钥，主密钥就绪不证明上游 OAuth 有效 |
 | REQ04 | 公共调用使用闭合 owner/page/capability_id/parameters 信封；Host 不分派行情业务，FF14 解释输入并验证行情事实 | 保留受信 allowlist、epoch、准入、只读/隐私检查与 32 blocks/512 nodes 总预算 |
-| REQ05 | Logs/日历使用模块 Vue 页及现有客户端、错误和恢复语义；旧业务 renderer 已移除 | 旧兼容入口仅指引使用宿主插件菜单正式重开；真实未配置/来源失败处理已验证，真实 FFLogs 和日历内容仍待外部条件 |
+| REQ05 | Logs/日历使用模块 Vue 页及现有客户端、错误和恢复语义；旧业务 renderer 已移除 | FF14 页面只呈现模块结果和安全状态；上游结果按地区与实际范围判定 |
 | REQ06 | exact owner disable/unload/restore；停用保留设置；卸载先 fence、排空与 cleanup，再撤销工具对象、许可、来源及 Registry 注册 | pending 保留可重试所有权；配置、秘密、缓存和 data 均保留。恢复只使用受信原候选；旧壳不自动续资产证明，应从宿主正式重开 |
 | REQ07 | 隔离中性模块有普通配置、公共只读能力和页面；正式 Host→Core 链验证同名页面隔离、声明不授信与持久数据恢复 | fixture 不入发布包；不等于任意第三方生产包安装验收 |
 
-Core 与模块的命名空间配置是当前读写权威；Core 目录不依赖 FF14 的生命周期。首次安装从当前声明和通过校验的 SQLite 值初始化，不读取旧配置快照或执行旧字段导入。非法初始配置仍可通过受权管理入口修复；启动不清空现有数据库或订阅。
+Core 与模块的命名空间配置是当前读写权威；Core 目录不依赖 FF14 的生命周期。模块字段从当前受信 manifest 与通过校验的 SQLite 值读取。FF14 默认区域仍由模块拥有；仅固定旧 Core 区域来源可按 `LegacyConfigCopyPolicy` 在目标缺失时投影/显式复制。其它未登记旧字段不被推断为可迁移。非法配置可通过受权管理入口修复；加载不会清空现有数据库或订阅。
 
 `disable` 关闭业务准入，继续允许模块设置与启用管理。显式 `unload` 退出 active 普通/凭据目录、页面、来源、工具和 owner 注册，但模块管理仍显示可信恢复候选；保留最大部署政策不允许旧请求在卸载后提交。精确 owner、epoch 和生命周期检查不授予配置字段读写权。
 
-当前薄 SDK 发布构建使用 `yomihime_game_link_sdk-0.1.0a10-py3-none-any.whl`，实际摘要与 pin 由构建核对。SDK 发行编号、模块 ABI `2.0`、输出/展示/存储合同 `1.8.0` 及磁盘/工厂协议 `1` 独立判断；旧模块接口在开发期不兼容，不能将旧 1.x SDK 作为当前发行加载。已发布旧工件字节及受限旧展示记录读取边界保留，不迁移配置、凭据或数据库。升级固定 SDK 需要保留数据的宿主卸载与冷加载，以退出旧进程中已导入的 SDK；不能以同壳恢复模拟该步骤。此前 SDK 1.7 的独立实例安装、首次冷加载、最小公开查询、普通管理读写及保留数据解除挂载/恢复，以及先前隔离 AstrBot 4.29.1 ZIP 冒烟，均为历史实机证据；本轮 Windows、用户实例、真实凭据查询、IM 平台和模型调用分别验收。
+当前 SDK 为 `0.1.0a11`，模块 ABI 为 `2.0`，输出/展示/存储合同为 `1.8.0`，磁盘/工厂协议为 `1`；这些版本各自描述不同合同。SDK a10 增加 invocation-scoped diagnostics 服务：现有模块消费者可继续使用原服务；实现 `InvocationServices` 的 Host provider 与测试替身须提供 diagnostics。依赖此属性的新模块不保证运行于不含它的旧 Host。构建时核对固定 wheel 字节与来源；版本和 ABI 声明不替代具体安装验证。
 
-SDK a8 引入的 PUBLIC `BACKGROUND` 调度与 1–32 组固定 `background_parameters` 继续包含在 a10；详情见[SDK 说明](module-sdk.md#background-collectors)。PR #8 固定候选 a9 wheel 为 42,636 bytes，SHA-256 `4d8d71c4ab04805c3a1edbd9e194b5228e66c9e0290caf01daae9374d65a74e5`；本轮 Windows 构建和宿主验收以对应原始记录为准。历史 a7/a8 工件及测试不作为当前候选的验收。
+SDK 的后台调度声明仍受 PUBLIC ownership、固定参数和 schema 验证约束；细节见[SDK 说明](module-sdk.md#background-collectors)。历史候选和验收流水不属于当前模块维护合同。
 
 固定宿主 iframe 不允许原生 `confirm` 或顶层导航。现有草稿与模块生命周期守卫使用有归属的页面内确认，保留操作、owner、revision 与生命周期检查；取消等待按钮解除禁用后才安全恢复焦点，不抢新页面或用户已转移的焦点。需要新资源投影时，使用宿主左侧“插件”菜单和目标 monitor 正式重开；页面内文字指引不承诺自动跳转、无刷新热加载或资源授权续期。
 
@@ -72,7 +72,7 @@ SDK a8 引入的 PUBLIC `BACKGROUND` 调度与 1–32 组固定 `background_para
 
 对应检查入口：声明与工厂见 [磁盘解析测试](../tests/extensions/test_disk_manifest.py)、[工厂解析测试](../tests/extensions/test_factory_resolver.py) 和 [扩展生命周期测试](../tests/services/test_extension_runtime.py)；第二模块 fixture 见 [壳生命周期测试](../tests/pages/shell/lifecycle.test.mjs)、[配置目录测试](../tests/services/test_configuration_catalog.py) 和 [宿主工具测试](../tests/host/test_llm_tools.py)。凭据正反例见 [受管凭据测试](../tests/host/test_managed_credentials.py) 与 [来源凭据测试](../tests/services/test_source_credentials.py)。这些是定位与运行入口，实际通过范围仍以对应冻结版本的报告为准。
 
-参考方向沿用此前记录的早柚核心审阅版本 `87c06f11ae10c12b3bb8e76b3c6f420c831282a8`，只用于模块注册、帮助、配置、订阅及展示的设计比较；本批未重新读取最新版或引入参考源码。game-link 已有上述合同和单 FF14 生产切片；生产多模块分发、任意包热替换、物理拆库和完整 IM 身份/投递验收仍有差距。不能用功能数量或百分比代替这些证据，也不应因此把游戏业务移入 Core。
+模块注册、帮助、配置、订阅及展示继续遵守本项目的公开 SDK、前端合同和当前实现。模块数量、扫描结果或 fixture 不能代替来源、授权、宿主集成与数据迁移各自的合同；不要把游戏业务移入 Core。
 
 维护时先运行变更涉及的模块、Core 输出及 Host 合同测试，页面修改显式运行管理/模块页面测试和正式构建预览。冻结后独立审查，主要跨层修改集成后安排一次全量。离线回放、隔离浏览器、真实宿主和模型回答分别记录；已有 ACL、跳过、格式及 EOF 提示单列。私有工作记录、凭据、数据库、备份和候选 ZIP 不入 Git 或发布包。
 
@@ -81,7 +81,7 @@ SDK a8 引入的 PUBLIC `BACKGROUND` 调度与 1–32 组固定 `background_para
 
 ### 声明式命令图片与模块徽标
 
-SDK a7 可在 `DisplayDocument.card` 附带纯 `cards.Document`，文本块仍为回退，模型事实保持独立。
+模块可在 `DisplayDocument.card` 附带纯 SDK 卡片声明；文本块仍为发送前回退，模型事实保持独立。当前 SDK 版本、ABI 和 invocation diagnostics 的 Host provider 要求见[模块 SDK 合同](module-sdk.md)。
 `card.logo=None` 时，命令展示由 Core 使用当前已注册模块的 `display.logo_resource`，从清单声明且 SHA-256 固定的资源中有界读取；模块显式提供 `cards.Asset` 时优先使用该资源。
 这个绑定仅用于命令图片，不是新公共资源下载接口。模块不能用 `__file__` 拼接并读取自身静态资源目录：隔离的源码捕获不包含静态资源。应声明 `ModuleDisplay.logo_resource` 与对应 `ModuleManifest.resources`，交给 Core 绑定。
 
@@ -112,7 +112,7 @@ Reviewed LegacyConfigCopyPolicy accepts only a policy ID and revisions from clie
 
 ### Diagnostic and configuration maintenance
 
-Calendar diagnostics omit absent HTTP status metadata; an ordinary source transport failure must still commit its failure state and try the existing fallback. Awaited diagnostic size ceilings (including strings) only drop optional output. Schema/type/unsafe-content errors remain strict, and cancellation, authorization and stale-epoch failures always propagate. The generic Host sink never imports FF14 schemas.
+Calendar diagnostics omit absent HTTP status metadata; an ordinary source transport failure must still commit its failure state and try the existing fallback. Awaited diagnostic size ceilings (including strings) only drop optional output. Schema/type/unsafe-content errors remain strict, and cancellation, authorization and stale-epoch failures always propagate. Build diagnostics from module-owned closed field projections and trusted policy; do not copy arbitrary plaintext or treat keyword scans as proof that a string contains no secret. Bounded booleans and finite status enums are preferable to free-form text. The generic Host sink checks and forwards only the generic envelope; it does not sanitize or interpret FF14 meaning.
 
 Use effective module-page configuration values and their controlled source/migration_pending metadata; do not substitute declaration defaults for a pending legacy destination. Source rows remain retained. Generic retained source fields do not appear in ordinary snapshots and cannot be patched/cleared through the active field list.
 

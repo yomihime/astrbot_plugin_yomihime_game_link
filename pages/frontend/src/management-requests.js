@@ -1,5 +1,5 @@
 import {exact,fail,validateCatalog,validateMasterKeyStatus} from './management-contract.js';
-const operations=new Set(['catalog','read','update','recover','master-key-status','master-key-retry','master-key-restore','master-key-reset','master-key-adopt-environment','master-key-migration-plan','master-key-migration-execute','legacy-config-plan','legacy-config-execute']);
+const operations=new Set(['catalog','read','update','recover','master-key-status','master-key-retry','master-key-restore','master-key-reset','master-key-adopt-environment','master-key-migration-plan','legacy-config-plan','legacy-config-execute']);
 export function validateLegacyPlan(value,policyId,execute=false){
   if(!exact(value,execute?['policy_id','status','target_revision','migration_pending','written']:['policy_id','status','source_revision','target_revision','migration_pending','written'])||value.policy_id!==policyId||!['migration_pending','already_configured','not_applicable','copied'].includes(value.status)||!Number.isSafeInteger(value.target_revision)||value.target_revision<1||!execute&&(!Number.isSafeInteger(value.source_revision)||value.source_revision<1)||typeof value.migration_pending!=='boolean'||typeof value.written!=='boolean'||!execute&&value.written||value.migration_pending!==(value.status==='migration_pending'))fail('operation_unavailable');
   return Object.freeze({...value});
@@ -18,7 +18,6 @@ export function createManagementRequests(bridge,current){return async function p
   if(endpoint==='catalog')return validateCatalog(response);if(endpoint==='read')return response;
   if(endpoint.startsWith('legacy-config-'))return validateLegacyPlan(response,body.policy_id,endpoint==='legacy-config-execute');
   if(endpoint==='master-key-migration-plan')return validateMigrationPlan(response);
-  if(endpoint==='master-key-migration-execute')return response;
   if(endpoint.startsWith('master-key-'))return validateMasterKeyStatus(response);
   if(endpoint==='update'&&(!exact(response,['module_id','revision'])||response.module_id!==body.module_id||!Number.isSafeInteger(response.revision)||response.revision<=body.expected_revision))fail('operation_unavailable');
   if(endpoint==='recover'&&(!exact(response,['recovered'])||response.recovered!==true))fail('operation_unavailable');return response;

@@ -79,6 +79,7 @@ class ManagedKeyManager:
         files: ManagedKeyFiles | None = None,
         storage_security: str = "legacy_review_required",
         storage_write_guard: Callable[[], None] | None = None,
+        storage_read_guard: Callable[[], None] | None = None,
         storage_layout=None,
     ) -> None:
         self.database = database
@@ -88,6 +89,7 @@ class ManagedKeyManager:
         self.files = files or ManagedKeyFiles(self.data_root)
         self.storage_security = storage_security
         self.storage_write_guard = storage_write_guard
+        self.storage_read_guard = storage_read_guard
         self.storage_layout = storage_layout
         self._generation: int | None = None
         self._revision: int | None = None
@@ -96,6 +98,13 @@ class ManagedKeyManager:
         if self.storage_write_guard is not None:
             try:
                 self.storage_write_guard()
+            except Exception:
+                raise ManagedKeyConflict("unsafe_storage_layout") from None
+
+    def assert_storage_readable(self) -> None:
+        if self.storage_read_guard is not None:
+            try:
+                self.storage_read_guard()
             except Exception:
                 raise ManagedKeyConflict("unsafe_storage_layout") from None
 
@@ -148,6 +157,7 @@ class ManagedKeyManager:
             raise ManagedKeyConflict("inventory_unknown") from None
 
     def _inventory(self, unit: SQLiteUnitOfWork) -> dict:
+        self.assert_storage_readable()
         receipts = unit.execute(
             "SELECT secret_token,principal_id,module_id,field,operation_id,state,"
             "payload_name,key_generation "
@@ -432,9 +442,10 @@ class ManagedKeyManager:
 
     def get_key(self) -> bytes:
         """Read current authority on every use so other processes cannot keep an old key."""
-        if self._generation is None or self._revision is None:
-            raise SecretKeyUnavailable()
         try:
+            self.assert_storage_readable()
+            if self._generation is None or self._revision is None:
+                raise SecretKeyUnavailable()
             connection = self.database.connect()
             try:
                 row = connection.execute(

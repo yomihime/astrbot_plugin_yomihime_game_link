@@ -1,9 +1,14 @@
-import {build} from 'vite';
-import {resolve, dirname} from 'node:path';
+import {resolve, dirname, basename} from 'node:path';
+import {tmpdir} from 'node:os';
 import {fileURLToPath} from 'node:url';
-import {readFile, writeFile, mkdir, readdir, lstat, realpath} from 'node:fs/promises';
+import {readFile, writeFile, mkdir, readdir, lstat, realpath, mkdtemp, rm} from 'node:fs/promises';
 import {createHash} from 'node:crypto';
 import {mergeManifestResources} from './manifest-resources.mjs';
+import {publishBuild} from './build-output.mjs';
+const {build}=await import('vite').catch(error=>{
+ if(error.code==='ERR_MODULE_NOT_FOUND')throw Error('Missing frontend dependencies; run npm ci --prefix pages/frontend before building',{cause:error});
+ throw error;
+});
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const frontend = resolve(root, 'pages/frontend');
 const invocationRoot = process.cwd();
@@ -17,8 +22,10 @@ if(!bundleRoots.length)bundleRoots.push('modules');
 const safeRelative=value=>typeof value==='string'&&/^[-a-zA-Z0-9_./]+$/.test(value)&&value.split('/').every(part=>part&&part!=='.'&&part!=='..');
 if(bundleRoots.some(value=>!safeRelative(value)))throw Error('Invalid reviewed build root');
 const outputRoot=outputOptions.length?resolve(invocationRoot,outputOptions[0].slice('--out-root='.length)):root;
+const stageRoot=await mkdtemp(resolve(tmpdir(),'ygl-frontend-'));
+try {
 const ids=new Set();
-const shell = resolve(outputRoot, 'pages/00-game-link');
+const shell = resolve(stageRoot, 'pages/00-game-link');
 const aliases = {vue: resolve(frontend, 'node_modules/vue/dist/vue.runtime.esm-bundler.js'), 'naive-ui': resolve(frontend, 'node_modules/naive-ui/es/index.mjs')};
 const defines = {'process.env.NODE_ENV': JSON.stringify('production'), __VUE_OPTIONS_API__: false, __VUE_PROD_DEVTOOLS__: false, __VUE_PROD_HYDRATION_MISMATCH_DETAILS__: false};
 const common = {configFile: false, root: frontend, resolve: {alias: aliases}, define: defines, logLevel: 'info'};
@@ -42,7 +49,7 @@ await build({...common, build: {outDir: shell, emptyOutDir: false, lib: {entry: 
 const projected=[];
 const branches=[],stylePaths=new Set();
 for(const bundleRoot of bundleRoots)for(const packageName of (await readdir(resolve(root,bundleRoot))).sort()) {
- const source=resolve(root,bundleRoot,packageName),destination=resolve(outputRoot,bundleRoot,packageName);
+ const source=resolve(root,bundleRoot,packageName),destination=resolve(stageRoot,bundleRoot,packageName);
  const metadata=await lstat(source);
  if(metadata.isSymbolicLink())throw Error('Reviewed source cannot be a link');
  if(!metadata.isDirectory())continue;
@@ -124,6 +131,11 @@ for (const name of [...runtimePackages].sort()) {
   const file=name.replaceAll('/','_')+'.txt'; await writeFile(resolve(shell,'licenses',file),content); licenseFiles.push(`licenses/${file}`); notices.push(content);
 }
 await writeFile(resolve(shell,'THIRD_PARTY_NOTICES.txt'),notices.join('\n\n--------------------\n\n'));
-const auditDir=resolve(outputRoot,'.build/frontend'); await mkdir(auditDir,{recursive:true});
+const auditDir=resolve(stageRoot,'.build/frontend'); await mkdir(auditDir,{recursive:true});
 await writeFile(resolve(auditDir,'runtime-packages.json'),JSON.stringify({packages:[...runtimePackages].sort(),facades:[{package:'vue',reason:'public runtime export facade; implementation rendered from @vue packages'}],modules:moduleAudit,licenseFiles},null,2)+'\n');
+await publishBuild(stageRoot,outputRoot);
 console.log(JSON.stringify({outputRoot,runtimeBytes:(await readFile(resolve(shell,'runtime.js'))).length,projected}));
+} finally {
+ if(dirname(stageRoot)!==resolve(tmpdir())||!basename(stageRoot).startsWith('ygl-frontend-'))throw Error('Invalid owned build staging directory');
+ await rm(stageRoot,{recursive:true,force:true});
+}

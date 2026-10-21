@@ -24,10 +24,44 @@ _SCHEMA_FIELDS = {
 _ROOT_SCHEMA_FIELDS = {
     kind: allowed | {"$defs"} for kind, allowed in _SCHEMA_FIELDS.items()
 }
-_SECRET = re.compile(
-    r"authorization|bearer\s|client_secret|access_token|refresh_token|password|ciphertext|(?:^|_)proof(?:$|_)",
+_SECRET_FIELDS = frozenset(
+    "authorization bearer token secret credential credentials apikey clientsecret "
+    "accesstoken refreshtoken password ciphertext proof masterkey privatekey "
+    "cookie setcookie headers requestheaders responseheaders".split()
+)
+_AUTH_MATERIAL = re.compile(
+    r"(?:\b(?:bearer|basic)\s+\S+|\b(?:authorization|cookie|set-cookie)\s*:|"
+    r"-----BEGIN (?:[A-Z]+ )?PRIVATE KEY-----|"
+    r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+|"
+    r"(?:[?&]|\b)(?:api[_-]?key|client[_-]?secret|access[_-]?token|"
+    r"refresh[_-]?token|password|proof)\s*[=:])",
     re.I,
 )
+
+
+def _sensitive_field(name, rule):
+    compact = re.sub(r"[^a-z0-9]", "", name.lower())
+
+    def sensitive(text):
+        return any(text.endswith(root) for root in _SECRET_FIELDS)
+
+    if sensitive(compact):
+        return True
+    # Credential status is useful, but must be a boolean or reviewed finite
+    # state enum, never an unrestricted string carrying the underlying value.
+    for suffix in ("configured", "present", "available", "valid", "status", "state"):
+        if compact.endswith(suffix) and sensitive(compact[: -len(suffix)]):
+            return not (
+                set(rule["type"]) <= {"boolean", "null"}
+                or rule.get("enum")
+                and all(
+                    value is None
+                    or type(value) is str
+                    and re.fullmatch(r"[a-z][a-z0-9_]{0,63}", value)
+                    for value in rule["enum"]
+                )
+            )
+    return False
 
 
 def freeze_diagnostic_schema(schema):
@@ -106,10 +140,11 @@ def freeze_diagnostic_schema(schema):
                 raise ValueError("diagnostic objects must be closed")
             if any(type(key) is not str or not _LABEL.fullmatch(key) for key in props):
                 raise ValueError("invalid diagnostic field")
+            children = {key: walk(child, depth + 1) for key, child in props.items()}
+            if any(_sensitive_field(key, child) for key, child in children.items()):
+                raise ValueError("sensitive diagnostic field rejected")
             result.update(
-                properties=MappingProxyType(
-                    {key: walk(child, depth + 1) for key, child in props.items()}
-                ),
+                properties=MappingProxyType(children),
                 required=tuple(required),
                 additionalProperties=False,
             )
@@ -201,7 +236,7 @@ def diagnostic_payload(schema, payload):
             props = rule["properties"]
             if not set(rule["required"]) <= set(value) or not set(value) <= set(props):
                 raise ValueError("diagnostic object mismatch")
-            if any(_SECRET.search(key) for key in value):
+            if any(_sensitive_field(key, props[key]) for key in value):
                 raise ValueError("sensitive diagnostic field rejected")
             return {
                 key: visit(props[key], child, depth + 1) for key, child in value.items()
@@ -211,7 +246,7 @@ def diagnostic_payload(schema, payload):
                 raise DiagnosticLimitExceeded("diagnostic array limit")
             return [visit(rule["items"], child, depth + 1) for child in value]
         if kind == "string":
-            if any(ord(c) < 32 for c in value) or _SECRET.search(value):
+            if any(ord(c) < 32 for c in value) or _AUTH_MATERIAL.search(value):
                 raise ValueError("unsafe diagnostic string")
         if kind in {"number", "integer"}:
             if (

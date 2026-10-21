@@ -131,7 +131,7 @@ class QueryDefaults:
 
     def __post_init__(self) -> None:
         if self.default_region not in ("cn", "global"):
-            raise QueryResolutionError("Core 默认区域无效。")
+            raise QueryResolutionError("FF14 默认区域无效。")
         for value in (self.core_revision, self.module_revision):
             if type(value) is not int or value < 0:
                 raise QueryResolutionError("配置 revision 无效。")

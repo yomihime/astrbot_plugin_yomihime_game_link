@@ -1,6 +1,6 @@
 # Game Link module SDK
 
-The independently installable distribution is `yomihime-game-link-sdk==0.1.0a10`. Import its public declarations with `import yomihime_game_link_sdk as ygl`. It requires Python 3.11 or newer and has no third-party runtime dependencies.
+The independently installable distribution is `yomihime-game-link-sdk==0.1.0a11`. Import its public declarations with `import yomihime_game_link_sdk as ygl`. It requires Python 3.11 or newer and has no third-party runtime dependencies.
 
 The SDK (including its packaged examples) is licensed under MIT; see `SDK-LICENSE`. The AstrBot plugin implementation remains AGPL-3.0 under `LICENSE`. Third-party notices retain their own terms. The a10 source contract adds invocation-bound diagnostics, CacheUnavailable and generic page roles without changing module ABI 2.0. Built wheel identity and installation evidence are recorded separately; editing these declarations does not prove a published or installed wheel.
 
@@ -9,8 +9,8 @@ The SDK (including its packaged examples) is licensed under MIT; see `SDK-LICENS
 Install the reviewed wheel into your module development environment:
 
 ```powershell
-python -m pip install --no-deps ./yomihime_game_link_sdk-0.1.0a10-py3-none-any.whl
-python -I -c "import yomihime_game_link_sdk as ygl; assert ygl.__version__ == '0.1.0a10'; assert ygl.MODULE_ABI_VERSION == '2.0'"
+python -m pip install --no-deps ./yomihime_game_link_sdk-0.1.0a11-py3-none-any.whl
+python -I -c "import yomihime_game_link_sdk as ygl; assert ygl.__version__ == '0.1.0a11'; assert ygl.MODULE_ABI_VERSION == '2.0'"
 ```
 
 The plugin release contains the exact content-pinned SDK from that wheel. Its bootstrap rejects changed contents, foreign package origins, partial preload graphs, and any preloaded retired `yomihime_sdk` graph. The retired root `api` and `yomihime_sdk.api` modules have no compatibility redirects. Historical stored-data readers are separate from module import compatibility.
@@ -246,6 +246,8 @@ ModuleDisplay metadata remains optional, bounded and localized; it never changes
 
 Declare optional `ModuleManifest.diagnostics: tuple[DiagnosticDeclaration, ...]` with an event ID and a closed finite JSON `payload_schema`. Event IDs are 1-96 ASCII label characters; at most 32 unique events are admitted. Only a separately selected trusted deployment policy enables events. Scanning a manifest never enables diagnostics.
 
+SDK a10 adds `diagnostics` to the invocation-scoped `InvocationServices` protocol. Existing modules that only consume injected services remain compatible. A Host or test double that implements the provider side of `InvocationServices` must supply this member to satisfy the current protocol; modules that require a10 are not promised to run on older Hosts without it. The module ABI remains `2.0` because this adds a service to the current SDK contract without changing manifest/factory ABI selection.
+
 ```python
 import yomihime_game_link_sdk as ygl
 
@@ -264,7 +266,7 @@ The data-only schema vocabulary supports closed objects, finite arrays (`maxItem
 
 Core derives owner, epoch and invocation trace; modules supply neither identity nor sinks. Each payload has at most 512 nodes including object keys, depth 8, 4096 characters per string and a 64-KiB event envelope. Limits only drop diagnostics. Per invocation the trusted policy cannot exceed 64 events / 512 KiB; retained payloads cannot exceed 64 events / 512 KiB and eight traces. Retention is a rolling memory limit, not a runtime lifetime acceptance quota. Accounting has at most eight live invocation slots; when full, new invocations drop optional diagnostics until an exact Core issuer release frees a slot. Released invocations cannot regain authority, and retention eviction never resets a still-live invocation budget. Events too large for the selected per-invocation byte budget allocate no counter metadata. FF14 calendar events retain a 48-event per-invocation cap. Closing the sink and ordinary sink faults are optional; every emit still checks current invocation, owner/epoch, deadline, admission, grant and instance lifetime. Authorization, lifecycle and cancellation failures propagate and cannot be treated as dropped diagnostics.
 
-Business field selection belongs to the module. Never copy headers, chat, exception bodies, raw arbitrary responses, credentials or proof. Closed field whitelists are the publication basis; sensitive-shape rejection is an additional guard and cannot detect every possible secret. Malformed schema/payload uses a fixed public error, with no rejected values in the error.
+Business field selection belongs to the module. Never copy headers, chat, exception bodies, raw arbitrary responses, credentials or proof. Closed field whitelists are the publication basis; sensitive-shape rejection is an additional guard and cannot detect every possible secret. A keyword or pattern scan cannot certify arbitrary plaintext as secret-free, and Host forwarding only validates the generic envelope; it does not interpret or sanitize module meaning. Prefer bounded typed values and finite enums over free-form strings. Reviewed status fields such as `client_secret_configured: bool` and `authorization_status` with a closed enum are suitable when declared by the module schema and enabled by trusted policy. Malformed schema/payload uses a fixed public error, with no rejected values in the error.
 
 ## Cache backend availability (a10)
 

@@ -33,11 +33,8 @@ operations:
   receipt after the real service operation succeeds. The list commands still
   query the service, then discard the returned private records. Their output
   contains no IDs, revisions, counts, presence information, configuration, or
-  command parameters. This offline sample therefore does not provide usable
-  private binding or subscription listings, or IDs for interactive follow-up.
-  That product capability remains for the later `CLOSEOUT-MANAGEMENT-PRIVACY`
-  Core contract decision; this receipt does not reclassify private records as
-  public or weaken their authorization and delivery rules.
+  command parameters. The fixed receipt keeps private records out of public
+  command output; it does not weaken their authorization or delivery rules.
 - `private status` is command-only and uses the account status operation. It
   returns a fixed private result and never reads or returns credential bytes.
 
@@ -72,7 +69,7 @@ supported `yomihime_game_link_sdk` package. Unit-test service stubs verify that 
 delegate through those SDK interfaces; they do not establish CoreRuntime,
 installed-artifact activation, or host behavior.
 
-## Current Tool message input (SDK 0.1.0a6)
+## Bound Tool message input
 
 `read_tool_message(services, invocation)` is a minimal SDK-only helper for a
 current root LLM Tool invocation: it binds the issued invocation and calls
@@ -99,7 +96,7 @@ Source tests of this helper use controlled injected services; trusted Core
 issuer/Gateway tests are separate. This sample alone does not prove native
 CoreRuntime/AstrBot initialization, real model calls or actual message delivery.
 
-## Public ERROR facts (SDK 0.1.0a6)
+## Public ERROR facts
 
 `public_error_example()` returns a fixed public NO_RECORDS result with the strict
 status/error envelope and an optional JSON-object supplement. Its archive fields
@@ -109,8 +106,8 @@ It performs no HTTP call and adds no authority. Existing management and
 subscription handlers retain their fixed public receipt.
 
 Core checks the envelope against ErrorDetail and bounds JSON at the receiver.
-See the SDK guide for the 512-node/depth16/string4096 and complete-ERROR-facts
-256-KiB limits; Web depth8/whole-response256-KiB is independent. Select public
+See the [module SDK contract](../../docs/module-sdk.md) for current DTO and
+receiver limits; Web response limits are independent. Select public
 fields explicitly: response bodies, headers, exception attributes, credentials,
 proof and full message text are not public facts merely because they are JSON.
 FF14 uses supplement.market only for ERROR; other modules need no market key.

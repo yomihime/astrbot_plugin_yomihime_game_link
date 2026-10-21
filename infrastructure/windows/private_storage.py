@@ -118,13 +118,24 @@ def publish_private_document(instance: Path, name: str, payload: bytes) -> None:
             raise ManagedKeyFileError()
 
 
+_CREDENTIAL_DIRECTORIES = frozenset({"keys", "secrets", "temp", "recovery"})
+
+
 class WindowsPrivateStorageGuard:
     """Hold no-delete directory handles and verify all existing private entries."""
 
-    def __init__(self, root: Path, *, create_children: bool = True):
+    def __init__(
+        self,
+        root: Path,
+        *,
+        create_children: bool = True,
+        isolate_credentials: bool = False,
+    ):
         self.root = root
         self.create_children = create_children
+        self.isolate_credentials = isolate_credentials
         self._stack: ExitStack | None = None
+        self._credentials_blocked = False
 
     def __enter__(self):
         if self._stack is not None:
@@ -132,25 +143,60 @@ class WindowsPrivateStorageGuard:
         stack = ExitStack()
         try:
             stack.enter_context(_pin(self.root, self.root))
-            for name in ("keys", "secrets", "temp", "recovery"):
-                child = self.root / name
-                if self.create_children:
-                    child = create_private_directory(self.root, name)
-                elif not child.exists():
-                    continue
-                stack.enter_context(_pin(child, self.root))
             self._stack = stack
-            self.validate()
+            self._credentials_blocked = False
+            if self.isolate_credentials:
+                # Prove the database boundary before touching credential trees.
+                # Missing DB + unsafe credentials is not a fresh installation.
+                database_exists, count = self._validate_tree(
+                    [(self.root, 0)], exclude_credentials=True
+                )
+                children = ExitStack()
+                try:
+                    roots = self._pin_credentials(children)
+                    self._validate_tree(roots, initial_count=count)
+                except (ManagedKeyFileError, OSError, fs.WindowsScanError):
+                    children.close()
+                    if not database_exists:
+                        raise
+                    # This exact handle set stays blocked until a cold reopen.
+                    # No key, secret, fallback layout or replacement DB is read.
+                    self._credentials_blocked = True
+                else:
+                    stack.enter_context(children)
+            else:
+                self._pin_credentials(stack)
+                self.validate()
             return self
         except BaseException:
             self._stack = None
             stack.close()
             raise
 
+    def _pin_credentials(self, stack):
+        roots = []
+        for name in ("keys", "secrets", "temp", "recovery"):
+            child = self.root / name
+            if self.create_children:
+                child = create_private_directory(self.root, name)
+            elif not child.exists():
+                continue
+            stack.enter_context(_pin(child, self.root))
+            roots.append((child, 1))
+        return roots
+
+    def assert_credentials_readable(self):
+        if self._stack is None or self._credentials_blocked:
+            raise ManagedKeyFileError()
+
     def validate(self):
         if self._stack is None:
             raise ManagedKeyFileError()
-        pending, count = [(self.root, 0)], 0
+        self._validate_tree([(self.root, 0)])
+
+    def _validate_tree(self, roots, *, exclude_credentials=False, initial_count=0):
+        pending, count = list(roots), initial_count
+        database_exists = False
         while pending:
             directory, depth = pending.pop()
             if depth > 32:
@@ -168,6 +214,12 @@ class WindowsPrivateStorageGuard:
                     native, handle, max_entries=8192, max_component=maximum
                 ):
                     if (
+                        exclude_credentials
+                        and directory == self.root
+                        and entry.name in _CREDENTIAL_DIRECTORIES
+                    ):
+                        continue
+                    if (
                         not self.create_children
                         and directory == self.root
                         and entry.name
@@ -175,6 +227,7 @@ class WindowsPrivateStorageGuard:
                             "runtime.sqlite3",
                             "runtime.sqlite3-wal",
                             "runtime.sqlite3-shm",
+                            "runtime.sqlite3-journal",
                             "keys",
                             "secrets",
                             "temp",
@@ -188,6 +241,10 @@ class WindowsPrivateStorageGuard:
                     ):
                         raise ManagedKeyFileError()
                     if entry.attributes & fs.FILE_ATTRIBUTE_DIRECTORY:
+                        if directory == self.root and entry.name.startswith(
+                            "runtime.sqlite3"
+                        ):
+                            raise ManagedKeyFileError()
                         pending.append((directory / entry.name, depth + 1))
                         continue
                     named = expected + "\\" + entry.name
@@ -210,6 +267,9 @@ class WindowsPrivateStorageGuard:
                             != entry.file_id
                         ):
                             raise ManagedKeyFileError()
+                    if directory == self.root and entry.name == "runtime.sqlite3":
+                        database_exists = True
+        return database_exists, count
 
     def close(self):
         stack, self._stack = self._stack, None

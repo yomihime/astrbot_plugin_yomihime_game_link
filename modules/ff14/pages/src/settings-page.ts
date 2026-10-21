@@ -7,7 +7,7 @@ export function mountSettings(container:HTMLElement,options:PageOptions):Mounted
   const revision=ref(0),controller=createSettingsController(options,()=>{revision.value++;options.onNavigationStateChange?.();});
   const app=createApp(defineComponent({setup(){return()=>{
     revision.value;const s=controller.state,ordinaryDisabled=!s.draftEditable||!s.context.available,disabled=s.pending||!s.ready||!s.context.available;
-    return h(NConfigProvider,{theme:s.context.theme==='dark'?darkTheme:null,themeOverrides:{common:{primaryColor:'#8763c5',primaryColorHover:'#9b79d6',primaryColorPressed:'#6f4db1'}},styleMountTarget:container,preflightStyleDisabled:true,inlineThemeDisabled:true},{default:()=>h('section',{class:'ff14-page ff14-settings','data-theme':s.context.theme},
+    return h(NConfigProvider,{theme:s.context.theme==='dark'?darkTheme:null,themeOverrides:{common:{heightMedium:'40px',primaryColor:'#8763c5',primaryColorHover:'#9b79d6',primaryColorPressed:'#6f4db1'}},styleMountTarget:container,preflightStyleDisabled:true,inlineThemeDisabled:true},{default:()=>h('section',{class:'ff14-page ff14-settings','data-theme':s.context.theme},
       options.routeId==='home'?[h(NCard,{title:'最终幻想 XIV',bordered:false},{default:()=>[
         h('p','物品、市场、角色 Logs 与活动日历。请从模块导航选择查询，或进入业务配置维护默认值和来源凭据。'),
         h('p',{class:'ff14-hint'},'查询只在手动提交后执行；缺失、失败与覆盖限制以本次来源结果为准。'),
@@ -23,7 +23,7 @@ export function mountSettings(container:HTMLElement,options:PageOptions):Mounted
               ]):'choices' in f?h('select',{id:`ff14-config-${f.name}`,value:s.draft[f.name],disabled:ordinaryDisabled,onChange:(e:Event)=>controller.edit(f.name,(e.target as HTMLSelectElement).value)},f.choices.map(([value,label])=>h('option',{value},label))):
                 h(NInput,{value:s.draft[f.name]||'',disabled:ordinaryDisabled,inputProps:{id:`ff14-config-${f.name}`},'onUpdate:value':(value:string)=>controller.edit(f.name,value)}),
             ])),
-            h('div',{class:'ff14-actions'},[h(NButton,{type:'primary',attrType:'submit',disabled:disabled||!s.dirty},()=> '保存配置'),h(NButton,{disabled:s.pending||!s.dirty,onClick:controller.discard},()=> '放弃修改')]),
+            h('div',{class:'ff14-actions'},[h(NButton,{type:'primary',attrType:'submit',disabled:disabled||!s.dirty},()=> '保存配置'),h(NButton,{disabled:s.pending||ordinaryDisabled||!s.dirty,onClick:controller.discard},()=> '放弃修改')]),
           ]),
         ]}),
         h(NCard,{title:'FFLogs 来源凭据',bordered:false},{default:()=>[
