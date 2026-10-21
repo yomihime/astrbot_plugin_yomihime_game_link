@@ -128,7 +128,9 @@ class BuildOutputSafetyTests(unittest.TestCase):
 
     def test_failed_archive_capture_preserves_previous_artifact(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            # Real included_files returns canonical paths, even when Windows
+            # TEMP names the same directory through its 8.3 short alias.
+            root = Path(temporary).resolve(strict=True)
             source = root / "runtime.py"
             source.write_bytes(b"source")
             artifact = root / "previous.zip"
