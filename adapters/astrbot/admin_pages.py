@@ -395,7 +395,11 @@ class AdminPages:
                 {
                     "status": "error",
                     "code": code,
-                    "message": "配置版本冲突，请刷新并重新核对后修改。"
+                    # The official Host bridge forwards only message, then
+                    # rejects with Error(message). Preserve this exact marker.
+                    "message": "admin_authorization_denied"
+                    if code == "admin_authorization_denied"
+                    else "配置版本冲突，请刷新并重新核对后修改。"
                     if code == "revision_conflict"
                     else "原密钥格式无效，请输入标准 Base64 编码的 32 字节密钥；旧凭据未更改。"
                     if code == "invalid_key"

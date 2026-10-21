@@ -334,6 +334,20 @@ class AdminPagesTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.call("read", {})).status_code, 200)
         self.assertEqual(self.runtime._admin_source._proofs, {})
 
+    async def test_authorization_marker_survives_message_only_host_bridge(self):
+        response = await self.call(
+            "read", {}, headers={**self.headers, "Origin": "https://other.test"}
+        )
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.headers["cache-control"], "no-store")
+        body = response.json()
+        self.assertEqual(body["code"], "admin_authorization_denied")
+        # PluginViewPage forwards only data.message; plugin_page_bridge rejects
+        # with Error(message). The controlled marker must survive both hops.
+        self.assertEqual(body["message"], "admin_authorization_denied")
+        self.assertEqual(body["data"], {})
+        self.assertEqual(self.runtime._admin_source._proofs, {})
+
     async def test_catalog_uses_existing_host_proof_redirect_and_empty_body(self):
         response = await self.call("catalog", {})
         self.assertEqual(response.status_code, 200, response.text)

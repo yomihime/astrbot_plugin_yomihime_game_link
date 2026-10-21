@@ -22,6 +22,8 @@
 
 官方首选 `AstrBotPluginView` bridge。`pages/` 仍为支持的目录，`views/` 若存在会优先；本项目只保留一种目录，避免双根遮蔽。官方 `/views/{view}/_t/{token}/...` 路径令牌使浏览器原生相对 URL 在 HTML、CSS、JavaScript 静态/动态导入间继承资产权限。插件不再假定宿主会重写 JS/CSS，不自行传播或持久化令牌。
 
+当前正式 Host 在 API 失败时仅把响应 `message` 作为字符串交给子页，HTTP status 和 `code` 不随 bridge 的 `Error(message)` 保留。因此插件对已确认的管理拒绝固定返回 HTTP 403、`code: admin_authorization_denied` 和精确相同的 `message` 标记。页面只精确识别该标记或受支持的结构化分类，不匹配模糊提示；其它未知失败仍为未确认错误，不冒称授权拒绝。后端校验与响应无缓存要求不变。
+
 ### 模块管理页面会话
 
 唯一正式根为 `00-game-link`。模块的配置与凭据动作还要求独立的、仅内存保存的 `page_session`；它不能由静态资产令牌、页面名称、Referer或客户端角色声明替代。

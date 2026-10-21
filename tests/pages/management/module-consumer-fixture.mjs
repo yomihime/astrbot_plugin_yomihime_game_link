@@ -3,10 +3,10 @@ export const {createSettingsController}=await sourceModule(root+'modules/ff14/pa
 const {createModuleServices}=await sourceModule(root+'pages/frontend/src/module-services.ts');
 export const flush=async()=>{for(let i=0;i<60;i++)await Promise.resolve();};
 let serial=0;
-export async function consumer({owner='ff14/ff14',failure='',configured=true,decryptable=true,hold='',context:patch={}}={}){
+export async function consumer({owner='ff14/ff14',failure='',error=null,configured=true,decryptable=true,hold='',context:patch={}}={}){
  const callbacks=[],calls=[],pending=[];let active=true,proof=0;
  const context={owner,runtimeId:'synthetic',epoch:1,boundary:'consumer-'+(++serial),available:true,theme:'light',locale:'zh-CN',...patch};
- const state={failure,error:null,configured,decryptable,hold,revision:4,fields:{reply_theme:{value:null,state:'valid',present:false,source:'default'}},descriptors:{reply_theme:{description:'Reply theme',value_schema:{type:'string',enum:['one','two']},default:null,choices:[{value:null,label:'Follow Core'},{value:'one',label:'Server one'},{value:'two',label:'Server two'}]}}};
+ const state={failure,error,configured,decryptable,hold,revision:4,fields:{reply_theme:{value:null,state:'valid',present:false,source:'default'}},descriptors:{reply_theme:{description:'Reply theme',value_schema:{type:'string',enum:['one','two']},default:null,choices:[{value:null,label:'Follow Core'},{value:'one',label:'Server one'},{value:'two',label:'Server two'}]}}};
  const pairState=()=>({revision:state.revision,fields:Object.fromEntries(['cn','global'].map(region=>['credential_fflogs_'+region,{configured:state.configured,decryptable:state.decryptable,upstream:'unverified'}]))});
  const bridge={async apiPost(action,body){calls.push({action,body});
   if(action==='admin/module-page-session')return {page_session:'synthetic-'+(++proof),expires_at:Date.now()/1000+30};

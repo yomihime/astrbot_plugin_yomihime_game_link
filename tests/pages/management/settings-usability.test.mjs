@@ -6,7 +6,7 @@ import {harness,keyStatus} from './global-settings-fixture.mjs';
 const accessFailures=[['controlled-code',Error('admin_authorization_denied')],['code-object',{code:'admin_authorization_denied',message:'controlled'}],['error-code',{error_code:'asset_revoked'}],['context-expired',Error('stale_context')],['page-revoked',Error('page_revoked')],['http401',{status:401}],['http403',{response:{status:403}}]];
 for(const [kind,error]of accessFailures)for(const when of ['initial','refresh','ack'])test(`Module ${kind} at ${when} clears and fences writes without success`,async()=>{
  const action=when==='ack'?'admin/module-credential-status':'admin/module-config-current';
- const h=await consumer(when==='initial'?{failure:action}:{});try{
+ const h=await consumer(when==='initial'?{failure:action,error}:{});try{
   h.state.error=error;
   if(when!=='initial'){h.editPair();if(when==='ack'){h.state.failure=action;await h.controller.replace('credential_fflogs_cn');}else{h.state.failure=action;await h.controller.load();}}
   assert.equal(h.controller.state.ready,false);assert.equal(h.controller.state.error,true);assert.ok(Object.values(h.controller.state.pairs).every(pair=>pair.client_secret===''));

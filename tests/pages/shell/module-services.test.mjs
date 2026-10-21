@@ -43,6 +43,17 @@ test('late bootstrap after disposal closes its own new proof and never mounts a 
 test('an uncertain mutation is sent once without automatically renewing or retrying it',async()=>{
  const h=await harness(()=>{throw Error('write_unknown');});await assert.rejects(h.services.config.save(1,{sample:'new'}),/operation_unavailable/);assert.equal(h.calls.length,1);assert.equal(h.calls[0].action,'admin/module-config-save');
 });
+
+test('message-only Host marker is exact; unknown management errors and business upstream errors stay distinct',async()=>{
+ for(const error of [Error('admin_authorization_denied'),{code:'admin_authorization_denied'},{response:{status:403}}]){
+  const h=await harness(()=>{throw error;});await assert.rejects(h.services.config.current(),{message:'admin_authorization_denied'});
+ }
+ for(const error of [Error('request failed: admin_authorization_denied'),Error('admin_authorization_denied '),TypeError('Failed to fetch'),{code:'upstream_error'}]){
+  const h=await harness(()=>{throw error;});await assert.rejects(h.services.config.current(),{message:'operation_unavailable'});
+ }
+ const upstream={status:'error',error:{code:'upstream_error',message:'controlled upstream failure'}};
+ const business=await harness(()=>upstream);assert.deepEqual(await business.services.invoke('example.query',{}),upstream);
+});
 test('approved own descriptors preserve null inheritance and immutable labels; private/unknown schema keys refuse',async()=>{
  const snapshot={revision:1,fields:{reply_theme:{value:null,state:'valid',present:false,source:'default'}},descriptors:{reply_theme:{description:'Theme',value_schema:{type:'string',enum:['synthetic-theme']},default:null,choices:[{value:null,label:'Follow Core'},{value:'synthetic-theme',label:'Server label'}]}}};
  const h=await harness(()=>snapshot);const read=await h.services.config.current();assert.equal(read.fields.reply_theme.value,null);assert.ok(Object.isFrozen(read.descriptors.reply_theme.choices[0]));

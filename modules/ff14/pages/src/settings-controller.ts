@@ -49,7 +49,10 @@ export function createSettingsController(options:PageOptions,onChanged:()=>void)
     }
     throw Error('revision_conflict');
   }
-  function failure(error:unknown,field?:string,committed=false){
+  function failure(error:unknown,field?:string,committed=false,reading=false){
+    // A failed management read cannot establish authority. Scrub this current
+    // context's secrets without pretending an unknown failure is an auth denial.
+    if(reading)scrub();
     const code=errorCode(error);
     if(authorityErrors.has(code)){state.ready=false;state.baselineUnverified=true;state.draftEditable=false;scrub();notify('管理授权或模块绑定已失效，请重新打开页面。',true);return;}
     if(committed){state.ready=false;state.baselineUnverified=true;if(field)scrub(field);notify('已提交，状态暂未核实，请刷新确认。',true);return;}
@@ -63,7 +66,7 @@ export function createSettingsController(options:PageOptions,onChanged:()=>void)
   async function load(){
     if(state.pending||!current(sequence))return;const n=++sequence,startedAt=editVersion;state.pending=true;changed();
     try{const pair=await snapshots(n);if(!pair)return;accept(...pair,startedAt);const invalid=Object.values(pair[0].fields).some(f=>f.state==='invalid');notify(invalid?'存在无效配置，请明确修正后保存；未使用默认值覆盖。':'配置已读取。保存凭据不代表上游验证成功。',invalid);}
-    catch(error){if(current(n))failure(error,undefined,acknowledgementPending);}
+    catch(error){if(current(n))failure(error,undefined,acknowledgementPending,true);}
     finally{if(current(n)){state.pending=false;changed();}}
   }
   async function mutate(action:(revision:number)=>Promise<{revision:number}>,submitted?:Record<string,string>,field?:string){
@@ -73,7 +76,7 @@ export function createSettingsController(options:PageOptions,onChanged:()=>void)
       if(submitted)acknowledgedSubmission={values:submitted,version:startedAt};
       if(field)scrub(field);const pair=await snapshots(n);if(!pair)return;accept(...pair,startedAt);
       notify(state.dirty?'已保存本次提交；仍有更新的未保存修改。':'已保存；上游状态仍需实际查询确认。');
-    }catch(error){if(current(n))failure(error,field,committed);}
+    }catch(error){if(current(n))failure(error,field,committed,committed);}
     finally{if(current(n)){state.pending=false;changed();}}
   }
   function cancel(){sequence++;state.pending=false;scrub();state.ready=false;state.baselineUnverified=true;notify('已停止等待；操作可能已经保存，请重新读取状态。');}
