@@ -36,6 +36,7 @@ class ErrorCode(str, Enum):
 class ErrorDetail:
     code: ErrorCode
     message: str
+    retry_after_seconds: int | None = None
 
 
 @dataclass(frozen=True)

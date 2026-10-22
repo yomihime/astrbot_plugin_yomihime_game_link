@@ -11,9 +11,12 @@ import asyncio
 import base64
 import hashlib
 import inspect
+import math
 from collections import deque
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from time import monotonic
 from types import MappingProxyType
 from typing import Protocol
@@ -26,6 +29,36 @@ from yomihime_game_link_sdk.services import HttpRequest, HttpResponse, SourceHtt
 from ..core.contracts.validation_boundary import validate_contract
 from ..core.public_errors import public_boundary
 from .sync_diagnostics import emit as diagnostic
+
+
+def _retry_after_seconds(response: HttpResponse) -> int | None:
+    raw = next(
+        (
+            value
+            for key, value in response.headers.items()
+            if key.lower() == "retry-after"
+        ),
+        None,
+    )
+    if not isinstance(raw, str) or len(raw) > 128:
+        return None
+    raw = raw.strip()
+    try:
+        if raw.isascii() and raw.isdigit():
+            seconds = int(raw)
+        else:
+            instant = parsedate_to_datetime(raw)
+            if instant.tzinfo is None:
+                return None
+            seconds = max(
+                0,
+                math.ceil(
+                    (instant.astimezone(UTC) - datetime.now(UTC)).total_seconds()
+                ),
+            )
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return seconds if 0 <= seconds <= 86400 else None
 
 
 class HttpTransport(Protocol):
@@ -514,11 +547,19 @@ class SourceHttpService(SourceHttp):
                 ) from None
             if 400 <= response.status_code <= 499:
                 raise SourceHttpError(
-                    "upstream_error", status_code=response.status_code
+                    "upstream_error",
+                    status_code=response.status_code,
+                    retry_after_seconds=_retry_after_seconds(response)
+                    if response.status_code == 429
+                    else None,
                 ) from None
             if 500 <= response.status_code <= 599:
                 raise SourceHttpError(
-                    "upstream_error", status_code=response.status_code
+                    "upstream_error",
+                    status_code=response.status_code,
+                    retry_after_seconds=_retry_after_seconds(response)
+                    if response.status_code == 503
+                    else None,
                 ) from None
             diagnostic("http_end", code="ok", http_status=response.status_code)
             return response

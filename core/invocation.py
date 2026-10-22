@@ -1136,7 +1136,9 @@ class Gateway:
             raise TypeError("expected error detail")
         if not isinstance(value.code, ErrorCode) or not isinstance(value.message, str):
             raise TypeError("malformed error detail")
-        return validate_contract(ErrorDetail(value.code, value.message))
+        return validate_contract(
+            ErrorDetail(value.code, value.message, value.retry_after_seconds)
+        )
 
     @staticmethod
     def _current_view(snapshot, module: RegisteredModule, view: InvocationView) -> bool:

@@ -13,6 +13,7 @@ from .storage import (
     CacheEntry,
     CacheLookup,
     CacheQuery,
+    CacheVisibility,
     GrantReference,
     JsonObject,
     OwnerScope,
@@ -194,7 +195,12 @@ class CacheAccess(Protocol):
         ...
 
     async def put(
-        self, key: str, payload: JsonObject, *, ttl_seconds: float
+        self,
+        key: str,
+        payload: JsonObject,
+        *,
+        ttl_seconds: float,
+        visibility: CacheVisibility | None = None,
     ) -> CacheEntry: ...
 
 

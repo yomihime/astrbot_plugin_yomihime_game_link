@@ -22,16 +22,25 @@ class _Routes:
 
 
 class OwnerDependencyTests(unittest.IsolatedAsyncioTestCase):
-    async def ready(self, *, declared=True, origin=ygl.InvocationOrigin.COMMAND,
-                    effect=ygl.CapabilityEffect.READ_ONLY):
+    async def ready(
+        self,
+        *,
+        declared=True,
+        origin=ygl.InvocationOrigin.COMMAND,
+        effect=ygl.CapabilityEffect.READ_ONLY,
+    ):
         fixture = fixtures.DependencyInvokerTests()
         fixture.setUp()
         reference = ygl.CapabilityReference("dependency-tests/target", "target.query")
-        target = fixtures._capability("target.query", policy=ygl.InvocationPolicy.COMMAND_ONLY,
-                                     privacy=ygl.PrivacyFloor.OWNER)
+        target = fixtures._capability(
+            "target.query",
+            policy=ygl.InvocationPolicy.COMMAND_ONLY,
+            privacy=ygl.PrivacyFloor.OWNER,
+        )
         target = replace(target, effect=effect)
-        authority = OwnerRouteProofAuthority(fixture.issuer, fixture.lifecycle.admission,
-                                            _Principals(), _Routes())
+        authority = OwnerRouteProofAuthority(
+            fixture.issuer, fixture.lifecycle.admission, _Principals(), _Routes()
+        )
         self.entered, self.release = asyncio.Event(), asyncio.Event()
         test = self
 
@@ -46,26 +55,52 @@ class OwnerDependencyTests(unittest.IsolatedAsyncioTestCase):
                 test.entered.set()
                 if getattr(test, "block", False):
                     await test.release.wait()
-                return ygl.CapabilityResult("owner-read", ygl.ResultStatus.SUCCESS,
-                    document=ygl.DisplayDocument("Identity", "private",
+                return ygl.CapabilityResult(
+                    "owner-read",
+                    ygl.ResultStatus.SUCCESS,
+                    document=ygl.DisplayDocument(
+                        "Identity",
+                        "private",
                         (ygl.FieldsBlock({"identity": principal}),),
-                        privacy=ygl.Privacy.PRIVATE), privacy=ygl.Privacy.PRIVATE)
+                        privacy=ygl.Privacy.PRIVATE,
+                    ),
+                    privacy=ygl.Privacy.PRIVATE,
+                )
 
         handler = Handler()
         old, _, _ = await fixture._ready(
-            (fixtures._capability("source.query", required=(reference,) if declared else ()),),
-            target, target_handler=handler)
+            (
+                fixtures._capability(
+                    "source.query", required=(reference,) if declared else ()
+                ),
+            ),
+            target,
+            target_handler=handler,
+        )
         fixture.issuer.release(old)
         snapshot = fixture.registry.snapshot()
         source = snapshot.module("dependency-tests/source")
-        parent = fixture.issuer.issue(origin=origin, module_id=source.module_id,
-            module_epoch=source.epoch, registry_revision=snapshot.revision,
-            actor_id="adapter-a:alice", adapter_id="adapter-a", conversation_id="group-a",
-            capability_id="source.query")
+        parent = fixture.issuer.issue(
+            origin=origin,
+            module_id=source.module_id,
+            module_epoch=source.epoch,
+            registry_revision=snapshot.revision,
+            actor_id="adapter-a:alice",
+            adapter_id="adapter-a",
+            conversation_id="group-a",
+            capability_id="source.query",
+        )
         fixture.lifecycle.admission.admit(parent, "source.query")
         caller = fixture.caller_issuer.issue(parent, "source.query")
-        invoker = DependencyInvoker(fixture.registry, fixture.issuer, fixture.lifecycle,
-            fixture.caller_issuer, caller, owner_authority=authority, clock=fixture.clock)
+        invoker = DependencyInvoker(
+            fixture.registry,
+            fixture.issuer,
+            fixture.lifecycle,
+            fixture.caller_issuer,
+            caller,
+            owner_authority=authority,
+            clock=fixture.clock,
+        )
         return fixture, authority, parent, reference, handler, invoker
 
     async def test_group_actor_reads_private_data_without_output_or_grant(self):
@@ -73,7 +108,10 @@ class OwnerDependencyTests(unittest.IsolatedAsyncioTestCase):
         result = await invoker.invoke(parent, reference, {})
         self.assertIs(result.status, ygl.ResultStatus.SUCCESS)
         self.assertIs(result.privacy, ygl.Privacy.PRIVATE)
-        self.assertEqual(result.document.ordered_blocks[0].fields["identity"], "principal:adapter-a:alice")
+        self.assertEqual(
+            result.document.ordered_blocks[0].fields["identity"],
+            "principal:adapter-a:alice",
+        )
         self.assertIsNone(result.model_facts)
         self.assertIsNone(handler.child.grant_id)
         with self.assertRaises(PermissionError):
@@ -87,8 +125,10 @@ class OwnerDependencyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(handler.calls, 0)
 
     async def test_tool_and_writable_owner_targets_are_rejected(self):
-        for options in ({"origin": ygl.InvocationOrigin.LLM_TOOL},
-                        {"effect": ygl.CapabilityEffect.WRITE}):
+        for options in (
+            {"origin": ygl.InvocationOrigin.LLM_TOOL},
+            {"effect": ygl.CapabilityEffect.WRITE},
+        ):
             with self.subTest(options=options):
                 _, _, parent, reference, handler, invoker = await self.ready(**options)
                 result = await invoker.invoke(parent, reference, {})

@@ -401,9 +401,8 @@ class DependencyInvoker:
                     return _error(ErrorCode.MODULE_UNAVAILABLE)
             expected_privacy = (
                 Privacy.PRIVATE
-                if target_descriptor.privacy_floor in (
-                    PrivacyFloor.PRIVATE, PrivacyFloor.OWNER
-                )
+                if target_descriptor.privacy_floor
+                in (PrivacyFloor.PRIVATE, PrivacyFloor.OWNER)
                 else Privacy.PUBLIC
             )
             from ..core.invocation import Gateway

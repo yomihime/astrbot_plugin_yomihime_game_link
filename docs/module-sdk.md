@@ -1,6 +1,6 @@
 # Game Link module SDK
 
-The independently installable distribution is `yomihime-game-link-sdk==0.1.0a12`. Import its public declarations with `import yomihime_game_link_sdk as ygl`. It requires Python 3.11 or newer and has no third-party runtime dependencies.
+The independently installable distribution is `yomihime-game-link-sdk==0.1.0a13`. Import its public declarations with `import yomihime_game_link_sdk as ygl`. It requires Python 3.11 or newer and has no third-party runtime dependencies.
 
 The SDK (including its packaged examples) is licensed under MIT; see `SDK-LICENSE`. The AstrBot plugin implementation remains AGPL-3.0 under `LICENSE`. Third-party notices retain their own terms. The a12 source contract adds the outer-plugin extension bridge without changing module ABI 2.0. Built wheel identity and installation evidence are recorded separately; editing these declarations does not prove a published or installed wheel.
 
@@ -45,8 +45,8 @@ read proof does not authorize root private output or account management.
 Install the reviewed wheel into your module development environment:
 
 ```powershell
-python -m pip install --no-deps ./yomihime_game_link_sdk-0.1.0a12-py3-none-any.whl
-python -I -c "import yomihime_game_link_sdk as ygl; assert ygl.__version__ == '0.1.0a12'; assert ygl.MODULE_ABI_VERSION == '2.0'"
+python -m pip install --no-deps ./yomihime_game_link_sdk-0.1.0a13-py3-none-any.whl
+python -I -c "import yomihime_game_link_sdk as ygl; assert ygl.__version__ == '0.1.0a13'; assert ygl.MODULE_ABI_VERSION == '2.0'"
 ```
 
 The plugin release contains the exact content-pinned SDK from that wheel. Its bootstrap rejects changed contents, foreign package origins, partial preload graphs, and any preloaded retired `yomihime_sdk` graph. The retired root `api` and `yomihime_sdk.api` modules have no compatibility redirects. Historical stored-data readers are separate from module import compatibility.
@@ -256,6 +256,30 @@ code/message equality is checked at Core input, not between these projected
 messages. SDK service APIs retain canonical safe typed failures and cancellation;
 Gateway retains its existing ERROR-result protocol. Neither a DTO nor a recovery
 hint grants permission to retry or change a user's request.
+
+## Explicit public query cache and safe retry hints (a13)
+
+`CacheAccess.put(..., visibility=CacheVisibility.PUBLIC)` pairs an explicit
+public lookup with a public write. Core permits this selection only for an
+invocation's PUBLIC, READ_ONLY capability. It cannot publish OWNER or private
+capability data. Omitting visibility preserves the existing current-owner
+partition; this is not a change to USER isolation. Payloads returned from a HIT
+are deeply immutable mappings and tuples, so consumers must accept `Mapping`
+and finite sequences rather than require mutable `dict` or `list` values.
+
+`SourceHttpError.retry_after_seconds` carries only an optional integer in
+0..86400. Core parses Retry-After delta seconds or an HTTP date for 429/503,
+discards invalid or excessive values, and never forwards arbitrary headers or
+upstream bodies as error details. No automatic retry is introduced. A module can
+copy the bounded value to `ErrorDetail.retry_after_seconds`; receiving validation,
+Gateway reconstruction and the fixed Core error renderer preserve it. The hint
+does not extend the invocation deadline or grant retry authority.
+
+Explicit read-only OWNER dependency scopes can open an existing USER record
+collection without registering or modifying storage metadata. An absent catalog
+with no records is readable as empty; conflicting metadata and orphan rows fail
+closed. Read-only scopes retain worker-level epoch checks and reject all writes.
+This does not expose a new principal selector or a writable grant to modules.
 
 ## Packaged examples
 

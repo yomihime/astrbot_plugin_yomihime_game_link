@@ -18,7 +18,9 @@ from ygl_test_subject.extensions.disk_manifest import parse_manifest
 from scripts.build_release import build_release
 
 ROOT = Path(__file__).resolve().parents[2]
-EXPECTED_WHEEL_SHA256 = 'efc0de300fe87774f1f148c00743dbeb779d8ff19527023bc5af859ba9c67cdd'
+EXPECTED_WHEEL_SHA256 = (
+    "3ea9366bfd937875066d74f764f6635ea845507ac2ee054a92f3bae38f531015"
+)
 EXPECTED_RESOURCES = {
     f"yomihime_game_link_sdk/_examples/{example}/{filename}"
     for example in ("empty_module", "offline_sample")
@@ -136,7 +138,7 @@ assert sdk.SourceHttpError is CanonicalSourceHttpError
 assert GatewayResultType is sdk.CapabilityResult
 assert OutputResultType is sdk.CapabilityResult
 
-assert sdk.__version__ == "0.1.0a12"
+assert sdk.__version__ == "0.1.0a13"
 assert sdk.MODULE_ABI_VERSION == "2.0"
 assert sdk.ScheduleTrigger.BACKGROUND.value == "background"
 assert sdk.ScheduleDescriptor.__dataclass_fields__["background_parameters"].default == ()
@@ -374,7 +376,7 @@ class InstalledArtifactTests(unittest.TestCase):
             wheel_digest = hashlib.sha256(wheel.read_bytes()).hexdigest()
             self.assertEqual(wheel_digest, EXPECTED_WHEEL_SHA256)
             self.assertEqual(
-                wheel.name, "yomihime_game_link_sdk-0.1.0a12-py3-none-any.whl"
+                wheel.name, "yomihime_game_link_sdk-0.1.0a13-py3-none-any.whl"
             )
             with zipfile.ZipFile(wheel) as archive:
                 entries = set(archive.namelist())

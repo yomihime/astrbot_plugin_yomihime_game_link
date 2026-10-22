@@ -111,9 +111,20 @@ class SourceHttpError(RuntimeError):
         "redirect_disallowed": "HTTP source redirect is not allowed",
     }
 
-    def __init__(self, code: str, *, status_code: int | None = None) -> None:
+    def __init__(
+        self,
+        code: str,
+        *,
+        status_code: int | None = None,
+        retry_after_seconds: int | None = None,
+    ) -> None:
         if code not in self._MESSAGES:
             code = "transport_failed"
         self.code = code
         self.status_code = status_code
+        self.retry_after_seconds = (
+            retry_after_seconds
+            if type(retry_after_seconds) is int and 0 <= retry_after_seconds <= 86400
+            else None
+        )
         super().__init__(self._MESSAGES[code])

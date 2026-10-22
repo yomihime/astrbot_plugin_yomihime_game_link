@@ -23,6 +23,7 @@ from yomihime_game_link_sdk.contexts import (
     MessageContext,
 )
 from yomihime_game_link_sdk.declarations import (
+    CapabilityEffect,
     ModuleManifest,
     PrivacyFloor,
 )
@@ -55,6 +56,7 @@ from yomihime_game_link_sdk.storage import (
     CacheEntry,
     CacheLookup,
     CacheQuery,
+    CacheVisibility,
     DeclaredIndexQuery,
     GrantReference,
     OwnerScope,
@@ -740,17 +742,19 @@ class _BoundRecords:
 
 
 class _BoundCache:
-    __slots__ = ("__cache", "__check_sync", "__check")
+    __slots__ = ("__cache", "__check_sync", "__check", "__public_write")
 
     def __init__(
         self,
         cache: CacheAccessService,
         check_sync: Callable[[], None],
         check: Callable[[], Awaitable[None]],
+        public_write: bool = False,
     ) -> None:
         object.__setattr__(self, "_BoundCache__cache", cache)
         object.__setattr__(self, "_BoundCache__check_sync", check_sync)
         object.__setattr__(self, "_BoundCache__check", check)
+        object.__setattr__(self, "_BoundCache__public_write", public_write)
 
     @public_boundary("service")
     async def get(self, key: str) -> CacheEntry | None:
@@ -775,10 +779,21 @@ class _BoundCache:
         return result
 
     @public_boundary("service")
-    async def put(self, key: str, payload: Mapping[str, object], *, ttl_seconds: float):
+    async def put(
+        self,
+        key: str,
+        payload: Mapping[str, object],
+        *,
+        ttl_seconds: float,
+        visibility: CacheVisibility | None = None,
+    ):
         await self.__check()
+        if visibility is CacheVisibility.PUBLIC and not self.__public_write:
+            raise InvocationBindingError()
         try:
-            result = await self.__cache.put(key, payload, ttl_seconds=ttl_seconds)
+            result = await self.__cache.put(
+                key, payload, ttl_seconds=ttl_seconds, visibility=visibility
+            )
         except Exception:
             await self.__check()
             raise
@@ -1286,6 +1301,7 @@ class InvocationServiceBinder:
             check_sync()
 
         grant_store = self._repositories.authorization
+
         def record_write_check() -> None:
             check_sync()
             if is_owner and invocation.parent_id is not None:
@@ -1294,7 +1310,8 @@ class InvocationServiceBinder:
                 raise InvocationBindingError()
 
         record_repository = self._repositories.records_for(module).with_write_check(
-            record_write_check
+            record_write_check,
+            read_only=is_owner and invocation.parent_id is not None,
         )
 
         async def collection_for_invocation(name: str) -> object:
@@ -1378,7 +1395,14 @@ class InvocationServiceBinder:
                     f"records-write:{module.module_id}"
                 ),
             ),
-            cache=_BoundCache(cache, check_sync, check),
+            cache=_BoundCache(
+                cache,
+                check_sync,
+                check,
+                public_write=owner_capability is not None
+                and owner_capability.privacy_floor is PrivacyFloor.PUBLIC
+                and owner_capability.effect is CapabilityEffect.READ_ONLY,
+            ),
             http=_BoundHttp(self._http, check_sync, check),
             resources=_BoundResources(resources, check_sync, check),
             dependencies=_BoundDependencies(dependencies, check),

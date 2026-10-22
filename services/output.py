@@ -856,6 +856,8 @@ class OutputService:
         if result.status is ResultStatus.ERROR:
             # Use stable core error text, never module or exception strings.
             message = _ERROR_MESSAGES.get(result.error.code, "request failed")
+            if result.error.retry_after_seconds is not None:
+                message += f" 建议等待 {result.error.retry_after_seconds} 秒后重试。"
             return RenderedMessage(message)
         if result.document is None:
             raise _OutputFailure("invalid_result")
@@ -1513,19 +1515,19 @@ async def _require_public_fact_resources(
 
 
 _ERROR_MESSAGES = {
-    ErrorCode.PARAMETER_ERROR: "invalid parameters",
-    ErrorCode.UNBOUND: "account binding required",
+    ErrorCode.PARAMETER_ERROR: "参数无效，请查看命令帮助。",
+    ErrorCode.UNBOUND: "尚未关联账号，请先私聊关联账号。",
     ErrorCode.AUTH_REQUIRED: "此来源需要授权。请联系管理员配置对应来源的凭据后重试；请勿在聊天中发送凭据。",
     ErrorCode.AUTH_EXPIRED: "此来源授权已失效。请联系管理员更新对应来源的凭据后重试；请勿在聊天中发送凭据。",
-    ErrorCode.NOT_FOUND: "not found",
-    ErrorCode.NOT_PUBLIC: "result is not public",
-    ErrorCode.NO_RECORDS: "no records found",
-    ErrorCode.UNPARSED: "result could not be interpreted",
-    ErrorCode.RATE_LIMITED: "request rate limited",
-    ErrorCode.UPSTREAM_ERROR: "source temporarily unavailable",
-    ErrorCode.MODULE_UNAVAILABLE: "module temporarily unavailable",
-    ErrorCode.UNSUPPORTED: "operation unsupported",
-    ErrorCode.UNKNOWN: "request failed",
+    ErrorCode.NOT_FOUND: "未找到请求的数据。",
+    ErrorCode.NOT_PUBLIC: "数据不可公开访问。",
+    ErrorCode.NO_RECORDS: "数据源暂无记录。",
+    ErrorCode.UNPARSED: "数据不完整或无法解析。",
+    ErrorCode.RATE_LIMITED: "请求过于频繁，请稍后重试。",
+    ErrorCode.UPSTREAM_ERROR: "上游服务暂时不可用。",
+    ErrorCode.MODULE_UNAVAILABLE: "模块或依赖服务暂时不可用。",
+    ErrorCode.UNSUPPORTED: "当前入口不支持此操作。",
+    ErrorCode.UNKNOWN: "请求未能完成。",
 }
 
 

@@ -16,6 +16,7 @@ from pathlib import Path
 from types import MappingProxyType
 
 from yomihime_game_link_sdk.declarations import ConfigUpdateMode
+from yomihime_game_link_sdk.errors import AccessDenied
 from yomihime_game_link_sdk.services import ConfigSnapshot, ConfigTarget
 from yomihime_game_link_sdk.storage import (
     CollectionDescriptor,
@@ -813,6 +814,24 @@ def _descriptor(value: CollectionDescriptor) -> CollectionDescriptor:
         raise ValueError("collection descriptor is invalid") from None
 
 
+def _validate_stored_collection(row, descriptor):
+    try:
+        existing = (
+            int(row["schema_version"]),
+            validate_contract(OwnershipKind(row["owner_kind"])),
+            _load_json(row["indexes_json"]),
+        )
+    except (TypeError, ValueError):
+        raise ValueError("stored collection declaration is invalid") from None
+    expected = (
+        descriptor.schema_version,
+        descriptor.owner_kind,
+        freeze_json({index.name: index.field for index in descriptor.indexes}),
+    )
+    if existing != expected:
+        raise ValueError("collection declaration does not match")
+
+
 class SQLiteRecordRepository:
     """Issue collections only from a registry-validated module snapshot."""
 
@@ -823,6 +842,7 @@ class SQLiteRecordRepository:
         registration_lookup: ModuleRegistrationLookup,
         *,
         write_check: Callable[[], None] | None = None,
+        read_only: bool = False,
     ) -> None:
         self.database = _database(database)
         if not isinstance(registered_module, RegisteredModule):
@@ -841,14 +861,22 @@ class SQLiteRecordRepository:
         if write_check is not None and not callable(write_check):
             raise TypeError("record write check must be callable")
         self._write_check = write_check
+        if type(read_only) is not bool:
+            raise TypeError("record read_only must be boolean")
+        self._read_only = read_only
 
-    def with_write_check(self, check: Callable[[], None]) -> "SQLiteRecordRepository":
+    def with_write_check(
+        self, check: Callable[[], None], *, read_only: bool = False
+    ) -> "SQLiteRecordRepository":
         """Bind one invocation's synchronous worker fence without sharing it."""
+        if type(read_only) is not bool:
+            raise TypeError("record read_only must be boolean")
         return SQLiteRecordRepository(
             self.database,
             self.registered_module,
             self.registration_lookup,
             write_check=check,
+            read_only=self._read_only or read_only,
         )
 
     async def collection(
@@ -882,7 +910,17 @@ class SQLiteRecordRepository:
             self.registration_lookup,
             registration,
             write_check=self._write_check,
+            read_only=self._read_only,
         )
+
+        if self._read_only:
+
+            def inspect(unit):
+                with collection._read_fence(unit):
+                    pass
+
+            await self.database.executor.run_read(inspect)
+            return collection
 
         def register(unit: SQLiteUnitOfWork) -> None:
             collection._guard_write(unit)
@@ -911,22 +949,7 @@ class SQLiteRecordRepository:
                         "collection declaration changed concurrently"
                     ) from None
             else:
-                try:
-                    existing = (
-                        int(row["schema_version"]),
-                        validate_contract(OwnershipKind(row["owner_kind"])),
-                        _load_json(row["indexes_json"]),
-                    )
-                except (TypeError, ValueError):
-                    raise ValueError(
-                        "stored collection declaration is invalid"
-                    ) from None
-                if existing != (
-                    descriptor.schema_version,
-                    descriptor.owner_kind,
-                    freeze_json(indexes),
-                ):
-                    raise ValueError("collection declaration does not match")
+                _validate_stored_collection(row, descriptor)
 
         await self.database.executor.run_transaction(register, begin_mode="IMMEDIATE")
         return collection
@@ -970,6 +993,7 @@ class SQLiteRecordCollection:
         registration: ModuleRegistrationSnapshot,
         *,
         write_check: Callable[[], None] | None = None,
+        read_only: bool = False,
     ) -> None:
         validate_contract(descriptor)
         validate_contract(owner)
@@ -981,6 +1005,35 @@ class SQLiteRecordCollection:
         self.registration_lookup = registration_lookup
         self._registration = registration
         self._write_check = write_check
+        if type(read_only) is not bool:
+            raise TypeError("record read_only must be boolean")
+        self._read_only = read_only
+
+    @contextmanager
+    def _read_fence(self, unit):
+        if not self._read_only:
+            yield
+            return
+        # Reuse the trusted registration lock, without invoking an invocation's
+        # write-only authority check. The SDK records coordinator retains the
+        # separate current invocation/owner proof checks around reads.
+        guard = getattr(self.registration_lookup, "record_write_guard", None)
+        with guard(self._registration) if callable(guard) else nullcontext():
+            row = unit.execute(
+                "SELECT schema_version,owner_kind,indexes_json FROM module_collections "
+                "WHERE module_id=? AND collection=?",
+                (self.module_id, self.descriptor.name),
+            ).fetchone()
+            if row is None:
+                orphan = unit.execute(
+                    "SELECT 1 FROM module_records WHERE module_id=? AND collection=? LIMIT 1",
+                    (self.module_id, self.descriptor.name),
+                ).fetchone()
+                if orphan is not None:
+                    raise ValueError("collection catalog is missing for stored records")
+            else:
+                _validate_stored_collection(row, self.descriptor)
+            yield
 
     @contextmanager
     def _write_fence(self) -> Iterator[None]:
@@ -990,6 +1043,8 @@ class SQLiteRecordCollection:
         guard = getattr(self.registration_lookup, "record_write_guard", None)
         if self._write_check is not None:
             self._write_check()
+        if self._read_only:
+            raise AccessDenied()
         with guard(self._registration) if callable(guard) else nullcontext():
             if self._write_check is not None:
                 self._write_check()
@@ -1011,8 +1066,9 @@ class SQLiteRecordCollection:
         key = _bounded(key, "record key")
 
         def _worker(unit):
-            row = self._row(unit, key)
-            return None if row is None else self._record(row)
+            with self._read_fence(unit):
+                row = self._row(unit, key)
+                return None if row is None else self._record(row)
 
         return await self.database.executor.run_read(_worker)
 
@@ -1131,8 +1187,9 @@ class SQLiteRecordCollection:
             params.extend([escaped + "%", query.limit + 1, offset])
 
         def read(unit: SQLiteUnitOfWork) -> tuple[VersionedRecord, ...]:
-            rows = unit.execute(sql, params).fetchall()
-            return tuple(self._record(row) for row in rows)
+            with self._read_fence(unit):
+                rows = unit.execute(sql, params).fetchall()
+                return tuple(self._record(row) for row in rows)
 
         records = await self.database.executor.run_read(read)
         next_cursor = str(offset + query.limit) if len(records) > query.limit else None
