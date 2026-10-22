@@ -1,6 +1,6 @@
 # Module 前端合同 v1
 
-模块唯一类型入口为 `pages/public-contract.ts`，独立于 Python SDK wheel。模块导出 `PageModule.mount(container, options)`，返回 `update(context)` 和 `dispose()`。不得导入 `pages/frontend/src` 内部实现。
+模块生命周期与服务类型入口为 `pages/public-contract.ts`，独立于 Python SDK wheel。可选共享展示组件从 `@game-link/ui`（`pages/public-ui.ts`）导入，接入与边界见[Module 共享 UI](module-ui.md)。模块导出 `PageModule.mount(container, options)`，返回 `update(context)` 和 `dispose()`。不得导入 `pages/frontend/src` 内部实现。
 
 受信 manifest/capture 注册页面；`ModulePageDefinition` 对应 routeId、title、role、order、capabilityId。role 闭合为 `home`、`config`、`aux`，未声明默认为 aux，每 owner 最多一个 home 和一个 config。后端 catalog 以 snake_case 投影这些字段及受审 entry/styles；owner、资源 URL 和 loader 由受信装配派生，不由模块运行时代码选择。
 

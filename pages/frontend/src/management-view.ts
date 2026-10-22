@@ -1,6 +1,6 @@
 import {createApp, defineComponent, h, shallowRef} from 'vue';
 import {NConfigProvider, darkTheme, zhCN, enUS, dateZhCN, dateEnUS} from 'naive-ui';
-import {ActionBar, SettingsGroup, SettingsRow, StatusHint} from './ui/components';
+import {ActionBar, SettingsGroup, SettingsRow, StatusHint} from '@game-link/ui';
 import {fieldPresentation, groupTitle, ownerPresentation} from './ui/presentation';
 import './ui/tokens.css';
 import {createInlineConfirmation} from './confirmation';

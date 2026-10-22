@@ -128,3 +128,15 @@ test('shell retains production cleanup owner and blocks new mount until the popu
   fail=false;shell.retryCleanup();await flush();await runtime.nextTick();assert.equal(shell.state.cleanupPending,false);assert.equal(shell.state.mounted,true);assert.equal(style.isConnected,false);assert.equal(loads,1);
  }finally{fail=false;shell.retryCleanup();shell.dispose();style.remove=remove;outer.remove();template.remove();window.document.head.append=append;window.location.hash='';}
 });
+
+test('production decorative logo survives theme and refresh updates but remounts on a new entry',async()=>{
+ const root=window.document.createElement('div'),theme=runtime.ref('light'),revision=runtime.ref(0);
+ const create=()=>runtime.createApp({render:()=>runtime.h('div',{'data-theme':theme.value,'data-refresh':revision.value},[runtime.h(runtime.LogoMark,{class:'fixture-logo'})])});
+ let app=create();app.mount(root);
+ try {
+  const logo=root.querySelector('.ui-logo-rebound');assert.ok(logo);assert.equal(logo.getAttribute('aria-hidden'),'true');assert.equal(logo.hasAttribute('tabindex'),false);
+  theme.value='dark';await runtime.nextTick();assert.equal(root.querySelector('.ui-logo-rebound'),logo);
+  revision.value++;await runtime.nextTick();assert.equal(root.querySelector('.ui-logo-rebound'),logo);
+  app.unmount();assert.equal(root.children.length,0);app=create();app.mount(root);assert.notEqual(root.querySelector('.ui-logo-rebound'),logo);
+ } finally {app.unmount();}
+});
