@@ -1,5 +1,6 @@
 """Fixed external pages reject mismatches without importing external Python."""
 
+import copy
 import hashlib
 import json
 import shutil
@@ -14,6 +15,11 @@ from ygl_test_subject.extensions.static_page_projection import (
 )
 
 from scripts.build_dashboard_zip import projected_page_assets
+from tests.fixtures.external_page_catalog import (
+    LOGO_BYTES,
+    LOGO_PATH,
+    external_catalog_fixture,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -126,6 +132,64 @@ class ExternalPageProjectionTests(unittest.TestCase):
         (self.package / "pages/entry.js").write_bytes(b"tampered")
         with self.assertRaisesRegex(ValueError, "hash mismatch"):
             capture_static_pages((self.package,))
+
+    def test_catalog_logo_tracks_projected_resources_without_mutating_input(self):
+        projection, catalog, digest = external_catalog_fixture()
+        (self.package / "yomihime.manifest.json").write_bytes(
+            projection.packages["minimal"][2]
+        )
+        (self.package / "assets").mkdir()
+        (self.package / "assets/logo.svg").write_bytes(LOGO_BYTES)
+        projection, resources = capture_static_pages((self.package,))
+        before = copy.deepcopy(catalog)
+        module = projection.catalog(catalog, {"minimal": digest})["modules"][0]
+        expected = f"module-assets/minimal/demo/pages/p{digest}/assets/logo.svg"
+        self.assertEqual(resources[expected], LOGO_BYTES)
+        self.assertEqual(module["display"]["logo_resource"], expected)
+        self.assertIn(expected, [item["path"] for item in module["resources"]])
+        self.assertEqual(catalog, before)
+        self.assertEqual(catalog["modules"][0]["display"]["logo_resource"], LOGO_PATH)
+        self.assertEqual(projection.catalog(catalog, {}), catalog)
+        wrong_owner = copy.deepcopy(catalog)
+        wrong_owner["modules"][0]["display"]["logo_resource"] = (
+            "module-assets/other/demo/assets/logo.svg"
+        )
+        with self.assertRaisesRegex(ValueError, "owner mismatch"):
+            projection.catalog(wrong_owner, {"minimal": digest})
+
+    def test_catalog_hidden_external_resources_also_hide_logo(self):
+        projection, catalog, digest = external_catalog_fixture()
+        before = copy.deepcopy(catalog)
+        for binding in (None, "0" * 64):
+            with self.subTest(binding=binding):
+                module = projection.catalog(catalog, {"minimal": binding})["modules"][0]
+                self.assertEqual(module["pages"], [])
+                self.assertEqual(module["resources"], [])
+                self.assertIsNone(module["display"]["logo_resource"])
+        for actual_projection, data in (
+            (StaticPageProjection(), catalog),
+            (projection, copy.deepcopy(catalog)),
+        ):
+            if actual_projection is projection:
+                data["modules"][0]["resources"][0]["sha256"] = "0" * 64
+            module = actual_projection.catalog(data, {"minimal": digest})["modules"][0]
+            self.assertEqual(module["pages"], [])
+            self.assertEqual(module["resources"], [])
+            self.assertIsNone(module["display"]["logo_resource"])
+        self.assertEqual(catalog, before)
+
+    def test_catalog_without_logo_keeps_pairing_behavior(self):
+        projection, catalog, digest = external_catalog_fixture(with_logo=False)
+        for binding in (digest, None, "0" * 64):
+            with self.subTest(binding=binding):
+                module = projection.catalog(catalog, {"minimal": binding})["modules"][0]
+                self.assertIsNone(module["display"]["logo_resource"])
+                self.assertEqual(bool(module["pages"]), binding == digest)
+                self.assertEqual(bool(module["resources"]), binding == digest)
+        catalog["modules"][0]["display"] = None
+        self.assertIsNone(
+            projection.catalog(catalog, {"minimal": digest})["modules"][0]["display"]
+        )
 
     def test_malformed_metadata_and_resource_hardlink_are_rejected(self):
         (self.root / PROJECTION_FILE).write_text(

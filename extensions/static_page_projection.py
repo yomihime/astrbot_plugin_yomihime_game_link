@@ -100,6 +100,8 @@ class StaticPageProjection:
                 continue
             if not self.permits(owner, bindings):
                 module["pages"], module["resources"] = [], []
+                if module.get("display") is not None:
+                    module["display"]["logo_resource"] = None
                 continue
             digest = self.packages[package_id][0]
             module["asset_version"] = digest
@@ -116,6 +118,8 @@ class StaticPageProjection:
                 "resources"
             ] != expected:
                 module["pages"], module["resources"] = [], []
+                if module.get("display") is not None:
+                    module["display"]["logo_resource"] = None
                 continue
             prefix = f"module-assets/{owner}/"
 
@@ -129,6 +133,9 @@ class StaticPageProjection:
                 page["styles"] = [rewrite(path) for path in page["styles"]]
             for resource in module["resources"]:
                 resource["path"] = rewrite(resource["path"])
+            display = module.get("display")
+            if display is not None and display.get("logo_resource") is not None:
+                display["logo_resource"] = rewrite(display["logo_resource"])
         return result
 
 

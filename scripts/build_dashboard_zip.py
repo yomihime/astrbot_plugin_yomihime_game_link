@@ -200,6 +200,13 @@ EXCLUDED_RUNTIME_DIRS = {
 }
 
 
+def validate_public_paths(paths) -> None:
+    for path in paths:
+        normalized = str(path).replace("\\", "/").casefold()
+        if ".local-dev" in normalized.split("/") or normalized == "agents.md":
+            raise ValueError(f"Local development material is not public input: {path}")
+
+
 def _sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
@@ -675,6 +682,9 @@ def included_files(root: Path = ROOT) -> list[Path]:
         files.append(path)
     files.extend(_reviewed_bundle_files(repository_root))
 
+    validate_public_paths(
+        path.relative_to(repository_root).as_posix() for path in files
+    )
     return sorted(
         set(files), key=lambda path: path.relative_to(repository_root).as_posix()
     )
@@ -742,6 +752,7 @@ def build(
 
 
 def _write_entry(archive: zipfile.ZipFile, name: str, data: bytes) -> None:
+    validate_public_paths((name,))
     info = zipfile.ZipInfo(name, date_time=(2020, 1, 1, 0, 0, 0))
     info.compress_type = zipfile.ZIP_DEFLATED
     info.external_attr = 0o100644 << 16
