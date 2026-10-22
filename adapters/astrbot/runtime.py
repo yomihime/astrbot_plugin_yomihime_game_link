@@ -63,6 +63,7 @@ from ...services.core_runtime import (
     CoreRuntime,
     CoreRuntimeCleanupPending,
     HostIngress,
+    HostIngressUnavailable,
 )
 from ...services.diagnostics import DiagnosticStore
 from ...services.external_packages import ExternalPackageHost
@@ -1835,6 +1836,13 @@ class AstrBotRuntime:
                 action.parameters,
                 ingress=ingress,
             )
+        except HostIngressUnavailable:
+            # This narrow signal is emitted before Gateway/OutputService ran.
+            # Recheck the exact event; later/unknown failures still never cause
+            # a speculative second reply.
+            if self._command_current(ingress):
+                return "模块或依赖服务暂时不可用。"
+            return None
         except Exception:
             # Core output may have started before an unexpected exception.
             # Never create a second reply that could duplicate an UNKNOWN send.
@@ -1958,11 +1966,17 @@ class AstrBotRuntime:
         )
         if not self._validate_ingress(InvocationOrigin.LLM_TOOL, ingress):
             raise PermissionError("validated Host event required")
-        outcome = await self._core.invoke_tool(
-            module_id, tool_name, parameters, ingress=ingress
-        )
+        unavailable = False
+        try:
+            outcome = await self._core.invoke_tool(
+                module_id, tool_name, parameters, ingress=ingress
+            )
+        except HostIngressUnavailable:
+            unavailable = True
         if not self._message_current(InvocationOrigin.LLM_TOOL, ingress):
             raise PermissionError("Host message unavailable")
+        if unavailable:
+            raise HostIngressUnavailable()
         return outcome
 
     def _tool_owner_current(self, handle):

@@ -9,6 +9,7 @@ from decimal import Decimal
 
 from ...core.contracts.services import ToolOutput
 from ...core.policy import tool_allowed
+from ...services.core_runtime import HostIngressUnavailable
 from ...services.output import OutputStatus
 
 
@@ -209,15 +210,31 @@ class AstrBotToolPublisher:
                     raise PermissionError("official Host event required")
                 _validate(parameters, kwargs, "parameters", 0)
                 event = context.context.event
-                outcome = await publisher.invoke(
-                    handle.module_id,
-                    handle.descriptor.name,
-                    kwargs,
-                    event,
-                    tool_handle=handle,
-                )
+                unavailable = False
+                try:
+                    outcome = await publisher.invoke(
+                        handle.module_id,
+                        handle.descriptor.name,
+                        kwargs,
+                        event,
+                        tool_handle=handle,
+                    )
+                except HostIngressUnavailable:
+                    unavailable = True
                 if not publisher._current(handle):
                     raise PermissionError("tool revoked during execution")
+                if unavailable:
+                    # Fixed public control feedback, with no module result,
+                    # identity, arbitrary exception text or new HTTP request.
+                    return json.dumps(
+                        {
+                            "error": {
+                                "code": "module_unavailable",
+                                "message": "模块或依赖服务暂时不可用。",
+                            }
+                        },
+                        ensure_ascii=False,
+                    )
                 routed = outcome.output
                 if (
                     routed.status is not OutputStatus.TOOL_RESULT

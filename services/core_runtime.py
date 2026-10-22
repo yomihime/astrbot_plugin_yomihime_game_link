@@ -36,6 +36,7 @@ from yomihime_game_link_sdk.services import CapabilityHealth, ConfigTarget
 from yomihime_game_link_sdk.storage import GrantReference
 from yomihime_game_link_sdk.subscriptions import ConversationKind, ConversationRef
 
+from ..core.admission import CapabilityUnavailable
 from ..core.context_issuer import ContextIssuer
 from ..core.contracts.administration import (
     AdminAuthorizationDenied,
@@ -341,6 +342,17 @@ class _HostIngressAuthority:
 class CoreInvocationOutcome:
     result: object
     output: object
+
+
+class HostIngressUnavailable(RuntimeError):
+    """Known capability refusal before any handler or output dispatch began.
+
+    Only the admission call in trusted Host ingress creates this signal. It is
+    not a failure classification for arbitrary exceptions after dispatch.
+    """
+
+    def __init__(self):
+        super().__init__("module_unavailable")
 
 
 @dataclass(frozen=True, slots=True)
@@ -1601,7 +1613,10 @@ class CoreRuntime:
                 ),
             )
             try:
-                self.lifecycle.admission.admit(view, capability_id)
+                try:
+                    self.lifecycle.admission.admit(view, capability_id)
+                except CapabilityUnavailable:
+                    raise HostIngressUnavailable() from None
                 if origin is InvocationOrigin.LLM_TOOL:
                     self._host_ingress_authority.attach_message(
                         self.issuer, view, accepted_ingress
