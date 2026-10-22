@@ -39,6 +39,8 @@ from ...core.help_catalog import HelpCatalog
 from ...core.ports import MessageTarget, RenderedMessage
 from ...core.public_errors import public_boundary
 from ...extensions.factory_resolver import (
+    FilesystemFactorySource,
+    PackageFactorySources,
     ReviewedInventoryFactorySource,
     ReviewedSupportLease,
 )
@@ -63,6 +65,7 @@ from ...services.core_runtime import (
     HostIngress,
 )
 from ...services.diagnostics import DiagnosticStore
+from ...services.external_packages import ExternalPackageHost
 from ...services.managed_font import ManagedFont
 from ...services.source_credentials import SourceCredentialPolicy
 from ...services.trusted_assembly import assemble_reviewed
@@ -591,6 +594,49 @@ class AstrBotRuntime:
         self._credential_admin_source = None
         self._key_admin_source = None
         self._module_admin_source = None
+        self._extension_host = None
+
+    @property
+    def extension_host(self):
+        """Public outer-plugin bridge; unavailable until this Core is ready."""
+        return self._extension_host if self.ready else None
+
+    def _external_packages_changed(self):
+        """Reissue exact management policies after Host-selected owners change."""
+        core = self._core
+        if core is None or self._closing:
+            return
+        for source in (self._admin_source, self._module_admin_source):
+            if source is not None:
+                core.admin_authorization.unregister_source(source)
+        self._admin_source = core.admin_authorization.register_source(
+            "astrbot-dashboard",
+            resources=_merge_resources(
+                core.admin_operations.ordinary_resources(),
+                core.admin_operations.legacy_config_resources(),
+            ),
+            operations={
+                AdminOperation.READ_CONFIG,
+                AdminOperation.UPDATE_CONFIG,
+                AdminOperation.RECOVER_CONFIG,
+            },
+        )
+        try:
+            resources = core.admin_operations.module_resources()
+        except AdminAuthorizationDenied:
+            self._module_admin_source = None
+        else:
+            self._module_admin_source = core.admin_authorization.register_source(
+                "astrbot-dashboard-modules",
+                resources=resources,
+                operations={
+                    AdminOperation.LIST_MODULES,
+                    AdminOperation.SET_ENABLED,
+                    AdminOperation.UNLOAD_MODULE,
+                },
+            )
+        if self._tool_publisher is not None:
+            self._tool_publisher.publish()
 
     def management_current(self, core, source):
         return (
@@ -1276,11 +1322,13 @@ class AstrBotRuntime:
                     host_message_current_validator=self._message_current,
                     config_principal_id=PLUGIN_NAME,
                     identity_namespace=PLUGIN_NAME,
-                    factory_source=ReviewedInventoryFactorySource(
-                        installation.inventory, selected=True
+                    factory_source=PackageFactorySources(
+                        ReviewedInventoryFactorySource(
+                            installation.inventory, selected=True
+                        )
                     )
                     if installation.trusted
-                    else None,
+                    else PackageFactorySources(FilesystemFactorySource()),
                     trusted_bundled_manifests=defaults,
                     trusted_subscription_gates=subscription_gates,
                     source_health=self._source_health,
@@ -1443,6 +1491,19 @@ class AstrBotRuntime:
                 ),
             )
             self._ready = True
+            if isinstance(core, CoreRuntime):
+                self._extension_host = ExternalPackageHost(
+                    self._context,
+                    core,
+                    core.extension_runtime.factory_source,
+                    generation=generation,
+                    current=lambda: self._ready
+                    and not self._closing
+                    and self._core is core
+                    and self._generation == generation,
+                    changed=self._external_packages_changed,
+                    registration_timeout=core._handler_timeout,
+                )
             await self._publish_tools_or_close(core)
 
     async def _publish_tools_or_close(self, core) -> None:
@@ -1469,6 +1530,8 @@ class AstrBotRuntime:
     async def terminate(self) -> None:
         """Stop ingress and close the owned pump/modules/database once."""
         self._page_sessions.close()
+        if self._extension_host is not None:
+            self._extension_host.stop_accepting()
         self._generation += 1
         self._message_receipts.close()
         if self._tool_publisher is not None:
@@ -1495,6 +1558,8 @@ class AstrBotRuntime:
             self._closing = False
 
     async def _close_owned_runtime(self) -> None:
+        if self._extension_host is not None:
+            await self._extension_host.close()
         await self._managed_font.close()
         self._message_receipts.close()
         pending = []
@@ -1563,6 +1628,7 @@ class AstrBotRuntime:
                 pending.append(("core_runtime_close", exc))
             else:
                 self._core = None
+                self._extension_host = None
         # A pending Core may still own workers using these resources. Preserve
         # its existing retry contract; failed tool removal alone does not block
         # transport/directory closure once Core is quiet.
@@ -1641,6 +1707,19 @@ class AstrBotRuntime:
         unavailable = validate_contract(
             CapabilityHealth(HealthStatus.UNAVAILABLE, "source_unavailable")
         )
+        if self._extension_host is not None and self._extension_host.source_ready(
+            module_id, source_id
+        ):
+            transport = self._http_transport
+            if (
+                transport is not None
+                and not self._transport_closed
+                and not getattr(transport, "closed", False)
+            ):
+                return validate_contract(
+                    CapabilityHealth(HealthStatus.AVAILABLE, "local_transport_ready")
+                )
+            return unavailable
         if (
             not self._trusted_bundle
             or self._assembly is None

@@ -1258,6 +1258,7 @@ class InvocationServiceBinder:
                     self._caller_issuer,
                     caller_capability,
                     private_authorizer=self._authorization.require_dependency_grant,
+                    owner_authority=self._owner_authority,
                     clock=self._clock,
                     utc_clock=self._utc_clock,
                 )
@@ -1285,8 +1286,15 @@ class InvocationServiceBinder:
             check_sync()
 
         grant_store = self._repositories.authorization
+        def record_write_check() -> None:
+            check_sync()
+            if is_owner and invocation.parent_id is not None:
+                # A current-actor dependency receives a read-only projection,
+                # never a reusable write grant for its provider's USER records.
+                raise InvocationBindingError()
+
         record_repository = self._repositories.records_for(module).with_write_check(
-            check_sync
+            record_write_check
         )
 
         async def collection_for_invocation(name: str) -> object:

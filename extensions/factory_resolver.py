@@ -162,6 +162,46 @@ class ReviewedInventoryFactorySource(FilesystemFactorySource):
         return lease
 
 
+class PackageFactorySources:
+    """Route exact external candidates without weakening the bundled fence."""
+
+    def __init__(self, bundled):
+        self._bundled = bundled
+        self._external = {}
+        self._filesystem = FilesystemFactorySource()
+
+    async def inspect(self, candidate):
+        """Capture inert bytes once; imports/factories are not executed here."""
+        lease = await self._filesystem.capture(candidate)
+        try:
+            return lease._bundle.digest
+        finally:
+            lease.release()
+
+    def attach(self, candidate, digest):
+        package_id = candidate.package.package_id
+        if package_id in self._external:
+            raise FactoryResolutionError("external package source is already owned")
+        self._external[package_id] = (candidate, digest)
+
+    def detach(self, candidate):
+        current = self._external.get(candidate.package.package_id)
+        if current is not None and current[0] is candidate:
+            self._external.pop(candidate.package.package_id)
+
+    async def capture(self, candidate):
+        current = self._external.get(candidate.package.package_id)
+        if current is None:
+            return await self._bundled.capture(candidate)
+        if current[0] is not candidate:
+            raise SourceSnapshotError("candidate_stale")
+        lease = await self._filesystem.capture(candidate)
+        if lease._bundle.digest != current[1]:
+            lease.release()
+            raise SourceSnapshotError("restart_required")
+        return lease
+
+
 class _SnapshotFinder(importlib.abc.MetaPathFinder, importlib.abc.Loader):
     """Imports one private namespace exclusively from immutable source bytes."""
 

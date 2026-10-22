@@ -57,6 +57,10 @@ from .errors import RevisionConflict as RevisionConflict
 from .errors import ServiceUnavailable as ServiceUnavailable
 from .errors import SourceHttpError as SourceHttpError
 from .errors import UniqueConstraintViolation as UniqueConstraintViolation
+from .host import BRIDGE_VERSION as BRIDGE_VERSION
+from .host import ExtensionHost as ExtensionHost
+from .host import ExtensionHostError as ExtensionHostError
+from .host import PackageLease as PackageLease
 from .results import CapabilityResult as CapabilityResult
 from .results import ErrorCode as ErrorCode
 from .results import ErrorDetail as ErrorDetail

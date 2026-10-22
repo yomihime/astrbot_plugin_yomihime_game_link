@@ -1,16 +1,52 @@
 # Game Link module SDK
 
-The independently installable distribution is `yomihime-game-link-sdk==0.1.0a11`. Import its public declarations with `import yomihime_game_link_sdk as ygl`. It requires Python 3.11 or newer and has no third-party runtime dependencies.
+The independently installable distribution is `yomihime-game-link-sdk==0.1.0a12`. Import its public declarations with `import yomihime_game_link_sdk as ygl`. It requires Python 3.11 or newer and has no third-party runtime dependencies.
 
-The SDK (including its packaged examples) is licensed under MIT; see `SDK-LICENSE`. The AstrBot plugin implementation remains AGPL-3.0 under `LICENSE`. Third-party notices retain their own terms. The a10 source contract adds invocation-bound diagnostics, CacheUnavailable and generic page roles without changing module ABI 2.0. Built wheel identity and installation evidence are recorded separately; editing these declarations does not prove a published or installed wheel.
+The SDK (including its packaged examples) is licensed under MIT; see `SDK-LICENSE`. The AstrBot plugin implementation remains AGPL-3.0 under `LICENSE`. Third-party notices retain their own terms. The a12 source contract adds the outer-plugin extension bridge without changing module ABI 2.0. Built wheel identity and installation evidence are recorded separately; editing these declarations does not prove a published or installed wheel.
+
+## Independent AstrBot extension plugins
+
+The outer Star may locate the active Core through the public AstrBot
+`Context.get_registered_star` API and call its public
+`get_game_link_extension_host()`. A ready host implements SDK `ExtensionHost`
+bridge version 1. Check its SDK release and module ABI before registration.
+The outer plugin must delay importing the canonical SDK until Core bootstrap
+has completed; it must not vendor a second copy.
+
+`register_package(plugin_name=..., plugin_instance=..., package_root=...)`
+accepts a complete package contained in the active plugin's installation.
+The host verifies the exact Star instance from the public registry, safely
+captures all package Python sources and returns an opaque `PackageLease`.
+Use `unregister_package(lease)` on termination. Same-instance registrations
+are idempotent; a stale lease cannot withdraw a replacement. Public plugin
+loaded/unloaded hooks support reconnecting after either plugin reloads.
+There is no polling requirement. Changed source or SDK bytes remain subject
+to `restart_required`. User records and stored enable intents survive detach.
+This initial bridge accepts ordinary configuration and uncredentialed sources;
+external credential-bearing sources and sensitive configuration are rejected.
+
+## Read-only current-actor dependencies
+
+A capability may explicitly declare a module-qualified dependency on an OWNER
+read-only capability. Core admits this edge only from an exact active root
+COMMAND with a real adapter-scoped actor. Tool, Web, scheduler, writable OWNER
+targets and nested promotion remain denied. The child inherits the actor and
+deadline, receives its own provider epoch/admission, and receives no copied
+module grant. Provider USER records are readable but record writes are denied.
+Core revalidates both parent and child across awaits and discards late results.
+
+Private dependency data uses a bounded PRIVATE `DisplayDocument`, for example
+one `FieldsBlock` with the provider's minimal DTO. It is consumed through the
+SDK result only. PRIVATE results still cannot contain model facts, and this
+read proof does not authorize root private output or account management.
 
 ## Install and import
 
 Install the reviewed wheel into your module development environment:
 
 ```powershell
-python -m pip install --no-deps ./yomihime_game_link_sdk-0.1.0a11-py3-none-any.whl
-python -I -c "import yomihime_game_link_sdk as ygl; assert ygl.__version__ == '0.1.0a11'; assert ygl.MODULE_ABI_VERSION == '2.0'"
+python -m pip install --no-deps ./yomihime_game_link_sdk-0.1.0a12-py3-none-any.whl
+python -I -c "import yomihime_game_link_sdk as ygl; assert ygl.__version__ == '0.1.0a12'; assert ygl.MODULE_ABI_VERSION == '2.0'"
 ```
 
 The plugin release contains the exact content-pinned SDK from that wheel. Its bootstrap rejects changed contents, foreign package origins, partial preload graphs, and any preloaded retired `yomihime_sdk` graph. The retired root `api` and `yomihime_sdk.api` modules have no compatibility redirects. Historical stored-data readers are separate from module import compatibility.
