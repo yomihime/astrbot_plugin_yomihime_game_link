@@ -52,3 +52,13 @@
 @media(max-width:599px){.ui-page-header h1{font-size:28px}.ui-settings-row,.ui-settings-row[data-width]{grid-template-columns:minmax(0,1fr);gap:6px}.ui-settings-group{padding:18px 0}.ui-settings-layout{gap:22px}.ui-surface{padding:20px}.ui-settings-row>.ui-button{justify-self:start}.ui-action-bar{gap:8px}}
 
 .ui-settings-layout[data-has-aside=false]{grid-template-columns:minmax(0,1fr)}
+
+/* Shared decorative vector rebound: rest 1.3s, sweep .55s, return .32s, hold 2.53s, fade .5s, rest .4s. */
+.ui-logo-rebound{position:relative;display:inline-block;isolation:isolate;overflow:hidden;pointer-events:none;background:color-mix(in srgb,var(--ui-gold) 20%,var(--ui-background));mask-size:contain;mask-position:center;mask-repeat:no-repeat}
+.ui-logo-rebound::before,.ui-logo-rebound::after{content:"";position:absolute;inset:0;pointer-events:none}
+.ui-logo-rebound::before{background:var(--ui-gold);animation:ui-logo-reveal 5.6s linear infinite,ui-logo-fade 5.6s linear infinite}
+.ui-logo-rebound::after{background:linear-gradient(225deg,transparent 43%,#fff6da 50%,transparent 57%);animation:ui-logo-beam 5.6s linear infinite}
+@keyframes ui-logo-beam{0%,23.2142%{transform:translateY(-100%);opacity:0}23.2143%{transform:translateY(-100%);opacity:1}33.0357%{transform:translateY(100%);opacity:1}38.75%{transform:translateY(-100%);opacity:1}38.751%,100%{transform:translateY(-100%);opacity:0}}
+@keyframes ui-logo-reveal{0%,33.0357%{clip-path:polygon(0 100%,100% 200%,100% 100%,0 100%)}38.75%,100%{clip-path:polygon(0 -100%,100% 0,100% 100%,0 100%)}}
+@keyframes ui-logo-fade{0%,83.9286%{opacity:1}92.8571%,100%{opacity:0}}
+@media(prefers-reduced-motion:reduce){.ui-logo-rebound::before{animation:none;clip-path:none;opacity:1}.ui-logo-rebound::after{animation:none;opacity:0}}

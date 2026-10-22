@@ -11,3 +11,6 @@ export const UiProvider=defineComponent({
 });
 export const SettingsLayout=defineComponent({setup(_,{slots}){return()=>h('div',{class:'ui-settings-layout','data-has-aside':Boolean(slots.aside)},[h('div',{class:'ui-settings-main'},slots.default?.()),slots.aside?h('aside',{class:'ui-settings-aside'},slots.aside()):null]);}});
 export const Surface=defineComponent({props:{title:String,eyebrow:String},setup(props,{slots}){return()=>h('section',{class:'ui-surface'},[props.eyebrow?h('p',{class:'ui-eyebrow'},props.eyebrow):null,props.title?h('h2',props.title):null,slots.default?.()]);}});
+
+/** Decorative only. Callers supply a trusted local resource mask via CSS/style. */
+export const LogoMark=defineComponent({setup(){return()=>h('span',{class:'ui-logo-rebound','aria-hidden':'true'});}});

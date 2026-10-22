@@ -6,6 +6,6 @@
 
 .ff14-module-mark{color:var(--ui-gold)}.ff14-module-mark svg{width:100%;height:100%}
 
-.ff14-module-mark{display:block;background:var(--ui-gold);mask:url(../../assets/ff14-meteor.svg) center/contain no-repeat}
+.ff14-module-mark{display:block;mask:url(../../assets/ff14-meteor.svg) center/contain no-repeat}
 
 .ff14-settings{gap:8px}.ff14-settings>.ui-action-bar{margin-top:8px}.ff14-settings>.ff14-hint,.ff14-settings>.ff14-error{margin:0}

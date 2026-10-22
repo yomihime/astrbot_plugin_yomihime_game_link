@@ -1,5 +1,5 @@
 import {createApp,defineComponent,h,ref} from 'vue';
-import {UiProvider,SettingsLayout,SettingsGroup,SettingsRow,Surface,ActionBar,StatusHint} from '@game-link/ui';
+import {UiProvider,LogoMark,SettingsLayout,SettingsGroup,SettingsRow,Surface,ActionBar,StatusHint} from '@game-link/ui';
 import type {PageOptions,MountedPage} from '../../../../pages/public-contract';
 import {createSettingsController,ordinaryFields,credentialFields} from './settings-controller';
 
@@ -21,7 +21,7 @@ export function mountSettings(container:HTMLElement,options:PageOptions):Mounted
     return h(UiProvider,{theme:s.context.theme,locale:s.context.locale,styleMountTarget:container},{default:()=>h('section',{class:'ff14-page ff14-settings','data-theme':s.context.theme},
       options.routeId==='home'?[h(Surface,{title:'最终幻想 XIV',eyebrow:'FINAL FANTASY XIV / MODULE'},{default:()=>[
         // Reviewed static local artwork, never remote or user-supplied markup.
-        h('span',{class:'ff14-module-mark','aria-hidden':'true'}),
+        h(LogoMark,{class:'ff14-module-mark','aria-hidden':'true'}),
         h('p','物品、市场、角色 Logs 与活动日历。请从模块导航选择查询，或进入业务配置维护默认值和来源凭据。'),
         h(StatusHint,{},()=> '查询只在手动提交后执行；缺失、失败与覆盖限制以本次来源结果为准。'),
         h(StatusHint,{},()=> '主密钥、存储恢复、全局主题和字体由全局设置管理。'),
