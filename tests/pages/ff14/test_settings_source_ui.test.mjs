@@ -9,14 +9,9 @@ const dom=new JSDOM('<body></body>',{pretendToBeVisual:true,url:'http://localhos
 for(const key of ['window','document','HTMLElement','Element','SVGElement','Node','MutationObserver','Event','MouseEvent','KeyboardEvent','InputEvent','Image'])globalThis[key]=key==='window'?window:key==='document'?window.document:window[key];
 globalThis.requestAnimationFrame=window.requestAnimationFrame.bind(window);globalThis.cancelAnimationFrame=window.cancelAnimationFrame.bind(window);
 globalThis.getComputedStyle=window.getComputedStyle.bind(window);window.matchMedia=()=>({matches:false,addEventListener(){},removeEventListener(){}});
-const url=source=>'data:text/javascript;base64,'+Buffer.from(source).toString('base64');
-const controller=url(stripTypeScriptTypes(await readFile('modules/ff14/pages/src/settings-controller.ts','utf8'),{mode:'strip'}));
-const source=stripTypeScriptTypes(await readFile('modules/ff14/pages/src/settings-page.ts','utf8'),{mode:'strip'})
- .replace("from 'vue'",`from ${JSON.stringify(pathToFileURL(resolve('pages/frontend/node_modules/vue/index.mjs')).href)}`)
- .replace("from 'naive-ui'",`from ${JSON.stringify(pathToFileURL(resolve('pages/frontend/node_modules/naive-ui/es/index.mjs')).href)}`)
- .replace("from './settings-controller'",`from ${JSON.stringify(controller)}`);
-const {mountSettings}=await import(url(source));
-const {nextTick}=await import(pathToFileURL(resolve('pages/frontend/node_modules/vue/index.mjs')));
+const {sourceApp,sourceRuntimeURL}=await import('../shell/source-build.mjs');
+const {mountSettings}=await sourceApp('modules/ff14/pages/src/settings-page.ts');
+const {nextTick}=await import(await sourceRuntimeURL());
 async function flush(){for(let i=0;i<20;i++)await Promise.resolve();await nextTick();}
 after(()=>window.close());
 test('actual source settings UI preserves mask/choices and editable fenced drafts after CAS/UNKNOWN',async()=>{
@@ -61,4 +56,15 @@ test('ordinary discard follows actual auth classification and recovers without w
   denied=false;button('重新读取状态').click();await flush();assert.equal(days.value,'17');assert.equal(days.disabled,false);assert.equal(button('放弃修改').disabled,false);
   button('放弃修改').click();await flush();assert.equal(days.value,'7');assert.equal(button('放弃修改').disabled,true);assert.equal(writes,0);
  }finally{page.dispose();callbacks.forEach(f=>f());container.remove();}
+});
+
+test('shared settings theme keeps focused draft node and credential regions remain masked',async()=>{
+ const container=window.document.createElement('main');window.document.body.append(container);let writes=0;
+ const context={owner:'ff14/ff14',runtimeId:'theme-ui',epoch:1,boundary:'theme-ui',available:true,theme:'light',locale:'zh-CN'};
+ const page=mountSettings(container,{routeId:'config',context,scope:{isCurrent:()=>true,onDispose(){}},services:{config:{current:async()=>({revision:1,fields:{}}),save:async()=>{writes++;return{revision:2};}},credentials:{status:async()=>({revision:1,fields:{}}),replace:async()=>{writes++;return{revision:2};},clear:async()=>{writes++;return{revision:2};}}}});
+ try{
+  await flush();const input=container.querySelector('#ff14-config-ff14_calendar_default_timezone');input.focus();input.value='Asia/Tokyo';input.dispatchEvent(new window.Event('input',{bubbles:true}));input.setSelectionRange(2,5);await flush();
+  page.update({...context,theme:'dark',locale:'en-US'});await flush();assert.equal(container.querySelector('#ff14-config-ff14_calendar_default_timezone'),input);assert.equal(window.document.activeElement,input);assert.equal(input.value,'Asia/Tokyo');assert.equal(input.selectionStart,2);assert.equal(container.querySelector('.ui-page').dataset.theme,'dark');assert.equal(writes,0);
+  const regions=[...container.querySelectorAll('.ui-segmented button')];assert.deepEqual(regions.map(b=>b.getAttribute('aria-pressed')),['true','false']);regions[1].click();await flush();assert.deepEqual(regions.map(b=>b.getAttribute('aria-pressed')),['false','true']);const forms=[...container.querySelectorAll('.ff14-credential')];assert.deepEqual(forms.map(f=>f.hidden),[true,false]);assert.ok([...forms[1].querySelectorAll('input')].every(i=>i.type==='password'));assert.equal(writes,0);
+ }finally{page.dispose();container.remove();}
 });

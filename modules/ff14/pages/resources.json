@@ -1,10 +1,10 @@
 [
   {
     "path": "pages/dist/entry.js",
-    "sha256": "26d178825312b9d695dd980d5914c8c83d33d57e56c6c5bef2b567caf4ba0004"
+    "sha256": "8d99184206f9df72a61cfb1ce4da405969d7cc3d0996ee70dd96637f4a481398"
   },
   {
     "path": "pages/dist/styles.css",
-    "sha256": "fd612413dde9b518a7fd5f5c14e22c44e8690adb41a0f4389c27b666adfa111b"
+    "sha256": "1aeded1f4214e140f4350dddf9fd8855cc90ab6d457860b19312ce481f09bea5"
   }
 ]

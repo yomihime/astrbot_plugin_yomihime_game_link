@@ -895,6 +895,7 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
                         "en": "FINAL FANTASY XIV",
                     },
                     "short_name": "FF14",
+                    "logo_resource": "module-assets/ff14/ff14/assets/ff14-meteor.svg",
                 },
             )
             self.assertEqual(

@@ -7,6 +7,7 @@
 - [模块维护速查](module-maintainer-guide.md)
 - [凭据及存储](credential-storage.md)
 - [公开前端模块合同](frontend-module-contract.md)
+- [Module 共享 UI 接入](module-ui.md)
 - [Host管理授权合同](host-management-authorization-contract.md)
 - [管理首页与全局设置](management-home-settings.md)
 - [存储迁移来源监督](storage-migration-supervision.md)

@@ -46,3 +46,26 @@ test('general resources cannot become non-pages or wrong-type executable page en
  ]){const value=structuredClone(projected),module=value.modules.find(m=>m.module_id==='neutral/demo');module.resources.push({path,sha256:'a'.repeat(64)});module.pages[0][field]=field==='styles'?[path]:path;assert.throws(()=>validateCatalog(value),/invalid_catalog/,field+': '+path);}
  const undeclared=structuredClone(projected);undeclared.modules[0].pages[0].entry='module-assets/ff14/ff14/pages/dist/undeclared.js';assert.throws(()=>validateCatalog(undeclared),/invalid_catalog/);
 });
+
+test('display logo projection is optional, owner scoped and backed by a declared image resource',()=>{
+ const checked=validateCatalog(projected), logo='module-assets/ff14/ff14/assets/ff14-meteor.svg';
+ assert.equal(checked.modules.find(m=>m.module_id==='ff14/ff14').display.logo_resource,logo);
+ for(const absent of [undefined,null,'']) {
+  const value=structuredClone(projected),module=value.modules.find(m=>m.module_id==='ff14/ff14');
+  if(absent===undefined)delete module.display.logo_resource;else module.display.logo_resource=absent;
+  assert.equal(validateCatalog(value).modules.find(m=>m.module_id===module.module_id).display.logo_resource,null);
+ }
+ for(const path of ['https://example.com/logo.svg','data:image/svg+xml,test','/logo.svg','module-assets/ff14/ff14/assets/../logo.svg','module-assets/ff14/ff14/assets/%2e%2e/logo.svg','module-assets/ff14/ff14/assets/missing.svg',general,'module-assets/ff14/ff14/pages/dist/entry.js',42,{},[]]) {
+  const value=structuredClone(projected);value.modules.find(m=>m.module_id==='ff14/ff14').display.logo_resource=path;
+  assert.throws(()=>validateCatalog(value),/invalid_catalog/,JSON.stringify(path));
+ }
+ // Neutral modules consume the same generic image field, not a bundled filename rule.
+ const neutral=structuredClone(projected),module=neutral.modules.find(m=>m.module_id==='neutral/demo');
+ const path='module-assets/neutral/demo/assets/badge.png';module.resources.push({path,sha256:'a'.repeat(64)});
+ module.display={default_name:'Neutral',logo_resource:path};
+ assert.equal(validateCatalog(neutral).modules.find(m=>m.module_id===module.module_id).display.logo_resource,path);
+ const unloaded=structuredClone(projected),off=unloaded.modules.find(m=>m.module_id==='ff14/ff14');
+ off.state='unavailable';off.runtime_id=null;off.pages=[];off.resources=[];
+ assert.throws(()=>validateCatalog(unloaded),/invalid_catalog/);
+ off.display.logo_resource=null;assert.equal(validateCatalog(unloaded).modules.find(m=>m.module_id===off.module_id).display.logo_resource,null);
+});

@@ -1,6 +1,7 @@
 import {createApp, defineComponent, h, ref, onMounted, onBeforeUnmount} from 'vue';
-import {NConfigProvider, NButton, darkTheme, zhCN, enUS, dateZhCN, dateEnUS} from 'naive-ui';
-import {PageHeader, SettingsGroup, StatusHint} from './ui/components';
+import {NButton} from 'naive-ui';
+import {UiProvider,LogoMark} from '@game-link/ui';
+import {PageHeader, SettingsGroup, StatusHint} from '@game-link/ui';
 import {loadPage} from './module-loader.js';
 import {createShell} from './controller';
 import type {Bridge} from './contracts';
@@ -69,23 +70,29 @@ const App = defineComponent({setup() {
     const currentModule=modules.find(m=>m.module_id===state?.moduleOwner),moduleHome=Boolean(currentModule&&state?.moduleSection==='home'),queries=Boolean(currentModule&&state?.moduleSection==='queries');
     const go=(action:()=>void)=>(event:Event)=>{event.preventDefault();void navigate(action);};
     const link=(text:string,href:string,current:boolean,action:()=>void)=>h('a',{href,'aria-current':current?'page':undefined,onClick:go(action)},text);
+    const title=currentModule?(state?.moduleSection==='config'?'业务配置':label(currentModule.module_id)):state?.settings?'全局设置':state?.modules?'模块管理':home?'首页 · 游戏工作台':'页面不可用';
+    const icon=(kind:'home'|'grid'|'game'|'settings'|'arrow'|'page')=>h('svg',{class:'shell-icon',viewBox:'0 0 24 24',fill:'none',stroke:'currentColor','stroke-width':1.5,'stroke-linecap':'round','stroke-linejoin':'round','aria-hidden':'true'},[h('path',{d:{home:'M3 10 12 3l9 7v11h-6v-8H9v8H3Z',grid:'M3 3h7v7H3Zm11 0h7v7h-7ZM3 14h7v7H3Zm11 0h7v7h-7Z',game:'M7 7h10c3 0 5 10 3 11-2 1-4-3-5-3H9c-1 0-3 4-5 3-2-1 0-11 3-11Zm0 3v4m-2-2h4m7-1h.01m2 3h.01',settings:'M9 3h6l1 3 3 1 2 5-2 5-3 1-1 3H9l-1-3-3-1-2-5 2-5 3-1Zm3 5a4 4 0 1 0 0 8 4 4 0 0 0 0-8',arrow:'M5 12h14m-5-5 5 5-5 5',page:'M5 3h10l4 4v14H5Zm9 0v5h5M8 12h8m-8 4h6'}[kind]})]);
+    const railLink=(text:string,href:string,current:boolean,action:()=>void,kind:'home'|'grid'|'game')=>h('a',{href,'aria-current':current?'page':undefined,onClick:go(action)},[icon(kind),h('span',text)]);
+    const workspaceLink=(text:string,description:string,href:string,action:()=>void,kind:'settings'|'grid')=>h('a',{class:'workspace-management-link',href,onClick:go(action)},[h('span',{class:'workspace-management-icon'},[icon(kind)]),h('span',[h('strong',text),h('span',description)]),icon('arrow')]);
     const moduleSelect = (id:string)=>h('div',{class:'shell-field'},[h('label',{for:id},'模块'),h('select',{id,value:currentModule?.module_id||'',disabled:!modules.length,onChange:(event:Event)=>{const owner=(event.target as HTMLSelectElement).value;if(owner)void navigate(()=>shell?.selectModule(owner));}},[h('option',{value:''},'选择模块'),...modules.map(module=>h('option',{value:module.module_id},label(module.module_id)))])]);
-    return h(NConfigProvider,{preflightStyleDisabled:true,theme: state?.theme === 'dark' ? darkTheme : null,locale:state?.locale.startsWith('en')?enUS:zhCN,dateLocale:state?.locale.startsWith('en')?dateEnUS:dateZhCN,inlineThemeDisabled:true}, {default:()=>[
+    return h(UiProvider,{theme:state?.theme||'light',locale:state?.locale||'zh-CN',styleMountTarget:document.head}, {default:()=>[
       h('button',{class:'skip-button',onClick:()=>skipToMain(main.value)},'跳至正文'),
       h('div',{class:'game-shell','data-theme':state?.theme || 'light'},[
         h('aside',{class:'shell-sidebar','aria-label':'模块导航'},[
-          h('p',{class:'shell-brand'},'如月怜的游戏连结'),
-          h('nav',{'aria-label':'主要导航'},[link('首页','#/',home,()=>shell?.selectHome()),link('模块管理','#/modules',Boolean(state?.modules),()=>shell?.selectModules())]),
-          h('nav',{'aria-label':'已挂载模块'},modules.map(module=>link(label(module.module_id),'#/module/'+encodeURIComponent(module.module_id),state?.moduleOwner===module.module_id,()=>shell?.selectModule(module.module_id)))),
-          h('div',{class:'shell-settings-slot'},[h('button',{class:'shell-settings',type:'button','aria-current':state?.settings&&state.settingsOwner===null?'page':undefined,onClick:()=>void navigate(()=>shell?.selectSettings())},'全局设置')]),
+          h('p',{class:'shell-brand'},[h('span',{class:'shell-brand-mark','aria-hidden':'true'},'☾'),h('span',[h('span',{class:'shell-brand-line'},'如月怜的'),h('span',{class:'shell-brand-line'},'游戏连结')])]),
+          h('nav',{'aria-label':'主要导航'},[railLink('首页','#/',home,()=>shell?.selectHome(),'home'),railLink('模块管理','#/modules',Boolean(state?.modules),()=>shell?.selectModules(),'grid')]),
+          h('p',{class:'shell-nav-label'},'游戏模块'),
+          h('nav',{'aria-label':'已挂载模块'},modules.map(module=>railLink(label(module.module_id),'#/module/'+encodeURIComponent(module.module_id),state?.moduleOwner===module.module_id,()=>shell?.selectModule(module.module_id),'game'))),
+          h('div',{class:'shell-settings-slot'},[h('button',{class:'shell-settings',type:'button','aria-current':state?.settings&&state.settingsOwner===null?'page':undefined,onClick:()=>void navigate(()=>shell?.selectSettings())},[icon('settings'),h('span','全局设置')]),h('p',{class:'shell-note'},['GAME LINK',h('br'),'如月之下，游戏之间。'])]),
         ]),
         h('div',{class:'shell-content'},[
+          h('div',{class:'shell-topbar'},[h('span','游戏连结'),h('span',{'aria-hidden':'true'},'/'),h('span',title)]),
           h('div',{class:'shell-mobile'},[h('p',{class:'shell-brand'},'如月怜的游戏连结'),h('nav',{'aria-label':'移动导航'},[link('首页','#/',home,()=>shell?.selectHome()),link('模块管理','#/modules',Boolean(state?.modules),()=>shell?.selectModules()),link('全局设置','#/settings',Boolean(state?.settings&&state.settingsOwner===null),()=>shell?.selectSettings())]),moduleSelect('module-select-mobile')]),
           h('main',{ref:main,id:'page-root',tabindex:-1,'aria-labelledby':'page-title'},[
-            h(PageHeader,{class:'shell-heading',titleId:'page-title',title:currentModule?label(currentModule.module_id):state?.settings?'全局设置':state?.modules?'模块管理':home?'首页':'页面不可用'},{default:()=>h(NButton,{onClick:()=>{if(!shell?.state.busy){void shell?.refresh();if(state?.modules)void modulesView?.refresh(true);}},'aria-disabled':String(busy),'aria-busy':String(busy),'aria-label':'刷新模块状态'},()=>busy?'正在刷新…':'刷新模块状态')}),
+            h(PageHeader,{class:'shell-heading',titleId:'page-title',title,eyebrow:home?'GAME LINK / WORKSPACE':currentModule?'GAME LINK / MODULE':'GAME LINK / SETTINGS',subtitle:home?'从游戏模块开始，为下一场冒险做好准备。':currentModule?(state?.moduleSection==='config'?label(currentModule.module_id)+' · 查询偏好、日历与来源凭据。':'游戏业务由模块独立管理。'):state?.modules?'查看模块状态，管理加载与恢复。':'管理工作区的通用偏好。'},{default:()=>h(NButton,{onClick:()=>{if(!shell?.state.busy){void shell?.refresh();if(state?.modules)void modulesView?.refresh(true);}},'aria-disabled':String(busy),'aria-busy':String(busy),'aria-label':'刷新模块状态'},()=>busy?'正在刷新…':'刷新模块状态')}),
             currentModule?h('nav',{class:'module-tabs','aria-label':'模块内分页'},[
-              link('主页','#/module/'+encodeURIComponent(currentModule.module_id),moduleHome,()=>shell?.selectModule(currentModule.module_id)),
-              currentModule.pages.some(page=>page.role==='config')?link('配置','#/module/'+encodeURIComponent(currentModule.module_id)+'/'+currentModule.pages.find(page=>page.role==='config')!.route_id,state?.moduleSection==='config',()=>shell?.selectSettings(currentModule.module_id)):null,
+              link('模块主页','#/module/'+encodeURIComponent(currentModule.module_id),moduleHome,()=>shell?.selectModule(currentModule.module_id)),
+              currentModule.pages.some(page=>page.role==='config')?link('业务配置','#/module/'+encodeURIComponent(currentModule.module_id)+'/'+currentModule.pages.find(page=>page.role==='config')!.route_id,state?.moduleSection==='config',()=>shell?.selectSettings(currentModule.module_id)):null,
               currentModule.pages.some(page=>page.role==='aux')?link('辅助查询','#/module/'+encodeURIComponent(currentModule.module_id)+'/-/queries',queries,()=>shell?.selectModule(currentModule.module_id,'queries')):null,
             ]):null,
             h(StatusHint,{class:'shell-status',hidden:!busy&&!state?.stale&&state?.message==='状态已更新；查询仅在手动提交时执行。',tone:state?.stale?'warning':'neutral'},{default:()=>state?.message||'正在准备页面。'}),
@@ -94,13 +101,25 @@ const App = defineComponent({setup() {
             queries?h('nav',{class:'query-links','aria-label':'辅助查询入口'},currentModule!.pages.filter(page=>page.role==='aux').map(page=>link(page.title,`#/module/${encodeURIComponent(currentModule!.module_id)}/${page.route_id}`,state?.selected?.route===page.route_id,()=>shell?.select(currentModule!.module_id,page.route_id)))):null,
             moduleHome&&!selection&&currentModule!.pages.length?h(SettingsGroup,{title:'可用功能'},{default:()=>h('div',{class:'module-capabilities'},currentModule!.pages.map(page=>h('span',{key:page.route_id},page.title)))}):null,
             queries&&!selection?h('p',{class:'shell-empty'},'选择一项辅助查询；仅在手动提交时请求数据。'):null,
-            home?h(SettingsGroup,{title:'游戏连结'},{default:()=>[h('p','从模块开始使用功能；模块管理用于加载与恢复，全局设置管理通用配置。'),modules.length?h('div',{class:'query-links'},modules.map(module=>link(label(module.module_id),'#/module/'+encodeURIComponent(module.module_id),false,()=>shell?.selectModule(module.module_id)))):h('p',{class:'shell-empty'},'暂无可用模块。可前往模块管理核对状态。')]}):null,
+            home?h('section',{class:'workspace-index','aria-label':'游戏连结'},[
+              h('div',{class:'workspace-catalog'},[
+                h('div',{class:'workspace-index-heading'},[h('h2',{class:'shell-eyebrow'},'游戏目录'),h('span',{class:'workspace-count'},String(modules.length).padStart(2,'0')+' / MODULE')]),
+                ...modules.map((module,index)=>h('article',{class:'workspace-module',key:module.module_id},[
+                  h('div',{class:'workspace-module-heading'},[h('div',[h('p',{class:'workspace-kicker'},'MODULE '+String(index+1).padStart(2,'0')),h('h2',[link(label(module.module_id),'#/module/'+encodeURIComponent(module.module_id),false,()=>shell?.selectModule(module.module_id))]),h('p',{class:'workspace-module-description'},module.pages.length?`${module.pages.filter(page=>page.role==='aux').length} 项辅助查询，收在一处。`:'暂无可用功能，请在模块管理中核对状态。')]),module.display?.logo_resource?h(LogoMark,{class:'workspace-emblem workspace-emblem-resource',style:{maskImage:`url("./${module.display.logo_resource}")`}}):h('span',{class:'workspace-emblem','aria-hidden':'true'},'✦')]),
+                  h('div',{class:'workspace-module-meta'},[h('span',{class:'workspace-state'},module.state==='loaded'?'已加载':module.state==='disabled'?'已停用':'不可用'),link('进入模块 →','#/module/'+encodeURIComponent(module.module_id),false,()=>shell?.selectModule(module.module_id))]),
+                  h('nav',{class:'workspace-page-index','aria-label':label(module.module_id)+'功能'},module.pages.filter(page=>page.role==='aux').map((page,pageIndex)=>h('a',{href:`#/module/${encodeURIComponent(module.module_id)}/${page.route_id}`,onClick:go(()=>page.role==='config'?shell?.selectSettings(module.module_id):shell?.select(module.module_id,page.route_id))},[h('span',{class:'workspace-page-number'},String(pageIndex+1).padStart(2,'0')),icon(page.role==='config'?'settings':'page'),h('span',{class:'workspace-page-copy'},[h('strong',page.title),h('span',page.role==='config'?'模块配置':page.role==='home'?'模块主页':'辅助查询')]),icon('arrow')]))),
+                ])),
+                !modules.length?h('p',{class:'shell-empty'},'暂无可用模块。可前往模块管理核对状态。'):null,
+              ]),
+              h('aside',{class:'workspace-aside','aria-label':'工作区管理'},[h('h2',{class:'shell-eyebrow'},'工作区管理'),workspaceLink('全局设置','管理通用偏好与配置','#/settings',()=>shell?.selectSettings(),'settings'),workspaceLink('模块管理','模块生命周期与恢复','#/modules',()=>shell?.selectModules(),'grid'),h('p',{class:'workspace-scope-note'},[h('span',{class:'shell-eyebrow'},'各归其位'),h('br'),'通用偏好留在全局。',h('br'),'游戏业务由模块独立管理。'])]),
+            ]):null,
             h('div',{ref:root,id:'module-container',hidden:!selection}),
             h('div',{class:'settings-container',hidden:!state?.settings||Boolean(state.settingsOwner&&!currentModule)},[h('div',{ref:settingsRoot,id:'settings-container'})]),
             h('div',{class:'module-dashboard',hidden:!state?.modules},[h('div',{ref:modulesRoot,id:'module-management-container',hidden:maintenanceOpen.value}),state?.modules?h(NButton,{size:'large',onClick:maintenanceOpen.value?closeMaintenance:openMaintenance},()=>maintenanceOpen.value?'关闭配置维护':'配置维护'):null]),
             h('div',{ref:maintenanceRoot,id:'maintenance-container',hidden:!maintenanceOpen.value}),
             !home&&!state?.modules&&!state?.settings&&!moduleHome&&!queries&&!state?.mounted||Boolean(state?.settingsOwner&&!currentModule)?h('p',{class:'shell-empty'},state?.cleanupPending?'页面清理未完成，请重新打开页面。':selection?'模块页面正在准备。':'此路由当前没有可用的注册页面。恢复模块后请从宿主插件详情正式重开。'):null,
           ]),
+          h('footer',{class:'shell-footer'},'如月怜的游戏连结'),
         ]),
       ]),
     ]});
