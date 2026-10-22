@@ -173,8 +173,11 @@ class ModuleDisplayTests(unittest.TestCase):
         owner = "sample/catalog"
         registered = snapshot.modules[owner]
         state = LifecycleState(
-            owner, registered.enabled, ModuleLifecycle.STOPPED,
-            registered.epoch, snapshot.revision,
+            owner,
+            registered.enabled,
+            ModuleLifecycle.STOPPED,
+            registered.epoch,
+            snapshot.revision,
         )
         for runtime_state in ("ready", "not_ready", "closing", "closed"):
             result = project_module_catalog(
