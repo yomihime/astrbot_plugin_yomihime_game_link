@@ -152,12 +152,36 @@ class ModuleDisplayTests(unittest.TestCase):
                 "default_name": "Name",
                 "localized_names": {"zh": "名称"},
                 "short_name": "N",
+                "logo_resource": None,
             },
         )
         item["display"]["localized_names"]["zh"] = "changed"
         self.assertEqual(display.localized_names["zh"], "名称")
         self.assertEqual((item["module_id"], item["route"]), (owner, "catalog"))
         self.assertEqual(snapshot.routes["catalog"], owner)
+
+    def test_catalog_withholds_declared_logo_when_module_is_not_loaded(self):
+        module = replace(
+            _module("catalog", "catalog"),
+            display=self.display("Name", logo_resource="assets/badge.svg"),
+            resources=(manifests.PageResource("assets/badge.svg", "a" * 64),),
+        )
+        registry = Registry()
+        snapshot = registry.register_package(
+            _package("sample", module), {"catalog": _handlers("record.query")}
+        )
+        owner = "sample/catalog"
+        registered = snapshot.modules[owner]
+        state = LifecycleState(
+            owner, registered.enabled, ModuleLifecycle.STOPPED,
+            registered.epoch, snapshot.revision,
+        )
+        for runtime_state in ("ready", "not_ready", "closing", "closed"):
+            result = project_module_catalog(
+                snapshot, {owner: state}, {owner: None}, runtime_state=runtime_state
+            )["modules"][0]
+            self.assertIsNone(result["display"]["logo_resource"])
+            self.assertEqual(result["resources"], [])
 
     def test_facade_and_core_share_display_identity(self):
         import yomihime_game_link_sdk as sdk

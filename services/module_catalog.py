@@ -92,6 +92,14 @@ def project_module_catalog(
                         "default_name": manifest.display.default_name,
                         "localized_names": dict(manifest.display.localized_names),
                         "short_name": manifest.display.short_name,
+                        # Presentation only: reuse the already validated resource
+                        # identity, and never expose assets for an unloaded module.
+                        "logo_resource": (
+                            f"module-assets/{module_id}/{manifest.display.logo_resource}"
+                            if availability == "loaded"
+                            and manifest.display.logo_resource is not None
+                            else None
+                        ),
                     }
                     if manifest.display is not None
                     else None
