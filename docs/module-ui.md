@@ -7,7 +7,7 @@ Module 不需要复制 Core 的页面布局、表单分组、主题配色或组�
 - `UiProvider`：页面根。传入规范化的 `PageContext.theme`（`light` / `dark`）、`PageContext.locale` 和当前挂载容器 `styleMountTarget`。配置共用组件的主题与语言，并提供 `.ui-page` 根。
 - `PageHeader`：`title` 必填，可选 `titleId`、`eyebrow`、`subtitle`；默认 slot 放页头操作。
 - `SettingsLayout`：默认 slot 放主内容，可选 `aside` slot 放说明。
-- `LogoMark`：装饰性矢量徽标。调用方用 CSS mask 指定已验证的本地资源和尺寸；组件不读取目录、网络或业务状态。默认 5.6 秒扫光回弹周期，减少动态效果偏好下静态全亮；没有徽标的通用占位符不使用该组件。
+- `LogoMark`：装饰性矢量徽标。调用方用 CSS mask 指定已验证的本地资源和尺寸；组件不读取目录、网络或业务状态。每次页面挂载只播放一次扫光回弹，约 2.17 秒后保持全亮，不淡出、不循环；同一页面的主题或配置刷新不会重播，离开后重新进入的新实例会重新播放。减少动态效果偏好下立即静态全亮；没有徽标的通用占位符不使用该组件。
 - `Surface`：语义化内容面板，可选 `title`、`eyebrow`。
 - `SettingsGroup`：`title` 必填，可选 `number`；`fieldset` 使相关表单控件采用 fieldset/legend。
 - `SettingsRow`：表单行布局；标签与控件通过默认 slot 提供。
