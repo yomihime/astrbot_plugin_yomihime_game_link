@@ -528,24 +528,30 @@ def _bundle_readers(namespace):
 
 
 def projected_page_assets(
-    repository_root: Path, *, bundle_roots=("modules",)
+    repository_root: Path, *, bundle_roots=("modules",), external_page_roots=()
 ) -> dict[str, bytes]:
     """Project declared hash-pinned resources into the sole authenticated page root."""
     with _checkout_imports() as namespace:
-        return _projected_page_assets(repository_root, bundle_roots, namespace)
+        return _projected_page_assets(
+            repository_root, bundle_roots, namespace, external_page_roots
+        )
 
 
-def _projected_page_assets(repository_root, bundle_roots, namespace):
+def _projected_page_assets(
+    repository_root, bundle_roots, namespace, external_page_roots=()
+):
     parse_manifest, read_page_resources = _bundle_readers(namespace)
     adapter = import_module(f"{namespace}.adapters.astrbot.bundled")
     payload = {}
     branches = []
     styles = set()
     prefix = "pages/00-game-link/"
+    builtin_packages = set()
     for package_root, bundle in _capture_reviewed_bundles(
         adapter, repository_root, bundle_roots
     ):
         manifest = parse_manifest(bundle["manifest"])
+        builtin_packages.add(manifest.package_id)
         resources = read_page_resources(package_root, manifest)
         for module in manifest.modules:
             owner = manifest.global_module_id(module.module_id)
@@ -559,6 +565,31 @@ def _projected_page_assets(repository_root, bundle_roots, namespace):
                     f"case {json.dumps(entry)}: return import({json.dumps('./' + entry)});"
                 )
                 styles.update(f"module-assets/{owner}/{style}" for style in page.styles)
+    projection_module = import_module(f"{namespace}.extensions.static_page_projection")
+    projection, external_resources = projection_module.capture_static_pages(
+        external_page_roots
+    )
+    if builtin_packages.intersection(projection.packages):
+        raise ValueError("external page input cannot replace a built-in package")
+    for path, content in external_resources.items():
+        name = prefix + path
+        if name.casefold() in {key.casefold() for key in payload}:
+            raise ValueError("external page input collides with static composition")
+        payload[name] = content
+    for digest, manifest, _ in projection.packages.values():
+        for module in manifest.modules:
+            owner = manifest.global_module_id(module.module_id)
+            for page in module.pages:
+                entry = projection_module.projected_path(owner, digest, page.entry)
+                branches.append(
+                    f"case {json.dumps(entry)}: return import({json.dumps('./' + entry)});"
+                )
+                styles.update(
+                    projection_module.projected_path(owner, digest, path)
+                    for path in page.styles
+                )
+    if projection.packages:
+        payload[projection_module.PROJECTION_FILE] = projection.serialize()
     payload[prefix + "module-loader.js"] = (
         "export async function loadPage(entry) {\nswitch (entry) {\n"
         + "\n".join(sorted(set(branches)))
@@ -653,12 +684,21 @@ def build(
     sdk_wheel: Path,
     archive_path: Path = ARCHIVE,
     repository_root: Path = ROOT,
+    *,
+    external_page_roots=(),
 ) -> Path:
     package = validate_wheel(sdk_wheel)
     repository_root = Path(repository_root).resolve(strict=True)
+    if any(
+        Path(archive_path).absolute().is_relative_to(Path(root).absolute())
+        for root in external_page_roots
+    ):
+        raise ValueError("Build output overlaps an external page input")
     files = included_files(repository_root)
-    page_assets = projected_page_assets(repository_root)
-    inputs = (*files, sdk_wheel)
+    page_assets = projected_page_assets(
+        repository_root, external_page_roots=external_page_roots
+    )
+    inputs = (*files, sdk_wheel, *external_page_roots)
     validate_output_paths((archive_path,), inputs)
     output = BytesIO()
     with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
@@ -716,8 +756,15 @@ def main() -> None:
         type=Path,
         help="Path to the offline K-reviewed wheel; its digest is checked against the built-in pin.",
     )
+    parser.add_argument(
+        "--external-page-package",
+        action="append",
+        type=Path,
+        default=[],
+        help="Explicit reviewed package root; capture only hash-declared static pages, never Python.",
+    )
     args = parser.parse_args()
-    archive = build(args.sdk_wheel)
+    archive = build(args.sdk_wheel, external_page_roots=args.external_page_package)
     print(f"Created {archive}")
     print(f"Included {len(included_files()) + len(PACKAGE_ENTRY_NAMES)} files")
 

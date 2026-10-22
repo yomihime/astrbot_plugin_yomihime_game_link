@@ -169,6 +169,8 @@ def build_release(
     output_dir: Path | None = None,
     sdk_wheel: Path | None = None,
     repository_root: Path = ROOT,
+    *,
+    external_page_roots=(),
 ) -> tuple[Path, Path, Path]:
     """Build the validated plugin ZIP, pinned SDK wheel, and SHA256SUMS."""
     repository_root = Path(repository_root).resolve(strict=True)
@@ -203,6 +205,12 @@ def build_release(
         if retain_wheel
         else (*output_artifacts, sums_path)
     )
+    if any(
+        Path(output).absolute().is_relative_to(Path(root).absolute())
+        for output in destinations
+        for root in external_page_roots
+    ):
+        raise ValueError("Release output overlaps an external page input")
     validate_output_paths(destinations, protected)
 
     with tempfile.TemporaryDirectory(prefix="yomihime-release-build-") as temporary:
@@ -219,7 +227,15 @@ def build_release(
         if not retain_wheel:
             shutil.copyfile(source_wheel, staged_wheel)
         staged_zip = work_root / zip_name
-        build_dashboard_zip(staged_wheel, staged_zip, repository_root)
+        if external_page_roots:
+            build_dashboard_zip(
+                staged_wheel,
+                staged_zip,
+                repository_root,
+                external_page_roots=external_page_roots,
+            )
+        else:
+            build_dashboard_zip(staged_wheel, staged_zip, repository_root)
 
         staged_artifacts = (staged_zip, staged_wheel)
         payloads = {
@@ -259,9 +275,19 @@ def main() -> None:
         type=Path,
         help="Reuse an existing SDK wheel after checking its pinned hash and contents.",
     )
+    parser.add_argument(
+        "--external-page-package",
+        action="append",
+        type=Path,
+        default=[],
+        help="Explicit reviewed external package root for fixed-pair static pages only.",
+    )
     args = parser.parse_args()
     archive, wheel, checksums = build_release(
-        args.tag, args.output_dir, sdk_wheel=args.sdk_wheel
+        args.tag,
+        args.output_dir,
+        sdk_wheel=args.sdk_wheel,
+        external_page_roots=args.external_page_package,
     )
     print(f"Created {archive}")
     print(f"Created {wheel}")

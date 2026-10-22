@@ -44,6 +44,7 @@ from ...extensions.factory_resolver import (
     ReviewedInventoryFactorySource,
     ReviewedSupportLease,
 )
+from ...extensions.static_page_projection import StaticPageProjection
 from ...infrastructure.key_provider import EnvironmentKeyProvider
 from ...infrastructure.managed_key_manager import ManagedKeyManager
 from ...infrastructure.private_storage import resolve_private_storage
@@ -552,6 +553,11 @@ class AstrBotRuntime:
         self._config_error: str | None = None
         # Injected Host config is hydrated and cannot establish raw key presence.
         self._plugin_root = Path(plugin_root)
+        try:
+            self._static_page_projection = StaticPageProjection.load(self._plugin_root)
+        except (OSError, ValueError, TypeError):
+            # A malformed optional UI composition cannot grant external pages.
+            self._static_page_projection = StaticPageProjection()
         self._data_dir = Path(data_dir)
         self._plain_factory = plain_factory
         self._chain_factory = chain_factory
@@ -653,6 +659,15 @@ class AstrBotRuntime:
             and getattr(core, "management_available", False) is True
         )
 
+    def _external_page_bindings(self):
+        host = getattr(self, "_extension_host", None)
+        return host.page_manifest_bindings() if host is not None else {}
+
+    def _external_page_permitted(self, owner, manifest=None):
+        projection = getattr(self, "_static_page_projection", None)
+        bindings = self._external_page_bindings()
+        return (projection or StaticPageProjection()).permits(owner, bindings, manifest)
+
     def management_entry(self, *, credentials=False, modules=False, master_key=False):
         source = (
             self._module_admin_source
@@ -747,6 +762,7 @@ class AstrBotRuntime:
             module = core.registry.snapshot().modules.get(owner)
             if (
                 module is None
+                or not self._external_page_permitted(owner, module.manifest)
                 or not module.enabled
                 or module.epoch != epoch
                 or not core.registry.is_active(module)
@@ -1129,7 +1145,10 @@ class AstrBotRuntime:
                 if module["state"] == "loaded":
                     module["state"] = "unavailable"
                     module["reason"] = "runtime_not_ready"
-        return data
+        projection = getattr(self, "_static_page_projection", None)
+        return (projection or StaticPageProjection()).catalog(
+            data, self._external_page_bindings()
+        )
 
     async def public_ff14_page_state(self, *, include_values: bool = False) -> dict:
         """Deprecated locator only; no module defaults, gates or credential state."""

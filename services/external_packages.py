@@ -99,6 +99,17 @@ class ExternalPackageHost:
     def current(self):
         return not self._closed and self._current() is True
 
+    def page_manifest_bindings(self):
+        """Known external owners stay external while a lease is being withdrawn."""
+        return {
+            package_id: fingerprint[0].hex()
+            if (lease := self._packages.get(package_id)) is not None
+            and lease.active
+            and lease._complete
+            else None
+            for package_id, fingerprint in self._known_sources.items()
+        }
+
     def _metadata(self, name, instance):
         getter = getattr(self._context, "get_registered_star", None)
         metadata = getter(name) if callable(getter) else None
