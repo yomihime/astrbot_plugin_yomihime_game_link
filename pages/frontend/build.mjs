@@ -26,7 +26,7 @@ const stageRoot=await mkdtemp(resolve(tmpdir(),'ygl-frontend-'));
 try {
 const ids=new Set();
 const shell = resolve(stageRoot, 'pages/00-game-link');
-const aliases = {vue: resolve(frontend, 'node_modules/vue/dist/vue.runtime.esm-bundler.js'), 'naive-ui': resolve(frontend, 'node_modules/naive-ui/es/index.mjs')};
+const aliases = {'@game-link/ui':resolve(root,'pages/public-ui.ts'),vue: resolve(frontend, 'node_modules/vue/dist/vue.runtime.esm-bundler.js'), 'naive-ui': resolve(frontend, 'node_modules/naive-ui/es/index.mjs')};
 const defines = {'process.env.NODE_ENV': JSON.stringify('production'), __VUE_OPTIONS_API__: false, __VUE_PROD_DEVTOOLS__: false, __VUE_PROD_HYDRATION_MISMATCH_DETAILS__: false};
 const common = {configFile: false, root: frontend, resolve: {alias: aliases}, define: defines, logLevel: 'info'};
 // The Vue public export facade can disappear from chunk.modules after folding.
@@ -45,7 +45,7 @@ const runtimeAudit = {name: 'runtime-package-notices', generateBundle(_options, 
 }};
 await mkdir(shell, {recursive: true});
 await build({...common, plugins:[runtimeAudit], build: {outDir: shell, emptyOutDir: false, lib: {entry: resolve(frontend, 'src/runtime.ts'), formats: ['es'], fileName: () => 'runtime.js'}, minify: true, sourcemap: false}});
-await build({...common, build: {outDir: shell, emptyOutDir: false, lib: {entry: resolve(frontend, 'src/main.ts'), formats: ['es'], fileName: () => 'app.js', cssFileName: 'styles'}, rolldownOptions: {external: ['vue', 'naive-ui', './module-loader.js'], output: {paths: {'vue': './runtime.js', 'naive-ui': './runtime.js'}}}, minify: true}});
+await build({...common, build: {outDir: shell, emptyOutDir: false, lib: {entry: resolve(frontend, 'src/main.ts'), formats: ['es'], fileName: () => 'app.js', cssFileName: 'styles'}, rolldownOptions: {external: ['vue', 'naive-ui', '@game-link/ui', './module-loader.js'], output: {paths: {'vue': './runtime.js', 'naive-ui': './runtime.js','@game-link/ui':'./runtime.js'}}}, minify: true}});
 const projected=[];
 const branches=[],stylePaths=new Set();
 for(const bundleRoot of bundleRoots)for(const packageName of (await readdir(resolve(root,bundleRoot))).sort()) {
@@ -81,7 +81,7 @@ for(const bundleRoot of bundleRoots)for(const packageName of (await readdir(reso
   const styles=page.styles||[],style=styles.find(value=>/^pages\/dist\/[A-Za-z0-9_-]+\.css$/.test(value));
   await build({...common, build:{outDir:resolve(destination,'pages/dist'),emptyOutDir:false,
    lib:{entry:resolve(source,'pages/src',entry+'.ts'),formats:['es'],fileName:()=>entry+'.js',cssFileName:style?style.split('/').at(-1).slice(0,-4):'styles'},
-   rolldownOptions:{external:['vue','naive-ui'],output:{minify:true,paths:{'vue':'../../../../../runtime.js','naive-ui':'../../../../../runtime.js'}}},minify:true}});
+   rolldownOptions:{external:['vue','naive-ui','@game-link/ui'],output:{minify:true,paths:{'vue':'../../../../../runtime.js','naive-ui':'../../../../../runtime.js','@game-link/ui':'../../../../../runtime.js'}}},minify:true}});
  }
  const generated=[];
  const generatedNames=new Set();

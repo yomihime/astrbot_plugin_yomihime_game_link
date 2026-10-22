@@ -22,11 +22,16 @@
       ],
       "naive-ui": [
         "./node_modules/naive-ui"
+      ],
+      "@game-link/ui": [
+        "../public-ui.ts"
       ]
     }
   },
   "include": [
     "src/**/*.ts",
-    "../../modules/ff14/pages/src/**/*.ts"
+    "../../modules/ff14/pages/src/**/*.ts",
+    "../public-ui.ts",
+    "../../examples/modules/*/pages/src/**/*.ts"
   ]
 }

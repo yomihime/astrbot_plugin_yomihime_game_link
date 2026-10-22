@@ -1,25 +1,27 @@
 # Yomihime 插件 UI 规范
 
-本规范面向仓库内 Vue / Naive UI 页面；第一版样板为全局设置和 FF14 配置。不新增 UI SDK、宿主授权或业务合同。
+本规范面向 Core 壳与 Module 页面。Core 通过 `@game-link/ui` 提供可复用的前端展示组件、样式和浅深主题；它不是 Python SDK 扩展，不新增宿主授权或业务服务。接入方式见 [Module 共享 UI](module-ui.md)。
 
 ## 导航与信息层级
 
-外层宿主导航保持原样。插件侧栏使用完整品牌、首页、当前目录中的模块，底部为全局设置。桌面宽度 258px，999px 以下为 220px，719px 以下使用移动导航。模块默认进入主页；内部配置按实际管理声明显示，辅助查询按模块现有页面 descriptor 显示，无能力不造空业务页。
+外层宿主导航保持原样。插件侧栏使用完整品牌、首页、当前目录中的模块，底部为全局设置。桌面侧栏宽度 218px，1100px 及以下为 190px，719px 及以下使用移动导航。模块默认进入主页；内部配置按实际管理声明显示，辅助查询按模块现有页面 descriptor 显示，无能力不造空业务页。
 
 首页提供模块入口，`#/modules` 单独负责模块生命周期管理；健康未知保持未知。模块根 `#/module/<encoded-owner>` 按 home role 挂载，业务配置使用实际 config role 路由；`#/module/<encoded-owner>/-/queries` 只列 aux 页面。全局设置为 `#/settings`。旧 `#/settings/module/<encoded-owner>` 不再路由到壳内业务表单。浏览器前进、后退及刷新使用同一 hash 路由和离页确认。
 
 ## 密度与组件
 
-公共实现位于 `pages/frontend/src/ui/`。`PageHeader`、`SettingsGroup`、`SettingsRow`、`ActionBar`、`StatusHint` 只负责呈现，调用方持有权限、草稿、确认和请求状态。
+Module 从 `@game-link/ui`（公开入口 `pages/public-ui.ts`）导入 `UiProvider`、`SettingsLayout`、`Surface`、`PageHeader`、`SettingsGroup`、`SettingsRow`、`ActionBar`、`StatusHint`，不得深层导入 `pages/frontend/src/ui/`。这些组件只负责呈现，调用方持有权限、草稿、确认和请求状态。Core 壳发布共用 token 与样式，模块不要复制配色或组件实现。
 
 |项目|约定|
 |---|---|
-|字号|正文 15px，页面标题 28px，组标题 18px，辅助状态 13px|
-|间距|4 / 8 / 12 / 16 / 24 / 32px，组内 16–20px，组间 12–16px|
-|控件|文本输入、选择和按钮最小高度 40px，短 210px、中 320px、长最多 560px；checkbox/radio 为固定 20×20px，不参与 flex 收缩|
+|字号|共享页面正文 14px，页面标题 32px（599px 及以下 28px），组标题 17px，辅助状态 13px；现有管理正文保留 15px|
+|间距|4 / 8 / 12 / 16 / 24 / 32px 基础 token；共享设置主栏与侧栏间距 30px，1099px 及以下改为单栏；组采用横向分隔而非逐字段卡片|
+|控件|公共输入与操作按钮最小高度 40px、圆角 2px；按内容选短 210px、中 320px 或弹性剩余宽度，不设置所有控件统一长宽；管理 checkbox/radio 为固定 20×20px，不参与 flex 收缩|
 |标签|桌面约 128px；窄屏放控件上方，不用 placeholder 代替|
 |行|标签、适长控件、字段恢复默认，行距 8–12px，无每字段分隔线|
-|颜色|`tokens.css` 的 panel / text / muted / border / accent / error / warning / success；与 Naive 浅深主题同步|
+|颜色|Core 提供 background / panel / text / muted / border / accent / gold / error / warning / success token；浅色为暖纸底、梅紫强调，深色为深紫灰底、柔金强调；与 Naive 浅深主题同步|
+
+`UiProvider` 读取规范化 `PageContext.theme` / `locale`，主题更新沿用当前视图，不重挂载或丢失草稿。此主题只影响网页呈现，不代替命令图片的 `reply_theme` 配置。
 
 正例：三行日历用短数值、时间、中等时区输入；错误紧跟字段；主要保存按钮紧邻本组。反例：短数值全宽、常驻大成功框、靠缩字或缩点击范围压密度、隐藏冲突、把所有业务入口塞进侧栏。
 
@@ -49,4 +51,4 @@
 
 ## 单入口职责
 
-正式页面根只有 `00-game-link`。首页、模块管理、全局设置及 Module 页面是该根内的视图；Module 按 home/config/aux 角色进入壳。管理与模块操作仍由各自后端授权合同约束，独立授权不表示另有页面根。接入合同见 [frontend-module-contract.md](frontend-module-contract.md)。保持现有紧凑紫金视觉和共用 SettingsGroup、SettingsRow、ActionBar、StatusHint。正常就绪时收起恢复与全域危险操作，异常时给出简短可执行路径；确认绑定当前 owner、revision 与生命周期。
+正式页面根只有 `00-game-link`。首页、模块管理、全局设置及 Module 页面是该根内的视图；Module 按 home/config/aux 角色进入壳。管理与模块操作仍由各自后端授权合同约束，独立授权不表示另有页面根。接入合同见 [frontend-module-contract.md](frontend-module-contract.md)。保持暖纸 / 深紫灰双主题、紫金强调和共用公开展示组件。正常就绪时收起恢复与全域危险操作，异常时给出简短可执行路径；确认绑定当前 owner、revision 与生命周期。
