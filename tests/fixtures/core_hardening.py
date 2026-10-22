@@ -154,6 +154,7 @@ def _isolated_probe_main() -> None:
     from ygl_core_hardening_subject.services.core_runtime import (
         CoreRuntime,
         HostIngress,
+        HostIngressUnavailable,
         TrustedSubscriptionGate,
     )
 
@@ -672,7 +673,7 @@ def _isolated_probe_main() -> None:
                 await runtime.invoke_command(
                     "offline_sample/status", "from source", {}, ingress=ingress("alice")
                 )
-            except PermissionError:
+            except HostIngressUnavailable:
                 dependency_denied = True
             else:
                 dependency_denied = False
@@ -694,7 +695,7 @@ def _isolated_probe_main() -> None:
                 await runtime.invoke_command(
                     "offline_sample/status", "configured", {}, ingress=ingress("alice")
                 )
-            except PermissionError:
+            except HostIngressUnavailable:
                 config_denied = True
             else:
                 config_denied = False
