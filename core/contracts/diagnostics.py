@@ -6,6 +6,7 @@ import json
 import math
 import re
 from collections.abc import Mapping
+from threading import RLock
 from types import MappingProxyType
 
 _LABEL = re.compile(r"[a-zA-Z][a-zA-Z0-9_.-]{0,95}\Z")
@@ -38,6 +39,41 @@ _AUTH_MATERIAL = re.compile(
     re.I,
 )
 
+_FROZEN_SCHEMA_LIMIT = 32
+_FROZEN_SCHEMAS = {}
+_FROZEN_SCHEMA_LOCK = RLock()
+
+
+def _detached_immutable_output(value):
+    """Qualify only a freshly built output; never use this as input authority.
+
+    Compatibility permits str subclasses in some type/required tuples. Those
+    caller-owned leaves can carry mutable comparison behavior and disqualify
+    the entire root from identity reuse.
+    """
+    seen = set()
+
+    def visit(item):
+        kind = type(item)
+        if (
+            kind is str
+            or kind is int
+            or kind is float
+            or kind is bool
+            or kind is type(None)
+        ):
+            return True
+        if kind is not MappingProxyType and kind is not tuple:
+            return False
+        if id(item) in seen:
+            return True
+        seen.add(id(item))
+        if kind is MappingProxyType:
+            return all(type(key) is str and visit(child) for key, child in item.items())
+        return all(visit(child) for child in item)
+
+    return visit(value)
+
 
 def _sensitive_field(name, rule):
     compact = re.sub(r"[^a-z0-9]", "", name.lower())
@@ -65,6 +101,12 @@ def _sensitive_field(name, rule):
 
 
 def freeze_diagnostic_schema(schema):
+    # Hold the exact output root strongly: identity alone must not permit id
+    # reuse. Foreign dict/proxy/custom mappings always take the full walk.
+    with _FROZEN_SCHEMA_LOCK:
+        cached = _FROZEN_SCHEMAS.get(id(schema))
+        if cached is not None and cached is schema:
+            return schema
     nodes = 0
     definitions = schema.get("$defs", {}) if isinstance(schema, Mapping) else {}
     if not isinstance(definitions, Mapping) or len(definitions) > 128:
@@ -195,6 +237,13 @@ def freeze_diagnostic_schema(schema):
         walk({"$ref": "#/$defs/" + name})
     if frozen["type"] != ("object",):
         raise ValueError("diagnostic root must be an object")
+    # This is the sole insertion point, after full validation/detachment and
+    # only for outputs entirely composed of our containers and builtin leaves.
+    if _detached_immutable_output(frozen):
+        with _FROZEN_SCHEMA_LOCK:
+            if len(_FROZEN_SCHEMAS) >= _FROZEN_SCHEMA_LIMIT:
+                _FROZEN_SCHEMAS.pop(next(iter(_FROZEN_SCHEMAS)))
+            _FROZEN_SCHEMAS[id(frozen)] = frozen
     return frozen
 
 

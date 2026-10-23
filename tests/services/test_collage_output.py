@@ -28,7 +28,9 @@ from ygl_test_subject.presentation.png_validation import (
     validate_png,
 )
 from ygl_test_subject.services.collage_cache import (
+    RequiredCollageResourceUnavailable,
     load_finished_pages,
+    resolve_collage_resources,
     store_finished_pages,
 )
 from ygl_test_subject.services.generated_png import (
@@ -169,6 +171,107 @@ class _CancelBeforeRunScheduler(LifecycleApprovedSendScheduler):
         super().schedule(permit, task, name=name)
         owned = self._lifecycle.scope(permit.module_id).tasks[-1]
         owned.cancel()
+
+
+class CollageResourceResolutionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_repeated_public_refs_read_once_per_invocation(self):
+        content = _png("#123456").content
+        scope = _ResourceScope(content)
+        items = tuple(
+            CollageItem(
+                f"item-{index}",
+                60 - index,
+                ResourceImage(
+                    "cover-A" if index % 2 == 0 else "cover-B",
+                    CacheVisibility.PUBLIC,
+                    f"alt-{index}",
+                    index % 3 != 0,
+                ),
+            )
+            for index in range(60)
+        )
+        card = Document("Repeated references", (WeightedCollage(items),))
+        current_calls = 0
+
+        async def current():
+            nonlocal current_calls
+            current_calls += 1
+
+        resolved, versions = await resolve_collage_resources(card, scope, current)
+        self.assertEqual(
+            scope.reads,
+            [
+                ("metadata", "cover-A", CacheVisibility.PUBLIC),
+                ("read", "cover-A", CacheVisibility.PUBLIC),
+                ("metadata", "cover-B", CacheVisibility.PUBLIC),
+                ("read", "cover-B", CacheVisibility.PUBLIC),
+            ],
+        )
+        self.assertEqual(current_calls, 4)
+        self.assertEqual(len(versions), 60)
+        self.assertEqual(versions[0], versions[2])
+        self.assertEqual(versions[1], versions[3])
+        self.assertNotEqual(versions[0], versions[1])
+        for index, item in enumerate(resolved.blocks[0].items):
+            self.assertIs(type(item.image), Asset)
+            self.assertEqual(item.image.content, content)
+            self.assertEqual(item.image.alt, f"alt-{index}")
+            self.assertEqual(item.image.required, index % 3 != 0)
+
+    async def test_missing_optional_ref_is_reused_but_later_required_still_fails(self):
+        scope = _ResourceScope(None)
+        optional = ResourceImage("absent", CacheVisibility.PUBLIC, "optional", False)
+        required = ResourceImage("absent", CacheVisibility.PUBLIC, "required", True)
+        card = Document(
+            "Missing reference",
+            (
+                WeightedCollage(
+                    (
+                        CollageItem("one", 2, optional),
+                        CollageItem("two", 1, required),
+                    )
+                ),
+            ),
+        )
+
+        async def current():
+            return None
+
+        with self.assertRaises(RequiredCollageResourceUnavailable):
+            await resolve_collage_resources(card, scope, current)
+        self.assertEqual(
+            scope.reads,
+            [("metadata", "absent", CacheVisibility.PUBLIC)],
+        )
+
+    async def test_repeated_refs_still_count_each_item_against_source_budget(self):
+        content = _png("#123456").content
+        scope = _ResourceScope(content)
+        items = tuple(
+            CollageItem(
+                f"item-{index}",
+                3 - index,
+                ResourceImage("same", CacheVisibility.PUBLIC, "cover", True),
+            )
+            for index in range(3)
+        )
+        card = Document("Budget", (WeightedCollage(items),))
+
+        async def current():
+            return None
+
+        with patch(
+            "ygl_test_subject.services.collage_cache._SOURCE_LIMIT", len(content) * 2
+        ):
+            with self.assertRaisesRegex(ValueError, "collage source budget"):
+                await resolve_collage_resources(card, scope, current)
+        self.assertEqual(
+            scope.reads,
+            [
+                ("metadata", "same", CacheVisibility.PUBLIC),
+                ("read", "same", CacheVisibility.PUBLIC),
+            ],
+        )
 
 
 class PrivateCollageOutputTests(unittest.IsolatedAsyncioTestCase):

@@ -318,6 +318,66 @@ class ManagedResourceConsumerTests(unittest.IsolatedAsyncioTestCase):
         stats = await alice.resources.stats()
         self.assertEqual((stats.items, stats.evictions), (33, 1))
 
+    async def test_capacity_continues_bounded_batches_until_large_write_fits(self):
+        repo = self.runtime.repositories.resources
+        manager = repo.managed_cache
+        manager.policy = ResourceCachePolicy(
+            max_file_bytes=33, max_bytes=40, max_items=40
+        )
+        for expired, actor in ((False, "alice"), (True, "bob")):
+            with self.subTest(expired=expired):
+                _, scope = await self.bound(actor)
+                refs = [
+                    await scope.resources.store("application/octet-stream", bytes((n,)))
+                    for n in range(40)
+                ]
+                if expired:
+
+                    def expire(unit):
+                        unit.execute(
+                            "UPDATE managed_resource_entries SET expires_at=? WHERE scope_key=?",
+                            (
+                                "2000-01-01T00:00:00+00:00",
+                                repo.managed_scope_key(refs[0].scope),
+                            ),
+                        )
+                        unit.execute(
+                            "UPDATE assets SET expires_at=? WHERE scope_kind='user' AND user_id=?",
+                            ("2000-01-01T00:00:00+00:00", actor),
+                        )
+
+                    await self.runtime.database.executor.run_transaction(expire)
+                batches = []
+                original = repo.managed_candidates
+
+                async def candidates(*args, **kwargs):
+                    rows = await original(*args, **kwargs)
+                    batches.append((kwargs["limit"], len(rows)))
+                    return rows
+
+                payload = b"x" * 33
+                self.assertEqual(len(payload), 33)
+                with patch.object(repo, "managed_candidates", candidates):
+                    admitted = await scope.resources.store(
+                        "application/octet-stream", payload
+                    )
+                self.assertEqual(await scope.resources.read(admitted.asset_id), payload)
+                stats = await scope.resources.stats()
+                self.assertEqual(
+                    (stats.bytes, stats.items, stats.evictions), (40, 8, 33)
+                )
+                self.assertTrue(
+                    all(0 < limit <= 32 and rows <= limit for limit, rows in batches)
+                )
+                self.assertLessEqual(len(batches), 3)
+                self.assertEqual(
+                    sum(
+                        not repo.file_store._final(ref.asset_id, ref.scope).exists()
+                        for ref in refs
+                    ),
+                    33,
+                )
+
     async def test_expired_cleanup_and_private_public_boundary(self):
         _, public = await self.bound()
         ref = await public.resources.store(

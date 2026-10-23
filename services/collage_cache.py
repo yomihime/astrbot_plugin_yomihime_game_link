@@ -43,44 +43,57 @@ async def resolve_collage_resources(card, scope, current):
     items = []
     versions = []
     total = 0
+    resolved = {}
     for item in collage.items:
         source = item.image
         if type(source) is not ResourceImage:
             items.append(item)
             continue
-        try:
-            metadata = await scope.resources.metadata(
-                source.asset_id, visibility=source.visibility
-            )
-            await current()
-            if metadata is None:
-                raise FileNotFoundError("resource is unavailable")
-            media = metadata.media_type
-            if media not in ("image/png", "image/jpeg"):
-                raise ValueError("unsupported collage resource")
-            if not 0 < metadata.size_bytes <= 1_048_576:
-                raise ValueError("collage source budget")
-            content = await scope.resources.read(
-                source.asset_id, visibility=source.visibility
-            )
-            await current()
-            if len(content) != metadata.size_bytes:
-                raise ValueError("collage resource changed")
-        except (FileNotFoundError, ValueError):
+        key = (source.visibility, source.asset_id)
+        if key not in resolved:
+            try:
+                metadata = await scope.resources.metadata(
+                    source.asset_id, visibility=source.visibility
+                )
+                await current()
+                if metadata is None:
+                    raise FileNotFoundError("resource is unavailable")
+                media = metadata.media_type
+                if media not in ("image/png", "image/jpeg"):
+                    raise ValueError("unsupported collage resource")
+                if not 0 < metadata.size_bytes <= 1_048_576:
+                    raise ValueError("collage source budget")
+                content = await scope.resources.read(
+                    source.asset_id, visibility=source.visibility
+                )
+                await current()
+                if len(content) != metadata.size_bytes:
+                    raise ValueError("collage resource changed")
+            except (FileNotFoundError, ValueError):
+                resolved[key] = None
+            else:
+                resolved[key] = (
+                    media,
+                    content,
+                    metadata.revision,
+                    sha256(content).hexdigest(),
+                )
+        snapshot = resolved[key]
+        if snapshot is None:
             if source.required:
                 raise RequiredCollageResourceUnavailable() from None
             items.append(replace(item, image=None))
             versions.append((source.asset_id, source.visibility.value, "missing"))
             continue
+        media, content, revision, digest = snapshot
         total += len(content)
         if total > _SOURCE_LIMIT:
             raise ValueError("collage source budget")
-        digest = sha256(content).hexdigest()
         versions.append(
             (
                 source.asset_id,
                 source.visibility.value,
-                metadata.revision,
+                revision,
                 digest,
             )
         )

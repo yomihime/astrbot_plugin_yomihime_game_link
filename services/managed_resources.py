@@ -148,52 +148,58 @@ class ManagedResourceCache:
         return True
 
     async def _room(self, scope, asset_id, size, *, check, authorization_deadline, now):
-        # All tombstones and expired candidates are SQL-index selected, bounded.
+        # Bound each indexed query by cleanup_batch and the whole operation by
+        # the initial managed partition inventory, rather than one query batch.
         scope_key = self.repository.managed_scope_key(scope)
         excluded = {asset_id} | {
             leased_asset
             for (leased_scope, leased_asset) in self._readers
             if leased_scope == scope_key
         }
-        expired = await self.repository.managed_candidates(
-            scope,
-            now=now,
-            limit=self.policy.cleanup_batch,
-            expired_only=True,
-            excluded_asset_ids=tuple(sorted(excluded)),
-        )
-        visited = set()
-        for candidate, _ in expired:
-            visited.add(candidate)
-            if candidate != asset_id:
-                await self._evict(candidate, scope, check, authorization_deadline)
         used, count, _ = await self.repository.managed_usage(scope)
+        inventory_count = count
         current = await self.repository.managed_entry(asset_id, scope)
         delta_size = size - (0 if current is None else current[1])
         delta_count = 1 if current is None else 0
-        if (
-            used + delta_size <= self.policy.max_bytes
-            and count + delta_count <= self.policy.max_items
-        ):
-            return
-        candidates = await self.repository.managed_candidates(
-            scope,
-            now=now,
-            limit=max(0, self.policy.cleanup_batch - len(visited)),
-            expired_only=False,
-            excluded_asset_ids=tuple(sorted(excluded | visited)),
-        )
-        for candidate, candidate_size in candidates:
-            if candidate == asset_id or candidate in visited:
-                continue
-            if await self._evict(candidate, scope, check, authorization_deadline):
-                used -= candidate_size
-                count -= 1
-                if (
-                    used + delta_size <= self.policy.max_bytes
-                    and count + delta_count <= self.policy.max_items
-                ):
-                    return
+
+        def fits():
+            return (
+                used + delta_size <= self.policy.max_bytes
+                and count + delta_count <= self.policy.max_items
+            )
+
+        visited = set()
+        # Expiry/tombstones have priority; LRU is only needed for admission.
+        for expired_only in (True, False):
+            while len(visited) < inventory_count:
+                await check()
+                candidates = await self.repository.managed_candidates(
+                    scope,
+                    now=now,
+                    limit=min(
+                        self.policy.cleanup_batch, inventory_count - len(visited)
+                    ),
+                    expired_only=expired_only,
+                    excluded_asset_ids=tuple(sorted(excluded | visited)),
+                )
+                fresh = [
+                    (candidate, candidate_size)
+                    for candidate, candidate_size in candidates
+                    if candidate not in excluded and candidate not in visited
+                ]
+                if not fresh:
+                    break
+                for candidate, candidate_size in fresh:
+                    visited.add(candidate)
+                    if await self._evict(
+                        candidate, scope, check, authorization_deadline
+                    ):
+                        used -= candidate_size
+                        count -= 1
+                    if fits():
+                        return
+            if fits():
+                return
         raise ResourceCapacityError("resource cache capacity is unavailable")
 
     async def store(
