@@ -31,7 +31,11 @@ from .card_bitmap import (
     render_card,
 )
 from .command_text import FULL_BRAND
-from .layout_renderer import apply_theme_selection, render_document
+from .layout_renderer import (
+    apply_theme_selection,
+    render_document,
+    render_document_pages,
+)
 from .png_validation import validate_png
 from .rendering import RenderingFailure
 from .text import TextPresenter
@@ -44,6 +48,7 @@ _MAX_CONTENT = 24_000
 class CommandPresentation:
     text: str
     bitmap: RenderedBitmap | None = None
+    bitmaps: tuple[RenderedBitmap, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -181,17 +186,31 @@ class CommandCardRenderer:
         fallback = text if self._fits_text(text) else TOO_LARGE
         if not image:
             return CommandPresentation(fallback)
+        bitmaps = ()
         try:
             if document.card is not None:
-                bitmap = render_document(
-                    apply_theme_selection(document.card, core_theme, module_theme),
-                    font_provider=self._font_provider_factory(),
+                selected = apply_theme_selection(
+                    document.card, core_theme, module_theme
                 )
+                if (
+                    len(selected.blocks) == 1
+                    and type(selected.blocks[0]) is cards.WeightedCollage
+                ):
+                    bitmaps = render_document_pages(
+                        selected, font_provider=self._font_provider_factory()
+                    )
+                    bitmap = bitmaps[0]
+                else:
+                    bitmap = render_document(
+                        selected,
+                        font_provider=self._font_provider_factory(),
+                    )
             else:
                 bitmap = render_card(spec, font_provider=self._font_provider_factory())
         except Exception:
             bitmap = None
-        return CommandPresentation(fallback, bitmap)
+            bitmaps = ()
+        return CommandPresentation(fallback, bitmap, bitmaps)
 
     def help(
         self, text: str, *, image: bool = True, card=None, core_theme="warm_paper"

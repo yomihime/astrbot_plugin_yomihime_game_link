@@ -1,6 +1,6 @@
 # Game Link module SDK
 
-The independently installable distribution is `yomihime-game-link-sdk==0.1.0a14`. Import its public declarations with `import yomihime_game_link_sdk as ygl`. It requires Python 3.11 or newer and has no third-party runtime dependencies.
+The independently installable distribution is `yomihime-game-link-sdk==0.1.0a15`. Import its public declarations with `import yomihime_game_link_sdk as ygl`. It requires Python 3.11 or newer and has no third-party runtime dependencies.
 
 The SDK (including its packaged examples) is licensed under MIT; see `SDK-LICENSE`. The AstrBot plugin implementation remains AGPL-3.0 under `LICENSE`. Third-party notices retain their own terms. The a12 source contract adds the outer-plugin extension bridge without changing module ABI 2.0. Built wheel identity and installation evidence are recorded separately; editing these declarations does not prove a published or installed wheel.
 
@@ -45,8 +45,8 @@ read proof does not authorize root private output or account management.
 Install the reviewed wheel into your module development environment:
 
 ```powershell
-python -m pip install --no-deps ./yomihime_game_link_sdk-0.1.0a14-py3-none-any.whl
-python -I -c "import yomihime_game_link_sdk as ygl; assert ygl.__version__ == '0.1.0a14'; assert ygl.MODULE_ABI_VERSION == '2.0'"
+python -m pip install --no-deps ./yomihime_game_link_sdk-0.1.0a15-py3-none-any.whl
+python -I -c "import yomihime_game_link_sdk as ygl; assert ygl.__version__ == '0.1.0a15'; assert ygl.MODULE_ABI_VERSION == '2.0'"
 ```
 
 The plugin release contains the exact content-pinned SDK from that wheel. Its bootstrap rejects changed contents, foreign package origins, partial preload graphs, and any preloaded retired `yomihime_sdk` graph. The retired root `api` and `yomihime_sdk.api` modules have no compatibility redirects. Historical stored-data readers are separate from module import compatibility.
@@ -370,3 +370,13 @@ Current config may also contain `descriptors` for the exact authorized page fiel
 Host module page requests require a short-lived opaque page_session after actual Dashboard JWT/Origin authentication. Host validates current subject/session, owner/page/runtime/epoch, field grants and generation on each request and commit, then removes the proof before the strict Core helper body. The proof demonstrates scoped Host authority; AstrBot does not attest the originating DOM. Asset tokens, client labels and page names alone grant no management rights.
 
 Trusted legacy policies may register retained ordinary source names with a configuration coordinator. Such rows remain stored but are hidden from ordinary current snapshots and cannot be patched or cleared through current declarations. Unknown fields and secret metadata still fail. A bad legacy source value is independently rejected by destination-schema projection and does not prevent unrelated valid Core theme updates.
+
+## Managed binary resources and weighted collages (a15)
+
+Bound resources provide `store(media_type, content, *, visibility=None, ttl_seconds=None)`, `read(asset_id, *, visibility=None)`, `metadata(asset_id, *, visibility=None)` and `stats(*, visibility=None)`. Core allocates an opaque content reference; modules never construct IDs, paths or owner hashes. PNG/JPEG bytes are validated in Core. New managed resources have a 4 MiB per-file limit and a 64 MiB / 512-item limit per scope, with a seven-day default TTL (at most thirty days), indexed expiry/LRU eviction and read leases. Cleanup is bounded and runs on writes; existing legacy resources are outside this managed eviction set. Missing or corrupt reads raise `FileNotFoundError`; metadata returns None. Authority and cancellation failures remain errors. `ResourceCacheStats` reports bytes, items, max_bytes, max_items and evictions. Stats expose only the requested authorized partition.
+
+PUBLIC writes require a current PUBLIC, READ_ONLY capability. A private caller may invoke a declared public preparation dependency with public parameters, then read its public reference; this grants no right to publish private results or write personal data into PUBLIC. Personal list/result caches stay USER or AUTHORIZED as appropriate. Runtime bytes live in Host-managed data storage and survive ordinary restart; development directories and plugin installation paths are not cache locations.
+
+`cards.ResourceImage(asset_id, visibility=CacheVisibility.PUBLIC, alt=..., required=False)` refers to prepared bytes. A sole `cards.WeightedCollage(items, max_height=2800, max_pages=8, preferred_aspect=2/3)` block accepts up to 200 `cards.CollageItem(key, weight, image=None, title=..., caption=...)` values. Weights must be positive and finite; business filtering, units and weighting belong to the module. Core resolves references before rendering and never performs HTTP while painting. Missing optional images become placeholders with their supplied text. Keep complete ordered text blocks as fallback.
+
+The deterministic integer shelf layout fills each page body, assigns areas monotonically by weight and stable key, limits relative weights and cell aspect variation, and bounds cover cropping; unsuitable ratios use contain/placeholder behavior. It does not promise exact linear proportions. Collage PNGs use a local 4 MiB/page, 16 MiB total and eight-page budget, plus the existing pixel/conversion limits. Ordinary cards retain their existing limits. The command path prepares all pages before final admission and sends one exact-event chain; ambiguous sends are never retried. Commands without a grant may cache finished pages through current USER-scoped services with normalized content, resource versions, resolved theme and layout inputs in the key. Grant-authorized finished pages are not cached into USER storage. Sole collages have a local text fallback budget of 24,000 characters and 1,024 lines; exceeding it requests a smaller selection. Full layout details are in [the rendering specification](command-presentation/declarative-rendering-spec.md).

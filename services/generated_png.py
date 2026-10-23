@@ -72,6 +72,16 @@ class GeneratedPngLimits:
     max_pixels: int = 8_000_000
     ttl: float = 30.0
 
+    @classmethod
+    def collage(cls) -> GeneratedPngLimits:
+        """Core-selected local page profile; ordinary PNG defaults stay fixed."""
+        return cls(
+            max_raw_bytes=16_777_216,
+            max_conversion_bytes=67_108_864,
+            max_png_bytes=4_194_304,
+            max_pixels=(128 * 1024 * 1024) // 36,
+        )
+
 
 class _GeneratedPngContext:
     __slots__ = ()
@@ -147,6 +157,7 @@ class GeneratedPngCoordinator:
         *,
         output_authority: OutputService,
         limits: GeneratedPngLimits = GeneratedPngLimits(),
+        collage_profile: bool = False,
         monotonic_clock: Callable[[], float] = monotonic,
         utc_clock: Callable[[], datetime] | None = None,
     ) -> None:
@@ -157,7 +168,9 @@ class GeneratedPngCoordinator:
             raise TypeError("generated PNG requires Core output authority")
         if type(limits) is not GeneratedPngLimits:
             raise ValueError("invalid generated PNG limits")
-        hard = GeneratedPngLimits()
+        if type(collage_profile) is not bool:
+            raise ValueError("invalid generated PNG profile")
+        hard = GeneratedPngLimits.collage() if collage_profile else GeneratedPngLimits()
         for item in fields(limits):
             value = getattr(limits, item.name)
             if item.name == "ttl":
@@ -172,6 +185,7 @@ class GeneratedPngCoordinator:
         self._loop = asyncio.get_running_loop()
         self._output = output_authority
         self._limits = limits
+        self._collage_profile = collage_profile
         self._png_limits = PngValidationLimits(
             limits.max_png_bytes, limits.max_width, limits.max_height, limits.max_pixels
         )
@@ -326,7 +340,9 @@ class GeneratedPngCoordinator:
         if entry.busy or entry.reference is not None:
             raise GeneratedPngError("busy")
         try:
-            check_png_input(bitmap, self._png_limits)
+            check_png_input(
+                bitmap, self._png_limits, collage_profile=self._collage_profile
+            )
         except PngValidationError as error:
             raise GeneratedPngError(error.reason) from None
         size = len(bitmap.content)
@@ -341,7 +357,11 @@ class GeneratedPngCoordinator:
                     raise GeneratedPngError("busy")
                 self._decoding = True
                 try:
-                    metadata = validate_png(bitmap, limits=self._png_limits)
+                    metadata = validate_png(
+                        bitmap,
+                        limits=self._png_limits,
+                        collage_profile=self._collage_profile,
+                    )
                 except PngValidationError as error:
                     raise GeneratedPngError(error.reason) from None
                 finally:
@@ -370,6 +390,30 @@ class GeneratedPngCoordinator:
         expected_target: MessageTarget,
         audience: DisplayAudience,
     ) -> AsyncIterator[_GeneratedPngLease]:
+        lease = await self.acquire(
+            context,
+            reference,
+            invocation=invocation,
+            result=result,
+            expected_target=expected_target,
+            audience=audience,
+        )
+        try:
+            yield lease
+        finally:
+            lease.release()
+
+    async def acquire(
+        self,
+        context: _GeneratedPngContext,
+        reference: _GeneratedPngRef,
+        *,
+        invocation: InvocationView,
+        result: CapabilityResult,
+        expected_target: MessageTarget,
+        audience: DisplayAudience,
+    ) -> _GeneratedPngLease:
+        """Pin one page for a task-owned, synchronously releasable send bundle."""
         entry = self._entry(context)
         if (
             entry.invocation is not invocation
@@ -393,9 +437,10 @@ class GeneratedPngCoordinator:
             async with self._output._admission.mutation("generated-png:pin"):
                 await self._authority(entry)
             self._lease(lease)
-            yield lease
-        finally:
+            return lease
+        except BaseException:
             lease.release()
+            raise
 
     def _lease(self, lease: _GeneratedPngLease) -> _Entry:
         self._own_loop()

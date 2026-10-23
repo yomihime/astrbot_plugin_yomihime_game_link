@@ -118,7 +118,7 @@ class SQLiteSecretStoreWorkerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(self.db_path.exists())
         self.assertFalse(self.secret_root.exists())
-        self.assertEqual(await self.database.executor.initialize(), 130)
+        self.assertEqual(await self.database.executor.initialize(), 140)
         self.assertTrue(self.db_path.is_file())
         self.assertFalse(self.secret_root.exists())
 

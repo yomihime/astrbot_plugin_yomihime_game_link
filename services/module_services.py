@@ -49,6 +49,7 @@ from yomihime_game_link_sdk.services import (
     InvocationServices,
     ModuleServices,
     ResolvedIdentity,
+    ResourceCacheStats,
     ResourceReference,
     SubscriptionOperations,
 )
@@ -63,6 +64,7 @@ from yomihime_game_link_sdk.storage import (
     OwnershipKind,
     QueryOperator,
     RecordPage,
+    ResourceMetadata,
     VersionedRecord,
 )
 from yomihime_game_link_sdk.subscriptions import SubscriptionRequest, SubscriptionView
@@ -802,17 +804,19 @@ class _BoundCache:
 
 
 class _BoundResources:
-    __slots__ = ("__resources", "__check_sync", "__check")
+    __slots__ = ("__resources", "__check_sync", "__check", "__public_write")
 
     def __init__(
         self,
         resources: ResourceAccessService,
         check_sync: Callable[[], None],
         check: Callable[[], Awaitable[None]],
+        public_write: bool = False,
     ) -> None:
         object.__setattr__(self, "_BoundResources__resources", resources)
         object.__setattr__(self, "_BoundResources__check_sync", check_sync)
         object.__setattr__(self, "_BoundResources__check", check)
+        object.__setattr__(self, "_BoundResources__public_write", public_write)
 
     @public_boundary("resource")
     async def register(self, asset_id: str, media_type: str, content: bytes):
@@ -832,13 +836,64 @@ class _BoundResources:
         return result
 
     @public_boundary("resource")
-    async def read(self, asset_id: str) -> bytes:
+    async def store(
+        self,
+        media_type: str,
+        content: bytes,
+        *,
+        visibility: CacheVisibility | None = None,
+        ttl_seconds: float | None = None,
+    ) -> ResourceReference:
+        await self.__check()
+        parameters(validate_contract, visibility)
+        if visibility is CacheVisibility.PUBLIC and not self.__public_write:
+            raise AccessDenied()
+        try:
+            result = await self.__resources.store(
+                media_type, content, visibility=visibility, ttl_seconds=ttl_seconds
+            )
+        except (ValueError, TypeError):
+            await self.__check()
+            raise ParameterError("parameters are invalid") from None
+        await self.__check()
+        _canonical_input(result, ResourceReference)
+        return result
+
+    @public_boundary("resource")
+    async def read(
+        self, asset_id: str, *, visibility: CacheVisibility | None = None
+    ) -> bytes:
         await self.__check()
         parameters(_asset_id, asset_id)
-        result = await self.__resources.read(asset_id)
+        parameters(validate_contract, visibility)
+        result = await self.__resources.read(asset_id, visibility=visibility)
         await self.__check()
         if type(result) is not bytes:
             raise ValueError("resource response is invalid")
+        return result
+
+    @public_boundary("resource")
+    async def metadata(
+        self, asset_id: str, *, visibility: CacheVisibility | None = None
+    ) -> ResourceMetadata | None:
+        await self.__check()
+        parameters(_asset_id, asset_id)
+        parameters(validate_contract, visibility)
+        result = await self.__resources.metadata(asset_id, visibility=visibility)
+        await self.__check()
+        if result is not None:
+            _canonical_input(result, ResourceMetadata)
+        return result
+
+    @public_boundary("resource")
+    async def stats(
+        self, *, visibility: CacheVisibility | None = None
+    ) -> ResourceCacheStats:
+        await self.__check()
+        parameters(validate_contract, visibility)
+        result = await self.__resources.stats(visibility=visibility)
+        await self.__check()
+        _canonical_input(result, ResourceCacheStats)
         return result
 
 
@@ -1411,7 +1466,14 @@ class InvocationServiceBinder:
                 and owner_capability.effect is CapabilityEffect.READ_ONLY,
             ),
             http=_BoundHttp(self._http, check_sync, check),
-            resources=_BoundResources(resources, check_sync, check),
+            resources=_BoundResources(
+                resources,
+                check_sync,
+                check,
+                public_write=owner_capability is not None
+                and owner_capability.privacy_floor is PrivacyFloor.PUBLIC
+                and owner_capability.effect is CapabilityEffect.READ_ONLY,
+            ),
             dependencies=_BoundDependencies(dependencies, check),
             tasks=_BoundTasks(tasks, check_sync, check),
         )

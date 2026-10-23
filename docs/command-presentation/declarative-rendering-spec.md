@@ -371,3 +371,11 @@ python -m unittest discover -s tests/presentation -t . -p 'test_layout*.py' -v
 样例独立 requirements 固定 `Pillow==12.3.0`、`resvg_py==0.5.0`；Core 根运行依赖的下限见 `requirements.txt`。SDK wheel 没有运行依赖。新 renderer 不要求 fontTools，字体维护专项测试如使用它遵循各自依赖。CLI 默认创建系统临时目录；显式输出必须在仓库外，文件独占创建，不覆盖旧 `samples/`。配套 `provenance.json` 记录来源、fixture 范围、尺寸、字节数和 SHA-256。
 
 保存的五张样图在 [samples/declarative](../../examples/command_cards/samples/declarative)，附统一 provenance。样图字节由 provenance 单独记录。视觉参考不改变 Help 可用性、Logs、Market 为离线 fixture、Item 为截图转录的数据性质。
+
+## 有界加权拼贴（SDK a15）
+
+`Document` 可使用单个 `WeightedCollage` 正文块，最多 200 个唯一 key 的 `CollageItem`。模块给出正有限权重、标题、真实数值说明，以及 `Asset` 或已准备的 `ResourceImage`；Core 不解释业务单位。资源引用在异步准备阶段按当前 invocation 权限解析为本地字节，绘制期间不联网。可选缺图使用占位并保留标题及说明；完整文字回退由模块同步提供。
+
+布局先把相对权重压到至多 16:1，再生成整数 shelf 矩形并按实际面积及稳定 key 分配条目；相同输入、画布和版本结果确定。单页正文铺满、不重叠、不越界；跨页也保持较高权重的实际面积不小于较低权重。相邻项可因像素舍入及分档同面积，这不是精确线性面积图。默认偏好 2:3 竖块，行内宽高变化受限；cover 保留至少三分之二源面积，无法满足时等比 contain 或占位，绝不拉伸。只有一项、两项、极端权重及同权重也走同一确定规则。
+
+默认正文高度参数为 2800，标题、页码/范围及来源区另计；仍受整张像素与转换预算约束。超长内容按版面顺序连续拆页，最多 8 页；每页标出实际全局排名区间，可能有多个非连续区间，不能把页码冒充连续排名。这个取舍保留跨页面积单调与紧密铺满。本地 PNG 上限为每页 4 MiB、总计 16 MiB。普通命令卡片保留原单图限制。Host 在最终发送许可前完成所有页的解码校验、图片组件与消息链构造；一次发送包含全部页。拼贴文字回退局部上限为 24,000 字符、1,024 行，超过时提示缩小查询；普通卡片的 6,000 字符、200 行不变。超预算、可选素材失败或构造失败通过受控文字回退呈现；已开始且结果不明的发送不自动重试。

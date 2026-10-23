@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 
 from yomihime_game_link_sdk.subscriptions import ConversationKind
 
@@ -49,6 +50,7 @@ class AstrBotMessagePort:
             or conversation.adapter_id != conversation.delivery_route
             or payload.resource_ids
             or payload.png_bytes is not None
+            or payload.png_pages
             or not _valid_session_component(conversation.delivery_route, platform=True)
             or not _valid_session_component(conversation.conversation_id)
         ):
@@ -106,6 +108,7 @@ class AstrBotMessagePort:
             if (
                 route is None
                 or payload.resource_ids
+                or payload.png_pages
                 or (payload.png_bytes is not None and target.authorized)
                 or route.adapter_id != ingress.adapter_id
                 or route.delivery_route != ingress.delivery_route
@@ -139,10 +142,7 @@ class AstrBotMessagePort:
             # The spent marker lives on the event, not in an ever-growing
             # global registry. One command output per exact event/runtime;
             # retained Host events cannot exhaust a global send quota.
-            if (
-                getattr(event, "_ygl_command_send_marker", None)
-                is self._command_send_marker
-            ):
+            if hasattr(event, "_ygl_command_send_marker"):
                 return MessageReceipt(MessageStatus.UNKNOWN)
             setattr(event, "_ygl_command_send_marker", self._command_send_marker)
         except Exception:
@@ -156,6 +156,57 @@ class AstrBotMessagePort:
         if sent is False:
             return MessageReceipt(MessageStatus.FAILED)
         return MessageReceipt(MessageStatus.UNKNOWN)
+
+    def prepare_command(self, ingress, target, payload, *, image_current):
+        """Build one exact-event chain before Core's final admission check.
+
+        This method does not send or authorize. Private images require a direct
+        target matching the trusted ingress actor. The returned private object
+        performs no preparation or asynchronous lookups during dispatch.
+        """
+        if (
+            type(target) is not MessageTarget
+            or type(payload) is not RenderedMessage
+            or payload.resource_ids
+            or not payload.png_pages
+            or not callable(image_current)
+            or self._command_current is None
+            or self._command_current(ingress) is not True
+        ):
+            raise ValueError("invalid prepared command")
+        route = target.conversation
+        if (
+            route is None
+            or route.adapter_id != ingress.adapter_id
+            or route.delivery_route != ingress.delivery_route
+            or route.conversation_id != ingress.conversation_id
+            or route.kind is not ingress.conversation_kind
+            or target.recipient_id is not None
+            and target.recipient_id != ingress.actor_id
+            or target.authorized
+            and (
+                route.kind is not ConversationKind.DIRECT
+                or target.recipient_id != ingress.actor_id
+            )
+        ):
+            raise ValueError("prepared command route changed")
+        event = ingress.evidence.event
+        send = getattr(event, "send", None)
+        chain_result = getattr(event, "chain_result", None)
+        if not callable(send) or not callable(chain_result):
+            raise ValueError("prepared command event is unavailable")
+        # Failures here have not dispatched anything; Core can retain complete
+        # text fallback. Never construct components after final admission.
+        components = tuple(self._image_factory(page) for page in payload.png_pages)
+        chain = chain_result(list(components))
+
+        def current():
+            image_current()
+            if self._command_current(ingress) is not True:
+                raise ValueError("prepared command ingress changed")
+
+        current()
+        return _PreparedHostCommand(event, chain, send, current)
 
     @staticmethod
     def _astrbot_image(content: bytes) -> object:
@@ -182,6 +233,37 @@ def _valid_session_component(value: object, *, platform: bool = False) -> bool:
     if any(ord(character) < 32 or ord(character) == 127 for character in value):
         return False
     return not (platform and ":" in value)
+
+
+@dataclass(slots=True, eq=False)
+class _PreparedHostCommand:
+    event: object
+    chain: object
+    send: Callable
+    check_current: Callable[[], None]
+    spent: bool = False
+
+    async def dispatch(self) -> MessageReceipt:
+        try:
+            self.check_current()
+            # A marker from any previous runtime also spends this exact event.
+            if self.spent or hasattr(self.event, "_ygl_command_send_marker"):
+                return MessageReceipt(MessageStatus.UNKNOWN)
+            self.spent = True
+            # Do not retain the prepared chain (and its base64 images) through
+            # the Host event's spent marker.
+            setattr(self.event, "_ygl_command_send_marker", object())
+        except Exception:
+            return MessageReceipt(MessageStatus.FAILED)
+        try:
+            sent = await self.send(self.chain)
+        except Exception:
+            return MessageReceipt(MessageStatus.UNKNOWN)
+        if sent is True:
+            return MessageReceipt(MessageStatus.ACCEPTED)
+        if sent is False:
+            return MessageReceipt(MessageStatus.FAILED)
+        return MessageReceipt(MessageStatus.UNKNOWN)
 
 
 __all__ = ["AstrBotMessagePort", "ImageFactory", "MessageChainFactory", "PlainFactory"]

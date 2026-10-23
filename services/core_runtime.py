@@ -752,6 +752,14 @@ class CoreRuntime:
                 if callable(getattr(message_port, "send_command", None))
                 else None
             ),
+            command_preparer=(
+                self._prepare_command_image
+                if callable(getattr(message_port, "prepare_command", None))
+                else None
+            ),
+            collage_scope_binder=lambda invocation: self.module_services.for_module(
+                invocation.module_id
+            ).scopes.bind(invocation),
             limits=display_limits,
             conversations=self._conversation_resolver,
             message_port=message_port,
@@ -1692,6 +1700,45 @@ class CoreRuntime:
             owned[1], target, payload, image_current=image_current
         )
 
+    async def _prepare_command_image(
+        self, invocation, result, target, payload, *, image_current
+    ):
+        """Prepare one exact Host chain while async authority checks are allowed."""
+        from .prepared_command import PreparedCommand
+
+        owned = self._command_ingresses.get(invocation.invocation_id)
+        if owned is None or owned[0] is not invocation:
+            raise PermissionError("command ingress is unavailable")
+        ingress = owned[1]
+        self._require_accepting_ingress()
+        self.issuer.require(invocation)
+        self.lifecycle.admission.check(self.output._root_lease(invocation))
+        await self._host_ingress(InvocationOrigin.COMMAND, ingress)
+        await self.output._validate_command_current(invocation, result, target)
+        self._require_accepting_ingress()
+        self.issuer.require(invocation)
+        self.lifecycle.admission.check(self.output._root_lease(invocation))
+        image_current()
+        if self._command_ingresses.get(invocation.invocation_id) is not owned:
+            raise PermissionError("command ingress changed")
+        host_prepared = self._command_message_port.prepare_command(
+            ingress, target, payload, image_current=image_current
+        )
+
+        def current() -> None:
+            if self._command_ingresses.get(invocation.invocation_id) is not owned:
+                raise PermissionError("command ingress changed")
+            self._require_accepting_ingress()
+            self.issuer.require(invocation)
+            self.lifecycle.admission.check(self.output._root_lease(invocation))
+            image_current()
+            host_prepared.check_current()
+
+        current()
+        return PreparedCommand(
+            invocation, result, target, current, host_prepared.dispatch
+        )
+
     @property
     def storage_migration_identity(self):
         return self._storage_runtime_id, self._storage_generation
@@ -1785,6 +1832,8 @@ class CoreRuntime:
         self._accepting = False
         if self.output._generated_png is not None:
             self.output._generated_png.close()
+        if self.output._collage_png is not None:
+            self.output._collage_png.close()
         # Fence pending durable activation before close can suspend on the
         # shared Admission mutation gate.
         self.extension_runtime.stop_accepting()

@@ -52,6 +52,15 @@ class LocalSafeFileStore:
             raise ValueError("asset id is invalid")
         return asset_id
 
+    @staticmethod
+    def content_id(content: bytes, scope: OwnerScope) -> str:
+        """Host-only allocation; modules never need the scope hash algorithm."""
+        validate_contract(scope)
+        return (
+            "asset_"
+            + hashlib.sha256(f"{_scope_token(scope)}\0".encode() + content).hexdigest()
+        )
+
     def _final(self, asset_id: str, scope: OwnerScope) -> Path:
         validate_contract(scope)
         asset_id = self._asset(asset_id)
@@ -80,10 +89,7 @@ class LocalSafeFileStore:
         if not isinstance(content, bytes):
             raise TypeError("resource content must be bytes")
         scope = OwnerScope_validate(scope)
-        digest = hashlib.sha256(
-            f"{_scope_token(scope)}\0".encode() + content
-        ).hexdigest()
-        asset_id = f"asset_{digest}"
+        asset_id = self.content_id(content, scope)
         path = self._temp(operation_id, asset_id)
         path.parent.mkdir(parents=True, exist_ok=True)
         if path.exists():
@@ -162,6 +168,31 @@ class LocalSafeFileStore:
             marker.unlink()
         except FileNotFoundError:
             return
+
+    async def replace_managed(self, stage: FileStage) -> None:
+        """Replace one verified managed content address, retaining crash marker."""
+        source = self._temp(stage.operation_id, stage.asset_id)
+        content = source.read_bytes()
+        if self.content_id(content, stage.scope) != stage.asset_id:
+            raise ValueError("staged resource identity is invalid")
+        target = self._final(stage.asset_id, stage.scope)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        self._pending(stage.asset_id, stage.scope).write_text(
+            "index pending", encoding="utf-8"
+        )
+        os.replace(source, target)
+
+    async def remove_managed(self, asset_id: str, scope: OwnerScope) -> None:
+        """Unlink exact indexed resource paths; never enumerate directories."""
+        for path in (
+            self._final(asset_id, scope),
+            self._pending(asset_id, scope),
+            self._orphan(asset_id, scope),
+        ):
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
 
     async def read(self, asset_id: str, scope: OwnerScope) -> bytes:
         validate_contract(scope)

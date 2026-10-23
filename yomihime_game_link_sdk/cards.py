@@ -10,6 +10,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal, TypeAlias
 
+from .storage import CacheVisibility
+
 Align: TypeAlias = Literal["left", "center", "right"]
 VAlign: TypeAlias = Literal["top", "center", "bottom"]
 
@@ -27,6 +29,48 @@ class Asset:
     content: str | bytes
     alt: str = ""
     required: bool = True
+
+
+@dataclass(frozen=True)
+class ResourceImage:
+    """Opaque prepared resource; the current invocation must authorize reads.
+
+    PUBLIC and USER describe resource partitions, never grant access. Rendering
+    performs no network IO. The enclosing DisplayDocument owns result privacy.
+    """
+
+    asset_id: str
+    visibility: CacheVisibility = CacheVisibility.PUBLIC
+    alt: str = ""
+    required: bool = False
+
+
+@dataclass(frozen=True)
+class CollageItem:
+    """Generic positive weight, stable unique key and literal display labels."""
+
+    key: str
+    weight: int | float
+    image: Asset | ResourceImage | None = None
+    title: str = ""
+    caption: str = ""
+
+
+@dataclass(frozen=True)
+class WeightedCollage:
+    """A sole document body composed by Core into bounded, indexed PNG pages.
+
+    Actual integer tile area is monotonic in weight, with deterministic key
+    ties. This is not an exact proportional-area chart: relative target weights
+    are capped at 16:1 and shelf widths at 2:1 to retain at least two thirds of
+    the preferred source aspect when covered. Core may limit label overlays to
+    two lines; ordered_blocks must retain the complete text fallback.
+    """
+
+    items: tuple[CollageItem, ...]
+    max_height: int = 2800
+    max_pages: int = 8
+    preferred_aspect: float = 2 / 3
 
 
 @dataclass(frozen=True)
@@ -154,7 +198,7 @@ class Image:
     fit: Literal["contain", "cover"] = "contain"
 
 
-Block: TypeAlias = Text | Section | Row | PropertyGrid | Table | Image
+Block: TypeAlias = Text | Section | Row | PropertyGrid | Table | Image | WeightedCollage
 
 
 @dataclass(frozen=True)
@@ -177,6 +221,9 @@ __all__ = [
     "Align",
     "VAlign",
     "Asset",
+    "ResourceImage",
+    "CollageItem",
+    "WeightedCollage",
     "Span",
     "Inline",
     "Content",

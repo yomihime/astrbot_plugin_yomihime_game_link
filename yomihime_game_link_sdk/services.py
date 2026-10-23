@@ -18,6 +18,7 @@ from .storage import (
     JsonObject,
     OwnerScope,
     RecordCollection,
+    ResourceMetadata,
     SecretMetadata,
 )
 from .storage import JsonValue as JsonValue
@@ -98,6 +99,17 @@ class ResourceReference:
     asset_id: str
     media_type: str
     scope: OwnerScope
+
+
+@dataclass(frozen=True, slots=True)
+class ResourceCacheStats:
+    """Managed binary cache usage in the invocation-selected partition."""
+
+    bytes: int
+    items: int
+    max_bytes: int
+    max_items: int
+    evictions: int
 
 
 class ConfigView(Protocol):
@@ -216,7 +228,28 @@ class ResourceAccess(Protocol):
         self, asset_id: str, media_type: str, content: bytes
     ) -> ResourceReference: ...
 
-    async def read(self, asset_id: str) -> bytes: ...
+    async def store(
+        self,
+        media_type: str,
+        content: bytes,
+        *,
+        visibility: CacheVisibility | None = None,
+        ttl_seconds: float | None = None,
+    ) -> ResourceReference:
+        """Allocate/reuse an opaque reference to bounded persistent bytes."""
+        ...
+
+    async def read(
+        self, asset_id: str, *, visibility: CacheVisibility | None = None
+    ) -> bytes: ...
+
+    async def metadata(
+        self, asset_id: str, *, visibility: CacheVisibility | None = None
+    ) -> ResourceMetadata | None: ...
+
+    async def stats(
+        self, *, visibility: CacheVisibility | None = None
+    ) -> ResourceCacheStats: ...
 
 
 @dataclass(frozen=True, slots=True)

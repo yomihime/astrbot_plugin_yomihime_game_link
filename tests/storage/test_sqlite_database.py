@@ -196,12 +196,28 @@ class SQLiteDatabaseTests(unittest.IsolatedAsyncioTestCase):
             connection.close()
 
         # The historical fence upgrade remains v90; the current full migration
-        # advances to v130 without resetting the consumed gate or old data.
+        # advances to v140 without resetting the consumed gate or old data.
         current = SQLiteDatabase(path)
-        self.assertEqual(current.initialize(), 130)
-        self.assertEqual(current.initialize(), 130)
+        self.assertEqual(current.initialize(), 140)
+        self.assertEqual(current.initialize(), 140)
         connection = current.connect()
         try:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM managed_resource_entries"
+                ).fetchone()[0],
+                0,
+            )
+            self.assertEqual(
+                {
+                    row[1]
+                    for row in connection.execute(
+                        "PRAGMA index_list(managed_resource_entries)"
+                    )
+                }
+                & {"managed_resource_expiry_idx", "managed_resource_lru_idx"},
+                {"managed_resource_expiry_idx", "managed_resource_lru_idx"},
+            )
             self.assertEqual(
                 connection.execute(
                     "SELECT phase FROM subscription_gate_bootstrap"

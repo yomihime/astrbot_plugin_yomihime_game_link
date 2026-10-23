@@ -956,11 +956,11 @@ class B04SubscriptionRepositoryTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(await self.scheduler.is_current(lease, now=self.now))
 
     async def test_r01_real_full_migration_reopens_at_0120(self) -> None:
-        self.assertEqual(self.db.initialize(), 130)
-        self.assertEqual(self.db.initialize(), 130)
-        self.assertEqual(self.db.schema_version(), 130)
+        self.assertEqual(self.db.initialize(), 140)
+        self.assertEqual(self.db.initialize(), 140)
+        self.assertEqual(self.db.schema_version(), 140)
         reopened = SQLiteDatabase(self.path)
-        self.assertEqual(reopened.schema_version(), 130)
+        self.assertEqual(reopened.schema_version(), 140)
 
     async def test_repository_sql_callbacks_run_on_worker_thread(self) -> None:
         caller_thread = threading.get_ident()

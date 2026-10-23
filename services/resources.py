@@ -12,7 +12,11 @@ from typing import Callable, TypeVar
 from uuid import uuid4
 
 from yomihime_game_link_sdk.contexts import InvocationView
-from yomihime_game_link_sdk.services import ResourceAccess, ResourceReference
+from yomihime_game_link_sdk.services import (
+    ResourceAccess,
+    ResourceCacheStats,
+    ResourceReference,
+)
 from yomihime_game_link_sdk.storage import CacheVisibility, OwnerScope, ResourceMetadata
 
 from ..core.context_issuer import ContextIssuer, InvalidInvocation
@@ -31,6 +35,7 @@ from .identity import (
     PrincipalResolutionDenied,
     PrincipalResolutionUnavailable,
 )
+from .managed_resources import drain_on_cancel
 
 _T = TypeVar("_T")
 
@@ -472,13 +477,71 @@ class _ResourceAccessCoordinator:
             )
             if metadata is None or metadata.scope != scope:
                 continue
+            manager = getattr(self.__repository, "managed_cache", None)
             content = await self._await_boundary(
                 lambda: self.__repository.read(asset_id, scope)
+                if manager is None
+                else manager.read(asset_id, scope, read=self.__repository.read)
             )
             if not isinstance(content, bytes):
                 raise ValueError("resource repository returned invalid content")
             return content
         raise FileNotFoundError("resource is unavailable")
+
+    async def store(
+        self,
+        media_type: str,
+        content: bytes,
+        *,
+        visibility: CacheVisibility | None = None,
+        ttl_seconds: float | None = None,
+    ) -> ResourceReference:
+        validate_contract(visibility)
+        await self._admit()
+        scope = await self._scope(visibility)
+        manager = getattr(self.__repository, "managed_cache", None)
+        if manager is None:
+            raise ResourceAccessError(
+                "resource storage is unavailable", code="resource_unavailable"
+            )
+
+        async def operation():
+            async with self._write_mutation("resource-store"):
+                deadline = await self._assert_grant_current()
+                metadata = await manager.store(
+                    media_type,
+                    content,
+                    scope,
+                    module_id=self.__invocation.module_id,
+                    ttl_seconds=ttl_seconds,
+                    check=self._admit,
+                    authorization_deadline=deadline
+                    if scope.grant is not None
+                    else None,
+                )
+                await self._admit()
+                return validate_contract(
+                    ResourceReference(
+                        metadata.asset_id, metadata.media_type, metadata.scope
+                    )
+                )
+
+        return await drain_on_cancel(operation())
+
+    async def stats(
+        self, *, visibility: CacheVisibility | None = None
+    ) -> ResourceCacheStats:
+        validate_contract(visibility)
+        await self._admit()
+        scope = await self._scope(visibility)
+        manager = getattr(self.__repository, "managed_cache", None)
+        if manager is None:
+            raise ResourceAccessError(
+                "resource storage is unavailable", code="resource_unavailable"
+            )
+        return validate_contract(
+            await self._await_boundary(lambda: manager.stats(scope))
+        )
 
     async def metadata(
         self, asset_id: str, *, visibility: CacheVisibility | None = None
@@ -491,6 +554,16 @@ class _ResourceAccessCoordinator:
                 lambda: self.__repository.metadata(asset_id, scope)
             )
             if metadata is not None and metadata.scope == scope:
+                manager = getattr(self.__repository, "managed_cache", None)
+                if manager is not None:
+                    try:
+                        await self._await_boundary(
+                            lambda: manager.read(
+                                asset_id, scope, read=self.__repository.read
+                            )
+                        )
+                    except FileNotFoundError:
+                        continue
                 return metadata
         return None
 
@@ -601,6 +674,23 @@ class ResourceAccessService(ResourceAccess):
     ) -> bytes:
         validate_contract(visibility)
         return await self.__coordinator.read(asset_id, visibility=visibility)
+
+    async def store(
+        self,
+        media_type: str,
+        content: bytes,
+        *,
+        visibility: CacheVisibility | None = None,
+        ttl_seconds: float | None = None,
+    ) -> ResourceReference:
+        return await self.__coordinator.store(
+            media_type, content, visibility=visibility, ttl_seconds=ttl_seconds
+        )
+
+    async def stats(
+        self, *, visibility: CacheVisibility | None = None
+    ) -> ResourceCacheStats:
+        return await self.__coordinator.stats(visibility=visibility)
 
     async def metadata(
         self, asset_id: str, *, visibility: CacheVisibility | None = None

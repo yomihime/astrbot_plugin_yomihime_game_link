@@ -49,6 +49,7 @@ from yomihime_game_link_sdk.services import ModuleRecords as ModuleRecords
 from yomihime_game_link_sdk.services import ModuleServices as ModuleServices
 from yomihime_game_link_sdk.services import ResolvedIdentity as ResolvedIdentity
 from yomihime_game_link_sdk.services import ResourceAccess as ResourceAccess
+from yomihime_game_link_sdk.services import ResourceCacheStats as ResourceCacheStats
 from yomihime_game_link_sdk.services import ResourceReference as ResourceReference
 from yomihime_game_link_sdk.services import SourceHttp as SourceHttp
 from yomihime_game_link_sdk.services import (
@@ -374,6 +375,19 @@ def check_ResourceReference(self) -> None:
     if not isinstance(self.media_type, str) or not self.media_type.strip():
         raise ValueError("media_type must be non-empty text")
     object.__setattr__(self, "scope", OwnerScope_validate(self.scope))
+
+
+def check_ResourceCacheStats(self) -> None:
+    for name in ("bytes", "items", "max_bytes", "max_items", "evictions"):
+        if type(getattr(self, name)) is not int or getattr(self, name) < 0:
+            raise ValueError("resource cache statistics must be nonnegative integers")
+    if (
+        self.max_bytes < 1
+        or self.max_items < 1
+        or self.bytes > self.max_bytes
+        or self.items > self.max_items
+    ):
+        raise ValueError("resource cache statistics exceed their bounded policy")
 
 
 class TrustedConversationResolver(Protocol):

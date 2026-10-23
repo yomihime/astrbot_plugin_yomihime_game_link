@@ -127,6 +127,57 @@ class ExactEventImageTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(again.status, MessageStatus.UNKNOWN)
         self.assertEqual(len(self.event.calls), 1)
 
+    async def test_prepared_private_pages_are_one_chain_across_runtime_markers(self):
+        private_target = replace(self.target, authorized=True)
+        payload = RenderedMessage(
+            "complete private text", png_pages=(b"page-a", b"page-b")
+        )
+        prepared = self.port.prepare_command(
+            self.ingress, private_target, payload, image_current=lambda: None
+        )
+        first = await prepared.dispatch()
+        self.assertIs(first.status, MessageStatus.UNKNOWN)
+        self.assertEqual(len(self.event.calls), 1)
+        self.assertEqual(len(self.event.calls[0].chain), 2)
+        self.assertIsNot(self.event._ygl_command_send_marker, prepared)
+        next_port = AstrBotMessagePort(
+            _Context(),
+            image_factory=_Image.fromBytes,
+            command_current=lambda ingress: self.current
+            and self.receiver.validate(InvocationOrigin.COMMAND, ingress),
+        )
+        second = next_port.prepare_command(
+            self.ingress, private_target, payload, image_current=lambda: None
+        )
+        again = await second.dispatch()
+        self.assertIs(again.status, MessageStatus.UNKNOWN)
+        legacy_again = await next_port.send_command(
+            self.ingress, self.target, self.payload
+        )
+        self.assertIs(legacy_again.status, MessageStatus.UNKNOWN)
+        self.assertEqual(len(self.event.calls), 1)
+
+    async def test_prepared_private_send_cancelled_after_marker_never_retries(self):
+        private_target = replace(self.target, authorized=True)
+        payload = RenderedMessage(
+            "complete private text", png_pages=(b"page-a", b"page-b")
+        )
+        self.event.gate = asyncio.Event()
+        prepared = self.port.prepare_command(
+            self.ingress, private_target, payload, image_current=lambda: None
+        )
+        task = asyncio.create_task(prepared.dispatch())
+        await self.event.entered.wait()
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        second = self.port.prepare_command(
+            self.ingress, private_target, payload, image_current=lambda: None
+        )
+        receipt = await second.dispatch()
+        self.assertIs(receipt.status, MessageStatus.UNKNOWN)
+        self.assertEqual(len(self.event.calls), 1)
+
     async def test_unknown_send_exception_never_duplicates_text(self):
         self.event.error = ValueError("after platform enqueue")
         receipt = await self.port.send_command(self.ingress, self.target, self.payload)

@@ -1352,7 +1352,7 @@ class B04RuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(failing_runtime.message_port.calls, [])
         self.assertEqual(len(self.runtime.message_port.calls), 1)
         reopened = type(self.runtime.database)(self.root / "runtime.sqlite3")
-        self.assertEqual(reopened.schema_version(), 130)
+        self.assertEqual(reopened.schema_version(), 140)
         recovered = build_runtime(self.root, clock=self.clock)
         self.assertTrue(
             await recovered.resource_visibility.contains_non_public_resource_reference(

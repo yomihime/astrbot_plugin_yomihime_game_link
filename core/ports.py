@@ -582,6 +582,7 @@ class RenderedMessage:
     text: str
     resource_ids: tuple[str, ...] = ()
     png_bytes: bytes | None = None
+    png_pages: tuple[bytes, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.text, str) or not self.text.strip():
@@ -591,6 +592,21 @@ class RenderedMessage:
             or not 1 <= len(self.png_bytes) <= 1_048_576
         ):
             raise ValueError("PNG payload exceeds its internal byte budget")
+        if self.png_pages:
+            if (
+                type(self.png_pages) is not tuple
+                or len(self.png_pages) > 8
+                or self.png_bytes is not None
+                or self.resource_ids
+                or any(
+                    type(page) is not bytes or not 1 <= len(page) <= 4_194_304
+                    for page in self.png_pages
+                )
+                or sum(map(len, self.png_pages)) > 16_777_216
+            ):
+                raise ValueError("collage pages exceed their local byte budget")
+        elif type(self.png_pages) is not tuple:
+            raise ValueError("collage pages must be immutable")
         resource_ids = tuple(self.resource_ids)
         for resource_id in resource_ids:
             _asset(resource_id)

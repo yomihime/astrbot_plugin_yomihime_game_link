@@ -92,6 +92,7 @@ from .services import ModuleRecords as ModuleRecords
 from .services import ModuleServices as ModuleServices
 from .services import ResolvedIdentity as ResolvedIdentity
 from .services import ResourceAccess as ResourceAccess
+from .services import ResourceCacheStats as ResourceCacheStats
 from .services import ResourceReference as ResourceReference
 from .services import SourceHttp as SourceHttp
 from .services import SubscriptionOperations as SubscriptionOperations
@@ -258,6 +259,7 @@ __all__ = [
     "ResolvedIdentity",
     "ResourceAccess",
     "ResourceReference",
+    "ResourceCacheStats",
     "SourceHttp",
     "SubscriptionOperations",
     "TaskScope",

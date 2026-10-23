@@ -20,7 +20,15 @@ from io import BytesIO
 from types import MappingProxyType
 from unicodedata import category
 
-from yomihime_game_link_sdk.cards import Cell, TaggedText
+from yomihime_game_link_sdk.cards import (
+    Asset,
+    Cell,
+    CollageItem,
+    ResourceImage,
+    TaggedText,
+    WeightedCollage,
+)
+from yomihime_game_link_sdk.storage import CacheVisibility
 
 from .bundled_font import BundledFontProvider
 from .card_bitmap import BitmapBounds, BitmapUnavailable, FontProvider, RenderedBitmap
@@ -211,6 +219,7 @@ class _Image:
     asset: object
     box: tuple[float, float, float, float]
     fit: str = "contain"
+    min_cover_fraction: float | None = None
 
 
 def _fail(reason="invalid_input"):
@@ -264,9 +273,15 @@ def _validate(document, bounds):
     if type(document) is not Document or type(bounds) is not BitmapBounds:
         _fail()
     hard = BitmapBounds()
+    collage = len(document.blocks) == 1 and type(document.blocks[0]) is WeightedCollage
     for field in fields(bounds):
         value = getattr(bounds, field.name)
-        if type(value) is not int or not 1 <= value <= getattr(hard, field.name):
+        ceiling = (
+            4 * 1024 * 1024
+            if collage and field.name == "max_bytes"
+            else getattr(hard, field.name)
+        )
+        if type(value) is not int or not 1 <= value <= ceiling:
             _fail()
     if type(document.width) is not int or document.width < 400:
         _fail()
@@ -378,9 +393,9 @@ def _validate(document, bounds):
             if type(value.content) is str
             else len(value.content)
         )
-        if asset_bytes > 8_388_608:
+        if asset_bytes > (32 * 1024 * 1024 if collage else 8_388_608):
             _fail("byte_limit")
-        if asset_count > 32:
+        if asset_count > (201 if collage else 32):
             _fail("layout_overflow")
 
     def blocks(values, depth):
@@ -468,6 +483,54 @@ def _validate(document, bounds):
             content(value.caption)
             if value.fit not in ("contain", "cover"):
                 _fail()
+        elif type(value) is WeightedCollage:
+            from .layout_collage import MAX_COLLAGE_ITEMS
+
+            if depth != 0 or document.blocks != (value,):
+                _fail()
+            _tuple(value.items, MAX_COLLAGE_ITEMS)
+            if (
+                not value.items
+                or type(value.max_height) is not int
+                or not 128 <= value.max_height <= 2800
+            ):
+                _fail()
+            if type(value.max_pages) is not int or not 1 <= value.max_pages <= 8:
+                _fail()
+            _number(value.preferred_aspect, 0.5, 2)
+            keys = set()
+            for item in value.items:
+                if (
+                    type(item) is not CollageItem
+                    or type(item.key) is not str
+                    or not item.key
+                    or item.key in keys
+                ):
+                    _fail()
+                keys.add(item.key)
+                content(item.key)
+                _number(item.weight, 0, float("inf"))
+                if item.weight <= 0:
+                    _fail()
+                content(item.title)
+                content(item.caption)
+                if type(item.image) is Asset:
+                    asset(item.image)
+                elif type(item.image) is ResourceImage:
+                    reference = item.image
+                    if (
+                        type(reference.asset_id) is not str
+                        or not 0 < len(reference.asset_id) <= 256
+                        or any(category(c).startswith("C") for c in reference.asset_id)
+                        or type(reference.visibility) is not CacheVisibility
+                        or reference.visibility
+                        not in (CacheVisibility.PUBLIC, CacheVisibility.USER)
+                        or type(reference.required) is not bool
+                    ):
+                        _fail()
+                    content(reference.alt)
+                elif item.image is not None:
+                    _fail()
         else:
             _fail()
 
@@ -488,16 +551,18 @@ def _validate(document, bounds):
 
 
 class _Layout:
-    def __init__(self, document, palette, provider, bounds):
+    def __init__(self, document, palette, provider, bounds, collage_page=None):
         try:
             from PIL import ImageFont
         except Exception:
             _fail("dependency_missing")
 
         self.document, self.palette, self.bounds = document, palette, bounds
+        self.collage_page = collage_page
         self.tokens = TOKENS[document.layout]
         self.fonts = {}
         self.texts, self.shapes, self.images, self.boxes = [], [], [], []
+        self.overlays = []
         self.measurements = self.output_lines = 0
         borrowed = 0
         try:
@@ -729,6 +794,91 @@ class _Layout:
             return self.text(
                 value.content, x, y, width, size, path, role, value.align, value.wrap
             )
+        if type(value) is WeightedCollage:
+            page = self.collage_page
+            if page is None or width != page.width:
+                _fail("invalid_input")
+            heading = (
+                f"第 {page.index}/{page.count} 页（版面顺序） · "
+                f"本页 {len(page.tiles)} 项 · 共 {page.total_items} 项"
+            )
+            y += self.text(heading, x, y, width, 16, path + "/page", "secondary") + 6
+            ranges = "、 ".join(
+                str(start) if start == end else f"{start}–{end}"
+                for start, end in page.rank_ranges
+            )
+            y += (
+                self.text(
+                    f"本页全局排名：{ranges}",
+                    x,
+                    y,
+                    width,
+                    16,
+                    path + "/ranks",
+                    "secondary",
+                )
+                + 12
+            )
+            grid_y = y
+            for tile in page.tiles:
+                left, tile_top, right, bottom = tile.box
+                tx0, ty0, tx1, ty1 = (
+                    x + left,
+                    grid_y + tile_top,
+                    x + right,
+                    grid_y + bottom,
+                )
+                self.shapes.append(_Shape((tx0, ty0, tx1, ty1), p.panel_alt))
+                source = tile.item.image
+                if type(source) is Asset:
+                    self.images.append(
+                        _Image(source, (tx0, ty0, tx1, ty1), "cover", 2 / 3)
+                    )
+                elif type(source) is ResourceImage and source.required:
+                    _fail("invalid_input")
+                # The title and caption are literal, bounded labels. The complete
+                # ranked list remains in the DisplayDocument text projection.
+                label_width = max(8, tx1 - tx0 - 16)
+                title = tile.item.title or tile.item.key
+                caption = tile.item.caption
+                max_chars = max(1, int(label_width // 20) - 1)
+                title = title[:max_chars] + ("…" if len(title) > max_chars else "")
+                caption = caption[:max_chars] + (
+                    "…" if len(caption) > max_chars else ""
+                )
+                label_height = 36 if caption else 20
+                self.overlays.append(
+                    _Shape((tx0, ty1 - label_height - 8, tx1, ty1), p.panel)
+                )
+                self.text(
+                    title,
+                    tx0 + 8,
+                    ty1 - label_height - 5,
+                    label_width,
+                    16,
+                    path + "/title",
+                    "strong",
+                    wrapping="nowrap",
+                )
+                if caption:
+                    self.text(
+                        caption,
+                        tx0 + 8,
+                        ty1 - 25,
+                        label_width,
+                        16,
+                        path + "/caption",
+                        "secondary",
+                        wrapping="nowrap",
+                    )
+                self.boxes.append(
+                    LayoutBox(path + "/tile", "collage_tile", (tx0, ty0, tx1, ty1))
+                )
+            y += page.height
+            self.boxes.append(
+                LayoutBox(path, "weightedcollage", (x, top, x + width, y))
+            )
+            return y - top
         if type(value) is Section:
             start_shape = len(self.shapes)
             inset = pad if value.panel else 0
@@ -966,7 +1116,7 @@ class _Layout:
         return MeasuredDocument(d.width, height, tuple(self.boxes))
 
 
-def _prepare(document, bounds, font_provider):
+def _prepare(document, bounds, font_provider, collage_page=None):
     palette, strings = _validate(document, bounds)
     provider = font_provider if font_provider is not None else BundledFontProvider()
     try:
@@ -978,7 +1128,7 @@ def _prepare(document, bounds, font_provider):
         raise
     except Exception:
         _fail("font_unavailable")
-    layout = _Layout(document, palette, provider, bounds)
+    layout = _Layout(document, palette, provider, bounds, collage_page)
     try:
         return layout, layout.build()
     except BaseException:
@@ -1069,6 +1219,7 @@ def render_document(
     *,
     bounds: BitmapBounds = BitmapBounds(),
     font_provider: FontProvider | None = None,
+    _collage_page=None,
 ) -> RenderedBitmap:
     """Render a complete bounded PNG or raise BitmapUnavailable; never truncate.
 
@@ -1083,7 +1234,13 @@ def render_document(
         from PIL import ImageDraw
     except Exception:
         _fail("dependency_missing")
-    layout, measured = _prepare(document, bounds, font_provider)
+    if (
+        len(document.blocks) == 1
+        and type(document.blocks[0]) is WeightedCollage
+        and _collage_page is None
+    ):
+        _fail("invalid_input")
+    layout, measured = _prepare(document, bounds, font_provider, _collage_page)
     session = None
     try:
         p = layout.palette
@@ -1116,6 +1273,7 @@ def render_document(
                             round(y1 - y0) * 2,
                             p.accent,
                             fit=item.fit,
+                            min_cover_fraction=item.min_cover_fraction,
                         )
                     ) as asset:
                         image.paste(asset, (round(x0 * 2), round(y0 * 2)), asset)
@@ -1144,6 +1302,8 @@ def render_document(
                     if h > y1 - y0 - 20:
                         _fail("layout_overflow")
                     layout.texts[start].y += (y1 - y0 - 20 - h) / 2
+            for shape in layout.overlays:
+                draw.rectangle(tuple(round(v * 2) for v in shape.box), fill=shape.fill)
             draw = None
             session = RichSession(
                 image,
@@ -1167,3 +1327,61 @@ def render_document(
         if session is not None:
             session.close()
         layout.fonts.clear()
+
+
+def render_document_pages(
+    document: Document,
+    *,
+    bounds: BitmapBounds = BitmapBounds(),
+    font_provider: FontProvider | None = None,
+) -> tuple[RenderedBitmap, ...]:
+    """Render every admitted collage page before the caller dispatches any one."""
+    from .layout_collage import MAX_COLLAGE_TOTAL_PNG_BYTES, plan_collage
+
+    if type(document) is not Document:
+        _fail()
+    if len(document.blocks) != 1 or type(document.blocks[0]) is not WeightedCollage:
+        return (render_document(document, bounds=bounds, font_provider=font_provider),)
+    if bounds.max_bytes != BitmapBounds().max_bytes:
+        # An explicit lower caller budget remains effective.
+        page_bytes = min(bounds.max_bytes, 4 * 1024 * 1024)
+    else:
+        page_bytes = 4 * 1024 * 1024
+    collage_bounds = replace(bounds, max_bytes=page_bytes)
+    _validate(document, collage_bounds)
+    # A single portrait needs no wide empty frame. Keep its actual PNG width
+    # within the declared document width and the standard pixel work budget.
+    if len(document.blocks[0].items) == 1 and document.width > 760:
+        document = replace(document, width=760)
+    margin = TOKENS[document.layout].margin
+    pages = plan_collage(document.blocks[0], document.width - 2 * margin)
+    if document.logo is not None:
+        logo_bytes = (
+            len(document.logo.content.encode("utf-8"))
+            if type(document.logo.content) is str
+            else len(document.logo.content)
+        )
+        for page in pages:
+            page_source_bytes = sum(
+                len(tile.item.image.content.encode("utf-8"))
+                if type(tile.item.image.content) is str
+                else len(tile.item.image.content)
+                for tile in page.tiles
+                if type(tile.item.image) is Asset
+            )
+            if page_source_bytes + logo_bytes > 8 * 1024 * 1024:
+                _fail("byte_limit")
+    result = []
+    total_bytes = 0
+    for page in pages:
+        bitmap = render_document(
+            document,
+            bounds=collage_bounds,
+            font_provider=font_provider,
+            _collage_page=page,
+        )
+        total_bytes += len(bitmap.content)
+        if total_bytes > MAX_COLLAGE_TOTAL_PNG_BYTES:
+            _fail("byte_limit")
+        result.append(bitmap)
+    return tuple(result)

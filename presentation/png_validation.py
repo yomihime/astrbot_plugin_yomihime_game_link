@@ -43,11 +43,20 @@ class ValidatedPngMetadata:
     size: int
 
 
-def check_png_input(bitmap: RenderedBitmap, limits: PngValidationLimits) -> None:
+def check_png_input(
+    bitmap: RenderedBitmap,
+    limits: PngValidationLimits,
+    *,
+    collage_profile: bool = False,
+) -> None:
     """Cheap checks suitable before reserving memory or awaiting authority."""
-    if type(limits) is not PngValidationLimits:
+    if type(limits) is not PngValidationLimits or type(collage_profile) is not bool:
         raise PngValidationError()
-    hard = PngValidationLimits()
+    hard = (
+        PngValidationLimits(max_bytes=4_194_304)
+        if collage_profile
+        else PngValidationLimits()
+    )
     for item in fields(limits):
         value = getattr(limits, item.name)
         if type(value) is not int or not 1 <= value <= getattr(hard, item.name):
@@ -169,10 +178,13 @@ def _container(bitmap: RenderedBitmap, limits: PngValidationLimits) -> None:
 
 
 def validate_png(
-    bitmap: RenderedBitmap, *, limits: PngValidationLimits = PngValidationLimits()
+    bitmap: RenderedBitmap,
+    *,
+    limits: PngValidationLimits = PngValidationLimits(),
+    collage_profile: bool = False,
 ) -> ValidatedPngMetadata:
     """Validate actual PNG bytes, then verify and fully decode with closed IO."""
-    check_png_input(bitmap, limits)
+    check_png_input(bitmap, limits, collage_profile=collage_profile)
     _container(bitmap, limits)
     try:
         from PIL import Image

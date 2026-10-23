@@ -40,7 +40,7 @@ class PublicExportTests(unittest.TestCase):
         )
 
     def test_canonical_release_and_abi_are_independent(self):
-        self.assertEqual(sdk.__version__, "0.1.0a14")
+        self.assertEqual(sdk.__version__, "0.1.0a15")
         self.assertEqual(sdk.MODULE_ABI_VERSION, "2.0")
         self.assertIs(sdk.PrivacyFloor.OWNER, sdk.PrivacyFloor("owner"))
 

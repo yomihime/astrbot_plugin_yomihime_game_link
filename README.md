@@ -90,13 +90,13 @@ POSIX 入口保留交互终端和文件所有者检查；Windows 仅接受已资
 
 1. 打开[构建工作流](https://github.com/yomihime/astrbot_plugin_yomihime_game_link/actions/workflows/build.yml)，选择通过验证且构建成功的运行记录。
 2. 下载该记录中的 `release-artifacts-<run-id>` 工件，并解开下载得到的外层压缩包。
-3. 在解开的文件中找到 `astrbot_plugin_yomihime_game_link-v0.1.2.zip`，通过 AstrBot WebUI 的插件管理上传这个内层 `ZIP`。
+3. 在解开的文件中找到 `astrbot_plugin_yomihime_game_link-v0.1.3.zip`，通过 AstrBot WebUI 的插件管理上传这个内层 `ZIP`。
 
 不要把外层 Actions 工件 `ZIP`、独立的 SDK `.whl` 或 `SHA256SUMS` 上传为插件。项目仓库直装尚未包含 release 构建时从已验证 SDK wheel 注入的运行资源，不能作为开箱即用的安装方式。
 
 SDK 发行版本或模块 ABI 变化时，需要停机安装步骤，不能只依赖 WebUI 上传；条件和安全升级流程见[贡献指南](CONTRIBUTING.md#sdk-发行版本或-abi-变化)。SDK 版本/ABI 未变的普通插件更新仍按上方 WebUI 流程进行。
 
-当前 `metadata.yaml` 声明的版本是 `v0.1.2`，尚无对应 tag 或 GitHub Release。Actions 工件属于开发构建，不要把它当作正式发布。
+当前 `metadata.yaml` 声明的版本是 `v0.1.3`，尚无对应 tag 或 GitHub Release。Actions 工件属于开发构建，不要把它当作正式发布。
 
 
 
