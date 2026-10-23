@@ -194,7 +194,17 @@ class AioHttpTransport:
         ) as response:
             diagnostic("http_response", http_status=response.status)
             content_encoding = response.headers.get("Content-Encoding", "")
-            if content_encoding.strip().lower() not in {"", "identity"}:
+            # Redirect entities are never interpreted by SourceHttpService.
+            # Keep their bounded wire bytes opaque so an encoded intermediate
+            # entity cannot prevent the service from validating its next hop.
+            # Final response bodies still require identity encoding.
+            if response.status not in {
+                301,
+                302,
+                303,
+                307,
+                308,
+            } and content_encoding.strip().lower() not in {"", "identity"}:
                 raise SourceHttpError("invalid_response") from None
             if (
                 response.content_length is not None
