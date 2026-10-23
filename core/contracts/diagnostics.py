@@ -68,6 +68,10 @@ class _FrozenDiagnosticMapping(tuple, Mapping):
     def __len__(self):
         return tuple.__len__(self)
 
+    def __contains__(self, key):
+        # tuple storage contains pairs; the public Mapping contains keys.
+        return any(name == key for name, _ in tuple.__iter__(self))
+
     def items(self):
         return tuple.__getitem__(self, slice(None))
 

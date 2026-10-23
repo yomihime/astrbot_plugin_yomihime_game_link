@@ -6,6 +6,7 @@ import copy
 import unittest
 from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
 from unittest.mock import patch
 
@@ -39,6 +40,36 @@ class DiagnosticSchemaWalkTests(unittest.TestCase):
     @staticmethod
     def root(child):
         return {"type": "object", "properties": {"item": child}}
+
+    def test_mapping_membership_and_evicted_refreeze_preserve_enum(self):
+        with patch.object(schemas, "_FROZEN_SCHEMAS", {}):
+            first = schemas.freeze_diagnostic_schema(SCHEMA)
+            state = first["properties"]["state"]
+            self.assertIn("enum", state)
+            self.assertIn("enum", state.keys())
+            self.assertNotIn(("enum", state["enum"]), state)
+            self.assertEqual(tuple(state), ("type", "maxLength", "enum"))
+            for _ in range(schemas._FROZEN_SCHEMA_LIMIT):
+                schemas.freeze_diagnostic_schema({"type": "object", "properties": {}})
+            self.assertNotIn(id(first), schemas._FROZEN_SCHEMAS)
+            again = schemas.freeze_diagnostic_schema(first)
+            self.assertEqual(again, first)
+            self.assertEqual(again["properties"]["state"]["enum"], ("ok", "failed"))
+            with self.assertRaisesRegex(ValueError, "enum"):
+                schemas.diagnostic_payload(again, {"count": 1, "state": "unknown"})
+
+    def test_real_ff14_manifest_equals_same_bytes_after_schema_cache_churn(self):
+        from ygl_test_subject.extensions.disk_manifest import parse_manifest
+
+        raw = (
+            Path(__file__).resolve().parents[2] / "modules/ff14/yomihime.manifest.json"
+        ).read_bytes()
+        with patch.object(schemas, "_FROZEN_SCHEMAS", {}):
+            first = parse_manifest(raw)
+            for _ in range(schemas._FROZEN_SCHEMA_LIMIT):
+                schemas.freeze_diagnostic_schema({"type": "object", "properties": {}})
+            validate_contract(first)
+            self.assertEqual(parse_manifest(raw), first)
 
     def test_comparison_never_exposes_writable_schema_backing(self):
         class Mutator:
