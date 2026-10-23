@@ -613,6 +613,7 @@ class AstrBotRuntime:
         core = self._core
         if core is None or self._closing:
             return
+        self._refresh_external_public_web_bindings()
         for source in (self._admin_source, self._module_admin_source):
             if source is not None:
                 core.admin_authorization.unregister_source(source)
@@ -662,6 +663,37 @@ class AstrBotRuntime:
     def _external_page_bindings(self):
         host = getattr(self, "_extension_host", None)
         return host.page_manifest_bindings() if host is not None else {}
+
+    def _refresh_external_public_web_bindings(self):
+        """One synchronous, fail-closed publication from captured live owners."""
+        validator = self._web_validator
+        core = self._core
+        if validator is None or core is None:
+            return
+        try:
+            host = self._extension_host
+            bindings = {}
+            if host is not None:
+                manifests = host.page_manifest_bindings()
+                projection = self._static_page_projection or StaticPageProjection()
+                for endpoint, page in host.public_web_page_bindings().items():
+                    owner = page.target[0]
+                    package_id = owner.partition("/")[0]
+                    if (
+                        manifests.get(package_id) is not None
+                        and projection.permits(owner, manifests, page.manifest)
+                        and page.current() is True
+                    ):
+                        bindings[endpoint] = (page.target, page.lease, page.current)
+            deployment = frozenset(value[0] for value in bindings.values())
+            # Neither operation awaits or invokes owner callbacks. If either
+            # rejects the fully constructed snapshot, withdraw external access.
+            core.issuer._replace_external_public_web_capabilities(deployment)
+            validator.replace_external_bindings(bindings)
+        except BaseException:
+            core.issuer._replace_external_public_web_capabilities(frozenset())
+            validator.replace_external_bindings({})
+            raise
 
     def _external_page_permitted(self, owner, manifest=None):
         projection = getattr(self, "_static_page_projection", None)
@@ -1084,14 +1116,13 @@ class AstrBotRuntime:
         return validator.remaining(ticket)
 
     async def invoke_public_web(
-        self, request_state, endpoint: str, parameters: dict
+        self, request_state, endpoint: str | tuple[str, str, str], parameters: dict
     ) -> dict:
         validator, ticket, core, generation, facts = request_state
         self.public_web_remaining(request_state)
+        route = validator.route_for(ticket, endpoint)
         proof = validator.mint(ticket)
-        result = await core.invoke_public_web(
-            *validator._bindings[endpoint], parameters, proof=proof
-        )
+        result = await core.invoke_public_web(*route.target, parameters, proof=proof)
         # Core deliberately revokes proof after result publication. Keep the
         # independent Host request deadline/generation facts for this final hop.
         if validator is not self._web_validator or not self._web_current(
@@ -1100,7 +1131,9 @@ class AstrBotRuntime:
             raise WebPublicRejected("entry_unavailable")
         if facts[0] <= monotonic() or facts[1] <= time():
             raise WebPublicRejected("session_expired")
+        validator.require_route_current(endpoint, route)
         data = project_result(result)
+        validator.require_route_current(endpoint, route)
         if (
             not self._web_current(core, generation)
             or facts[0] <= monotonic()

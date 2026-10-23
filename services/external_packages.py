@@ -4,14 +4,27 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from pathlib import Path
 
+from yomihime_game_link_sdk.contexts import InvocationOrigin
 from yomihime_game_link_sdk.host import BRIDGE_VERSION, ExtensionHostError
 from yomihime_game_link_sdk.version import MODULE_ABI_VERSION, __version__
 
+from ..core.policy import supports_public_read_only
 from ..extensions.discovery import EXTENSION_ROOT_MAX_PACKAGES, discover_packages
 from ..extensions.loader import CandidateState, ExtensionCandidate
 from .extension_runtime import ExtensionCleanupPending
+
+
+@dataclass(frozen=True, slots=True)
+class _ExternalPublicWebPage:
+    target: tuple[str, str]
+    manifest: object
+    lease: object
+
+    def current(self):
+        return self.lease._complete and self.lease.active
 
 
 class _PackageLease:
@@ -109,6 +122,28 @@ class ExternalPackageHost:
             else None
             for package_id, fingerprint in self._known_sources.items()
         }
+
+    def public_web_page_bindings(self):
+        """Core composition only: captured declarations from exact live leases."""
+        bindings = {}
+        for lease in tuple(self._packages.values()):
+            if not lease._complete or not lease.active:
+                continue
+            manifest = lease._candidate.package.manifest
+            for module in manifest.modules:
+                owner = manifest.global_module_id(module.module_id)
+                capabilities = {c.capability_id: c for c in module.capabilities}
+                for page in module.pages:
+                    capability = capabilities.get(page.capability_id)
+                    if (
+                        supports_public_read_only(capability)
+                        and InvocationOrigin.WEB_PUBLIC in capability.effective_origins
+                    ):
+                        endpoint = (owner, page.route_id, page.capability_id)
+                        bindings[endpoint] = _ExternalPublicWebPage(
+                            (owner, page.capability_id), module, lease
+                        )
+        return bindings
 
     def _metadata(self, name, instance):
         getter = getattr(self._context, "get_registered_star", None)

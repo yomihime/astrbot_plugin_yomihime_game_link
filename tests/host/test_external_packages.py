@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import shutil
+import sys
 import unittest
 import uuid
 from pathlib import Path
@@ -14,8 +15,11 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from ygl_test_subject.adapters.astrbot.bundled import DEFAULT_BUNDLE_SELECTION
+from ygl_test_subject.adapters.astrbot.public_pages import PublicPages
 from ygl_test_subject.adapters.astrbot.runtime import PLUGIN_NAME, AstrBotRuntime
+from ygl_test_subject.adapters.astrbot.web_public import WebPublicRejected
 from ygl_test_subject.core.contracts.administration import AdminOperation
+from ygl_test_subject.extensions.static_page_projection import StaticPageProjection
 from ygl_test_subject.infrastructure.private_storage import resolve_private_storage
 from ygl_test_subject.infrastructure.windows.private_storage import (
     create_private_directory,
@@ -23,6 +27,7 @@ from ygl_test_subject.infrastructure.windows.private_storage import (
 )
 from ygl_test_subject.services.extension_runtime import ExtensionCleanupPending
 
+from tests.host.test_ff14_pages import _host_contracts, _request
 from yomihime_game_link_sdk.host import ExtensionHostError
 from yomihime_game_link_sdk.services import HealthStatus
 
@@ -133,6 +138,7 @@ class ExternalPackageTests(unittest.IsolatedAsyncioTestCase):
             font_manager_factory=_Font,
             http_transport_factory=_Transport,
             bundled_selection=None,
+            config={"web_public_origin": "https://ui.test"},
         )
         self.addAsyncCleanup(self.runtime.terminate)
         self.key_patch = patch(
@@ -164,6 +170,358 @@ class ExternalPackageTests(unittest.IsolatedAsyncioTestCase):
             plugin_instance=self.metadata.star_cls,
             package_root=str(self.package),
         )
+
+    def _public_page_fixture(self):
+        example = ROOT / "examples/modules/minimal"
+        self.manifest = json.loads((example / "yomihime.manifest.json").read_bytes())
+        self.manifest["package_id"] = "steam_dlc"
+        self._write_manifest()
+        shutil.copyfile(example / "module.py", self.package / "module.py")
+        shutil.copytree(example / "pages", self.package / "pages")
+        self.runtime._static_page_projection = StaticPageProjection(
+            ((self.package / "yomihime.manifest.json").read_bytes(),)
+        )
+        return ("steam_dlc/demo", "home", "status")
+
+    async def _public_call(
+        self, endpoint, *, parameters=None, origin="https://ui.test"
+    ):
+        web, _ = _host_contracts()
+        context = SimpleNamespace(register_web_api=lambda *_args: None)
+        pages = PublicPages(context, self.runtime)
+        pages.register()
+        self.addCleanup(pages.close)
+        request = _request(
+            web,
+            path=f"/api/plug/{PLUGIN_NAME}/invoke",
+            origin=origin,
+            body=dict(
+                zip(("owner", "page", "capability_id"), endpoint),
+                parameters={} if parameters is None else parameters,
+            ),
+        )
+        with (
+            patch.dict(sys.modules, {"astrbot.api.web": web}),
+            web.bind_request_context(request),
+        ):
+            return await next(
+                handler
+                for route, handler in pages._registrations
+                if route == f"/{PLUGIN_NAME}/invoke"
+            )()
+
+    async def test_external_public_page_real_http_without_bundled_deployment(self):
+        endpoint = self._public_page_fixture()
+        lease = await self._register()
+        self.assertTrue(lease.active)
+        response = await self._public_call(endpoint)
+        self.assertEqual(response.status_code, 200, response.body)
+        result = json.loads(response.body)["data"]
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["model_facts"], {"sample": "minimal", "ready": True})
+
+    async def test_external_public_page_has_explicit_core_deployment(self):
+        endpoint = self._public_page_fixture()
+        await self._register()
+        module = self.core.registry.snapshot().module(endpoint[0])
+        self.assertTrue(
+            self.core.issuer.allows_public_web(
+                endpoint[0], module.manifest.capabilities[0]
+            )
+        )
+
+    def _public_begin(self, endpoint):
+        web, _ = _host_contracts()
+        request = _request(web, path=f"/api/plug/{PLUGIN_NAME}/invoke")
+        return self.runtime.begin_public_web(request, endpoint, request.path)
+
+    async def test_external_public_page_selectors_projection_and_origin_fail_closed(
+        self,
+    ):
+        endpoint = self._public_page_fixture()
+        await self._register()
+        for target in (
+            (endpoint[0], "missing", endpoint[2]),
+            (endpoint[0], endpoint[1], "undeclared"),
+            ("foreign/demo", endpoint[1], endpoint[2]),
+        ):
+            response = await self._public_call(target)
+            self.assertEqual(response.status_code, 400)
+        self.assertEqual(
+            (await self._public_call(endpoint, origin="https://else.test")).status_code,
+            403,
+        )
+        bad_parameters = await self._public_call(endpoint, parameters={"extra": True})
+        self.assertEqual(json.loads(bad_parameters.body)["data"]["status"], "error")
+        state = self._public_begin(endpoint)
+        self.runtime._static_page_projection = StaticPageProjection()
+        self.runtime._refresh_external_public_web_bindings()
+        with self.assertRaises(WebPublicRejected):
+            self.runtime.public_web_remaining(state)
+        self.assertEqual((await self._public_call(endpoint)).status_code, 400)
+        module = self.core.registry.snapshot().module(endpoint[0])
+        self.assertFalse(
+            self.core.issuer.allows_public_web(
+                endpoint[0], module.manifest.capabilities[0]
+            )
+        )
+
+    async def test_external_public_capability_without_page_is_not_deployed(self):
+        endpoint = self._public_page_fixture()
+        self.manifest["modules"][0]["pages"][0].pop("capability_id")
+        self._write_manifest()
+        self.runtime._static_page_projection = StaticPageProjection(
+            ((self.package / "yomihime.manifest.json").read_bytes(),)
+        )
+        await self._register()
+        self.assertEqual((await self._public_call(endpoint)).status_code, 400)
+        self.assertFalse(self.host.public_web_page_bindings())
+
+    async def test_external_page_rejects_undeclared_private_write_and_command_only(
+        self,
+    ):
+        self._public_page_fixture()
+        original = json.dumps(self.manifest)
+        cases = (
+            {"capability_id": "missing"},
+            {"invocation_policy": "command_only", "invocation_origins": ["command"]},
+            {"privacy_floor": "private"},
+            {"privacy_floor": "owner"},
+            {"effect": "write"},
+        )
+        for changes in cases:
+            with self.subTest(changes=changes):
+                self.manifest = json.loads(original)
+                self.manifest["modules"][0]["capabilities"][0].update(changes)
+                self._write_manifest()
+                with self.assertRaisesRegex(
+                    ExtensionHostError, "package_manifest_invalid"
+                ):
+                    await self._register()
+                self.assertFalse(self.host._packages)
+                self.assertFalse(self.runtime._web_validator._bindings)
+
+    async def test_external_public_page_exact_lease_idempotency_replacement_and_restart(
+        self,
+    ):
+        endpoint = self._public_page_fixture()
+        first = await self._register()
+        state = self._public_begin(endpoint)
+        self.assertIs(await self._register(), first)
+        self.runtime.public_web_remaining(state)
+        self.metadata.star_cls = object()
+        second = await self._register()
+        self.assertIsNot(first, second)
+        with self.assertRaises(WebPublicRejected):
+            self.runtime.public_web_remaining(state)
+        self.assertEqual((await self._public_call(endpoint)).status_code, 200)
+        next_state = self._public_begin(endpoint)
+        await self.runtime.terminate()
+        await self.runtime.initialize()
+        self.host, self.core = self.runtime.extension_host, self.runtime.core_runtime
+        await self._register()
+        with self.assertRaises(WebPublicRejected):
+            self.runtime.public_web_remaining(next_state)
+        self.assertEqual((await self._public_call(endpoint)).status_code, 200)
+
+    async def test_external_public_withdraw_fences_before_async_cleanup(self):
+        endpoint = self._public_page_fixture()
+        lease = await self._register()
+        state = self._public_begin(endpoint)
+        entered, release = asyncio.Event(), asyncio.Event()
+        detach = self.core.extension_runtime.detach_host_package
+
+        async def delayed(*args, **kwargs):
+            entered.set()
+            await release.wait()
+            return await detach(*args, **kwargs)
+
+        with patch.object(self.core.extension_runtime, "detach_host_package", delayed):
+            task = asyncio.create_task(self.host.unregister_package(lease))
+            try:
+                await asyncio.wait_for(entered.wait(), 2)
+                self.assertFalse(lease.active)
+                with self.assertRaises(WebPublicRejected):
+                    self.runtime.public_web_remaining(state)
+                self.assertEqual((await self._public_call(endpoint)).status_code, 503)
+            finally:
+                release.set()
+                await task
+        self.assertEqual((await self._public_call(endpoint)).status_code, 400)
+
+    async def test_external_public_handler_revocation_and_cancellation_do_not_publish(
+        self,
+    ):
+        endpoint = self._public_page_fixture()
+        await self._register()
+        handler = self.core.lifecycle.handlers(endpoint[0]).capabilities[endpoint[2]]
+        invoke = handler.invoke
+        for cancel in (False, True):
+            with self.subTest(cancel=cancel):
+                self.metadata.activated = True
+                entered, release, finished = (
+                    asyncio.Event(),
+                    asyncio.Event(),
+                    asyncio.Event(),
+                )
+
+                async def delayed(view, parameters):
+                    entered.set()
+                    try:
+                        await release.wait()
+                        return await invoke(view, parameters)
+                    finally:
+                        finished.set()
+
+                with patch.object(handler, "invoke", delayed):
+                    task = asyncio.create_task(self._public_call(endpoint))
+                    try:
+                        await asyncio.wait_for(entered.wait(), 2)
+                        if cancel:
+                            task.cancel()
+                            with self.assertRaises(asyncio.CancelledError):
+                                await task
+                        else:
+                            self.metadata.activated = False
+                            release.set()
+                            self.assertEqual((await task).status_code, 503)
+                    finally:
+                        release.set()
+                        if not task.done():
+                            task.cancel()
+                        await asyncio.gather(task, return_exceptions=True)
+                        await asyncio.wait_for(finished.wait(), 2)
+                self.assertTrue(await self.core.gateway.drain_public_web(2))
+                self.assertFalse(self.core.gateway.public_web_pending)
+
+    async def test_external_public_final_host_fence_before_and_after_projection(self):
+        from ygl_test_subject.adapters.astrbot import runtime as runtime_module
+
+        endpoint = self._public_page_fixture()
+        await self._register()
+        invoke = self.core.invoke_public_web
+        project = runtime_module.project_result
+        for phase in ("returned", "projected"):
+            with self.subTest(phase=phase):
+                self.metadata.activated = True
+
+                async def returned(*args, **kwargs):
+                    result = await invoke(*args, **kwargs)
+                    self.metadata.activated = False
+                    return result
+
+                def projected(result):
+                    data = project(result)
+                    self.metadata.activated = False
+                    return data
+
+                target, attribute, replacement = (
+                    (self.core, "invoke_public_web", returned)
+                    if phase == "returned"
+                    else (runtime_module, "project_result", projected)
+                )
+                with patch.object(target, attribute, replacement):
+                    response = await self._public_call(endpoint)
+                self.assertEqual(response.status_code, 503)
+
+    async def test_external_public_page_preserves_bundled_web_deployment(self):
+        await self.runtime.terminate()
+        (self.root / "bundled-data").mkdir()
+        runtime = AstrBotRuntime(
+            self.context,
+            plugin_root=self._ff14_fixture(),
+            data_dir=self.root / "bundled-data",
+            font_manager_factory=_Font,
+            http_transport_factory=_Transport,
+            bundled_selection=DEFAULT_BUNDLE_SELECTION,
+            config={"web_public_origin": "https://ui.test"},
+        )
+        self.addAsyncCleanup(runtime.terminate)
+        await runtime.initialize()
+        self.runtime, self.core, self.host = (
+            runtime,
+            runtime.core_runtime,
+            runtime.extension_host,
+        )
+        bundled = dict(runtime._web_validator._bindings)
+        endpoint = self._public_page_fixture()
+        await self._register()
+        self.assertTrue(bundled)
+        self.assertTrue(bundled.items() <= runtime._web_validator._bindings.items())
+        self.assertEqual((await self._public_call(endpoint)).status_code, 200)
+        for owner, capability_id in runtime._assembly.public_capabilities:
+            manifest = self.core.registry.snapshot().module(owner).manifest
+            capability = next(
+                c for c in manifest.capabilities if c.capability_id == capability_id
+            )
+            self.assertTrue(self.core.issuer.allows_public_web(owner, capability))
+
+    async def test_external_public_registration_is_unpublished_until_complete(self):
+        endpoint = self._public_page_fixture()
+        restore = self.core.extension_runtime.restore_host_package
+
+        async def observed(candidate):
+            self.assertFalse(self.host.public_web_page_bindings())
+            self.assertEqual((await self._public_call(endpoint)).status_code, 400)
+            await restore(candidate)
+            self.assertFalse(self.host.public_web_page_bindings())
+            self.assertEqual((await self._public_call(endpoint)).status_code, 400)
+
+        with patch.object(
+            self.core.extension_runtime, "restore_host_package", observed
+        ):
+            await self._register()
+        self.assertEqual((await self._public_call(endpoint)).status_code, 200)
+
+    async def test_external_public_cleanup_failure_keeps_old_proof_unusable(self):
+        endpoint = self._public_page_fixture()
+        lease = await self._register()
+        state = self._public_begin(endpoint)
+
+        async def pending(*_args, **_kwargs):
+            raise ExtensionCleanupPending("synthetic pending cleanup")
+
+        with patch.object(self.core.extension_runtime, "detach_host_package", pending):
+            with self.assertRaises(ExtensionCleanupPending):
+                await self.host.unregister_package(lease)
+        self.assertFalse(lease.active)
+        with self.assertRaises(WebPublicRejected):
+            self.runtime.public_web_remaining(state)
+        self.assertEqual((await self._public_call(endpoint)).status_code, 503)
+        await self.host.unregister_package(lease)
+        await self._register()
+        with self.assertRaises(WebPublicRejected):
+            self.runtime.public_web_remaining(state)
+        self.assertEqual((await self._public_call(endpoint)).status_code, 200)
+
+    async def test_external_public_partial_publish_failure_withdraws_both_gates(self):
+        endpoint = self._public_page_fixture()
+        await self._register()
+        state = self._public_begin(endpoint)
+        validator = self.runtime._web_validator
+        replace = validator.replace_external_bindings
+        calls = []
+
+        def rejected_once(bindings):
+            calls.append(bindings)
+            if len(calls) == 1:
+                raise ValueError("synthetic rejected publication")
+            replace(bindings)
+
+        with patch.object(validator, "replace_external_bindings", rejected_once):
+            with self.assertRaises(ValueError):
+                self.runtime._refresh_external_public_web_bindings()
+        self.assertFalse(validator._bindings)
+        module = self.core.registry.snapshot().module(endpoint[0])
+        self.assertFalse(
+            self.core.issuer.allows_public_web(
+                endpoint[0], module.manifest.capabilities[0]
+            )
+        )
+        self.runtime._refresh_external_public_web_bindings()
+        with self.assertRaises(WebPublicRejected):
+            self.runtime.public_web_remaining(state)
+        self.assertEqual((await self._public_call(endpoint)).status_code, 200)
 
     async def test_four_modules_real_capture_idempotency_and_exact_old_lease(self):
         first = await self._register()

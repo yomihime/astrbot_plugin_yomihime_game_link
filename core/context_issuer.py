@@ -82,6 +82,7 @@ class ContextIssuer:
         self._clock = clock
         self._web_validator = public_web_validator
         self._web_deployment = deployment
+        self._external_web_deployment = frozenset()
         self._web_proofs: dict[str, tuple[object, PublicWebBinding]] = {}
         self._issued: dict[str, InvocationView] = {}
         self._messages: dict[str, _OwnedMessage] = {}
@@ -89,6 +90,22 @@ class ContextIssuer:
         self._children: dict[str, set[str]] = {}
         self._leases: dict[str, object] = {}
         self._release_observers: set[Callable[[InvocationView], None]] = set()
+
+    def _replace_external_public_web_capabilities(self, deployment) -> None:
+        """Trusted Host composition only; modules cannot obtain this issuer."""
+        if type(deployment) is not frozenset or any(
+            type(item) is not tuple
+            or len(item) != 2
+            or any(type(value) is not str or not value.strip() for value in item)
+            for item in deployment
+        ):
+            raise TypeError("external public web deployment must be exact pairs")
+        if deployment & self._web_deployment:
+            raise ValueError("external public web deployment overlaps bundled targets")
+        self._external_web_deployment = deployment
+
+    def _public_web_deployment(self):
+        return self._web_deployment | self._external_web_deployment
 
     def issue(
         self,
@@ -287,7 +304,10 @@ class ContextIssuer:
     ) -> InvocationView:
         """Consume an exact host proof, without fabricating any chat identity."""
         validator = self._web_validator
-        if validator is None or (module_id, capability_id) not in self._web_deployment:
+        if (
+            validator is None
+            or (module_id, capability_id) not in self._public_web_deployment()
+        ):
             raise InvalidInvocation("Public web capability is not deployed")
         binding = validator.consume(
             proof,
@@ -341,7 +361,7 @@ class ContextIssuer:
         return pair[1]
 
     def allows_public_web(self, module_id: str, capability: object) -> bool:
-        return public_web_allowed(module_id, capability, self._web_deployment)
+        return public_web_allowed(module_id, capability, self._public_web_deployment())
 
     def require(self, view: InvocationView) -> InvocationView:
         """Validate identity and the entire still-active parent chain."""
@@ -356,6 +376,12 @@ class ContextIssuer:
             if self._issued.get(current.invocation_id) is not current:
                 raise InvalidInvocation("Invocation is not active in this runtime")
             self._check_deadline(current)
+            if (
+                current.origin is InvocationOrigin.WEB_PUBLIC
+                and (current.module_id, current.capability_id)
+                not in self._public_web_deployment()
+            ):
+                raise InvalidInvocation("Public web capability is no longer deployed")
             if current.parent_id is None:
                 if current.origin is InvocationOrigin.WEB_PUBLIC:
                     pair = self._web_proofs.get(current.invocation_id)
@@ -415,7 +441,7 @@ class ContextIssuer:
         self.require(parent)
         if parent.origin is InvocationOrigin.WEB_PUBLIC and (
             capability_id is None
-            or (module_id, capability_id) not in self._web_deployment
+            or (module_id, capability_id) not in self._public_web_deployment()
         ):
             raise InvalidInvocation("Public web dependency is not deployed")
         grant_id = parent.grant_id

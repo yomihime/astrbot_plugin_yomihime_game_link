@@ -155,13 +155,21 @@ def validated_bearer(
 
 @dataclass(slots=True)
 class _RequestFacts:
-    endpoint: str
+    endpoint: str | tuple[str, str, str]
     generation: int
     key: str
     expiry: int
     deadline: float
+    route: _PublicWebRoute
     minted: bool = False
     binding: PublicWebBinding | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _PublicWebRoute:
+    target: tuple[str, str]
+    owner: object = None
+    current: object = None
 
 
 class HostPublicWebValidator:
@@ -179,6 +187,10 @@ class HostPublicWebValidator:
     ):
         self._generation = generation
         self._bindings = dict(bindings or {})
+        self._bundled_bindings = dict(self._bindings)
+        self._routes = {
+            key: _PublicWebRoute(value) for key, value in self._bindings.items()
+        }
         self._capability_timeouts = freeze_execution_timeouts(
             capability_timeouts, targets=set(self._bindings.values())
         )
@@ -188,6 +200,58 @@ class HostPublicWebValidator:
         self._core = None
         self._closed = False
         self._requests: dict[object, _RequestFacts] = {}
+
+    def replace_external_bindings(self, bindings) -> None:
+        """Publish only trusted Host-selected page declarations, never aliases."""
+        routes = {key: self._routes[key] for key in self._bundled_bindings}
+        bundled_targets = set(self._bundled_bindings.values())
+        for endpoint, (target, owner, current) in bindings.items():
+            if (
+                type(endpoint) is not tuple
+                or len(endpoint) != 3
+                or any(type(value) is not str or not value for value in endpoint)
+                or type(target) is not tuple
+                or any(type(value) is not str for value in target)
+                or target != (endpoint[0], endpoint[2])
+                or endpoint in self._bundled_bindings
+                or target in bundled_targets
+                or owner is None
+                or not callable(current)
+            ):
+                raise ValueError("external public web binding rejected")
+            old = self._routes.get(endpoint)
+            routes[endpoint] = (
+                old
+                if old is not None and old.owner is owner and old.target == target
+                else _PublicWebRoute(target, owner, current)
+            )
+        # Build everything first: rejected input must not partly publish routes.
+        targets = {key: route.target for key, route in routes.items()}
+        self._routes, self._bindings = routes, targets
+        for ticket, facts in tuple(self._requests.items()):
+            if routes.get(facts.endpoint) is not facts.route:
+                self.revoke(ticket)
+
+    def require_route_current(self, endpoint, route) -> None:
+        """Also usable at Host's final hop, after Core intentionally revokes proof."""
+        try:
+            current = (
+                not self._closed
+                and self._core is not None
+                and self._current(self._core, self._generation) is True
+                and self._routes.get(endpoint) is route
+                and (route.current is None or route.current() is True)
+            )
+        except Exception:
+            current = False
+        if not current:
+            raise WebPublicRejected("entry_unavailable")
+
+    def route_for(self, ticket, endpoint):
+        facts = self._require(ticket)
+        if facts.endpoint != endpoint:
+            raise WebPublicRejected("request_rejected")
+        return facts.route
 
     def attach(self, core: object) -> None:
         if self._core is not None or self._closed:
@@ -208,15 +272,23 @@ class HostPublicWebValidator:
             or self._wall_clock() >= facts.expiry
         ):
             raise WebPublicRejected("entry_unavailable")
+        self.require_route_current(facts.endpoint, facts.route)
         return facts
 
     def begin(
-        self, endpoint: str, token: str, expiry: int, *, started_at: float | None = None
+        self,
+        endpoint: str | tuple[str, str, str],
+        token: str,
+        expiry: int,
+        *,
+        started_at: float | None = None,
     ) -> object:
         if endpoint not in self._bindings or type(expiry) is not int:
             raise WebPublicRejected("request_rejected")
+        route = self._routes[endpoint]
+        self.require_route_current(endpoint, route)
         now = self._clock()
-        ttl = self._capability_timeouts.get(self._bindings[endpoint], PROOF_TTL)
+        ttl = self._capability_timeouts.get(route.target, PROOF_TTL)
         deadline = min(
             (now if started_at is None else started_at) + ttl,
             now + expiry - self._wall_clock(),
@@ -228,6 +300,7 @@ class HostPublicWebValidator:
             hmac.new(self._salt, token.encode("ascii"), hashlib.sha256).hexdigest(),
             expiry,
             deadline,
+            route,
         )
         try:
             self._require(ticket)
@@ -258,7 +331,7 @@ class HostPublicWebValidator:
         if (
             not facts.minted
             or facts.binding is not None
-            or (module_id, capability_id) != self._bindings[facts.endpoint]
+            or (module_id, capability_id) != facts.route.target
         ):
             raise WebPublicRejected("request_rejected")
         # The Core-supplied generation is distinct from the Host generation.
@@ -285,7 +358,7 @@ class HostPublicWebValidator:
 
     def revoke_owner(self, module_id):
         for ticket, facts in tuple(self._requests.items()):
-            if self._bindings.get(facts.endpoint, (None,))[0] == module_id:
+            if facts.route.target[0] == module_id:
                 self.revoke(ticket)
 
 
