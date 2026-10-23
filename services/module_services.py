@@ -862,7 +862,14 @@ class _BoundHttp:
             await self.__check()
         except (InvocationBindingError, AccessDenied):
             raise SourceHttpError("request_rejected") from None
-        response = await self.__http.fetch(request)
+
+        async def check_authority() -> None:
+            try:
+                await self.__check()
+            except (InvocationBindingError, AccessDenied):
+                raise SourceHttpError("request_rejected") from None
+
+        response = await self.__http.fetch(request, _check_authority=check_authority)
         try:
             await self.__check()
         except (InvocationBindingError, AccessDenied):

@@ -278,10 +278,18 @@ class ConfigField:
 
 @dataclass(frozen=True, slots=True)
 class SourceDeclaration:
-    """A bounded source target; credentials and paths are never supplied by modules."""
+    """A bounded source target with optional anonymous GET redirect policy."""
 
     source_id: str
     host: str
     credential_ref: str | None = None
     timeout_seconds: float = 10.0
     requests_per_minute: int = 60
+    max_redirects: int = 0
+    redirect_path_prefixes: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.redirect_path_prefixes is not None:
+            object.__setattr__(
+                self, "redirect_path_prefixes", tuple(self.redirect_path_prefixes)
+            )

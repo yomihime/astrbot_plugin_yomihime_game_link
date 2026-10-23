@@ -10,6 +10,7 @@ from datetime import datetime
 from enum import Enum
 from types import MappingProxyType
 from typing import Protocol
+from urllib.parse import urlsplit
 
 from yomihime_game_link_sdk.contexts import InvocationOrigin as InvocationOrigin
 from yomihime_game_link_sdk.contexts import InvocationView as InvocationView
@@ -343,6 +344,29 @@ def check_HttpResponse(self) -> None:
     if not isinstance(self.body, bytes):
         raise TypeError("HTTP response body must be bytes")
     object.__setattr__(self, "headers", _safe_http_headers(self.headers, response=True))
+    if self.final_url is not None:
+        if type(self.final_url) is not str or len(self.final_url) > 4096:
+            raise ValueError("HTTP final URL must be bounded text")
+        try:
+            target = urlsplit(self.final_url)
+            if (
+                target.scheme != "https"
+                or not target.hostname
+                or target.username is not None
+                or target.password is not None
+                or target.port not in (None, 443)
+                or "?" in self.final_url
+                or "#" in self.final_url
+            ):
+                raise ValueError
+            from .manifests import SourceDeclaration, check_SourceDeclaration
+
+            check_SourceDeclaration(SourceDeclaration("final_url", target.hostname))
+            check_HttpRequest(HttpRequest("final_url", target.path))
+        except Exception:
+            raise ValueError(
+                "HTTP final URL must be a safe HTTPS origin and path"
+            ) from None
 
 
 def check_ResourceReference(self) -> None:

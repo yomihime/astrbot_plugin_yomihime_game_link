@@ -158,6 +158,8 @@ def bind_source_credential_declarations(
                     policy.credential_ref,
                     declaration.timeout_seconds,
                     declaration.requests_per_minute,
+                    declaration.max_redirects,
+                    declaration.redirect_path_prefixes,
                 )
             )
         )

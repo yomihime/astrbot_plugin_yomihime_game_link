@@ -86,6 +86,7 @@ class HttpResponse:
     status_code: int
     headers: Mapping[str, str]
     body: bytes
+    final_url: str | None = None
 
     def __post_init__(self) -> None:
         if isinstance(self.headers, Mapping):

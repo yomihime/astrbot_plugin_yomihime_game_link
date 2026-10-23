@@ -20,7 +20,7 @@ from email.utils import parsedate_to_datetime
 from time import monotonic
 from types import MappingProxyType
 from typing import Protocol
-from urllib.parse import quote_plus, urlencode
+from urllib.parse import parse_qsl, quote_plus, urlencode, urljoin, urlsplit
 
 from yomihime_game_link_sdk.declarations import SourceDeclaration
 from yomihime_game_link_sdk.errors import SourceHttpError
@@ -66,7 +66,7 @@ class HttpTransport(Protocol):
 
     A transport receives a fully policy-checked ``TransportRequest`` and must
     return a public ``HttpResponse``.  It must not follow redirects itself;
-    the service rejects redirect responses before they can be treated as data.
+    the service applies the declaration's redirect policy one hop at a time.
     """
 
     async def request(self, request: "TransportRequest") -> HttpResponse: ...
@@ -490,7 +490,12 @@ class SourceHttpService(SourceHttp):
             await close()
 
     @public_boundary("service")
-    async def fetch(self, request: HttpRequest) -> HttpResponse:
+    async def fetch(
+        self,
+        request: HttpRequest,
+        *,
+        _check_authority: Callable[[], Awaitable[None]] | None = None,
+    ) -> HttpResponse:
         """Fetch one request after enforcing the declared source policy."""
 
         checked = self._validate_request(request)
@@ -515,13 +520,16 @@ class SourceHttpService(SourceHttp):
             global_acquired = True
             await self._wait_for_deadline(source.semaphore.acquire(), deadline)
             source_acquired = True
+            await self._check_authority(_check_authority, deadline)
             diagnostic("http_quota")
             await self._reserve_quota(source, deadline)
             lease = await self._credential_lease(source.declaration, checked, deadline)
+            await self._check_authority(_check_authority, deadline)
             result = await self._perform_resource_request(
                 source.declaration, checked, lease, deadline
             )
             response = self._validate_response(result)
+            await self._check_authority(_check_authority, deadline)
             diagnostic("http_response", http_status=response.status_code)
             self._ensure_remaining(deadline)
             if response.status_code == 401 and lease is not None:
@@ -531,6 +539,7 @@ class SourceHttpService(SourceHttp):
                     refreshed = await self._credential_lease(
                         source.declaration, checked, deadline
                     )
+                    await self._check_authority(_check_authority, deadline)
                     response = self._validate_response(
                         await self._perform_resource_request(
                             source.declaration, checked, refreshed, deadline
@@ -541,10 +550,23 @@ class SourceHttpService(SourceHttp):
                             source.declaration, refreshed, deadline
                         )
                     self._ensure_remaining(deadline)
-            if 300 <= response.status_code <= 399:
-                raise SourceHttpError(
-                    "redirect_disallowed", status_code=response.status_code
-                ) from None
+                    await self._check_authority(_check_authority, deadline)
+            visited = {(checked.path, checked.query)}
+            redirect_count = 0
+            while 300 <= response.status_code <= 399:
+                redirected = self._redirect_request(
+                    source.declaration, checked, response, redirect_count, visited
+                )
+                await self._check_authority(_check_authority, deadline)
+                await self._reserve_quota(source, deadline)
+                await self._check_authority(_check_authority, deadline)
+                response = await self._perform_resource_request(
+                    source.declaration, redirected, None, deadline
+                )
+                await self._check_authority(_check_authority, deadline)
+                checked = redirected
+                redirect_count += 1
+                visited.add((checked.path, checked.query))
             if 400 <= response.status_code <= 499:
                 raise SourceHttpError(
                     "upstream_error",
@@ -562,7 +584,16 @@ class SourceHttpService(SourceHttp):
                     else None,
                 ) from None
             diagnostic("http_end", code="ok", http_status=response.status_code)
-            return response
+            # The service owns this provenance. Never trust a transport's URL,
+            # and never expose a query that could contain upstream secrets.
+            return self._validate_response(
+                HttpResponse(
+                    response.status_code,
+                    response.headers,
+                    response.body,
+                    f"https://{source.declaration.host}{checked.path}",
+                )
+            )
         except asyncio.CancelledError:
             diagnostic("http_end", code="cancelled")
             raise
@@ -580,6 +611,93 @@ class SourceHttpService(SourceHttp):
                 source.semaphore.release()
             if global_acquired:
                 self._global_semaphore.release()
+
+    async def _check_authority(
+        self, check: Callable[[], Awaitable[None]] | None, deadline: float
+    ) -> None:
+        if check is not None:
+            await self._wait_for_deadline(check(), deadline)
+        self._ensure_remaining(deadline)
+
+    def _redirect_request(
+        self,
+        declaration: SourceDeclaration,
+        current: HttpRequest,
+        response: HttpResponse,
+        count: int,
+        visited: set[tuple[str, tuple[tuple[str, str], ...]]],
+    ) -> HttpRequest:
+        try:
+            if (
+                declaration.credential_ref is not None
+                or current.method != "GET"
+                or response.status_code not in {301, 302, 303, 307, 308}
+                or count >= declaration.max_redirects
+            ):
+                raise ValueError
+            locations = [
+                value
+                for key, value in response.headers.items()
+                if key.lower() == "location"
+            ]
+            if len(locations) != 1:
+                raise ValueError
+            location = locations[0]
+            if (
+                not location
+                or len(location) > 8192
+                or "#" in location
+                or "\\" in location
+                or location.startswith("//")
+                or any(
+                    char.isspace() or ord(char) < 32 or 127 <= ord(char) <= 159
+                    for char in location
+                )
+            ):
+                raise ValueError
+            raw = urlsplit(location)
+            # Check before urljoin normalizes away traversal segments.
+            if "%" in raw.path or any(
+                part in {".", ".."} for part in raw.path.split("/")
+            ):
+                raise ValueError
+            base = f"https://{declaration.host}{current.path}"
+            if current.query:
+                base += "?" + urlencode(current.query)
+            target = urlsplit(urljoin(base, location))
+            if (
+                target.scheme != "https"
+                or target.netloc not in {declaration.host, declaration.host + ":443"}
+                or target.username is not None
+                or target.password is not None
+                or target.port not in (None, 443)
+                or target.fragment
+            ):
+                raise ValueError
+            path = target.path or "/"
+            if not any(
+                path == prefix
+                or path.startswith(prefix if prefix.endswith("/") else prefix + "/")
+                for prefix in declaration.redirect_path_prefixes
+            ):
+                raise ValueError
+            redirected = self._validate_request(
+                HttpRequest(
+                    declaration.source_id,
+                    path,
+                    "GET",
+                    tuple(parse_qsl(target.query, keep_blank_values=True)),
+                    headers=current.headers,
+                )
+            )
+            self._validate_limits(redirected)
+            if (redirected.path, redirected.query) in visited:
+                raise ValueError
+            return redirected
+        except Exception:
+            raise SourceHttpError(
+                "redirect_disallowed", status_code=response.status_code
+            ) from None
 
     async def _credential_lease(
         self,
@@ -638,6 +756,8 @@ class SourceHttpService(SourceHttp):
         validate_contract(declaration)
         validate_contract(checked)
         headers = dict(checked.headers)
+        remaining = deadline - asyncio.get_running_loop().time()
+        self._ensure_remaining(deadline)
         proof = None
         if lease is not None:
             module_id = self._module_id
@@ -657,7 +777,7 @@ class SourceHttpService(SourceHttp):
                 body=checked.body,
                 headers=headers,
                 authorization=lease.authorization,
-                timeout_seconds=float(declaration.timeout_seconds),
+                timeout_seconds=remaining,
                 max_response_bytes=self._max_response_bytes,
             )
         transport_request = TransportRequest(
@@ -670,7 +790,7 @@ class SourceHttpService(SourceHttp):
             checked.body,
             headers,
             declaration.credential_ref,
-            float(declaration.timeout_seconds),
+            remaining,
             self._max_response_bytes,
             self._module_id,
             proof,
@@ -776,6 +896,7 @@ class SourceHttpService(SourceHttp):
                     response.status_code,
                     response.headers,
                     response.body,
+                    response.final_url,
                 )
             )
         except Exception:

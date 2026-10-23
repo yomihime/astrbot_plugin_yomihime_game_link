@@ -180,7 +180,14 @@ EXTENSION_DESCRIPTOR_FIELDS: Mapping[str, frozenset[str]] = MappingProxyType(
             }
         ),
         "source": frozenset(
-            {"source_id", "host", "timeout_seconds", "requests_per_minute"}
+            {
+                "source_id",
+                "host",
+                "timeout_seconds",
+                "requests_per_minute",
+                "max_redirects",
+                "redirect_path_prefixes",
+            }
         ),
         "collection": frozenset(
             {"name", "schema_version", "owner_kind", "indexes", "retention_category"}
@@ -867,6 +874,30 @@ def check_SourceDeclaration(self) -> None:
         or self.requests_per_minute < 1
     ):
         raise ValueError("source quota must be a positive integer")
+    if type(self.max_redirects) is not int or not 0 <= self.max_redirects <= 2:
+        raise ValueError("source redirect limit must be between zero and two")
+    if (
+        type(self.redirect_path_prefixes) is not tuple
+        or len(self.redirect_path_prefixes) > 16
+    ):
+        raise ValueError("source redirect prefixes must be a bounded tuple")
+    from .services import HttpRequest, check_HttpRequest
+
+    for prefix in self.redirect_path_prefixes:
+        if type(prefix) is not str or len(prefix) > 2048:
+            raise ValueError("source redirect prefixes must be paths")
+        candidate = HttpRequest(self.source_id, prefix)
+        check_HttpRequest(candidate)
+        if candidate.path != prefix:
+            raise ValueError("source redirect prefixes must be canonical paths")
+    if len(set(self.redirect_path_prefixes)) != len(self.redirect_path_prefixes):
+        raise ValueError("source redirect prefixes must be unique")
+    if self.max_redirects and (
+        self.credential_ref is not None or not self.redirect_path_prefixes
+    ):
+        raise ValueError(
+            "redirects require an anonymous source and explicit path prefixes"
+        )
 
 
 def check_DiagnosticDeclaration(self):

@@ -1,6 +1,6 @@
 # Game Link module SDK
 
-The independently installable distribution is `yomihime-game-link-sdk==0.1.0a13`. Import its public declarations with `import yomihime_game_link_sdk as ygl`. It requires Python 3.11 or newer and has no third-party runtime dependencies.
+The independently installable distribution is `yomihime-game-link-sdk==0.1.0a14`. Import its public declarations with `import yomihime_game_link_sdk as ygl`. It requires Python 3.11 or newer and has no third-party runtime dependencies.
 
 The SDK (including its packaged examples) is licensed under MIT; see `SDK-LICENSE`. The AstrBot plugin implementation remains AGPL-3.0 under `LICENSE`. Third-party notices retain their own terms. The a12 source contract adds the outer-plugin extension bridge without changing module ABI 2.0. Built wheel identity and installation evidence are recorded separately; editing these declarations does not prove a published or installed wheel.
 
@@ -45,8 +45,8 @@ read proof does not authorize root private output or account management.
 Install the reviewed wheel into your module development environment:
 
 ```powershell
-python -m pip install --no-deps ./yomihime_game_link_sdk-0.1.0a13-py3-none-any.whl
-python -I -c "import yomihime_game_link_sdk as ygl; assert ygl.__version__ == '0.1.0a13'; assert ygl.MODULE_ABI_VERSION == '2.0'"
+python -m pip install --no-deps ./yomihime_game_link_sdk-0.1.0a14-py3-none-any.whl
+python -I -c "import yomihime_game_link_sdk as ygl; assert ygl.__version__ == '0.1.0a14'; assert ygl.MODULE_ABI_VERSION == '2.0'"
 ```
 
 The plugin release contains the exact content-pinned SDK from that wheel. Its bootstrap rejects changed contents, foreign package origins, partial preload graphs, and any preloaded retired `yomihime_sdk` graph. The retired root `api` and `yomihime_sdk.api` modules have no compatibility redirects. Historical stored-data readers are separate from module import compatibility.
@@ -131,6 +131,28 @@ Record duplicate and CAS errors use the unique SDK `UniqueConstraintViolation` a
 Subscriptions use only `create_request(invocation, SubscriptionRequest)`, `revise_request`, `list_current` and `cancel(invocation, id, *, expected_revision)`. Creation omits ID/revision; Core supplies a new ID and revision 1. Revision includes both and must match current CAS. A `SubscriptionView` omits collector command parameters and cannot replace a request. Repeated identical creates can make distinct subscriptions sharing one collection job; no idempotency or automatic deduplication is promised. Revision/cancellation conflicts raise `RevisionConflict`; cancellation removes only the selected association, preserving other subscribers' jobs/data. A paused owner with fresh current proof may list/revise/cancel but cannot create. Command root, exact issuer, route, principal, module epoch and grant checks apply across awaits; old contexts/handles never regain authority on restore. An unconfigured delegate raises `ServiceUnavailable`. Collector input normalization and matching remain module business rules.
 
 `OwnerScope.authorized` is the sole spelling for an authorization-bound descriptive scope; the historical `private` helper is retired. The Core-only `CacheService` synonym is also retired, without adding a module-facing repository API. Host administration remains outside `ModuleServices` and the SDK. Its Core-private unload/rollback receipts acknowledge observed facts only. An unload can disable before a later failure, and cancellation or late authorization failure after an accepted SQLite transaction can leave the commit outcome unknown. Refresh a newly authorized snapshot to reconcile; do not infer rollback or automatically retry from a missing receipt. Configuration, credentials and business data remain retained across unload/restore.
+
+## Declared anonymous HTTP redirects
+
+`SourceDeclaration.max_redirects` defaults to `0` (all redirects rejected).
+An anonymous source may opt in with a limit of `1` or `2` and explicit
+`redirect_path_prefixes`, for example `("/profiles/", "/id/")`. Prefixes match
+whole path segments; `/id` does not authorize `/identity`. Only GET requests
+and status 301/302/303/307/308 can follow a redirect. Every target must use
+HTTPS, the exact declared host, and port 443. Userinfo, fragments, encoded
+paths, traversal, loops, excess hops and undeclared paths are rejected with
+`SourceHttpError("redirect_disallowed")`. Credentialed sources cannot opt in;
+Cookie and authorization headers remain forbidden to modules.
+
+Each hop uses the existing transport with automatic redirects disabled, the
+same total deadline/concurrency slots, a fresh source quota reservation, and
+the same request and response size limits. Bound invocation authority is
+rechecked before and after each network attempt. Cancellation does not replay
+requests. SourceHttp returns `HttpResponse.final_url` as the verified final
+HTTPS origin and path only, with query and fragment omitted. It is optional
+(`None`) for compatibility with existing three-argument response constructors.
+Consumers must still validate upstream identity and login-wall content; a
+successful HTTP response and final path do not establish business identity.
 
 ## Current root Tool message
 
