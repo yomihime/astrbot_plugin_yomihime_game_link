@@ -1123,6 +1123,7 @@ class OutputService:
             CommandCardRenderer,
             CommandPresentation,
         )
+        from ..presentation.layout_collage import LAYOUT_VERSION
         from ..presentation.layout_renderer import apply_theme_selection
         from .collage_cache import (
             RequiredCollageResourceUnavailable,
@@ -1190,7 +1191,7 @@ class OutputService:
             selected = apply_theme_selection(card, **theme)
             cache_key = "collage-v1-" + _fingerprint(
                 {
-                    "layout": "weighted-collage-v1",
+                    "layout": LAYOUT_VERSION,
                     "card": selected,
                     "resources": versions,
                 }

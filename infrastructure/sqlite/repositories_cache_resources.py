@@ -473,23 +473,39 @@ class SQLiteResourceRepository:
         return await self.database.executor.run_read(read)
 
     async def managed_candidates(
-        self, scope: OwnerScope, *, now: datetime, limit: int, expired_only: bool
+        self,
+        scope: OwnerScope,
+        *,
+        now: datetime,
+        limit: int,
+        expired_only: bool,
+        excluded_asset_ids: tuple[str, ...] = (),
     ) -> tuple[tuple[str, int], ...]:
         key = self.managed_scope_key(scope)
+        # Exclude current readers before LIMIT, so a leased LRU prefix cannot
+        # hide an eligible entry beyond the bounded returned candidate batch.
+        exclusion = (
+            " AND asset_id NOT IN (" + ",".join("?" for _ in excluded_asset_ids) + ")"
+            if excluded_asset_ids
+            else ""
+        )
 
         def read(unit):
             if expired_only:
                 rows = unit.execute(
                     "SELECT asset_id,size_bytes FROM managed_resource_entries "
                     "WHERE scope_key=? AND (evicting=1 OR expires_at<=?) "
-                    "ORDER BY evicting DESC,expires_at,asset_id LIMIT ?",
-                    (key, _iso(now), limit),
+                    + exclusion
+                    + " ORDER BY evicting DESC,expires_at,asset_id LIMIT ?",
+                    (key, _iso(now), *excluded_asset_ids, limit),
                 ).fetchall()
             else:
                 rows = unit.execute(
                     "SELECT asset_id,size_bytes FROM managed_resource_entries "
-                    "WHERE scope_key=? ORDER BY last_access,asset_id LIMIT ?",
-                    (key, limit),
+                    "WHERE scope_key=?"
+                    + exclusion
+                    + " ORDER BY last_access,asset_id LIMIT ?",
+                    (key, *excluded_asset_ids, limit),
                 ).fetchall()
             return tuple((str(row[0]), int(row[1])) for row in rows)
 

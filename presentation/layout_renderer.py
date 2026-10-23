@@ -799,7 +799,7 @@ class _Layout:
             if page is None or width != page.width:
                 _fail("invalid_input")
             heading = (
-                f"第 {page.index}/{page.count} 页（版面顺序） · "
+                f"第 {page.index}/{page.count} 页（排名顺序） · "
                 f"本页 {len(page.tiles)} 项 · 共 {page.total_items} 项"
             )
             y += self.text(heading, x, y, width, 16, path + "/page", "secondary") + 6

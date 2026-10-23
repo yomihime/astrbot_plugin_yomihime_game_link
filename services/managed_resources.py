@@ -149,8 +149,18 @@ class ManagedResourceCache:
 
     async def _room(self, scope, asset_id, size, *, check, authorization_deadline, now):
         # All tombstones and expired candidates are SQL-index selected, bounded.
+        scope_key = self.repository.managed_scope_key(scope)
+        excluded = {asset_id} | {
+            leased_asset
+            for (leased_scope, leased_asset) in self._readers
+            if leased_scope == scope_key
+        }
         expired = await self.repository.managed_candidates(
-            scope, now=now, limit=self.policy.cleanup_batch, expired_only=True
+            scope,
+            now=now,
+            limit=self.policy.cleanup_batch,
+            expired_only=True,
+            excluded_asset_ids=tuple(sorted(excluded)),
         )
         visited = set()
         for candidate, _ in expired:
@@ -171,6 +181,7 @@ class ManagedResourceCache:
             now=now,
             limit=max(0, self.policy.cleanup_batch - len(visited)),
             expired_only=False,
+            excluded_asset_ids=tuple(sorted(excluded | visited)),
         )
         for candidate, candidate_size in candidates:
             if candidate == asset_id or candidate in visited:

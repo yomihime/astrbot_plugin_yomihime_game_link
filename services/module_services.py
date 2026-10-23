@@ -29,6 +29,7 @@ from yomihime_game_link_sdk.declarations import (
 )
 from yomihime_game_link_sdk.errors import (
     AccessDenied,
+    CacheUnavailable,
     ParameterError,
     ServiceUnavailable,
 )
@@ -102,6 +103,7 @@ from .configuration.operations import ConfigurationCoordinator
 from .dependency_calls import DependencyInvoker
 from .diagnostics import BoundDiagnostics, DiagnosticPolicy, DiagnosticStore
 from .identity import IdentityResolverService, InvocationPrincipalResolver
+from .managed_resources import ResourceCapacityError
 from .module_storage import ModuleStorageRouter
 from .records import ModuleRecordsService, _collection_name
 from .resources import ResourceAccessService, _asset_id
@@ -852,6 +854,9 @@ class _BoundResources:
             result = await self.__resources.store(
                 media_type, content, visibility=visibility, ttl_seconds=ttl_seconds
             )
+        except ResourceCapacityError:
+            await self.__check()
+            raise CacheUnavailable() from None
         except (ValueError, TypeError):
             await self.__check()
             raise ParameterError("parameters are invalid") from None

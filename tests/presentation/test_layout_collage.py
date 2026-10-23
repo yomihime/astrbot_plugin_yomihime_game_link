@@ -2,6 +2,7 @@
 
 import io
 import math
+import random
 import unittest
 
 from PIL import Image as PillowImage
@@ -90,15 +91,15 @@ class CollageTests(unittest.TestCase):
                                 or b.box[3] <= a.box[1]
                             )
 
-    def test_noncontiguous_page_ranks_are_labeled_as_actual_ranges(self):
+    def test_rank_pages_are_contiguous_and_labeled_in_order(self):
         card = document(200, weights=[1 + i % 11 for i in range(200)])
         pages = plan_collage(card.blocks[0], 928)
-        self.assertTrue(any(len(page.rank_ranges) > 1 for page in pages))
+        self.assertGreater(len(pages), 1)
+        first = 1
         for page in pages:
-            expected = "、 ".join(
-                str(start) if start == end else f"{start}–{end}"
-                for start, end in page.rank_ranges
-            )
+            last = first + len(page.tiles) - 1
+            self.assertEqual(page.rank_ranges, ((first, last),))
+            expected = str(first) if first == last else f"{first}–{last}"
             layout, _ = layout_renderer._prepare(
                 card, BitmapBounds(max_bytes=4 * 1024 * 1024), None, page
             )
@@ -110,12 +111,59 @@ class CollageTests(unittest.TestCase):
                 self.assertIn(f"本页全局排名：{expected}", text)
                 self.assertTrue(
                     any(
-                        f"第 {page.index}/{page.count} 页（版面顺序）" in line
+                        f"第 {page.index}/{page.count} 页（排名顺序）" in line
                         for line in text
                     )
                 )
             finally:
                 layout.fonts.clear()
+            first = last + 1
+        self.assertEqual(first, 201)
+
+    def test_extreme_and_near_equal_weights_keep_rank_area_order(self):
+        cases = (
+            [1e300, 1e-300],
+            [1e300] + [1e-300] * 7,
+            [1 + i * 1e-6 for i in range(200)],
+            [math.sqrt(1 + (200 - i) ** 3) for i in range(200)],
+        )
+        for weights in cases:
+            with self.subTest(count=len(weights), peak=max(weights)):
+                node = document(len(weights), weights=weights).blocks[0]
+                pages = plan_collage(node, 928)
+                ranks = [tile.rank for page in pages for tile in page.tiles]
+                areas = [tile.area for page in pages for tile in page.tiles]
+                self.assertEqual(ranks, list(range(1, len(weights) + 1)))
+                self.assertTrue(all(a >= b for a, b in zip(areas, areas[1:])))
+                self.assertLessEqual(len(pages), 8)
+        extreme = plan_collage(document(2, weights=[1e300, 1e-300]).blocks[0], 928)
+        self.assertGreater(extreme[0].tiles[0].area, extreme[0].tiles[1].area)
+
+    def test_variable_width_aspect_and_extreme_weights_preserve_geometry(self):
+        rng = random.Random(20261023)
+        for _ in range(25):
+            count = rng.randint(1, 200)
+            width = rng.randint(288, 1936)
+            aspect = rng.uniform(0.5, 2)
+            weights = [10 ** rng.uniform(-300, 300) for _ in range(count)]
+            node = document(count, weights=weights, preferred_aspect=aspect).blocks[0]
+            pages = plan_collage(node, width)
+            tiles = [tile for page in pages for tile in page.tiles]
+            self.assertEqual([tile.rank for tile in tiles], list(range(1, count + 1)))
+            self.assertTrue(all(a.area >= b.area for a, b in zip(tiles, tiles[1:])))
+            self.assertLessEqual(len(pages), 8)
+            for page in pages:
+                self.assertEqual(
+                    sum(tile.area for tile in page.tiles), width * page.height
+                )
+                self.assertEqual(
+                    page.rank_ranges, ((page.tiles[0].rank, page.tiles[-1].rank),)
+                )
+                for tile in page.tiles:
+                    x0, y0, x1, y1 = tile.box
+                    ratio = (x1 - x0) / (y1 - y0) / aspect
+                    self.assertGreaterEqual(ratio + 1e-9, 2 / 3)
+                    self.assertLessEqual(ratio, 1.5 + 1e-9)
 
     def test_reordered_inputs_have_same_tiles(self):
         node = document(60, weights=[i % 7 + 1 for i in range(60)]).blocks[0]

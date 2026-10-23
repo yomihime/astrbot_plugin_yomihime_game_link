@@ -10,6 +10,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from PIL import Image
 from ygl_test_subject.adapters.astrbot.message_port import AstrBotMessagePort
@@ -349,6 +350,25 @@ class PrivateCollageOutputTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(self.event.calls), 1)
         finally:
             await granted.stop()
+
+    async def test_layout_algorithm_change_invalidates_finished_pages(self):
+        self.scope = _CachingScope()
+        first = await self.fixture.output.route(self.fixture.view, self.result)
+        self.assertIs(first.status, OutputStatus.SENT, first)
+        view = self.fixture.new_view()
+        await self.fixture.owner.capture(view, self.fixture.issuer.lease_for(view))
+        self.fixture.view = view
+        self.event = _Event()
+        self.ingress.evidence.event = self.event
+        with patch(
+            "ygl_test_subject.presentation.layout_collage.LAYOUT_VERSION",
+            "synthetic-next-layout",
+        ):
+            second = await self.fixture.output.route(view, self.result)
+        self.assertIs(second.status, OutputStatus.SENT, second)
+        self.assertEqual(self.render_calls, 2)
+        self.assertEqual(self.scope.stores, 4)
+        self.assertEqual(len(self.event.calls), 1)
 
     async def test_damaged_finished_page_is_rendered_again(self):
         self.scope = _CachingScope()

@@ -7,6 +7,7 @@ import struct
 import tempfile
 import unittest
 import zlib
+from contextlib import AsyncExitStack
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
@@ -285,6 +286,37 @@ class ManagedResourceConsumerTests(unittest.IsolatedAsyncioTestCase):
         stats = await bound.resources.stats(visibility=CacheVisibility.PUBLIC)
         self.assertEqual((stats.items, stats.evictions), (2, 1))
         self.assertLessEqual(stats.bytes, stats.max_bytes)
+
+    async def test_capacity_excludes_leased_prefix_before_selecting_candidates(self):
+        _, alice = await self.bound()
+        _, bob = await self.bound("bob")
+        repo = self.runtime.repositories.resources
+        manager = repo.managed_cache
+        manager.policy = ResourceCachePolicy(
+            max_file_bytes=128, max_bytes=128 * 33, max_items=33
+        )
+        bob_ref = await bob.resources.store("image/png", png(90))
+        refs = [
+            await alice.resources.store("image/png", png(color)) for color in range(33)
+        ]
+        async with AsyncExitStack() as readers:
+            for ref in refs[:32]:
+                await readers.enter_async_context(
+                    manager.lease(ref.asset_id, ref.scope)
+                )
+            admitted = await alice.resources.store("image/png", png(33))
+            for ref in refs[:32]:
+                self.assertTrue(
+                    repo.file_store._final(ref.asset_id, ref.scope).exists()
+                )
+        self.assertEqual(await alice.resources.read(admitted.asset_id), png(33))
+        self.assertIsNone(await alice.resources.metadata(refs[32].asset_id))
+        self.assertFalse(
+            repo.file_store._final(refs[32].asset_id, refs[32].scope).exists()
+        )
+        self.assertEqual(await bob.resources.read(bob_ref.asset_id), png(90))
+        stats = await alice.resources.stats()
+        self.assertEqual((stats.items, stats.evictions), (33, 1))
 
     async def test_expired_cleanup_and_private_public_boundary(self):
         _, public = await self.bound()
