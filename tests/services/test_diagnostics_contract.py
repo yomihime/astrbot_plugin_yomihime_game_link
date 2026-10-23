@@ -40,6 +40,58 @@ class DiagnosticSchemaWalkTests(unittest.TestCase):
     def root(child):
         return {"type": "object", "properties": {"item": child}}
 
+    def test_comparison_never_exposes_writable_schema_backing(self):
+        class Mutator:
+            def __eq__(self, other):
+                if type(other) is dict:
+                    other["token"] = {"type": "string", "maxLength": 8}
+                return False
+
+        class MappingMutator(dict):
+            def __eq__(self, other):
+                if type(other) is dict:
+                    other["token"] = {"type": "string", "maxLength": 8}
+                return False
+
+        declaration = validate_contract(DiagnosticDeclaration("SafeEvent", SCHEMA))
+        frozen = declaration.payload_schema
+        for layer in (frozen, frozen["properties"], frozen["properties"]["count"]):
+            for attacker in (Mutator(), MappingMutator()):
+                self.assertFalse(layer == attacker)
+                self.assertNotIn("token", layer)
+            with self.assertRaises((AttributeError, TypeError)):
+                object.__setattr__(layer, "backing", {"token": True})
+            self.assertIs(type(layer.items()), tuple)
+        self.assertIs(validate_contract(declaration), declaration)
+        self.assertIs(declaration.payload_schema, frozen)
+
+    def test_same_class_forgery_and_foreign_wrappers_still_fully_validate(self):
+        frozen = schemas.freeze_diagnostic_schema(SCHEMA)
+        cls = type(frozen)
+        forged = tuple.__new__(
+            cls,
+            tuple(
+                {
+                    "type": ("object",),
+                    "properties": {"token": {"type": "string", "maxLength": 8}},
+                }.items()
+            ),
+        )
+        self.assertNotIn(id(forged), schemas._FROZEN_SCHEMAS)
+        with self.assertRaisesRegex(ValueError, "sensitive"):
+            schemas.freeze_diagnostic_schema(forged)
+        with self.assertRaisesRegex(ValueError, "sensitive"):
+            schemas.freeze_diagnostic_schema(MappingProxyType(dict(forged)))
+        backing = {"item": {"type": "boolean"}}
+        benign = tuple.__new__(cls, (("type", ("object",)), ("properties", backing)))
+        detached = schemas.freeze_diagnostic_schema(benign)
+        self.assertIsNot(benign, detached)
+        self.assertNotIn(id(benign), schemas._FROZEN_SCHEMAS)
+        backing["token"] = {"type": "string", "maxLength": 8}
+        self.assertNotIn("token", detached["properties"])
+        with self.assertRaisesRegex(ValueError, "sensitive"):
+            schemas.freeze_diagnostic_schema(benign)
+
     def test_only_self_created_deep_immutable_roots_are_reused(self):
         with patch.object(schemas, "_FROZEN_SCHEMAS", {}):
             with self.assertRaises(ValueError):
@@ -115,7 +167,10 @@ class DiagnosticSchemaWalkTests(unittest.TestCase):
             self.assertTrue(all(value is trusted for value in results))
             self.assertTrue(all(value is not trusted for value in fresh))
             self.assertTrue(
-                all(key == id(value) for key, value in schemas._FROZEN_SCHEMAS.items())
+                all(
+                    key == id(value[0])
+                    for key, value in schemas._FROZEN_SCHEMAS.items()
+                )
             )
             self.assertLessEqual(
                 len(schemas._FROZEN_SCHEMAS), schemas._FROZEN_SCHEMA_LIMIT

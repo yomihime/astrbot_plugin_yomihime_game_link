@@ -11,6 +11,8 @@ from dataclasses import fields, is_dataclass
 from importlib import import_module
 from types import MappingProxyType
 
+from .diagnostics import _proven_diagnostic_schema_depth
+
 _MODULES = (
     "contexts",
     "display",
@@ -86,6 +88,11 @@ def validate_contract(value):
             or kind is _NONE_TYPE
             or kind is bytes
         ):
+            return
+        proven_depth = _proven_diagnostic_schema_depth(item)
+        if proven_depth is not None:
+            if depth + proven_depth > 64:
+                raise ValueError("contract nesting limit exceeded")
             return
         if kind in types:
             token = id(item)

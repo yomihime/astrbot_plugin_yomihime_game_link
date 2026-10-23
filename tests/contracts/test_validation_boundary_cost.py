@@ -12,12 +12,88 @@ from types import MappingProxyType, SimpleNamespace
 from unittest.mock import patch
 
 from ygl_test_subject.core.contracts import validation_boundary as boundary
+from ygl_test_subject.core.contracts.diagnostics import freeze_diagnostic_schema
 from ygl_test_subject.extensions.disk_manifest import parse_manifest
 
 from yomihime_game_link_sdk import TextBlock
 
 
 class ValidationBoundaryCostTests(unittest.TestCase):
+    def test_only_identity_proven_schema_roots_skip_pure_json_visits(self):
+        frozen = freeze_diagnostic_schema(
+            {
+                "type": "object",
+                "properties": {f"field{i}": {"type": "boolean"} for i in range(128)},
+            }
+        )
+        source = boundary.validate_contract.__code__.co_filename
+
+        def visits(value):
+            count = 0
+
+            def profile(frame, event, function):
+                nonlocal count
+                if (
+                    event == "call"
+                    and frame.f_code.co_filename == source
+                    and frame.f_code.co_name == "visit"
+                ):
+                    count += 1
+
+            previous = sys.getprofile()
+            try:
+                sys.setprofile(profile)
+                boundary.validate_contract(value)
+            finally:
+                sys.setprofile(previous)
+            return count
+
+        self.assertEqual(visits(frozen), 1)
+        self.assertGreater(visits(MappingProxyType(dict(frozen))), 128)
+        with self.assertRaisesRegex(TypeError, "subclasses"):
+
+            class Forged(TextBlock):
+                pass
+
+            forged = tuple.__new__(type(frozen), (("nested", object.__new__(Forged)),))
+            boundary.validate_contract(forged)
+
+    def test_proven_schema_retains_original_composed_json_depth_limit(self):
+        frozen = freeze_diagnostic_schema(
+            {"type": "object", "properties": {"flag": {"type": "boolean"}}}
+        )
+        value = frozen
+        for _ in range(60):
+            value = [value]
+        self.assertIs(boundary.validate_contract(value), value)
+        with self.assertRaisesRegex(ValueError, "nesting limit"):
+            boundary.validate_contract([value])
+
+    def test_proven_shared_subtree_keeps_deeper_branch_height(self):
+        frozen = freeze_diagnostic_schema(
+            {
+                "type": "object",
+                "$defs": {"flag": {"type": "boolean"}},
+                "properties": {
+                    "shallow": {"$ref": "#/$defs/flag"},
+                    "deep": {
+                        "type": "array",
+                        "maxItems": 1,
+                        "items": {"$ref": "#/$defs/flag"},
+                    },
+                },
+            }
+        )
+        self.assertIs(
+            frozen["properties"]["shallow"], frozen["properties"]["deep"]["items"]
+        )
+        value = frozen
+        for _ in range(59):
+            value = [value]
+        self.assertIs(boundary.validate_contract(value), value)
+        with self.assertRaisesRegex(ValueError, "nesting limit"):
+            boundary.validate_contract([value])
+
     def test_catalog_requires_only_nominal_dataclasses(self):
         _, catalog = boundary._catalog()
         self.assertGreater(len(catalog), 100)
