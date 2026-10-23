@@ -21,6 +21,7 @@ from ..presentation.png_validation import (
     validate_png,
 )
 from .managed_resources import ResourceCapacityError
+from .module_services import _BoundResources
 
 _PAGE_LIMIT = 4_194_304
 _TOTAL_LIMIT = 16_777_216
@@ -52,10 +53,17 @@ async def resolve_collage_resources(card, scope, current):
         key = (source.visibility, source.asset_id)
         if key not in resolved:
             try:
-                metadata = await scope.resources.metadata(
-                    source.asset_id, visibility=source.visibility
-                )
-                await current()
+                resources = scope.resources
+                if type(resources) is _BoundResources:
+                    metadata, content = await resources._read_collage_reference(
+                        source.asset_id, source.visibility
+                    )
+                    await current()
+                else:
+                    metadata = await resources.metadata(
+                        source.asset_id, visibility=source.visibility
+                    )
+                    await current()
                 if metadata is None:
                     raise FileNotFoundError("resource is unavailable")
                 media = metadata.media_type
@@ -63,10 +71,11 @@ async def resolve_collage_resources(card, scope, current):
                     raise ValueError("unsupported collage resource")
                 if not 0 < metadata.size_bytes <= 1_048_576:
                     raise ValueError("collage source budget")
-                content = await scope.resources.read(
-                    source.asset_id, visibility=source.visibility
-                )
-                await current()
+                if type(resources) is not _BoundResources:
+                    content = await resources.read(
+                        source.asset_id, visibility=source.visibility
+                    )
+                    await current()
                 if len(content) != metadata.size_bytes:
                     raise ValueError("collage resource changed")
             except (FileNotFoundError, ValueError):

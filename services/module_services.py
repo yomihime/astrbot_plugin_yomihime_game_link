@@ -891,6 +891,42 @@ class _BoundResources:
         return result
 
     @public_boundary("resource")
+    async def _read_collage_reference(
+        self, asset_id: str, visibility: CacheVisibility
+    ) -> tuple[ResourceMetadata, bytes | None]:
+        """Core-only snapshot with one outer authority check at each end.
+
+        The underlying services still check issuer/admission/grant/scope at
+        every awaited storage boundary. This facade additionally binds OWNER
+        principal/route authority to the complete metadata-and-bytes operation.
+        """
+        await self.__check()
+        parameters(_asset_id, asset_id)
+        parameters(validate_contract, visibility)
+        try:
+            metadata = await self.__resources.metadata(asset_id, visibility=visibility)
+            if metadata is None:
+                raise FileNotFoundError("resource is unavailable")
+            _canonical_input(metadata, ResourceMetadata)
+            if metadata.asset_id != asset_id:
+                raise ValueError("resource response is invalid")
+            # Preserve the public resolver's pre-read source budget. Invalid
+            # metadata is returned without bytes for its existing optional/
+            # required fallback, rather than masking ValueError at this facade.
+            content = None
+            if metadata.media_type in ("image/png", "image/jpeg") and (
+                0 < metadata.size_bytes <= 1_048_576
+            ):
+                content = await self.__resources.read(asset_id, visibility=visibility)
+                if type(content) is not bytes:
+                    raise ValueError("resource response is invalid")
+        except Exception:
+            await self.__check()
+            raise
+        await self.__check()
+        return metadata, content
+
+    @public_boundary("resource")
     async def stats(
         self, *, visibility: CacheVisibility | None = None
     ) -> ResourceCacheStats:

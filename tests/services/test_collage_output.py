@@ -174,6 +174,38 @@ class _CancelBeforeRunScheduler(LifecycleApprovedSendScheduler):
 
 
 class CollageResourceResolutionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_custom_scope_cannot_select_core_private_snapshot_by_method_name(
+        self,
+    ):
+        class Custom(_ResourceScope):
+            async def _read_collage_reference(self, *_args):
+                raise AssertionError("custom resource is not a Core facade")
+
+        scope = Custom(_png("#123456").content)
+        card = Document(
+            "Custom scope",
+            (
+                WeightedCollage(
+                    (
+                        CollageItem(
+                            "one",
+                            1,
+                            ResourceImage(
+                                "cover", CacheVisibility.PUBLIC, required=True
+                            ),
+                        ),
+                    )
+                ),
+            ),
+        )
+
+        async def current():
+            return None
+
+        resolved, _ = await resolve_collage_resources(card, scope, current)
+        self.assertIs(type(resolved.blocks[0].items[0].image), Asset)
+        self.assertEqual([entry[0] for entry in scope.reads], ["metadata", "read"])
+
     async def test_repeated_public_refs_read_once_per_invocation(self):
         content = _png("#123456").content
         scope = _ResourceScope(content)
