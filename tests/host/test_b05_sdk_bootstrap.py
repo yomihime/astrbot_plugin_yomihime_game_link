@@ -256,7 +256,7 @@ class SDKBootstrapTests(unittest.TestCase):
             )
         )
         package = validate_wheel(self.wheel)
-        self.assertEqual(len(manifest), 19)
+        self.assertEqual(len(manifest), 20)
         self.assertEqual(
             set(package), {"yomihime_game_link_sdk/" + name for name in manifest}
         )

@@ -785,6 +785,7 @@ class VersionDomainTests(unittest.IsolatedAsyncioTestCase):
                 "display.py",
                 "errors.py",
                 "host.py",
+                "jobs.py",
                 "py.typed",
                 "results.py",
                 "services.py",
@@ -798,7 +799,7 @@ class VersionDomainTests(unittest.IsolatedAsyncioTestCase):
             for example in ("empty_module", "offline_sample")
             for name in ("README.md", "manifest.json", "module.py")
         ]
-        self.assertEqual(len(set(paths)), 23)
+        self.assertEqual(len(set(paths)), 24)
         freeze = {
             "files": [
                 {
@@ -957,7 +958,7 @@ sys.exit(not r.wasSuccessful())
 
         self.assertEqual(
             hashlib.sha256(wheel.read_bytes()).hexdigest(),
-            "562a6cd01dc47464a3c89b1406cf3931b5c67523acdcb2f3f2e9e8c1ac5b09e0",
+            "daa4d3d0f109d52af75c7f7e87b5ce8e8bcc2100a7131b87181121e097b10392",
         )
         SDKBootstrapTests.setUpClass()
         try:

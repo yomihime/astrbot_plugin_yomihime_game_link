@@ -958,6 +958,7 @@ class CoreRuntime:
         self._closed = False
         self._cleanup_pending = False
         self._pump_task: asyncio.Task[None] | None = None
+        self._jobs_cleanup_task: asyncio.Task[bool] | None = None
         self._host_flights: set[asyncio.Task[object]] = set()
         self._pump_failures: tuple[CoreRuntimeFailure, ...] = ()
         self._startup_report: CoreStartupReport | None = None
@@ -2129,12 +2130,32 @@ class CoreRuntime:
         if remaining <= 0:
             self._cleanup_pending = True
             raise CoreRuntimeCleanupPending("durable_jobs")
+        cleanup = self._jobs_cleanup_task
+        if cleanup is None:
+            cleanup = asyncio.create_task(self.jobs.close(), name="ygl:jobs-cleanup")
+            self._jobs_cleanup_task = cleanup
+
+            def completed(work):
+                if not work.cancelled():
+                    work.exception()
+
+            cleanup.add_done_callback(completed)
         try:
-            jobs_closed = await asyncio.wait_for(self.jobs.close(), timeout=remaining)
-        except TimeoutError as exc:
+            _done, pending = await asyncio.wait({cleanup}, timeout=remaining)
+        except asyncio.CancelledError:
+            self._cleanup_pending = True
+            raise
+        if pending:
+            self._cleanup_pending = True
+            raise CoreRuntimeCleanupPending("durable_jobs")
+        try:
+            jobs_closed = cleanup.result()
+        except (Exception, asyncio.CancelledError) as exc:
+            self._jobs_cleanup_task = None
             self._cleanup_pending = True
             raise CoreRuntimeCleanupPending("durable_jobs") from exc
         if not jobs_closed:
+            self._jobs_cleanup_task = None
             self._cleanup_pending = True
             raise CoreRuntimeCleanupPending("durable_jobs")
 

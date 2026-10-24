@@ -2420,6 +2420,121 @@ class CoreRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(runtime.jobs._busy_jobs())
         self.assertEqual(runtime._command_message_port.calls, [])
 
+    async def test_close_deadline_keeps_owned_jobs_cleanup_while_real_SQL_is_locked(
+        self,
+    ):
+        def awaiting(task):
+            cursor, names = task.get_coro(), []
+            while cursor is not None:
+                code = getattr(cursor, "cr_code", None)
+                if code is not None:
+                    names.append(code.co_name)
+                cursor = getattr(cursor, "cr_await", None)
+            return names
+
+        async def until(predicate):
+            async with asyncio.timeout(1):
+                while not predicate():
+                    await asyncio.sleep(0.001)
+
+        runtime = self._runtime()
+        await runtime.start()
+        locker, observations = None, []
+        try:
+            await until(
+                lambda: "sleep" in awaiting(runtime._pump_task)
+                and "wait" in awaiting(runtime.jobs._driver)
+                and runtime.database.executor._outstanding == 0
+            )
+            locker = runtime.database.connect()
+            locker.execute("BEGIN IMMEDIATE")
+            runtime.jobs.notify_changed()
+            await until(
+                lambda: "expire" in awaiting(runtime.jobs._driver)
+                and runtime.database.executor._outstanding > 0
+            )
+            cleanup = None
+            for _attempt in range(2):
+                observation = asyncio.create_task(runtime.close(timeout=0.02))
+                observations.append(observation)
+                done, _pending = await asyncio.wait({observation}, timeout=0.15)
+                self.assertIn(
+                    observation,
+                    done,
+                    "Core deadline must return pending before external SQL lock is released",
+                )
+                with self.assertRaises(CoreRuntimeCleanupPending) as caught:
+                    observation.result()
+                self.assertEqual(caught.exception.component, "durable_jobs")
+                if cleanup is None:
+                    cleanup = runtime._jobs_cleanup_task
+                self.assertIs(runtime._jobs_cleanup_task, cleanup)
+                self.assertFalse(cleanup.done())
+                self.assertEqual(cleanup.cancelling(), 0)
+                self.assertEqual(runtime.database.executor.state, "OPEN")
+                self.assertGreater(runtime.database.executor._outstanding, 0)
+            observer = asyncio.create_task(runtime.close(timeout=1))
+            observations.append(observer)
+            await until(
+                lambda: "_close_with_lock" in awaiting(observer)
+                and "wait" in awaiting(observer)
+            )
+            observer.cancel()
+            done, _pending = await asyncio.wait({observer}, timeout=0.15)
+            self.assertIn(observer, done)
+            with self.assertRaises(asyncio.CancelledError):
+                observer.result()
+            self.assertIs(runtime._jobs_cleanup_task, cleanup)
+            self.assertEqual(cleanup.cancelling(), 0)
+            self.assertFalse(runtime.closed)
+        finally:
+            if locker is not None:
+                locker.rollback()
+                locker.close()
+            await asyncio.gather(*observations, return_exceptions=True)
+            self.assertTrue(await runtime.close(timeout=1))
+
+    async def test_late_jobs_cleanup_error_is_consumed_and_retry_can_recover(self):
+        runtime = self._runtime()
+        await runtime.start()
+        original = runtime.jobs.repository.recover
+        entered, release = asyncio.Event(), asyncio.Event()
+        calls = 0
+
+        async def fail_after_real_recovery(now):
+            nonlocal calls
+            await original(now)
+            calls += 1
+            if calls == 1:
+                entered.set()
+                await release.wait()
+                raise RuntimeError("synthetic post-SQL cleanup failure")
+
+        runtime.jobs.repository.recover = fail_after_real_recovery
+        try:
+            with self.assertRaises(CoreRuntimeCleanupPending) as caught:
+                await runtime.close(timeout=0.02)
+            self.assertEqual(caught.exception.component, "durable_jobs")
+            await asyncio.wait_for(entered.wait(), 1)
+            cleanup = runtime._jobs_cleanup_task
+            release.set()
+            done, _pending = await asyncio.wait({cleanup}, timeout=1)
+            self.assertIn(cleanup, done)
+            # asyncio.wait does not retrieve task exceptions. The Core callback
+            # must consume it even when the original close observer has left.
+            self.assertFalse(cleanup._log_traceback)
+            with self.assertRaises(CoreRuntimeCleanupPending) as caught:
+                await runtime.close(timeout=0.5)
+            self.assertEqual(caught.exception.component, "durable_jobs")
+            self.assertIsInstance(caught.exception.__cause__, RuntimeError)
+            self.assertIsNone(runtime._jobs_cleanup_task)
+            self.assertTrue(await runtime.close(timeout=0.5))
+            self.assertEqual(calls, 2)
+        finally:
+            release.set()
+            if not runtime.closed:
+                await runtime.close(timeout=1)
+
     async def test_close_fences_jobs_before_waiting_for_close_lock(self):
         runtime = self._runtime()
         await runtime.start()

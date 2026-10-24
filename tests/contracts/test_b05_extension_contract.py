@@ -194,10 +194,19 @@ class B05ExtensionContractTests(unittest.TestCase):
             self.assertIs(get_type_hints(factory.create)["services"], ModuleServices)
         self.assertEqual(
             tuple(ModuleHandlers.__dataclass_fields__),
-            ("capabilities", "collectors", "evaluators", "event_composers"),
+            (
+                "capabilities",
+                "collectors",
+                "evaluators",
+                "event_composers",
+                "event_projectors",
+                "jobs",
+            ),
         )
         # The optional fourth channel preserves legacy positional factories.
         self.assertEqual(ModuleHandlers({}, {}, {}).event_composers, {})
+        self.assertEqual(ModuleHandlers({}, {}, {}).event_projectors, {})
+        self.assertEqual(ModuleHandlers({}, {}, {}).jobs, {})
 
     def test_capability_schema_and_tool_policy_are_explicit(self):
         # This is the exact strict JSON object shape. It maps directly to the
