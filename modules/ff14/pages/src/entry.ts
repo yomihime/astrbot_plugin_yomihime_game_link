@@ -1,6 +1,7 @@
 import {createApp, defineComponent, h, withDirectives, ref} from 'vue';
-import {NButton,NInput,NSelect,NCard,NTag} from 'naive-ui';
-import {UiProvider} from '@game-link/ui';
+import {NButton,NInput,NSelect,NTag} from 'naive-ui';
+import {UiProvider,Surface,FormField,FormGrid,ActionBar,StatusHint} from '@game-link/ui';
+import type {FormFieldSlot} from '@game-link/ui';
 import type {PageOptions, MountedPage} from '../../../../pages/public-contract';
 import {mountSettings} from './settings-page';
 import {createQueryController,fields,queryTimeoutMs} from './query-controller';
@@ -37,24 +38,22 @@ export function mount(container:HTMLElement,options:PageOptions):MountedPage {
     const submit=async(event?:Event)=>{event?.preventDefault(); await controller.submit(); const name=Object.keys(state.errors)[0]; if (name) container.querySelector<HTMLInputElement>(`#ff14-${options.routeId}-${name}`)?.focus();};
     const market=result?.model_facts?.market;
     return h(UiProvider,{theme:context.theme,locale:context.locale,styleMountTarget:container}, {default:()=>h('section',{class:'ff14-page','data-theme':context.theme},[
-      h(NCard,{title:titles[options.routeId],bordered:false}, {default:()=>[
+      h(Surface,{title:titles[options.routeId]}, {default:()=>[
         h('p',{class:'ff14-hint'},hints[options.routeId]),
-        h('form',{class:'ff14-form','aria-busy':pending,onSubmit:submit},[
-          ...fields[options.routeId].map(field=>h('div',{class:`ff14-field ${field.name==='query'?'ff14-query':''}`},[
-            h('label',{id:`label-${options.routeId}-${field.name}`,for:`ff14-${options.routeId}-${field.name}`,onClick:()=>container.querySelector<HTMLElement>(`#ff14-${options.routeId}-${field.name}`)?.focus()},field.label),
+        h('form',{class:'ff14-form','aria-busy':pending,onSubmit:submit},[h(FormGrid,{}, {default:()=>[
+          ...fields[options.routeId].map(field=>h(FormField,{controlId:`ff14-${options.routeId}-${field.name}`,label:field.label,labelId:`label-${options.routeId}-${field.name}`,errorId:`error-${field.name}`,error:state.errors[field.name],class:field.name==='query'?'ui-field-wide':undefined},{default:({controlAttrs}:FormFieldSlot)=>[
             field.options?withDirectives(h(NSelect,{value:state.draft[field.name],options:field.options,to:container,
               menuProps:{id:`menu-${options.routeId}-${field.name}`,role:'listbox','aria-labelledby':`label-${options.routeId}-${field.name}`},
               nodeProps:(option:any)=>({id:`option-${options.routeId}-${field.name}-${option.value}`,role:'option','aria-selected':state.draft[field.name]===option.value}),
               'onUpdate:show':(show:boolean)=>{expanded.value={...expanded.value,[field.name]:show};},
               'onUpdate:value':(value:string)=>controller.edit(field.name,value)}),[[selectA11y,{id:`ff14-${options.routeId}-${field.name}`,labelId:`label-${options.routeId}-${field.name}`,menuId:`menu-${options.routeId}-${field.name}`,expanded:Boolean(expanded.value[field.name]),invalid:Boolean(state.errors[field.name]),errorId:`error-${field.name}`}]] )
-              :h(NInput,{value:state.draft[field.name],placeholder:field.placeholder,maxlength:field.limit,inputProps:{id:`ff14-${options.routeId}-${field.name}`,'aria-label':field.label,'aria-invalid':Boolean(state.errors[field.name]),'aria-describedby':`error-${field.name}`},'onUpdate:value':(value:string)=>controller.edit(field.name,value)}),
-            h('span',{class:'ff14-field-error',id:`error-${field.name}`},state.errors[field.name]||''),
-          ])),
-          h('div',{class:'ff14-actions'},[h(NButton,{type:'primary',attrType:'submit',disabled:pending||!context.available},()=>({market:'查询市场',items:'查询物品',logs:'查询 Logs',calendar:'查询日历'} as Record<string,string>)[options.routeId]),pending?h(NButton,{onClick:()=>{controller.stop();container.querySelector<HTMLInputElement>('input')?.focus();}},()=> '停止展示'):null]),
-        ]),
-        h('p',{class:context.available?'ff14-hint':'ff14-warning',role:'status'},context.available?'模块目录已加载；实际查询仍由后端逐请求鉴权，仅手动提交。':'当前入口状态尚未确认，请刷新状态；仍失败时请重新登录 Dashboard 或重新打开本页。'),
+              :h(NInput,{value:state.draft[field.name],placeholder:field.placeholder,maxlength:field.limit,inputProps:controlAttrs,'onUpdate:value':(value:string)=>controller.edit(field.name,value)}),
+          ]})),
+          h(ActionBar,{}, {default:()=>[h(NButton,{type:'primary',attrType:'submit',disabled:pending||!context.available},()=>({market:'查询市场',items:'查询物品',logs:'查询 Logs',calendar:'查询日历'} as Record<string,string>)[options.routeId]),pending?h(NButton,{onClick:()=>{controller.stop();container.querySelector<HTMLInputElement>('input')?.focus();}},()=> '停止展示'):null]}),
+        ]})]),
+        h(StatusHint,{tone:context.available?'neutral':'warning'},()=>context.available?'模块目录已加载；实际查询仍由后端逐请求鉴权，仅手动提交。':'当前入口状态尚未确认，请刷新状态；仍失败时请重新登录 Dashboard 或重新打开本页。'),
       ]}),
-      h(NCard,{title:'本次结果',bordered:false,class:'ff14-result','aria-live':'polite','data-result-status':result?.status||state.phase}, {default:()=>[
+      h(Surface,{title:'本次结果',class:'ff14-result','aria-live':'polite','data-result-status':result?.status||state.phase}, {default:()=>[
         result?h('p',{class:result.status==='error'?'ff14-error':result.status==='success'?'ff14-success':'ff14-warning',role:result.status==='error'?'alert':'status'},result.status==='success'?'查询完成':result.status==='partial_success'?'部分结果 · 保留来源说明':result.status==='needs_selection'?'需要选择物品 · 请确认本次候选':`${result.error?.code==='not_found'?'无匹配结果':result.error?.code==='no_records'?'没有可展示记录':'查询失败'} · ${errors[result.error?.code||'']||'查询未完成，请检查输入与来源后手动重试。'}`):h('p',{role:['error','timeout'].includes(state.phase)?'alert':'status'},state.message),
         pending?h('p',{class:'ff14-hint'},'仅停止展示，本次请求可能仍在后台处理。'):null,
         ...(result?blocks(result):[]),

@@ -6,6 +6,8 @@ import {loadPage} from './module-loader.js';
 import {createShell} from './controller';
 import type {Bridge} from './contracts';
 import './shell.css';
+// Core owns public presentation CSS independently of the management view.
+import './ui/tokens.css';
 import {skipToMain} from './navigation';
 import {createManagementPage,validateCatalog as configurationCatalog,validateSnapshot as configurationSnapshot} from './management.js';
 import {createModuleManagement} from './module-management';
