@@ -122,7 +122,7 @@ const App = defineComponent({setup() {
             h('div',{ref:maintenanceRoot,id:'maintenance-container',hidden:!maintenanceOpen.value}),
             !home&&!state?.modules&&!state?.settings&&!moduleHome&&!queries&&!state?.mounted||Boolean(state?.settingsOwner&&!currentModule)?h('p',{class:'shell-empty'},state?.cleanupPending?'页面清理未完成，请重新打开页面。':selection?'模块页面正在准备。':'此路由当前没有可用的注册页面。恢复模块后请从宿主插件详情正式重开。'):null,
           ]),
-          h('footer',{class:'shell-footer'},'如月怜的游戏连结'),
+          h('footer',{class:'shell-footer'},[h('a',{class:'shell-project-link',href:'https://github.com/yomihime/astrbot_plugin_yomihime_game_link',target:'_blank',rel:'noopener noreferrer'},[h('span','如月怜的游戏连结'),h('span',{class:'shell-project-english'},[' / Yomihime Game Link ',h('span',{class:'shell-project-spark','aria-hidden':'true'},'✧')])])]),
         ]),
       ]),
     ]});
