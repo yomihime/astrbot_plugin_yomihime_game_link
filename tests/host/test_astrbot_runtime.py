@@ -895,6 +895,7 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
                         "en": "FINAL FANTASY XIV",
                     },
                     "short_name": "FF14",
+                    "summary": "物品查询 · 市场行情 · 角色 Logs · 活动日历",
                     "logo_resource": "module-assets/ff14/ff14/assets/ff14-meteor.svg",
                 },
             )
@@ -917,7 +918,12 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
                     "runtime_id",
                     "asset_version",
                     "display",
+                    "source",
                 },
+            )
+            self.assertEqual(
+                module["source"],
+                {"kind": "builtin", "package_id": "ff14", "display_name": None},
             )
             self.assertTrue(
                 all(
