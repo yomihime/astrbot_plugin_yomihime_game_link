@@ -455,6 +455,104 @@ class SQLiteResourceRepository:
 
         return await self.database.executor.run_read(read)
 
+    async def integrity_snapshot(self, asset_id: str, scope: OwnerScope):
+        key = self.managed_scope_key(scope)
+
+        def read(unit):
+            row = unit.execute(
+                "SELECT revision,content_sha256,file_identity FROM resource_integrity_snapshots WHERE scope_key=? AND asset_id=?",
+                (key, asset_id),
+            ).fetchone()
+            if row is None:
+                return None
+            try:
+                identity = json.loads(row[2])
+                if (
+                    type(identity) is not list
+                    or len(identity) != 5
+                    or any(type(v) is not int for v in identity)
+                    or type(row[1]) is not str
+                    or len(row[1]) != 64
+                ):
+                    return None
+                return int(row[0]), row[1], tuple(identity)
+            except (ValueError, TypeError):
+                return None
+
+        return await self.database.executor.run_read(read)
+
+    async def integrity_portfolio(self, asset_ids, scope):
+        """Bounded join of live registration and trusted verification evidence."""
+        if type(asset_ids) is not tuple or not 1 <= len(asset_ids) <= 1000:
+            raise ValueError("resource portfolio is invalid")
+        for asset_id in asset_ids:
+            self._params(asset_id, scope)
+        key = self.managed_scope_key(scope)
+        parts = self._params(asset_ids[0], scope)[1:]
+
+        def read(unit):
+            result = {}
+            for start in range(0, len(asset_ids), 200):
+                batch = asset_ids[start : start + 200]
+                rows = unit.execute(
+                    "SELECT a.*,m.content_sha256 AS managed_sha,m.size_bytes AS managed_size,m.expires_at AS managed_expiry,m.last_access AS managed_access,m.evicting AS managed_evicting,i.revision AS integrity_revision,i.content_sha256 AS verified_sha,i.file_identity AS verified_identity FROM assets a LEFT JOIN managed_resource_entries m ON m.scope_key=? AND m.asset_id=a.asset_id LEFT JOIN resource_integrity_snapshots i ON i.scope_key=? AND i.asset_id=a.asset_id WHERE a.asset_id IN ("
+                    + ",".join("?" for _ in batch)
+                    + ") AND a.scope_kind=? AND a.user_id IS ? AND a.grant_id IS ? AND a.grant_revision IS ?",
+                    (key, key, *batch, *parts),
+                ).fetchall()
+                for row in rows:
+                    metadata = self._metadata(row)
+                    entry = (
+                        None
+                        if row["managed_sha"] is None
+                        else (
+                            row["managed_sha"],
+                            row["managed_size"],
+                            row["managed_expiry"],
+                            row["managed_access"],
+                            row["managed_evicting"],
+                        )
+                    )
+                    saved = None
+                    try:
+                        identity = json.loads(row["verified_identity"])
+                        digest = row["verified_sha"]
+                        if (
+                            type(identity) is list
+                            and len(identity) == 5
+                            and all(type(value) is int for value in identity)
+                            and type(digest) is str
+                            and len(digest) == 64
+                        ):
+                            saved = (
+                                int(row["integrity_revision"]),
+                                digest,
+                                tuple(identity),
+                            )
+                    except (ValueError, TypeError):
+                        pass
+                    result[metadata.asset_id] = metadata, entry, saved
+            return result
+
+        return await self.database.executor.run_read(read)
+
+    async def remember_integrity(self, asset_id, scope, revision, digest, identity):
+        key = self.managed_scope_key(scope)
+
+        def write(unit):
+            unit.execute(
+                "INSERT INTO resource_integrity_snapshots(scope_key,asset_id,revision,content_sha256,file_identity) VALUES (?,?,?,?,?) ON CONFLICT(scope_key,asset_id) DO UPDATE SET revision=excluded.revision,content_sha256=excluded.content_sha256,file_identity=excluded.file_identity",
+                (
+                    key,
+                    asset_id,
+                    revision,
+                    digest,
+                    json.dumps(identity, separators=(",", ":")),
+                ),
+            )
+
+        await self.database.executor.run_transaction(write, begin_mode="IMMEDIATE")
+
     async def managed_usage(self, scope: OwnerScope) -> tuple[int, int, int]:
         key = self.managed_scope_key(scope)
 
@@ -549,6 +647,10 @@ class SQLiteResourceRepository:
             )
             unit.execute(
                 "DELETE FROM managed_resource_entries WHERE scope_key=? AND asset_id=?",
+                (key, asset_id),
+            )
+            unit.execute(
+                "DELETE FROM resource_integrity_snapshots WHERE scope_key=? AND asset_id=?",
                 (key, asset_id),
             )
             unit.execute(
@@ -831,6 +933,10 @@ class SQLiteResourceRepository:
                 "DELETE FROM assets WHERE asset_id=? AND scope_kind=? AND user_id IS ? "
                 "AND grant_id IS ? AND grant_revision IS ?",
                 params,
+            )
+            unit.execute(
+                "DELETE FROM resource_integrity_snapshots WHERE scope_key=? AND asset_id=?",
+                (self.managed_scope_key(scope), asset_id),
             )
             _check_authorization_deadline(authorization_deadline)
 

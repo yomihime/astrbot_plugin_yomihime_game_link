@@ -38,7 +38,7 @@ test('home states use distinct icons with named descriptions and no extra tab st
  const {catalog}=await import('./fixtures.mjs');const data=catalog(),base=data.modules[0];
  for(const state of ['disabled','unavailable'])data.modules.push({...base,module_id:'example/'+state,route:state,state,enabled:false,lifecycle:'stopped',runtime_id:null,pages:[],resources:[]});
  const h=await harness(data);try{
-  const articles=[...h.doc.querySelectorAll('.workspace-module')];
+  const articles=['loaded','disabled','unavailable'].map(state=>h.doc.querySelector('.workspace-status-icon[data-state='+state+']').closest('.workspace-module'));
   assert.ok(articles[0].querySelector('.workspace-status-icon svg circle'));
   assert.ok(articles[0].querySelector('.workspace-status-icon svg path'));
   const title=articles[0].querySelector('h2 a');assert.equal(h.doc.getElementById(title.getAttribute('aria-describedby')).textContent,'已加载');

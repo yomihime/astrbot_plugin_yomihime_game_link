@@ -20,7 +20,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 ARCHIVE = ROOT / "dist" / "astrbot_plugin_yomihime_game_link-local.zip"
 EXPECTED_WHEEL_SHA256 = (
-    "9f429148ac8c469b9e92bf9b0097bf27c898afed3d20c933519d1851e991e481"
+    "7799484e8b674e1c2f48d7ed68030193ae8d6db90fc43ef369761a91c40ebe4d"
 )
 EXPECTED_WHEEL_ENTRIES = {
     "yomihime_game_link_sdk/host.py",
@@ -35,17 +35,17 @@ EXPECTED_WHEEL_ENTRIES = {
     "yomihime_game_link_sdk/version.py",
     "yomihime_game_link_sdk/results.py",
     "yomihime_game_link_sdk/_examples/empty_module/README.md",
-    "yomihime_game_link_sdk-0.1.0a16.dist-info/licenses/SDK-LICENSE",
-    "yomihime_game_link_sdk-0.1.0a16.dist-info/METADATA",
+    "yomihime_game_link_sdk-0.1.0a17.dist-info/licenses/SDK-LICENSE",
+    "yomihime_game_link_sdk-0.1.0a17.dist-info/METADATA",
     "yomihime_game_link_sdk/_examples/empty_module/module.py",
     "yomihime_game_link_sdk/storage.py",
-    "yomihime_game_link_sdk-0.1.0a16.dist-info/top_level.txt",
+    "yomihime_game_link_sdk-0.1.0a17.dist-info/top_level.txt",
     "yomihime_game_link_sdk/subscriptions.py",
     "yomihime_game_link_sdk/contexts.py",
-    "yomihime_game_link_sdk-0.1.0a16.dist-info/WHEEL",
+    "yomihime_game_link_sdk-0.1.0a17.dist-info/WHEEL",
     "yomihime_game_link_sdk/py.typed",
     "yomihime_game_link_sdk/__init__.py",
-    "yomihime_game_link_sdk-0.1.0a16.dist-info/RECORD",
+    "yomihime_game_link_sdk-0.1.0a17.dist-info/RECORD",
     "yomihime_game_link_sdk/_examples/empty_module/manifest.json",
 }
 PACKAGE_ENTRY_NAMES = {
@@ -424,11 +424,11 @@ def validate_wheel(path: Path) -> dict[str, bytes]:
                 "SDK wheel entry manifest differs from the reviewed artifact"
             )
         metadata_lines = set(
-            wheel.read("yomihime_game_link_sdk-0.1.0a16.dist-info/METADATA")
+            wheel.read("yomihime_game_link_sdk-0.1.0a17.dist-info/METADATA")
             .decode("utf-8")
             .splitlines()
         )
-        if not {"Name: yomihime-game-link-sdk", "Version: 0.1.0a16"} <= metadata_lines:
+        if not {"Name: yomihime-game-link-sdk", "Version: 0.1.0a17"} <= metadata_lines:
             raise ValueError("SDK wheel distribution metadata is unsupported")
         package = {name: wheel.read(name) for name in sorted(PACKAGE_ENTRY_NAMES)}
     return package
@@ -535,17 +535,29 @@ def _bundle_readers(namespace):
 
 
 def projected_page_assets(
-    repository_root: Path, *, bundle_roots=("modules",), external_page_roots=()
+    repository_root: Path,
+    *,
+    bundle_roots=("modules",),
+    external_page_roots=(),
+    external_source_policy_roots=(),
 ) -> dict[str, bytes]:
     """Project declared hash-pinned resources into the sole authenticated page root."""
     with _checkout_imports() as namespace:
         return _projected_page_assets(
-            repository_root, bundle_roots, namespace, external_page_roots
+            repository_root,
+            bundle_roots,
+            namespace,
+            external_page_roots,
+            external_source_policy_roots,
         )
 
 
 def _projected_page_assets(
-    repository_root, bundle_roots, namespace, external_page_roots=()
+    repository_root,
+    bundle_roots,
+    namespace,
+    external_page_roots=(),
+    external_source_policy_roots=(),
 ):
     parse_manifest, read_page_resources = _bundle_readers(namespace)
     adapter = import_module(f"{namespace}.adapters.astrbot.bundled")
@@ -597,6 +609,72 @@ def _projected_page_assets(
                 )
     if projection.packages:
         payload[projection_module.PROJECTION_FILE] = projection.serialize()
+    if external_source_policy_roots:
+        policy_module = import_module(f"{namespace}.services.external_source_policies")
+        packages = []
+        for root in external_source_policy_roots:
+            root = Path(root).resolve(strict=True)
+            raw = _read_snapshot(
+                root / "yomihime.manifest.json", root, "External source manifest"
+            )
+            manifest = parse_manifest(raw)
+            record = projection.packages.get(manifest.package_id)
+            if record is None or record[2] != raw:
+                raise ValueError(
+                    "source policy requires the same explicit paired page manifest"
+                )
+            policy_bytes = _read_snapshot(
+                root / "yomihime.source-policy.json", root, "External source policy"
+            )
+            if len(policy_bytes) > 262144:
+                raise ValueError("external source policy exceeds byte budget")
+            policy = json.loads(policy_bytes, object_pairs_hook=policy_module._object)
+            if (
+                type(policy) is not dict
+                or set(policy)
+                not in (
+                    {"schema_version", "credentials", "authorizations"},
+                    {
+                        "schema_version",
+                        "credentials",
+                        "authorizations",
+                        "capability_timeouts",
+                    },
+                )
+                or type(policy["schema_version"]) is not int
+                or policy["schema_version"] != 1
+            ):
+                raise ValueError("invalid source policy input")
+            packages.append(
+                {
+                    "manifest": raw.decode("utf-8"),
+                    "credentials": policy["credentials"],
+                    "authorizations": policy["authorizations"],
+                    **(
+                        {"capability_timeouts": policy["capability_timeouts"]}
+                        if "capability_timeouts" in policy
+                        else {}
+                    ),
+                }
+            )
+            if (
+                _read_snapshot(
+                    root / "yomihime.manifest.json", root, "External source manifest"
+                )
+                != raw
+                or _read_snapshot(
+                    root / "yomihime.source-policy.json", root, "External source policy"
+                )
+                != policy_bytes
+            ):
+                raise ValueError("external source policy changed during capture")
+        selected = json.dumps(
+            {"schema_version": 1, "packages": packages},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        policy_module.ExternalSourcePolicies(selected)
+        payload[policy_module.POLICY_FILE] = selected
     payload[prefix + "module-loader.js"] = (
         "export async function loadPage(entry) {\nswitch (entry) {\n"
         + "\n".join(sorted(set(branches)))
@@ -696,19 +774,35 @@ def build(
     repository_root: Path = ROOT,
     *,
     external_page_roots=(),
+    external_source_policy_roots=(),
 ) -> Path:
     package = validate_wheel(sdk_wheel)
     repository_root = Path(repository_root).resolve(strict=True)
     if any(
         Path(archive_path).absolute().is_relative_to(Path(root).absolute())
-        for root in external_page_roots
+        for root in (*external_page_roots, *external_source_policy_roots)
     ):
         raise ValueError("Build output overlaps an external page input")
     files = included_files(repository_root)
+    policy_inputs = {
+        Path(root).resolve(strict=True): _read_snapshot(
+            Path(root).resolve(strict=True) / "yomihime.source-policy.json",
+            Path(root).resolve(strict=True),
+            "External source policy",
+            max_bytes=262144,
+        )
+        for root in external_source_policy_roots
+    }
     page_assets = projected_page_assets(
-        repository_root, external_page_roots=external_page_roots
+        repository_root,
+        external_page_roots=external_page_roots,
+        **(
+            {"external_source_policy_roots": external_source_policy_roots}
+            if external_source_policy_roots
+            else {}
+        ),
     )
-    inputs = (*files, sdk_wheel, *external_page_roots)
+    inputs = (*files, sdk_wheel, *external_page_roots, *external_source_policy_roots)
     validate_output_paths((archive_path,), inputs)
     output = BytesIO()
     with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
@@ -747,6 +841,28 @@ def build(
                 raise RuntimeError(f"Module asset differs from verified bundle: {name}")
         if result.testzip() is not None:
             raise RuntimeError("The generated ZIP failed its integrity check")
+    if external_source_policy_roots:
+        # A selected secret-use policy and its page projection form one pair.
+        # Recheck the explicit external inputs at the publication boundary;
+        # a changed capture must leave an existing artifact untouched.
+        for policy_root, captured in policy_inputs.items():
+            if (
+                _read_snapshot(
+                    policy_root / "yomihime.source-policy.json",
+                    policy_root,
+                    "External source policy",
+                    max_bytes=262144,
+                )
+                != captured
+            ):
+                raise ValueError("external source policy changed before publication")
+        current_assets = projected_page_assets(
+            repository_root,
+            external_page_roots=external_page_roots,
+            external_source_policy_roots=external_source_policy_roots,
+        )
+        if current_assets != page_assets:
+            raise ValueError("external paired inputs changed before publication")
     publish_artifacts({archive_path: output.getvalue()}, inputs)
     return archive_path
 

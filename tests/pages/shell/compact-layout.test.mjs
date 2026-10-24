@@ -60,3 +60,12 @@ test('status motion is short and finite with static reduced-motion and readable 
  assert.match(css,/@media\(prefers-reduced-motion:reduce\)\{\.workspace-status-icon>svg\{animation:none;transition:none\}/);
  assert.match(css,/\.workspace-module-summary\{font-size:13px;line-height:1.6;[^}]*overflow-wrap:anywhere/);
 });
+
+
+test('home directory uses two light columns and keeps mobile single-column',()=>{
+ assert.match(css,/\.workspace-package-grid\{display:grid;grid-template-columns:repeat\(2,minmax\(0,1fr\)\)/);
+ assert.match(css,/\.workspace-index-heading\{grid-column:1\/-1/);
+ assert.match(css,/\.workspace-module \.workspace-emblem\{order:-1/);
+ assert.match(css,/@media\(max-width:719px\)\{\.workspace-package-grid\{grid-template-columns:minmax\(0,1fr\)/);
+ assert.doesNotMatch(css,/\.workspace-module:last-child[^}]*grid-column/);
+});

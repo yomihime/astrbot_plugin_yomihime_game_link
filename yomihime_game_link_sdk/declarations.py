@@ -240,6 +240,7 @@ class PackageManifest:
     author: str
     license: str
     source: str
+    display_name: str | None = None
 
     def global_module_id(self, module_id: str) -> str:
         """Return the package-qualified ID for one declared local module."""
@@ -288,6 +289,9 @@ class SourceDeclaration:
     requests_per_minute: int = 60
     max_redirects: int = 0
     redirect_path_prefixes: tuple[str, ...] = ()
+    requests_per_hour: int | None = None
+    request_budget_config: str | None = None
+    authorization_only: bool = False
 
     def __post_init__(self) -> None:
         if self.redirect_path_prefixes is not None:

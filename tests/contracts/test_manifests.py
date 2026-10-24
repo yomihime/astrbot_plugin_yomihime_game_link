@@ -67,6 +67,42 @@ def _module(**changes: object) -> ModuleManifest:
 
 
 class ManifestContractTests(unittest.TestCase):
+    def test_package_display_name_is_trailing_optional_and_core_normalized(self):
+        from dataclasses import fields, replace
+
+        package = example_package()
+        self.assertEqual(fields(PackageManifest)[-1].name, "display_name")
+        self.assertIsNone(package.display_name)
+        for value, expected in (
+            (None, None),
+            ("", None),
+            ("   ", None),
+            ("　", None),
+            ("  星港扩展  ", "  星港扩展  "),
+            ("🚀" * 128, "🚀" * 128),
+        ):
+            with self.subTest(value=value):
+                declaration = replace(package, display_name=value)
+                self.assertEqual(validate_contract(declaration).display_name, expected)
+        for value in (
+            True,
+            1,
+            [],
+            {},
+            "x" * 129,
+            "\n",
+            "\t",
+            "\x00",
+            "\u200b",
+            "\u202e",
+            "\ud800",
+        ):
+            with self.subTest(value=value):
+                # SDK construction remains descriptive, never receiving authority.
+                declaration = replace(package, display_name=value)
+                with self.assertRaises((TypeError, ValueError)):
+                    validate_contract(declaration)
+
     def test_optional_config_value_schema_is_frozen_and_backward_compatible(self):
         self.assertIsNone(validate_contract(ConfigField("mode")).group)
         self.assertEqual(

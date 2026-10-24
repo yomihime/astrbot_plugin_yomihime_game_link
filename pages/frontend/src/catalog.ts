@@ -51,6 +51,11 @@ export function validateCatalog(input: unknown): Catalog {
   const modules: ModuleDescriptor[] = value.modules.map((m: Record<string, any>) => {
     if (!record(m) || !str(m.module_id) || !/^[a-z][a-z0-9_.-]*\/[a-z][a-z0-9_.-]*$/.test(m.module_id) || !str(m.route) || !['loaded','disabled','unavailable'].includes(String(m.state)) || !Number.isSafeInteger(m.module_epoch) || Number(m.module_epoch) < 0 || !Array.isArray(m.pages) || m.pages.length > 64 || !Array.isArray(m.resources) || m.resources.length > 128) fail();
     const raw = m as Record<string, any>;
+    const packageId=raw.module_id.split('/')[0], source=raw.source??{kind:'unknown',package_id:packageId};
+    if(!record(source)||Object.keys(source).some(key=>!['kind','package_id','display_name'].includes(key))||typeof source.kind!=='string'||!['builtin','extension','unknown'].includes(source.kind)||source.package_id!==packageId)fail();
+    const packageName=source.display_name??null;
+    if(packageName!==null&&(typeof packageName!=='string'||[...packageName].length>128||/[\p{Cc}\p{Cf}\p{Cs}]/u.test(packageName)))fail();
+    const displayName=typeof packageName==='string'&&packageName.trim()?packageName:null;
     if (raw.state === 'loaded' ? !str(raw.runtime_id) || raw.enabled !== true || raw.lifecycle !== 'active' || value.runtime.state !== 'ready' : raw.runtime_id !== null || raw.pages.length || raw.resources.length) fail();
     if (!str(raw.asset_version, 64) || !/^[a-f0-9]{64}$/.test(raw.asset_version)) fail();
     const prefix = `module-assets/${raw.module_id}/`;
@@ -62,7 +67,7 @@ export function validateCatalog(input: unknown): Catalog {
       return {role:(p.role ?? 'aux') as PageDescriptor['role'], route_id: p.route_id as string, title: p.title as string, order: p.order as number, access: 'public_web', capability_id: p.capability_id as string | null, entry: p.entry as string, styles: [...p.styles] as string[]};
     });
     if (new Set(pages.map(p => p.route_id)).size !== pages.length || ['home','config'].some(role=>pages.filter(p=>p.role===role).length>1)) fail();
-    return {display:displayMetadata(raw.display, prefix, resources), module_id: raw.module_id, route: raw.route, state: raw.state, module_epoch: raw.module_epoch, runtime_id: raw.runtime_id, asset_version: raw.asset_version, pages: pages.sort((a,b) => a.order - b.order || a.route_id.localeCompare(b.route_id)), resources};
+    return {source:{display_name:displayName,kind:source.kind as 'builtin'|'extension'|'unknown',package_id:packageId},display:displayMetadata(raw.display, prefix, resources), module_id: raw.module_id, route: raw.route, state: raw.state, module_epoch: raw.module_epoch, runtime_id: raw.runtime_id, asset_version: raw.asset_version, pages: pages.sort((a,b) => a.order - b.order || a.route_id.localeCompare(b.route_id)), resources};
   });
   if (new Set(modules.map(m => m.module_id)).size !== modules.length) fail();
   return {legacy_config_policies:policies.map((policy:Record<string,string>)=>({policy_id:policy.policy_id,target_owner:policy.target_owner})),schema_version: 1, catalog_revision: value.catalog_revision, runtime: {state: value.runtime.state}, modules};
@@ -71,4 +76,20 @@ export function routeHash(owner: string, route: string): string {return `#/modul
 export function readRoute(hash: string): {owner: string; route: string} | null {
   const match = /^#\/module\/([^/]+)\/([^/]+)$/.exec(hash); if (!match) return null;
   try {return {owner: decodeURIComponent(match[1]), route: decodeURIComponent(match[2])};} catch {return null;}
+}
+
+// Group by validated package identity, never by translated names or game prefixes.
+export function moduleGroups(modules: ModuleDescriptor[]): {key:string;title:string;modules:ModuleDescriptor[]}[] {
+  const packages=new Map<string,ModuleDescriptor[]>();
+  for(const module of modules){const id=module.module_id.split('/')[0];const list=packages.get(id)||[];list.push(module);packages.set(id,list);}
+  const groups=new Map<string,{key:string;title:string;modules:ModuleDescriptor[]}>();
+  for(const [id,list] of [...packages].sort(([a],[b])=>a<b?-1:a>b?1:0)){
+    const kinds=new Set(list.map(module=>module.source?.kind||'unknown'));
+    const kind=kinds.size===1?[...kinds][0]:'unknown',key=kind==='builtin'?'builtin':'package:'+id;
+    const names=new Set(list.map(module=>module.source?.display_name||null));
+    const name=names.size===1?[...names][0]:null;
+    const group=groups.get(key)||{key,title:kind==='builtin'?'内置模块':kind==='extension'?(name||id):id+' · 来源未识别',modules:[]};
+    group.modules.push(...list);groups.set(key,group);
+  }
+  return [...groups.values()].sort((a,b)=>a.key==='builtin'?-1:b.key==='builtin'?1:a.key<b.key?-1:1);
 }

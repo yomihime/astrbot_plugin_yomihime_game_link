@@ -60,7 +60,7 @@ python scripts/verify_frontend_build.py
 python scripts/build_release.py
 ```
 
-前端 build 会从模块源码生成 `modules/*/pages/dist/` 与 `pages/resources.json`，更新 manifest 中对应资源摘要，再生成唯一正式页面根 `pages/00-game-link` 及构建检查清单。它先在临时 staging 树完整生成，完成目标目录的链接检查后逐文件原子替换。正式发行资产按受审 manifest 投影模块入口、样式和资源。缺少 Vite 等依赖时先执行 `npm ci`；缺少待校验的 frontend 生成物时运行前端 build。`verify_frontend_build.py` 要求正式构建产物已存在，不会代替 build。隔离构建可用 `node pages/frontend/build.mjs --out-root=<absolute-task-directory>`，不作为正式发行资产。字体脚本仅下载经 SHA-256 和长度校验的官方固定测试资源；运行时字体仍由独立管理服务获取。发行 ZIP 注入经过内容摘要校验的 SDK a11 wheel 中的运行时成员字节，不把 `.whl` 文件本身放入插件 ZIP，也不依赖尚未发布的远端下载地址。`--sdk-wheel` 可复用校验通过的现有 wheel，包括 `dist/` 中与目标内容完全相同的 wheel；复用时按摘要及文件系统链接边界验证，再直接从 wheel 打包运行时成员。
+前端 build 会从模块源码生成 `modules/*/pages/dist/` 与 `pages/resources.json`，更新 manifest 中对应资源摘要，再生成唯一正式页面根 `pages/00-game-link` 及构建检查清单。它先在临时 staging 树完整生成，完成目标目录的链接检查后逐文件原子替换。正式发行资产按受审 manifest 投影模块入口、样式和资源。缺少 Vite 等依赖时先执行 `npm ci`；缺少待校验的 frontend 生成物时运行前端 build。`verify_frontend_build.py` 要求正式构建产物已存在，不会代替 build。隔离构建可用 `node pages/frontend/build.mjs --out-root=<absolute-task-directory>`，不作为正式发行资产。字体脚本仅下载经 SHA-256 和长度校验的官方固定测试资源；运行时字体仍由独立管理服务获取。发行 ZIP 注入经过内容摘要校验的 SDK a17 wheel 中的运行时成员字节，不把 `.whl` 文件本身放入插件 ZIP，也不依赖尚未发布的远端下载地址。`--sdk-wheel` 可复用校验通过的现有 wheel，包括 `dist/` 中与目标内容完全相同的 wheel；复用时按摘要及文件系统链接边界验证，再直接从 wheel 打包运行时成员。
 
 
 从仓库根目录运行：
@@ -71,11 +71,11 @@ python scripts/build_release.py
 
 脚本要求 Python 3.13 和固定版本的 setuptools、wheel。它从临时 SDK 源码副本构建并验证固定的 SDK wheel，然后生成：
 
-- `dist/astrbot_plugin_yomihime_game_link-v0.1.2.zip`：上传到 AstrBot WebUI 的插件包；
-- `dist/yomihime_game_link_sdk-0.1.0a11-py3-none-any.whl`：独立 SDK 工件，不是插件 ZIP；
+- `dist/astrbot_plugin_yomihime_game_link-v0.1.6.zip`：上传到 AstrBot WebUI 的插件包；
+- `dist/yomihime_game_link_sdk-0.1.0a17-py3-none-any.whl`：独立 SDK 工件，不是插件 ZIP；
 - `dist/SHA256SUMS`：上述工件的摘要。
 
-可用 `--tag v0.1.2` 校验 tag 必须与 `metadata.yaml` 中的版本相同。该参数只做版本校验，不创建 tag。发布工件的下载和安装步骤见[README](https://github.com/yomihime/astrbot_plugin_yomihime_game_link/blob/master/README.md)。
+可用 `--tag v0.1.6` 校验 tag 必须与 `metadata.yaml` 中的版本相同。该参数只做版本校验，不创建 tag。发布工件的下载和安装步骤见[README](https://github.com/yomihime/astrbot_plugin_yomihime_game_link/blob/master/README.md)。
 
 不要直接把未经构建的仓库快照安装到 AstrBot：SDK 运行文件由已验证的 wheel 注入插件 ZIP。SDK 契约与工件细节见[模块 SDK 说明](https://github.com/yomihime/astrbot_plugin_yomihime_game_link/blob/master/docs/module-sdk.md)。
 
@@ -108,7 +108,7 @@ node tests/pages/ff14/test_item_display.mjs
 全量测试需要明确指定刚构建并验证的 SDK wheel：
 
 ```powershell
-$env:YGL_TEST_SDK_WHEEL = (Resolve-Path dist/yomihime_game_link_sdk-0.1.0a11-py3-none-any.whl).Path
+$env:YGL_TEST_SDK_WHEEL = (Resolve-Path dist/yomihime_game_link_sdk-0.1.0a17-py3-none-any.whl).Path
 python -m unittest discover -s tests -t . -v
 python scripts/check_doc_links.py
 ```
@@ -120,7 +120,7 @@ python -m unittest -v tests.storage.test_windows_ci_boundaries tests.integration
 node --test tests/packaging/build-output.test.mjs
 ```
 
-Linux 对应 `export YGL_TEST_SDK_WHEEL="$PWD/dist/yomihime_game_link_sdk-0.1.0a11-py3-none-any.whl"`。真实宿主 ZIP 冒烟测试使用独立完整宿主环境，步骤见[真实宿主验证](docs/real-host-smoke.md)。
+Linux 对应 `export YGL_TEST_SDK_WHEEL="$PWD/dist/yomihime_game_link_sdk-0.1.0a17-py3-none-any.whl"`。真实宿主 ZIP 冒烟测试使用独立完整宿主环境，步骤见[真实宿主验证](docs/real-host-smoke.md)。
 
 Ubuntu job 运行全量 unittest 与 Ruff。每次验证应报告实际 passed/failed/skipped 汇总；局部测试通过不等于全量通过。
 

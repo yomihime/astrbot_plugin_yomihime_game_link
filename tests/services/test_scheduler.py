@@ -57,14 +57,18 @@ from yomihime_game_link_sdk.contexts import InvocationOrigin
 from yomihime_game_link_sdk.declarations import (
     CapabilityDescriptor,
     CapabilityEffect,
+    ConfigField,
     InvocationPolicy,
     ModuleCategory,
     ModuleManifest,
     PackageManifest,
     SourceDeclaration,
 )
+from yomihime_game_link_sdk.errors import SourceHttpError
 from yomihime_game_link_sdk.services import (
     CapabilityHealth,
+    ConfigSnapshot,
+    ConfigTarget,
     HealthReport,
     HealthStatus,
     ModuleHandlers,
@@ -180,6 +184,7 @@ class _Repo:
         self.releases = []
         self.evaluation = None
         self.active = {}
+        self.deferred = []
 
     async def claim_due(self, request, *, now):
         self.claims += 1
@@ -226,6 +231,11 @@ class _Repo:
     async def release(self, lease):
         self.releases.append(lease)
         self.active.pop(lease.token, None)
+
+    async def defer(self, lease, *, next_due_at):
+        self.deferred.append((lease, next_due_at))
+        self.active.pop(lease.token, None)
+        return True
 
 
 class _SubscriptionStore:
@@ -418,6 +428,7 @@ def _runtime(
     grant_store=None,
     collection_timeout_seconds=5.0,
     scope=OwnershipKind.PUBLIC,
+    config_fields=(),
 ):
     collector = collector or _Collector()
     schedule = _schedule(scope=scope)
@@ -455,6 +466,7 @@ def _runtime(
                     SourceDeclaration("market", "example.test", requests_per_minute=60)
                 ),
             ),
+            config_fields=config_fields,
         )
     )
     handlers = validate_contract(
@@ -574,6 +586,69 @@ def _runtime(
 
 
 class SchedulerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_c3_quota_error_releases_lease_at_recovery_time_without_failed_sample(
+        self,
+    ):
+        now = datetime(2026, 1, 1, tzinfo=UTC)
+        next_available = now + timedelta(hours=1)
+
+        class QuotaCollector(_Collector):
+            async def collect(self, context, parameters, previous):
+                raise SourceHttpError("rate_limited", next_available_at=next_available)
+
+        record = _record()
+        link = SubscriptionJobAssociation(
+            record.subscription_id, 1, record.collection_key, 60, 1
+        )
+        scheduler, _, repo, _, key, _, _, _ = _runtime(
+            collector=QuotaCollector(), records=(record,), links=(link,), now=now
+        )
+        result = await scheduler.run_due_job(DueCollectionJob(key, now, 60, 1, "job"))
+        self.assertIsNone(result.observation)
+        self.assertFalse(result.committed)
+        self.assertEqual(repo.commits, [])
+        self.assertEqual(repo.deferred[0][1], next_available)
+        self.assertEqual(repo.active, {})
+
+    async def test_c3_periodic_interval_reads_current_config_for_next_due_without_rebuilding(
+        self,
+    ):
+        record = _record()
+        link = SubscriptionJobAssociation(
+            record.subscription_id, 1, record.collection_key, 60, 1
+        )
+        collector = _Collector()
+        collector.finish.set()
+        scheduler, _, repo, _, key, _, _, _ = _runtime(
+            collector=collector,
+            records=(record,),
+            links=(link,),
+            config_fields=(
+                ConfigField(
+                    "poll_seconds",
+                    default=60,
+                    value_schema={"type": "integer", "minimum": 30},
+                ),
+            ),
+        )
+        current = [120]
+
+        async def config(module):
+            return ConfigSnapshot(
+                7,
+                {"poll_seconds": current[0]},
+                target=ConfigTarget("host", module.module_id),
+            )
+
+        scheduler.background_config_for = config
+        now = scheduler.now()
+        await scheduler.run_due_job(DueCollectionJob(key, now, 60, 1, "job"))
+        self.assertEqual(repo.commits[-1][0].config_revision, 7)
+        self.assertEqual(repo.next_due[-1], now + timedelta(seconds=120))
+        current[0] = 30
+        await scheduler.run_due_job(DueCollectionJob(key, now, 120, 7, "job"))
+        self.assertEqual(repo.next_due[-1], now + timedelta(seconds=30))
+
     def test_key_uses_registered_normalizer_and_scope(self):
         registry = Registry()
         scheduler, _, _, registry, _, _, _, _ = _runtime()

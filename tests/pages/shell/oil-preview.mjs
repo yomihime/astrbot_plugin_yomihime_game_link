@@ -6,7 +6,7 @@ import {createHash} from 'node:crypto';
 const root=resolve(import.meta.dirname,'../../..'),out=resolve(process.argv[2]||'/tmp/game-link-oil-production');
 await mkdir(out,{recursive:true});await cp(resolve(root,'pages/00-game-link'),out,{recursive:true});
 const manifest=JSON.parse(await readFile(resolve(root,'modules/ff14/yomihime.manifest.json'),'utf8')),module=manifest.modules[0],prefix='module-assets/ff14/ff14/';
-const catalog={schema_version:1,catalog_revision:1,runtime:{state:'ready'},modules:[{...module,module_id:'ff14/ff14',display:{...module.display,default_name:'最终幻想 XIV',localized_names:{},short_name:'FF14',logo_resource:prefix+module.display.logo_resource},state:'loaded',enabled:true,lifecycle:'active',module_epoch:1,runtime_id:'offline-fixture',asset_version:'a'.repeat(64),pages:module.pages.map(p=>({...p,capability_id:p.capability_id??null,entry:prefix+p.entry,styles:p.styles.map(s=>prefix+s)})),resources:module.resources.map(r=>({...r,path:prefix+r.path}))}]};
+const catalog={schema_version:1,catalog_revision:1,runtime:{state:'ready'},modules:[{...module,module_id:'ff14/ff14',source:{kind:'builtin',package_id:manifest.package_id},display:{...module.display,default_name:'最终幻想 XIV',localized_names:{},short_name:'FF14',logo_resource:prefix+module.display.logo_resource},state:'loaded',enabled:true,lifecycle:'active',module_epoch:1,runtime_id:'offline-fixture',asset_version:'a'.repeat(64),pages:module.pages.map(p=>({...p,capability_id:p.capability_id??null,entry:prefix+p.entry,styles:p.styles.map(s=>prefix+s)})),resources:module.resources.map(r=>({...r,path:prefix+r.path}))}]};
 // Five-module navigation preview requires real, reviewed external package assets.
 // Only bridge state/data are synthetic; no external DLC code is modified.
 if(process.argv.includes('--five-modules')){
@@ -35,7 +35,7 @@ for name,content in projected_page_assets(root,external_page_roots=(external,)).
     const descriptor=external.modules.find(value=>value.module_id===id);
     if(!descriptor)throw Error('Missing external fixture module '+id);
     const owner=`steam_dlc/${id}`,target=`module-assets/${owner}/pages/p${digest}/`;
-    catalog.modules.push({...catalog.modules[0],...descriptor,module_id:owner,
+    catalog.modules.push({...catalog.modules[0],...descriptor,module_id:owner,source:{kind:'extension',package_id:external.package_id},
       display:{...descriptor.display,localized_names:{},logo_resource:null},
       pages:descriptor.pages.map(page=>({...page,capability_id:page.capability_id??null,entry:target+page.entry,styles:page.styles.map(style=>target+style)})),
       resources:descriptor.resources.map(resource=>({...resource,path:target+resource.path})),
@@ -48,6 +48,11 @@ const {themeCatalog,themeSnapshot}=await import('./theme-settings-fixtures.mjs')
 const declarations=themeCatalog();declarations.fields=declarations.fields.filter(f=>f.module_id==='game_link/core'&&f.name==='image_theme');
 const snapshot={'game_link/core':{revision:7,fields:{image_theme:themeSnapshot()['game_link/core'].fields.image_theme}}};
 const bridge=`const catalog=${JSON.stringify(catalog)},declarations=${JSON.stringify(declarations)},snapshot=${JSON.stringify(snapshot)};
+const packageNameExample=new URLSearchParams(location.search).get('packageName');
+if(packageNameExample==='named'||packageNameExample==='blank'){
+ for(const module of catalog.modules)if(module.source?.kind==='extension')module.source.display_name=packageNameExample==='named'?'游戏扩展合集':'   ';
+ const notice=document.createElement('p');notice.id='synthetic-package-name-notice';notice.textContent='模拟元数据，不是实际 DLC 声明 · '+(packageNameExample==='named'?'已填写展示名':'空白展示名回退包名');notice.style='position:fixed;right:12px;bottom:12px;z-index:99999;padding:6px 10px;margin:0;max-width:calc(100vw - 24px);box-sizing:border-box;border:1px solid #a99866;background:#f7f4ed;color:#655071;font:13px system-ui';document.body.append(notice);
+}
 const showStates=new URLSearchParams(location.search).get('states')==='1';
 if(showStates){
   for(const [index,state] of [[1,'disabled'],[2,'unavailable']]){
@@ -80,5 +85,5 @@ window.YGLPreview={calls};
 `;
 await writeFile(resolve(out,'mock-bridge.js'),bridge);
 let html=await readFile(resolve(out,'index.html'),'utf8');html=html.replace('<script src="/api/plugin/page/bridge-sdk.js"></script>','<script src="./mock-bridge.js"></script>');await writeFile(resolve(out,'index.html'),html);
-await writeFile(resolve(out,'capture.html'),`<!doctype html><meta charset="utf-8"><style>body{margin:0;background:#ddd}iframe{border:0;display:block;width:1440px;height:1000px}</style><iframe id="view" title="Production UI"></iframe><script>const p=new URLSearchParams(location.search);view.style.width=(p.get('width')||1440)+'px';view.style.height=(p.get('height')||1000)+'px';view.src='./index.html?theme='+(p.get('theme')||'light')+'&controls='+(p.get('controls')||'0')+'&states='+(p.get('states')||'0')+'#'+(p.get('route')||'/module/ff14%2Fff14/config');</script>`);
+await writeFile(resolve(out,'capture.html'),`<!doctype html><meta charset="utf-8"><style>body{margin:0;background:#ddd}iframe{border:0;display:block;width:1440px;height:1000px}</style><iframe id="view" title="Production UI"></iframe><script>const p=new URLSearchParams(location.search);view.style.width=(p.get('width')||1440)+'px';view.style.height=(p.get('height')||1000)+'px';view.src='./index.html?theme='+(p.get('theme')||'light')+'&controls='+(p.get('controls')||'0')+'&states='+(p.get('states')||'0')+'&packageName='+(p.get('packageName')||'')+'#'+(p.get('route')||'/module/ff14%2Fff14/config');</script>`);
 console.log(out);

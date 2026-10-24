@@ -11,6 +11,7 @@ import asyncio
 import base64
 import hashlib
 import inspect
+import json
 import math
 from collections import deque
 from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -59,6 +60,75 @@ def _retry_after_seconds(response: HttpResponse) -> int | None:
     except (TypeError, ValueError, OverflowError):
         return None
     return seconds if 0 <= seconds <= 86400 else None
+
+
+def _redact_response_body(
+    body: bytes, secrets: tuple[str, ...], *, json_response: bool = False
+) -> bytes:
+    """Redact decoded JSON strings as well as literal non-JSON echoes.
+
+    JSON permits multiple spellings of the same string (including mixed
+    unicode escapes). Matching only serialized bytes cannot enforce the
+    credential boundary seen by a module calling json.loads.
+    """
+
+    def checked_object(pairs):
+        result = {}
+        for key, value in pairs:
+            # Check decoded keys before a dict can discard an earlier value.
+            if key in result:
+                raise SourceHttpError("invalid_response")
+            result[key] = value
+        return result
+
+    def redact(value):
+        if isinstance(value, str):
+            for secret in secrets:
+                value = value.replace(secret, "[redacted]")
+            return value
+        if isinstance(value, list):
+            return [redact(item) for item in value]
+        if isinstance(value, dict):
+            result = {}
+            for key, item in value.items():
+                safe_key = redact(key)
+                if safe_key in result:
+                    raise SourceHttpError("invalid_response")
+                result[safe_key] = redact(item)
+            return result
+        # Keep literal numeric/null/bool echoes from bypassing the previous
+        # raw-byte protection merely because JSON assigned them a scalar type.
+        literal = json.dumps(value, allow_nan=False)
+        if any(secret in literal for secret in secrets):
+            return "[redacted]"
+        return value
+
+    try:
+        parsed = json.loads(body, object_pairs_hook=checked_object)
+    except (json.JSONDecodeError, UnicodeError):
+        if json_response or body.lstrip().startswith(
+            (b"{", b"[", b'"', b"\xef\xbb\xbf", b"\xff\xfe", b"\xfe\xff")
+        ):
+            raise SourceHttpError("invalid_response") from None
+    except (ValueError, RecursionError, OverflowError):
+        # A decoder limit must not turn valid but expensive JSON into a raw
+        # byte bypass that a different module decoder could still consume.
+        raise SourceHttpError("invalid_response") from None
+    else:
+        try:
+            return json.dumps(
+                redact(parsed),
+                ensure_ascii=False,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+        except (ValueError, RecursionError, OverflowError):
+            raise SourceHttpError("invalid_response") from None
+    for secret in secrets:
+        body = body.replace(secret.encode("utf-8"), b"[redacted]")
+        escaped = json.dumps(secret, ensure_ascii=True)[1:-1].encode("ascii")
+        body = body.replace(escaped, b"[redacted]")
+    return body
 
 
 class HttpTransport(Protocol):
@@ -114,6 +184,10 @@ class CredentialLease:
     authorization: str = field(repr=False)
     generation: int
     secret_token: str = field(repr=False)
+    headers: tuple[tuple[str, str], ...] = field(default=(), repr=False)
+    body_fields: tuple[tuple[str, str], ...] = field(default=(), repr=False)
+    kind: str = "resource"
+    redactions: tuple[str, ...] = field(default=(), repr=False)
 
     def __repr__(self) -> str:
         return f"CredentialLease(generation={self.generation})"
@@ -168,7 +242,7 @@ class _AuthenticatedRequestProof:
     ) -> bool:
         return (
             self.channel is channel
-            and self.kind == "resource"
+            and self.kind in {"resource", "static"}
             and self.module_id == request.module_id
             and self.source_id == request.source_id
             and self.credential_ref == request.credential_ref
@@ -416,6 +490,8 @@ class SourceHttpService(SourceHttp):
         clock: Callable[[], float] = monotonic,
         module_id: str | None = None,
         credential_service: SourceCredentialAuthorizer | None = None,
+        request_budget=None,
+        budget_config=None,
     ) -> None:
         validate_contract(declarations)
         if isinstance(declarations, Mapping):
@@ -464,6 +540,8 @@ class SourceHttpService(SourceHttp):
         self._clock = clock
         self._module_id = module_id
         self._credential_service = credential_service
+        self._request_budget = request_budget
+        self._budget_config = budget_config
         self._credential_channel = getattr(transport, "_credential_channel", None)
         self._max_body_bytes = max_body_bytes
         self._max_response_bytes = max_response_bytes
@@ -489,12 +567,38 @@ class SourceHttpService(SourceHttp):
         if callable(close):
             await close()
 
+    async def _hourly_limit(self, declaration):
+        limit = declaration.requests_per_hour
+        if (
+            declaration.request_budget_config is not None
+            and self._budget_config is not None
+        ):
+            snapshot = await self._budget_config.current()
+            value = snapshot.values.get(declaration.request_budget_config)
+            if value is not None and value != "":
+                if type(value) is not int or not 1 <= value <= 1000000:
+                    raise SourceHttpError("request_rejected")
+                limit = value
+        return limit
+
+    async def budget(self, source_id):
+        from yomihime_game_link_sdk import HttpBudgetStatus
+
+        if type(source_id) is not str or source_id not in self._sources:
+            raise SourceHttpError("source_not_declared")
+        declaration = self._sources[source_id].declaration
+        limit = await self._hourly_limit(declaration)
+        if self._request_budget is None:
+            return HttpBudgetStatus(source_id, limit, 0, limit)
+        return await self._request_budget.status(declaration, limit)
+
     @public_boundary("service")
     async def fetch(
         self,
         request: HttpRequest,
         *,
         _check_authority: Callable[[], Awaitable[None]] | None = None,
+        _authorization_request: bool = False,
     ) -> HttpResponse:
         """Fetch one request after enforcing the declared source policy."""
 
@@ -502,6 +606,8 @@ class SourceHttpService(SourceHttp):
         source = self._sources.get(checked.source_id)
         if source is None:
             raise SourceHttpError("source_not_declared") from None
+        if source.declaration.authorization_only and _authorization_request is not True:
+            raise SourceHttpError("request_rejected") from None
         self._validate_limits(checked)
         loop = asyncio.get_running_loop()
         deadline = loop.time() + float(source.declaration.timeout_seconds)
@@ -522,7 +628,6 @@ class SourceHttpService(SourceHttp):
             source_acquired = True
             await self._check_authority(_check_authority, deadline)
             diagnostic("http_quota")
-            await self._reserve_quota(source, deadline)
             lease = await self._credential_lease(source.declaration, checked, deadline)
             await self._check_authority(_check_authority, deadline)
             result = await self._perform_resource_request(
@@ -535,7 +640,6 @@ class SourceHttpService(SourceHttp):
             if response.status_code == 401 and lease is not None:
                 await self._invalidate_credential(source.declaration, lease, deadline)
                 if checked.method == "GET":
-                    await self._reserve_quota(source, deadline)
                     refreshed = await self._credential_lease(
                         source.declaration, checked, deadline
                     )
@@ -558,7 +662,6 @@ class SourceHttpService(SourceHttp):
                     source.declaration, checked, response, redirect_count, visited
                 )
                 await self._check_authority(_check_authority, deadline)
-                await self._reserve_quota(source, deadline)
                 await self._check_authority(_check_authority, deadline)
                 response = await self._perform_resource_request(
                     source.declaration, redirected, None, deadline
@@ -568,11 +671,19 @@ class SourceHttpService(SourceHttp):
                 redirect_count += 1
                 visited.add((checked.path, checked.query))
             if 400 <= response.status_code <= 499:
+                status = (
+                    await self.budget(source.declaration.source_id)
+                    if response.status_code == 429 and self._request_budget is not None
+                    else None
+                )
                 raise SourceHttpError(
                     "upstream_error",
                     status_code=response.status_code,
                     retry_after_seconds=_retry_after_seconds(response)
                     if response.status_code == 429
+                    else None,
+                    next_available_at=status.next_available_at
+                    if status is not None
                     else None,
                 ) from None
             if 500 <= response.status_code <= 599:
@@ -756,6 +867,7 @@ class SourceHttpService(SourceHttp):
         validate_contract(declaration)
         validate_contract(checked)
         headers = dict(checked.headers)
+        body = checked.body
         remaining = deadline - asyncio.get_running_loop().time()
         self._ensure_remaining(deadline)
         proof = None
@@ -763,10 +875,27 @@ class SourceHttpService(SourceHttp):
             module_id = self._module_id
             if declaration.credential_ref is None or module_id is None:
                 raise SourceHttpError("credentials_unavailable") from None
-            headers["Authorization"] = lease.authorization
+            if lease.kind == "static":
+                headers.update(lease.headers)
+                if lease.body_fields:
+                    try:
+                        payload = json.loads(body or b"{}")
+                        if type(payload) is not dict or any(
+                            key in payload for key, _ in lease.body_fields
+                        ):
+                            raise ValueError
+                        payload.update(lease.body_fields)
+                        body = json.dumps(
+                            payload, ensure_ascii=False, separators=(",", ":")
+                        ).encode("utf-8")
+                        headers["Content-Type"] = "application/json"
+                    except Exception:
+                        raise SourceHttpError("request_rejected") from None
+            else:
+                headers["Authorization"] = lease.authorization
             proof = _make_authenticated_request_proof(
                 self._credential_channel,
-                kind="resource",
+                kind=lease.kind,
                 module_id=module_id,
                 source_id=declaration.source_id,
                 credential_ref=declaration.credential_ref,
@@ -774,7 +903,7 @@ class SourceHttpService(SourceHttp):
                 path=checked.path,
                 method=checked.method,
                 query=checked.query,
-                body=checked.body,
+                body=body,
                 headers=headers,
                 authorization=lease.authorization,
                 timeout_seconds=remaining,
@@ -787,21 +916,55 @@ class SourceHttpService(SourceHttp):
             checked.path,
             checked.method,
             checked.query,
-            checked.body,
+            body,
             headers,
-            declaration.credential_ref,
+            declaration.credential_ref if lease is not None else None,
             remaining,
             self._max_response_bytes,
             self._module_id,
             proof,
         )
         try:
+            source = self._sources[declaration.source_id]
+            if self._request_budget is not None:
+                limit = await self._hourly_limit(declaration)
+                await self._request_budget.reserve(declaration, limit)
+            else:
+                await self._reserve_quota(source, deadline)
             diagnostic("http_transport")
-            return self._validate_response(
+            response = self._validate_response(
                 await self._wait_for_deadline(
                     self._invoke_transport(transport_request), deadline
                 )
             )
+            if response.status_code == 429 and self._request_budget is not None:
+                await self._request_budget.cool_down(
+                    declaration, _retry_after_seconds(response) or 60
+                )
+            if lease is not None and lease.redactions:
+                safe_body = _redact_response_body(
+                    response.body,
+                    lease.redactions,
+                    json_response=any(
+                        name.lower() == "content-type"
+                        and (
+                            value.split(";", 1)[0].strip().lower() == "application/json"
+                            or value.split(";", 1)[0].strip().lower().endswith("+json")
+                        )
+                        for name, value in response.headers.items()
+                    ),
+                )
+                safe_headers = dict(response.headers)
+                if len(safe_body) > self._max_response_bytes:
+                    raise SourceHttpError("response_too_large")
+                for secret in lease.redactions:
+                    safe_headers = {
+                        name: value.replace(secret, "[redacted]")
+                        for name, value in safe_headers.items()
+                        if secret not in name
+                    }
+                response = HttpResponse(response.status_code, safe_headers, safe_body)
+            return response
         except asyncio.CancelledError:
             raise
         except SourceHttpError:

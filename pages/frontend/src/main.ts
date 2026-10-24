@@ -11,7 +11,7 @@ import {createManagementPage,validateCatalog as configurationCatalog,validateSna
 import {createModuleManagement} from './module-management';
 import {createInlineConfirmation} from './confirmation';
 import {contextBoundary} from './lifecycle';
-import {moduleLabels} from './catalog';
+import {moduleLabels,moduleGroups} from './catalog';
 declare global {interface Window {AstrBotPluginView: Bridge}}
 const App = defineComponent({setup() {
   const revision = ref(0), root = ref<HTMLElement|null>(null), main = ref<HTMLElement|null>(null), settingsRoot=ref<HTMLElement|null>(null), modulesRoot=ref<HTMLElement|null>(null),maintenanceRoot=ref<HTMLElement|null>(null),maintenanceOpen=ref(false);
@@ -108,9 +108,9 @@ const App = defineComponent({setup() {
             home?h('section',{class:'workspace-index','aria-label':'游戏连结'},[
               h('div',{class:'workspace-catalog'},[
                 h('div',{class:'workspace-index-heading'},[h('h2',{class:'shell-eyebrow'},'游戏目录'),h('span',{class:'workspace-count'},modules.length+' 个模块')]),
-                ...modules.map(module=>h('article',{class:'workspace-module',key:module.module_id},[
-                  h('div',{class:'workspace-module-heading'},[h('div',[h('div',{class:'workspace-module-title'},[h('h2',[link(label(module.module_id)+' →','#/module/'+encodeURIComponent(module.module_id),false,()=>shell?.selectModule(module.module_id),'workspace-status-'+encodeURIComponent(module.module_id))]),workspaceStatus(module.module_id,module.state)]),module.display?.summary?h('p',{class:'workspace-module-summary'},module.display.summary):null,!module.pages.length?h('p',{class:'workspace-module-description'},'暂无可用功能，请在模块管理中核对状态。'):null]),module.display?.logo_resource?h(LogoMark,{class:'workspace-emblem workspace-emblem-resource',style:{maskImage:`url("./${module.display.logo_resource}")`}}):h('span',{class:'workspace-emblem','aria-hidden':'true'},'✦')]),
-                ])),
+                ...moduleGroups(modules).map(group=>h('section',{class:'workspace-package',key:group.key,'aria-label':group.title},[h('h3',{class:'workspace-package-title'},group.title),h('div',{class:'workspace-package-grid'},group.modules.map(module=>h('article',{class:'workspace-module',key:module.module_id},[
+                  h('div',{class:'workspace-module-heading'},[h('div',[h('div',{class:'workspace-module-title'},[h('h2',{'aria-level':4},[link(label(module.module_id)+' →','#/module/'+encodeURIComponent(module.module_id),false,()=>shell?.selectModule(module.module_id),'workspace-status-'+encodeURIComponent(module.module_id))]),workspaceStatus(module.module_id,module.state)]),module.display?.summary?h('p',{class:'workspace-module-summary'},module.display.summary):null,!module.pages.length?h('p',{class:'workspace-module-description'},'暂无可用功能，请在模块管理中核对状态。'):null]),module.display?.logo_resource?h(LogoMark,{class:'workspace-emblem workspace-emblem-resource',style:{maskImage:`url("./${module.display.logo_resource}")`}}):h('span',{class:'workspace-emblem','aria-hidden':'true'},'✦')]),
+                ])))])),
                 !modules.length?h('p',{class:'shell-empty'},'暂无可用模块。可前往模块管理核对状态。'):null,
               ]),
               h('aside',{class:'workspace-aside','aria-label':'工作区管理'},[h('h2',{class:'shell-eyebrow'},'工作区管理'),workspaceLink('全局设置','#/settings',()=>shell?.selectSettings(),'settings'),workspaceLink('模块管理','#/modules',()=>shell?.selectModules(),'grid')]),

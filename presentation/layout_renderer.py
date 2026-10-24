@@ -24,6 +24,7 @@ from yomihime_game_link_sdk.cards import (
     Asset,
     Cell,
     CollageItem,
+    DenseCollage,
     ResourceImage,
     TaggedText,
     WeightedCollage,
@@ -273,13 +274,23 @@ def _validate(document, bounds):
     if type(document) is not Document or type(bounds) is not BitmapBounds:
         _fail()
     hard = BitmapBounds()
-    collage = len(document.blocks) == 1 and type(document.blocks[0]) is WeightedCollage
+    dense = len(document.blocks) == 1 and type(document.blocks[0]) is DenseCollage
+    collage = len(document.blocks) == 1 and type(document.blocks[0]) in (
+        WeightedCollage,
+        DenseCollage,
+    )
     for field in fields(bounds):
         value = getattr(bounds, field.name)
         ceiling = (
             4 * 1024 * 1024
             if collage and field.name == "max_bytes"
-            else getattr(hard, field.name)
+            else (
+                160_000
+                if dense and field.name == "max_chars"
+                else 6000
+                if dense and field.name == "max_input_lines"
+                else getattr(hard, field.name)
+            )
         )
         if type(value) is not int or not 1 <= value <= ceiling:
             _fail()
@@ -395,7 +406,7 @@ def _validate(document, bounds):
         )
         if asset_bytes > (32 * 1024 * 1024 if collage else 8_388_608):
             _fail("byte_limit")
-        if asset_count > (201 if collage else 32):
+        if asset_count > (1001 if dense else 201 if collage else 32):
             _fail("layout_overflow")
 
     def blocks(values, depth):
@@ -483,6 +494,22 @@ def _validate(document, bounds):
             content(value.caption)
             if value.fit not in ("contain", "cover"):
                 _fail()
+        elif type(value) is DenseCollage:
+            # Canonical validation owns the additive DTO and aggregate budgets.
+            from ..core.contracts.cards import validate_card
+
+            try:
+                validate_card(document)
+            except (ValueError, TypeError):
+                _fail()
+            for item in value.items:
+                content(item.key)
+                content(item.title)
+                content(item.caption)
+                if type(item.image) is Asset:
+                    asset(item.image)
+                elif type(item.image) is ResourceImage:
+                    content(item.image.alt)
         elif type(value) is WeightedCollage:
             from .layout_collage import MAX_COLLAGE_ITEMS
 
@@ -794,12 +821,13 @@ class _Layout:
             return self.text(
                 value.content, x, y, width, size, path, role, value.align, value.wrap
             )
-        if type(value) is WeightedCollage:
+        if type(value) in (WeightedCollage, DenseCollage):
+            dense = type(value) is DenseCollage
             page = self.collage_page
-            if page is None or width != page.width:
+            if page is None or (not dense and width != page.width):
                 _fail("invalid_input")
             heading = (
-                f"第 {page.index}/{page.count} 页（排名顺序） · "
+                f"第 {page.index}/{page.count} 页（{'密排补空' if dense else '排名顺序'}） · "
                 f"本页 {len(page.tiles)} 项 · 共 {page.total_items} 项"
             )
             y += self.text(heading, x, y, width, 16, path + "/page", "secondary") + 6
@@ -809,7 +837,9 @@ class _Layout:
             )
             y += (
                 self.text(
-                    f"本页全局排名：{ranges}",
+                    "海报位置按大小补空；逻辑排名见文字列表"
+                    if dense
+                    else f"本页全局排名：{ranges}",
                     x,
                     y,
                     width,
@@ -819,6 +849,8 @@ class _Layout:
                 )
                 + 12
             )
+            if dense:
+                x, width = 0, page.width
             grid_y = y
             for tile in page.tiles:
                 left, tile_top, right, bottom = tile.box
@@ -832,13 +864,26 @@ class _Layout:
                 source = tile.item.image
                 if type(source) is Asset:
                     self.images.append(
-                        _Image(source, (tx0, ty0, tx1, ty1), "cover", 2 / 3)
+                        _Image(
+                            source,
+                            (tx0, ty0, tx1, ty1),
+                            value.fit if dense else "cover",
+                            None if dense else 2 / 3,
+                        )
                     )
                 elif type(source) is ResourceImage and source.required:
                     _fail("invalid_input")
                 # The title and caption are literal, bounded labels. The complete
                 # ranked list remains in the DisplayDocument text projection.
-                label_width = max(8, tx1 - tx0 - 16)
+                # Tiny dense posters retain the artwork. Complete labels stay
+                # in the logical list; overlays would cover the smallest cell.
+                if dense and tx1 - tx0 < 108:
+                    self.boxes.append(
+                        LayoutBox(path + "/tile", "collage_tile", (tx0, ty0, tx1, ty1))
+                    )
+                    continue
+                label_inset = 16 if dense else 8
+                label_width = max(8, tx1 - tx0 - 2 * label_inset)
                 title = tile.item.title or tile.item.key
                 caption = tile.item.caption
                 max_chars = max(1, int(label_width // 20) - 1)
@@ -852,7 +897,7 @@ class _Layout:
                 )
                 self.text(
                     title,
-                    tx0 + 8,
+                    tx0 + label_inset,
                     ty1 - label_height - 5,
                     label_width,
                     16,
@@ -863,7 +908,7 @@ class _Layout:
                 if caption:
                     self.text(
                         caption,
-                        tx0 + 8,
+                        tx0 + label_inset,
                         ty1 - 25,
                         label_width,
                         16,
@@ -1236,7 +1281,7 @@ def render_document(
         _fail("dependency_missing")
     if (
         len(document.blocks) == 1
-        and type(document.blocks[0]) is WeightedCollage
+        and type(document.blocks[0]) in (WeightedCollage, DenseCollage)
         and _collage_page is None
     ):
         _fail("invalid_input")
@@ -1340,21 +1385,43 @@ def render_document_pages(
 
     if type(document) is not Document:
         _fail()
-    if len(document.blocks) != 1 or type(document.blocks[0]) is not WeightedCollage:
+    if len(document.blocks) != 1 or type(document.blocks[0]) not in (
+        WeightedCollage,
+        DenseCollage,
+    ):
         return (render_document(document, bounds=bounds, font_provider=font_provider),)
     if bounds.max_bytes != BitmapBounds().max_bytes:
         # An explicit lower caller budget remains effective.
         page_bytes = min(bounds.max_bytes, 4 * 1024 * 1024)
     else:
         page_bytes = 4 * 1024 * 1024
-    collage_bounds = replace(bounds, max_bytes=page_bytes)
+    dense = type(document.blocks[0]) is DenseCollage
+    collage_bounds = replace(
+        bounds,
+        max_bytes=page_bytes,
+        max_chars=160_000 if dense else bounds.max_chars,
+        max_input_lines=6000 if dense else bounds.max_input_lines,
+    )
     _validate(document, collage_bounds)
     # A single portrait needs no wide empty frame. Keep its actual PNG width
     # within the declared document width and the standard pixel work budget.
-    if len(document.blocks[0].items) == 1 and document.width > 760:
+    if not dense and len(document.blocks[0].items) == 1 and document.width > 760:
         document = replace(document, width=760)
     margin = TOKENS[document.layout].margin
-    pages = plan_collage(document.blocks[0], document.width - 2 * margin)
+    if dense:
+        from .layout_collage import CollagePage
+        from .layout_dense import plan_dense
+
+        empty = CollagePage(1, 8, document.width, 0, (), len(document.blocks[0].items))
+        layout, measured = _prepare(document, collage_bounds, font_provider, empty)
+        layout.fonts.clear()
+        pixel_limit = min(bounds.max_pixels, bounds.max_rich_work_bytes // 36)
+        body_height = (
+            min(bounds.max_height, pixel_limit // document.width) - measured.height
+        )
+        pages = plan_dense(document.blocks[0], max_height=body_height)
+    else:
+        pages = plan_collage(document.blocks[0], document.width - 2 * margin)
     if document.logo is not None:
         logo_bytes = (
             len(document.logo.content.encode("utf-8"))

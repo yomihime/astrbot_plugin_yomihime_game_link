@@ -13,6 +13,17 @@
 
 磁盘声明包含 `package_id`、`contract_version`、局部 `module_id` 和 `factory_entry`，全局 owner 是 `package_id/module_id`。现有 FF14 的 `factory_entry="module:Factory"`；`ModuleFactory.create(ModuleServices)` 返回实现 `handlers/start/stop/check_health` 的实例，handlers 的 capabilities、collectors 和 evaluators 必须与声明精确一致。生产链经可信授权、不可变源码捕获、工厂解析、受限服务创建、生命周期接管后注册；测试直接调用 Registry 注册 fixture 不等于第二个生产包安装成功。
 
+### DLC 包显示名称（SDK a17 候选）
+
+此候选在 `yomihime.manifest.json` 根对象增加可选 `display_name`，例如 `"display_name": "Steam 游戏扩展"`；它属于整个包，不是某个模块的 `display.default_name`。SDK `PackageManifest` 在末尾提供同名可选字段，旧必填字段、`package_id` 和模块 owner 均保持不变。
+
+- 值只能是字符串或 `null`，原始字符串最多 128 个 Unicode 码点；拒绝 Unicode `Cc`、`Cf`、`Cs` 类字符，包括换行、制表、零宽和双向格式控制符。先验证这些限制，再检查是否全为空白；有效非空名称保留原文，包括首尾空格。
+- 未填写、`null`、空字符串或仅含合法空白时规范化为 `null`；首页回退显示 `package_id`。有效名称作为普通文字显示，不解释 HTML，也不从模块名称、目录或插件类名猜测包名。
+- Core 只从当前可信登记且与 Registry 模块声明精确匹配的外部包投影 `source.display_name`；同一包的模块共用这个名称。来源未知或内置时该字段为 `null`，内置分组仍显示「内置模块」。名称不授予调用、管理或资源权限。
+- 旧 Core 会拒绝这个新根字段，并非跨版本可用的额外 JSON；包声明变化仍遵守现有捕获、撤销和重启边界，不支持通过改磁盘文本热更新名称。
+
+配对边界：这些字段属于新的 SDK `0.1.0a17` 候选；构建验证对应 wheel 与内容 pins，不沿用旧 a16 工件。现有外部 DLC 的精确 SDK pin 须另行更新并验证后才能配对部署。本轮只改 Core，不修改或发布实际 DLC 包。
+
 | 维护对象 | 实际入口与检查位置 |
 | --- | --- |
 | 能力、命令、工具、字段、来源和页面声明 | [FF14 manifest](../modules/ff14/yomihime.manifest.json)；声明必须通过磁盘解析与固定 SDK 合同校验 |
@@ -62,7 +73,7 @@ Core 与模块的命名空间配置是当前读写权威；Core 目录不依赖 
 
 `disable` 关闭业务准入，继续允许模块设置与启用管理。显式 `unload` 退出 active 普通/凭据目录、页面、来源、工具和 owner 注册，但模块管理仍显示可信恢复候选；保留最大部署政策不允许旧请求在卸载后提交。精确 owner、epoch 和生命周期检查不授予配置字段读写权。
 
-当前 SDK 为 `0.1.0a16`，模块 ABI 为 `2.0`，输出/展示/存储合同为 `1.8.0`，磁盘/工厂协议为 `1`；这些版本各自描述不同合同。SDK a10 增加 invocation-scoped diagnostics 服务：现有模块消费者可继续使用原服务；实现 `InvocationServices` 的 Host provider 与测试替身须提供 diagnostics。依赖此属性的新模块不保证运行于不含它的旧 Host。构建时核对固定 wheel 字节与来源；版本和 ABI 声明不替代具体安装验证。
+当前 SDK 为 `0.1.0a17`，模块 ABI 为 `2.0`，输出/展示/存储合同为 `1.8.0`，磁盘/工厂协议为 `1`；这些版本各自描述不同合同。SDK a10 增加 invocation-scoped diagnostics 服务：现有模块消费者可继续使用原服务；实现 `InvocationServices` 的 Host provider 与测试替身须提供 diagnostics。依赖此属性的新模块不保证运行于不含它的旧 Host。构建时核对固定 wheel 字节与来源；版本和 ABI 声明不替代具体安装验证。
 
 SDK 的后台调度声明仍受 PUBLIC ownership、固定参数和 schema 验证约束；细节见[SDK 说明](module-sdk.md#background-collectors)。历史候选和验收流水不属于当前模块维护合同。
 

@@ -759,6 +759,94 @@ class CoreRuntimeTests(unittest.IsolatedAsyncioTestCase):
             release.set()
             await runtime.close(timeout=0.5)
 
+    async def test_c3_declared_subscription_gate_initializes_without_bundled_trust_or_activation(
+        self,
+    ):
+        root = self.root / "extensions" / "private"
+        root.mkdir(parents=True)
+        manifest = _private_manifest()
+        module = manifest["modules"][0]
+        module["sources"] = [{"source_id": "source", "host": "example.test"}]
+        module["config_fields"] = [
+            {
+                "name": "subscription_enabled",
+                "default": True,
+                "value_schema": {"type": "boolean"},
+            },
+            {
+                "name": "poll_interval_seconds",
+                "default": 300,
+                "value_schema": {"type": "integer", "minimum": 60},
+            },
+        ]
+        module["schedules"] = [
+            {
+                "collector_id": "watch",
+                "key_version": 1,
+                "source_id": "source",
+                "data_version": 1,
+                "input_schema": {
+                    "type": "object",
+                    "properties": {},
+                    "required": [],
+                    "additionalProperties": False,
+                },
+                "shared_scope": "public",
+                "trigger": "periodic",
+                "minimum_interval_seconds": 60,
+                "default_interval_seconds": 300,
+                "interval_config_key": "poll_interval_seconds",
+            }
+        ]
+        module["subscriptions"] = [
+            {
+                "type_id": "watch",
+                "collector_id": "watch",
+                "matcher_id": "watch",
+                "filter_schema": {
+                    "type": "object",
+                    "properties": {},
+                    "required": [],
+                    "additionalProperties": False,
+                },
+                "notification_modes": ["instant"],
+                "enabled_config_key": "subscription_enabled",
+            }
+        ]
+        (root / "yomihime.manifest.json").write_text(
+            json.dumps(manifest), encoding="utf-8"
+        )
+        runtime = self._runtime(source=_FactorySource(_Factory(_Handler())))
+        try:
+            await runtime.start()
+            self.assertEqual(
+                runtime._declared_subscription_gate_specs,
+                {"private/mod": "subscription_enabled"},
+            )
+            self.assertEqual(dict(runtime._trusted_subscription_gates), {})
+            binding = runtime.b04_repositories.lifecycle._subscription_gate_bindings[
+                "private/mod"
+            ]
+            self.assertTrue(binding.declared)
+            state = await runtime.subscription_gate_state("private/mod")
+            self.assertTrue(state.supported)
+            self.assertFalse(state.can_run)
+            self.assertEqual(
+                self._gate_sql(
+                    runtime, "SELECT phase FROM subscription_gate_bootstrap"
+                ),
+                [("pending",)],
+            )
+            self.assertEqual(
+                self._gate_sql(
+                    runtime,
+                    "SELECT value_json FROM config_entries WHERE field='subscription_enabled'",
+                ),
+                [("true",)],
+            )
+        finally:
+            await runtime.close(timeout=0.5)
+
     def _gate_packages(self):
         extension_root = self.root / "extensions"
         extension_root.mkdir(exist_ok=True)
@@ -1366,6 +1454,237 @@ class CoreRuntimeTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 self.assertTrue(await runtime.close())
         self.assertEqual(runtime.output._message_port.calls, [])
+
+    async def test_catalog_source_uses_exact_host_metadata_not_names_or_discovery(self):
+        manifest = _private_manifest()
+        manifest["package_id"] = "ff14"
+        manifest["modules"][0]["route"] = "builtin"
+        manifest["modules"][0]["display"] = {"default_name": "内置"}
+        directory = self.root / "extensions" / "ff14"
+        directory.mkdir(parents=True)
+        (directory / "yomihime.manifest.json").write_text(
+            json.dumps(manifest), encoding="utf-8"
+        )
+        runtime = self._runtime(source=_FactorySource(_Factory(_Handler())))
+        await runtime.start()
+        try:
+            await runtime.admin_credential_repository.bootstrap(
+                _digest(token_urlsafe(32))
+            )
+            await runtime.admin_operations.set_enabled(
+                None,
+                "ff14/mod",
+                True,
+                expected_registry_revision=runtime.registry.snapshot().revision,
+                authorization=_AdminContext(),
+            )
+            package = runtime.extension_runtime.candidate("ff14").package.manifest
+            current = package.modules[0]
+
+            def source():
+                return runtime.public_module_catalog()["modules"][0]["source"]
+
+            self.assertEqual(
+                source(),
+                {"kind": "unknown", "package_id": "ff14", "display_name": None},
+            )
+            with patch.object(
+                runtime, "_trusted_bundled_manifests", {"ff14/mod": current}
+            ):
+                self.assertEqual(
+                    source(),
+                    {"kind": "builtin", "package_id": "ff14", "display_name": None},
+                )
+                changed = replace(current, module_version="2.0.0")
+                snapshot = runtime.registry.snapshot()
+                changed_snapshot = replace(
+                    snapshot,
+                    modules={
+                        "ff14/mod": replace(
+                            snapshot.modules["ff14/mod"], manifest=changed
+                        )
+                    },
+                )
+                with patch.object(
+                    runtime.registry, "snapshot", return_value=changed_snapshot
+                ):
+                    self.assertEqual(source()["kind"], "unknown")
+                # Independent and conflicting host records must never imply built-in.
+                runtime.admin_operations.attach_external_package(package)
+                self.assertEqual(source()["kind"], "unknown")
+                runtime.admin_operations.detach_external_package(package)
+
+            runtime.admin_operations.attach_external_package(package)
+            with (
+                patch.object(
+                    runtime.extension_runtime,
+                    "candidate",
+                    side_effect=AssertionError("catalog consulted candidate discovery"),
+                ),
+                patch.object(
+                    runtime.extension_runtime,
+                    "scan",
+                    side_effect=AssertionError("catalog scanned the filesystem"),
+                ),
+            ):
+                self.assertEqual(
+                    source(),
+                    {"kind": "extension", "package_id": "ff14", "display_name": None},
+                )
+            runtime.admin_operations.detach_external_package(package)
+            self.assertEqual(source()["kind"], "unknown")
+
+            # A current package id with a different module declaration is not proof.
+            changed_package = replace(
+                package, modules=(replace(current, module_version="2.0.0"),)
+            )
+            runtime.admin_operations.attach_external_package(changed_package)
+            self.assertEqual(source()["kind"], "unknown")
+            runtime.admin_operations.detach_external_package(changed_package)
+            self.assertNotIn(
+                str(self.root), json.dumps(runtime.public_module_catalog())
+            )
+        finally:
+            self.assertTrue(await runtime.close())
+
+    async def test_catalog_source_preserves_availability_and_resource_boundaries(self):
+        from tests.fixtures.settings_module import write_settings_module
+
+        runtime = self._runtime()
+        owner = write_settings_module(self.root / "extensions", "dlc_fixture", "demo")
+        await runtime.start()
+        try:
+            await runtime.admin_credential_repository.bootstrap(
+                _digest(token_urlsafe(32))
+            )
+            package = runtime.extension_runtime.candidate(
+                "dlc_fixture"
+            ).package.manifest
+            runtime.admin_operations.attach_external_package(package)
+            await runtime.admin_operations.set_enabled(
+                None,
+                owner,
+                True,
+                expected_registry_revision=runtime.registry.snapshot().revision,
+                authorization=_AdminContext(),
+            )
+
+            def selected():
+                return runtime.public_module_catalog()["modules"][0]
+
+            expected = {
+                "kind": "extension",
+                "package_id": "dlc_fixture",
+                "display_name": None,
+            }
+            loaded = selected()
+            self.assertEqual(loaded["source"], expected)
+            self.assertEqual(loaded["state"], "loaded")
+            self.assertTrue(loaded["pages"])
+            self.assertTrue(loaded["resources"])
+            with patch.object(runtime, "_closing", True):
+                unavailable = selected()
+            self.assertEqual(unavailable["source"], expected)
+            self.assertEqual(unavailable["state"], "unavailable")
+            self.assertEqual(unavailable["pages"], [])
+            self.assertEqual(unavailable["resources"], [])
+            await runtime.admin_operations.set_enabled(
+                None,
+                owner,
+                False,
+                expected_registry_revision=runtime.registry.snapshot().revision,
+                authorization=_AdminContext(),
+            )
+            disabled = selected()
+            self.assertEqual(disabled["source"], expected)
+            self.assertEqual(disabled["state"], "disabled")
+            self.assertEqual(disabled["pages"], [])
+            self.assertEqual(disabled["resources"], [])
+            runtime.admin_operations.detach_external_package(package)
+            self.assertEqual(selected()["source"]["kind"], "unknown")
+        finally:
+            self.assertTrue(await runtime.close())
+
+    async def test_catalog_package_names_are_shared_only_by_exact_external_owners(self):
+        manifest = _private_manifest()
+        manifest["package_id"] = "dlc_fixture"
+        manifest["display_name"] = "  星港扩展  "
+        base = manifest["modules"][0]
+        manifest["modules"] = [
+            {
+                **base,
+                "module_id": name,
+                "route": name,
+                "display": {"default_name": "Not the package name"},
+            }
+            for name in ("one", "two")
+        ]
+        directory = self.root / "extensions" / "dlc_fixture"
+        directory.mkdir(parents=True)
+        (directory / "yomihime.manifest.json").write_text(
+            json.dumps(manifest), encoding="utf-8"
+        )
+        runtime = self._runtime(source=_FactorySource(_Factory(_Handler())))
+        await runtime.start()
+        try:
+            await runtime.admin_credential_repository.bootstrap(
+                _digest(token_urlsafe(32))
+            )
+            for name in ("one", "two"):
+                await runtime.admin_operations.set_enabled(
+                    None,
+                    f"dlc_fixture/{name}",
+                    True,
+                    expected_registry_revision=runtime.registry.snapshot().revision,
+                    authorization=_AdminContext(),
+                )
+            package = runtime.extension_runtime.candidate(
+                "dlc_fixture"
+            ).package.manifest
+            self.assertEqual(package.display_name, "  星港扩展  ")
+
+            def sources():
+                return [
+                    item["source"]
+                    for item in runtime.public_module_catalog()["modules"]
+                ]
+
+            self.assertEqual([item["display_name"] for item in sources()], [None, None])
+            for name, expected in (
+                (package.display_name, "  星港扩展  "),
+                (None, None),
+                ("", None),
+                ("   ", None),
+            ):
+                declared = replace(package, display_name=name)
+                runtime.admin_operations.attach_external_package(declared)
+                self.assertEqual(
+                    sources(),
+                    [
+                        {
+                            "kind": "extension",
+                            "package_id": "dlc_fixture",
+                            "display_name": expected,
+                        }
+                    ]
+                    * 2,
+                )
+                runtime.admin_operations.detach_external_package(declared)
+                self.assertEqual(
+                    [item["display_name"] for item in sources()], [None, None]
+                )
+            changed = replace(
+                package,
+                modules=tuple(
+                    replace(module, module_version="2.0.0")
+                    for module in package.modules
+                ),
+            )
+            runtime.admin_operations.attach_external_package(changed)
+            self.assertEqual([item["display_name"] for item in sources()], [None, None])
+            runtime.admin_operations.detach_external_package(changed)
+        finally:
+            self.assertTrue(await runtime.close())
 
     async def test_catalog_failures_are_not_empty_success(self):
         runtime = self._runtime()

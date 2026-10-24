@@ -111,13 +111,16 @@ class BoundCollageReferenceTests(unittest.IsolatedAsyncioTestCase):
         self,
     ):
         payload = fixtures._png("#234567").content
-        for method in ("metadata", "read"):
+        for method in ("_collage_snapshot", "_collage_read"):
             with self.subTest(method=method):
                 view, scope = await self.subject.bound()
                 ref = await scope.resources.store("image/png", payload)
                 original = getattr(ResourceAccessService, method)
+                calls = 0
 
                 async def revoke(service, *args, **kwargs):
+                    nonlocal calls
+                    calls += 1
                     result = await original(service, *args, **kwargs)
                     self.subject.runtime.issuer.release(view)
                     _, lease = self.subject.views.pop()
@@ -129,6 +132,7 @@ class BoundCollageReferenceTests(unittest.IsolatedAsyncioTestCase):
                         await scope.resources._read_collage_reference(
                             ref.asset_id, CacheVisibility.USER
                         )
+                self.assertEqual(calls, 1)
 
     async def test_cancel_and_missing_preserve_original_resource_semantics(self):
         _, scope = await self.subject.bound()
@@ -138,20 +142,24 @@ class BoundCollageReferenceTests(unittest.IsolatedAsyncioTestCase):
                 "asset_absent", CacheVisibility.USER
             )
         entered, release = asyncio.Event(), asyncio.Event()
-        original = ResourceAccessService.read
+        original = ResourceAccessService._collage_read
+        calls = 0
 
         async def paused(service, *args, **kwargs):
+            nonlocal calls
+            calls += 1
             entered.set()
             await release.wait()
             return await original(service, *args, **kwargs)
 
-        with patch.object(ResourceAccessService, "read", paused):
+        with patch.object(ResourceAccessService, "_collage_read", paused):
             task = asyncio.create_task(
                 scope.resources._read_collage_reference(
                     ref.asset_id, CacheVisibility.USER
                 )
             )
-            await entered.wait()
+            await asyncio.wait_for(entered.wait(), timeout=2)
+            self.assertEqual(calls, 1)
             task.cancel()
             with self.assertRaises(asyncio.CancelledError):
                 await task
@@ -169,7 +177,7 @@ class BoundCollageReferenceTests(unittest.IsolatedAsyncioTestCase):
             visibility=CacheVisibility.PUBLIC,
         )
         base = await self.subject.grant()
-        for method in ("metadata", "read"):
+        for method in ("_collage_snapshot", "_collage_read"):
             with self.subTest(method=method):
                 grant = replace(
                     base, grant_id="snapshot-" + method, account_id="snapshot-" + method
@@ -181,8 +189,11 @@ class BoundCollageReferenceTests(unittest.IsolatedAsyncioTestCase):
                     capability="private.read", grant=grant
                 )
                 original = getattr(ResourceAccessService, method)
+                calls = 0
 
                 async def revoke(service, *args, **kwargs):
+                    nonlocal calls
+                    calls += 1
                     result = await original(service, *args, **kwargs)
                     await self.subject.runtime.repositories.authorization.revoke_grant(
                         grant, expected_revision=1
@@ -194,6 +205,7 @@ class BoundCollageReferenceTests(unittest.IsolatedAsyncioTestCase):
                         await scope.resources._read_collage_reference(
                             ref.asset_id, CacheVisibility.PUBLIC
                         )
+                self.assertEqual(calls, 1)
 
     async def test_real_snapshot_retains_missing_required_and_source_budget(self):
         _, scope = await self.subject.bound()
@@ -283,7 +295,7 @@ class BoundCollageReferenceTests(unittest.IsolatedAsyncioTestCase):
         )
         with patch.object(
             ResourceAccessService,
-            "read",
+            "_collage_read",
             side_effect=AssertionError("metadata rejected before bytes"),
         ) as read:
             with patch("ygl_test_subject.services.collage_cache._SOURCE_LIMIT", 1):
@@ -310,7 +322,7 @@ class BoundCollageReferenceTests(unittest.IsolatedAsyncioTestCase):
         )
         with patch.object(
             ResourceAccessService,
-            "read",
+            "_collage_read",
             side_effect=AssertionError("oversized source must not read"),
         ) as read:
             with self.assertRaises(fixtures.RequiredCollageResourceUnavailable):
@@ -362,10 +374,10 @@ class BoundCollageReferenceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_owner_route_and_sqlite_principal_change_at_snapshot_end_reject(self):
         for mutation, phase in (
-            ("route", "metadata"),
-            ("route", "read"),
-            ("principal", "metadata"),
-            ("principal", "read"),
+            ("route", "_collage_snapshot"),
+            ("route", "_collage_read"),
+            ("principal", "_collage_snapshot"),
+            ("principal", "_collage_read"),
         ):
             with self.subTest(mutation=mutation, phase=phase):
                 owner = await fixtures.GeneratedPngFixture().start(owner=True)
@@ -398,8 +410,11 @@ class BoundCollageReferenceTests(unittest.IsolatedAsyncioTestCase):
                         "image/png", fixtures._png("#567890").content
                     )
                     original = getattr(ResourceAccessService, phase)
+                    calls = 0
 
                     async def changed(service, *args, **kwargs):
+                        nonlocal calls
+                        calls += 1
                         result = await original(service, *args, **kwargs)
                         async with owner.admission.mutation("snapshot-owner-change"):
                             if mutation == "route":
@@ -430,6 +445,7 @@ class BoundCollageReferenceTests(unittest.IsolatedAsyncioTestCase):
                             await scope.resources._read_collage_reference(
                                 ref.asset_id, CacheVisibility.USER
                             )
+                    self.assertEqual(calls, 1)
                     await factory.close_credentials()
                 finally:
                     await owner.stop()

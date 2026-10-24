@@ -31,7 +31,7 @@ from yomihime_game_link_sdk.declarations import (
 )
 from yomihime_game_link_sdk.display import DisplayLimits, DisplayRenderer, Privacy
 from yomihime_game_link_sdk.errors import AccessDenied, InvalidInvocation
-from yomihime_game_link_sdk.results import CapabilityResult
+from yomihime_game_link_sdk.results import CapabilityResult, ResultStatus
 from yomihime_game_link_sdk.services import CapabilityHealth, ConfigTarget
 from yomihime_game_link_sdk.storage import GrantReference
 from yomihime_game_link_sdk.subscriptions import ConversationKind, ConversationRef
@@ -48,7 +48,7 @@ from ..core.contracts.validation_boundary import validate_contract
 from ..core.health import HealthResolver
 from ..core.invocation import Gateway
 from ..core.lifecycle import LifecycleController
-from ..core.policy import tool_allowed
+from ..core.policy import supports_public_read_only, tool_allowed
 from ..core.ports import (
     AdmissionLease,
     PublicWebProofValidator,
@@ -487,6 +487,7 @@ class CoreRuntime:
         identity_namespace: str,
         trusted_bundled_defaults: Mapping[str, tuple[str, ...]] | None = None,
         trusted_bundled_manifests: Mapping[str, ModuleManifest] | None = None,
+        trusted_external_timeout_manifests: Mapping[str, ModuleManifest] | None = None,
         trusted_subscription_gates: Mapping[str, TrustedSubscriptionGate] | None = None,
         module_host_config_snapshots: Mapping[str, Mapping[str, object]] | None = None,
         public_web_validator: PublicWebProofValidator | None = None,
@@ -495,6 +496,7 @@ class CoreRuntime:
         collector_timeouts: Mapping[tuple[str, str], float] | None = None,
         source_credential_policies: Sequence[SourceCredentialPolicy] = (),
         managed_source_credentials=(),
+        commentary_port=None,
         factory_source: FactorySourcePort | None = None,
         source_health: Callable[[str, str], Awaitable[CapabilityHealth]] | None = None,
         utc_clock: Callable[[], datetime] = lambda: datetime.now(UTC),
@@ -521,6 +523,7 @@ class CoreRuntime:
         validate_contract(renderer)
         validate_contract(display_limits)
         validate_contract(trusted_bundled_manifests)
+        validate_contract(trusted_external_timeout_manifests)
         validate_contract(source_health)
         if not isinstance(database, SQLiteDatabase):
             database = SQLiteDatabase(database)
@@ -530,6 +533,15 @@ class CoreRuntime:
             raise ValueError("identity_namespace is required")
         bundled_defaults = _normalize_bundled_defaults(trusted_bundled_defaults)
         bundled_manifests = _normalize_bundled_manifests(trusted_bundled_manifests)
+        # External declarations validate reviewed timeout targets only. They
+        # never join bundled startup defaults, registration or web deployment.
+        external_timeout_manifests = _normalize_bundled_manifests(
+            trusted_external_timeout_manifests
+        )
+        if set(external_timeout_manifests).intersection(
+            set(bundled_manifests) | set(bundled_defaults)
+        ):
+            raise ValueError("external timeout owners overlap trusted bundled owners")
         from ..core.invocation_budget import (
             InvocationBudgetPolicy,
             freeze_execution_timeouts,
@@ -541,6 +553,13 @@ class CoreRuntime:
                 (owner, item.capability_id)
                 for owner, manifest in bundled_manifests.items()
                 for item in manifest.capabilities
+            }
+            | {
+                (owner, item.capability_id)
+                for owner, manifest in external_timeout_manifests.items()
+                for item in manifest.capabilities
+                if supports_public_read_only(item)
+                and InvocationOrigin.WEB_PUBLIC in item.effective_origins
             },
         )
         collector_timeouts = freeze_execution_timeouts(
@@ -607,6 +626,8 @@ class CoreRuntime:
         self._trusted_bundled_defaults = bundled_defaults
         self._trusted_bundled_manifests = bundled_manifests
         self._trusted_subscription_gates = subscription_gates
+        self._declared_subscription_gate_specs = {}
+        self._config_principal_id = config_principal_id
         self.module_storage = ModuleStorageRouter(Path(file_root).parent / "modules")
         self.file_store = LocalSafeFileStore(file_root)
         self.secret_store = SQLiteSecretStore(
@@ -775,6 +796,7 @@ class CoreRuntime:
             now=utc_clock,
         )
         self.delivery = DeliveryService(
+            commentary_port=commentary_port,
             deliveries=self.b04_repositories.deliveries,
             subscriptions=self.b04_repositories.subscriptions,
             grants=self.repositories.authorization,
@@ -991,7 +1013,46 @@ class CoreRuntime:
             identities,
             runtime_state=runtime_state,
             legacy_config_policies=self._legacy_config_policies,
+            source_metadata=self._module_catalog_source_metadata(snapshot),
         )
+
+    def _module_catalog_source_metadata(
+        self, snapshot
+    ) -> dict[str, tuple[str, str | None]]:
+        """Read exact host declarations for display, without granting authority."""
+        # Snapshot Host admission metadata synchronously. Only presentation
+        # strings leave here, never mutable maps, private paths or package objects.
+        external_packages = dict(self.admin_operations._external_packages)
+        result = {}
+        for module_id, module in snapshot.modules.items():
+            package_id, local_id = module_id.split("/", 1)
+            expected = self._trusted_bundled_manifests.get(module_id)
+            builtin = expected is not None and _matches_trusted_bundled_manifest(
+                module.manifest, expected
+            )
+            external = external_packages.get(package_id)
+            extension = (
+                external is not None
+                and external.package_id == package_id
+                and tuple(
+                    item for item in external.modules if item.module_id == local_id
+                )
+                == (module.manifest,)
+            )
+            # Names, discovery alone and conflicting host evidence prove no
+            # source. In particular, an unclassified module is never built-in.
+            kind = (
+                "builtin"
+                if builtin and not extension
+                else "extension"
+                if extension and not builtin
+                else "unknown"
+            )
+            result[module_id] = (
+                kind,
+                external.display_name if kind == "extension" else None,
+            )
+        return result
 
     def require_help_source_current(self, source) -> None:
         """Fence retained help facts against live, coherent module availability."""
@@ -1076,7 +1137,10 @@ class CoreRuntime:
 
     async def subscription_gate_state(self, module_id: str) -> SubscriptionGateState:
         """Read exact persistent eligibility and live state under the original gate."""
-        if module_id not in self._trusted_subscription_gates:
+        if (
+            module_id not in self._trusted_subscription_gates
+            and module_id not in self._declared_subscription_gate_specs
+        ):
             return SubscriptionGateState(False, None, None, "unsupported")
         try:
             async with self.lifecycle.admission.mutation("subscription-gate-read"):
@@ -1245,6 +1309,27 @@ class CoreRuntime:
             self._check_recovery(recovery_grant)
             if self._closing:
                 raise asyncio.CancelledError
+            declared_manifests = {}
+            package_counts = {}
+            for candidate in candidates:
+                package_counts[candidate.package.package_id] = (
+                    package_counts.get(candidate.package.package_id, 0) + 1
+                )
+            for candidate in candidates:
+                package = candidate.package
+                if (
+                    isinstance(package, DiscoveredPackage)
+                    and package.valid
+                    and package.manifest is not None
+                    and package_counts[package.package_id] == 1
+                ):
+                    declared_manifests.update(
+                        {
+                            f"{package.package_id}/{module.module_id}": module
+                            for module in package.manifest.modules
+                        }
+                    )
+            await self._register_declared_subscription_gates(declared_manifests)
             if self._subscription_gate_candidates_match(candidates):
                 await self.config_repository.initialize_subscription_gates()
             self._check_recovery(recovery_grant)
@@ -1308,6 +1393,62 @@ class CoreRuntime:
         finally:
             self._starting = False
             self._startup_done.set()
+
+    async def _register_declared_subscription_gates(self, manifests) -> None:
+        """Bind validated self-pause declarations without granting module intent.
+
+        Independent once-only markers preserve original bootstrap and deleted-row
+        fail-closed behavior. Persisted desired_enabled is still required by every
+        collection/delivery fence; a declaration cannot activate its module.
+        """
+        for module_id, manifest in manifests.items():
+            if module_id in self._trusted_subscription_gates:
+                continue
+            keys = {
+                item.enabled_config_key
+                for item in manifest.subscriptions
+                if item.enabled_config_key is not None
+            }
+            if not keys:
+                continue
+            if len(keys) != 1 or any(
+                item.enabled_config_key is None for item in manifest.subscriptions
+            ):
+                continue
+            field = next(iter(keys))
+            if not _is_subscription_gate_field(manifest, field):
+                continue
+            if self._declared_subscription_gate_specs.get(module_id) == field:
+                continue
+            target = validate_contract(
+                ConfigTarget(self._config_principal_id, module_id)
+            )
+            async with self.lifecycle.admission.mutation(
+                "declared-subscription-gate-register"
+            ):
+                await self.config_repository.register_declared_subscription_gate(
+                    target, field
+                )
+                binding = SubscriptionGateBinding(
+                    target, field, *module_id.split("/", 1), declared=True
+                )
+                for repository in (
+                    self.b04_repositories.subscriptions,
+                    self.b04_repositories.jobs,
+                    self.b04_repositories.lifecycle,
+                    self.b04_repositories.scheduler,
+                    self.b04_repositories.windows,
+                    self.b04_repositories.deliveries,
+                ):
+                    bindings = dict(repository._subscription_gate_bindings)
+                    bindings[module_id] = binding
+                    repository._subscription_gate_bindings = MappingProxyType(bindings)
+                fields = dict(self.admin_operations._subscription_gate_fields)
+                fields[target] = (field,)
+                self.admin_operations._subscription_gate_fields = MappingProxyType(
+                    fields
+                )
+                self._declared_subscription_gate_specs[module_id] = field
 
     def _subscription_gate_candidates_match(
         self, candidates: tuple[ExtensionCandidate, ...]
@@ -1419,6 +1560,13 @@ class CoreRuntime:
     async def _pump_loop(self) -> None:
         while self._accepting:
             try:
+                await self._register_declared_subscription_gates(
+                    {
+                        module.module_id: module.manifest
+                        for module in self.registry.snapshot().modules.values()
+                        if module.enabled
+                    }
+                )
                 await self.scheduler.run_due_page()
                 await self.scheduler.create_digest_windows_page()
                 await self.delivery.dispatch_due_events()
@@ -1521,6 +1669,31 @@ class CoreRuntime:
         return await self.gateway.invoke_public_web(
             proof, module_id, capability_id, parameters
         )
+
+    async def preview_public_web(
+        self, module_id: str, capability_id: str, parameters: object, *, proof: object
+    ):
+        """Render public data while its original web invocation is still live."""
+        self._require_accepting_ingress()
+        pages = ()
+
+        async def consume(invocation, result, current):
+            nonlocal pages
+            if result.document is not None and result.document.card is not None:
+                pages = await self.output.render_public_preview(
+                    invocation, result, current=current
+                )
+            else:
+                # Empty and explanatory business documents are valid results.
+                # They still remain inside the original invocation fence.
+                await current()
+
+        result = await self.gateway.invoke_public_web(
+            proof, module_id, capability_id, parameters, _consume=consume
+        )
+        if result.status not in (ResultStatus.SUCCESS, ResultStatus.PARTIAL_SUCCESS):
+            pages = ()
+        return result, pages
 
     async def invoke_tool(
         self,

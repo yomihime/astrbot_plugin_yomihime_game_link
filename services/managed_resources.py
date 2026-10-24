@@ -11,13 +11,14 @@ import asyncio
 import hashlib
 import math
 from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
+from yomihime_game_link_sdk.errors import ParameterError
 from yomihime_game_link_sdk.services import ResourceCacheStats
-from yomihime_game_link_sdk.storage import OwnerScope, ResourceMetadata
+from yomihime_game_link_sdk.storage import OwnerScope, OwnershipKind, ResourceMetadata
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,6 +57,14 @@ class ResourceCapacityError(RuntimeError):
     """A finite cache cannot admit bytes without disrupting leased resources."""
 
 
+@dataclass(frozen=True, slots=True)
+class ResourceIntegritySnapshot:
+    metadata: ResourceMetadata
+    digest: str
+    identity: tuple | None
+    content: bytes | None = None
+
+
 async def drain_on_cancel(operation: Awaitable):
     """Keep accepted mutations owned and ordered until they settle."""
     task = asyncio.create_task(operation)
@@ -80,8 +89,23 @@ class ManagedResourceCache:
         self.repository = repository
         self.files = repository.file_store
         self.policy = policy or ResourceCachePolicy()
+        self._initial_policy = self.policy
+        self._public_policy = (
+            ResourceCachePolicy(max_bytes=256 * 1024 * 1024, max_items=2048)
+            if policy is None
+            else self.policy
+        )
         self._lock = asyncio.Lock()
         self._readers: dict[tuple[str, str], int] = {}
+
+    def _policy(self, scope):
+        # Explicit test/deployment policy replacements remain authoritative.
+        return (
+            self._public_policy
+            if scope.kind is OwnershipKind.PUBLIC
+            and self.policy is self._initial_policy
+            else self.policy
+        )
 
     def _key(self, asset_id: str, scope: OwnerScope) -> tuple[str, str]:
         return self.repository.managed_scope_key(scope), asset_id
@@ -100,6 +124,25 @@ class ManagedResourceCache:
                 self._readers[key] = remaining
             else:
                 self._readers.pop(key)
+
+    @asynccontextmanager
+    async def lease_many(self, references):
+        """Pin one finite source portfolio with one awaited lock boundary."""
+        keys = tuple(
+            dict.fromkeys(self._key(asset_id, scope) for asset_id, scope in references)
+        )
+        async with self._lock:
+            for key in keys:
+                self._readers[key] = self._readers.get(key, 0) + 1
+        try:
+            yield
+        finally:
+            for key in keys:
+                remaining = self._readers[key] - 1
+                if remaining:
+                    self._readers[key] = remaining
+                else:
+                    self._readers.pop(key)
 
     async def read(self, asset_id: str, scope: OwnerScope, *, read=None) -> bytes:
         async with self.lease(asset_id, scope):
@@ -125,10 +168,117 @@ class ManagedResourceCache:
                 await self.repository.managed_touch(asset_id, scope, datetime.now(UTC))
             return content
 
+    async def snapshot(self, asset_id: str, scope: OwnerScope):
+        """Validate live index and file version before reusing verified digest."""
+        async with self.lease(asset_id, scope):
+            metadata = await self.repository.metadata(asset_id, scope)
+            entry = await self.repository.managed_entry(asset_id, scope)
+            if metadata is None or (
+                entry is not None
+                and (entry[4] or datetime.fromisoformat(entry[2]) <= datetime.now(UTC))
+            ):
+                raise FileNotFoundError("resource is unavailable")
+            identity = await self.files.identity(asset_id, scope)
+            saved = await self.repository.integrity_snapshot(asset_id, scope)
+            if (
+                identity is not None
+                and saved is not None
+                and saved[0] == metadata.revision
+                and saved[2] == identity
+                and (entry is None or saved[1] == entry[0])
+            ):
+                return ResourceIntegritySnapshot(metadata, saved[1], identity)
+            content = await self.read(asset_id, scope)
+            after = await self.files.identity(asset_id, scope)
+            latest = await self.repository.metadata(asset_id, scope)
+            if identity != after or latest != metadata:
+                raise FileNotFoundError("resource changed")
+            digest = hashlib.sha256(content).hexdigest()
+            if identity is not None:
+                await self.repository.remember_integrity(
+                    asset_id, scope, metadata.revision, digest, identity
+                )
+            return ResourceIntegritySnapshot(metadata, digest, identity, content)
+
+    async def snapshots(self, asset_ids, scope, *, retained_budget=None):
+        """One authority-bound portfolio; changed versions use the full verifier."""
+        retained_budget = (
+            retained_budget if retained_budget is not None else {"bytes": 0}
+        )
+        async with AsyncExitStack() as readers:
+            for asset_id in asset_ids:
+                await readers.enter_async_context(self.lease(asset_id, scope))
+            portfolio = await self.repository.integrity_portfolio(asset_ids, scope)
+            result = {}
+            now = datetime.now(UTC)
+            for asset_id in asset_ids:
+                record = portfolio.get(asset_id)
+                result[asset_id] = None
+                if record is None:
+                    continue
+                metadata, entry, saved = record
+                if (
+                    metadata.media_type not in ("image/png", "image/jpeg")
+                    or not 0 < metadata.size_bytes <= 1_048_576
+                ):
+                    continue
+                if (metadata.expires_at is not None and metadata.expires_at <= now) or (
+                    entry is not None
+                    and (entry[4] or datetime.fromisoformat(entry[2]) <= now)
+                ):
+                    continue
+                try:
+                    identity = await self.files.identity(asset_id, scope)
+                    if (
+                        identity is not None
+                        and saved is not None
+                        and saved[0] == metadata.revision
+                        and saved[2] == identity
+                        and (entry is None or saved[1] == entry[0])
+                    ):
+                        result[asset_id] = ResourceIntegritySnapshot(
+                            metadata, saved[1], identity
+                        )
+                    else:
+                        result[asset_id] = await self.snapshot(asset_id, scope)
+                        if result[asset_id].content is not None:
+                            retained_budget["bytes"] += len(result[asset_id].content)
+                            if retained_budget["bytes"] > 33_554_432:
+                                raise ParameterError("collage source budget")
+                except FileNotFoundError:
+                    continue
+            return result
+
+    async def read_snapshot(self, snapshot: ResourceIntegritySnapshot):
+        metadata = snapshot.metadata
+        asset_id, scope = metadata.asset_id, metadata.scope
+        async with self.lease(asset_id, scope):
+            latest = await self.repository.metadata(asset_id, scope)
+            entry = await self.repository.managed_entry(asset_id, scope)
+            if latest != metadata or (
+                entry is not None and (entry[4] or entry[0] != snapshot.digest)
+            ):
+                raise FileNotFoundError("resource changed")
+            identity = await self.files.identity(asset_id, scope)
+            if identity != snapshot.identity:
+                raise FileNotFoundError("resource changed")
+            content = snapshot.content
+            if content is None:
+                content = await self.read(asset_id, scope)
+            if (
+                hashlib.sha256(content).hexdigest() != snapshot.digest
+                or self.files.content_id(content, scope) != asset_id
+            ):
+                raise FileNotFoundError("resource changed")
+            if await self.files.identity(asset_id, scope) != identity:
+                raise FileNotFoundError("resource changed")
+            return content
+
     async def stats(self, scope: OwnerScope) -> ResourceCacheStats:
         size, count, evictions = await self.repository.managed_usage(scope)
+        policy = self._policy(scope)
         return ResourceCacheStats(
-            size, count, self.policy.max_bytes, self.policy.max_items, evictions
+            size, count, policy.max_bytes, policy.max_items, evictions
         )
 
     async def _evict(self, asset_id, scope, check, authorization_deadline):
@@ -148,6 +298,7 @@ class ManagedResourceCache:
         return True
 
     async def _room(self, scope, asset_id, size, *, check, authorization_deadline, now):
+        policy = self._policy(scope)
         # Bound each indexed query by cleanup_batch and the whole operation by
         # the initial managed partition inventory, rather than one query batch.
         scope_key = self.repository.managed_scope_key(scope)
@@ -164,8 +315,8 @@ class ManagedResourceCache:
 
         def fits():
             return (
-                used + delta_size <= self.policy.max_bytes
-                and count + delta_count <= self.policy.max_items
+                used + delta_size <= policy.max_bytes
+                and count + delta_count <= policy.max_items
             )
 
         visited = set()
@@ -176,9 +327,7 @@ class ManagedResourceCache:
                 candidates = await self.repository.managed_candidates(
                     scope,
                     now=now,
-                    limit=min(
-                        self.policy.cleanup_batch, inventory_count - len(visited)
-                    ),
+                    limit=min(policy.cleanup_batch, inventory_count - len(visited)),
                     expired_only=expired_only,
                     excluded_asset_ids=tuple(sorted(excluded | visited)),
                 )
@@ -215,15 +364,16 @@ class ManagedResourceCache:
     ) -> ResourceMetadata:
         if type(content) is not bytes:
             raise TypeError("resource content must be bytes")
-        if len(content) > self.policy.max_file_bytes:
+        policy = self._policy(scope)
+        if len(content) > policy.max_file_bytes:
             raise ValueError("resource exceeds the per-file byte budget")
-        ttl = self.policy.ttl_seconds if ttl_seconds is None else ttl_seconds
+        ttl = policy.ttl_seconds if ttl_seconds is None else ttl_seconds
         if (
             isinstance(ttl, bool)
             or not isinstance(ttl, (int, float))
             or not math.isfinite(ttl)
             or ttl <= 0
-            or ttl > self.policy.max_ttl_seconds
+            or ttl > policy.max_ttl_seconds
         ):
             raise ValueError("resource ttl is outside the supported range")
         # Validate before staging; arbitrary media strings must leave no bytes.
@@ -256,6 +406,15 @@ class ManagedResourceCache:
             asset_id = self.files.content_id(content, scope)
             current = await self.repository.registration_state(asset_id, scope)
             managed = await self.repository.managed_entry(asset_id, scope)
+            if (
+                current is not None
+                and managed is None
+                and current.expires_at is not None
+                and current.expires_at <= now
+            ):
+                raise ValueError(
+                    "expired legacy resource must be registered with a new lifetime before storage"
+                )
             # Never adopt existing unmanaged rows into retention policy.
             if current is None or managed is not None:
                 await self._room(
@@ -297,6 +456,16 @@ class ManagedResourceCache:
                     # Reuse/repair never changes an unmanaged asset's lifetime.
                     await self.files.confirm(current)
                     await check()
+                    identity = await self.files.identity(asset_id, scope)
+                    if identity is not None:
+                        await self.repository.remember_integrity(
+                            asset_id,
+                            scope,
+                            current.revision,
+                            hashlib.sha256(content).hexdigest(),
+                            identity,
+                        )
+                        await check()
                     return current
                 registered = await self.repository.register_managed(
                     metadata,
@@ -306,6 +475,16 @@ class ManagedResourceCache:
                     authorization_deadline=authorization_deadline,
                 )
                 await check()
+                identity = await self.files.identity(asset_id, scope)
+                if identity is not None:
+                    await self.repository.remember_integrity(
+                        asset_id,
+                        scope,
+                        registered.revision,
+                        hashlib.sha256(content).hexdigest(),
+                        identity,
+                    )
+                    await check()
                 return registered
             finally:
                 # Uncertain committed registration keeps its pending marker.

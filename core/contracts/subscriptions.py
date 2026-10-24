@@ -23,6 +23,14 @@ from yomihime_game_link_sdk.storage import OwnershipKind as OwnershipKind
 from yomihime_game_link_sdk.subscriptions import CollectionKey as CollectionKey
 from yomihime_game_link_sdk.subscriptions import CollectionView as CollectionView
 from yomihime_game_link_sdk.subscriptions import Collector as Collector
+from yomihime_game_link_sdk.subscriptions import (
+    CommentaryRequest,
+    EvaluationEvent,
+    PublicEventContribution,
+)
+from yomihime_game_link_sdk.subscriptions import (
+    ComposedPublicEvent as ComposedPublicEvent,
+)
 from yomihime_game_link_sdk.subscriptions import ConversationKind as ConversationKind
 from yomihime_game_link_sdk.subscriptions import ConversationRef as ConversationRef
 from yomihime_game_link_sdk.subscriptions import (
@@ -114,6 +122,8 @@ def check_DigestScheduleProfile(self) -> None:
 def check_SubscriptionRequest(self) -> None:
     _identifier(self.type_id, "type_id")
     _identifier(self.notification_mode, "notification_mode")
+    if self.creation_key is not None:
+        _bounded_event_identifier(self.creation_key, "creation_key")
     if (self.subscription_id is None) != (self.expected_revision is None):
         raise ValueError(
             "subscription ID and expected revision must be supplied together"
@@ -191,8 +201,11 @@ class SubscriptionRecord:
     status: SubscriptionStatus = SubscriptionStatus.ACTIVE
     type_id: str | None = None
     digest_schedule: DigestScheduleProfile | None = None
+    creation_key: str | None = None
 
     def __post_init__(self) -> None:
+        if self.creation_key is not None:
+            _bounded_event_identifier(self.creation_key, "creation_key")
         _identifier(self.subscription_id, "subscription_id")
         _identifier(self.owner_id, "owner_id")
         _identifier(self.notification_mode, "notification_mode")
@@ -917,8 +930,22 @@ class DeliveryEvent:
     state: DeliveryState = DeliveryState.PENDING
     attempt: DeliveryAttempt | None = None
     retry_at: datetime | None = None
+    public_contribution: PublicEventContribution | None = None
+    commentary: CommentaryRequest | None = None
 
     def __post_init__(self) -> None:
+        if self.public_contribution is not None:
+            if not isinstance(self.public_contribution, PublicEventContribution):
+                raise TypeError("invalid public contribution")
+            if (
+                self.display_data.privacy is not Privacy.PUBLIC
+                or self.grant is not None
+            ):
+                raise ValueError("aggregated events require public ungranted data")
+        if self.commentary is not None and not isinstance(
+            self.commentary, CommentaryRequest
+        ):
+            raise TypeError("invalid commentary request")
         for name in ("event_key", "subscription_id", "owner_id", "idempotency_key"):
             _identifier(getattr(self, name), name)
         for name in ("event_version", "subscription_revision"):
@@ -1003,6 +1030,10 @@ def check_Observation(self) -> None:
 
 
 def check_SubscriptionView(self) -> None:
+    if self.evaluation_state is not None and not isinstance(
+        self.evaluation_state, EvaluationState
+    ):
+        raise TypeError("evaluation_state must be an EvaluationState or None")
     for field in ("subscription_id", "owner_id", "notification_conversation_id"):
         _identifier(getattr(self, field), field)
     if (
@@ -1177,7 +1208,97 @@ class ObservationEvaluationCommit:
         object.__setattr__(self, "subscriptions", subscriptions)
 
 
+def _bounded_event_identifier(value, field):
+    _identifier(value, field)
+    if len(value) > 128 or any(ord(ch) < 32 for ch in value):
+        raise ValueError(f"{field} exceeds identifier limits")
+
+
+def check_CommentaryRequest(self) -> None:
+    _bounded_event_identifier(self.template_id, "template_id")
+    _positive_int(self.template_version, "template_version")
+    if (
+        type(self.prompt) is not str
+        or not self.prompt.strip()
+        or len(self.prompt) > 8192
+    ):
+        raise ValueError("commentary prompt exceeds limits")
+    if (
+        type(self.timeout_seconds) not in (int, float)
+        or not isfinite(self.timeout_seconds)
+        or not 0 < self.timeout_seconds <= 10
+    ):
+        raise ValueError("commentary timeout must be at most ten seconds")
+    if type(self.max_output_chars) is not int or not 1 <= self.max_output_chars <= 1000:
+        raise ValueError("commentary output exceeds limits")
+
+
+def check_PublicEventContribution(self) -> None:
+    _bounded_event_identifier(self.composer_id, "composer_id")
+    _bounded_event_identifier(self.contribution_key, "contribution_key")
+    snapshot = freeze_json(self.payload)
+    if not isinstance(snapshot, Mapping):
+        raise TypeError("contribution payload must be a JSON object")
+    if (
+        len(
+            json.dumps(
+                dict(snapshot),
+                ensure_ascii=False,
+                default=lambda value: dict(value)
+                if isinstance(value, Mapping)
+                else list(value),
+            ).encode("utf-8")
+        )
+        > 65536
+    ):
+        raise ValueError("contribution payload exceeds byte limit")
+    object.__setattr__(self, "payload", snapshot)
+
+
+def check_ComposedPublicEvent(self) -> None:
+    if (
+        not isinstance(self.display_data, DisplayDocument)
+        or self.display_data.privacy is not Privacy.PUBLIC
+    ):
+        raise ValueError("composed event must have a public display document")
+    if self.commentary is not None and not isinstance(
+        self.commentary, CommentaryRequest
+    ):
+        raise TypeError("commentary must be a CommentaryRequest")
+
+
+def check_EvaluationEvent(self) -> None:
+    _identifier(self.event_key, "event_key")
+    _positive_int(self.event_version, "event_version")
+    if not isinstance(self.display_data, DisplayDocument):
+        raise TypeError("event requires a DisplayDocument")
+    if self.commentary is not None and not isinstance(
+        self.commentary, CommentaryRequest
+    ):
+        raise TypeError("commentary must be a CommentaryRequest")
+    if self.public_contribution is not None:
+        if not isinstance(self.public_contribution, PublicEventContribution):
+            raise TypeError("contribution must be a PublicEventContribution")
+        if self.display_data.privacy is not Privacy.PUBLIC:
+            raise ValueError("contributions require public data")
+        if self.commentary is not None:
+            raise ValueError("aggregated commentary belongs to the composer")
+
+
 def check_EvaluationDecision(self) -> None:
+    events = tuple(self.events)
+    if len(events) > 3 or any(not isinstance(item, EvaluationEvent) for item in events):
+        raise ValueError("evaluation allows at most three events")
+    if len({(item.event_key, item.event_version) for item in events}) != len(events):
+        raise ValueError("evaluation events must have unique identities")
+    if events and (
+        self.triggered
+        or self.event_key is not None
+        or self.event_version is not None
+        or self.display_data is not None
+    ):
+        raise ValueError("legacy event fields and events are mutually exclusive")
+    object.__setattr__(self, "events", events)
     object.__setattr__(self, "state", freeze_json(self.state))
     if not isinstance(self.triggered, bool):
         raise TypeError("triggered must be a bool")
@@ -1363,6 +1484,8 @@ def check_SubscriptionDescriptor(self) -> None:
     _identifier(self.type_id, "type_id")
     _identifier(self.collector_id, "collector_id")
     _identifier(self.matcher_id, "matcher_id")
+    if self.enabled_config_key is not None:
+        _bounded_event_identifier(self.enabled_config_key, "enabled_config_key")
     modes = tuple(self.notification_modes)
     if not modes or len(modes) != len(set(modes)):
         raise ValueError("notification modes must be non-empty and unique")
@@ -1399,13 +1522,19 @@ def validate_evaluation_decision(
         raise ValueError("subscription owner cannot receive another user's observation")
     if scope.grant is not None and subscription.grant != scope.grant:
         raise ValueError("subscription grant must match an authorized observation")
-    if not decision.triggered:
-        return decision
-    document = decision.display_data
-    assert document is not None
-    if (
-        scope.kind is not OwnershipKind.PUBLIC
-        and document.privacy is not Privacy.PRIVATE
-    ):
-        raise ValueError("private observations require private delivery documents")
+    documents = [item.display_data for item in decision.events]
+    if decision.triggered:
+        documents.append(decision.display_data)
+    for item in decision.events:
+        if (
+            item.public_contribution is not None
+            and scope.kind is not OwnershipKind.PUBLIC
+        ):
+            raise ValueError("contributions require PUBLIC observations")
+    for document in documents:
+        if (
+            scope.kind is not OwnershipKind.PUBLIC
+            and document.privacy is not Privacy.PRIVATE
+        ):
+            raise ValueError("private observations require private delivery documents")
     return decision

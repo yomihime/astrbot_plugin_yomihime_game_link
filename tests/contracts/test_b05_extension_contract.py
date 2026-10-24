@@ -12,6 +12,7 @@ from ygl_test_subject.core.contracts.manifests import (
     EXTENSION_MANIFEST_FILENAME,
     EXTENSION_MANIFEST_MAX_BYTES,
     EXTENSION_PACKAGE_FIELDS,
+    EXTENSION_PACKAGE_OPTIONAL_FIELDS,
     ExtensionManifestABI,
 )
 from ygl_test_subject.core.contracts.validation_boundary import validate_contract
@@ -60,6 +61,7 @@ class B05ExtensionContractTests(unittest.TestCase):
             ),
         )
         self.assertEqual(EXTENSION_MANIFEST_ABI.schema_version, 1)
+        self.assertEqual(EXTENSION_PACKAGE_OPTIONAL_FIELDS, frozenset({"display_name"}))
         with self.assertRaises(ValueError):
             ExtensionManifestABI(schema_version=True)
         self.assertEqual(EXTENSION_MANIFEST_ABI.max_modules, 64)
@@ -115,6 +117,7 @@ class B05ExtensionContractTests(unittest.TestCase):
                 "author",
                 "license",
                 "source",
+                "display_name",
             ),
         )
         with self.assertRaises(ValueError):
@@ -187,8 +190,10 @@ class B05ExtensionContractTests(unittest.TestCase):
             self.assertIs(get_type_hints(factory.create)["services"], ModuleServices)
         self.assertEqual(
             tuple(ModuleHandlers.__dataclass_fields__),
-            ("capabilities", "collectors", "evaluators"),
+            ("capabilities", "collectors", "evaluators", "event_composers"),
         )
+        # The optional fourth channel preserves legacy positional factories.
+        self.assertEqual(ModuleHandlers({}, {}, {}).event_composers, {})
 
     def test_capability_schema_and_tool_policy_are_explicit(self):
         # This is the exact strict JSON object shape. It maps directly to the

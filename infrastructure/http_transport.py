@@ -117,7 +117,7 @@ class AioHttpTransport:
                 ).with_query(checked.query)
             except Exception:
                 raise SourceHttpError("request_rejected") from None
-            headers = dict(checked.headers)
+            headers = dict(request.headers)
             if authorization is not None:
                 headers["Authorization"] = authorization
             return await self._send(
@@ -319,6 +319,24 @@ class AioHttpTransport:
                     request._credential_proof, _AuthenticatedRequestProof
                 ):
                     raise SourceHttpError("credentials_unavailable")
+                if request._credential_proof.kind == "static":
+                    authorization = ""
+                    if not request._credential_proof.matches_resource(
+                        self._credential_channel, request, authorization
+                    ):
+                        raise ValueError
+                    # The proof binds exact bytes to this transport instance.
+                    checked = HttpRequest(
+                        request.source_id,
+                        request.path,
+                        request.method,
+                        request.query,
+                        request.body,
+                        {},
+                    )
+                    if request.url != f"https://{declaration.host}{checked.path}":
+                        raise ValueError
+                    return declaration, checked, None
                 if len(auth_keys) != 1:
                     raise ValueError
                 auth_key = auth_keys[0]

@@ -110,7 +110,7 @@ class NeutralModuleSettingsTests(unittest.IsolatedAsyncioTestCase):
             live=lambda actual: actual is request,
         )
 
-    async def _unload_candidate_and_restore(self):
+    async def _unload_candidate_and_restore(self, *, credential_state="unset"):
         ops = self.core.admin_operations
         self.assertNotIn(self.owner, self.core.registry.snapshot().modules)
         ordinary = self.proof(self.ordinary)
@@ -132,24 +132,22 @@ class NeutralModuleSettingsTests(unittest.IsolatedAsyncioTestCase):
             ),
             authorization=ordinary,
         )
-        status = await ops.credential_status(authorization=credentials)
-        await ops.credential_update(
-            {
-                "module_id": self.owner,
-                "expected_revision": status[self.owner]["revision"],
-                "updates": [
-                    {
-                        "field": "credential_demo",
-                        "mode": "replace",
-                        "value": {
-                            "client_id": "fixture-client",
-                            "client_secret": "fixture-secret",
-                        },
-                    }
-                ],
-            },
-            authorization=credentials,
+        # Discovery alone does not register a module or grant credential access.
+        self.assertEqual(await ops.credential_status(authorization=credentials), {})
+        self.assertEqual(
+            await ops.credential_catalog(authorization=credentials),
+            {"schema_version": 1, "fields": []},
         )
+        snapshot = await self.core.config_repository.current(self.target)
+        with self.assertRaises(AdminAuthorizationDenied):
+            await ops.credential_update(
+                {
+                    "module_id": self.owner,
+                    "expected_revision": snapshot.revision,
+                    "updates": [{"field": "credential_demo", "mode": "clear"}],
+                },
+                authorization=credentials,
+            )
         before = await self.core.config_repository.current(self.target)
         marker = self.root / "persistent-business-data"
         marker.write_bytes(b"retain")
@@ -227,7 +225,7 @@ class NeutralModuleSettingsTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(self.owner, await ops.ordinary_snapshot(authorization=ordinary))
         restored = await ops.credential_status(authorization=credentials)
         self.assertEqual(
-            restored[self.owner]["fields"]["credential_demo"], "configured"
+            restored[self.owner]["fields"]["credential_demo"], credential_state
         )
         self.assertEqual(
             (await self.core.config_repository.current(self.target)).values,
@@ -247,6 +245,25 @@ class NeutralModuleSettingsTests(unittest.IsolatedAsyncioTestCase):
             expected_registry_revision=self.core.registry.snapshot().revision,
             authorization=context,
         )
+        credentials = self.proof(self.credentials)
+        status = await ops.credential_status(authorization=credentials)
+        await ops.credential_update(
+            {
+                "module_id": self.owner,
+                "expected_revision": status[self.owner]["revision"],
+                "updates": [
+                    {
+                        "field": "credential_demo",
+                        "mode": "replace",
+                        "value": {
+                            "client_id": "fixture-client",
+                            "client_secret": "fixture-secret",
+                        },
+                    }
+                ],
+            },
+            authorization=credentials,
+        )
         await ops.set_enabled(
             None,
             self.owner,
@@ -260,7 +277,7 @@ class NeutralModuleSettingsTests(unittest.IsolatedAsyncioTestCase):
             "example", "demo"
         )
         self.assertFalse(intent.desired_enabled)
-        await self._unload_candidate_and_restore()
+        await self._unload_candidate_and_restore(credential_state="configured")
 
     async def test_candidate_unload_requires_authorization_and_registry_cas(self):
         ops = self.core.admin_operations
@@ -377,11 +394,23 @@ class NeutralModuleSettingsTests(unittest.IsolatedAsyncioTestCase):
         source = self.credentials if credential else self.ordinary
         context = self.proof(source)
         modules = self.proof(self.modules)
+        if credential:
+            for enabled in (True, False):
+                await ops.set_enabled(
+                    None,
+                    self.owner,
+                    enabled,
+                    expected_registry_revision=self.core.registry.snapshot().revision,
+                    authorization=modules,
+                )
+        selection_calls = 0
         before = await self.core.config_repository.current(self.target)
         selected, release = asyncio.Event(), asyncio.Event()
         configuration = ops._configuration
 
         async def delayed_configuration(selection):
+            nonlocal selection_calls
+            selection_calls += 1
             coordinator = await configuration(selection)
             selected.set()
             await release.wait()
@@ -416,6 +445,7 @@ class NeutralModuleSettingsTests(unittest.IsolatedAsyncioTestCase):
             task = asyncio.create_task(write())
             try:
                 await asyncio.wait_for(selected.wait(), 2)
+                self.assertEqual(selection_calls, 1)
                 if unload:
                     await ops.unload_module(
                         None,
@@ -453,13 +483,17 @@ class NeutralModuleSettingsTests(unittest.IsolatedAsyncioTestCase):
     async def test_queued_candidate_ordinary_write_cannot_commit_after_unload(self):
         await self._queued_write_across_unload(credential=False)
 
-    async def test_queued_candidate_credential_write_cannot_commit_after_unload(self):
+    async def test_queued_registered_disabled_credential_write_cannot_commit_after_unload(
+        self,
+    ):
         await self._queued_write_across_unload(credential=True)
 
     async def test_old_candidate_write_cannot_commit_after_unload_and_restore(self):
         await self._queued_write_across_unload(credential=False, restore=True)
 
-    async def test_old_candidate_credential_write_cannot_commit_after_restore(self):
+    async def test_old_registered_disabled_credential_write_cannot_commit_after_restore(
+        self,
+    ):
         await self._queued_write_across_unload(credential=True, restore=True)
 
     async def test_candidate_write_remains_valid_across_first_registration(self):
@@ -505,10 +539,20 @@ class NeutralModuleSettingsTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_status_revalidates_authorization_after_metadata_read(self):
         ops = self.core.admin_operations
+        await ops.set_enabled(
+            None,
+            self.owner,
+            True,
+            expected_registry_revision=self.core.registry.snapshot().revision,
+            authorization=self.proof(self.modules),
+        )
+        reads = 0
         context = self.proof(self.credentials)
         current = self.core.config_repository.current
 
         async def revoke_after_read(*args, **kwargs):
+            nonlocal reads
+            reads += 1
             snapshot = await current(*args, **kwargs)
             self.credentials.end(context)
             return snapshot
@@ -516,6 +560,7 @@ class NeutralModuleSettingsTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(self.core.config_repository, "current", revoke_after_read):
             with self.assertRaises(AdminAuthorizationDenied):
                 await ops.credential_status(authorization=context)
+        self.assertEqual(reads, 1)
 
     async def test_neutral_module_and_core_settings_survive_owner_unload_restore(self):
         ops = self.core.admin_operations

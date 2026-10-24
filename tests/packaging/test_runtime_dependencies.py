@@ -20,6 +20,7 @@ class RuntimeDependencyTests(unittest.TestCase):
             "tzdata": "2026.4",
             "Pillow": "12.3.0",
             "resvg_py": "0.5.0",
+            "qrcode": "8.2",
         }
         requirements = [
             Requirement(line)

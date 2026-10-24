@@ -389,6 +389,7 @@ class PrivateCollageOutputTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.render_calls, 1)
         self.assertEqual(self.text_sends, [])
         self.assertEqual(len(self.event.calls), 1)
+
         chain = self.event.calls[0]
         self.assertEqual(len(chain), 2)
         self.assertEqual(
@@ -731,3 +732,112 @@ class BoundFinishedPageCacheTests(unittest.IsolatedAsyncioTestCase):
             await store_finished_pages(
                 scope, "collage-revoked", (_png("#123456"),), current
             )
+
+
+class PublicPreviewTests(unittest.IsolatedAsyncioTestCase):
+    async def test_public_preview_uses_live_web_authority_without_send_or_user_cache(
+        self,
+    ):
+        from ygl_test_subject.core.context_issuer import ContextIssuer
+        from ygl_test_subject.presentation.command_card import CommandCardRenderer
+
+        from tests.contracts.test_context_issuer import _PublicWebProofs
+        from tests.fixtures import generated_png as fixture_module
+        from yomihime_game_link_sdk import cards
+        from yomihime_game_link_sdk.contexts import InvocationOrigin
+        from yomihime_game_link_sdk.display import Privacy
+
+        original = fixture_module.build_package
+
+        def package():
+            value, handlers = original()
+            module = value.modules[0]
+            capability = replace(
+                module.capabilities[0],
+                invocation_origins=(
+                    InvocationOrigin.COMMAND,
+                    InvocationOrigin.LLM_TOOL,
+                    InvocationOrigin.WEB_PUBLIC,
+                ),
+            )
+            return replace(
+                value,
+                modules=(
+                    replace(
+                        module, capabilities=(capability, *module.capabilities[1:])
+                    ),
+                ),
+            ), handlers
+
+        proofs = _PublicWebProofs(lambda: 10.0)
+
+        def issuer(**kwargs):
+            return ContextIssuer(
+                **kwargs,
+                public_web_validator=proofs,
+                public_web_capabilities=frozenset({("sample/demo", "lookup")}),
+            )
+
+        with (
+            patch.object(fixture_module, "build_package", package),
+            patch.object(fixture_module, "ContextIssuer", issuer),
+        ):
+            fixture = await GeneratedPngFixture().start()
+        try:
+            snapshot = fixture.registry.snapshot()
+            view = fixture.issuer.issue_public_web(
+                proofs.new("sample/demo", "lookup"),
+                module_id="sample/demo",
+                capability_id="lookup",
+                module_epoch=snapshot.module("sample/demo").epoch,
+                registry_revision=snapshot.revision,
+                generation=1,
+                deadline=20.0,
+            )
+            fixture.admission.admit(view, "lookup")
+            fixture.output._command_card_renderer = CommandCardRenderer()
+
+            async def bind(_):
+                return _Scope()
+
+            fixture.output._collage_scope_binder = bind
+            result = replace(
+                fixture.result,
+                document=replace(
+                    fixture.result.document,
+                    card=cards.Document(
+                        "Preview",
+                        (cards.DenseCollage((cards.DenseCollageItem("one", 2),)),),
+                        width=1080,
+                    ),
+                ),
+            )
+            checks = 0
+
+            async def current():
+                nonlocal checks
+                checks += 1
+
+            pages = await fixture.output.render_public_preview(
+                view, result, current=current
+            )
+            self.assertEqual(len(pages), 1)
+            self.assertTrue(pages[0].startswith(b"\x89PNG"))
+            self.assertGreater(checks, 3)
+            self.assertIsNone(fixture.output._collage_png)
+            private = replace(
+                result,
+                privacy=Privacy.PRIVATE,
+                document=replace(result.document, privacy=Privacy.PRIVATE),
+            )
+            with self.assertRaises(ValueError):
+                await fixture.output.render_public_preview(
+                    view, private, current=current
+                )
+            fixture.issuer.release(view)
+            with self.assertRaises(Exception):
+                await fixture.output.render_public_preview(
+                    view, result, current=current
+                )
+        finally:
+            await fixture.stop()

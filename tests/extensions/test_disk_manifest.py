@@ -67,6 +67,58 @@ def valid_document() -> dict[str, object]:
 
 
 class DiskManifestTests(unittest.TestCase):
+    def test_optional_package_display_name_normalizes_without_changing_identity(self):
+        document = valid_document()
+        self.assertIsNone(parse_manifest(json.dumps(document).encode()).display_name)
+        for value, expected in (
+            (None, None),
+            ("", None),
+            ("   ", None),
+            ("　", None),
+            ("  星港扩展  ", "  星港扩展  "),
+            ("🚀" * 128, "🚀" * 128),
+            ("<b>Literal name</b>", "<b>Literal name</b>"),
+        ):
+            with self.subTest(value=value):
+                document["display_name"] = value
+                package = parse_manifest(json.dumps(document).encode())
+                self.assertEqual(package.display_name, expected)
+                self.assertEqual(package.package_id, "sample_pkg")
+                self.assertEqual(
+                    package.global_module_id("status"), "sample_pkg/status"
+                )
+
+    def test_package_display_name_rejects_invalid_types_controls_and_length(self):
+        for value in (
+            True,
+            1,
+            1.5,
+            [],
+            {},
+            "x" * 129,
+            "🚀" * 129,
+            " " * 129,
+            "\n",
+            "\t",
+            "name\x00",
+            "name\x7f",
+            "name\u200b",
+            "name\u202e",
+            "\ud800",
+        ):
+            with self.subTest(value=value):
+                document = valid_document()
+                document["display_name"] = value
+                with self.assertRaises(ManifestError):
+                    parse_manifest(json.dumps(document).encode())
+        for field in valid_document():
+            with self.subTest(missing_required=field):
+                document = valid_document()
+                document["display_name"] = "Display name"
+                document.pop(field)
+                with self.assertRaises(ManifestError):
+                    parse_manifest(json.dumps(document).encode())
+
     def test_anonymous_redirect_policy_roundtrips_and_rejects_invalid_shape(self):
         document = valid_document()
         source = {

@@ -45,6 +45,7 @@ from ..core.contracts.manifests import (
     EXTENSION_MANIFEST_MAX_STRING_LENGTH,
     EXTENSION_MANIFEST_SCHEMA_VERSION,
     EXTENSION_PACKAGE_FIELDS,
+    EXTENSION_PACKAGE_OPTIONAL_FIELDS,
 )
 from ..core.contracts.validation_boundary import validate_contract
 from ..core.contracts.version import CONTRACT_VERSION
@@ -411,7 +412,10 @@ def parse_manifest(data: bytes | bytearray | memoryview) -> PackageManifest:
         raise ManifestError("invalid manifest JSON") from None
     _walk_budget(raw)
     root = _shape(raw, "object", "manifest")
-    if set(root) != EXTENSION_PACKAGE_FIELDS:
+    if (
+        EXTENSION_PACKAGE_FIELDS - set(root)
+        or set(root) - EXTENSION_PACKAGE_FIELDS - EXTENSION_PACKAGE_OPTIONAL_FIELDS
+    ):
         raise ManifestError("manifest fields do not match schema v1")
     if (
         type(root["schema_version"]) is not int
@@ -437,6 +441,7 @@ def parse_manifest(data: bytes | bytearray | memoryview) -> PackageManifest:
                 author=_shape(root["author"], "string", "author"),
                 license=_shape(root["license"], "string", "license"),
                 source=_shape(root["source"], "string", "source"),
+                display_name=root.get("display_name"),
             )
         )
     except ManifestError:

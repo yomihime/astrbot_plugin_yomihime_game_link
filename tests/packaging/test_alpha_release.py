@@ -35,7 +35,7 @@ class AlphaReleaseTests(unittest.TestCase):
             for line in (ROOT / "requirements.txt").read_text().splitlines()
             if line.strip() and not line.startswith("#")
         ]
-        self.assertEqual(len(dependencies), 8)
+        self.assertEqual(len(dependencies), 9)
         for dependency in dependencies:
             self.assertRegex(
                 dependency, r"^[A-Za-z0-9_-]+>=\d+(?:\.\d+)+(?:\.post\d+)?$"

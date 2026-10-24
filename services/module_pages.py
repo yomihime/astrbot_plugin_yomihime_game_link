@@ -339,7 +339,11 @@ async def module_page_operation(
         item = {"field": name, "mode": "clear" if clear else "replace"}
         if not clear:
             pair = data["pair"]
-            if type(pair) is not dict or set(pair) != {"client_id", "client_secret"}:
+            if type(pair) is not dict or set(pair) not in (
+                {"client_id", "client_secret"},
+                {"token"},
+                {"token", "subject"},
+            ):
                 raise ValueError("complete credential pair required")
             item["value"] = pair
         await current()

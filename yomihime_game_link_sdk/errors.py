@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime
 
 _LABEL = re.compile(r"[a-z][a-z0-9_.-]{0,127}\Z")
 
@@ -117,6 +118,7 @@ class SourceHttpError(RuntimeError):
         *,
         status_code: int | None = None,
         retry_after_seconds: int | None = None,
+        next_available_at: datetime | None = None,
     ) -> None:
         if code not in self._MESSAGES:
             code = "transport_failed"
@@ -125,6 +127,13 @@ class SourceHttpError(RuntimeError):
         self.retry_after_seconds = (
             retry_after_seconds
             if type(retry_after_seconds) is int and 0 <= retry_after_seconds <= 86400
+            else None
+        )
+        self.next_available_at = (
+            next_available_at
+            if type(next_available_at) is datetime
+            and next_available_at.tzinfo is not None
+            and next_available_at.utcoffset() is not None
             else None
         )
         super().__init__(self._MESSAGES[code])

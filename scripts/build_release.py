@@ -171,6 +171,7 @@ def build_release(
     repository_root: Path = ROOT,
     *,
     external_page_roots=(),
+    external_source_policy_roots=(),
 ) -> tuple[Path, Path, Path]:
     """Build the validated plugin ZIP, pinned SDK wheel, and SHA256SUMS."""
     repository_root = Path(repository_root).resolve(strict=True)
@@ -184,7 +185,7 @@ def build_release(
         Path(output_dir) if output_dir is not None else repository_root / "dist"
     )
     zip_name = f"{plugin_name}-{metadata_version}.zip"
-    wheel_name = "yomihime_game_link_sdk-0.1.0a16-py3-none-any.whl"
+    wheel_name = "yomihime_game_link_sdk-0.1.0a17-py3-none-any.whl"
     output_artifacts = (output_dir / zip_name, output_dir / wheel_name)
     sums_path = output_dir / "SHA256SUMS"
     protected = (repository_root / "metadata.yaml",)
@@ -227,12 +228,17 @@ def build_release(
         if not retain_wheel:
             shutil.copyfile(source_wheel, staged_wheel)
         staged_zip = work_root / zip_name
-        if external_page_roots:
+        if external_page_roots or external_source_policy_roots:
             build_dashboard_zip(
                 staged_wheel,
                 staged_zip,
                 repository_root,
                 external_page_roots=external_page_roots,
+                **(
+                    {"external_source_policy_roots": external_source_policy_roots}
+                    if external_source_policy_roots
+                    else {}
+                ),
             )
         else:
             build_dashboard_zip(staged_wheel, staged_zip, repository_root)
@@ -282,12 +288,20 @@ def main() -> None:
         default=[],
         help="Explicit reviewed external package root for fixed-pair static pages only.",
     )
+    parser.add_argument(
+        "--external-source-policy-package",
+        action="append",
+        type=Path,
+        default=[],
+        help="Explicit reviewed external credential/authorization policy root; requires exact paired page manifest.",
+    )
     args = parser.parse_args()
     archive, wheel, checksums = build_release(
         args.tag,
         args.output_dir,
         sdk_wheel=args.sdk_wheel,
         external_page_roots=args.external_page_package,
+        external_source_policy_roots=args.external_source_policy_package,
     )
     print(f"Created {archive}")
     print(f"Created {wheel}")

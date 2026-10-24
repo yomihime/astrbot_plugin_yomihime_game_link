@@ -14,7 +14,7 @@ from enum import Enum, StrEnum
 from typing import Any, Protocol, TypeAlias
 from uuid import uuid4
 
-from yomihime_game_link_sdk.cards import WeightedCollage
+from yomihime_game_link_sdk.cards import DenseCollage, WeightedCollage
 from yomihime_game_link_sdk.contexts import (
     InvocationOrigin,
     InvocationSubscriptionScope,
@@ -344,6 +344,120 @@ class OutputService:
         if capability is None:
             raise ValueError("invocation capability is no longer declared")
         return capability
+
+    async def render_public_preview(self, invocation, result, *, current):
+        """Render bounded public web bytes inside the caller's live proof.
+
+        This path has no message target, send claim, personal finished cache,
+        or reusable grant pixels. Gateway retains ownership of the invocation.
+        """
+        from yomihime_game_link_sdk.cards import ResourceImage
+        from yomihime_game_link_sdk.storage import CacheVisibility
+
+        from ..presentation.command_card import CommandCardRenderer, CommandPresentation
+        from ..presentation.png_validation import PngValidationLimits, validate_png
+        from .collage_cache import (
+            collage_snapshots_current,
+            inspect_collage_resources,
+            resolve_collage_resources,
+        )
+
+        validate_contract(invocation)
+        validate_contract(result)
+        if (
+            not callable(current)
+            or invocation.origin is not InvocationOrigin.WEB_PUBLIC
+            or invocation.grant_id is not None
+            or result.privacy is not Privacy.PUBLIC
+            or result.status not in (ResultStatus.SUCCESS, ResultStatus.PARTIAL_SUCCESS)
+            or result.document is None
+            or result.document.privacy is not Privacy.PUBLIC
+            or result.document.card is None
+        ):
+            raise ValueError("public preview is unavailable")
+
+        async def check():
+            await current()
+            self._issuer.require(invocation)
+            self._admission.check(self._root_lease(invocation))
+            capability = self._require_current_module(invocation)
+            if (
+                not supports_public_read_only(capability)
+                or InvocationOrigin.WEB_PUBLIC not in capability.effective_origins
+            ):
+                raise ValueError("public preview is unavailable")
+
+        await check()
+        card = result.document.card
+        snapshots = None
+        scope = None
+        if len(card.blocks) == 1 and type(card.blocks[0]) in (
+            DenseCollage,
+            WeightedCollage,
+        ):
+            if self._collage_scope_binder is None:
+                raise ValueError("public preview is unavailable")
+            if any(
+                type(item.image) is ResourceImage
+                and item.image.visibility is not CacheVisibility.PUBLIC
+                for item in card.blocks[0].items
+            ):
+                raise ValueError("public preview is unavailable")
+            if type(card.blocks[0]) is DenseCollage:
+                from ..presentation.layout_dense import plan_dense
+
+                plan_dense(card.blocks[0])
+            scope = await self._collage_scope_binder(invocation)
+            await check()
+            card, _, snapshots = await inspect_collage_resources(card, scope, check)
+            await check()
+            if snapshots is not None:
+                card, _ = await resolve_collage_resources(
+                    card,
+                    scope,
+                    check,
+                    snapshots=snapshots,
+                    may_cache_derivatives=True,
+                    derivative_visibility=CacheVisibility.PUBLIC,
+                )
+                await check()
+        theme = {"core_theme": "warm_paper"}
+        if self._command_theme_settings is not None:
+            settings = await self._command_theme_settings(invocation.module_id)
+            await check()
+            theme = {
+                "core_theme": settings.core_theme,
+                "module_theme": settings.module_theme,
+            }
+        renderer = self._command_card_renderer or CommandCardRenderer()
+        presentation = renderer(
+            replace(result.document, card=card),
+            audience=DisplayAudience.PUBLIC,
+            **theme,
+        )
+        if type(presentation) is not CommandPresentation:
+            raise ValueError("public preview is unavailable")
+        pages = presentation.bitmaps or (
+            (presentation.bitmap,) if presentation.bitmap is not None else ()
+        )
+        if (
+            not pages
+            or len(pages) > 8
+            or sum(len(page.content) for page in pages) > 16_777_216
+        ):
+            raise ValueError("public preview exceeds image budget")
+        limits = PngValidationLimits(
+            max_bytes=4_194_304, max_pixels=(128 * 1024 * 1024) // 36
+        )
+        for page in pages:
+            validate_png(page, limits=limits, collage_profile=True)
+        await check()
+        if snapshots is not None and not await collage_snapshots_current(
+            scope, snapshots, check
+        ):
+            raise ValueError("public preview source changed")
+        await check()
+        return tuple(page.content for page in pages)
 
     def _root_lease(self, invocation: InvocationView) -> AdmissionLease:
         validate_contract(invocation)
@@ -729,9 +843,12 @@ class OutputService:
         invocation: InvocationView,
         result: CapabilityResult,
         expected_target: MessageTarget,
+        *,
+        _validated_result: bool = False,
     ) -> datetime | None:
         validate_contract(invocation)
-        validate_contract(result)
+        if not _validated_result:
+            validate_contract(result)
         try:
             self._issuer.require(invocation)
             capability = self._require_current_module(invocation)
@@ -740,7 +857,7 @@ class OutputService:
         if capability is None:
             raise _OutputFailure("invocation_unavailable")
         grant_expiry = await self._check_result_authority(
-            invocation, capability, result
+            invocation, capability, result, _validated_result=_validated_result
         )
         current_target = await self._target(invocation, result.privacy)
         if current_target != expected_target:
@@ -836,10 +953,13 @@ class OutputService:
         invocation: InvocationView,
         capability: CapabilityDescriptor,
         result: CapabilityResult,
+        *,
+        _validated_result: bool = False,
     ) -> datetime | None:
         validate_contract(invocation)
         validate_contract(capability)
-        validate_contract(result)
+        if not _validated_result:
+            validate_contract(result)
         if not isinstance(result, CapabilityResult):
             raise _OutputFailure("invalid_result")
         owner_floor = capability.privacy_floor is PrivacyFloor.OWNER
@@ -924,7 +1044,7 @@ class OutputService:
         return (
             card is not None
             and len(card.blocks) == 1
-            and type(card.blocks[0]) is WeightedCollage
+            and type(card.blocks[0]) in (WeightedCollage, DenseCollage)
         )
 
     def _release_collage_image(self, image: dict) -> None:
@@ -1118,15 +1238,20 @@ class OutputService:
         self, invocation, result, target, document, audience, image
     ) -> RenderedMessage:
         """Select only the validated sole collage for the larger local profile."""
+        from ..presentation.card_bitmap import BitmapUnavailable
         from ..presentation.command_card import (
             TOO_LARGE,
             CommandCardRenderer,
             CommandPresentation,
         )
         from ..presentation.layout_collage import LAYOUT_VERSION
+        from ..presentation.layout_dense import DENSE_LAYOUT_VERSION, plan_dense
         from ..presentation.layout_renderer import apply_theme_selection
         from .collage_cache import (
+            CollageBudgetExceeded,
             RequiredCollageResourceUnavailable,
+            collage_snapshots_current,
+            inspect_collage_resources,
             load_finished_pages,
             resolve_collage_resources,
             store_finished_pages,
@@ -1154,6 +1279,10 @@ class OutputService:
                 max_text_lines=1_024,
             )(document, audience=audience, image=False)
         fallback = RenderedMessage(text_presentation.text)
+        # Keep the immutable declaration's structural validation outside the
+        # per-resource authority loop. Current permissions/routes are still
+        # checked at each storage boundary and immediately before sending.
+        validate_contract(result)
         if (
             invocation is None
             or target is None
@@ -1163,7 +1292,9 @@ class OutputService:
             return fallback
 
         async def current():
-            await self._validate_command_current(invocation, result, target)
+            await self._validate_command_current(
+                invocation, result, target, _validated_result=True
+            )
             self._admission.check(self._root_lease(invocation))
 
         try:
@@ -1179,7 +1310,12 @@ class OutputService:
                     raise
                 except Exception:
                     return fallback
-            card, versions = await resolve_collage_resources(card, scope, current)
+            if type(card.blocks[0]) is DenseCollage:
+                # Admission geometry must precede even the initial source IO.
+                plan_dense(card.blocks[0])
+            card, versions, snapshots = await inspect_collage_resources(
+                card, scope, current
+            )
             theme = {"core_theme": "warm_paper"}
             if self._command_theme_settings is not None:
                 settings = await self._command_theme_settings(invocation.module_id)
@@ -1189,9 +1325,11 @@ class OutputService:
                     "module_theme": settings.module_theme,
                 }
             selected = apply_theme_selection(card, **theme)
-            cache_key = "collage-v1-" + _fingerprint(
+            cache_key = "collage-v2-" + _fingerprint(
                 {
-                    "layout": LAYOUT_VERSION,
+                    "layout": DENSE_LAYOUT_VERSION
+                    if type(card.blocks[0]) is DenseCollage
+                    else LAYOUT_VERSION,
                     "card": selected,
                     "resources": versions,
                 }
@@ -1206,7 +1344,23 @@ class OutputService:
                 else None
             )
             cache_hit = bitmaps is not None
+            if cache_hit and not await collage_snapshots_current(
+                scope, snapshots, current
+            ):
+                bitmaps = None
+                cache_hit = False
+                may_cache_finished = False
             if not cache_hit:
+                if snapshots is not None:
+                    card, resolved_versions = await resolve_collage_resources(
+                        card,
+                        scope,
+                        current,
+                        snapshots=snapshots,
+                        may_cache_derivatives=may_cache_finished,
+                    )
+                    if resolved_versions != versions:
+                        may_cache_finished = False
                 presentation = self._command_card_renderer(
                     replace(document, card=card), audience=audience, **theme
                 )
@@ -1214,7 +1368,10 @@ class OutputService:
                     raise ValueError("invalid collage presentation")
                 bitmaps = presentation.bitmaps
             if not bitmaps or len(bitmaps) > 8:
-                return fallback
+                return RenderedMessage(
+                    fallback.text
+                    + "\n拼图未能在输出预算内生成；请降低清晰度或数量，或选用较小倍率预设后重试。"
+                )
             if sum(len(bitmap.content) for bitmap in bitmaps) > 16_777_216:
                 return fallback
             if self._collage_png is None:
@@ -1239,6 +1396,13 @@ class OutputService:
             self._release_collage_image(image)
             image.clear()
             return fallback
+        except (CollageBudgetExceeded, BitmapUnavailable):
+            self._release_collage_image(image)
+            image.clear()
+            return RenderedMessage(
+                fallback.text
+                + "\n拼图超过页面或素材预算；请降低清晰度或数量，或选用较小倍率预设后重试。"
+            )
         except GeneratedPngError as exc:
             self._release_collage_image(image)
             image.clear()

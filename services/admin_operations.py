@@ -223,7 +223,15 @@ class AdminOperationsService(AdminOperations):
         resources = {}
         for module in manifest.modules:
             fields = module_configuration_fields(module.config_fields)
-            if any(field.sensitive for field in fields):
+            allowed_secrets = {
+                policy.name
+                for policy in self._managed_source_credentials
+                if policy.module_id == f"{manifest.package_id}/{module.module_id}"
+            }
+            if any(
+                field.sensitive and field.name not in allowed_secrets
+                for field in fields
+            ):
                 raise ValueError("external sensitive configuration is unsupported")
             target = validate_contract(
                 ConfigTarget(
@@ -231,7 +239,9 @@ class AdminOperationsService(AdminOperations):
                     f"{manifest.package_id}/{module.module_id}",
                 )
             )
-            resources[target] = frozenset(field.name for field in fields)
+            resources[target] = frozenset(
+                field.name for field in fields if not field.sensitive
+            )
         self._ordinary_config_resources = MappingProxyType(
             {
                 **self._ordinary_config_resources,
@@ -620,10 +630,12 @@ class AdminOperationsService(AdminOperations):
             }
 
     def _active_credential_policies(self):
+        registered = self.registry.snapshot().modules
         return tuple(
             policy
             for policy in self._managed_source_credentials
-            if policy.module_id not in self.extension_runtime.unloaded_owners
+            if policy.module_id in registered
+            and policy.module_id not in self.extension_runtime.unloaded_owners
         )
 
     def credential_resources(self, *, active=False):

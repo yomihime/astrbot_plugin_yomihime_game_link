@@ -791,6 +791,29 @@ class B04SubscriptionServiceTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIsNone(snapshot.state)
 
+    async def test_c3_command_create_is_idempotent_at_cap_and_recreate_uses_fresh_generation(
+        self,
+    ):
+        self.service._max_subscriptions = 1
+        request = replace(self.request(), creation_key="watch-US")
+        left, right = await asyncio.gather(
+            self.service.create_request(self.invocation(), request),
+            self.service.create_request(self.invocation(), request),
+        )
+        self.assertEqual(left.subscription_id, right.subscription_id)
+        self.assertEqual(left.revision, 1)
+        self.assertEqual(len(await self.service.list_current(self.invocation())), 1)
+        with self.assertRaises(SubscriptionOperationError):
+            await self.service.create_request(
+                self.invocation(), replace(request, creation_key="another")
+            )
+        await self.service.cancel(
+            self.invocation(), left.subscription_id, expected_revision=1
+        )
+        fresh = await self.service.create_request(self.invocation(), request)
+        self.assertNotEqual(fresh.subscription_id, left.subscription_id)
+        self.assertEqual(fresh.revision, 1)
+
     async def test_m01_command_create_revise_list_cancel_and_revision_cas(self):
         created = await self.create()
         self.assertEqual(created.revision, 1)

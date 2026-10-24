@@ -74,6 +74,8 @@ EXTENSION_PACKAGE_FIELDS = frozenset(
         "source",
     }
 )
+# Optional presentation fields do not replace any original required root key.
+EXTENSION_PACKAGE_OPTIONAL_FIELDS = frozenset({"display_name"})
 EXTENSION_DESCRIPTOR_FIELDS: Mapping[str, frozenset[str]] = MappingProxyType(
     {
         "module": frozenset(
@@ -172,6 +174,7 @@ EXTENSION_DESCRIPTOR_FIELDS: Mapping[str, frozenset[str]] = MappingProxyType(
                 "matcher_id",
                 "filter_schema",
                 "notification_modes",
+                "enabled_config_key",
             }
         ),
         "config_field": frozenset(
@@ -191,6 +194,9 @@ EXTENSION_DESCRIPTOR_FIELDS: Mapping[str, frozenset[str]] = MappingProxyType(
                 "host",
                 "timeout_seconds",
                 "requests_per_minute",
+                "requests_per_hour",
+                "request_budget_config",
+                "authorization_only",
                 "max_redirects",
                 "redirect_path_prefixes",
             }
@@ -594,6 +600,23 @@ def check_ModuleManifest(self) -> None:
             raise ValueError("page fields mismatch module declarations")
 
     capabilities = {item.capability_id: item for item in self.capabilities}
+    gate_keys = {item.enabled_config_key for item in self.subscriptions}
+    if len(gate_keys) > 1:
+        raise ValueError("module subscription gates must share one configuration key")
+    for key in gate_keys - {None}:
+        field = next((field for field in self.config_fields if field.name == key), None)
+        if (
+            field is None
+            or field.sensitive
+            or field.default is not True
+            or (
+                field.value_schema is None
+                or field.value_schema.get("type") != "boolean"
+            )
+        ):
+            raise ValueError(
+                "subscription gate must reference a default-enabled boolean"
+            )
     _unique(tuple((item.capability_id for item in self.capabilities)), "capabilities")
     _unique(tuple((item.operation_path for item in self.commands)), "commands")
     _unique(tuple((item.name for item in self.tools)), "tools")
@@ -703,6 +726,21 @@ class ExtensionManifestABI:
 EXTENSION_MANIFEST_ABI = ExtensionManifestABI()
 
 
+def normalize_package_display_name(value: object) -> str | None:
+    """Normalize optional package-owned plain text at the Core boundary."""
+    if value is None:
+        return None
+    if (
+        type(value) is not str
+        or len(value) > 128
+        or any(
+            unicodedata.category(character) in {"Cc", "Cf", "Cs"} for character in value
+        )
+    ):
+        raise ValueError("package display_name must be bounded plain text or null")
+    return value if value.strip() else None
+
+
 def check_PackageManifest(self) -> None:
     _identifier(self.package_id, "package_id")
     _version(self.package_version, "package_version")
@@ -715,6 +753,9 @@ def check_PackageManifest(self) -> None:
     _text(self.author, "author")
     _text(self.license, "license")
     _text(self.source, "source")
+    object.__setattr__(
+        self, "display_name", normalize_package_display_name(self.display_name)
+    )
     _unique(tuple((item.module_id for item in self.modules)), "modules")
     _unique(tuple((item.route for item in self.modules)), "module routes")
     _unique(
@@ -850,6 +891,23 @@ def ConfigField_validate_value(self, value: object) -> None:
 
 
 def check_SourceDeclaration(self) -> None:
+    if type(self.authorization_only) is not bool:
+        raise ValueError("authorization-only marker must be a boolean")
+    if self.authorization_only and (
+        self.credential_ref is not None or self.max_redirects
+    ):
+        raise ValueError(
+            "authorization sources cannot redirect or use stored credentials"
+        )
+    if self.requests_per_hour is not None and (
+        type(self.requests_per_hour) is not int
+        or not 1 <= self.requests_per_hour <= 1000000
+    ):
+        raise ValueError("hourly budget must be a positive bounded integer")
+    if self.request_budget_config is not None:
+        _identifier(self.request_budget_config, "request_budget_config")
+        if self.requests_per_hour is None:
+            raise ValueError("configurable budget requires an explicit default")
     _identifier(self.source_id, "source_id")
     host = (
         unicodedata.normalize("NFKC", self.host) if isinstance(self.host, str) else ""
