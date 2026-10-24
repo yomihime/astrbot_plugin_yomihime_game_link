@@ -1036,7 +1036,11 @@ class AstrBotRuntime:
             subject=subject,
             request=raw,
             expiry=expiry,
-            operations={operation},
+            # Authorization flows read the selected credential revision before
+            # any exchange, then retain separate UPDATE authority for commit.
+            operations={operation, AdminOperation.READ_CONFIG}
+            if action == "module-credential-authorize"
+            else {operation},
             resources=resources,
             live=still_current,
         )
@@ -1193,7 +1197,7 @@ class AstrBotRuntime:
                 {target: binding.credential_fields},
             )
             grant = await core.admin_authorization.authorize(
-                AdminOperation.UPDATE_CONFIG,
+                AdminOperation.READ_CONFIG,
                 invocation=None,
                 context=authorization,
                 resources={target: binding.credential_fields},
@@ -1201,7 +1205,7 @@ class AstrBotRuntime:
             snapshot = await core.admin_operations._config_repository.current(
                 target,
                 grant=grant,
-                operation=AdminOperation.UPDATE_CONFIG,
+                operation=AdminOperation.READ_CONFIG,
             )
             if snapshot.revision != material_binding.expected_revision:
                 from ...core.ports import RevisionConflict
