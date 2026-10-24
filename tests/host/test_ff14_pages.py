@@ -817,19 +817,22 @@ class _PublicRuntime:
 
 
 class PublicPagesTests(unittest.IsolatedAsyncioTestCase):
-    async def test_exact_four_get_and_four_post_handlers_preserve_projections(self):
+    async def test_exact_four_get_and_six_post_handlers_preserve_projections(self):
         context, runtime = _Context(), _PublicRuntime()
         pages = PublicPages(context, runtime)
         pages.register()
         pages.register()
-        self.assertEqual(len(context.registered_web_apis), 9)
+        self.assertEqual(len(context.registered_web_apis), 10)
         self.assertEqual(
             [(entry[0], entry[2]) for entry in context.registered_web_apis],
             [
                 (f"/{PLUGIN_NAME}/{endpoint}", ["GET"])
                 for endpoint in ("overview", "settings", "catalog", "web-status")
             ]
-            + [(f"/{PLUGIN_NAME}/invoke", ["POST"])]
+            + [
+                (f"/{PLUGIN_NAME}/{endpoint}", ["POST"])
+                for endpoint in ("invoke", "invoke-images")
+            ]
             + [
                 (f"/{PLUGIN_NAME}/queries/{endpoint}", ["POST"])
                 for endpoint in ("items", "character", "calendar", "market")

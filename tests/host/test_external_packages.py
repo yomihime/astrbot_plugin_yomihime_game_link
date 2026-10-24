@@ -9,6 +9,7 @@ import shutil
 import sys
 import unittest
 import uuid
+from contextlib import asynccontextmanager
 from pathlib import Path
 from time import time
 from types import SimpleNamespace
@@ -170,6 +171,205 @@ class ExternalPackageTests(unittest.IsolatedAsyncioTestCase):
             plugin_instance=self.metadata.star_cls,
             package_root=str(self.package),
         )
+
+    def _subscription_fixture(self):
+        module = self.manifest["modules"][1]
+        module["sources"] = [{"source_id": "source", "host": "example.test"}]
+        module["config_fields"] = [
+            {
+                "name": "subscription_enabled",
+                "default": True,
+                "value_schema": {"type": "boolean"},
+            },
+            {
+                "name": "poll_interval_seconds",
+                "default": 300,
+                "value_schema": {"type": "integer", "minimum": 60},
+            },
+        ]
+        schema = {
+            "type": "object",
+            "properties": {},
+            "required": [],
+            "additionalProperties": False,
+        }
+        module["schedules"] = [
+            {
+                "collector_id": "watch",
+                "key_version": 1,
+                "source_id": "source",
+                "data_version": 1,
+                "input_schema": schema,
+                "shared_scope": "public",
+                "trigger": "periodic",
+                "minimum_interval_seconds": 60,
+                "default_interval_seconds": 300,
+                "interval_config_key": "poll_interval_seconds",
+            }
+        ]
+        module["subscriptions"] = [
+            {
+                "type_id": "watch",
+                "collector_id": "watch",
+                "matcher_id": "watch",
+                "filter_schema": schema,
+                "notification_modes": ["instant"],
+                "enabled_config_key": "subscription_enabled",
+            }
+        ]
+        self._write_manifest()
+        source = (
+            SOURCE.replace(
+                "return ModuleHandlers(capabilities={}, collectors={}, evaluators={})",
+                'return ModuleHandlers(capabilities={}, collectors={"watch": self} '
+                'if self.owner == "steam_dlc/dota2" else {}, evaluators={"watch": self} '
+                'if self.owner == "steam_dlc/dota2" else {})',
+            )
+            .replace(
+                "class Instance:\n",
+                "class Instance:\n"
+                "    def __init__(self, owner): self.owner = owner\n"
+                "    def normalize(self, value): raise AssertionError('not collected')\n"
+                "    async def collect(self, request): raise AssertionError('not collected')\n"
+                "    def evaluate(self, request): raise AssertionError('not evaluated')\n",
+            )
+            .replace(
+                "return Instance()",
+                "return Instance((await services.config.current()).target.module_id)",
+            )
+        )
+        # The factory receives real scoped services; its module identity is fixed
+        # by the existing config target, rather than by test ambient authority.
+        (self.package / "module.py").write_text(source, encoding="utf-8")
+
+    @asynccontextmanager
+    async def _subscription_pump_barrier(self):
+        entered, release = asyncio.Event(), asyncio.Event()
+        original = self.core._register_declared_subscription_gates
+
+        async def guarded(manifests):
+            if asyncio.current_task() is self.core._pump_task:
+                entered.set()
+                await release.wait()
+            await original(manifests)
+
+        self.core._pump_task.cancel()
+        await asyncio.gather(self.core._pump_task, return_exceptions=True)
+        with patch.object(self.core, "_register_declared_subscription_gates", guarded):
+            self.core._pump_task = asyncio.create_task(self.core._pump_loop())
+            await entered.wait()
+            try:
+                yield
+            finally:
+                self.core._pump_task.cancel()
+                await asyncio.gather(self.core._pump_task, return_exceptions=True)
+                release.set()
+
+    def _subscription_sql(self, sql):
+        connection = self.core.database.connect()
+        try:
+            rows = [tuple(row) for row in connection.execute(sql).fetchall()]
+            connection.commit()
+            return rows
+        finally:
+            connection.close()
+
+    async def test_external_register_has_first_subscription_fence_without_pump(self):
+        self._subscription_fixture()
+        async with self._subscription_pump_barrier():
+            lease = await self._register()
+            self.assertTrue(lease._complete)
+            self.assertIsNotNone(
+                await self.core.b04_repositories.lifecycle.current_fence(
+                    "steam_dlc/dota2"
+                )
+            )
+            binding = self.core.b04_repositories.lifecycle._subscription_gate_bindings[
+                "steam_dlc/dota2"
+            ]
+            self.assertTrue(binding.declared)
+            self.assertFalse(self.core._trusted_subscription_gates)
+            self.assertEqual(
+                self._subscription_sql("SELECT phase FROM subscription_gate_bootstrap"),
+                [("pending",)],
+            )
+
+    async def test_external_reregister_preserves_false_and_missing_marker(self):
+        self._subscription_fixture()
+        async with self._subscription_pump_barrier():
+            lease = await self._register()
+            self._subscription_sql(
+                "UPDATE config_entries SET value_json='false' "
+                "WHERE module_id='steam_dlc/dota2' AND field='subscription_enabled'"
+            )
+            await self.host.unregister_package(lease)
+            lease = await self._register()
+            self.assertIsNone(
+                await self.core.b04_repositories.lifecycle.current_fence(
+                    "steam_dlc/dota2"
+                )
+            )
+            self.assertEqual(
+                self._subscription_sql(
+                    "SELECT value_json FROM config_entries "
+                    "WHERE module_id='steam_dlc/dota2' AND field='subscription_enabled'"
+                ),
+                [("false",)],
+            )
+            self._subscription_sql(
+                "UPDATE config_entries SET value_json='true' "
+                "WHERE module_id='steam_dlc/dota2' AND field='subscription_enabled'"
+            )
+            self._subscription_sql(
+                "DELETE FROM b04_declared_subscription_gates "
+                "WHERE module_id='steam_dlc/dota2'"
+            )
+            await self.host.unregister_package(lease)
+            await self._register()
+            self.assertIsNone(
+                await self.core.b04_repositories.lifecycle.current_fence(
+                    "steam_dlc/dota2"
+                )
+            )
+            self.assertEqual(
+                self._subscription_sql(
+                    "SELECT COUNT(*) FROM b04_declared_subscription_gates "
+                    "WHERE module_id='steam_dlc/dota2'"
+                ),
+                [(0,)],
+            )
+
+    async def test_external_register_preserves_disabled_intent(self):
+        self._subscription_fixture()
+        await self.core.runtime_repository.seed_default_enabled_if_absent(
+            "steam_dlc",
+            "dota2",
+            expected_registry_revision=self.core.registry.snapshot().revision,
+        )
+        self._subscription_sql(
+            "UPDATE module_runtime_intents SET desired_enabled=0 "
+            "WHERE package_id='steam_dlc' AND module_id='dota2'"
+        )
+        async with self._subscription_pump_barrier():
+            await self._register()
+            intent = await self.core.runtime_repository.current_intent(
+                "steam_dlc", "dota2"
+            )
+            self.assertFalse(intent.desired_enabled)
+            self.assertIsNone(
+                await self.core.b04_repositories.lifecycle.current_fence(
+                    "steam_dlc/dota2"
+                )
+            )
+            self.assertEqual(
+                self._subscription_sql(
+                    "SELECT value_json FROM config_entries "
+                    "WHERE module_id='steam_dlc/dota2' AND field='subscription_enabled'"
+                ),
+                [("true",)],
+            )
+            module = self.core.registry.snapshot().modules.get("steam_dlc/dota2")
+            self.assertTrue(module is None or not module.enabled)
 
     def _public_page_fixture(self):
         example = ROOT / "examples/modules/minimal"
