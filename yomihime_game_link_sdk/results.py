@@ -55,6 +55,18 @@ class FactDocument:
 
 
 @dataclass(frozen=True)
+class AnalysisRequest:
+    """Core-managed optional COMMAND analysis of the accompanying public facts."""
+
+    template_id: str
+    template_version: int
+    instructions: str
+    focus_key: str
+    timeout_seconds: float = 30.0
+    max_output_chars: int = 8000
+
+
+@dataclass(frozen=True)
 class CapabilityResult:
     result_id: str
     status: ResultStatus
@@ -66,6 +78,7 @@ class CapabilityResult:
     warnings: tuple[str, ...] = ()
     error: ErrorDetail | None = None
     schema_version: str = "1.8.0"
+    analysis_request: AnalysisRequest | None = None
 
     def __post_init__(self) -> None:
         if self.provenance is not None:

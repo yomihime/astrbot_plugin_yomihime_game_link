@@ -20,9 +20,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 ARCHIVE = ROOT / "dist" / "astrbot_plugin_yomihime_game_link-local.zip"
 EXPECTED_WHEEL_SHA256 = (
-    "562a6cd01dc47464a3c89b1406cf3931b5c67523acdcb2f3f2e9e8c1ac5b09e0"
+    "daa4d3d0f109d52af75c7f7e87b5ce8e8bcc2100a7131b87181121e097b10392"
 )
 EXPECTED_WHEEL_ENTRIES = {
+    "yomihime_game_link_sdk/jobs.py",
     "yomihime_game_link_sdk/host.py",
     "yomihime_game_link_sdk/cards.py",
     "yomihime_game_link_sdk/_examples/offline_sample/manifest.json",
@@ -35,17 +36,17 @@ EXPECTED_WHEEL_ENTRIES = {
     "yomihime_game_link_sdk/version.py",
     "yomihime_game_link_sdk/results.py",
     "yomihime_game_link_sdk/_examples/empty_module/README.md",
-    "yomihime_game_link_sdk-0.1.0a16.dist-info/licenses/SDK-LICENSE",
-    "yomihime_game_link_sdk-0.1.0a16.dist-info/METADATA",
+    "yomihime_game_link_sdk-0.1.0a22.dist-info/licenses/SDK-LICENSE",
+    "yomihime_game_link_sdk-0.1.0a22.dist-info/METADATA",
     "yomihime_game_link_sdk/_examples/empty_module/module.py",
     "yomihime_game_link_sdk/storage.py",
-    "yomihime_game_link_sdk-0.1.0a16.dist-info/top_level.txt",
+    "yomihime_game_link_sdk-0.1.0a22.dist-info/top_level.txt",
     "yomihime_game_link_sdk/subscriptions.py",
     "yomihime_game_link_sdk/contexts.py",
-    "yomihime_game_link_sdk-0.1.0a16.dist-info/WHEEL",
+    "yomihime_game_link_sdk-0.1.0a22.dist-info/WHEEL",
     "yomihime_game_link_sdk/py.typed",
     "yomihime_game_link_sdk/__init__.py",
-    "yomihime_game_link_sdk-0.1.0a16.dist-info/RECORD",
+    "yomihime_game_link_sdk-0.1.0a22.dist-info/RECORD",
     "yomihime_game_link_sdk/_examples/empty_module/manifest.json",
 }
 PACKAGE_ENTRY_NAMES = {
@@ -424,11 +425,11 @@ def validate_wheel(path: Path) -> dict[str, bytes]:
                 "SDK wheel entry manifest differs from the reviewed artifact"
             )
         metadata_lines = set(
-            wheel.read("yomihime_game_link_sdk-0.1.0a16.dist-info/METADATA")
+            wheel.read("yomihime_game_link_sdk-0.1.0a22.dist-info/METADATA")
             .decode("utf-8")
             .splitlines()
         )
-        if not {"Name: yomihime-game-link-sdk", "Version: 0.1.0a16"} <= metadata_lines:
+        if not {"Name: yomihime-game-link-sdk", "Version: 0.1.0a22"} <= metadata_lines:
             raise ValueError("SDK wheel distribution metadata is unsupported")
         package = {name: wheel.read(name) for name in sorted(PACKAGE_ENTRY_NAMES)}
     return package

@@ -185,6 +185,10 @@ class _Repo:
         self.evaluation = None
         self.active = {}
         self.deferred = []
+        self.shared_observation = None
+
+    async def previous_observation(self, lease):
+        return self.shared_observation
 
     async def claim_due(self, request, *, now):
         self.claims += 1

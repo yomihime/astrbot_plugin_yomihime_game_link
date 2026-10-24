@@ -1,5 +1,5 @@
 import {createScope} from './lifecycle';
-import type {ModuleDescriptor, PageDescriptor, PageModule} from './contracts';
+import type {Bridge, ModuleDescriptor, PageDescriptor, PageModule} from './contracts';
 
 // This identity belongs to the HTML projection, not to a transient page view.
 export function assetIdentity(module: ModuleDescriptor, boundary: string): string {
@@ -7,9 +7,52 @@ export function assetIdentity(module: ModuleDescriptor, boundary: string): strin
     module.resources, module.pages.map(page => [page.route_id, page.entry, page.styles, page.capability_id])]);
 }
 
-export function createModuleAssets(document: Document, loadPage: (entry: string) => Promise<PageModule>, timeoutMs: number) {
+export function createModuleAssets(document: Document, loadPage: (entry: string) => Promise<PageModule>, timeoutMs: number, dynamic?:{bridge:Bridge;runtimeUrl:string}) {
   type Record = {revoked: boolean; scope: ReturnType<typeof createScope>; styles: Map<string, Promise<void>>; entries: Map<string, Promise<PageModule>>};
   const owners = new Map<string, Record>();
+  async function livePage(module:ModuleDescriptor,page:PageDescriptor,value:Record):Promise<PageModule>{
+    if(!dynamic||!module.runtime_id)throw Error('missing_live_projection');
+    const response=await dynamic.bridge.apiPost('admin/module-page-assets',{owner:module.module_id,page:page.route_id,runtime_id:module.runtime_id,module_epoch:module.module_epoch}) as {entry:string;styles:string[];asset_version:string;resources:{path:string;sha256:string;media_type:string;base64:string}[]};
+    if(value.revoked||!response||response.asset_version!==module.asset_version||!Array.isArray(response.resources)||response.resources.length>128||!Array.isArray(response.styles))throw Error('asset_revoked');
+    const prefix=`module-assets/${module.module_id}/pages/p${module.asset_version}/`;
+    if(page.entry!==prefix+response.entry||JSON.stringify(page.styles)!==JSON.stringify(response.styles.map(path=>prefix+path)))throw Error('invalid_live_projection');
+    const expected=new Map(module.resources.map(item=>[item.path,item.sha256])),payload=new Map<string,{bytes:Uint8Array;mime:string}>();
+    let total=0;
+    for(const item of response.resources){
+      if(typeof item.path!=='string'||typeof item.base64!=='string'||item.base64.length>5592416||expected.get(prefix+item.path)!==item.sha256||payload.has(item.path))throw Error('invalid_live_resource');
+      const bytes=Uint8Array.from(atob(item.base64),c=>c.charCodeAt(0));total+=bytes.length;
+      if(total>16777216)throw Error('live_resource_budget');
+      const digest=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',bytes)),x=>x.toString(16).padStart(2,'0')).join('');
+      if(digest!==item.sha256||value.revoked)throw Error('asset_revoked');
+      payload.set(item.path,{bytes,mime:item.media_type});
+    }
+    if(payload.size!==expected.size)throw Error('incomplete_live_projection');
+    const runtimeUrl=new URL(dynamic.runtimeUrl,document.location.href);
+    if(runtimeUrl.origin!==document.location.origin||!['http:','https:'].includes(runtimeUrl.protocol))throw Error('invalid_shared_runtime');
+    const decoder=new TextDecoder('utf-8',{fatal:true});
+    for(const path of response.styles){
+      const item=payload.get(path);if(!item||item.mime!=='text/css')throw Error('invalid_live_style');
+      const css=decoder.decode(item.bytes);
+      if(/@import\b|url\s*\(/i.test(css))throw Error('unsupported_live_style_reference');
+      const blob=URL.createObjectURL(new Blob([css],{type:'text/css'}));value.scope.onDispose(()=>URL.revokeObjectURL(blob));
+      await new Promise<void>((resolve,reject)=>{
+        const link=document.createElement('link');link.rel='stylesheet';link.href=blob;link.dataset.moduleStyle=module.module_id;
+        let done=false;const finish=(error?:Error)=>{if(done)return;done=true;clearTimeout(timer);link.onload=null;link.onerror=null;error?reject(error):resolve();};
+        const timer=setTimeout(()=>finish(Error('style_load_timeout')),timeoutMs);link.onload=()=>finish();link.onerror=()=>finish(Error('style_load_failed'));
+        value.scope.onDispose(()=>{finish(Error('asset_revoked'));link.remove();});document.head.append(link);
+      });
+    }
+    const entry=payload.get(response.entry);if(!entry||entry.mime!=='text/javascript'||value.revoked)throw Error('invalid_live_entry');
+    // Installed page code uses only the shell's one public runtime import.
+    let code=decoder.decode(entry.bytes);
+    code=code.replace(/(["'])(?:\.\.?\/)+runtime\.js\1/g,JSON.stringify(runtimeUrl.href));
+    const imports=[...code.matchAll(/(?:\bfrom\s*|\bimport\s*\(\s*|\bimport\s*)(["'])([^"']+)\1/g)].map(match=>match[2]);
+    if(imports.some(path=>path!==runtimeUrl.href))throw Error('unsupported_live_import');
+    const blob=URL.createObjectURL(new Blob([code],{type:'text/javascript'}));value.scope.onDispose(()=>URL.revokeObjectURL(blob));
+    const mounted=await import(/* @vite-ignore */ blob);
+    if(value.revoked||typeof mounted.mount!=='function')throw Error('asset_revoked');
+    return mounted;
+  }
   function record(owner: string): Record {
     let value = owners.get(owner);
     if (!value) {const next: Record = {revoked: false, scope: createScope(() => !next.revoked), styles: new Map(), entries: new Map()}; owners.set(owner, next); value = next;}
@@ -37,6 +80,9 @@ export function createModuleAssets(document: Document, loadPage: (entry: string)
   return {
     async load(module: ModuleDescriptor, page: PageDescriptor): Promise<PageModule> {
       const value = record(module.module_id);
+      if(new RegExp('/pages/p[0-9a-f]{64}/').test(page.entry)){
+        let entry=value.entries.get(page.entry);if(!entry){entry=livePage(module,page,value);value.entries.set(page.entry,entry);}return entry;
+      }
       const styles = page.styles.map(path => style(module.module_id, value, path));
       let entry = value.entries.get(page.entry);
       if (!entry) {entry = Promise.resolve().then(() => loadPage(page.entry)); value.entries.set(page.entry, entry);}

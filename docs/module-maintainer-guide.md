@@ -62,7 +62,7 @@ Core 与模块的命名空间配置是当前读写权威；Core 目录不依赖 
 
 `disable` 关闭业务准入，继续允许模块设置与启用管理。显式 `unload` 退出 active 普通/凭据目录、页面、来源、工具和 owner 注册，但模块管理仍显示可信恢复候选；保留最大部署政策不允许旧请求在卸载后提交。精确 owner、epoch 和生命周期检查不授予配置字段读写权。
 
-当前 SDK 为 `0.1.0a16`，模块 ABI 为 `2.0`，输出/展示/存储合同为 `1.8.0`，磁盘/工厂协议为 `1`；这些版本各自描述不同合同。SDK a10 增加 invocation-scoped diagnostics 服务：现有模块消费者可继续使用原服务；实现 `InvocationServices` 的 Host provider 与测试替身须提供 diagnostics。依赖此属性的新模块不保证运行于不含它的旧 Host。构建时核对固定 wheel 字节与来源；版本和 ABI 声明不替代具体安装验证。
+当前SDK为 `0.1.0a22`，保留a16服务并合入a19目录元数据、持久Jobs及受控投影/分析。模块ABI `2.0`、桥接 `1`，输出/展示/存储 `1.8.0`。部署固定canonical wheel字节；新增可选服务不代表旧Core可承载新消费者。SDK来源、导入顺序及正常冷启动需按候选实际验证。
 
 SDK 的后台调度声明仍受 PUBLIC ownership、固定参数和 schema 验证约束；细节见[SDK 说明](module-sdk.md#background-collectors)。历史候选和验收流水不属于当前模块维护合同。
 
@@ -77,6 +77,10 @@ SDK 的后台调度声明仍受 PUBLIC ownership、固定参数和 schema 验证
 维护时先运行变更涉及的模块、Core 输出及 Host 合同测试，页面修改显式运行管理/模块页面测试和正式构建预览。冻结后独立审查，主要跨层修改集成后安排一次全量。离线回放、隔离浏览器、真实宿主和模型回答分别记录；已有 ACL、跳过、格式及 EOF 提示单列。私有工作记录、凭据、数据库、备份和候选 ZIP 不入 Git 或发布包。
 
 模块展示保留可选 `ModuleDisplay` 与磁盘 `display`，由模块提供名称和翻译。FF14 owner 与 `/ygl ff14` 路由不变。当前根配置声明仅保留网页访问地址；FF14 普通设置由模块目录和已校验的 SQLite 值提供。旧配置准备文件、迁移完成 marker 与回滚选择器已退出当前安装合同。
+
+`ModuleDisplay.summary` 是可选的 160 Unicode code point 纯文本摘要；空白及 Cc/Cf/Cs 字符拒绝。包清单可提供可选 `display_name`（最多 128 code point，空白值归一为缺省）和 `module_order`（仅本包局部 module ID；未列模块按实际本地化显示名及稳定 ID 排序）。重复、未知、限定/跨包和非字符串 ID 拒绝。两者只影响目录显示：内置分类来自精确受信内置声明；扩展标签和排序要求已完成的本地包及精确当前注册 manifest。扫描结果或展示元数据不授予来源、租约、存储、凭据或管理权限。旧闭合 schema Core 会拒绝新增磁盘字段，使用这些字段的包须随匹配 Core/SDK 部署。
+
+模块前端可按需使用公开 `@game-link/ui` 的 `FormField` 与 `FormGrid` 共享字段呈现和布局；它们属于展示组件，不提供提交逻辑、业务 schema 或授权。见[共享 UI 合同](module-ui.md)。
 
 
 ### 声明式命令图片与模块徽标
@@ -107,6 +111,8 @@ Business diagnostics use scope.diagnostics.emit(event_id, payload) with module-o
 
 Frontend modules consume [the public lifecycle/service contract](../pages/public-contract.ts) and optionally the `@game-link/ui` presentation facade. See [shared UI integration](module-ui.md); do not import Core frontend internals. Page roles home/config/aux are declared in manifests, with at most one home and one config per module. Owner and entry assets are captured by trusted assembly. Config and credential services are limited to current owner/page/runtime/epoch and trusted declared fields, with independent READ/UPDATE authority and CAS. A single 00-game-link page token does not grant management authority. Credential snapshots contain only configured/decryptable/upstream=unverified.
 
+`ModulePageServices.preview` renders only PUBLIC results from the same page caller's current public read-only Web capability. It returns bounded, validated PNG pages (at most 8 pages and 16 MiB total, with 4 MiB per page); the path has no send target, personal finished-image cache or reusable grant pixels. Core rechecks current invocation and resource authority across awaits. It does not expose private output or add capability authority. Source request budgets remain per declared source and are reported through the bound HTTP budget service; modules must respect `remaining` and `next_available_at` rather than bypassing them.
+
 Reviewed LegacyConfigCopyPolicy accepts only a policy ID and revisions from clients. Source owner/field/value/schema are server-selected. Existing target values are preserved, missing source is a no-op, invalid/secret source is refused. Temporary effective projection uses only the destination field name until explicit target configuration exists; no core_defaults object or arbitrary Core read port is exposed. Explicit copy keeps source rows.
 
 
@@ -117,3 +123,7 @@ Calendar diagnostics omit absent HTTP status metadata; an ordinary source transp
 Use effective module-page configuration values and their controlled source/migration_pending metadata; do not substitute declaration defaults for a pending legacy destination. Source rows remain retained. Generic retained source fields do not appear in ordinary snapshots and cannot be patched/cleared through the active field list.
 
 Module config pages preserve reply_theme with null meaning follow Core. Read choices from the authorized descriptors supplied by Core; never hardcode the Core palette or import its implementation. Config descriptors contain only the selected page's authorized ordinary fields and a bounded approved schema subset. Opaque page sessions bind real Host management authority across awaits and commit, without claiming DOM attestation.
+
+## 独立安装与更新
+
+Core模块管理可读取并批准已安装插件的权限计划；来源、凭据注入、作业及兼容迁移扩张必须明确批准，模块不能自批。普通版本和页面内容更新使用当前有效lease捕获的完整性资源，同一Core包不因DLC页面变化重建。已有构建选择的等价策略可审计导入，保留配置、绑定、凭据与CAS。审批方法与边界见[source policies](source-policies.md)。

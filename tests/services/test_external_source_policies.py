@@ -183,23 +183,27 @@ class ExternalSourcePolicyTests(unittest.TestCase):
         self.assertIn("example_qr", selected.authorizations[OWNER])
         self.assertEqual(selected.managed_credentials[0].project()["name"], ALIAS)
 
-    def test_wrong_package_digest_and_manifest_only_change_do_not_permit(self):
+    def test_permissions_survive_content_updates_and_integrity_remains_separate(self):
         selected = self.selected()
         package = self.discovered()
         self.assertFalse(selected.permits(replace(package, package_id="another")))
-        self.assertFalse(
-            selected.permits(
-                replace(
-                    package,
-                    _provenance=replace(package._provenance, manifest_sha256=bytes(32)),
-                )
-            )
+        from ygl_test_subject.extensions.page_resources import capture_page_resources
+
+        forged = replace(
+            package, _provenance=replace(package._provenance, manifest_sha256=bytes(32))
         )
-        # Even semantically equivalent JSON has a different reviewed byte pin.
+        with self.assertRaises(ValueError):
+            capture_page_resources(forged._provenance, forged.manifest)
+        # Content changes do not expand an approved permission snapshot.
         (self.package / "yomihime.manifest.json").write_bytes(self.raw + b"\n")
-        self.assertFalse(selected.permits(self.discovered()))
+        self.assertTrue(selected.permits(self.discovered()))
         changed = copy.deepcopy(self.manifest)
         changed["author"] += " changed"
+        (self.package / "yomihime.manifest.json").write_text(
+            json.dumps(changed), encoding="utf-8"
+        )
+        self.assertTrue(selected.permits(self.discovered()))
+        changed["modules"][0]["sources"][0]["host"] = "unapproved.example.test"
         (self.package / "yomihime.manifest.json").write_text(
             json.dumps(changed), encoding="utf-8"
         )

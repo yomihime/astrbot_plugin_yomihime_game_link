@@ -9,6 +9,7 @@ from typing import Protocol, runtime_checkable
 
 from .contexts import InvocationView, MessageContext
 from .declarations import CapabilityReference
+from .jobs import JobHandler, JobOperations
 from .results import CapabilityResult
 from .storage import (
     CacheEntry,
@@ -26,6 +27,7 @@ from .storage import JsonValue as JsonValue
 from .subscriptions import (
     Collector,
     PublicEventComposer,
+    PublicEventProjector,
     SubscriptionEvaluator,
     SubscriptionRequest,
     SubscriptionView,
@@ -101,6 +103,13 @@ class ResourceReference:
     asset_id: str
     media_type: str
     scope: OwnerScope
+
+
+class ResourceCacheClass(str, Enum):
+    DEFAULT = "default"
+    RAW = "raw"
+    DERIVED = "derived"
+    OUTPUT = "output"
 
 
 @dataclass(frozen=True, slots=True)
@@ -252,6 +261,7 @@ class ResourceAccess(Protocol):
         *,
         visibility: CacheVisibility | None = None,
         ttl_seconds: float | None = None,
+        cache_class: ResourceCacheClass = ResourceCacheClass.DEFAULT,
     ) -> ResourceReference:
         """Allocate/reuse an opaque reference to bounded persistent bytes."""
         ...
@@ -267,6 +277,12 @@ class ResourceAccess(Protocol):
     async def stats(
         self, *, visibility: CacheVisibility | None = None
     ) -> ResourceCacheStats: ...
+
+    async def pin(self, asset_ids: tuple[str, ...], *, lease_seconds: int = 300) -> str:
+        """Protect current-authorized bytes for a bounded run; no new read rights."""
+        ...
+
+    async def unpin(self, pin_id: str) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -360,6 +376,9 @@ class InvocationServices(Protocol):
     @property
     def tasks(self) -> TaskScope: ...
 
+    @property
+    def jobs(self) -> JobOperations: ...
+
 
 class InvocationServiceBinder(Protocol):
     async def bind(self, invocation: InvocationView) -> InvocationServices: ...
@@ -378,8 +397,14 @@ class ModuleHandlers:
     collectors: Mapping[str, "Collector"]
     evaluators: Mapping[str, "SubscriptionEvaluator"]
     event_composers: Mapping[str, PublicEventComposer] = field(default_factory=dict)
+    event_projectors: Mapping[str, PublicEventProjector] = field(default_factory=dict)
+    jobs: Mapping[str, JobHandler] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        for name in ("event_projectors", "jobs"):
+            value = getattr(self, name)
+            if isinstance(value, Mapping):
+                object.__setattr__(self, name, MappingProxyType(dict(value)))
         if isinstance(self.capabilities, Mapping):
             object.__setattr__(
                 self, "capabilities", MappingProxyType(dict(self.capabilities))

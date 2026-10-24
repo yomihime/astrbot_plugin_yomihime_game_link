@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import inspect
 import secrets
 from collections.abc import Callable, Mapping
@@ -1228,7 +1229,161 @@ class SubscriptionOperationsService(SubscriptionOperations):
                     digest_members,
                 )
             )
+        commits = await self._project_public_members(
+            lease, observation, module, commits
+        )
         return ObservationEvaluationCommit(observation, tuple(commits))
+
+    async def _project_public_members(self, lease, observation, module, commits):
+        """Re-evaluate only current members of the already public event's target."""
+        projectors = module.handlers.event_projectors
+        if not projectors or observation.key.scope.kind is not OwnershipKind.PUBLIC:
+            return commits
+        reader = getattr(self._scheduler, "public_event_candidates", None)
+        if not callable(reader):
+            raise SubscriptionOperationError("public event projection unavailable")
+        prepared = {item.subscription_id: item for item in commits}
+        # Only ordinary evaluator events seed projection. Never recursively fan out.
+        for seed in tuple(commits):
+            source = await self._subscriptions.current(seed.subscription_id)
+            await self._require_execution_fence(lease)
+            if source is None or source.revision != seed.subscription_revision:
+                raise SubscriptionOperationError("public event source changed")
+            for event in seed.delivery_events:
+                contribution = event.public_contribution
+                if contribution is None:
+                    continue
+                projector = projectors.get(contribution.composer_id)
+                if projector is None:
+                    continue
+                candidates = await reader(source)
+                await self._require_execution_fence(lease)
+                for record in candidates:
+                    if (
+                        record.module_id != source.module_id
+                        or record.type_id != source.type_id
+                        or record.recipient != source.recipient
+                        or record.grant is not None
+                        or record.status is not SubscriptionStatus.ACTIVE
+                        or record.notification_mode != "instant"
+                        or record.collection_key.scope.kind is not OwnershipKind.PUBLIC
+                        or record.collection_key.source_id
+                        != source.collection_key.source_id
+                        or record.collection_key.collector_id
+                        != source.collection_key.collector_id
+                        or record.collection_key.key_version
+                        != source.collection_key.key_version
+                    ):
+                        continue
+                    checkpoint = await self._scheduler.current_checkpoint(
+                        record.subscription_id, record.collection_key
+                    )
+                    await self._require_execution_fence(lease)
+                    if (
+                        checkpoint is None
+                        or checkpoint.fence != lease.subscription_fence
+                        or checkpoint.snapshot.subscription != record
+                    ):
+                        # Projection must not establish a new subscriber's baseline.
+                        continue
+                    prior = prepared.get(record.subscription_id)
+                    state = (
+                        prior.state if prior is not None else checkpoint.snapshot.state
+                    )
+                    view = replace(self._view(record), evaluation_state=state)
+                    decision = projector.project(
+                        view, contribution, observed_at=observation.collected_at
+                    )
+                    if inspect.isawaitable(decision):
+                        if inspect.iscoroutine(decision):
+                            decision.close()
+                        raise SubscriptionOperationError(
+                            "public event projector must be synchronous"
+                        )
+                    if decision is None:
+                        continue
+                    decision = validate_evaluation_decision(view, observation, decision)
+                    if decision.triggered:
+                        raise SubscriptionOperationError(
+                            "projected event requires public contributions"
+                        )
+                    events = list(prior.delivery_events if prior is not None else ())
+                    for selected in decision.events:
+                        if (
+                            selected.event_key != event.event_key
+                            or selected.public_contribution is None
+                            or selected.public_contribution.composer_id
+                            != contribution.composer_id
+                        ):
+                            raise SubscriptionOperationError(
+                                "public event projection widened its identity"
+                            )
+                        projected = DeliveryEvent(
+                            selected.event_key,
+                            selected.event_version,
+                            record.subscription_id,
+                            record.revision,
+                            record.owner_id,
+                            None,
+                            record.recipient,
+                            selected.display_data,
+                            delivery_idempotency_key(
+                                selected.event_key,
+                                selected.event_version,
+                                record.subscription_id,
+                                record.revision,
+                                record.recipient,
+                            ),
+                            DeliveryState.PENDING,
+                            public_contribution=selected.public_contribution,
+                            commentary=selected.commentary,
+                        )
+                        if not any(
+                            (old.event_key, old.event_version)
+                            == (projected.event_key, projected.event_version)
+                            for old in events
+                        ):
+                            events.append(projected)
+                    expected = (
+                        prior.expected_state_revision
+                        if prior is not None
+                        else checkpoint.expected_state_revision
+                    )
+                    projected_observation = Observation(
+                        hashlib.sha256(
+                            f"{observation.observation_id}:{record.subscription_id}:{record.revision}".encode()
+                        ).hexdigest(),
+                        record.collection_key,
+                        observation.data_version,
+                        observation.source_observed_at,
+                        observation.collected_at,
+                        ObservationCompleteness.PARTIAL,
+                        tuple(dict.fromkeys(e.event_key for e in events)),
+                        {
+                            "source_observation_id": observation.observation_id,
+                            "subscription_id": record.subscription_id,
+                            "kind": "public_event_projection",
+                        },
+                    )
+                    prepared[record.subscription_id] = SubscriptionEvaluationCommit(
+                        record.subscription_id,
+                        record.revision,
+                        expected,
+                        EvaluationState(
+                            1 if expected is None else expected + 1, decision.state
+                        ),
+                        ObservationCursor(
+                            projected_observation.observation_id,
+                            projected_observation.data_version,
+                            projected_observation.completeness,
+                            projected_observation.covered_ids,
+                        ),
+                        tuple(events),
+                        prior.digest_members if prior is not None else (),
+                        projected_observation,
+                    )
+                    await self._require_execution_fence(lease)
+        return list(prepared.values())
 
     async def _require_execution_fence(self, lease: ExecutionLease) -> None:
         if lease.subscription_fence is None or not await self._scheduler.is_current(

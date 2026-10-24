@@ -623,11 +623,16 @@ class DeliveryService:
                                 window_id, candidates
                             )
                             self._admission.check(lease)
-                            rendered = await self._renderer.render(
-                                document,
-                                limits=self._limits,
-                                audience=DisplayAudience.PUBLIC,
-                            )
+                            try:
+                                rendered = await self._renderer.render(
+                                    document,
+                                    limits=self._limits,
+                                    audience=DisplayAudience.PUBLIC,
+                                )
+                            except asyncio.CancelledError:
+                                raise
+                            except Exception:
+                                rendered = self._public_text_fallback(document)
                         else:
                             rendered = await self._renderer.render_batch(
                                 batch, self._limits
@@ -994,6 +999,21 @@ class DeliveryService:
 
         return DeliveryResult(DeliveryState.CANCELLED, "subscription_revision_changed")
 
+    @staticmethod
+    def _public_text_fallback(document):
+        """Keep a valid settlement event when an optional renderer fails."""
+        blocks = [
+            block.text for block in document.ordered_blocks if type(block) is TextBlock
+        ]
+        if not blocks or document.privacy is not Privacy.PUBLIC:
+            raise ValueError("public event has no deterministic text fallback")
+        text = (
+            "排版不可用，以下为文字战报：\n" + document.title + "\n" + "\n".join(blocks)
+        )
+        if len(text) > 8192:
+            raise ValueError("public event text fallback exceeds bounds")
+        return validate_contract(DisplayOutput(text))
+
     async def _compose_public_event(self, window_id, candidates):
         """Compose only this claimed recipient's surviving public contributions."""
         records = [check.record for _, _, check in candidates]
@@ -1008,7 +1028,6 @@ class DeliveryService:
         if any(
             event.recipient != first.recipient
             or event.event_key != first.event_key
-            or event.event_version != first.event_version
             or event.grant is not None
             or event.display_data.privacy is not Privacy.PUBLIC
             or event.public_contribution is None

@@ -17,7 +17,7 @@ from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 from yomihime_game_link_sdk.errors import ParameterError
-from yomihime_game_link_sdk.services import ResourceCacheStats
+from yomihime_game_link_sdk.services import ResourceCacheClass, ResourceCacheStats
 from yomihime_game_link_sdk.storage import OwnerScope, OwnershipKind, ResourceMetadata
 
 
@@ -29,6 +29,7 @@ class ResourceCachePolicy:
     ttl_seconds: float = 7 * 86400
     max_ttl_seconds: float = 30 * 86400
     cleanup_batch: int = 32
+    raw_reserved_fraction: float = 0.75
 
     def __post_init__(self):
         for value in (
@@ -51,6 +52,11 @@ class ResourceCachePolicy:
                 raise ValueError("resource policy expiry must be finite and positive")
         if self.ttl_seconds > self.max_ttl_seconds:
             raise ValueError("resource default expiry exceeds maximum")
+        if (
+            type(self.raw_reserved_fraction) not in (float, int)
+            or not 0 <= self.raw_reserved_fraction <= 1
+        ):
+            raise ValueError("resource raw reservation is invalid")
 
 
 class ResourceCapacityError(RuntimeError):
@@ -91,7 +97,7 @@ class ManagedResourceCache:
         self.policy = policy or ResourceCachePolicy()
         self._initial_policy = self.policy
         self._public_policy = (
-            ResourceCachePolicy(max_bytes=256 * 1024 * 1024, max_items=2048)
+            ResourceCachePolicy(max_bytes=512 * 1024 * 1024, max_items=8192)
             if policy is None
             else self.policy
         )
@@ -187,6 +193,10 @@ class ManagedResourceCache:
                 and saved[2] == identity
                 and (entry is None or saved[1] == entry[0])
             ):
+                if entry is not None:
+                    await self.repository.managed_touch(
+                        asset_id, scope, datetime.now(UTC)
+                    )
                 return ResourceIntegritySnapshot(metadata, saved[1], identity)
             content = await self.read(asset_id, scope)
             after = await self.files.identity(asset_id, scope)
@@ -247,6 +257,15 @@ class ManagedResourceCache:
                                 raise ParameterError("collage source budget")
                 except FileNotFoundError:
                     continue
+            await self.repository.managed_touch_many(
+                tuple(
+                    asset_id
+                    for asset_id, snapshot in result.items()
+                    if snapshot is not None
+                ),
+                scope,
+                datetime.now(UTC),
+            )
             return result
 
     async def read_snapshot(self, snapshot: ResourceIntegritySnapshot):
@@ -272,6 +291,8 @@ class ManagedResourceCache:
                 raise FileNotFoundError("resource changed")
             if await self.files.identity(asset_id, scope) != identity:
                 raise FileNotFoundError("resource changed")
+            if entry is not None:
+                await self.repository.managed_touch(asset_id, scope, datetime.now(UTC))
             return content
 
     async def stats(self, scope: OwnerScope) -> ResourceCacheStats:
@@ -285,9 +306,11 @@ class ManagedResourceCache:
         if self._key(asset_id, scope) in self._readers:
             return False
         await check()
-        await self.repository.managed_mark_evicting(
+        marked = await self.repository.managed_mark_evicting(
             asset_id, scope, authorization_deadline=authorization_deadline
         )
+        if not marked:
+            return False
         await check()
         await self.files.remove_managed(asset_id, scope)
         await check()
@@ -297,7 +320,9 @@ class ManagedResourceCache:
         await check()
         return True
 
-    async def _room(self, scope, asset_id, size, *, check, authorization_deadline, now):
+    async def _room(
+        self, scope, asset_id, size, *, check, authorization_deadline, now, cache_class
+    ):
         policy = self._policy(scope)
         # Bound each indexed query by cleanup_batch and the whole operation by
         # the initial managed partition inventory, rather than one query batch.
@@ -307,6 +332,7 @@ class ManagedResourceCache:
             for (leased_scope, leased_asset) in self._readers
             if leased_scope == scope_key
         }
+        excluded.update(await self.repository.pinned_asset_ids(scope, now))
         used, count, _ = await self.repository.managed_usage(scope)
         inventory_count = count
         current = await self.repository.managed_entry(asset_id, scope)
@@ -324,12 +350,26 @@ class ManagedResourceCache:
         for expired_only in (True, False):
             while len(visited) < inventory_count:
                 await check()
+                raw_bytes, raw_count = await self.repository.managed_class_usage(
+                    scope, "raw"
+                )
+                protect_raw = (
+                    not expired_only
+                    and cache_class is not ResourceCacheClass.RAW
+                    and (
+                        raw_bytes
+                        <= int(policy.max_bytes * policy.raw_reserved_fraction)
+                        or raw_count
+                        <= int(policy.max_items * policy.raw_reserved_fraction)
+                    )
+                )
                 candidates = await self.repository.managed_candidates(
                     scope,
                     now=now,
                     limit=min(policy.cleanup_batch, inventory_count - len(visited)),
                     expired_only=expired_only,
                     excluded_asset_ids=tuple(sorted(excluded | visited)),
+                    protect_raw=protect_raw,
                 )
                 fresh = [
                     (candidate, candidate_size)
@@ -361,9 +401,12 @@ class ManagedResourceCache:
         ttl_seconds: float | None,
         check: Callable[[], Awaitable[None]],
         authorization_deadline=None,
+        cache_class: ResourceCacheClass = ResourceCacheClass.DEFAULT,
     ) -> ResourceMetadata:
         if type(content) is not bytes:
             raise TypeError("resource content must be bytes")
+        if type(cache_class) is not ResourceCacheClass:
+            raise ValueError("invalid resource cache class")
         policy = self._policy(scope)
         if len(content) > policy.max_file_bytes:
             raise ValueError("resource exceeds the per-file byte budget")
@@ -424,6 +467,7 @@ class ManagedResourceCache:
                     check=check,
                     authorization_deadline=authorization_deadline,
                     now=now,
+                    cache_class=cache_class,
                 )
             await check()
             valid = False
@@ -473,6 +517,7 @@ class ManagedResourceCache:
                     content_sha256=hashlib.sha256(content).hexdigest(),
                     now=now,
                     authorization_deadline=authorization_deadline,
+                    cache_class=cache_class.value,
                 )
                 await check()
                 identity = await self.files.identity(asset_id, scope)

@@ -182,6 +182,18 @@ class PublicEventComposer(Protocol):
     ) -> ComposedPublicEvent: ...
 
 
+class PublicEventProjector(Protocol):
+    """Pure projection for one Core-filtered current PUBLIC recipient member."""
+
+    def project(
+        self,
+        subscription: SubscriptionView,
+        contribution: PublicEventContribution,
+        *,
+        observed_at: datetime,
+    ) -> EvaluationDecision | None: ...
+
+
 @dataclass(frozen=True, slots=True)
 class EvaluationEvent:
     event_key: str

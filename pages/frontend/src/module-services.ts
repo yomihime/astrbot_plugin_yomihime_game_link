@@ -53,6 +53,19 @@ export async function createModuleServices({bridge,binding,capabilityId,isCurren
     } finally {writing=false;}
   }
   return Object.freeze({
+    jobs:Object.freeze({
+      submit(jobRequest:{handler_id:string;parameters:Readonly<Record<string,JsonValue>>;idempotency_key?:string|null}) {return request('job-submit',{request:jobRequest});},
+      status(jobId:string) {return request('job-status',{job_id:jobId});},
+      result(jobId:string,options:{cursor?:string|null;page_size?:number}={}) {return request('job-result',{job_id:jobId,...options});},
+      cancel(jobId:string,expectedRevision:number) {if(!revision(expectedRevision))return Promise.reject(Error('invalid_config'));return request('job-cancel',{job_id:jobId,expected_revision:expectedRevision});},
+      retry(jobId:string,expectedRevision:number) {if(!revision(expectedRevision))return Promise.reject(Error('invalid_config'));return request('job-retry',{job_id:jobId,expected_revision:expectedRevision});},
+      async resource(jobId:string,assetId:string) {
+        const value=await request('job-resource',{job_id:jobId,asset_id:assetId});
+        if(!plain(value)||value.media_type!=='image/png'||typeof value.base64!=='string'||value.base64.length>5592416)throw Error('operation_unavailable');
+        const raw=atob(value.base64),bytes=Uint8Array.from(raw,c=>c.charCodeAt(0));check(true);
+        return new Blob([bytes],{type:value.media_type});
+      },
+    }),
     async invoke(id:string,parameters:unknown) {check();if(id!==capabilityId||!id)denied();const result=await bridge.apiPost('invoke',{owner:identity.owner,page:identity.page,capability_id:id,parameters});check(true);return result;},
     async preview(id:string,parameters:unknown) {check();if(id!==capabilityId||!id)denied();const result=await bridge.apiPost('invoke-images',{owner:identity.owner,page:identity.page,capability_id:id,parameters});check(true);return result;},
     config:Object.freeze({

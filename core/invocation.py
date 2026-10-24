@@ -892,12 +892,32 @@ class Gateway:
                 warnings=result.warnings,
                 error=Gateway._rebuild_error(result.error),
                 schema_version=result.schema_version,
+                analysis_request=Gateway._rebuild_analysis(result.analysis_request),
             )
         )
         document = checked_result.document
         if document is not None and document.privacy is not expected_privacy:
             raise ValueError("document privacy exceeds its declaration")
         return checked_result
+
+    @staticmethod
+    def _rebuild_analysis(request):
+        from yomihime_game_link_sdk.results import AnalysisRequest
+
+        if request is None:
+            return None
+        if type(request) is not AnalysisRequest:
+            raise TypeError("analysis request must be the canonical SDK type")
+        return validate_contract(
+            AnalysisRequest(
+                template_id=request.template_id,
+                template_version=request.template_version,
+                instructions=request.instructions,
+                focus_key=request.focus_key,
+                timeout_seconds=request.timeout_seconds,
+                max_output_chars=request.max_output_chars,
+            )
+        )
 
     @staticmethod
     def _rebuild_value(value: object, depth: int = 0) -> object:

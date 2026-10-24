@@ -1,6 +1,6 @@
 import {h, shallowRef, nextTick} from 'vue';
 import {NCard, NButton} from 'naive-ui';
-export type ConfirmationRequest={kind:'navigation'|'module-draft'|'unload'|'maintenance'|'credential-clear'|'key-reset'|'key-restore'|'key-adopt'|'legacy-config';title:string;message:string;confirmLabel:string;isCurrent():boolean;canRestoreFocus?():boolean;owner?:string;trigger?:HTMLElement|null};
+export type ConfirmationRequest={kind:'navigation'|'module-draft'|'unload'|'maintenance'|'credential-clear'|'key-reset'|'key-restore'|'key-adopt'|'legacy-config'|'extension-install';title:string;message:string;confirmLabel:string;isCurrent():boolean;canRestoreFocus?():boolean;owner?:string;trigger?:HTMLElement|null};
 type Pending=ConfirmationRequest&{id:number;resolve(value:boolean):void};
 // One owned, non-modal confirmation for the existing shell guards.
 export function createInlineConfirmation(document:Document) {

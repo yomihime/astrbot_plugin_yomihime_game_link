@@ -33,6 +33,7 @@ from yomihime_game_link_sdk.declarations import PageResource as PageResource
 from yomihime_game_link_sdk.declarations import PrivacyFloor as PrivacyFloor
 from yomihime_game_link_sdk.declarations import SourceDeclaration as SourceDeclaration
 from yomihime_game_link_sdk.declarations import ToolDescriptor as ToolDescriptor
+from yomihime_game_link_sdk.jobs import JobDescriptor
 from yomihime_game_link_sdk.storage import CollectionDescriptor as CollectionDescriptor
 from yomihime_game_link_sdk.storage import JsonValue as JsonValue
 from yomihime_game_link_sdk.subscriptions import (
@@ -58,6 +59,7 @@ EXTENSION_PACKAGE_MAX_MODULES = 64
 EXTENSION_MODULE_MAX_DECLARATIONS = 128
 EXTENSION_SCHEMA_MAX_DEPTH = 16
 EXTENSION_SCHEMA_MAX_NODES = 2048
+EXTENSION_MANIFEST_MAX_NODES = 4096
 EXTENSION_MANIFEST_MAX_STRING_LENGTH = 4096
 EXTENSION_MANIFEST_MAX_ARRAY_ITEMS = 256
 EXTENSION_MANIFEST_ROOT_POLICY = "host_supplied_read_only_root"
@@ -74,6 +76,8 @@ EXTENSION_PACKAGE_FIELDS = frozenset(
         "source",
     }
 )
+# Optional presentation fields do not replace any original required root key.
+EXTENSION_PACKAGE_OPTIONAL_FIELDS = frozenset({"display_name", "module_order"})
 EXTENSION_DESCRIPTOR_FIELDS: Mapping[str, frozenset[str]] = MappingProxyType(
     {
         "module": frozenset(
@@ -95,11 +99,21 @@ EXTENSION_DESCRIPTOR_FIELDS: Mapping[str, frozenset[str]] = MappingProxyType(
                 "resources",
                 "display",
                 "diagnostics",
+                "jobs",
             }
         ),
         "diagnostic": frozenset({"event_id", "payload_schema"}),
+        "job": frozenset(
+            {"job_id", "parameter_schema", "timeout_seconds", "max_active_per_owner"}
+        ),
         "module_display": frozenset(
-            {"default_name", "localized_names", "short_name", "logo_resource"}
+            {
+                "default_name",
+                "localized_names",
+                "short_name",
+                "logo_resource",
+                "summary",
+            }
         ),
         "capability": frozenset(
             {
@@ -513,6 +527,8 @@ def _display_name(value: object, label: str, limit: int) -> None:
 
 
 def check_ModuleDisplay(self) -> None:
+    if self.summary is not None:
+        _display_name(self.summary, "summary", 160)
     if self.logo_resource is not None:
         validate_page_resource_path(self.logo_resource)
         if self.logo_resource.rsplit(".", 1)[-1] not in {"svg", "png", "jpg", "jpeg"}:
@@ -540,6 +556,10 @@ def check_ModuleDisplay(self) -> None:
 
 
 def check_ModuleManifest(self) -> None:
+    _descriptor_tuple(self.jobs, JobDescriptor, "jobs")
+    if len(self.jobs) > 16:
+        raise ValueError("job declaration budget exceeded")
+    _unique(tuple(item.job_id for item in self.jobs), "jobs")
     _identifier(self.module_id, "module_id")
     _route(self.route)
     if not isinstance(self.category, ModuleCategory):
@@ -682,6 +702,7 @@ class ExtensionManifestABI:
     max_declarations_per_module: int = EXTENSION_MODULE_MAX_DECLARATIONS
     max_schema_depth: int = EXTENSION_SCHEMA_MAX_DEPTH
     max_schema_nodes: int = EXTENSION_SCHEMA_MAX_NODES
+    max_manifest_nodes: int = EXTENSION_MANIFEST_MAX_NODES
     max_string_length: int = EXTENSION_MANIFEST_MAX_STRING_LENGTH
     max_array_items: int = EXTENSION_MANIFEST_MAX_ARRAY_ITEMS
     root_policy: str = EXTENSION_MANIFEST_ROOT_POLICY
@@ -703,6 +724,7 @@ class ExtensionManifestABI:
             "max_declarations_per_module": EXTENSION_MODULE_MAX_DECLARATIONS,
             "max_schema_depth": EXTENSION_SCHEMA_MAX_DEPTH,
             "max_schema_nodes": EXTENSION_SCHEMA_MAX_NODES,
+            "max_manifest_nodes": EXTENSION_MANIFEST_MAX_NODES,
             "max_string_length": EXTENSION_MANIFEST_MAX_STRING_LENGTH,
             "max_array_items": EXTENSION_MANIFEST_MAX_ARRAY_ITEMS,
             "factory_abi_version": EXTENSION_FACTORY_ABI_VERSION,
@@ -714,6 +736,21 @@ class ExtensionManifestABI:
 
 
 EXTENSION_MANIFEST_ABI = ExtensionManifestABI()
+
+
+def normalize_package_display_name(value: object) -> str | None:
+    """Normalize optional package-owned plain text at the Core boundary."""
+    if value is None:
+        return None
+    if (
+        type(value) is not str
+        or len(value) > 128
+        or any(
+            unicodedata.category(character) in {"Cc", "Cf", "Cs"} for character in value
+        )
+    ):
+        raise ValueError("package display_name must be bounded plain text or null")
+    return value if value.strip() else None
 
 
 def check_PackageManifest(self) -> None:
@@ -728,7 +765,22 @@ def check_PackageManifest(self) -> None:
     _text(self.author, "author")
     _text(self.license, "license")
     _text(self.source, "source")
+    object.__setattr__(
+        self, "display_name", normalize_package_display_name(self.display_name)
+    )
     _unique(tuple((item.module_id for item in self.modules)), "modules")
+    order = self.module_order
+    if order is None:
+        order = ()
+    if type(order) is not tuple or len(order) > len(self.modules):
+        raise ValueError("package module_order must be a bounded local ID sequence")
+    known = {module.module_id for module in self.modules}
+    for module_id in order:
+        _identifier(module_id, "module_order entry")
+        if module_id not in known:
+            raise ValueError("package module_order contains an undeclared local ID")
+    _unique(order, "package module_order")
+    object.__setattr__(self, "module_order", order)
     _unique(tuple((item.route for item in self.modules)), "module routes")
     _unique(
         tuple(

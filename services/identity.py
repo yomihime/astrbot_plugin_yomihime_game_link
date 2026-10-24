@@ -39,6 +39,7 @@ from ..core.ports import (
     ScheduledLease,
     UniqueConstraintViolation,
 )
+from ..core.ports_jobs import JobRunLease
 
 
 class IdentityBindingError(RuntimeError):
@@ -203,6 +204,16 @@ class InvocationPrincipalResolver:
                 raise PrincipalResolutionDenied()
             return principal_id
 
+        if trusted.origin is InvocationOrigin.JOB:
+            if (
+                type(lease) is not JobRunLease
+                or lease.owner_id != actor_id
+                or lease.invocation_id != trusted.invocation_id
+            ):
+                raise PrincipalResolutionDenied()
+            self._check_lease(trusted, lease)
+            return lease.owner_id
+
         if trusted.origin is InvocationOrigin.SCHEDULER:
             if (
                 not isinstance(lease, ScheduledLease)
@@ -230,7 +241,7 @@ class InvocationPrincipalResolver:
         validate_contract(invocation)
         if self._admission is None:
             return
-        if not isinstance(lease, (AdmissionLease, ScheduledLease)):
+        if not isinstance(lease, (AdmissionLease, ScheduledLease, JobRunLease)):
             raise ValueError("invocation has no exact Admission lease")
         if (
             lease.module_id != invocation.module_id

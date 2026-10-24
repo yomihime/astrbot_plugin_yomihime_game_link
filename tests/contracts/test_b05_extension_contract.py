@@ -12,6 +12,7 @@ from ygl_test_subject.core.contracts.manifests import (
     EXTENSION_MANIFEST_FILENAME,
     EXTENSION_MANIFEST_MAX_BYTES,
     EXTENSION_PACKAGE_FIELDS,
+    EXTENSION_PACKAGE_OPTIONAL_FIELDS,
     ExtensionManifestABI,
 )
 from ygl_test_subject.core.contracts.validation_boundary import validate_contract
@@ -60,6 +61,10 @@ class B05ExtensionContractTests(unittest.TestCase):
             ),
         )
         self.assertEqual(EXTENSION_MANIFEST_ABI.schema_version, 1)
+        self.assertEqual(
+            EXTENSION_PACKAGE_OPTIONAL_FIELDS,
+            frozenset({"display_name", "module_order"}),
+        )
         with self.assertRaises(ValueError):
             ExtensionManifestABI(schema_version=True)
         self.assertEqual(EXTENSION_MANIFEST_ABI.max_modules, 64)
@@ -115,6 +120,8 @@ class B05ExtensionContractTests(unittest.TestCase):
                 "author",
                 "license",
                 "source",
+                "display_name",
+                "module_order",
             ),
         )
         with self.assertRaises(ValueError):

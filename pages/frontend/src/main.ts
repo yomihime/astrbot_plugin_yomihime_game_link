@@ -2,16 +2,18 @@ import {createApp, defineComponent, h, ref, onMounted, onBeforeUnmount} from 'vu
 import {NButton} from 'naive-ui';
 import {UiProvider,LogoMark} from '@game-link/ui';
 import {PageHeader, SettingsGroup, StatusHint} from '@game-link/ui';
-import {loadPage} from './module-loader.js';
+import {loadPage,sharedRuntimeUrl} from './module-loader.js';
 import {createShell} from './controller';
 import type {Bridge} from './contracts';
 import './shell.css';
+// Core owns public presentation CSS independently of the management view.
+import './ui/tokens.css';
 import {skipToMain} from './navigation';
 import {createManagementPage,validateCatalog as configurationCatalog,validateSnapshot as configurationSnapshot} from './management.js';
 import {createModuleManagement} from './module-management';
 import {createInlineConfirmation} from './confirmation';
 import {contextBoundary} from './lifecycle';
-import {moduleLabels} from './catalog';
+import {moduleLabels,moduleGroups} from './catalog';
 declare global {interface Window {AstrBotPluginView: Bridge}}
 const App = defineComponent({setup() {
   const revision = ref(0), root = ref<HTMLElement|null>(null), main = ref<HTMLElement|null>(null), settingsRoot=ref<HTMLElement|null>(null), modulesRoot=ref<HTMLElement|null>(null),maintenanceRoot=ref<HTMLElement|null>(null),maintenanceOpen=ref(false);
@@ -52,6 +54,7 @@ const App = defineComponent({setup() {
     if(!showModules)closeMaintenance();
     if(shell?.state.catalog&&!modulesView&&modulesRoot.value){modulesView=createModuleManagement(modulesRoot.value,window.AstrBotPluginView,window,pageName,()=>{void shell?.refresh();management?.resume();},operation=>{const snapshot=interactionKey(),impact=navigationImpact();if(impact.blocked){shell?.refuseNavigation();return false;}return !management?.dirty()&&!impact.requiresConfirmation||confirmation.ask({kind:'module-draft',owner:operation.owner,title:'确认模块操作 '+operation.owner,message:`存在未提交的配置草稿。模块状态变化可能撤销其字段，继续执行？取消可先保存草稿。${impact.credentialOwners.length?'当前页面凭据输入将在解除绑定时清空。':''}${impact.pending?'等待中的请求不能撤回，结果未确认时请重新读取，不会自动重试。':''}注册版本 ${operation.revision}。`,confirmLabel:'保留草稿并继续核对',isCurrent:()=>snapshot===interactionKey()&&operation.isCurrent(),canRestoreFocus:()=>snapshot===interactionKey()&&operation.canRestoreFocus()});},confirmation,interactionKey,{hasSettings:owner=>Boolean(shell?.state.catalog?.modules?.find(module=>module.module_id===owner)?.pages.some(page=>page.role==='config')),onSettings:owner=>void navigate(()=>shell?.selectSettings(owner)),labels:()=>moduleLabels(shell?.state.catalog?.modules||[],shell?.state.locale||'zh-CN'),catalog:configurationCatalog,snapshot:configurationSnapshot});modulesView.start();}
     modulesView?.setRenderVisible(showModules);
+    modulesView?.presentationCatalog(shell?.state.catalog?.modules||[]);
     modulesView?.presentationLabels(moduleLabels(shell?.state.catalog?.modules||[],shell?.state.locale||'zh-CN'));
     modulesView?.setHomeVisible(Boolean(shell?.state.modules));
     modulesView?.selectOwner(shell?.state.moduleOwner||null);
@@ -60,20 +63,24 @@ const App = defineComponent({setup() {
     else if(settings&&wasSettings&&lastSettingsOwner!==shell?.state.settingsOwner){management?.suspend();management?.resume();}
     else if(!settings&&wasSettings)management?.suspend();lastSettingsOwner=shell?.state.settingsOwner||null;if(settings)management?.selectOwner();management?.setLegacyPolicies(shell?.state.catalog?.legacy_config_policies||[]);wasSettings=settings;
   }
-  onMounted(() => {offContext=window.AstrBotPluginView?.onContext(context=>{let next='';try{if(context.pluginName!=='astrbot_plugin_yomihime_game_link'||context.pageName!==pageName)throw Error();next=contextBoundary(context);}catch{contextValid=false;contextGeneration++;confirmation.cancel();modulesView?.cancelConfirmation();return;}if(next!==contextKey){contextGeneration++;contextKey=next;confirmation.cancel();modulesView?.cancelConfirmation();}contextValid=true;});window.addEventListener('hashchange',guardHash);shell = createShell({bridge: window.AstrBotPluginView, container: root.value!, window, loadPage, expectedPage: '00-game-link', confirmClear:(owner,field,revision,isCurrent)=>confirmation.ask({kind:'credential-clear',owner,title:'清除模块凭据？',message:owner+' 的 '+field+' 已保存凭据将失效；普通配置保留。版本 '+revision+'。',confirmLabel:'确认清除',isCurrent}), changed}); shell.start();});
+  onMounted(() => {offContext=window.AstrBotPluginView?.onContext(context=>{let next='';try{if(context.pluginName!=='astrbot_plugin_yomihime_game_link'||context.pageName!==pageName)throw Error();next=contextBoundary(context);}catch{contextValid=false;contextGeneration++;confirmation.cancel();modulesView?.cancelConfirmation();return;}if(next!==contextKey){contextGeneration++;contextKey=next;confirmation.cancel();modulesView?.cancelConfirmation();}contextValid=true;});window.addEventListener('hashchange',guardHash);shell = createShell({bridge: window.AstrBotPluginView, container: root.value!, window, loadPage, runtimeUrl:sharedRuntimeUrl, expectedPage: '00-game-link', confirmClear:(owner,field,revision,isCurrent)=>confirmation.ask({kind:'credential-clear',owner,title:'清除模块凭据？',message:owner+' 的 '+field+' 已保存凭据将失效；普通配置保留。版本 '+revision+'。',confirmLabel:'确认清除',isCurrent}), changed}); shell.start();});
   onBeforeUnmount(() => {closed=true;contextGeneration++;closeMaintenance();confirmation.dispose();offContext?.();window.removeEventListener('hashchange',guardHash);management?.dispose();modulesView?.dispose();shell?.dispose();});
   return () => {
     revision.value;
-    const state = shell?.state, selection = shell?.selected(), modules = state?.catalog?.modules || [];
+    const state = shell?.state, selection = shell?.selected(), modules = moduleGroups(state?.catalog?.modules || [],state?.locale||'zh-CN').flatMap(group=>group.modules);
     const labels=moduleLabels(modules,state?.locale||'zh-CN'),label=(owner:string)=>labels.get(owner)||owner;
     const busy = state?.busy || false,home=state?.home??true;
     const currentModule=modules.find(m=>m.module_id===state?.moduleOwner),moduleHome=Boolean(currentModule&&state?.moduleSection==='home'),queries=Boolean(currentModule&&state?.moduleSection==='queries');
     const go=(action:()=>void)=>(event:Event)=>{event.preventDefault();void navigate(action);};
-    const link=(text:string,href:string,current:boolean,action:()=>void)=>h('a',{href,'aria-current':current?'page':undefined,onClick:go(action)},text);
-    const title=currentModule?(state?.moduleSection==='config'?'业务配置':label(currentModule.module_id)):state?.settings?'全局设置':state?.modules?'模块管理':home?'首页 · 游戏工作台':'页面不可用';
+    const link=(text:string,href:string,current:boolean,action:()=>void,description?:string)=>h('a',{href,'aria-current':current?'page':undefined,'aria-describedby':description,onClick:go(action)},text);
+    const title=currentModule?(state?.moduleSection==='config'?'业务配置':label(currentModule.module_id)):state?.settings?'全局设置':state?.modules?'模块管理':home?'游戏工作台':'页面不可用';
     const icon=(kind:'home'|'grid'|'game'|'settings'|'arrow'|'page')=>h('svg',{class:'shell-icon',viewBox:'0 0 24 24',fill:'none',stroke:'currentColor','stroke-width':1.5,'stroke-linecap':'round','stroke-linejoin':'round','aria-hidden':'true'},[h('path',{d:{home:'M3 10 12 3l9 7v11h-6v-8H9v8H3Z',grid:'M3 3h7v7H3Zm11 0h7v7h-7ZM3 14h7v7H3Zm11 0h7v7h-7Z',game:'M7 7h10c3 0 5 10 3 11-2 1-4-3-5-3H9c-1 0-3 4-5 3-2-1 0-11 3-11Zm0 3v4m-2-2h4m7-1h.01m2 3h.01',settings:'M9 3h6l1 3 3 1 2 5-2 5-3 1-1 3H9l-1-3-3-1-2-5 2-5 3-1Zm3 5a4 4 0 1 0 0 8 4 4 0 0 0 0-8',arrow:'M5 12h14m-5-5 5 5-5 5',page:'M5 3h10l4 4v14H5Zm9 0v5h5M8 12h8m-8 4h6'}[kind]})]);
     const railLink=(text:string,href:string,current:boolean,action:()=>void,kind:'home'|'grid'|'game')=>h('a',{href,'aria-current':current?'page':undefined,onClick:go(action)},[icon(kind),h('span',text)]);
-    const workspaceLink=(text:string,description:string,href:string,action:()=>void,kind:'settings'|'grid')=>h('a',{class:'workspace-management-link',href,onClick:go(action)},[h('span',{class:'workspace-management-icon'},[icon(kind)]),h('span',[h('strong',text),h('span',description)]),icon('arrow')]);
+    const workspaceStatus=(owner:string,state:string)=>h('span',{class:'workspace-status-icon','data-state':state},[
+      h('svg',{viewBox:'0 0 24 24',fill:'none',stroke:'currentColor','stroke-width':1.7,'stroke-linecap':'round','stroke-linejoin':'round','aria-hidden':'true'},state==='unavailable'?[h('path',{d:'m12 3 10 18H2Z'}),h('path',{d:'M12 9v5m0 3h.01'})]:[h('circle',{cx:12,cy:12,r:9}),h('path',{d:state==='loaded'?'m8 12 3 3 5-6':'M9 8v8m6-8v8'})]),
+      h('span',{class:'workspace-status-tooltip',id:'workspace-status-'+encodeURIComponent(owner),role:'tooltip'},state==='loaded'?'已加载':state==='disabled'?'已停用':'不可用'),
+    ]);
+    const workspaceLink=(text:string,href:string,action:()=>void,kind:'settings'|'grid')=>h('a',{class:'workspace-management-link',href,onClick:go(action)},[h('span',{class:'workspace-management-icon'},[icon(kind)]),h('span',[h('strong',text)]),icon('arrow')]);
     const moduleSelect = (id:string)=>h('div',{class:'shell-field'},[h('label',{for:id},'模块'),h('select',{id,value:currentModule?.module_id||'',disabled:!modules.length,onChange:(event:Event)=>{const owner=(event.target as HTMLSelectElement).value;if(owner)void navigate(()=>shell?.selectModule(owner));}},[h('option',{value:''},'选择模块'),...modules.map(module=>h('option',{value:module.module_id},label(module.module_id)))])]);
     return h(UiProvider,{theme:state?.theme||'light',locale:state?.locale||'zh-CN',styleMountTarget:document.head}, {default:()=>[
       h('button',{class:'skip-button',onClick:()=>skipToMain(main.value)},'跳至正文'),
@@ -89,7 +96,7 @@ const App = defineComponent({setup() {
           h('div',{class:'shell-topbar'},[h('span','游戏连结'),h('span',{'aria-hidden':'true'},'/'),h('span',title)]),
           h('div',{class:'shell-mobile'},[h('p',{class:'shell-brand'},'如月怜的游戏连结'),h('nav',{'aria-label':'移动导航'},[link('首页','#/',home,()=>shell?.selectHome()),link('模块管理','#/modules',Boolean(state?.modules),()=>shell?.selectModules()),link('全局设置','#/settings',Boolean(state?.settings&&state.settingsOwner===null),()=>shell?.selectSettings())]),moduleSelect('module-select-mobile')]),
           h('main',{ref:main,id:'page-root',tabindex:-1,'aria-labelledby':'page-title'},[
-            h(PageHeader,{class:'shell-heading',titleId:'page-title',title,eyebrow:home?'GAME LINK / WORKSPACE':currentModule?'GAME LINK / MODULE':'GAME LINK / SETTINGS',subtitle:home?'从游戏模块开始，为下一场冒险做好准备。':currentModule?(state?.moduleSection==='config'?label(currentModule.module_id)+' · 查询偏好、日历与来源凭据。':'游戏业务由模块独立管理。'):state?.modules?'查看模块状态，管理加载与恢复。':'管理工作区的通用偏好。'},{default:()=>h(NButton,{onClick:()=>{if(!shell?.state.busy){void shell?.refresh();if(state?.modules)void modulesView?.refresh(true);}},'aria-disabled':String(busy),'aria-busy':String(busy),'aria-label':'刷新模块状态'},()=>busy?'正在刷新…':'刷新模块状态')}),
+            h(PageHeader,{class:'shell-heading',titleId:'page-title',title,eyebrow:home?undefined:currentModule?'GAME LINK / MODULE':'GAME LINK / SETTINGS',subtitle:home||currentModule?undefined:state?.modules?'查看模块状态，管理加载与恢复。':'管理工作区的通用偏好。'},{default:()=>h(NButton,{onClick:()=>{if(!shell?.state.busy){void shell?.refresh();if(state?.modules)void modulesView?.refresh(true);}},'aria-disabled':String(busy),'aria-busy':String(busy),'aria-label':'刷新模块状态'},()=>busy?'正在刷新…':'刷新模块状态')}),
             currentModule?h('nav',{class:'module-tabs','aria-label':'模块内分页'},[
               link('模块主页','#/module/'+encodeURIComponent(currentModule.module_id),moduleHome,()=>shell?.selectModule(currentModule.module_id)),
               currentModule.pages.some(page=>page.role==='config')?link('业务配置','#/module/'+encodeURIComponent(currentModule.module_id)+'/'+currentModule.pages.find(page=>page.role==='config')!.route_id,state?.moduleSection==='config',()=>shell?.selectSettings(currentModule.module_id)):null,
@@ -103,15 +110,13 @@ const App = defineComponent({setup() {
             queries&&!selection?h('p',{class:'shell-empty'},'选择一项辅助查询；仅在手动提交时请求数据。'):null,
             home?h('section',{class:'workspace-index','aria-label':'游戏连结'},[
               h('div',{class:'workspace-catalog'},[
-                h('div',{class:'workspace-index-heading'},[h('h2',{class:'shell-eyebrow'},'游戏目录'),h('span',{class:'workspace-count'},String(modules.length).padStart(2,'0')+' / MODULE')]),
-                ...modules.map((module,index)=>h('article',{class:'workspace-module',key:module.module_id},[
-                  h('div',{class:'workspace-module-heading'},[h('div',[h('p',{class:'workspace-kicker'},'MODULE '+String(index+1).padStart(2,'0')),h('h2',[link(label(module.module_id),'#/module/'+encodeURIComponent(module.module_id),false,()=>shell?.selectModule(module.module_id))]),h('p',{class:'workspace-module-description'},module.pages.length?`${module.pages.filter(page=>page.role==='aux').length} 项辅助查询，收在一处。`:'暂无可用功能，请在模块管理中核对状态。')]),module.display?.logo_resource?h(LogoMark,{class:'workspace-emblem workspace-emblem-resource',style:{maskImage:`url("./${module.display.logo_resource}")`}}):h('span',{class:'workspace-emblem','aria-hidden':'true'},'✦')]),
-                  h('div',{class:'workspace-module-meta'},[h('span',{class:'workspace-state'},module.state==='loaded'?'已加载':module.state==='disabled'?'已停用':'不可用'),link('进入模块 →','#/module/'+encodeURIComponent(module.module_id),false,()=>shell?.selectModule(module.module_id))]),
-                  h('nav',{class:'workspace-page-index','aria-label':label(module.module_id)+'功能'},module.pages.filter(page=>page.role==='aux').map((page,pageIndex)=>h('a',{href:`#/module/${encodeURIComponent(module.module_id)}/${page.route_id}`,onClick:go(()=>page.role==='config'?shell?.selectSettings(module.module_id):shell?.select(module.module_id,page.route_id))},[h('span',{class:'workspace-page-number'},String(pageIndex+1).padStart(2,'0')),icon(page.role==='config'?'settings':'page'),h('span',{class:'workspace-page-copy'},[h('strong',page.title),h('span',page.role==='config'?'模块配置':page.role==='home'?'模块主页':'辅助查询')]),icon('arrow')]))),
-                ])),
+                h('div',{class:'workspace-index-heading'},[h('h2',{class:'shell-eyebrow'},'游戏目录'),h('span',{class:'workspace-count'},modules.length+' 个模块')]),
+                ...moduleGroups(modules,state?.locale||'zh-CN').map(group=>h('section',{class:'workspace-package',key:group.key,'aria-label':group.title},[h('h3',{class:'workspace-package-title'},group.title),h('div',{class:'workspace-package-grid'},group.modules.map(module=>h('article',{class:'workspace-module',key:module.module_id},[
+                  h('div',{class:'workspace-module-heading'},[h('div',[h('div',{class:'workspace-module-title'},[h('h2',{'aria-level':4},[link(label(module.module_id),'#/module/'+encodeURIComponent(module.module_id),false,()=>shell?.selectModule(module.module_id),'workspace-status-'+encodeURIComponent(module.module_id))]),workspaceStatus(module.module_id,module.state)]),module.display?.summary?h('p',{class:'workspace-module-summary'},module.display.summary):null,!module.pages.length?h('p',{class:'workspace-module-description'},'暂无可用功能，请在模块管理中核对状态。'):null]),module.display?.logo_resource?h(LogoMark,{class:'workspace-emblem workspace-emblem-resource',style:{maskImage:`url("./${module.display.logo_resource}")`}}):h('span',{class:'workspace-emblem','aria-hidden':'true'},'✦')]),
+                ])))])),
                 !modules.length?h('p',{class:'shell-empty'},'暂无可用模块。可前往模块管理核对状态。'):null,
               ]),
-              h('aside',{class:'workspace-aside','aria-label':'工作区管理'},[h('h2',{class:'shell-eyebrow'},'工作区管理'),workspaceLink('全局设置','管理通用偏好与配置','#/settings',()=>shell?.selectSettings(),'settings'),workspaceLink('模块管理','模块生命周期与恢复','#/modules',()=>shell?.selectModules(),'grid'),h('p',{class:'workspace-scope-note'},[h('span',{class:'shell-eyebrow'},'各归其位'),h('br'),'通用偏好留在全局。',h('br'),'游戏业务由模块独立管理。'])]),
+              h('aside',{class:'workspace-aside','aria-label':'工作区管理'},[h('h2',{class:'shell-eyebrow'},'工作区管理'),workspaceLink('全局设置','#/settings',()=>shell?.selectSettings(),'settings'),workspaceLink('模块管理','#/modules',()=>shell?.selectModules(),'grid')]),
             ]):null,
             h('div',{ref:root,id:'module-container',hidden:!selection}),
             h('div',{class:'settings-container',hidden:!state?.settings||Boolean(state.settingsOwner&&!currentModule)},[h('div',{ref:settingsRoot,id:'settings-container'})]),
@@ -119,7 +124,7 @@ const App = defineComponent({setup() {
             h('div',{ref:maintenanceRoot,id:'maintenance-container',hidden:!maintenanceOpen.value}),
             !home&&!state?.modules&&!state?.settings&&!moduleHome&&!queries&&!state?.mounted||Boolean(state?.settingsOwner&&!currentModule)?h('p',{class:'shell-empty'},state?.cleanupPending?'页面清理未完成，请重新打开页面。':selection?'模块页面正在准备。':'此路由当前没有可用的注册页面。恢复模块后请从宿主插件详情正式重开。'):null,
           ]),
-          h('footer',{class:'shell-footer'},'如月怜的游戏连结'),
+          h('footer',{class:'shell-footer'},[h('a',{class:'shell-project-link',href:'https://github.com/yomihime/astrbot_plugin_yomihime_game_link',target:'_blank',rel:'noopener noreferrer'},[h('span','如月怜的游戏连结'),h('span',{class:'shell-project-english'},[' / Yomihime Game Link ',h('span',{class:'shell-project-spark','aria-hidden':'true'},'✧')])])]),
         ]),
       ]),
     ]});

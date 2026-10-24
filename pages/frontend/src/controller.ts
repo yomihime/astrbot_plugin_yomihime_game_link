@@ -3,12 +3,12 @@ import {validateCatalog, readRoute, routeHash} from './catalog';
 import {createScope, contextBoundary, mountIdentity} from './lifecycle';
 import {createModuleAssets, assetIdentity} from './module-assets';
 import type {Bridge, Catalog, ModuleDescriptor, PageDescriptor, PageContext, PageModule, MountedPage} from './contracts';
-export function createShell({bridge, container, window, loadPage, changed, timeoutMs = 8000, expectedPlugin = 'astrbot_plugin_yomihime_game_link', expectedPage = '00-game-link', confirmClear = async () => false}: {bridge: Bridge; container: HTMLElement; window: Window; loadPage(entry: string): Promise<PageModule>; changed(): void; timeoutMs?: number; expectedPlugin?: string; expectedPage?: string; confirmClear?(owner:string,field:string,revision:number,isCurrent:()=>boolean):Promise<boolean>}) {
+export function createShell({bridge, container, window, loadPage, runtimeUrl, changed, timeoutMs = 8000, expectedPlugin = 'astrbot_plugin_yomihime_game_link', expectedPage = '00-game-link', confirmClear = async () => false}: {bridge: Bridge; container: HTMLElement; window: Window; loadPage(entry: string): Promise<PageModule>; runtimeUrl?:string; changed(): void; timeoutMs?: number; expectedPlugin?: string; expectedPage?: string; confirmClear?(owner:string,field:string,revision:number,isCurrent:()=>boolean):Promise<boolean>}) {
   const state = {catalog: null as Catalog | null, busy: false, stale: false, message: '正在连接宿主。', theme: 'light' as 'light'|'dark', locale: 'zh-CN', selected: null as {owner: string; route: string}|null, mounted: false, cleanupPending: false, home: true, modules: false, settings: false, settingsOwner: null as string|null, moduleOwner:null as string|null, moduleSection:null as 'home'|'config'|'queries'|null};
   let closed = false, ready = false, sequence = 0, generation = 0, boundary = '', contextSeen = false;
   let off: (() => void) | undefined, mounted: MountedPage | null = null, identity = '', pendingIdentity = '';
   let scope: ReturnType<typeof createScope> | null = null;
-  const assets = createModuleAssets(container.ownerDocument, loadPage, timeoutMs), bindings = new Map<string, string>(), revokedOwners = new Set<string>();
+  const assets = createModuleAssets(container.ownerDocument, loadPage, timeoutMs, runtimeUrl?{bridge,runtimeUrl}:undefined), bindings = new Map<string, string>(), revokedOwners = new Set<string>();
   const reopenMessage = '模块资源已失效。请关闭此页，并从宿主插件详情重新打开页面。';
   let projectionRevoked = false, catalogSeen = false, activeOwner = '';
   let navigationVersion=0,lastPageNavigationVersion=-1;

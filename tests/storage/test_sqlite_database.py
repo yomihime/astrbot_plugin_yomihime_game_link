@@ -82,6 +82,86 @@ class SQLiteDatabaseTests(unittest.IsolatedAsyncioTestCase):
         finally:
             connection.close()
 
+    def test_schema_170_upgrade_preserves_existing_values_bindings_and_cas(
+        self,
+    ) -> None:
+        migrations = discover_migrations(
+            SQLiteDatabase(self.root / "unused").migrations_dir
+        )
+        historical = self.root / "schema-170"
+        historical.mkdir()
+        for migration in migrations:
+            if migration.version <= 170:
+                shutil.copyfile(migration.path, historical / migration.path.name)
+        path = self.root / "upgrade-170.sqlite3"
+        previous = SQLiteDatabase(path, migrations_dir=historical)
+        self.assertEqual(previous.initialize(), 170)
+        connection = previous.connect()
+        try:
+            connection.execute("INSERT INTO principals VALUES('owner','test','user')")
+            connection.execute(
+                "INSERT INTO conversations VALUES('test','room','group','synthetic')"
+            )
+            connection.execute(
+                "INSERT INTO bindings VALUES('binding',17,'owner','example/demo',"
+                "'test','account','synthetic','command','room')"
+            )
+            connection.execute(
+                "INSERT INTO binding_defaults VALUES('owner','example/demo','test','room','binding',19)"
+            )
+            connection.execute(
+                "INSERT INTO config_state VALUES('owner','example/demo',23)"
+            )
+            connection.execute(
+                "INSERT INTO config_entries(principal_id,module_id,field,value_json,revision) "
+                "VALUES('owner','example/demo','limit','1000',21)"
+            )
+            connection.execute(
+                "INSERT INTO config_entries(principal_id,module_id,field,secret_token,"
+                "secret_principal_id,secret_module_id,secret_field,secret_operation_id,"
+                "secret_state,revision) VALUES('owner','example/demo','credential',"
+                "'synthetic-opaque-token','owner','example/demo','credential','test','active',22)"
+            )
+            connection.commit()
+            tables = [
+                row[0]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+                )
+            ]
+            before = {
+                table: sorted(
+                    map(tuple, connection.execute(f'SELECT * FROM "{table}"')), key=repr
+                )
+                for table in tables
+            }
+        finally:
+            connection.close()
+        current = SQLiteDatabase(path)
+        self.assertEqual(current.initialize(), migrations[-1].version)
+        self.assertEqual(current.initialize(), migrations[-1].version)
+        connection = current.connect()
+        try:
+            for table, expected in before.items():
+                actual = sorted(
+                    map(tuple, connection.execute(f'SELECT * FROM "{table}"')), key=repr
+                )
+                with self.subTest(table=table):
+                    if table == "schema_migrations":
+                        self.assertEqual(
+                            [row for row in actual if row[0] <= 170], expected
+                        )
+                    else:
+                        self.assertEqual(actual, expected)
+            self.assertEqual(
+                connection.execute("PRAGMA quick_check").fetchone()[0], "ok"
+            )
+            self.assertEqual(
+                connection.execute("PRAGMA foreign_key_check").fetchall(), []
+            )
+        finally:
+            connection.close()
+
     def test_subscription_fence_migration_preserves_v80_rows_and_null_stamps(
         self,
     ) -> None:
@@ -196,10 +276,11 @@ class SQLiteDatabaseTests(unittest.IsolatedAsyncioTestCase):
             connection.close()
 
         # The historical fence upgrade remains v90; the current full migration
-        # advances to v170 without resetting the consumed gate or old data.
+        # advances to the latest schema without resetting the consumed gate or old data.
         current = SQLiteDatabase(path)
-        self.assertEqual(current.initialize(), 170)
-        self.assertEqual(current.initialize(), 170)
+        latest = discover_migrations(current.migrations_dir)[-1].version
+        self.assertEqual(current.initialize(), latest)
+        self.assertEqual(current.initialize(), latest)
         connection = current.connect()
         try:
             self.assertEqual(

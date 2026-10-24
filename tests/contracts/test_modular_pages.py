@@ -330,6 +330,16 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
                 "capabilities",
                 "config_fields",
                 "display",
+                "source",
+            },
+        )
+        self.assertEqual(
+            projected["source"],
+            {
+                "kind": "unknown",
+                "package_id": "sample",
+                "display_name": None,
+                "module_order": [],
             },
         )
         self.assertIsNone(projected["display"])

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "yomihime-game-link-sdk"
-version = "0.1.0a16"
+version = "0.1.0a22"
 description = "Host-independent public contracts and resources for Yomihime modules"
 readme = "docs/module-sdk.md"
 requires-python = ">=3.11"

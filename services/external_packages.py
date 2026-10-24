@@ -80,6 +80,7 @@ class ExternalPackageHost:
         timeout=5.0,
         registration_timeout=30.0,
         source_policies=None,
+        installation_trust=None,
     ):
         self._context = context
         self._core = core
@@ -89,6 +90,7 @@ class ExternalPackageHost:
         self._changed = changed
         self._timeout = timeout
         self._source_policies = source_policies
+        self._installation_trust = installation_trust
         self._registration_timeout = registration_timeout
         self._packages = {}
         self._known_sources = {}
@@ -147,6 +149,79 @@ class ExternalPackageHost:
                         )
         return bindings
 
+    def page_projection(self):
+        """Current immutable capture, independent of the Core build's UI list."""
+        from ..extensions.static_page_projection import StaticPageProjection
+
+        records = {}
+        for key, lease in tuple(self._packages.items()):
+            if lease._complete and lease.active:
+                package = lease._candidate.package
+                records[key] = (
+                    package._provenance.manifest_sha256.hex(),
+                    package.manifest,
+                    b"",
+                )
+        projection = StaticPageProjection()
+        from types import MappingProxyType
+
+        projection.packages = MappingProxyType(records)
+        return projection
+
+    def page_assets(self, owner, page_id):
+        import base64
+        import hashlib
+
+        package_id, separator, local_id = owner.partition("/")
+        lease = self._packages.get(package_id)
+        if not separator or lease is None or not lease._complete or not lease.active:
+            raise ExtensionHostError("page_unavailable")
+        package = lease._candidate.package
+        module = next(
+            (item for item in package.manifest.modules if item.module_id == local_id),
+            None,
+        )
+        page = (
+            next((item for item in module.pages if item.route_id == page_id), None)
+            if module
+            else None
+        )
+        if page is None:
+            raise ExtensionHostError("page_unavailable")
+        resources = []
+        media = {
+            ".js": "text/javascript",
+            ".css": "text/css",
+            ".svg": "image/svg+xml",
+            ".png": "image/png",
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".webp": "image/webp",
+        }
+        for resource in module.resources:
+            content = lease._page_resources[resource.path]
+            if hashlib.sha256(content).hexdigest() != resource.sha256:
+                raise ExtensionHostError("page_resource_changed")
+            mime = media.get(Path(resource.path).suffix.lower())
+            if mime is None:
+                raise ExtensionHostError("page_resource_type_rejected")
+            resources.append(
+                {
+                    "path": resource.path,
+                    "sha256": resource.sha256,
+                    "media_type": mime,
+                    "base64": base64.b64encode(content).decode("ascii"),
+                }
+            )
+        if not lease.active:
+            raise ExtensionHostError("page_unavailable")
+        return {
+            "entry": page.entry,
+            "styles": list(page.styles),
+            "asset_version": package._provenance.manifest_sha256.hex(),
+            "resources": resources,
+        }
+
     def _metadata(self, name, instance):
         getter = getattr(self._context, "get_registered_star", None)
         metadata = getter(name) if callable(getter) else None
@@ -190,6 +265,12 @@ class ExternalPackageHost:
         if len(packages) != 1 or not packages[0].valid:
             raise ExtensionHostError("package_manifest_invalid")
         package = packages[0]
+        if (
+            self._source_policies is not None
+            and package.package_id in self._source_policies.permission_snapshots
+            and not self._source_policies.permits(package)
+        ):
+            raise ExtensionHostError("installation_approval_required")
         for module in package.manifest.modules:
             if any(field.sensitive for field in module.config_fields) or any(
                 source.credential_ref is not None for source in module.sources
@@ -275,6 +356,29 @@ class ExternalPackageHost:
             if self._core.extension_runtime.candidate(key) is not None:
                 raise ExtensionHostError("package_already_owned")
             lease = _PackageLease(self, plugin_name, plugin_instance, candidate, digest)
+            from ..extensions.page_resources import capture_page_resources
+
+            lease._page_resources = await self._bounded(
+                asyncio.to_thread(
+                    capture_page_resources,
+                    candidate.package._provenance,
+                    candidate.package.manifest,
+                )
+            )
+            if (
+                self._installation_trust is not None
+                and self._source_policies is not None
+                and key in self._source_policies.permission_snapshots
+            ):
+                await self._bounded(
+                    self._installation_trust.bind(
+                        plugin_name,
+                        root,
+                        candidate.package,
+                        current=lambda: self.current()
+                        and self._owner_current(plugin_name, plugin_instance),
+                    )
+                )
             self._packages[key] = lease
             self._known_sources[key] = fingerprint
             self._sources.attach(candidate, digest)

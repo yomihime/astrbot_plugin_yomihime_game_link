@@ -3848,7 +3848,7 @@ class B04SubscriptionRepositoryTests(unittest.IsolatedAsyncioTestCase):
             await self._create(record)
             records.append(record)
 
-        async def commit(record, identity):
+        async def commit(record, identity, version=1, composer="compose"):
             doc = DisplayDocument(
                 "title",
                 "public facts",
@@ -3856,10 +3856,10 @@ class B04SubscriptionRepositoryTests(unittest.IsolatedAsyncioTestCase):
                 privacy=Privacy.PUBLIC,
             )
             event = replace(
-                self._event(record),
+                self._event(record, version=version),
                 display_data=doc,
                 public_contribution=PublicEventContribution(
-                    "compose",
+                    composer,
                     record.subscription_id,
                     {"account": record.subscription_id},
                 ),
@@ -3900,10 +3900,11 @@ class B04SubscriptionRepositoryTests(unittest.IsolatedAsyncioTestCase):
             lease_expires_at=due + timedelta(minutes=1),
         )
         self.assertEqual(len(claim.envelope.member_associations), 2)
-        late = await commit(records[2], "obs-c")
+        # A formatter/composer upgrade must not make the same business match new.
+        late = await commit(records[2], "obs-c", version=2, composer="compose-v2")
         saved_late = await self.delivery.current_event(
             late.event_key,
-            1,
+            2,
             subscription_id=late.subscription_id,
             subscription_revision=1,
         )
@@ -3914,6 +3915,124 @@ class B04SubscriptionRepositoryTests(unittest.IsolatedAsyncioTestCase):
             ).fetchone()[0]
         )
         self.assertEqual(count, 1)
+
+    async def test_i02_shared_committed_observation_survives_new_representative_and_reopen(
+        self,
+    ):
+        old = await self._create(self._record("old"))
+        first = self._observation(identity="shared-baseline")
+        lease = await self._lease()
+        state = SubscriptionEvaluationCommit(
+            old.subscription_id,
+            1,
+            None,
+            EvaluationState(1, {"initialized": True}),
+            ObservationCursor(
+                first.observation_id, 1, first.completeness, first.covered_ids
+            ),
+        )
+        self.assertTrue(
+            await self.scheduler.commit_observation_with_evaluations(
+                lease, ObservationEvaluationCommit(first, (state,))
+            )
+        )
+        new = await self._create(self._record("aaa-new"))
+        checkpoint = await self.scheduler.current_checkpoint(
+            new.subscription_id, new.collection_key
+        )
+        self.assertIsNone(checkpoint.snapshot.observation)
+        self.now += timedelta(seconds=31)
+        lease = await self._lease()
+        self.assertEqual(await self.scheduler.previous_observation(lease), first)
+        reopened = SQLiteSchedulerRepository(
+            SQLiteDatabase(self.path), subscription_gate_bindings=self.bindings
+        )
+        self.assertEqual(await reopened.previous_observation(lease), first)
+        self.assertIsNone(
+            await reopened.previous_observation(replace(lease, token="stale-token"))
+        )
+        failed = self._observation(
+            identity="failed-new-details", completeness=ObservationCompleteness.FAILED
+        )
+        self.assertTrue(await self.scheduler.commit_observation(lease, failed))
+        self.now += timedelta(seconds=31)
+        next_lease = await self._lease()
+        self.assertEqual(await reopened.previous_observation(next_lease), first)
+
+    async def test_0190_backfill_adopts_existing_sealed_business_event(self):
+        record = await self._create(self._record("legacy"))
+        event = replace(
+            self._event(record),
+            display_data=DisplayDocument("public", "facts", (TextBlock("public"),)),
+            public_contribution=PublicEventContribution("old-composer", "a", {"a": 1}),
+        )
+        obs = self._observation(identity="legacy-sample")
+        change = SubscriptionEvaluationCommit(
+            record.subscription_id,
+            1,
+            None,
+            EvaluationState(1, {}),
+            ObservationCursor(obs.observation_id, 1, obs.completeness, obs.covered_ids),
+            (event,),
+        )
+        self.assertTrue(
+            await self.scheduler.commit_observation_with_evaluations(
+                await self._lease(), ObservationEvaluationCommit(obs, (change,))
+            )
+        )
+        expected_key = repositories_subscriptions._dump(
+            (record.module_id, event.recipient, event.event_key)
+        )
+        migration = (
+            Path(__file__).resolve().parents[2]
+            / "infrastructure/sqlite/migrations/0190_public_event_identity.sql"
+        ).read_text(encoding="utf-8")
+
+        def backfill(unit):
+            original = unit.execute(
+                "SELECT window_id FROM b04_public_event_identity WHERE business_key=?",
+                (expected_key,),
+            ).fetchone()[0]
+            unit.execute("DELETE FROM b04_public_event_identity")
+            for statement in migration.split(";"):
+                if statement.strip():
+                    unit.execute(statement)
+            restored = unit.execute(
+                "SELECT window_id FROM b04_public_event_identity WHERE business_key=?",
+                (expected_key,),
+            ).fetchone()
+            return original, None if restored is None else restored[0]
+
+        original, restored = await self.db.executor.run_transaction(
+            backfill, begin_mode="IMMEDIATE"
+        )
+        self.assertEqual(restored, original)
+
+    async def test_public_projection_membership_over_budget_is_explicit_rejection(self):
+        source = await self._create(self._record("source", type_id="public-alert"))
+
+        # Use schema column names explicitly: the real store remains the reader.
+        def insert_rows(unit):
+            for index in range(100):
+                candidate = replace(source, subscription_id=f"candidate-{index}")
+                unit.execute(
+                    "INSERT INTO b04_subscriptions(subscription_id,revision,owner_id,scope_kind,scope_user,grant_id,grant_revision,status,record_json) VALUES (?,?,?,?,?,?,?,?,?)",
+                    (
+                        candidate.subscription_id,
+                        1,
+                        candidate.owner_id,
+                        "public",
+                        None,
+                        None,
+                        None,
+                        "active",
+                        repositories_subscriptions._dump(candidate),
+                    ),
+                )
+
+        await self.db.executor.run_transaction(insert_rows, begin_mode="IMMEDIATE")
+        with self.assertRaisesRegex(ValueError, "exceeds bounded projection"):
+            await self.scheduler.public_event_candidates(source)
 
     async def test_c3_defer_releases_without_observation_or_evaluation(self):
         record = await self._create()

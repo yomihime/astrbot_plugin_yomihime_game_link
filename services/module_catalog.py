@@ -15,6 +15,7 @@ from ..core.contracts.manifests import (
     EXTENSION_MANIFEST_MAX_STRING_LENGTH,
     EXTENSION_MODULE_MAX_DECLARATIONS,
     EXTENSION_PACKAGE_MAX_MODULES,
+    normalize_package_display_name,
 )
 from ..core.lifecycle import LifecycleState
 from ..core.ports import RunIdentity
@@ -32,6 +33,8 @@ def project_module_catalog(
     *,
     runtime_state: str,
     legacy_config_policies=(),
+    source_metadata: Mapping[str, tuple[str, str | None, tuple[str, ...]]]
+    | None = None,
 ) -> dict:
     """Copy only fixed public metadata fields, without performing IO."""
     if runtime_state not in ("ready", "not_ready", "closing", "closed"):
@@ -69,6 +72,21 @@ def project_module_catalog(
         else:
             availability, reason = "loaded", None
         manifest = module.manifest
+        # Core-owned presentation metadata only. Registry identity establishes
+        # package grouping, never whether a package is bundled or external.
+        source_kind, source_name, source_order = (source_metadata or {}).get(
+            module_id, ("unknown", None, ())
+        )
+        if source_kind not in ("builtin", "extension"):
+            source_kind = "unknown"
+        try:
+            source_name = (
+                normalize_package_display_name(source_name)
+                if source_kind == "extension"
+                else None
+            )
+        except ValueError:
+            raise ModuleCatalogUnavailable("module catalog source is invalid") from None
         if (
             len(module_id) > 2 * EXTENSION_MANIFEST_MAX_STRING_LENGTH + 1
             or len(manifest.route) > EXTENSION_MANIFEST_MAX_STRING_LENGTH
@@ -84,6 +102,14 @@ def project_module_catalog(
         modules.append(
             {
                 "module_id": module_id,
+                "source": {
+                    "kind": source_kind,
+                    "package_id": module_id.split("/", 1)[0],
+                    "display_name": source_name,
+                    "module_order": list(source_order)
+                    if source_kind == "extension"
+                    else [],
+                },
                 "route": manifest.route,
                 "category": manifest.category.value,
                 "version": manifest.module_version,
@@ -92,6 +118,7 @@ def project_module_catalog(
                         "default_name": manifest.display.default_name,
                         "localized_names": dict(manifest.display.localized_names),
                         "short_name": manifest.display.short_name,
+                        "summary": manifest.display.summary,
                         # Presentation only: reuse the already validated resource
                         # identity, and never expose assets for an unloaded module.
                         "logo_resource": (

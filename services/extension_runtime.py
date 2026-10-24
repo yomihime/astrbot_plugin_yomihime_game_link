@@ -1356,7 +1356,16 @@ class ExtensionRuntime:
                 self._require_exact_catalog_candidate(flight.candidate)
                 self._check_registry_value(flight.base_registry_revision)
                 registered = self.registry.register_package(
-                    replace(manifest, modules=modules), handlers
+                    replace(
+                        manifest,
+                        modules=modules,
+                        module_order=tuple(
+                            item
+                            for item in manifest.module_order
+                            if item in {module.module_id for module in modules}
+                        ),
+                    ),
+                    handlers,
                 )
                 package_registered = True
                 flight.registered = True

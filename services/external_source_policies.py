@@ -19,6 +19,7 @@ from ..core.invocation_budget import freeze_execution_timeouts
 from ..core.policy import supports_public_read_only
 from ..extensions.disk_manifest import parse_manifest
 from ..extensions.page_resources import _read_file
+from .extension_permissions import permission_snapshot, permissions_within
 from .managed_source_credentials import ManagedSourceCredentialPolicy
 from .source_authorizations import AuthorizationFlowPolicy
 from .source_credentials import CredentialInjection, SourceCredentialPolicy
@@ -37,6 +38,9 @@ def _object(pairs):
 
 class ExternalSourcePolicies:
     def __init__(self, payload=None):
+        self.payload = payload
+        self.permission_snapshots = {}
+        self.config_migrations = {}
         self.credential_policies = ()
         self.managed_credentials = ()
         self.authorizations = MappingProxyType({})
@@ -61,21 +65,61 @@ class ExternalSourcePolicies:
         timeout_manifests: dict[str, ModuleManifest] = {}
         for package in value["packages"]:
             required = {"manifest", "credentials", "authorizations"}
-            if type(package) is not dict or set(package) not in (
-                required,
-                required | {"capability_timeouts"},
+            if (
+                type(package) is not dict
+                or not required <= set(package)
+                or set(package)
+                - required
+                - {"capability_timeouts", "config_migrations"}
             ):
                 raise ValueError("invalid external source package")
             if type(package["manifest"]) is not str:
                 raise ValueError("invalid external source manifest")
             raw = package["manifest"].encode("utf-8")
             manifest = parse_manifest(raw)
+            self.permission_snapshots[manifest.package_id] = permission_snapshot(
+                manifest
+            )
             if manifest.package_id in manifests:
                 raise ValueError("duplicate external source package")
             manifests[manifest.package_id] = hashlib.sha256(raw).hexdigest()
             modules = {
                 manifest.global_module_id(m.module_id): m for m in manifest.modules
             }
+            migrations = package.get("config_migrations", [])
+            if type(migrations) is not list or len(migrations) > 32:
+                raise ValueError("invalid configuration compatibility rules")
+            for rule in migrations:
+                if (
+                    type(rule) is not dict
+                    or set(rule)
+                    != {"owner", "field", "kind", "from_minimum", "to_minimum"}
+                    or rule["kind"] != "integer_floor"
+                    or rule["owner"] not in modules
+                ):
+                    raise ValueError("invalid configuration compatibility rule")
+                field = next(
+                    (
+                        item
+                        for item in modules[rule["owner"]].config_fields
+                        if item.name == rule["field"]
+                    ),
+                    None,
+                )
+                if (
+                    field is None
+                    or field.sensitive
+                    or field.value_schema is None
+                    or field.value_schema.get("type") != "integer"
+                    or type(rule["from_minimum"]) is not int
+                    or type(rule["to_minimum"]) is not int
+                    or not rule["from_minimum"] < rule["to_minimum"]
+                    or field.value_schema.get("minimum") != rule["to_minimum"]
+                ):
+                    raise ValueError("configuration compatibility declaration mismatch")
+            self.config_migrations[manifest.package_id] = tuple(
+                freeze_json(rule) for rule in migrations
+            )
             budgets = package.get("capability_timeouts", {})
             if type(budgets) is not dict:
                 raise ValueError("invalid external execution budgets")
@@ -216,7 +260,7 @@ class ExternalSourcePolicies:
         return cls(_read_file(path, root, 1048576))
 
     def permits(self, package):
-        return (
-            self.manifests.get(package.package_id)
-            == package._provenance.manifest_sha256.hex()
+        approved = self.permission_snapshots.get(package.package_id)
+        return approved is not None and permissions_within(
+            permission_snapshot(package.manifest), approved
         )

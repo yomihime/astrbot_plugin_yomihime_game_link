@@ -26,6 +26,7 @@ from yomihime_game_link_sdk.declarations import (
     SourceDeclaration,
     ToolDescriptor,
 )
+from yomihime_game_link_sdk.jobs import JobDescriptor
 from yomihime_game_link_sdk.storage import (
     CollectionDescriptor,
     CollectionIndex,
@@ -45,6 +46,7 @@ from ..core.contracts.manifests import (
     EXTENSION_MANIFEST_MAX_STRING_LENGTH,
     EXTENSION_MANIFEST_SCHEMA_VERSION,
     EXTENSION_PACKAGE_FIELDS,
+    EXTENSION_PACKAGE_OPTIONAL_FIELDS,
 )
 from ..core.contracts.validation_boundary import validate_contract
 from ..core.contracts.version import CONTRACT_VERSION
@@ -70,7 +72,7 @@ def _walk_budget(value: object) -> tuple[int, int]:
     def visit(item: object, depth: int, in_schema: bool = False) -> None:
         nonlocal nodes, schemas
         nodes += 1
-        if nodes > EXTENSION_MANIFEST_ABI.max_schema_nodes:
+        if nodes > EXTENSION_MANIFEST_ABI.max_manifest_nodes:
             raise ManifestError("manifest node budget exceeded")
         if depth > EXTENSION_MANIFEST_ABI.max_schema_depth:
             raise ManifestError("manifest nesting budget exceeded")
@@ -99,6 +101,7 @@ def _walk_budget(value: object) -> tuple[int, int]:
                     "input_schema",
                     "filter_schema",
                     "value_schema",
+                    "parameter_schema",
                 }
                 if is_schema:
                     schemas += 1
@@ -379,6 +382,12 @@ def _map_module(value: object, contract_version: str) -> ModuleManifest:
             ),
             display=display,
             diagnostics=tuple(diagnostics),
+            jobs=tuple(
+                validate_contract(
+                    JobDescriptor(**_keys(item, "job", {"job_id", "parameter_schema"}))
+                )
+                for item in _list(obj, "jobs")
+            ),
         )
     )
 
@@ -411,7 +420,10 @@ def parse_manifest(data: bytes | bytearray | memoryview) -> PackageManifest:
         raise ManifestError("invalid manifest JSON") from None
     _walk_budget(raw)
     root = _shape(raw, "object", "manifest")
-    if set(root) != EXTENSION_PACKAGE_FIELDS:
+    if (
+        EXTENSION_PACKAGE_FIELDS - set(root)
+        or set(root) - EXTENSION_PACKAGE_FIELDS - EXTENSION_PACKAGE_OPTIONAL_FIELDS
+    ):
         raise ManifestError("manifest fields do not match schema v1")
     if (
         type(root["schema_version"]) is not int
@@ -437,6 +449,12 @@ def parse_manifest(data: bytes | bytearray | memoryview) -> PackageManifest:
                 author=_shape(root["author"], "string", "author"),
                 license=_shape(root["license"], "string", "license"),
                 source=_shape(root["source"], "string", "source"),
+                display_name=root.get("display_name"),
+                module_order=(
+                    None
+                    if root.get("module_order") is None
+                    else tuple(_shape(root["module_order"], "array", "module_order"))
+                ),
             )
         )
     except ManifestError:

@@ -1222,6 +1222,10 @@ class SchedulerRepository(Protocol):
         self, lease: ExecutionLease
     ) -> Observation | None: ...
 
+    async def previous_observation(self, lease: ExecutionLease) -> Observation | None:
+        """Shared committed collection state, independent of subscriber cursors."""
+        ...
+
     async def claim_due(
         self, request: CollectionRunRequest, *, now: datetime
     ) -> ExecutionLease | None: ...

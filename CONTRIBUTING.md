@@ -72,7 +72,7 @@ python scripts/build_release.py
 脚本要求 Python 3.13 和固定版本的 setuptools、wheel。它从临时 SDK 源码副本构建并验证固定的 SDK wheel，然后生成：
 
 - `dist/astrbot_plugin_yomihime_game_link-v0.1.2.zip`：上传到 AstrBot WebUI 的插件包；
-- `dist/yomihime_game_link_sdk-0.1.0a11-py3-none-any.whl`：独立 SDK 工件，不是插件 ZIP；
+- `dist/yomihime_game_link_sdk-0.1.0a19-py3-none-any.whl`：独立 SDK 工件，不是插件 ZIP；
 - `dist/SHA256SUMS`：上述工件的摘要。
 
 可用 `--tag v0.1.2` 校验 tag 必须与 `metadata.yaml` 中的版本相同。该参数只做版本校验，不创建 tag。发布工件的下载和安装步骤见[README](https://github.com/yomihime/astrbot_plugin_yomihime_game_link/blob/master/README.md)。
@@ -108,7 +108,7 @@ node tests/pages/ff14/test_item_display.mjs
 全量测试需要明确指定刚构建并验证的 SDK wheel：
 
 ```powershell
-$env:YGL_TEST_SDK_WHEEL = (Resolve-Path dist/yomihime_game_link_sdk-0.1.0a11-py3-none-any.whl).Path
+$env:YGL_TEST_SDK_WHEEL = (Resolve-Path dist/yomihime_game_link_sdk-0.1.0a19-py3-none-any.whl).Path
 python -m unittest discover -s tests -t . -v
 python scripts/check_doc_links.py
 ```
@@ -120,7 +120,7 @@ python -m unittest -v tests.storage.test_windows_ci_boundaries tests.integration
 node --test tests/packaging/build-output.test.mjs
 ```
 
-Linux 对应 `export YGL_TEST_SDK_WHEEL="$PWD/dist/yomihime_game_link_sdk-0.1.0a11-py3-none-any.whl"`。真实宿主 ZIP 冒烟测试使用独立完整宿主环境，步骤见[真实宿主验证](docs/real-host-smoke.md)。
+Linux 对应 `export YGL_TEST_SDK_WHEEL="$PWD/dist/yomihime_game_link_sdk-0.1.0a19-py3-none-any.whl"`。真实宿主 ZIP 冒烟测试使用独立完整宿主环境，步骤见[真实宿主验证](docs/real-host-smoke.md)。
 
 Ubuntu job 运行全量 unittest 与 Ruff。每次验证应报告实际 passed/failed/skipped 汇总；局部测试通过不等于全量通过。
 

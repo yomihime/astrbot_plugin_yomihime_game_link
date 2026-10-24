@@ -592,6 +592,25 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("Bob", self.port.calls[0][1].text)
         self.assertEqual(prompts, ["Alice,Bob", "Alice"])
 
+    async def test_c3_public_renderer_failure_sends_bounded_deterministic_settlement_text(
+        self,
+    ):
+        window, _ = await self._c3_public_fixture("renderer-fallback")
+
+        async def failed_renderer(*args, **kwargs):
+            raise RuntimeError("renderer unavailable")
+
+        self.service._renderer = SimpleNamespace(render=failed_renderer)
+        result = await self.service.dispatch_digest(
+            window.window_id, self.recipient, now=self.now
+        )
+        self.assertIs(result.state, DeliveryState.SENT)
+        self.assertEqual(len(self.port.calls), 1)
+        text = self.port.calls[0][1].text
+        self.assertIn("文字战报", text)
+        self.assertIn("Alice", text)
+        self.assertIn("Bob", text)
+
     async def test_c3_public_restart_unknown_retains_original_member_receipts(self):
         window, events = await self._c3_public_fixture("restart-unknown")
         claim = await self.windows.claim_due_envelope(

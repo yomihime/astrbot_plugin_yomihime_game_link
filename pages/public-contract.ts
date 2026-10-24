@@ -14,6 +14,14 @@ export interface MutationReceipt {readonly revision: number}
 export type CredentialPair = {readonly client_id: string; readonly client_secret: string}
   | {readonly token: string; readonly subject?: string};
 export interface ModulePageServices {
+  readonly jobs: {
+    submit(request:{handler_id:string;parameters:Readonly<Record<string,JsonValue>>;idempotency_key?:string|null}):Promise<unknown>;
+    status(jobId:string):Promise<unknown>;
+    result(jobId:string,options?:{cursor?:string|null;page_size?:number}):Promise<unknown>;
+    cancel(jobId:string,expectedRevision:number):Promise<unknown>;
+    retry(jobId:string,expectedRevision:number):Promise<unknown>;
+    resource(jobId:string,assetId:string):Promise<Blob>;
+  };
   invoke(capabilityId: string, parameters: unknown): Promise<unknown>;
   preview(capabilityId: string, parameters: unknown): Promise<unknown>;
   readonly config: {

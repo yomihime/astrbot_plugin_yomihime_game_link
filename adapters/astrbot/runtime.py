@@ -69,12 +69,14 @@ from ...services.core_runtime import (
     HostIngressUnavailable,
 )
 from ...services.diagnostics import DiagnosticStore
+from ...services.external_installations import ExternalInstallationTrust
 from ...services.external_packages import ExternalPackageHost
 from ...services.external_source_policies import ExternalSourcePolicies
 from ...services.managed_font import ManagedFont
 from ...services.source_authorizations import AuthorizationBinding
 from ...services.source_credentials import SourceCredentialPolicy
 from ...services.trusted_assembly import assemble_reviewed
+from .analysis import AstrBotCommandAnalysis
 from .bundled import (
     DEFAULT_BUNDLE_SELECTION,
     BundledExtensionError,
@@ -613,6 +615,7 @@ class AstrBotRuntime:
         self._key_admin_source = None
         self._module_admin_source = None
         self._extension_host = None
+        self._installation_trust = None
 
     @property
     def extension_host(self):
@@ -625,6 +628,8 @@ class AstrBotRuntime:
         if core is None or self._closing:
             return
         self._refresh_external_public_web_bindings()
+        if getattr(core, "jobs", None) is not None:
+            core.jobs.notify_changed()
         for source in (self._admin_source, self._module_admin_source):
             if source is not None:
                 core.admin_authorization.unregister_source(source)
@@ -675,6 +680,10 @@ class AstrBotRuntime:
         host = getattr(self, "_extension_host", None)
         return host.page_manifest_bindings() if host is not None else {}
 
+    def _external_projection(self):
+        host = getattr(self, "_extension_host", None)
+        return host.page_projection() if host is not None else StaticPageProjection()
+
     def _refresh_external_public_web_bindings(self):
         """One synchronous, fail-closed publication from captured live owners."""
         validator = self._web_validator
@@ -686,7 +695,7 @@ class AstrBotRuntime:
             bindings = {}
             if host is not None:
                 manifests = host.page_manifest_bindings()
-                projection = self._static_page_projection or StaticPageProjection()
+                projection = self._external_projection()
                 for endpoint, page in host.public_web_page_bindings().items():
                     owner = page.target[0]
                     package_id = owner.partition("/")[0]
@@ -779,7 +788,7 @@ class AstrBotRuntime:
             raise
 
     def _external_page_permitted(self, owner, manifest=None):
-        projection = getattr(self, "_static_page_projection", None)
+        projection = self._external_projection()
         bindings = self._external_page_bindings()
         return (projection or StaticPageProjection()).permits(owner, bindings, manifest)
 
@@ -796,6 +805,125 @@ class AstrBotRuntime:
         if not self.management_current(self._core, source) or source is None:
             raise AdminAuthorizationDenied
         return self._core, source
+
+    async def installation_operation(self, action, data, context):
+        core, source = self.management_entry(modules=True)
+        resources = core.admin_operations.module_resources()
+        operation = (
+            AdminOperation.LIST_MODULES
+            if action == "module-install-plan"
+            else AdminOperation.SET_ENABLED
+        )
+
+        def guard():
+            if not self.management_current(core, source):
+                raise AdminAuthorizationDenied
+            source.check(context, operation, resources)
+
+        guard()
+        trust = self._installation_trust
+        if trust is None:
+            raise AdminAuthorizationDenied
+        required = {"plugin_name", "package_id"}
+        if action == "module-install-plan":
+            if set(data) != required:
+                raise ValueError("invalid installation plan")
+            result = await trust.plan(data["plugin_name"], data["package_id"])
+        else:
+            if set(data) != required | {"plan_id", "expected_revision"}:
+                raise ValueError("invalid installation approval")
+            result = await trust.approve(
+                data["plugin_name"],
+                data["package_id"],
+                plan_id=data["plan_id"],
+                expected_revision=data["expected_revision"],
+                actor=context.adapter_id + ":" + context.session_id,
+                current=guard,
+            )
+        guard()
+        return result
+
+    async def _module_job_operation(
+        self, action, data, *, core, binding, subject, current, check
+    ):
+        import base64
+
+        from yomihime_game_link_sdk.jobs import JobRequest
+
+        from ...services.extension_permissions import plain
+
+        identity = {"owner", "page", "runtime_id", "module_epoch", "page_session"}
+
+        def guard():
+            if (
+                not current()
+                or core is not self._core
+                or not core.registry.is_active(
+                    core.registry.snapshot().module(binding.owner)
+                )
+            ):
+                return False
+            identity_now = core.lifecycle.current_identity(binding.owner)
+            return (
+                identity_now is not None
+                and identity_now.runtime_id == binding.runtime_id
+                and identity_now.module_epoch == binding.module_epoch
+                and self._external_page_permitted(
+                    binding.owner,
+                    core.registry.snapshot().module(binding.owner).manifest,
+                )
+            )
+
+        bound = await core.jobs.for_dashboard(
+            subject=subject, module_id=binding.owner, current=guard
+        )
+        if action == "module-job-submit":
+            if (
+                set(data) - identity - {"request"}
+                or type(data.get("request")) is not dict
+                or set(data["request"])
+                - {"handler_id", "parameters", "idempotency_key"}
+            ):
+                raise ValueError("invalid job request")
+            result = await bound.submit(JobRequest(**data["request"]))
+        elif action in {"module-job-status", "module-job-resource"}:
+            required = (
+                {"job_id", "asset_id"} if action.endswith("resource") else {"job_id"}
+            )
+            if set(data) != identity | required:
+                raise ValueError("invalid job selector")
+            if action.endswith("resource"):
+                mime, content = await bound.read_result_asset(
+                    data["job_id"], data["asset_id"]
+                )
+                result = {
+                    "media_type": mime,
+                    "base64": base64.b64encode(content).decode("ascii"),
+                }
+            else:
+                result = await bound.status(data["job_id"])
+        elif action == "module-job-result":
+            if (
+                set(data) - identity - {"job_id", "cursor", "page_size"}
+                or "job_id" not in data
+            ):
+                raise ValueError("invalid job result selector")
+            result = await bound.result(
+                data["job_id"],
+                cursor=data.get("cursor"),
+                page_size=data.get("page_size", 20),
+            )
+        elif action in {"module-job-cancel", "module-job-retry"}:
+            if set(data) != identity | {"job_id", "expected_revision"}:
+                raise ValueError("invalid job mutation")
+            method = bound.cancel if action.endswith("cancel") else bound.retry
+            result = await method(
+                data["job_id"], expected_revision=data["expected_revision"]
+            )
+        else:
+            raise ValueError("unknown job operation")
+        await check(binding.owner, binding.page, binding.module_epoch, action)
+        return plain(result)
 
     async def module_page_operation(self, action, data, *, request):
         """Bind a real Dashboard session to a current, selected module page.
@@ -821,6 +949,13 @@ class AstrBotRuntime:
             "module-credential-authorize",
             "module-page-session",
             "module-page-session-close",
+            "module-page-assets",
+            "module-job-submit",
+            "module-job-status",
+            "module-job-result",
+            "module-job-cancel",
+            "module-job-retry",
+            "module-job-resource",
         }
         if action not in actions or type(data) is not dict:
             raise AdminAuthorizationDenied
@@ -844,7 +979,7 @@ class AstrBotRuntime:
                 and dashboard_fence.current(raw)
             )
 
-        bootstrap = action == "module-page-session"
+        bootstrap = action in {"module-page-session", "module-page-assets"}
         if action == "module-page-session-close":
             if set(data) != {"page_session"}:
                 raise ValueError("invalid page session close")
@@ -935,6 +1070,25 @@ class AstrBotRuntime:
         )
         if data.get("runtime_id") != binding.runtime_id:
             raise AdminAuthorizationDenied
+        if action == "module-page-assets":
+            host = self._extension_host
+            if host is None:
+                raise AdminAuthorizationDenied
+            result = host.page_assets(binding.owner, binding.page)
+            await check_page_binding(
+                binding.owner, binding.page, binding.module_epoch, action
+            )
+            return result
+        if action.startswith("module-job-"):
+            return await self._module_job_operation(
+                action,
+                data,
+                core=core,
+                binding=binding,
+                subject=subject,
+                current=request_current,
+                check=check_page_binding,
+            )
         target = ConfigTarget(core.admin_operations.config_principal_id, binding.owner)
         if bootstrap:
             # Authentication alone does not establish field rights. Mint only
@@ -1431,7 +1585,7 @@ class AstrBotRuntime:
                 if module["state"] == "loaded":
                     module["state"] = "unavailable"
                     module["reason"] = "runtime_not_ready"
-        projection = getattr(self, "_static_page_projection", None)
+        projection = self._external_projection()
         return (projection or StaticPageProjection()).catalog(
             data, self._external_page_bindings()
         )
@@ -1603,6 +1757,19 @@ class AstrBotRuntime:
                 storage_guard.__enter__()
                 self._private_storage_guard = storage_guard
                 database = SQLiteDatabase(layout.database_path)
+                self._installation_trust = ExternalInstallationTrust(
+                    database,
+                    self._context,
+                    self._external_source_policies,
+                    config_principal_id=PLUGIN_NAME,
+                )
+                self._external_source_policies = await self._installation_trust.load()
+                self._source_authorizations = AuthorizationManagement(
+                    self._external_source_policies
+                )
+                self._source_credential_policies = (
+                    self._assembly.credential_policies if self._assembly else ()
+                ) + self._external_source_policies.credential_policies
                 managed_keys = ManagedKeyManager(
                     database,
                     layout.key_data_root,
@@ -1650,6 +1817,7 @@ class AstrBotRuntime:
                     trusted_subscription_gates=subscription_gates,
                     source_health=self._source_health,
                     commentary_port=AstrBotSubscriptionCommentary(self._context),
+                    analysis_port=AstrBotCommandAnalysis(self._context),
                     source_credential_policies=self._source_credential_policies,
                     managed_source_credentials=(
                         (self._assembly.managed_credentials if self._assembly else ())
@@ -1819,6 +1987,7 @@ class AstrBotRuntime:
                     core,
                     core.extension_runtime.factory_source,
                     source_policies=self._external_source_policies,
+                    installation_trust=self._installation_trust,
                     generation=generation,
                     current=lambda: self._ready
                     and not self._closing

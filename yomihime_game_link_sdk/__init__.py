@@ -61,6 +61,15 @@ from .host import BRIDGE_VERSION as BRIDGE_VERSION
 from .host import ExtensionHost as ExtensionHost
 from .host import ExtensionHostError as ExtensionHostError
 from .host import PackageLease as PackageLease
+from .jobs import JobControl as JobControl
+from .jobs import JobDescriptor as JobDescriptor
+from .jobs import JobHandler as JobHandler
+from .jobs import JobOperations as JobOperations
+from .jobs import JobRequest as JobRequest
+from .jobs import JobResultPage as JobResultPage
+from .jobs import JobStatus as JobStatus
+from .jobs import JobView as JobView
+from .results import AnalysisRequest as AnalysisRequest
 from .results import CapabilityResult as CapabilityResult
 from .results import ErrorCode as ErrorCode
 from .results import ErrorDetail as ErrorDetail
@@ -93,6 +102,7 @@ from .services import ModuleRecords as ModuleRecords
 from .services import ModuleServices as ModuleServices
 from .services import ResolvedIdentity as ResolvedIdentity
 from .services import ResourceAccess as ResourceAccess
+from .services import ResourceCacheClass as ResourceCacheClass
 from .services import ResourceCacheStats as ResourceCacheStats
 from .services import ResourceReference as ResourceReference
 from .services import SourceHttp as SourceHttp
@@ -148,6 +158,7 @@ from .subscriptions import (
 from .subscriptions import (
     PublicEventContribution as PublicEventContribution,
 )
+from .subscriptions import PublicEventProjector as PublicEventProjector
 from .subscriptions import ScheduleDescriptor as ScheduleDescriptor
 from .subscriptions import ScheduleTrigger as ScheduleTrigger
 from .subscriptions import SubscriptionDescriptor as SubscriptionDescriptor
@@ -305,3 +316,18 @@ __all__.extend(["MessageContext", "MessageAccess"])
 
 
 __all__.extend(["DiagnosticDeclaration", "DiagnosticAccess", "CacheUnavailable"])
+__all__.extend(
+    [
+        "AnalysisRequest",
+        "JobControl",
+        "JobDescriptor",
+        "JobHandler",
+        "JobOperations",
+        "JobRequest",
+        "JobResultPage",
+        "JobStatus",
+        "JobView",
+        "PublicEventProjector",
+        "ResourceCacheClass",
+    ]
+)

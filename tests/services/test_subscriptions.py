@@ -72,15 +72,18 @@ from yomihime_game_link_sdk.services import (
 from yomihime_game_link_sdk.storage import GrantReference, OwnerScope, OwnershipKind
 from yomihime_game_link_sdk.subscriptions import (
     CollectionKey,
+    ComposedPublicEvent,
     ConversationKind,
     ConversationRef,
     DigestScheduleProfile,
     DstFoldPolicy,
     DstGapPolicy,
     EvaluationDecision,
+    EvaluationEvent,
     NormalizedInput,
     Observation,
     ObservationCompleteness,
+    PublicEventContribution,
     ScheduleDescriptor,
     ScheduleTrigger,
     SubscriptionDescriptor,
@@ -128,6 +131,7 @@ class _ThresholdEvaluator:
     def __init__(self, *, privacy: Privacy) -> None:
         self.privacy = privacy
         self.calls = 0
+        self.public_events = False
 
     def evaluate(self, subscription, observation, previous_state):
         self.calls += 1
@@ -139,6 +143,26 @@ class _ThresholdEvaluator:
             and observation.data_version > previous
         )
         version = max(previous, observation.data_version)
+        if self.public_events and triggered:
+            contribution = PublicEventContribution(
+                "test.public",
+                str(subscription.filters["threshold"]),
+                {"version": version},
+            )
+            return validate_contract(
+                EvaluationDecision(
+                    {"last_version": version},
+                    False,
+                    events=(
+                        EvaluationEvent(
+                            "shared-public",
+                            version,
+                            _ProjectionComposer().compose((contribution,)).display_data,
+                            contribution,
+                        ),
+                    ),
+                )
+            )
         document = (
             validate_contract(
                 DisplayDocument(
@@ -159,6 +183,40 @@ class _ThresholdEvaluator:
                 observation.data_version if triggered else None,
                 document,
             )
+        )
+
+
+class _ProjectionComposer:
+    def compose(self, contributions):
+        return ComposedPublicEvent(
+            DisplayDocument(
+                "public",
+                "facts",
+                (TextBlock(",".join(c.contribution_key for c in contributions)),),
+            )
+        )
+
+
+class _ProjectionMatcher:
+    def project(self, subscription, contribution, *, observed_at):
+        state = subscription.evaluation_state
+        version = contribution.payload["version"]
+        if state is None or state.value["last_version"] >= version:
+            return None
+        projected = PublicEventContribution(
+            "test.public", str(subscription.filters["threshold"]), {"version": version}
+        )
+        return EvaluationDecision(
+            {"last_version": version},
+            False,
+            events=(
+                EvaluationEvent(
+                    "shared-public",
+                    version,
+                    _ProjectionComposer().compose((projected,)).display_data,
+                    projected,
+                ),
+            ),
         )
 
 
@@ -368,6 +426,8 @@ class B04SubscriptionServiceTests(unittest.IsolatedAsyncioTestCase):
                             "private-alert_matcher": self.private_evaluator,
                             "user-alert_matcher": self.private_evaluator,
                         },
+                        event_composers={"test.public": _ProjectionComposer()},
+                        event_projectors={"test.public": _ProjectionMatcher()},
                     )
                 ),
             },
@@ -1335,6 +1395,171 @@ class B04SubscriptionServiceTests(unittest.IsolatedAsyncioTestCase):
             created.subscription_id, complete.key
         )
         self.assertEqual(snapshot.cursor.completeness, ObservationCompleteness.COMPLETE)
+
+    async def test_public_projection_prepares_other_key_same_full_target_before_late_recent(
+        self,
+    ):
+        first = await self.create("u1", threshold=4, conversation="group-g1")
+        second = await self.service.create_request(
+            self.invocation("u2", "group-g1"), self.request(threshold=12, region="JP")
+        )
+        other = await self.service.create_request(
+            self.invocation("u1", "group-g2"), self.request(threshold=13, region="JP")
+        )
+        for index, view in enumerate((first, second, other)):
+            self.assertTrue(
+                await self.evaluate(
+                    await self.observation_for(
+                        view, identity=f"baseline-{index}", score=0
+                    )
+                )
+            )
+        self.public_evaluator.public_events = True
+        self.assertTrue(
+            await self.evaluate(
+                await self.observation_for(
+                    first, identity="public-match", score=8, version=2
+                )
+            )
+        )
+        second_record = await self.record_for(second)
+        checkpoint = await self.scheduler.current_checkpoint(
+            second.subscription_id, second_record.collection_key
+        )
+        self.assertEqual(checkpoint.snapshot.state.value["last_version"], 2)
+        self.assertEqual(
+            checkpoint.snapshot.observation.payload["kind"], "public_event_projection"
+        )
+        shared_lease = await self.scheduler.claim_due(
+            CollectionRunRequest(
+                second_record.collection_key,
+                self.eval_now - timedelta(seconds=1),
+                30,
+                1,
+                self.module.epoch,
+                self.snapshot.revision,
+            ),
+            now=self.eval_now,
+        )
+        self.assertIsNotNone(shared_lease)
+        try:
+            shared = await self.scheduler.previous_observation(shared_lease)
+            self.assertEqual(shared.payload["score"], 0)
+            self.assertIs(shared.completeness, ObservationCompleteness.COMPLETE)
+        finally:
+            await self.scheduler.release(shared_lease)
+        self.assertIsNotNone(
+            await self.delivery.current_event(
+                "shared-public",
+                2,
+                subscription_id=second.subscription_id,
+                subscription_revision=1,
+            )
+        )
+        self.assertIsNone(
+            await self.delivery.current_event(
+                "shared-public",
+                2,
+                subscription_id=other.subscription_id,
+                subscription_revision=1,
+            )
+        )
+
+        def members(unit):
+            return tuple(
+                unit.execute(
+                    "SELECT COUNT(*),COUNT(DISTINCT window_id) FROM b04_digest_members WHERE event_key='shared-public'"
+                ).fetchone()
+            )
+
+        count, windows = await self.db.executor.run_read(members)
+        self.assertEqual((count, windows), (2, 1))
+        # The second account's list is observed over a window later: state was
+        # already advanced by public projection, so this cannot create a replay.
+        self.now += timedelta(seconds=45)
+        self.assertTrue(
+            await self.evaluate(
+                await self.observation_for(
+                    second, identity="late-recent", score=8, version=2
+                )
+            )
+        )
+        self.assertEqual(tuple(await self.db.executor.run_read(members)), (2, 1))
+
+    async def test_public_projection_rejects_forged_target_key_and_cancelled_generation_atomically(
+        self,
+    ):
+        first = await self.create("u1", threshold=4, conversation="group-g1")
+        second = await self.service.create_request(
+            self.invocation("u2", "group-g1"), self.request(threshold=12, region="JP")
+        )
+        for index, view in enumerate((first, second)):
+            self.assertTrue(
+                await self.evaluate(
+                    await self.observation_for(
+                        view, identity=f"cas-baseline-{index}", score=0
+                    )
+                )
+            )
+        self.public_evaluator.public_events = True
+        observation = await self.observation_for(
+            first, identity="cas-public", score=8, version=2
+        )
+        self.eval_now += timedelta(seconds=31)
+        lease = await self.scheduler.claim_due(
+            CollectionRunRequest(
+                observation.key,
+                self.eval_now - timedelta(seconds=1),
+                30,
+                1,
+                self.module.epoch,
+                self.snapshot.revision,
+            ),
+            now=self.eval_now,
+        )
+        self.assertIsNotNone(lease)
+        try:
+            commit = await self.service.prepare_evaluations(lease, observation)
+            projected = next(
+                item
+                for item in commit.subscriptions
+                if item.subscription_id == second.subscription_id
+            )
+            self.assertIsNotNone(projected.projected_observation)
+            wrong_key = replace(
+                projected.projected_observation.key,
+                parameters=NormalizedInput({"region": "forged"}),
+            )
+            forged = replace(
+                projected,
+                projected_observation=replace(
+                    projected.projected_observation, key=wrong_key
+                ),
+            )
+            wrong = replace(
+                commit,
+                subscriptions=tuple(
+                    forged if item.subscription_id == second.subscription_id else item
+                    for item in commit.subscriptions
+                ),
+            )
+            self.assertFalse(
+                await self.scheduler.commit_observation_with_evaluations(lease, wrong)
+            )
+            await self.service.cancel(
+                self.invocation("u2", "group-g1"),
+                second.subscription_id,
+                expected_revision=1,
+            )
+            self.assertFalse(
+                await self.scheduler.commit_observation_with_evaluations(lease, commit)
+            )
+            checkpoint = await self.scheduler.current_checkpoint(
+                first.subscription_id, observation.key
+            )
+            self.assertEqual(checkpoint.snapshot.state.value["last_version"], 1)
+        finally:
+            await self.scheduler.release(lease)
 
     async def test_m09_failed_observation_preserves_previous_state_and_cursor(self):
         created = await self.create()

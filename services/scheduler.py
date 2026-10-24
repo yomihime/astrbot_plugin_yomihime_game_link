@@ -1082,15 +1082,7 @@ class SharedCollectionScheduler:
                         lease
                     )
                 else:
-                    checkpoint = await self.repository.current_checkpoint(
-                        principal.subscription_id, candidate.key
-                    )
-                    previous = (
-                        None
-                        if checkpoint is None
-                        or checkpoint.fence != lease.subscription_fence
-                        else checkpoint.snapshot.observation
-                    )
+                    previous = await self.repository.previous_observation(lease)
                 await self._require_current_execution(
                     candidate.key, principal, lease, scheduled_lease
                 )

@@ -1120,6 +1120,7 @@ class SubscriptionEvaluationCommit:
     cursor: ObservationCursor
     delivery_events: tuple[DeliveryEvent, ...] = ()
     digest_members: tuple[DigestMemberAssociation, ...] = ()
+    projected_observation: Observation | None = None
 
     def __post_init__(self) -> None:
         _identifier(self.subscription_id, "subscription_id")
@@ -1137,6 +1138,16 @@ class SubscriptionEvaluationCommit:
             raise ValueError("evaluation state must advance exactly one revision")
         if not isinstance(self.cursor, ObservationCursor):
             raise TypeError("cursor must be an ObservationCursor")
+        if self.projected_observation is not None:
+            projected = self.projected_observation
+            if (
+                not isinstance(projected, Observation)
+                or projected.key.scope.kind is not OwnershipKind.PUBLIC
+                or projected.completeness is not ObservationCompleteness.PARTIAL
+            ):
+                raise ValueError(
+                    "public projection requires an explicit partial public observation"
+                )
         events = tuple(self.delivery_events)
         if any(
             (
@@ -1196,11 +1207,30 @@ class ObservationEvaluationCommit:
             raise ValueError("failed observations cannot advance evaluation state")
         for item in subscriptions:
             cursor = item.cursor
+            projected = item.projected_observation
+            expected_observation = projected if projected is not None else observation
+            if projected is not None and (
+                observation.key.scope.kind is not OwnershipKind.PUBLIC
+                or projected.observation_id == observation.observation_id
+                or projected.key.module_id != observation.key.module_id
+                or projected.key.source_id != observation.key.source_id
+                or projected.key.collector_id != observation.key.collector_id
+                or projected.key.key_version != observation.key.key_version
+                or projected.data_version != observation.data_version
+                or projected.collected_at != observation.collected_at
+                or projected.source_observed_at != observation.source_observed_at
+                or projected.payload.get("source_observation_id")
+                != observation.observation_id
+                or projected.payload.get("subscription_id") != item.subscription_id
+            ):
+                raise ValueError(
+                    "projection must retain the exact public source and observation time"
+                )
             if (
-                cursor.observation_id != observation.observation_id
-                or cursor.data_version != observation.data_version
-                or cursor.completeness is not observation.completeness
-                or (cursor.covered_ids != observation.covered_ids)
+                cursor.observation_id != expected_observation.observation_id
+                or cursor.data_version != expected_observation.data_version
+                or cursor.completeness is not expected_observation.completeness
+                or (cursor.covered_ids != expected_observation.covered_ids)
             ):
                 raise ValueError(
                     "subscription cursor must match the committed observation"

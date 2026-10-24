@@ -439,7 +439,7 @@ class ExternalPackageTests(unittest.IsolatedAsyncioTestCase):
         self,
     ):
         endpoint = self._public_page_fixture()
-        await self._register()
+        lease = await self._register()
         for target in (
             (endpoint[0], "missing", endpoint[2]),
             (endpoint[0], endpoint[1], "undeclared"),
@@ -456,10 +456,14 @@ class ExternalPackageTests(unittest.IsolatedAsyncioTestCase):
         state = self._public_begin(endpoint)
         self.runtime._static_page_projection = StaticPageProjection()
         self.runtime._refresh_external_public_web_bindings()
+        # Installed pages use their current captured lease, not a Core build pin.
+        self.assertGreater(self.runtime.public_web_remaining(state), 0)
+        self.assertEqual((await self._public_call(endpoint)).status_code, 200)
+        module = self.core.registry.snapshot().module(endpoint[0])
+        await self.host.unregister_package(lease)
         with self.assertRaises(WebPublicRejected):
             self.runtime.public_web_remaining(state)
         self.assertEqual((await self._public_call(endpoint)).status_code, 400)
-        module = self.core.registry.snapshot().module(endpoint[0])
         self.assertFalse(
             self.core.issuer.allows_public_web(
                 endpoint[0], module.manifest.capabilities[0]

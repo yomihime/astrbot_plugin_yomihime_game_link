@@ -542,6 +542,8 @@ async def load_finished_pages(scope, key: str, current):
 
 
 async def store_finished_pages(scope, key: str, bitmaps, current) -> None:
+    from yomihime_game_link_sdk.services import ResourceCacheClass
+
     """Publish a USER manifest only after every page is stored successfully."""
     pages = []
     for bitmap in bitmaps:
@@ -551,6 +553,7 @@ async def store_finished_pages(scope, key: str, bitmaps, current) -> None:
                 bitmap.content,
                 visibility=CacheVisibility.USER,
                 ttl_seconds=_CACHE_TTL,
+                cache_class=ResourceCacheClass.OUTPUT,
             )
             await current()
         except (CacheUnavailable, ResourceCapacityError, ParameterError):

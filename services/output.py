@@ -78,6 +78,7 @@ from ..core.ports import (
     SubscriptionStore,
 )
 from ..core.registry import Registry
+from .analysis import CommandAnalysisService
 from .identity import (
     InvocationPrincipalResolver,
     PrincipalResolutionDenied,
@@ -211,6 +212,7 @@ class OutputService:
         command_sender=None,
         command_preparer=None,
         collage_scope_binder=None,
+        analysis_port=None,
         claim_lease: timedelta,
         send_timeout: float,
         now: Callable[[], datetime] | None = None,
@@ -237,6 +239,7 @@ class OutputService:
         self._command_sender = command_sender
         self._command_preparer = command_preparer
         self._collage_scope_binder = collage_scope_binder
+        self._analysis = CommandAnalysisService(analysis_port)
         self._generated_png = None
         self._collage_png = None
         if command_card_renderer is not None:
@@ -346,6 +349,30 @@ class OutputService:
         return capability
 
     async def render_public_preview(self, invocation, result, *, current):
+        return await self._render_bounded_document(
+            invocation,
+            result,
+            current=current,
+            expected_origin=InvocationOrigin.WEB_PUBLIC,
+        )
+
+    async def render_job_document(self, invocation, document, *, current):
+        if invocation.origin is not InvocationOrigin.JOB:
+            raise ValueError("job rendering requires a current job run")
+        result = CapabilityResult(
+            result_id="durable-job-page",
+            status=ResultStatus.SUCCESS,
+            document=document,
+            privacy=document.privacy,
+        )
+        pages = await self._render_bounded_document(
+            invocation, result, current=current, expected_origin=InvocationOrigin.JOB
+        )
+        return tuple(("image/png", page) for page in pages)
+
+    async def _render_bounded_document(
+        self, invocation, result, *, current, expected_origin
+    ):
         """Render bounded public web bytes inside the caller's live proof.
 
         This path has no message target, send claim, personal finished cache,
@@ -359,19 +386,27 @@ class OutputService:
         from .collage_cache import (
             collage_snapshots_current,
             inspect_collage_resources,
+            load_finished_pages,
             resolve_collage_resources,
+            store_finished_pages,
         )
 
         validate_contract(invocation)
         validate_contract(result)
         if (
             not callable(current)
-            or invocation.origin is not InvocationOrigin.WEB_PUBLIC
+            or invocation.origin is not expected_origin
             or invocation.grant_id is not None
-            or result.privacy is not Privacy.PUBLIC
+            or (
+                expected_origin is InvocationOrigin.WEB_PUBLIC
+                and result.privacy is not Privacy.PUBLIC
+            )
             or result.status not in (ResultStatus.SUCCESS, ResultStatus.PARTIAL_SUCCESS)
             or result.document is None
-            or result.document.privacy is not Privacy.PUBLIC
+            or (
+                expected_origin is InvocationOrigin.WEB_PUBLIC
+                and result.document.privacy is not Privacy.PUBLIC
+            )
             or result.document.card is None
         ):
             raise ValueError("public preview is unavailable")
@@ -379,9 +414,13 @@ class OutputService:
         async def check():
             await current()
             self._issuer.require(invocation)
-            self._admission.check(self._root_lease(invocation))
+            self._admission.check(
+                self._issuer.lease_for(invocation)
+                if expected_origin is InvocationOrigin.JOB
+                else self._root_lease(invocation)
+            )
             capability = self._require_current_module(invocation)
-            if (
+            if expected_origin is InvocationOrigin.WEB_PUBLIC and (
                 not supports_public_read_only(capability)
                 or InvocationOrigin.WEB_PUBLIC not in capability.effective_origins
             ):
@@ -391,6 +430,7 @@ class OutputService:
         card = result.document.card
         snapshots = None
         scope = None
+        versions = ()
         if len(card.blocks) == 1 and type(card.blocks[0]) in (
             DenseCollage,
             WeightedCollage,
@@ -409,18 +449,10 @@ class OutputService:
                 plan_dense(card.blocks[0])
             scope = await self._collage_scope_binder(invocation)
             await check()
-            card, _, snapshots = await inspect_collage_resources(card, scope, check)
+            card, versions, snapshots = await inspect_collage_resources(
+                card, scope, check
+            )
             await check()
-            if snapshots is not None:
-                card, _ = await resolve_collage_resources(
-                    card,
-                    scope,
-                    check,
-                    snapshots=snapshots,
-                    may_cache_derivatives=True,
-                    derivative_visibility=CacheVisibility.PUBLIC,
-                )
-                await check()
         theme = {"core_theme": "warm_paper"}
         if self._command_theme_settings is not None:
             settings = await self._command_theme_settings(invocation.module_id)
@@ -430,16 +462,57 @@ class OutputService:
                 "module_theme": settings.module_theme,
             }
         renderer = self._command_card_renderer or CommandCardRenderer()
-        presentation = renderer(
-            replace(result.document, card=card),
-            audience=DisplayAudience.PUBLIC,
-            **theme,
-        )
-        if type(presentation) is not CommandPresentation:
-            raise ValueError("public preview is unavailable")
-        pages = presentation.bitmaps or (
-            (presentation.bitmap,) if presentation.bitmap is not None else ()
-        )
+        cache_key = None
+        pages = None
+        if (
+            expected_origin is InvocationOrigin.JOB
+            and scope is not None
+            and snapshots is not None
+        ):
+            from ..presentation.layout_collage import LAYOUT_VERSION
+            from ..presentation.layout_dense import DENSE_LAYOUT_VERSION
+            from ..presentation.layout_renderer import apply_theme_selection
+
+            cache_key = "job-collage-v1-" + _fingerprint(
+                {
+                    "card": apply_theme_selection(card, **theme),
+                    "resources": versions,
+                    "layout": DENSE_LAYOUT_VERSION
+                    if type(card.blocks[0]) is DenseCollage
+                    else LAYOUT_VERSION,
+                }
+            )
+            pages = await load_finished_pages(scope, cache_key, check)
+            if pages is not None and not await collage_snapshots_current(
+                scope, snapshots, check
+            ):
+                raise ValueError("job source changed")
+        cache_hit = pages is not None
+        if not cache_hit:
+            if scope is not None and snapshots is not None:
+                card, resolved = await resolve_collage_resources(
+                    card,
+                    scope,
+                    check,
+                    snapshots=snapshots,
+                    may_cache_derivatives=True,
+                    derivative_visibility=CacheVisibility.PUBLIC,
+                )
+                if resolved != versions:
+                    cache_key = None
+                await check()
+            presentation = renderer(
+                replace(result.document, card=card),
+                audience=DisplayAudience.PRIVATE
+                if expected_origin is InvocationOrigin.JOB
+                else DisplayAudience.PUBLIC,
+                **theme,
+            )
+            if type(presentation) is not CommandPresentation:
+                raise ValueError("bounded rendering is unavailable")
+            pages = presentation.bitmaps or (
+                (presentation.bitmap,) if presentation.bitmap is not None else ()
+            )
         if (
             not pages
             or len(pages) > 8
@@ -456,6 +529,8 @@ class OutputService:
             scope, snapshots, check
         ):
             raise ValueError("public preview source changed")
+        if cache_key is not None and not cache_hit:
+            await store_finished_pages(scope, cache_key, pages, check)
         await check()
         return tuple(page.content for page in pages)
 
@@ -508,13 +583,34 @@ class OutputService:
                     and capability.privacy_floor is not PrivacyFloor.OWNER
                 )
                 collage = self._is_collage(result)
+                from yomihime_game_link_sdk.display import ImageBlock
+
+                owned_image = (
+                    result.privacy is Privacy.PRIVATE
+                    and result.document is not None
+                    and result.document.card is None
+                    and invocation.grant_id is None
+                    and sum(
+                        type(block) is ImageBlock
+                        for block in result.document.ordered_blocks
+                    )
+                    == 1
+                )
                 await self._check_result_authority(invocation, capability, result)
                 target = await self._target(invocation, result.privacy)
+                if result.analysis_request is not None:
+
+                    async def analysis_current():
+                        await self._validate_command_current(invocation, result, target)
+
+                    result = await self._analysis.apply(
+                        invocation, target, result, current=analysis_current
+                    )
                 rendered = await self._render(
                     result,
                     invocation=invocation,
                     target=target,
-                    image=image if (public_command or collage) else None,
+                    image=image if (public_command or collage or owned_image) else None,
                 )
                 if image.get("collage"):
                     try:
@@ -1108,6 +1204,81 @@ class OutputService:
         prepared.require(invocation, result, target)
         image["prepared"] = prepared
 
+    async def _render_owned_png(
+        self, invocation, result, target, document, image, block
+    ):
+        """Explicit one-image private reply through the existing prepared sender."""
+        import struct
+
+        from yomihime_game_link_sdk.storage import CacheVisibility
+
+        from ..presentation.card_bitmap import RenderedBitmap
+        from ..presentation.command_card import CommandCardRenderer, CommandPresentation
+        from ..presentation.png_validation import PngValidationLimits, validate_png
+        from .generated_png import GeneratedPngCoordinator, GeneratedPngLimits
+
+        async def current():
+            await self._validate_command_current(
+                invocation, result, target, _validated_result=True
+            )
+            self._admission.check(self._root_lease(invocation))
+
+        await current()
+        scope = await self._collage_scope_binder(invocation)
+        await current()
+        metadata = await scope.resources.metadata(
+            block.asset_id, visibility=CacheVisibility.USER
+        )
+        await current()
+        if (
+            metadata is None
+            or metadata.scope.kind is not OwnershipKind.USER
+            or metadata.media_type != "image/png"
+            or not 24 <= metadata.size_bytes <= 4194304
+        ):
+            raise ValueError("owned PNG is unavailable")
+        content = await scope.resources.read(
+            block.asset_id, visibility=CacheVisibility.USER
+        )
+        await current()
+        if len(content) < 24:
+            raise ValueError("owned PNG is invalid")
+        width, height = struct.unpack(">II", content[16:24])
+        bitmap = RenderedBitmap(content, width, height)
+        validate_png(
+            bitmap,
+            limits=PngValidationLimits(
+                max_bytes=4194304, max_pixels=(128 * 1024 * 1024) // 36
+            ),
+            collage_profile=True,
+        )
+        await current()
+        renderer = self._command_card_renderer or CommandCardRenderer()
+        from yomihime_game_link_sdk.display import ImageBlock, TextBlock
+
+        text_blocks = tuple(
+            item for item in document.ordered_blocks if type(item) is not ImageBlock
+        )
+        text_document = replace(
+            document,
+            ordered_blocks=text_blocks or (TextBlock(block.alt_text or "图片"),),
+        )
+        text = renderer(text_document, audience=DisplayAudience.PRIVATE, image=False)
+        if type(text) is not CommandPresentation:
+            raise ValueError("owned PNG presentation is invalid")
+        if self._collage_png is None:
+            self._collage_png = GeneratedPngCoordinator(
+                output_authority=self,
+                limits=GeneratedPngLimits.collage(),
+                collage_profile=True,
+            )
+        context = await self._collage_png.bind(invocation, result)
+        image.update(collage=True, pages=[(context, None)], pins=[], released=False)
+        reference = await self._collage_png.register(context, bitmap)
+        image["pages"][0] = (context, reference)
+        await current()
+        return RenderedMessage(text.text)
+
     async def _render(
         self,
         result: CapabilityResult,
@@ -1161,8 +1332,29 @@ class OutputService:
                 document = replace(document, title=heading[0], subject=heading[1])
                 validate_contract(document)
             if image is not None and self._command_card_renderer is not None:
+                from yomihime_game_link_sdk.display import ImageBlock
+
                 from ..presentation.command_card import CommandPresentation
                 from .generated_png import GeneratedPngCoordinator, GeneratedPngError
+
+                owned_images = tuple(
+                    block
+                    for block in document.ordered_blocks
+                    if type(block) is ImageBlock
+                )
+                if (
+                    len(owned_images) == 1
+                    and document.card is None
+                    and invocation is not None
+                    and target is not None
+                    and invocation.origin is InvocationOrigin.COMMAND
+                    and invocation.grant_id is None
+                    and result.privacy is Privacy.PRIVATE
+                    and self._collage_scope_binder is not None
+                ):
+                    return await self._render_owned_png(
+                        invocation, result, target, document, image, owned_images[0]
+                    )
 
                 if self._is_collage(result):
                     return await self._render_collage(

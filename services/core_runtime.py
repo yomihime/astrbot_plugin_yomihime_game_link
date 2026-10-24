@@ -497,6 +497,7 @@ class CoreRuntime:
         source_credential_policies: Sequence[SourceCredentialPolicy] = (),
         managed_source_credentials=(),
         commentary_port=None,
+        analysis_port=None,
         factory_source: FactorySourcePort | None = None,
         source_health: Callable[[str, str], Awaitable[CapabilityHealth]] | None = None,
         utc_clock: Callable[[], datetime] = lambda: datetime.now(UTC),
@@ -759,6 +760,7 @@ class CoreRuntime:
         self._command_ingresses = {}
         self._command_message_port = message_port
         self.output = OutputService(
+            analysis_port=analysis_port,
             issuer=self.issuer,
             admission=self.lifecycle.admission,
             send_scheduler=self.send_scheduler,
@@ -795,6 +797,23 @@ class CoreRuntime:
             send_timeout=send_timeout,
             now=utc_clock,
         )
+        from .jobs import JobsService
+
+        self.jobs = JobsService(
+            database=database,
+            registry=self.registry,
+            issuer=self.issuer,
+            lifecycle=self.lifecycle,
+            identities=self.repositories.identities,
+            principal_resolver=self.principal_resolver,
+            identity_namespace=identity_namespace,
+            bind_services=lambda invocation: self.module_services.for_module(
+                invocation.module_id
+            ).scopes.bind(invocation),
+            resource_repository=self.repositories.resources,
+            render_document=self._render_job_document,
+        )
+        self.module_services.set_jobs(self.jobs)
         self.delivery = DeliveryService(
             commentary_port=commentary_port,
             deliveries=self.b04_repositories.deliveries,
@@ -1013,7 +1032,42 @@ class CoreRuntime:
             identities,
             runtime_state=runtime_state,
             legacy_config_policies=self._legacy_config_policies,
+            source_metadata=self._module_catalog_source_metadata(snapshot),
         )
+
+    def _module_catalog_source_metadata(
+        self, snapshot
+    ) -> dict[str, tuple[str, str | None, tuple[str, ...]]]:
+        """Read exact owned declarations for display, without granting authority."""
+        # Read only packages already built by the existing local extension runtime.
+        # Discovery alone is not provenance. This is display, not authorization.
+        built_packages = dict(self.extension_runtime._built)
+        result = {}
+        for module_id, module in snapshot.modules.items():
+            package_id, local_id = module_id.split("/", 1)
+            expected = self._trusted_bundled_manifests.get(module_id)
+            builtin = expected is not None and _matches_trusted_bundled_manifest(
+                module.manifest, expected
+            )
+            built = built_packages.get(package_id)
+            external = built.manifest if built is not None and built.complete else None
+            extension = (
+                external is not None
+                and external.package_id == package_id
+                and tuple(
+                    item for item in external.modules if item.module_id == local_id
+                )
+                == (module.manifest,)
+            )
+            # Built-in packages also use this local build path. Exact bundled
+            # declarations take precedence; discovery alone proves no source.
+            kind = "builtin" if builtin else "extension" if extension else "unknown"
+            result[module_id] = (
+                kind,
+                external.display_name if kind == "extension" else None,
+                external.module_order if kind == "extension" else (),
+            )
+        return result
 
     def require_help_source_current(self, source) -> None:
         """Fence retained help facts against live, coherent module availability."""
@@ -1060,6 +1114,17 @@ class CoreRuntime:
             card = None
         self.require_help_source_current(source)
         return card, settings.core_theme
+
+    async def _render_job_document(self, invocation, document):
+        async def current():
+            self.issuer.require(invocation)
+            if self._closing or not self._started:
+                raise InvalidInvocation()
+            self.lifecycle.admission.check(self.issuer.lease_for(invocation))
+
+        return await self.output.render_job_document(
+            invocation, document, current=current
+        )
 
     async def _command_card_logo(self, module_id):
         """Bind only the current manifest's declared, hash-verified static logo."""
@@ -1345,6 +1410,7 @@ class CoreRuntime:
             )
             self._startup_report = report
             self._started = True
+            await self.jobs.start()
             if not self._closing:
                 self._accepting = True
                 self._pump_task = asyncio.get_running_loop().create_task(
@@ -1795,7 +1861,12 @@ class CoreRuntime:
             finally:
                 self._command_ingresses.pop(view.invocation_id, None)
                 self.owner_authority.release(view)
-                self.issuer.release(view)
+                try:
+                    self.issuer.release(view)
+                except InvalidInvocation:
+                    # Revocation may already have retired this exact Host view.
+                    # Cleanup must preserve the controlled no-send outcome.
+                    pass
         finally:
             self._host_flights.discard(task)
 
@@ -1964,6 +2035,17 @@ class CoreRuntime:
             return True
         self._closing = True
         self._accepting = False
+        try:
+            jobs_closed = await asyncio.wait_for(
+                self.jobs.close(),
+                timeout=max(0.001, deadline - asyncio.get_running_loop().time()),
+            )
+        except TimeoutError as exc:
+            self._cleanup_pending = True
+            raise CoreRuntimeCleanupPending("durable_jobs") from exc
+        if not jobs_closed:
+            self._cleanup_pending = True
+            raise CoreRuntimeCleanupPending("durable_jobs")
         if self.output._generated_png is not None:
             self.output._generated_png.close()
         if self.output._collage_png is not None:

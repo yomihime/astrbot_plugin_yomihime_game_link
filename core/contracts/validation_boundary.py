@@ -21,6 +21,7 @@ _MODULES = (
     "storage",
     "subscriptions",
     "services",
+    "jobs",
     "administration",
 )
 _VALIDATORS = None

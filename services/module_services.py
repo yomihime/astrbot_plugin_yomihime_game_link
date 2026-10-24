@@ -50,6 +50,7 @@ from yomihime_game_link_sdk.services import (
     InvocationServices,
     ModuleServices,
     ResolvedIdentity,
+    ResourceCacheClass,
     ResourceCacheStats,
     ResourceReference,
     SubscriptionOperations,
@@ -83,6 +84,7 @@ from ..core.ports import (
     ModuleRegistrationSnapshot,
     ScheduledLease,
 )
+from ..core.ports_jobs import JobRunLease
 from ..core.public_errors import parameters, proof, public_boundary
 from ..core.registry import RegisteredModule, Registry
 from ..core.task_scope import TaskScope
@@ -103,6 +105,7 @@ from .configuration.operations import ConfigurationCoordinator
 from .dependency_calls import DependencyInvoker
 from .diagnostics import BoundDiagnostics, DiagnosticPolicy, DiagnosticStore
 from .identity import IdentityResolverService, InvocationPrincipalResolver
+from .jobs import InvocationJobs
 from .managed_resources import ResourceCapacityError
 from .module_storage import ModuleStorageRouter
 from .records import ModuleRecordsService, _collection_name
@@ -926,14 +929,24 @@ class _BoundResources:
         *,
         visibility: CacheVisibility | None = None,
         ttl_seconds: float | None = None,
+        cache_class: ResourceCacheClass = ResourceCacheClass.DEFAULT,
     ) -> ResourceReference:
         await self.__check()
         parameters(validate_contract, visibility)
         if visibility is CacheVisibility.PUBLIC and not self.__public_write:
             raise AccessDenied()
+        if type(cache_class) is not ResourceCacheClass or (
+            cache_class is ResourceCacheClass.OUTPUT
+            and visibility is CacheVisibility.PUBLIC
+        ):
+            raise ParameterError("resource cache class is invalid")
         try:
             result = await self.__resources.store(
-                media_type, content, visibility=visibility, ttl_seconds=ttl_seconds
+                media_type,
+                content,
+                visibility=visibility,
+                ttl_seconds=ttl_seconds,
+                cache_class=cache_class,
             )
         except ResourceCapacityError:
             await self.__check()
@@ -944,6 +957,19 @@ class _BoundResources:
         await self.__check()
         _canonical_input(result, ResourceReference)
         return result
+
+    @public_boundary("resource")
+    async def pin(self, asset_ids, *, lease_seconds=300):
+        await self.__check()
+        result = await self.__resources.pin(asset_ids, lease_seconds=lease_seconds)
+        await self.__check()
+        return result
+
+    @public_boundary("resource")
+    async def unpin(self, pin_id):
+        await self.__check()
+        await self.__resources.unpin(pin_id)
+        await self.__check()
 
     @public_boundary("resource")
     async def read(
@@ -1132,6 +1158,7 @@ class _BoundResources:
                 content,
                 visibility=CacheVisibility.PUBLIC,
                 ttl_seconds=7 * 86400,
+                cache_class=ResourceCacheClass.DERIVED,
             )
         except (ResourceCapacityError, CacheUnavailable):
             pass
@@ -1152,21 +1179,25 @@ class _BoundResources:
 
 
 class _BoundHttp:
-    __slots__ = ("__http", "__check_sync", "__check")
+    __slots__ = ("__http", "__check_sync", "__check", "__read_only")
 
     def __init__(
         self,
         http: SourceHttpService,
         check_sync: Callable[[], None],
         check: Callable[[], Awaitable[None]],
+        read_only: bool = False,
     ) -> None:
         object.__setattr__(self, "_BoundHttp__http", http)
+        object.__setattr__(self, "_BoundHttp__read_only", read_only)
         object.__setattr__(self, "_BoundHttp__check_sync", check_sync)
         object.__setattr__(self, "_BoundHttp__check", check)
 
     @public_boundary("service")
     async def fetch(self, request: HttpRequest) -> HttpResponse:
         parameters(_canonical_input, request, HttpRequest)
+        if self.__read_only and (request.method != "GET" or request.body is not None):
+            raise SourceHttpError("request_rejected")
         try:
             await self.__check()
         except (InvocationBindingError, AccessDenied):
@@ -1347,6 +1378,7 @@ class _InvocationServices(InvocationServices):
     resources: _BoundResources
     dependencies: _BoundDependencies
     tasks: _BoundTasks
+    jobs: object
 
 
 class InvocationServiceBinder:
@@ -1368,6 +1400,7 @@ class InvocationServiceBinder:
         "_diagnostic_policy",
         "_diagnostics",
         "_service_lifetime",
+        "_jobs_provider",
     )
 
     def __init__(
@@ -1388,8 +1421,10 @@ class InvocationServiceBinder:
         diagnostics: DiagnosticStore | None = None,
         clock: Callable[[], float] = monotonic,
         utc_clock: Callable[[], datetime] | None = None,
+        jobs_provider=None,
     ) -> None:
         self._service_lifetime = service_lifetime
+        self._jobs_provider = jobs_provider or (lambda: None)
         self._diagnostic_policy = diagnostic_policy
         self._diagnostics = diagnostics or DiagnosticStore()
         self._diagnostics.bind_issuer(issuer)
@@ -1429,7 +1464,19 @@ class InvocationServiceBinder:
             if not module.enabled or module.epoch != view.module_epoch:
                 raise ValueError
             lease = self._issuer.lease_for(view)
-            if view.origin is InvocationOrigin.SCHEDULER:
+            if view.origin is InvocationOrigin.JOB:
+                if (
+                    type(lease) is not JobRunLease
+                    or view.capability_id is not None
+                    or view.actor_id != lease.owner_id
+                    or view.adapter_id is not None
+                    or view.conversation_id is not None
+                    or view.grant_id is not None
+                    or view.parent_id is not None
+                    or lease.invocation_id != view.invocation_id
+                ):
+                    raise ValueError
+            elif view.origin is InvocationOrigin.SCHEDULER:
                 if view.capability_id is not None or not isinstance(
                     lease, ScheduledLease
                 ):
@@ -1581,7 +1628,8 @@ class InvocationServiceBinder:
             except Exception:
                 raise
         is_scheduler = invocation.origin is InvocationOrigin.SCHEDULER
-        if is_scheduler:
+        is_job = invocation.origin is InvocationOrigin.JOB
+        if is_scheduler or is_job:
             caller_capability = None
             dependencies = None
         else:
@@ -1638,6 +1686,8 @@ class InvocationServiceBinder:
         )
 
         async def collection_for_invocation(name: str) -> object:
+            if is_job:
+                raise InvocationBindingError()
             current_module = self._check(invocation)
             descriptor = next(
                 (
@@ -1699,7 +1749,11 @@ class InvocationServiceBinder:
             principal_resolver=self._principal_resolver,
             clock=self._clock,
         )
-        tasks = self._lifecycle.scope(module.module_id)
+        tasks = (
+            self._jobs_provider().scope_for(invocation)
+            if is_job
+            else self._lifecycle.scope(module.module_id)
+        )
         bound = _InvocationServices(
             invocation=invocation,
             message=_BoundMessage(self._issuer, invocation, check_sync, check),
@@ -1722,21 +1776,24 @@ class InvocationServiceBinder:
                 cache,
                 check_sync,
                 check,
-                public_write=owner_capability is not None
+                public_write=is_job
+                or owner_capability is not None
                 and owner_capability.privacy_floor is PrivacyFloor.PUBLIC
                 and owner_capability.effect is CapabilityEffect.READ_ONLY,
             ),
-            http=_BoundHttp(self._http, check_sync, check),
+            http=_BoundHttp(self._http, check_sync, check, read_only=is_job),
             resources=_BoundResources(
                 resources,
                 check_sync,
                 check,
-                public_write=owner_capability is not None
+                public_write=is_job
+                or owner_capability is not None
                 and owner_capability.privacy_floor is PrivacyFloor.PUBLIC
                 and owner_capability.effect is CapabilityEffect.READ_ONLY,
             ),
             dependencies=_BoundDependencies(dependencies, check),
             tasks=_BoundTasks(tasks, check_sync, check),
+            jobs=InvocationJobs(self._jobs_provider, invocation),
         )
         await check()
         return bound
@@ -1774,6 +1831,7 @@ class ModuleServicesFactory:
         "_legacy_config_policies",
         "_module_config_validators",
         "_storage_router",
+        "_jobs",
     )
 
     def __init__(
@@ -1868,6 +1926,7 @@ class ModuleServicesFactory:
         ):
             raise TypeError("module services owner authority is invalid")
         self._registry = registry
+        self._jobs = None
         self._issuer = issuer
         self._lifecycle = lifecycle
         self._storage_router = storage_router
@@ -1904,6 +1963,10 @@ class ModuleServicesFactory:
                 for module_id, checks in (module_config_validators or {}).items()
             }
         )
+
+    def set_jobs(self, service):
+        """Trusted composition; existing binders observe the current service."""
+        self._jobs = service
 
     def for_module(self, module_id: str) -> ModuleServices:
         try:
@@ -2131,6 +2194,7 @@ class ModuleServicesFactory:
                 diagnostics=self._diagnostics,
                 clock=self._clock,
                 utc_clock=self._utc_clock,
+                jobs_provider=lambda: self._jobs,
             )
         )
         subscription_delegate: SubscriptionOperations = self._subscriptions

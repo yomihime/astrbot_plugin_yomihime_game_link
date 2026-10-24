@@ -1,6 +1,6 @@
 # Game Link module SDK
 
-The independently installable distribution is `yomihime-game-link-sdk==0.1.0a16`. Import its public declarations with `import yomihime_game_link_sdk as ygl`. It requires Python 3.11 or newer and has no third-party runtime dependencies.
+Import public declarations with `import yomihime_game_link_sdk as ygl`. SDK `0.1.0a22` combines the a16 service contracts and the a19 catalog metadata contract. The a19 branch alone was not a complete superset of a16. Core and extensions pin the exact canonical wheel; version ranges are not a substitute for content identity. The SDK requires Python 3.11 or newer and has no third-party runtime dependencies. Module ABI remains 2.0 and the outer registration bridge remains 1: new declarations are optional trailing fields and existing registration signatures are unchanged. New consumers require a22 and its matching Core implementation.
 
 The SDK (including its packaged examples) is licensed under MIT; see `SDK-LICENSE`. The AstrBot plugin implementation remains AGPL-3.0 under `LICENSE`. Third-party notices retain their own terms. The a12 source contract adds the outer-plugin extension bridge without changing module ABI 2.0. Built wheel identity and installation evidence are recorded separately; editing these declarations does not prove a published or installed wheel.
 
@@ -22,8 +22,7 @@ are idempotent; a stale lease cannot withdraw a replacement. Public plugin
 loaded/unloaded hooks support reconnecting after either plugin reloads.
 There is no polling requirement. Changed source or SDK bytes remain subject
 to `restart_required`. User records and stored enable intents survive detach.
-This initial bridge accepts ordinary configuration and uncredentialed sources;
-external credential-bearing sources and sensitive configuration are rejected.
+Sensitive configuration and credential-bearing sources require an approved installation policy bound to the actual Host plugin, package root and reviewed sensitive permissions. Current content hashes prove integrity; they are separate from the durable permission identity. A trusted management plan and revision-checked approval can grant the proposed policy. A package's own policy file never approves itself. Compatible version and page updates retain permissions without rebuilding Core; expanded source, credential injection, authorization, job or migration permissions require a new trusted approval and normal restart. Exact build-selected policies from earlier paired releases may migrate equivalent permissions with an audit record. Core keeps secret storage and injects credentials only into approved host/path/method/field slots; modules do not receive token bytes. Discovery and declarations confer no management authority, lease, storage or page permission. Pages publish only immutable, hash-verified resources captured from a current installation lease and share the shell's runtime. See [trusted source policies](source-policies.md).
 
 ## Read-only current-actor dependencies
 
@@ -44,10 +43,7 @@ read proof does not authorize root private output or account management.
 
 Install the reviewed wheel into your module development environment:
 
-```powershell
-python -m pip install --no-deps ./yomihime_game_link_sdk-0.1.0a16-py3-none-any.whl
-python -I -c "import yomihime_game_link_sdk as ygl; assert ygl.__version__ == '0.1.0a16'; assert ygl.MODULE_ABI_VERSION == '2.0'"
-```
+Install the reviewed wheel recorded for the paired Core plugin build, then verify its version and public ABI against that release record. The Core bootstrap pins exact wheel contents and rejects changed contents, foreign package origins, partial preload graphs, and any preloaded retired `yomihime_sdk` graph. Do not infer the combined release version or digest from a branch label.
 
 The plugin release contains the exact content-pinned SDK from that wheel. Its bootstrap rejects changed contents, foreign package origins, partial preload graphs, and any preloaded retired `yomihime_sdk` graph. The retired root `api` and `yomihime_sdk.api` modules have no compatibility redirects. Historical stored-data readers are separate from module import compatibility.
 
@@ -128,7 +124,7 @@ Cache lookup accepts `ygl.CacheQuery(key, visibility=None)`. Core derives user, 
 
 Record duplicate and CAS errors use the unique SDK `UniqueConstraintViolation` and `RevisionConflict` identities. Invalid proof, denied authority, invalid input, unavailable dependency and deadline failures map to `InvalidInvocation`, `AccessDenied`, `ParameterError`, `ServiceUnavailable` and `OperationTimeout`. Public errors contain fixed messages and safe logical attributes, without raw dependency cause/context chains. Cancellation propagates unchanged; a cancelled or timed-out accepted write may already have committed and is never automatically retried. Existing SourceHttpError codes retain the source policy contract.
 
-Subscriptions use only `create_request(invocation, SubscriptionRequest)`, `revise_request`, `list_current` and `cancel(invocation, id, *, expected_revision)`. Creation omits ID/revision; Core supplies a new ID and revision 1. Revision includes both and must match current CAS. A `SubscriptionView` omits collector command parameters and cannot replace a request. Repeated identical creates can make distinct subscriptions sharing one collection job; no idempotency or automatic deduplication is promised. Revision/cancellation conflicts raise `RevisionConflict`; cancellation removes only the selected association, preserving other subscribers' jobs/data. A paused owner with fresh current proof may list/revise/cancel but cannot create. Command root, exact issuer, route, principal, module epoch and grant checks apply across awaits; old contexts/handles never regain authority on restore. An unconfigured delegate raises `ServiceUnavailable`. Collector input normalization and matching remain module business rules.
+Subscriptions use only `create_request(invocation, SubscriptionRequest)`, `revise_request`, `list_current` and `cancel(invocation, id, *, expected_revision)`. Creation omits ID/revision; Core supplies a new ID and revision 1. Revision includes both and must match current CAS. A `SubscriptionView` omits collector command parameters and cannot replace a request. `creation_key` is optional. Without it, identical creates may form distinct subscriptions. When supplied, Core atomically reuses an active record only for the same trusted owner, route, type, canonical CollectionKey and key. Other associations and jobs retain their independent lifecycle. Revision/cancellation conflicts raise `RevisionConflict`; cancellation removes only the selected association, preserving other subscribers' jobs/data. A paused owner with fresh current proof may list/revise/cancel but cannot create. Command root, exact issuer, route, principal, module epoch and grant checks apply across awaits; old contexts/handles never regain authority on restore. An unconfigured delegate raises `ServiceUnavailable`. Collector input normalization and matching remain module business rules.
 
 `OwnerScope.authorized` is the sole spelling for an authorization-bound descriptive scope; the historical `private` helper is retired. The Core-only `CacheService` synonym is also retired, without adding a module-facing repository API. Host administration remains outside `ModuleServices` and the SDK. Its Core-private unload/rollback receipts acknowledge observed facts only. An unload can disable before a later failure, and cancellation or late authorization failure after an accepted SQLite transaction can leave the commit outcome unknown. Refresh a newly authorized snapshot to reconcile; do not infer rollback or automatically retry from a missing receipt. Configuration, credentials and business data remain retained across unload/restore.
 
@@ -360,6 +356,8 @@ Business field selection belongs to the module. Never copy headers, chat, except
 
 PageDescriptor also declares config_fields and credential_fields as separate bounded name tuples. They must match ordinary and sensitive fields in the owning manifest, without overlap. The reserved generic reply_theme field may appear in config_fields; its declaration and palette are injected by Core, never overridden by a module. The receiving page service requires the current page declaration, trusted deployment policy and actual management authority; adding a field name never grants access.
 
+`ModulePageServices.preview(capabilityId, parameters)` is an owner-bound public rendering path. It is available only to the caller's current public read-only Web capability and accepts only PUBLIC success/partial-success card results. It returns at most eight validated PNG pages and 16 MiB total (4 MiB per page); it has no message target, personal finished-image cache or reusable grant pixels. Current invocation, module, capability and resource proofs are rechecked across awaits. Preview does not grant permission to invoke a different capability or expose private output.
+
 
 ### Effective page configuration and safe descriptors
 
@@ -394,3 +392,31 @@ Core checks a current authority-bound resource integrity snapshot before looking
 `SourceDeclaration` appends `requests_per_hour`, `request_budget_config` and `authorization_only`. `scope.http.budget(source_id)` returns `HttpBudgetStatus(source_id, requests_per_hour, used, remaining, next_available_at)`, with aware UTC time or None. `SourceHttpError.next_available_at` preserves cooldown information for trusted scheduler defer. Normal bound HTTP refuses authorization-only sources. Secrets and authorization runners remain Core-only; modules declare public protocol data and never receive the credential. See [trusted source policies](source-policies.md).
 
 `SubscriptionRequest.creation_key` optionally requests atomic active creation reuse within the exact trusted owner, route, type, CollectionKey and key. `EvaluationDecision.events` accepts at most3 independent `EvaluationEvent` values and is disjoint with legacy single-event fields. `PublicEventContribution` selects a declared pure composer in `ModuleHandlers.event_composers`; Core derives exact PUBLIC/full-route event aggregation, retaining every member's durable receipt and fence. `CommentaryRequest` is bounded and optional, executed after event persistence by the Host port with deterministic fallback. `SubscriptionDescriptor.enabled_config_key` declares an ordinary boolean pause control defaulting True, without granting bundled-module trust. `SubscriptionView.evaluation_state` is only returned by trusted own-current-session listing; evaluators/create/revise views retain None. See [subscription events](subscription-events.md) for limits, sealed membership and UNKNOWN handling.
+
+## Module catalog metadata (a19)
+
+`ModuleDisplay.summary: str | None = None` is optional plain text limited to 160 Unicode code points. Missing or null means absent; blank strings and Cc/Cf/Cs characters are rejected.
+
+`PackageManifest.display_name: str | None = None` is an optional trailing field, limited to 128 Unicode code points without Cc/Cf/Cs. Missing, null and whitespace-only values normalize to null; other spacing is preserved. Missing names fall back to `package_id`.
+
+`PackageManifest.module_order: tuple[str, ...] | None = None` is an optional trailing field. The disk root accepts a JSON array of local module IDs or null. Missing, null and empty normalize to an empty tuple. Partial lists put declared IDs first, followed by other modules sorted by their actual localized display name and stable ID. Duplicate, unknown, qualified/cross-package and non-string IDs are rejected.
+
+These fields affect catalog presentation only; they do not change module IDs, command routing, owner identity, storage or permissions. Built-in classification requires an exact trusted bundled declaration. Extension labels and order require a completed local package and its exact current registered module manifest. Discovery alone and unclassified modules remain unknown. Neither metadata nor the public UI facade grants trust, a lease, storage, credential or management authority. Older closed-schema Core versions reject these disk keys, so packages using them require a matching Core/SDK pair.
+
+The frontend may use the public `@game-link/ui` presentation facade, including `FormField` and `FormGrid`, for shared form layout and accessible field presentation. These are view components; they do not define submission, business schemas or authorization. See [shared UI integration](module-ui.md). The catalog projection and frontend contract remain separate from module services.
+
+## Durable work and cache classes (a22)
+
+The closed disk envelope has a 4096-node manifest traversal budget, with a separate 2048-node schema budget and depth 16. Job parameter schemas participate in schema accounting. These finite aggregate limits do not relax individual document, image, JSON, result or execution budgets.
+
+`ModuleManifest.jobs` declares bounded `JobDescriptor` input schemas and deadlines. `ModuleHandlers.jobs` maps each declared ID to `JobHandler.run(invocation, parameters, control)`. Submit through invocation-bound `services.jobs`; every status/result/cancel/retry request rechecks current owner and module. IDs are locators. Workers receive fresh `InvocationOrigin.JOB` contexts with no command identity, default account binding, conversation or arbitrary send authority. Running jobs interrupted by restart require an explicit retry with a fresh generation. Closing a page stops polling without cancelling accepted work.
+
+`JobControl.update` persists bounded progress/checkpoints; `publish` appends bounded result entries. `publish_document` delegates declared document rendering to Core and stores owner-bound output assets; it never sends a group message. Results paginate using `JobResultPage`. A failed renderer cannot produce a successful empty job. Cancel/retry require current CAS revisions and reject late publication.
+
+`ResourceAccess.store` accepts generic `ResourceCacheClass.DEFAULT`, `RAW`, `DERIVED` or `OUTPUT`; existing default callers retain their scope checks. `pin(asset_ids, lease_seconds=300)` protects only currently authorized resources for a bounded lease, and `unpin` releases the same invocation's protection. A pin grants no read permission. Cache visibility, current owner, module, integrity and expiry remain independent checks.
+
+## Public event projection and command analysis (a22)
+
+`ModuleHandlers.event_projectors[composer_id]` optionally supplies a pure `PublicEventProjector.project(subscription, contribution, observed_at=...)`. Core selects one current PUBLIC subscription from the same module, type, source and complete recipient route. The callback receives that one `SubscriptionView` and bounded public facts, never a subscription list, repository, service or send handle. It returns `EvaluationDecision` or `None`; Core retains baseline, CAS, generation, cancellation and outbox authority. Presentation/template versions do not define the underlying business event identity.
+
+An optional `CapabilityResult.analysis_request` is an `AnalysisRequest` with template identity, trusted instructions, focus identity and bounded timeout/output. It requires accompanying public `model_facts`. Only an authorized command can request Core-managed Host model generation; Tool output exposes the facts without recursively calling a model. Host calls use separate untrusted fact data, no history, tools or persistence. Missing provider, limits, timeout or generation failure retain a deterministic report and explicit fallback. Module code receives no model Key or client. Late results remain subject to the original authorization.

@@ -9,33 +9,35 @@ import sys
 from pathlib import Path
 from types import ModuleType
 
-SDK_VERSION = "0.1.0a16"
+SDK_VERSION = "0.1.0a22"
 SDK_MODULE_ABI_VERSION = "2.0"
 
 
 SDK_PACKAGE_MANIFEST = {
-    "__init__.py": "25e126c8a61420aaf06b25fd4757097129a582acf6f24a3e12a9dd92e5f4116b",
+    "__init__.py": "cf6363d5ab21686c8445eb02de14a8b94b8bfef86c887bda5b3a6af12aca704a",
     "cards.py": "35adee0631a5dfed936b6b37b41e0ae3b218a179778b1c517624b00780aa7283",
-    "contexts.py": "d9b44695677c47a0133dade501a0ca1cfc9847593062f5e5ff0337372bc34723",
-    "declarations.py": "140f07079fb78ae599ae3729368332ebb96519d094a30804b1b5ddeff83c49d0",
+    "contexts.py": "874944d5183ad8717620589d0b1541ac9748529e63e425df1b6ca9216bc4c614",
+    "declarations.py": "2a9d0d5c9e5cd1f7b38e4cf2bd4d81e0752b4bb46d6f3b73b8abf3d48455a7ef",
     "display.py": "21df4ef036ae54962fb2f37de3b55c812f635722796dacecdd278a7d811e68ff",
     "errors.py": "b991a5d73f3f70fb4b0377f274e972339c14754bd4fc3be2945c456643daf467",
     "host.py": "dbbfabc8b3655a124925dd1c489a403e38cfbd8f34ef6b3b9fb799b26bf2a168",
+    "jobs.py": "1c96ff06564408ecaa8104c49d670a6376d9cd53f9af3ef975d30f8685da5718",
     "py.typed": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
-    "results.py": "ed8cb8f4e9e7f9a5bfcb855c3e90657455067ccfe72d0b7f161fd65630da343d",
-    "services.py": "a688d53fb7b7bed0d4355ce50e42fb8355bc2f1f47d930eeb19e777666f4f659",
+    "results.py": "d2d2b26a54298d51738db99e367725e9ac9f7f6910d4cd27ad88aba1be2c280f",
+    "services.py": "603697d623595a7175465c1289c18b65f52309a7125ed94e0ff9a21ec9f7edce",
     "storage.py": "6311b4754da6e37616debd68003d6993cf89c0b060845387288e2de575313260",
-    "subscriptions.py": "036e472a0a80ffc955cb6ecac34707abead75497e9c00d4a71284e4be9de5bf3",
-    "version.py": "05146a893ac7ee6410475f5070d6707b9290cba05ee90e2e063a7378fdc5b088",
-    "_examples/empty_module/README.md": "c1150018aa2eb2bfb9f9129ba753f6f26d132a0a245d245eb8a62f3c6debc1d7",
+    "subscriptions.py": "c3458ed30bc90481e17b1e8ca27676f19eaf7097ab79817a3a3554532dcef00a",
+    "version.py": "744eaeb6860285c1782eaca6a262bafd56e0ebe0cc9f437f85e08c1119860587",
     "_examples/empty_module/manifest.json": "9de2d0e3cbb7e32acf029677e59381d1bb8893c6cae84a45f9a606b6e3a7e965",
     "_examples/empty_module/module.py": "21fdb6428bd422804ad00e98038b032c25b1d2488b3df5f17e3be855e0c8198f",
-    "_examples/offline_sample/README.md": "f8dc79bb4e1e933b8254da8b44b774d6e60aedd281c40629381b0458b850b79f",
+    "_examples/empty_module/README.md": "c1150018aa2eb2bfb9f9129ba753f6f26d132a0a245d245eb8a62f3c6debc1d7",
     "_examples/offline_sample/manifest.json": "2f0583a18c43501625ca47d94af7f9173c1b706413ae810b768edf309518c34d",
     "_examples/offline_sample/module.py": "6a3971d633d947671fdbcb9b6b0025a871ab21e615c0d0f57edc2b0e2be30f32",
+    "_examples/offline_sample/README.md": "f8dc79bb4e1e933b8254da8b44b774d6e60aedd281c40629381b0458b850b79f",
 }
 
 SDK_MODULES = {
+    "yomihime_game_link_sdk.jobs",
     "yomihime_game_link_sdk.host",
     "yomihime_game_link_sdk.cards",
     "yomihime_game_link_sdk.results",
@@ -217,7 +219,7 @@ from astrbot.api.star import Star, register  # noqa: E402
     "astrbot_plugin_yomihime_game_link",
     "yomihime",
     "如月怜的游戏连结：聚合游戏角色、战绩与资讯。",
-    "0.1.10",
+    "0.1.11",
 )
 class YomihimeGameLink(Star):
     """Provide the entry point for the game information plugin."""

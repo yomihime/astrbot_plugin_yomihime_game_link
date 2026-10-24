@@ -9,6 +9,7 @@ from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from yomihime_game_link_sdk.storage import (
     CacheEntry,
@@ -455,6 +456,170 @@ class SQLiteResourceRepository:
 
         return await self.database.executor.run_read(read)
 
+    async def managed_owner(self, asset_id, scope):
+        key = self.managed_scope_key(scope)
+
+        def read(unit):
+            row = unit.execute(
+                "SELECT module_id,cache_class FROM managed_resource_entries "
+                "WHERE scope_key=? AND asset_id=? AND evicting=0",
+                (key, asset_id),
+            ).fetchone()
+            return None if row is None else tuple(row)
+
+        return await self.database.executor.run_read(read)
+
+    async def managed_class_usage(self, scope, cache_class):
+        return await self.database.executor.run_read(
+            lambda unit: tuple(
+                unit.execute(
+                    "SELECT COALESCE(SUM(size_bytes),0),COUNT(*) FROM managed_resource_entries "
+                    "WHERE scope_key=? AND cache_class=?",
+                    (self.managed_scope_key(scope), cache_class),
+                ).fetchone()
+            )
+        )
+
+    async def pinned_asset_ids(self, scope, now):
+        return await self.database.executor.run_read(
+            lambda unit: tuple(
+                row[0]
+                for row in unit.execute(
+                    "SELECT DISTINCT asset_id FROM managed_resource_pins WHERE scope_key=? AND expires_at>?",
+                    (self.managed_scope_key(scope), _iso(now)),
+                ).fetchall()
+            )
+        )
+
+    async def pin_resources(
+        self,
+        references,
+        *,
+        module_id,
+        invocation_id,
+        owner_key,
+        expires_at,
+        now,
+        pin_id=None,
+        commit_guard=None,
+    ):
+        pin_id = pin_id or uuid4().hex
+
+        def write(unit):
+            unit.execute(
+                "DELETE FROM managed_resource_pins WHERE expires_at<=?", (_iso(now),)
+            )
+            count = unit.execute(
+                "SELECT COUNT(DISTINCT pin_id) FROM managed_resource_pins WHERE invocation_id=?",
+                (invocation_id,),
+            ).fetchone()[0]
+            if count >= 16:
+                existing = unit.execute(
+                    "SELECT 1 FROM managed_resource_pins WHERE pin_id=? AND invocation_id=? "
+                    "AND module_id=? AND owner_key=?",
+                    (pin_id, invocation_id, module_id, owner_key),
+                ).fetchone()
+                if existing is None:
+                    raise ValueError("resource pin capacity exceeded")
+            prior = unit.execute(
+                "SELECT module_id,invocation_id,owner_key FROM managed_resource_pins WHERE pin_id=? LIMIT 1",
+                (pin_id,),
+            ).fetchone()
+            if prior is not None and tuple(prior) != (
+                module_id,
+                invocation_id,
+                owner_key,
+            ):
+                raise PermissionError("resource pin is outside invocation")
+            for asset_id, scope in references:
+                row = unit.execute(
+                    "SELECT expires_at FROM assets WHERE asset_id=? AND scope_kind=? "
+                    "AND user_id IS ? AND grant_id IS ? AND grant_revision IS ?",
+                    self._params(asset_id, scope),
+                ).fetchone()
+                if row is None or (row[0] is not None and row[0] <= _iso(now)):
+                    raise FileNotFoundError("resource is unavailable")
+                entry = unit.execute(
+                    "SELECT evicting FROM managed_resource_entries WHERE scope_key=? AND asset_id=?",
+                    (self.managed_scope_key(scope), asset_id),
+                ).fetchone()
+                if entry is not None and entry[0]:
+                    raise FileNotFoundError("resource is unavailable")
+                expiry = (
+                    min(_iso(expires_at), row[0])
+                    if row[0] is not None
+                    else _iso(expires_at)
+                )
+                unit.execute(
+                    "INSERT INTO managed_resource_pins VALUES (?,?,?,?,?,?,?) "
+                    "ON CONFLICT(pin_id,scope_key,asset_id) DO UPDATE SET expires_at=excluded.expires_at",
+                    (
+                        pin_id,
+                        module_id,
+                        invocation_id,
+                        owner_key,
+                        self.managed_scope_key(scope),
+                        asset_id,
+                        expiry,
+                    ),
+                )
+            if (
+                unit.execute(
+                    "SELECT COUNT(*) FROM managed_resource_pins WHERE pin_id=?",
+                    (pin_id,),
+                ).fetchone()[0]
+                > 1000
+            ):
+                raise ValueError("resource pin member limit exceeded")
+            if commit_guard is not None:
+                unit.add_commit_guard(commit_guard)
+            return pin_id
+
+        return await self.database.executor.run_transaction(
+            write, begin_mode="IMMEDIATE"
+        )
+
+    async def unpin_resources(
+        self, pin_id, *, module_id, invocation_id, owner_key, commit_guard=None
+    ):
+        def write(unit):
+            row = unit.execute(
+                "SELECT module_id,invocation_id,owner_key FROM managed_resource_pins WHERE pin_id=? LIMIT 1",
+                (pin_id,),
+            ).fetchone()
+            if row is not None and tuple(row) != (module_id, invocation_id, owner_key):
+                raise PermissionError("resource pin is outside invocation")
+            unit.execute("DELETE FROM managed_resource_pins WHERE pin_id=?", (pin_id,))
+            if commit_guard is not None:
+                unit.add_commit_guard(commit_guard)
+
+        await self.database.executor.run_transaction(write, begin_mode="IMMEDIATE")
+
+    async def release_invocation_pins(self, invocation_id):
+        await self.database.executor.run_transaction(
+            lambda unit: unit.execute(
+                "DELETE FROM managed_resource_pins WHERE invocation_id=?",
+                (invocation_id,),
+            ).rowcount,
+            begin_mode="IMMEDIATE",
+        )
+
+    async def managed_touch_many(self, asset_ids, scope, now):
+        unique = tuple(dict.fromkeys(asset_ids))
+        if not unique:
+            return
+        if len(unique) > 1000:
+            raise ValueError("resource touch batch exceeded")
+        slots = ",".join("?" for _ in unique)
+        await self.database.executor.run_transaction(
+            lambda unit: unit.execute(
+                "UPDATE managed_resource_entries SET last_access=? WHERE scope_key=? AND evicting=0 "
+                f"AND asset_id IN ({slots})",
+                (_iso(now), self.managed_scope_key(scope), *unique),
+            ).rowcount,
+            begin_mode="IMMEDIATE",
+        )
+
     async def integrity_snapshot(self, asset_id: str, scope: OwnerScope):
         key = self.managed_scope_key(scope)
 
@@ -578,11 +743,12 @@ class SQLiteResourceRepository:
         limit: int,
         expired_only: bool,
         excluded_asset_ids: tuple[str, ...] = (),
+        protect_raw: bool = False,
     ) -> tuple[tuple[str, int], ...]:
         key = self.managed_scope_key(scope)
         # Exclude current readers before LIMIT, so a leased LRU prefix cannot
         # hide an eligible entry beyond the bounded returned candidate batch.
-        exclusion = (
+        exclusion = (" AND cache_class<>'raw'" if protect_raw else "") + (
             " AND asset_id NOT IN (" + ",".join("?" for _ in excluded_asset_ids) + ")"
             if excluded_asset_ids
             else ""
@@ -616,14 +782,18 @@ class SQLiteResourceRepository:
 
         def write(unit):
             _check_authorization_deadline(authorization_deadline)
-            unit.execute(
+            changed = unit.execute(
                 "UPDATE managed_resource_entries SET evicting=1 "
-                "WHERE scope_key=? AND asset_id=?",
-                (key, asset_id),
-            )
+                "WHERE scope_key=? AND asset_id=? AND NOT EXISTS(SELECT 1 FROM managed_resource_pins p "
+                "WHERE p.scope_key=managed_resource_entries.scope_key AND p.asset_id=managed_resource_entries.asset_id AND p.expires_at>?)",
+                (key, asset_id, _iso(datetime.now(UTC))),
+            ).rowcount
             _check_authorization_deadline(authorization_deadline)
+            return changed == 1
 
-        await self.database.executor.run_transaction(write, begin_mode="IMMEDIATE")
+        return await self.database.executor.run_transaction(
+            write, begin_mode="IMMEDIATE"
+        )
 
     async def managed_finish_eviction(
         self, asset_id: str, scope: OwnerScope, *, authorization_deadline=None
@@ -684,6 +854,7 @@ class SQLiteResourceRepository:
         content_sha256: str,
         now: datetime,
         authorization_deadline=None,
+        cache_class="default",
     ) -> ResourceMetadata:
         """Commit resource/index retention facts together; never adopt legacy rows."""
         metadata = _validate_metadata(metadata)
@@ -733,10 +904,11 @@ class SQLiteResourceRepository:
             if row is None or managed is not None:
                 unit.execute(
                     "INSERT INTO managed_resource_entries(scope_key,asset_id,module_id,"
-                    "content_sha256,size_bytes,expires_at,last_access,evicting) "
-                    "VALUES (?,?,?,?,?,?,?,0) ON CONFLICT(scope_key,asset_id) DO UPDATE SET "
+                    "content_sha256,size_bytes,expires_at,last_access,evicting,cache_class) "
+                    "VALUES (?,?,?,?,?,?,?,0,?) ON CONFLICT(scope_key,asset_id) DO UPDATE SET "
                     "content_sha256=excluded.content_sha256,size_bytes=excluded.size_bytes,"
-                    "expires_at=excluded.expires_at,last_access=excluded.last_access,evicting=0",
+                    "expires_at=excluded.expires_at,last_access=excluded.last_access,evicting=0,"
+                    "cache_class=CASE WHEN managed_resource_entries.cache_class='raw' THEN 'raw' ELSE excluded.cache_class END",
                     (
                         key,
                         metadata.asset_id,
@@ -745,6 +917,7 @@ class SQLiteResourceRepository:
                         metadata.size_bytes,
                         _iso(metadata.expires_at),
                         _iso(now),
+                        cache_class,
                     ),
                 )
             _check_authorization_deadline(authorization_deadline)

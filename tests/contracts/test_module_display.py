@@ -39,6 +39,56 @@ class ModuleDisplayTests(unittest.TestCase):
         with self.assertRaises((TypeError, ValueError)):
             self.display("Name", {"en": "x" * 129})
 
+    def test_summary_is_optional_bounded_plain_text(self):
+        self.assertIsNone(self.display("Name").summary)
+        self.assertIsNone(self.display("Name", summary=None).summary)
+        for summary in ("物品查询 · 市场行情", "x" * 160, "😀" * 160, "<b>literal</b>"):
+            self.assertEqual(self.display("Name", summary=summary).summary, summary)
+        for summary in (
+            "",
+            " ",
+            "\u00a0",
+            "x" * 161,
+            "😀" * 161,
+            "a\n",
+            "a\t",
+            "a\x7f",
+            "a\u202e",
+            "a\ud800",
+            1,
+            True,
+            [],
+            {},
+        ):
+            with self.subTest(summary=repr(summary)):
+                with self.assertRaises((TypeError, ValueError)):
+                    self.display("Name", summary=summary)
+
+    def test_disk_summary_roundtrip_and_old_manifest_defaults(self):
+        document = valid_document()
+        # Existing ABI 2.0 manifests have no new field or even no display.
+        self.assertIsNone(
+            parse_manifest(json.dumps(document).encode()).modules[0].display
+        )
+        document["modules"][0]["display"] = {"default_name": "Name"}
+        self.assertIsNone(
+            parse_manifest(json.dumps(document).encode()).modules[0].display.summary
+        )
+        for summary in (None, "物品查询 · 市场行情", "😀" * 160):
+            document["modules"][0]["display"]["summary"] = summary
+            parsed = parse_manifest(json.dumps(document).encode())
+            self.assertEqual(parsed.modules[0].display.summary, summary)
+        for summary in ("", " ", "x" * 161, "a\n", "a\u202e", 42, [], {}):
+            document["modules"][0]["display"]["summary"] = summary
+            with self.subTest(summary=repr(summary)), self.assertRaises(ManifestError):
+                parse_manifest(json.dumps(document).encode())
+        document["modules"][0]["display"] = {
+            "default_name": "Name",
+            "summary_html": "text",
+        }
+        with self.assertRaises(ManifestError):
+            parse_manifest(json.dumps(document).encode())
+
     def test_locale_syntax_budget_and_casefold_duplicates(self):
         self.display(
             "Name", {"zh-Hans-CN": "名称", "en-US": "Name", "es-419": "Nombre"}
@@ -125,7 +175,7 @@ class ModuleDisplayTests(unittest.TestCase):
     def test_catalog_projects_trusted_names_without_business_execution_or_identity_change(
         self,
     ):
-        display = self.display("Name", {"zh": "名称"}, "N")
+        display = self.display("Name", {"zh": "名称"}, "N", summary="功能一 · 功能二")
         module = replace(_module("catalog", "catalog"), display=display)
         registry = Registry()
         snapshot = registry.register_package(
@@ -153,6 +203,7 @@ class ModuleDisplayTests(unittest.TestCase):
                 "localized_names": {"zh": "名称"},
                 "short_name": "N",
                 "logo_resource": None,
+                "summary": "功能一 · 功能二",
             },
         )
         item["display"]["localized_names"]["zh"] = "changed"
@@ -184,6 +235,7 @@ class ModuleDisplayTests(unittest.TestCase):
                 snapshot, {owner: state}, {owner: None}, runtime_state=runtime_state
             )["modules"][0]
             self.assertIsNone(result["display"]["logo_resource"])
+            self.assertIsNone(result["display"]["summary"])
             self.assertEqual(result["resources"], [])
 
     def test_facade_and_core_share_display_identity(self):

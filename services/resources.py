@@ -14,6 +14,7 @@ from uuid import uuid4
 from yomihime_game_link_sdk.contexts import InvocationView
 from yomihime_game_link_sdk.services import (
     ResourceAccess,
+    ResourceCacheClass,
     ResourceCacheStats,
     ResourceReference,
 )
@@ -30,6 +31,7 @@ from ..core.ports import (
     SafeFileStore,
     ScheduledLease,
 )
+from ..core.ports_jobs import JobRunLease
 from .identity import (
     InvocationPrincipalResolver,
     PrincipalResolutionDenied,
@@ -207,7 +209,7 @@ class _ResourceAccessCoordinator:
         try:
             issuer.require(self.__invocation)
             lease = issuer.lease_for(self.__invocation)
-            if not isinstance(lease, (AdmissionLease, ScheduledLease)):
+            if not isinstance(lease, (AdmissionLease, ScheduledLease, JobRunLease)):
                 raise InvalidInvocation("invocation has no admission lease")
             admission.check(lease)
         except ResourceAccessError:
@@ -495,8 +497,11 @@ class _ResourceAccessCoordinator:
         *,
         visibility: CacheVisibility | None = None,
         ttl_seconds: float | None = None,
+        cache_class: ResourceCacheClass = ResourceCacheClass.DEFAULT,
     ) -> ResourceReference:
         validate_contract(visibility)
+        if type(cache_class) is not ResourceCacheClass:
+            raise ValueError("invalid resource cache class")
         await self._admit()
         scope = await self._scope(visibility)
         manager = getattr(self.__repository, "managed_cache", None)
@@ -514,6 +519,7 @@ class _ResourceAccessCoordinator:
                     scope,
                     module_id=self.__invocation.module_id,
                     ttl_seconds=ttl_seconds,
+                    cache_class=cache_class,
                     check=self._admit,
                     authorization_deadline=deadline
                     if scope.grant is not None
@@ -527,6 +533,68 @@ class _ResourceAccessCoordinator:
                 )
 
         return await drain_on_cancel(operation())
+
+    async def pin(self, asset_ids, *, lease_seconds=300):
+        await self._admit()
+        if type(asset_ids) is not tuple or not 1 <= len(asset_ids) <= 1000:
+            raise ValueError("invalid resource pin batch")
+        if type(lease_seconds) is not int or not 1 <= lease_seconds <= 1800:
+            raise ValueError("invalid resource pin lifetime")
+        invocation = self.__invocation
+        owner = (
+            await self._principal_id()
+            if invocation.actor_id is not None
+            else invocation.public_session_id
+        )
+        if not owner:
+            raise ResourceAccessError(code="scope_denied")
+        references = []
+        for asset_id in tuple(dict.fromkeys(asset_ids)):
+            metadata = await self.metadata(asset_id)
+            if metadata is None:
+                raise FileNotFoundError("resource is unavailable")
+            references.append((asset_id, metadata.scope))
+        now = datetime.now(UTC)
+        ttl = lease_seconds
+        if invocation.deadline is not None:
+            ttl = min(ttl, max(0, invocation.deadline - self.__clock()))
+        if ttl <= 0:
+            raise ResourceAccessError(code="invocation_expired")
+        manager = self.__repository.managed_cache
+        async with manager._lock:
+            await self._admit()
+            pin_id = await self.__repository.pin_resources(
+                tuple(references),
+                module_id=invocation.module_id,
+                invocation_id=invocation.invocation_id,
+                owner_key=owner,
+                expires_at=now + timedelta(seconds=ttl),
+                now=now,
+                commit_guard=lambda: self.__admission.commit_guard(
+                    self.__issuer.lease_for(invocation)
+                ),
+            )
+            await self._admit()
+            return pin_id
+
+    async def unpin(self, pin_id):
+        await self._admit()
+        invocation = self.__invocation
+        owner = (
+            await self._principal_id()
+            if invocation.actor_id is not None
+            else invocation.public_session_id
+        )
+        await self.__repository.unpin_resources(
+            _asset_id(pin_id),
+            module_id=invocation.module_id,
+            invocation_id=invocation.invocation_id,
+            owner_key=owner,
+            commit_guard=lambda: self.__admission.commit_guard(
+                self.__issuer.lease_for(invocation)
+            ),
+        )
+        await self._admit()
 
     async def stats(
         self, *, visibility: CacheVisibility | None = None
@@ -776,10 +844,21 @@ class ResourceAccessService(ResourceAccess):
         *,
         visibility: CacheVisibility | None = None,
         ttl_seconds: float | None = None,
+        cache_class: ResourceCacheClass = ResourceCacheClass.DEFAULT,
     ) -> ResourceReference:
         return await self.__coordinator.store(
-            media_type, content, visibility=visibility, ttl_seconds=ttl_seconds
+            media_type,
+            content,
+            visibility=visibility,
+            ttl_seconds=ttl_seconds,
+            cache_class=cache_class,
         )
+
+    async def pin(self, asset_ids, *, lease_seconds=300):
+        return await self.__coordinator.pin(asset_ids, lease_seconds=lease_seconds)
+
+    async def unpin(self, pin_id):
+        return await self.__coordinator.unpin(pin_id)
 
     async def stats(
         self, *, visibility: CacheVisibility | None = None

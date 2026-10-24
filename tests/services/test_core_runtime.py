@@ -427,6 +427,7 @@ class CoreRuntimeTests(unittest.IsolatedAsyncioTestCase):
         command_heading_projector=None,
         monotonic_clock=None,
         command_timeout=90,
+        managed_module_owners=(),
     ) -> CoreRuntime:
         (self.root / "extensions").mkdir(exist_ok=True)
         return CoreRuntime(
@@ -456,6 +457,7 @@ class CoreRuntimeTests(unittest.IsolatedAsyncioTestCase):
             command_heading_projector=command_heading_projector,
             monotonic_clock=monotonic_clock or monotonic,
             command_timeout=command_timeout,
+            managed_module_owners=managed_module_owners,
         )
 
     async def _public_web_runtime(self, *, detached=False, block_root=False):
@@ -1454,6 +1456,122 @@ class CoreRuntimeTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 self.assertTrue(await runtime.close())
         self.assertEqual(runtime.output._message_port.calls, [])
+
+    async def test_catalog_source_requires_completed_build_and_exact_registry(self):
+        document = _private_manifest()
+        document.update(display_name="Local package", module_order=["mod"])
+        root = self.root / "extensions/private"
+        root.mkdir(parents=True)
+        (root / "yomihime.manifest.json").write_text(json.dumps(document))
+        runtime = self._runtime(
+            source=_FactorySource(_Factory(_Handler())),
+            managed_module_owners=("private/mod",),
+        )
+        await runtime.start()
+        try:
+            self.assertIsNotNone(runtime.extension_runtime.candidate("private"))
+            self.assertEqual(runtime.public_module_catalog()["modules"], [])
+            await runtime.admin_credential_repository.bootstrap(
+                _digest(token_urlsafe(32))
+            )
+            await runtime.admin_operations.set_enabled(
+                None,
+                "private/mod",
+                True,
+                expected_registry_revision=runtime.registry.snapshot().revision,
+                authorization=_AdminContext(),
+            )
+
+            def source():
+                return runtime.public_module_catalog()["modules"][0]["source"]
+
+            expected = {
+                "kind": "extension",
+                "package_id": "private",
+                "display_name": "Local package",
+                "module_order": ["mod"],
+            }
+            unknown = {
+                "kind": "unknown",
+                "package_id": "private",
+                "display_name": None,
+                "module_order": [],
+            }
+            self.assertEqual(source(), expected)
+            built = runtime.extension_runtime._built["private"]
+            self.assertTrue(built.complete)
+            with patch.dict(runtime.extension_runtime._built, {}, clear=True):
+                # Discovery plus a registered ID alone cannot prove ownership.
+                self.assertEqual(source(), unknown)
+            with patch.object(built, "complete", False):
+                self.assertEqual(source(), unknown)
+            changed = replace(built.manifest.modules[0], module_version="9.0.0")
+            with patch.object(
+                built, "manifest", replace(built.manifest, modules=(changed,))
+            ):
+                self.assertEqual(source(), unknown)
+            self.assertEqual(source(), expected)
+            await runtime.admin_operations.set_enabled(
+                None,
+                "private/mod",
+                False,
+                expected_registry_revision=runtime.registry.snapshot().revision,
+                authorization=_AdminContext(),
+            )
+            self.assertEqual(source(), expected)
+            self.assertEqual(
+                runtime.public_module_catalog()["modules"][0]["state"], "disabled"
+            )
+            await runtime.admin_operations.unload_module(
+                None,
+                "private/mod",
+                expected_registry_revision=runtime.registry.snapshot().revision,
+                authorization=_AdminContext(),
+            )
+            self.assertEqual(runtime.public_module_catalog()["modules"], [])
+            self.assertNotIn("private", runtime.extension_runtime._built)
+        finally:
+            self.assertTrue(await runtime.close())
+        self.assertEqual(runtime.output._message_port.calls, [])
+
+    async def test_catalog_trusted_bundle_stays_builtin_after_local_build(self):
+        from ygl_test_subject.extensions.disk_manifest import parse_manifest
+
+        document = _private_manifest()
+        document.update(display_name="Not an external label", module_order=["mod"])
+        encoded = json.dumps(document).encode()
+        expected = parse_manifest(encoded).modules[0]
+        root = self.root / "extensions/private"
+        root.mkdir(parents=True)
+        (root / "yomihime.manifest.json").write_bytes(encoded)
+        runtime = self._runtime(
+            source=_FactorySource(_Factory(_Handler())),
+            trusted_bundled_manifests={"private/mod": expected},
+        )
+        await runtime.start()
+        try:
+            await runtime.admin_credential_repository.bootstrap(
+                _digest(token_urlsafe(32))
+            )
+            await runtime.admin_operations.set_enabled(
+                None,
+                "private/mod",
+                True,
+                expected_registry_revision=runtime.registry.snapshot().revision,
+                authorization=_AdminContext(),
+            )
+            self.assertTrue(runtime.extension_runtime._built["private"].complete)
+            self.assertEqual(
+                runtime.public_module_catalog()["modules"][0]["source"],
+                {
+                    "kind": "builtin",
+                    "package_id": "private",
+                    "display_name": None,
+                    "module_order": [],
+                },
+            )
+        finally:
+            self.assertTrue(await runtime.close())
 
     async def test_catalog_failures_are_not_empty_success(self):
         runtime = self._runtime()

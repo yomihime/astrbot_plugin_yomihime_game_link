@@ -548,6 +548,8 @@ def check_ModuleHandlers(self) -> None:
         ("collectors", self.collectors),
         ("evaluators", self.evaluators),
         ("event_composers", self.event_composers),
+        ("event_projectors", self.event_projectors),
+        ("jobs", self.jobs),
     ):
         if not isinstance(handlers, Mapping) or any(
             (not isinstance(key, str) or not key for key in handlers)

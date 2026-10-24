@@ -332,18 +332,15 @@ def _attach_public_event(unit, event, record, collected_at):
         or event.grant is not None
     ):
         raise ValueError("public aggregate cannot include private observations")
-    identity = _dump(
-        (
-            record.module_id,
-            event.recipient,
-            record.collection_key.scope,
-            event.event_key,
-            event.event_version,
-            contribution.composer_id,
-        )
-    )
+    identity = _dump((record.module_id, event.recipient, event.event_key))
+    prior_identity = unit.execute(
+        "SELECT window_id FROM b04_public_event_identity WHERE business_key=?",
+        (identity,),
+    ).fetchone()
     window_id = (
-        "public-event:v1:" + hashlib.sha256(identity.encode("utf-8")).hexdigest()
+        prior_identity[0]
+        if prior_identity is not None
+        else ("public-event:v1:" + hashlib.sha256(identity.encode("utf-8")).hexdigest())
     )
     route = _route_key(event.recipient)
     existing_member = unit.execute(
@@ -437,6 +434,10 @@ def _attach_public_event(unit, event, record, collected_at):
                 _dump(window),
             ),
         )
+    unit.execute(
+        "INSERT OR IGNORE INTO b04_public_event_identity VALUES (?,?)",
+        (identity, window_id),
+    )
     member = DigestMember(
         event.subscription_id,
         event.subscription_revision,
@@ -1565,6 +1566,68 @@ class SQLiteSchedulerRepository(_Repository):
 
         return await self.database.executor.run_read(read)
 
+    async def previous_observation(self, lease: ExecutionLease) -> Observation | None:
+        """Read the collection's last committed sample under its exact live lease."""
+
+        def read(unit):
+            current = _read_subscription_fence(
+                unit, self._subscription_gate_bindings.get(lease.key.module_id)
+            )
+            row = unit.execute(
+                "SELECT * FROM b04_collection_jobs WHERE job_key=?",
+                (_job_key(lease.key),),
+            ).fetchone()
+            if (
+                row is None
+                or current != lease.subscription_fence
+                or _row_fence(row) != current
+                or row["lease_token"] != lease.token
+                or row["key_json"] != _key_json(lease.key)
+                or row["config_revision"] != lease.config_revision
+                or row["module_epoch"] != lease.module_epoch
+                or row["registry_revision"] != lease.registry_revision
+                or _StoredDateTime.fromisoformat(row["lease_expires_at"])
+                <= _utc_instant(self._utc_clock(), "utc_clock")
+            ):
+                return None
+            saved = unit.execute(
+                "SELECT observation_json FROM b04_observations WHERE observation_id=?",
+                (row["observation_id"],),
+            ).fetchone()
+            return None if saved is None else _load(saved[0])
+
+        return await self.database.executor.run_read(read)
+
+    async def public_event_candidates(self, source: SubscriptionRecord):
+        """Core-only restricted view; never supplied to an extension service."""
+        if (
+            source.collection_key.scope.kind is not OwnershipKind.PUBLIC
+            or source.grant is not None
+        ):
+            return ()
+
+        def read(unit):
+            rows = unit.execute(
+                "SELECT record_json FROM b04_subscriptions WHERE status='active' AND scope_kind='public' "
+                "AND json_extract(record_json,'$.fields.module_id')=? "
+                "AND json_extract(record_json,'$.fields.type_id')=? "
+                "AND json_extract(record_json,'$.fields.collection_key.fields.source_id')=? "
+                "AND json_extract(record_json,'$.fields.recipient')=json(?) ORDER BY subscription_id LIMIT 101",
+                (
+                    source.module_id,
+                    source.type_id,
+                    source.collection_key.source_id,
+                    _dump(source.recipient),
+                ),
+            ).fetchall()
+            if len(rows) > 100:
+                raise ValueError(
+                    "public event target membership exceeds bounded projection"
+                )
+            return tuple(_load(row[0]) for row in rows)
+
+        return await self.database.executor.run_read(read)
+
     async def claim_due(
         self, request: CollectionRunRequest, *, now: datetime
     ) -> ExecutionLease | None:
@@ -1869,9 +1932,36 @@ class SQLiteSchedulerRepository(_Repository):
                     <= committed_at
                 ):
                     return False
+                public_sources = set()
+                for item in commit.subscriptions:
+                    source_row = unit.execute(
+                        "SELECT record_json FROM b04_subscriptions WHERE subscription_id=?",
+                        (item.subscription_id,),
+                    ).fetchone()
+                    source_record = None if source_row is None else _load(source_row[0])
+                    if (
+                        source_record is not None
+                        and source_record.collection_key == lease.key
+                        and source_record.collection_key.scope.kind
+                        is OwnershipKind.PUBLIC
+                        and any(
+                            event.public_contribution is not None
+                            for event in item.delivery_events
+                        )
+                    ):
+                        public_sources.update(
+                            (
+                                source_record.module_id,
+                                source_record.type_id,
+                                _dump(source_record.recipient),
+                                event.event_key,
+                            )
+                            for event in item.delivery_events
+                            if event.public_contribution is not None
+                        )
                 for item in commit.subscriptions:
                     sub = unit.execute(
-                        "SELECT revision,status FROM b04_subscriptions WHERE subscription_id=?",
+                        "SELECT revision,status,record_json FROM b04_subscriptions WHERE subscription_id=?",
                         (item.subscription_id,),
                     ).fetchone()
                     link = unit.execute(
@@ -1883,12 +1973,50 @@ class SQLiteSchedulerRepository(_Repository):
                         (item.subscription_id,),
                     ).fetchone()
                     actual_state = None if state is None else int(state[0])
+                    if item.projected_observation is not None:
+                        if (
+                            sub is None
+                            or item.projected_observation.key
+                            != _load(sub["record_json"]).collection_key
+                        ):
+                            return False
+                    projected_allowed = False
+                    if sub is not None and link is not None and link["job_key"] != job:
+                        candidate = _load(sub["record_json"])
+                        projected_allowed = (
+                            candidate.collection_key.scope.kind is OwnershipKind.PUBLIC
+                            and item.projected_observation is not None
+                            and candidate.grant is None
+                            and candidate.notification_mode == "instant"
+                            and candidate.collection_key.source_id
+                            == lease.key.source_id
+                            and candidate.collection_key.collector_id
+                            == lease.key.collector_id
+                            and candidate.collection_key.key_version
+                            == lease.key.key_version
+                            and link["job_key"] == _job_key(candidate.collection_key)
+                            and not item.digest_members
+                            and all(
+                                event.public_contribution is not None
+                                and event.owner_id == candidate.owner_id
+                                and event.recipient == candidate.recipient
+                                and event.grant is None
+                                and (
+                                    candidate.module_id,
+                                    candidate.type_id,
+                                    _dump(candidate.recipient),
+                                    event.event_key,
+                                )
+                                in public_sources
+                                for event in item.delivery_events
+                            )
+                        )
                     if (
                         sub is None
                         or int(sub["revision"]) != item.subscription_revision
                         or sub["status"] != "active"
                         or link is None
-                        or link["job_key"] != job
+                        or (link["job_key"] != job and not projected_allowed)
                         or int(link["subscription_revision"])
                         != item.subscription_revision
                         or actual_state != item.expected_state_revision
@@ -1930,6 +2058,19 @@ class SQLiteSchedulerRepository(_Repository):
                 )
                 if observation.completeness is not ObservationCompleteness.FAILED:
                     for item in commit.subscriptions:
+                        projected = item.projected_observation
+                        if projected is not None:
+                            unit.execute(
+                                "INSERT INTO b04_observations VALUES (?,?,?,?,?,?)",
+                                (
+                                    projected.observation_id,
+                                    _job_key(projected.key),
+                                    projected.data_version,
+                                    projected.completeness.value,
+                                    _dump(projected.payload),
+                                    _dump(projected),
+                                ),
+                            )
                         state_json, cursor_json = _dump(item.state), _dump(item.cursor)
                         if item.expected_state_revision is None:
                             unit.execute(
