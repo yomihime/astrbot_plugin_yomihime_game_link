@@ -4,7 +4,8 @@ import {UiProvider,LogoMark} from '@game-link/ui';
 import {PageHeader, SettingsGroup, StatusHint} from '@game-link/ui';
 import {loadPage,sharedRuntimeUrl} from './module-loader.js';
 import {createShell} from './controller';
-import type {Bridge} from './contracts';
+import type {Bridge, ModuleDescriptor} from './contracts';
+import {createModuleAssets, assetIdentity} from './module-assets';
 import './shell.css';
 // Core owns public presentation CSS independently of the management view.
 import './ui/tokens.css';
@@ -23,6 +24,27 @@ const App = defineComponent({setup() {
 
   const confirmation=createInlineConfirmation(document);
   let lastHash=window.location.hash,approvedHash='',contextGeneration=0,contextKey='',contextValid=false,draftGeneration=0,navigationSerial=0,closed=false,offContext:(()=>void)|undefined;
+  const logoAssets=createModuleAssets(document,loadPage,8000,{bridge:window.AstrBotPluginView,runtimeUrl:sharedRuntimeUrl});
+  const logos=new Map<string,{identity:string;url:string|null}>();let logoBoundaryRevoked=false;
+  const dynamicLogo=(path:string)=>/\/pages\/p[0-9a-f]{64}\//.test(path);
+  function clearLogos(){logoAssets.invalidateAll();logos.clear();revision.value++;}
+  function syncLogos(){
+    const modules=logoBoundaryRevoked||closed?[]:(shell?.state.catalog?.modules||[]).filter(module=>module.state==='loaded'&&module.display?.logo_resource&&dynamicLogo(module.display.logo_resource));
+    const identities=new Map(modules.map(module=>[module.module_id,JSON.stringify([assetIdentity(module,contextKey),module.display!.logo_resource])]));
+    for(const [owner,entry] of logos)if(identities.get(owner)!==entry.identity){logoAssets.invalidate(owner);logos.delete(owner);}
+    for(const module of modules){
+      if(logos.has(module.module_id))continue;
+      const entry={identity:identities.get(module.module_id)!,url:null as string|null};logos.set(module.module_id,entry);
+      void logoAssets.image(module,module.display!.logo_resource!).then(url=>{
+        if(!closed&&!logoBoundaryRevoked&&logos.get(module.module_id)===entry){entry.url=url;revision.value++;}
+      }).catch(()=>{ /* A rejected logo retains the ordinary decorative fallback. */ });
+    }
+  }
+  function moduleLogo(module:ModuleDescriptor):string|null{
+    if(closed||logoBoundaryRevoked||module.state!=='loaded')return null;
+    const path=module.display?.logo_resource;if(!path)return null;
+    return dynamicLogo(path)?logos.get(module.module_id)?.url||null:module.source?.kind==='builtin'?'./'+path:null;
+  }
   const interactionKey=()=>JSON.stringify([contextGeneration,contextKey,contextValid,draftGeneration,maintenanceOpen.value,shell?.state.home,shell?.state.settings,shell?.state.settingsOwner,shell?.state.selected,shell?.state.catalog?.catalog_revision,shell?.state.busy,shell?.state.stale,shell?.navigationImpact(),window.location.hash]);
   const navigationImpact=()=>{const global=shell?.state.settings?management?.navigationImpact():null,local=shell?.navigationImpact();return {ordinaryOwners:[...(global?.ordinaryOwners||[]),...(local?.ordinary?[local.owner]:[])],credentialOwners:[...(global?.credentialOwners||[]),...(local?.credentials?[local.owner]:[])],pending:local?.pending||false,blocked:local?.blocked||false,requiresConfirmation:Boolean(global?.requiresConfirmation||local?.ordinary||local?.credentials||local?.pending)};};
   const closeMaintenance=()=>{if(!maintenance&&!maintenanceOpen.value)return;confirmation.cancel();maintenance?.dispose();maintenance=null;maintenanceOpen.value=false;};
@@ -49,7 +71,7 @@ const App = defineComponent({setup() {
     }confirmation.cancel();closeMaintenance();lastHash=requested;
   };
   const draftEdited=()=>{draftGeneration++;confirmation.cancel();modulesView?.cancelConfirmation();};
-  function changed(){confirmation.invalidate();revision.value++;const settings=shell?.state.settings||false;
+  function changed(){syncLogos();confirmation.invalidate();revision.value++;const settings=shell?.state.settings||false;
     const showModules=Boolean(shell?.state.modules);
     if(!showModules)closeMaintenance();
     if(shell?.state.catalog&&!modulesView&&modulesRoot.value){modulesView=createModuleManagement(modulesRoot.value,window.AstrBotPluginView,window,pageName,()=>{void shell?.refresh();management?.resume();},operation=>{const snapshot=interactionKey(),impact=navigationImpact();if(impact.blocked){shell?.refuseNavigation();return false;}return !management?.dirty()&&!impact.requiresConfirmation||confirmation.ask({kind:'module-draft',owner:operation.owner,title:'确认模块操作 '+operation.owner,message:`存在未提交的配置草稿。模块状态变化可能撤销其字段，继续执行？取消可先保存草稿。${impact.credentialOwners.length?'当前页面凭据输入将在解除绑定时清空。':''}${impact.pending?'等待中的请求不能撤回，结果未确认时请重新读取，不会自动重试。':''}注册版本 ${operation.revision}。`,confirmLabel:'保留草稿并继续核对',isCurrent:()=>snapshot===interactionKey()&&operation.isCurrent(),canRestoreFocus:()=>snapshot===interactionKey()&&operation.canRestoreFocus()});},confirmation,interactionKey,{hasSettings:owner=>Boolean(shell?.state.catalog?.modules?.find(module=>module.module_id===owner)?.pages.some(page=>page.role==='config')),onSettings:owner=>void navigate(()=>shell?.selectSettings(owner)),labels:()=>moduleLabels(shell?.state.catalog?.modules||[],shell?.state.locale||'zh-CN'),catalog:configurationCatalog,snapshot:configurationSnapshot});modulesView.start();}
@@ -63,8 +85,8 @@ const App = defineComponent({setup() {
     else if(settings&&wasSettings&&lastSettingsOwner!==shell?.state.settingsOwner){management?.suspend();management?.resume();}
     else if(!settings&&wasSettings)management?.suspend();lastSettingsOwner=shell?.state.settingsOwner||null;if(settings)management?.selectOwner();management?.setLegacyPolicies(shell?.state.catalog?.legacy_config_policies||[]);wasSettings=settings;
   }
-  onMounted(() => {offContext=window.AstrBotPluginView?.onContext(context=>{let next='';try{if(context.pluginName!=='astrbot_plugin_yomihime_game_link'||context.pageName!==pageName)throw Error();next=contextBoundary(context);}catch{contextValid=false;contextGeneration++;confirmation.cancel();modulesView?.cancelConfirmation();return;}if(next!==contextKey){contextGeneration++;contextKey=next;confirmation.cancel();modulesView?.cancelConfirmation();}contextValid=true;});window.addEventListener('hashchange',guardHash);shell = createShell({bridge: window.AstrBotPluginView, container: root.value!, window, loadPage, runtimeUrl:sharedRuntimeUrl, expectedPage: '00-game-link', confirmClear:(owner,field,revision,isCurrent)=>confirmation.ask({kind:'credential-clear',owner,title:'清除模块凭据？',message:owner+' 的 '+field+' 已保存凭据将失效；普通配置保留。版本 '+revision+'。',confirmLabel:'确认清除',isCurrent}), changed}); shell.start();});
-  onBeforeUnmount(() => {closed=true;contextGeneration++;closeMaintenance();confirmation.dispose();offContext?.();window.removeEventListener('hashchange',guardHash);management?.dispose();modulesView?.dispose();shell?.dispose();});
+  onMounted(() => {offContext=window.AstrBotPluginView?.onContext(context=>{let next='';try{if(context.pluginName!=='astrbot_plugin_yomihime_game_link'||context.pageName!==pageName)throw Error();next=contextBoundary(context);}catch{contextValid=false;contextGeneration++;logoBoundaryRevoked=true;clearLogos();confirmation.cancel();modulesView?.cancelConfirmation();return;}if(next!==contextKey){if(contextKey){logoBoundaryRevoked=true;clearLogos();}contextGeneration++;contextKey=next;confirmation.cancel();modulesView?.cancelConfirmation();}contextValid=true;});window.addEventListener('hashchange',guardHash);shell = createShell({bridge: window.AstrBotPluginView, container: root.value!, window, loadPage, runtimeUrl:sharedRuntimeUrl, expectedPage: '00-game-link', confirmClear:(owner,field,revision,isCurrent)=>confirmation.ask({kind:'credential-clear',owner,title:'清除模块凭据？',message:owner+' 的 '+field+' 已保存凭据将失效；普通配置保留。版本 '+revision+'。',confirmLabel:'确认清除',isCurrent}), changed}); shell.start();});
+  onBeforeUnmount(() => {closed=true;contextGeneration++;clearLogos();closeMaintenance();confirmation.dispose();offContext?.();window.removeEventListener('hashchange',guardHash);management?.dispose();modulesView?.dispose();shell?.dispose();});
   return () => {
     revision.value;
     const state = shell?.state, selection = shell?.selected(), modules = moduleGroups(state?.catalog?.modules || [],state?.locale||'zh-CN').flatMap(group=>group.modules);
@@ -112,7 +134,7 @@ const App = defineComponent({setup() {
               h('div',{class:'workspace-catalog'},[
                 h('div',{class:'workspace-index-heading'},[h('h2',{class:'shell-eyebrow'},'游戏目录'),h('span',{class:'workspace-count'},modules.length+' 个模块')]),
                 ...moduleGroups(modules,state?.locale||'zh-CN').map(group=>h('section',{class:'workspace-package',key:group.key,'aria-label':group.title},[h('h3',{class:'workspace-package-title'},group.title),h('div',{class:'workspace-package-grid'},group.modules.map(module=>h('article',{class:'workspace-module',key:module.module_id},[
-                  h('div',{class:'workspace-module-heading'},[h('div',[h('div',{class:'workspace-module-title'},[h('h2',{'aria-level':4},[link(label(module.module_id),'#/module/'+encodeURIComponent(module.module_id),false,()=>shell?.selectModule(module.module_id),'workspace-status-'+encodeURIComponent(module.module_id))]),workspaceStatus(module.module_id,module.state)]),module.display?.summary?h('p',{class:'workspace-module-summary'},module.display.summary):null,!module.pages.length?h('p',{class:'workspace-module-description'},'暂无可用功能，请在模块管理中核对状态。'):null]),module.display?.logo_resource?h(LogoMark,{class:'workspace-emblem workspace-emblem-resource',style:{maskImage:`url("./${module.display.logo_resource}")`}}):h('span',{class:'workspace-emblem','aria-hidden':'true'},'✦')]),
+                  h('div',{class:'workspace-module-heading'},[h('div',[h('div',{class:'workspace-module-title'},[h('h2',{'aria-level':4},[link(label(module.module_id),'#/module/'+encodeURIComponent(module.module_id),false,()=>shell?.selectModule(module.module_id),'workspace-status-'+encodeURIComponent(module.module_id))]),workspaceStatus(module.module_id,module.state)]),module.display?.summary?h('p',{class:'workspace-module-summary'},module.display.summary):null,!module.pages.length?h('p',{class:'workspace-module-description'},'暂无可用功能，请在模块管理中核对状态。'):null]),moduleLogo(module)?h(LogoMark,{class:'workspace-emblem workspace-emblem-resource',style:{maskImage:`url("${moduleLogo(module)}")`}}):h('span',{class:'workspace-emblem','aria-hidden':'true'},'✦')]),
                 ])))])),
                 !modules.length?h('p',{class:'shell-empty'},'暂无可用模块。可前往模块管理核对状态。'):null,
               ]),
