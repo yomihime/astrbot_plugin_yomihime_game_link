@@ -108,7 +108,7 @@ class StaticCredentialsTests(unittest.IsolatedAsyncioTestCase):
             claimed, metadata_revision=fixture.snapshot.revision
         )
 
-    def http(self, policy=None):
+    def http(self, policy=None, **options):
         fixture = self.fixture
         policy = policy or self.policy
         declarations = bind_source_credential_declarations(
@@ -129,6 +129,7 @@ class StaticCredentialsTests(unittest.IsolatedAsyncioTestCase):
             self.transport,
             module_id=fixture_module.MODULE_ID,
             credential_service=credentials,
+            **options,
         )
 
     async def test_header_json_injection_redaction_rotation_and_private_proof(self):
@@ -189,6 +190,97 @@ class StaticCredentialsTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(decoded["[redacted]"], "key echo")
         self.assertEqual(decoded["business"], {"id": "123", "score": 13})
+
+    async def _fetch_response_bytes(self, payload, headers=None, *, http=None):
+        async def send(method, url, body, request_headers, timeout_seconds, maximum):
+            return HttpResponse(200, headers or {}, payload)
+
+        self.transport._send = send
+        return await (http or self.http()).fetch(
+            HttpRequest(fixture_module.SOURCE_ID, fixture_module.RESOURCE_PATH, "POST")
+        )
+
+    async def test_ambiguous_or_unparseable_json_fails_closed_before_module_receives_body(
+        self,
+    ):
+        escaped = "".join(f"\\u{ord(char):04x}" for char in self.token).encode()
+        duplicate = b'{"echo":"' + escaped + b'","echo":"public"}'
+        cases = (
+            (duplicate, {}),
+            (b'{"echo":"public","echo":"' + escaped + b'"}', {}),
+            (b'{"nested":[' + duplicate + b"]}", {}),
+            (b'{"echo":"' + escaped + b'","\\u0065cho":"public"}', {}),
+            (b'{"' + escaped + b'":1,"[redacted]":2}', {}),
+            (b'{"echo":"' + escaped + b'"', {}),
+            (b'{"echo":"' + escaped + b'"} trailing', {}),
+            (b'"' + escaped, {}),
+            (b'{"n":1e99999,"echo":"' + escaped + b'"}', {}),
+            (b"[" * 1500 + b'"' + escaped + b'"' + b"]" * 1500, {}),
+            (b"not-json " + escaped, {"Content-Type": "application/problem+json"}),
+        )
+        for index, (payload, headers) in enumerate(cases):
+            with self.subTest(case=index):
+                with self.assertRaises(SourceHttpError) as caught:
+                    await self._fetch_response_bytes(payload, headers)
+                self.assertEqual(caught.exception.code, "invalid_response")
+                self.assertNotIn(self.token, repr(caught.exception))
+
+    async def test_all_valid_json_views_are_sanitized_and_plain_text_still_works(self):
+        escaped = "".join(f"\\u{ord(char):04x}" for char in self.token).encode()
+        for payload in (
+            b'"' + escaped + b'"',
+            b'["' + escaped + b'",{"nested":"prefix-' + escaped + b'"}]',
+            b'{"' + escaped + b'":"key","id":"123","count":13}',
+            b' { "id": "123", "items": [null, true, 13] } ',
+        ):
+            with self.subTest(shape=payload[:1]):
+                response = await self._fetch_response_bytes(payload)
+                for options in ({}, {"object_pairs_hook": list}):
+                    self.assertNotIn(
+                        self.token, repr(json.loads(response.body, **options))
+                    )
+        business = {"id": "123", "count": 13, "label": "公共示例"}
+        response = await self._fetch_response_bytes(json.dumps(business).encode())
+        self.assertEqual(json.loads(response.body), business)
+        response = await self._fetch_response_bytes(("echo: " + self.token).encode())
+        self.assertEqual(response.body, b"echo: [redacted]")
+
+    async def test_non_ascii_quote_and_slash_json_spellings_are_sanitized(self):
+        self.token = 'private/"\\-\u4e2d-key'
+        await self.activate(self.token)
+        encoded = json.dumps(self.token, ensure_ascii=True).replace("/", "\\/")
+        response = await self._fetch_response_bytes(
+            ('{"echo":' + encoded + "}").encode()
+        )
+        self.assertEqual(json.loads(response.body), {"echo": "[redacted]"})
+
+    async def test_header_names_and_literal_json_scalar_echo_cannot_return_secret(self):
+        response = await self._fetch_response_bytes(
+            b'{"id":"public"}',
+            {"X-" + self.token: "public", "X-Debug": self.token, "X-Business": "ok"},
+        )
+        self.assertNotIn(self.token, repr(response))
+        self.assertEqual(response.headers["X-Business"], "ok")
+        for token in ("123456789", "true", "null"):
+            with self.subTest(kind=token):
+                self.token = token
+                await self.activate(token)
+                response = await self._fetch_response_bytes(
+                    ('{"echo":' + token + ',"id":"public"}').encode()
+                )
+                self.assertEqual(
+                    json.loads(response.body), {"echo": "[redacted]", "id": "public"}
+                )
+
+    async def test_sanitized_body_still_obeys_original_response_byte_budget(self):
+        self.token = "x"
+        await self.activate(self.token)
+        with self.assertRaises(SourceHttpError) as caught:
+            await self._fetch_response_bytes(
+                b'["x","x","x","x","x","x","x"]',
+                http=self.http(max_response_bytes=64),
+            )
+        self.assertEqual(caught.exception.code, "response_too_large")
 
     async def test_wrong_path_method_body_collision_and_header_collision_reject_before_wire(
         self,

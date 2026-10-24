@@ -1640,6 +1640,9 @@ class AstrBotRuntime:
                     if installation.trusted
                     else PackageFactorySources(FilesystemFactorySource()),
                     trusted_bundled_manifests=defaults,
+                    trusted_external_timeout_manifests=(
+                        self._external_source_policies.timeout_manifests
+                    ),
                     trusted_subscription_gates=subscription_gates,
                     source_health=self._source_health,
                     commentary_port=AstrBotSubscriptionCommentary(self._context),

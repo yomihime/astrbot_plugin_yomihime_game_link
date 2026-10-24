@@ -62,13 +62,24 @@ def _retry_after_seconds(response: HttpResponse) -> int | None:
     return seconds if 0 <= seconds <= 86400 else None
 
 
-def _redact_response_body(body: bytes, secrets: tuple[str, ...]) -> bytes:
+def _redact_response_body(
+    body: bytes, secrets: tuple[str, ...], *, json_response: bool = False
+) -> bytes:
     """Redact decoded JSON strings as well as literal non-JSON echoes.
 
     JSON permits multiple spellings of the same string (including mixed
     unicode escapes). Matching only serialized bytes cannot enforce the
     credential boundary seen by a module calling json.loads.
     """
+
+    def checked_object(pairs):
+        result = {}
+        for key, value in pairs:
+            # Check decoded keys before a dict can discard an earlier value.
+            if key in result:
+                raise SourceHttpError("invalid_response")
+            result[key] = value
+        return result
 
     def redact(value):
         if isinstance(value, str):
@@ -82,21 +93,37 @@ def _redact_response_body(body: bytes, secrets: tuple[str, ...]) -> bytes:
             for key, item in value.items():
                 safe_key = redact(key)
                 if safe_key in result:
-                    raise SourceHttpError("response_rejected")
+                    raise SourceHttpError("invalid_response")
                 result[safe_key] = redact(item)
             return result
+        # Keep literal numeric/null/bool echoes from bypassing the previous
+        # raw-byte protection merely because JSON assigned them a scalar type.
+        literal = json.dumps(value, allow_nan=False)
+        if any(secret in literal for secret in secrets):
+            return "[redacted]"
         return value
 
     try:
-        parsed = json.loads(body)
-    except (ValueError, UnicodeError):
-        pass
+        parsed = json.loads(body, object_pairs_hook=checked_object)
+    except (json.JSONDecodeError, UnicodeError):
+        if json_response or body.lstrip().startswith(
+            (b"{", b"[", b'"', b"\xef\xbb\xbf", b"\xff\xfe", b"\xfe\xff")
+        ):
+            raise SourceHttpError("invalid_response") from None
+    except (ValueError, RecursionError, OverflowError):
+        # A decoder limit must not turn valid but expensive JSON into a raw
+        # byte bypass that a different module decoder could still consume.
+        raise SourceHttpError("invalid_response") from None
     else:
-        safe = redact(parsed)
-        if safe != parsed:
-            return json.dumps(safe, ensure_ascii=True, separators=(",", ":")).encode(
-                "ascii"
-            )
+        try:
+            return json.dumps(
+                redact(parsed),
+                ensure_ascii=False,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+        except (ValueError, RecursionError, OverflowError):
+            raise SourceHttpError("invalid_response") from None
     for secret in secrets:
         body = body.replace(secret.encode("utf-8"), b"[redacted]")
         escaped = json.dumps(secret, ensure_ascii=True)[1:-1].encode("ascii")
@@ -915,12 +942,26 @@ class SourceHttpService(SourceHttp):
                     declaration, _retry_after_seconds(response) or 60
                 )
             if lease is not None and lease.redactions:
-                safe_body = _redact_response_body(response.body, lease.redactions)
+                safe_body = _redact_response_body(
+                    response.body,
+                    lease.redactions,
+                    json_response=any(
+                        name.lower() == "content-type"
+                        and (
+                            value.split(";", 1)[0].strip().lower() == "application/json"
+                            or value.split(";", 1)[0].strip().lower().endswith("+json")
+                        )
+                        for name, value in response.headers.items()
+                    ),
+                )
                 safe_headers = dict(response.headers)
+                if len(safe_body) > self._max_response_bytes:
+                    raise SourceHttpError("response_too_large")
                 for secret in lease.redactions:
                     safe_headers = {
                         name: value.replace(secret, "[redacted]")
                         for name, value in safe_headers.items()
+                        if secret not in name
                     }
                 response = HttpResponse(response.status_code, safe_headers, safe_body)
             return response

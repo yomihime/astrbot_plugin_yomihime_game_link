@@ -8,9 +8,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping
 from types import MappingProxyType
 
 from yomihime_game_link_sdk.contexts import InvocationOrigin
+from yomihime_game_link_sdk.declarations import ModuleManifest
 
 from ..core.contracts.storage import freeze_json
 from ..core.invocation_budget import freeze_execution_timeouts
@@ -40,6 +42,7 @@ class ExternalSourcePolicies:
         self.authorizations = MappingProxyType({})
         self.manifests = MappingProxyType({})
         self.capability_timeouts = MappingProxyType({})
+        self.timeout_manifests: Mapping[str, ModuleManifest] = MappingProxyType({})
         if payload is None:
             return
         if type(payload) is not bytes or len(payload) > 1048576:
@@ -55,6 +58,7 @@ class ExternalSourcePolicies:
         if type(value["packages"]) is not list or len(value["packages"]) > 32:
             raise ValueError("invalid external source packages")
         sources, managed, manifests, authorizations, timeouts = [], [], {}, {}, {}
+        timeout_manifests: dict[str, ModuleManifest] = {}
         for package in value["packages"]:
             required = {"manifest", "credentials", "authorizations"}
             if type(package) is not dict or set(package) not in (
@@ -94,6 +98,8 @@ class ExternalSourcePolicies:
                         targets=allowed,
                     )
                 )
+                if declarations:
+                    timeout_manifests[owner] = modules[owner]
             timeouts.update(declared_budgets)
             if (
                 type(package["credentials"]) is not list
@@ -200,6 +206,7 @@ class ExternalSourcePolicies:
         self.manifests = MappingProxyType(manifests)
         self.authorizations = MappingProxyType(authorizations)
         self.capability_timeouts = freeze_execution_timeouts(timeouts)
+        self.timeout_manifests = MappingProxyType(timeout_manifests)
 
     @classmethod
     def load(cls, root):

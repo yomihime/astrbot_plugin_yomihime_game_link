@@ -48,7 +48,7 @@ from ..core.contracts.validation_boundary import validate_contract
 from ..core.health import HealthResolver
 from ..core.invocation import Gateway
 from ..core.lifecycle import LifecycleController
-from ..core.policy import tool_allowed
+from ..core.policy import supports_public_read_only, tool_allowed
 from ..core.ports import (
     AdmissionLease,
     PublicWebProofValidator,
@@ -487,6 +487,7 @@ class CoreRuntime:
         identity_namespace: str,
         trusted_bundled_defaults: Mapping[str, tuple[str, ...]] | None = None,
         trusted_bundled_manifests: Mapping[str, ModuleManifest] | None = None,
+        trusted_external_timeout_manifests: Mapping[str, ModuleManifest] | None = None,
         trusted_subscription_gates: Mapping[str, TrustedSubscriptionGate] | None = None,
         module_host_config_snapshots: Mapping[str, Mapping[str, object]] | None = None,
         public_web_validator: PublicWebProofValidator | None = None,
@@ -522,6 +523,7 @@ class CoreRuntime:
         validate_contract(renderer)
         validate_contract(display_limits)
         validate_contract(trusted_bundled_manifests)
+        validate_contract(trusted_external_timeout_manifests)
         validate_contract(source_health)
         if not isinstance(database, SQLiteDatabase):
             database = SQLiteDatabase(database)
@@ -531,6 +533,15 @@ class CoreRuntime:
             raise ValueError("identity_namespace is required")
         bundled_defaults = _normalize_bundled_defaults(trusted_bundled_defaults)
         bundled_manifests = _normalize_bundled_manifests(trusted_bundled_manifests)
+        # External declarations validate reviewed timeout targets only. They
+        # never join bundled startup defaults, registration or web deployment.
+        external_timeout_manifests = _normalize_bundled_manifests(
+            trusted_external_timeout_manifests
+        )
+        if set(external_timeout_manifests).intersection(
+            set(bundled_manifests) | set(bundled_defaults)
+        ):
+            raise ValueError("external timeout owners overlap trusted bundled owners")
         from ..core.invocation_budget import (
             InvocationBudgetPolicy,
             freeze_execution_timeouts,
@@ -542,6 +553,13 @@ class CoreRuntime:
                 (owner, item.capability_id)
                 for owner, manifest in bundled_manifests.items()
                 for item in manifest.capabilities
+            }
+            | {
+                (owner, item.capability_id)
+                for owner, manifest in external_timeout_manifests.items()
+                for item in manifest.capabilities
+                if supports_public_read_only(item)
+                and InvocationOrigin.WEB_PUBLIC in item.effective_origins
             },
         )
         collector_timeouts = freeze_execution_timeouts(
