@@ -1,6 +1,5 @@
 import {createApp, defineComponent, h, shallowRef} from 'vue';
-import {NConfigProvider, darkTheme, zhCN, enUS, dateZhCN, dateEnUS} from 'naive-ui';
-import {ActionBar, SettingsGroup, SettingsRow, StatusHint} from '@game-link/ui';
+import {UiProvider, ActionBar, SettingsGroup, SettingsRow, StatusHint} from '@game-link/ui';
 import {fieldPresentation, groupTitle, ownerPresentation} from './ui/presentation';
 import './ui/tokens.css';
 import {createInlineConfirmation} from './confirmation';
@@ -30,7 +29,8 @@ export function createManagementView(document:Document,container:HTMLElement=doc
    h('button',{type:'button','data-action':'default',ref:(node:unknown)=>{c.reset=node as HTMLButtonElement;},onClick:()=>{if(!c.mode||!c.input||c.reset?.disabled)return;c.mode.value=p.reset==='replace-default'?'replace':inheritMode();c.draftVersion++;const value=(f as Field&{default:unknown}).default;c.input.value=choices?String(choices.findIndex(choice=>choice===value)):value===null?'':String(value);mutate();}},'恢复默认'),c.problem?h('p',{class:'field-detail',id:id+'-detail',role:'status'},c.problem):p.hint?h('p',{class:'field-hint',id:id+'-hint'},p.hint):null,
   ]});
  }
- function fontControls(){const f=font.value;if(!f?.visible)return null;const disabled=!f.enabled||f.busy||f.status?.state==='downloading'||f.status?.state==='checking';return h('section',{'data-font-settings':'','aria-label':'图片字体','aria-busy':String(f.busy)},[
+ function fontControls(){const f=font.value;if(!f?.visible)return null;const disabled=!f.enabled||f.busy||f.status?.state==='downloading'||f.status?.state==='checking';return h('section',{class:'global-font-panel','data-font-settings':'','aria-label':'图片字体','aria-busy':String(f.busy)},[
+  h('h2','图片字体'),
   h(StatusHint,{id:'font-status'},{default:()=>f.progress||f.message||fontStatusText(f.status)}),
   h('p',{class:'field-hint',id:'font-help'},'启动时自动获取标准字体；下载失败时优先使用系统字体；缺字时回复文字。上传仅接受指定版本并校验文件。'),
   h(ActionBar,{}, {default:()=>[
@@ -41,13 +41,14 @@ export function createManagementView(document:Document,container:HTMLElement=doc
   ]}),
   f.status?h('p',{class:'field-hint'},['指定文件：'+f.status.filename+' ',fontDownloadUrl(f.status)?h('a',{href:fontDownloadUrl(f.status)!,target:'_blank',rel:'noopener noreferrer'},'下载指定字体'):null]):null,
  ]);}
- const App=defineComponent({setup(){return()=>{draftRevision.value;const dark=context.value.isDark===true||context.value.theme==='dark',english=String(context.value.locale||'').startsWith('en');
-  return h(NConfigProvider,{preflightStyleDisabled:true,theme:dark?darkTheme:null,locale:english?enUS:zhCN,dateLocale:english?dateEnUS:dateZhCN,inlineThemeDisabled:true},{default:()=>h('section',{class:'management'},[
+ const App=defineComponent({setup(){return()=>{draftRevision.value;const dark=typeof context.value.isDark==='boolean'?context.value.isDark:context.value.theme==='dark';
+  return h(UiProvider,{theme:dark?'dark':'light',locale:typeof context.value.locale==='string'?context.value.locale:'zh-CN',styleMountTarget:container},{default:()=>h('section',{class:['management',scope==='settings'&&(owner.value===null||owner.value==='game_link/core')?'management-global':'']},[
    container.id==='management-root'?h('h1',scope==='maintenance'?'配置维护':'设置'):null,h('div',{class:'management-toolbar'},[h(StatusHint,{id:'status'}),button('refresh','刷新配置与版本')]),
    scope==='settings'?h('section',{id:'fields','aria-label':'普通配置'},cards.value.map(card=>{const advanced=card.controls.filter(c=>fieldPresentation(c.field).advanced||c.field.editable===false),normal=card.controls.filter(c=>!advanced.includes(c));return h('section',{class:'card',key:card.target,'data-owner':card.target,hidden:owner.value!==null&&owner.value!==card.target},[
-    ...groups(normal).map(group=>h(SettingsGroup,{title:groupTitle(card.target,group.group),fieldset:true,class:'config-group','data-group':group.group||'general',key:group.group},{default:()=>[...group.items.map(field),card.target==='game_link/core'&&group.group==='reply_style'?fontControls():null]})),
+    ...groups(normal).map(group=>h(SettingsGroup,{title:groupTitle(card.target,group.group),fieldset:true,class:'config-group','data-group':group.group||'general',key:group.group},{default:()=>group.items.map(field)})),
     advanced.length?h('details',{class:'advanced-config'},[h('summary','只读与高级设置'),...groups(advanced).map(group=>h(SettingsGroup,{title:groupTitle(card.target,group.group),key:group.group},{default:()=>group.items.map(field)}))]):null,
-    h(ActionBar,{class:'ordinary-actions'}, {default:()=>[h('button',{type:'button','data-action':'save',disabled:true,ref:(node:unknown)=>{card.save=node as HTMLButtonElement;},onClick:card.onSave},ownerPresentation(card.target)?.saveLabel||'保存普通设置'),h('button',{type:'button','data-action':'discard',ref:(node:unknown)=>{card.discard=node as HTMLButtonElement;},onClick:()=>card.onDiscard?.()},'放弃本模块修改'),card.controls.some(dirty)?h('span',{class:'dirty-indicator',role:'status'},'普通设置有未保存修改'):null]}),
+    h(ActionBar,{class:'ordinary-actions'}, {default:()=>[h('button',{type:'button','data-action':'save',disabled:true,ref:(node:unknown)=>{card.save=node as HTMLButtonElement;},onClick:card.onSave},ownerPresentation(card.target)?.saveLabel||'保存普通设置'),h('button',{type:'button','data-action':'discard',ref:(node:unknown)=>{card.discard=node as HTMLButtonElement;},onClick:()=>card.onDiscard?.()},card.target==='game_link/core'?'放弃全局修改':'放弃本模块修改'),card.controls.some(dirty)?h('span',{class:'dirty-indicator',role:'status'},'普通设置有未保存修改'):null]}),
+    card.target==='game_link/core'?fontControls():null,
    ]);})) : null,
    scope==='settings'?h(SettingsGroup,{title:'凭据存储',class:'master-key-panel',hidden:owner.value!==null&&owner.value!=='game_link/core'},{default:()=>{const panel=masterKey.value,canReset=Boolean(panel?.enabled&&!panel.busy&&panel.state!=='unknown'&&panel.reason!=='encryption_component_unavailable'&&panel.source!=='environment');if(!panel)return [h(StatusHint,{id:'master-key-status',tone:'warning'},{default:()=> '尚未读取凭据存储状态。'})];
     const recovery=()=>[

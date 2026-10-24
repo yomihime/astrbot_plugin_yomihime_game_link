@@ -17,6 +17,7 @@ const confirmationURL='data:text/javascript;base64,'+Buffer.from(confirmationSou
 const {createInlineConfirmation}=await import(confirmationURL);
 let source=stripTypeScriptTypes(await readFile(new URL('pages/frontend/src/module-management.ts',root),'utf8'),{mode:'strip'});
 source=source.replace("from 'vue'",'from '+JSON.stringify(runtimeURL)).replace("from 'naive-ui'",'from '+JSON.stringify(runtimeURL)).replace("from './lifecycle'",'from '+JSON.stringify(new URL('pages/frontend/src/lifecycle.ts',root).href)).replace("from './confirmation'",'from '+JSON.stringify(confirmationURL));
+source=source.replace("from '@game-link/ui'",'from '+JSON.stringify(runtimeURL));
 source=source.replace("from './ui/notice'",'from '+JSON.stringify(new URL('pages/frontend/src/ui/notice.ts',root).href));
 const {createModuleManagement}=await import('data:text/javascript;base64,'+Buffer.from(source).toString('base64'));
 const {validateCatalog:configurationCatalog,validateSnapshot:configurationSnapshot}=await import('../management/source-management.mjs');
@@ -110,4 +111,19 @@ test('deferred cancel restoration never steals a newer focus or restores invalid
 });
 test('cancelled unload cannot restore focus after context loss or user movement',async()=>{
  for(const loseContext of [false,true]){const f=fixture();const elsewhere=dom.window.document.createElement('input');dom.window.document.body.append(elsewhere);try{await load(f);const trigger=button(f,'解除挂载（保留数据）');trigger.focus();await open(f);cancel(f).click();if(loseContext)f.emit({...context,pageName:'wrong'});else elsewhere.focus();await flush();assert.notEqual(dom.window.document.activeElement,trigger);if(!loseContext)assert.equal(dom.window.document.activeElement,elsewhere);assert.equal(f.calls.filter(c=>c.endpoint==='admin/module-unload').length,0);}finally{f.close();elsewhere.remove();}}
+});
+
+test('management uses shared Oil provider and theme changes preserve controls and requests',async()=>{
+ const f=fixture();try{
+  await load(f);const trigger=button(f,'启用 / 恢复');
+  assert.ok(f.container.querySelector('.module-management-info'));
+  assert.ok(f.container.querySelector('.module-management-actions'));
+  assert.equal(f.container.querySelector('.n-card'),null);
+  for(const [presentation,expected] of [[{isDark:true},'dark'],[{theme:'dark',isDark:false},'light'],[{theme:'dark'},'dark']]){
+   f.emit({...context,...presentation});await flush();
+   assert.equal(f.container.querySelector('.ui-page').dataset.theme,expected);
+   assert.equal(button(f,'启用 / 恢复'),trigger);
+   assert.equal(f.calls.length,1);
+  }
+ }finally{f.close();}
 });
