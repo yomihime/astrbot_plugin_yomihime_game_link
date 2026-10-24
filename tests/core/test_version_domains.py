@@ -807,7 +807,7 @@ class VersionDomainTests(unittest.IsolatedAsyncioTestCase):
                 for path in paths
             ]
         }
-        self.assertEqual(ygl.__version__, "0.1.0a11")
+        self.assertEqual(ygl.__version__, "0.1.0a19")
         probe = r"""import hashlib, json, pathlib, sys, unittest
 selected = pathlib.Path(sys.argv[1]).resolve()
 repo = pathlib.Path(sys.argv[2]).resolve()
@@ -853,8 +853,8 @@ sys.exit(not r.wasSuccessful())
         reports = []
         with tempfile.TemporaryDirectory(prefix="source-release-") as workspace:
             for profile, release in (
-                ("current", "0.1.0a11"),
-                ("counterfactual", "0.1.0a12"),
+                ("current", "0.1.0a19"),
+                ("counterfactual", "0.1.0a20"),
             ):
                 with self.subTest(profile=profile):
                     selected = Path(workspace) / profile
@@ -868,11 +868,11 @@ sys.exit(not r.wasSuccessful())
                         destination = selected / entry["path"]
                         destination.parent.mkdir(parents=True, exist_ok=True)
                         shutil.copyfile(original, destination)
-                        if release != "0.1.0a11" and entry["path"] in (
+                        if release != "0.1.0a19" and entry["path"] in (
                             "pyproject.toml",
                             "yomihime_game_link_sdk/version.py",
                         ):
-                            altered = payload.replace(b"0.1.0a11", release.encode())
+                            altered = payload.replace(b"0.1.0a19", release.encode())
                             self.assertNotEqual(altered, payload)
                             destination.write_bytes(altered)
                             changed.append(entry["path"])
@@ -951,12 +951,12 @@ sys.exit(not r.wasSuccessful())
         )
         wheel = Path(explicit_wheel)
         self.assertTrue(wheel.is_file())
-        self.assertEqual(wheel.name, "yomihime_game_link_sdk-0.1.0a11-py3-none-any.whl")
+        self.assertEqual(wheel.name, "yomihime_game_link_sdk-0.1.0a19-py3-none-any.whl")
         import hashlib
 
         self.assertEqual(
             hashlib.sha256(wheel.read_bytes()).hexdigest(),
-            "466f10824c4a40a9046a982db06cdcf0d3b193c87b393e8868e7b7f7c95e1b24",
+            "00214ad26e756f4eac0f7d9d931727810c510117e3a37ff11010444d54723a22",
         )
         SDKBootstrapTests.setUpClass()
         try:
@@ -975,7 +975,7 @@ sys.exit(not r.wasSuccessful())
                 )
                 marker = selected / "yomihime_game_link_sdk/version.py"
                 original = marker.read_bytes()
-                changed = original.replace(b"0.1.0a11", b"0.1.0a12")
+                changed = original.replace(b"0.1.0a19", b"0.1.0a20")
                 self.assertNotEqual(changed, original)
                 marker.write_bytes(changed)
                 fixture._run_bootstrap(plugin, "different", selected)
@@ -983,7 +983,7 @@ sys.exit(not r.wasSuccessful())
             # Current canonical preloads, same validated plugin origin, only
             # the descriptive loaded package release marker becomes a12.
             probe = BOOTSTRAP_CASE.replace(
-                '__version__ = "9.9.9"', '__version__ = "0.1.0a12"'
+                '__version__ = "9.9.9"', '__version__ = "0.1.0a20"'
             )
             self.assertNotEqual(probe, BOOTSTRAP_CASE)
             rejected = subprocess.run(

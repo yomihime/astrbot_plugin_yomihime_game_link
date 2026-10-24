@@ -67,6 +67,103 @@ def valid_document() -> dict[str, object]:
 
 
 class DiskManifestTests(unittest.TestCase):
+    def test_optional_package_display_name_normalizes_without_changing_identity(self):
+        document = valid_document()
+        self.assertIsNone(parse_manifest(json.dumps(document).encode()).display_name)
+        for value, expected in (
+            (None, None),
+            ("", None),
+            ("   ", None),
+            ("　", None),
+            ("  星港扩展  ", "  星港扩展  "),
+            ("🚀" * 128, "🚀" * 128),
+            ("<b>Literal name</b>", "<b>Literal name</b>"),
+        ):
+            with self.subTest(value=value):
+                document["display_name"] = value
+                package = parse_manifest(json.dumps(document).encode())
+                self.assertEqual(package.display_name, expected)
+                self.assertEqual(package.package_id, "sample_pkg")
+                self.assertEqual(
+                    package.global_module_id("status"), "sample_pkg/status"
+                )
+
+    def test_package_display_name_rejects_invalid_types_controls_and_length(self):
+        for value in (
+            True,
+            1,
+            1.5,
+            [],
+            {},
+            "x" * 129,
+            "🚀" * 129,
+            " " * 129,
+            "\n",
+            "\t",
+            "name\x00",
+            "name\x7f",
+            "name\u200b",
+            "name\u202e",
+            "\ud800",
+        ):
+            with self.subTest(value=value):
+                document = valid_document()
+                document["display_name"] = value
+                with self.assertRaises(ManifestError):
+                    parse_manifest(json.dumps(document).encode())
+        for field in valid_document():
+            with self.subTest(missing_required=field):
+                document = valid_document()
+                document["display_name"] = "Display name"
+                document.pop(field)
+                with self.assertRaises(ManifestError):
+                    parse_manifest(json.dumps(document).encode())
+
+    def test_package_module_order_accepts_partial_local_ids_and_rejects_bad_ids(self):
+        document = valid_document()
+        self.assertEqual(parse_manifest(json.dumps(document).encode()).module_order, ())
+        second = {
+            **document["modules"][0],
+            "module_id": "second",
+            "route": "second",
+            "tools": [],
+        }
+        document["modules"].append(second)
+        for value, expected in (
+            (None, ()),
+            ([], ()),
+            (["second"], ("second",)),
+            (["second", "status"], ("second", "status")),
+        ):
+            with self.subTest(value=value):
+                document["module_order"] = value
+                package = parse_manifest(json.dumps(document).encode())
+                self.assertEqual(package.module_order, expected)
+                self.assertEqual(
+                    [m.module_id for m in package.modules], ["status", "second"]
+                )
+        for value in (
+            "status",
+            {},
+            True,
+            1,
+            [None],
+            [False],
+            [1],
+            [""],
+            ["unknown"],
+            ["sample_pkg/status"],
+            ["other/status"],
+            ["status", "status"],
+            ["status", "second", "status"],
+            [" status"],
+            ["status\n"],
+        ):
+            with self.subTest(invalid=value):
+                document["module_order"] = value
+                with self.assertRaises(ManifestError):
+                    parse_manifest(json.dumps(document).encode())
+
     def test_optional_config_value_schema_roundtrip_and_invalid_default(self):
         document = valid_document()
         module = document["modules"][0]

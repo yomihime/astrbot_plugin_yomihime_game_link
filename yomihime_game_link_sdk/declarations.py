@@ -157,12 +157,13 @@ class ToolDescriptor:
 
 @dataclass(frozen=True, slots=True)
 class ModuleDisplay:
-    """Optional translated plain-text names; never identity or authority."""
+    """Optional plain-text presentation metadata; never identity or authority."""
 
     default_name: str
     localized_names: Mapping[str, str] = _dataclass_field(default_factory=dict)
     short_name: str | None = None
     logo_resource: str | None = None
+    summary: str | None = None
 
     def __post_init__(self) -> None:
         if isinstance(self.localized_names, Mapping):
@@ -239,6 +240,8 @@ class PackageManifest:
     author: str
     license: str
     source: str
+    display_name: str | None = None
+    module_order: tuple[str, ...] | None = None
 
     def global_module_id(self, module_id: str) -> str:
         """Return the package-qualified ID for one declared local module."""
@@ -249,6 +252,8 @@ class PackageManifest:
     def __post_init__(self) -> None:
         if self.modules is not None:
             object.__setattr__(self, "modules", tuple(self.modules))
+        if isinstance(self.module_order, list):
+            object.__setattr__(self, "module_order", tuple(self.module_order))
 
 
 class ConfigUpdateMode(StrEnum):

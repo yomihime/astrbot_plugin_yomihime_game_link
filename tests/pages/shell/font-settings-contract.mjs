@@ -35,7 +35,7 @@ try{
  const app=module('/app.js');await app.link((specifier,reference)=>module(new URL(specifier,reference.identifier).pathname));await app.evaluate();await flush();
  if(process.argv.includes('--cold-module')){assert.equal(calls.some(c=>c.endpoint==='admin/font-status'),false);await go('#/settings');}
  const panel=document.querySelector('[data-font-settings]');assert.ok(panel);assert.equal(document.querySelectorAll('[data-font-settings]').length,1);
- assert.equal(panel.closest('[data-owner]').dataset.owner,'game_link/core');assert.equal(panel.closest('fieldset').dataset.group,'reply_style');
+ assert.equal(panel.closest('[data-owner]').dataset.owner,'game_link/core');assert.equal(panel.closest('fieldset'),null);assert.ok(panel.classList.contains('global-font-panel'));assert.match(panel.querySelector('h2').textContent,/图片字体/);
  assert.equal(panel.querySelector('a').getAttribute('href'),font.download_url);assert.equal(panel.querySelector('a').getAttribute('rel'),'noopener noreferrer');
  assert.match(panel.textContent,/系统字体/);assert.match(panel.textContent,/NotoSansCJKsc-Regular.otf/);assert.equal(panel.querySelector('#font-upload').disabled,false);
  assert.equal(panel.querySelector('#font-upload').getAttribute('aria-describedby'),'font-help font-status');

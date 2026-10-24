@@ -971,7 +971,42 @@ class CoreRuntime:
             identities,
             runtime_state=runtime_state,
             legacy_config_policies=self._legacy_config_policies,
+            source_metadata=self._module_catalog_source_metadata(snapshot),
         )
+
+    def _module_catalog_source_metadata(
+        self, snapshot
+    ) -> dict[str, tuple[str, str | None, tuple[str, ...]]]:
+        """Read exact owned declarations for display, without granting authority."""
+        # Read only packages already built by the existing local extension runtime.
+        # Discovery alone is not provenance. This is display, not authorization.
+        built_packages = dict(self.extension_runtime._built)
+        result = {}
+        for module_id, module in snapshot.modules.items():
+            package_id, local_id = module_id.split("/", 1)
+            expected = self._trusted_bundled_manifests.get(module_id)
+            builtin = expected is not None and _matches_trusted_bundled_manifest(
+                module.manifest, expected
+            )
+            built = built_packages.get(package_id)
+            external = built.manifest if built is not None and built.complete else None
+            extension = (
+                external is not None
+                and external.package_id == package_id
+                and tuple(
+                    item for item in external.modules if item.module_id == local_id
+                )
+                == (module.manifest,)
+            )
+            # Built-in packages also use this local build path. Exact bundled
+            # declarations take precedence; discovery alone proves no source.
+            kind = "builtin" if builtin else "extension" if extension else "unknown"
+            result[module_id] = (
+                kind,
+                external.display_name if kind == "extension" else None,
+                external.module_order if kind == "extension" else (),
+            )
+        return result
 
     def require_help_source_current(self, source) -> None:
         """Fence retained help facts against live, coherent module availability."""

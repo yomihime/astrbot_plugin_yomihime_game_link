@@ -1,5 +1,6 @@
 import {createApp, h, shallowRef} from 'vue';
-import {UiProvider, PageHeader, SettingsLayout, Surface, ActionBar, StatusHint} from '@game-link/ui';
+import {UiProvider, PageHeader, SettingsLayout, Surface, ActionBar, StatusHint, FormGrid, FormField} from '@game-link/ui';
+import type {FormFieldSlot} from '@game-link/ui';
 import type {MountedPage, PageContext, PageOptions} from '../../../../../pages/public-contract';
 
 /** Source-only, non-FF14 consumer of the Core public presentation facade. */
@@ -7,6 +8,7 @@ export function mount(container: HTMLElement, options: PageOptions): MountedPage
   const context = shallowRef(options.context);
   const message = shallowRef('No request has been sent.');
   const pending = shallowRef(false);
+  const heading = shallowRef('Public status');
   const identity = (value: Readonly<PageContext>) => JSON.stringify([value.owner, value.runtimeId, value.epoch, value.boundary]);
   const binding = identity(options.context);
   let disposed = false, invalidated = false, sequence = 0;
@@ -30,7 +32,15 @@ export function mount(container: HTMLElement, options: PageOptions): MountedPage
   }, {default: () => [
     h(PageHeader, {title: 'Shared UI example', eyebrow: 'EXAMPLE', subtitle: 'A module-owned view using Core presentation components.'}),
     h(SettingsLayout, {}, {
-      default: () => h(Surface, {title: 'Public status'}, {default: () => [
+      default: () => h(Surface, {title: heading.value || 'Public status'}, {default: () => [
+        h(FormGrid, {columns: 1}, {default: () => h(FormField, {
+          controlId: 'example-view-heading', label: 'Local heading',
+          hint: 'Presentation only: this value is not saved or sent to a service.',
+          error: heading.value.trim() ? '' : 'Enter a heading.',
+        }, {default: ({controlAttrs}: FormFieldSlot) => h('input', {
+          ...controlAttrs, class: 'ui-control', value: heading.value, maxlength: 80,
+          onInput: (event: Event) => {heading.value = (event.target as HTMLInputElement).value;},
+        })})}),
         h('p', 'Business requests still use the owner-bound page services.'),
         h(ActionBar, {}, {default: () => h('button', {type: 'button', class: 'ui-button', 'data-variant': 'primary', disabled: pending.value || !current(sequence), onClick: inspect}, 'Read public status')}),
         h(StatusHint, {}, {default: () => message.value}),

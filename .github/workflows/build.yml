@@ -104,7 +104,7 @@ jobs:
 
       - name: Run unit tests
         env:
-          YGL_TEST_SDK_WHEEL: ${{ github.workspace }}/dist/yomihime_game_link_sdk-0.1.0a11-py3-none-any.whl
+          YGL_TEST_SDK_WHEEL: ${{ github.workspace }}/dist/yomihime_game_link_sdk-0.1.0a19-py3-none-any.whl
         run: python -m unittest discover -s tests -t . -v
 
       - name: Check lint
