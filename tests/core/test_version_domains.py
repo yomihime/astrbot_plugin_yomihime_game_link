@@ -784,6 +784,7 @@ class VersionDomainTests(unittest.IsolatedAsyncioTestCase):
                 "declarations.py",
                 "display.py",
                 "errors.py",
+                "host.py",
                 "py.typed",
                 "results.py",
                 "services.py",
@@ -797,7 +798,7 @@ class VersionDomainTests(unittest.IsolatedAsyncioTestCase):
             for example in ("empty_module", "offline_sample")
             for name in ("README.md", "manifest.json", "module.py")
         ]
-        self.assertEqual(len(set(paths)), 22)
+        self.assertEqual(len(set(paths)), 23)
         freeze = {
             "files": [
                 {
@@ -807,7 +808,7 @@ class VersionDomainTests(unittest.IsolatedAsyncioTestCase):
                 for path in paths
             ]
         }
-        self.assertEqual(ygl.__version__, "0.1.0a11")
+        self.assertEqual(ygl.__version__, "0.1.0a16")
         probe = r"""import hashlib, json, pathlib, sys, unittest
 selected = pathlib.Path(sys.argv[1]).resolve()
 repo = pathlib.Path(sys.argv[2]).resolve()
@@ -853,8 +854,8 @@ sys.exit(not r.wasSuccessful())
         reports = []
         with tempfile.TemporaryDirectory(prefix="source-release-") as workspace:
             for profile, release in (
-                ("current", "0.1.0a11"),
-                ("counterfactual", "0.1.0a12"),
+                ("current", "0.1.0a16"),
+                ("counterfactual", "0.1.0a17"),
             ):
                 with self.subTest(profile=profile):
                     selected = Path(workspace) / profile
@@ -868,11 +869,11 @@ sys.exit(not r.wasSuccessful())
                         destination = selected / entry["path"]
                         destination.parent.mkdir(parents=True, exist_ok=True)
                         shutil.copyfile(original, destination)
-                        if release != "0.1.0a11" and entry["path"] in (
+                        if release != "0.1.0a16" and entry["path"] in (
                             "pyproject.toml",
                             "yomihime_game_link_sdk/version.py",
                         ):
-                            altered = payload.replace(b"0.1.0a11", release.encode())
+                            altered = payload.replace(b"0.1.0a16", release.encode())
                             self.assertNotEqual(altered, payload)
                             destination.write_bytes(altered)
                             changed.append(entry["path"])
@@ -947,23 +948,23 @@ sys.exit(not r.wasSuccessful())
         explicit_wheel = os.environ.get("YGL_TEST_SDK_WHEEL")
         self.assertTrue(
             explicit_wheel,
-            "current a11 strict control requires an explicit actual wheel",
+            "current a12 strict control requires an explicit actual wheel",
         )
         wheel = Path(explicit_wheel)
         self.assertTrue(wheel.is_file())
-        self.assertEqual(wheel.name, "yomihime_game_link_sdk-0.1.0a11-py3-none-any.whl")
+        self.assertEqual(wheel.name, "yomihime_game_link_sdk-0.1.0a16-py3-none-any.whl")
         import hashlib
 
         self.assertEqual(
             hashlib.sha256(wheel.read_bytes()).hexdigest(),
-            "466f10824c4a40a9046a982db06cdcf0d3b193c87b393e8868e7b7f7c95e1b24",
+            "562a6cd01dc47464a3c89b1406cf3931b5c67523acdcb2f3f2e9e8c1ac5b09e0",
         )
         SDKBootstrapTests.setUpClass()
         try:
             fixture = SDKBootstrapTests(
                 "test_cold_and_identical_preload_work_under_arbitrary_plugin_names"
             )
-            plugin = fixture._plugin("actual-a11-strict-control")
+            plugin = fixture._plugin("actual-a12-strict-control")
             fixture._run_bootstrap(plugin, "cold")
             # Official validated Host projection, never an SDK installation.
             with tempfile.TemporaryDirectory(prefix="strict-counter-") as work:
@@ -975,15 +976,15 @@ sys.exit(not r.wasSuccessful())
                 )
                 marker = selected / "yomihime_game_link_sdk/version.py"
                 original = marker.read_bytes()
-                changed = original.replace(b"0.1.0a11", b"0.1.0a12")
+                changed = original.replace(b"0.1.0a16", b"0.1.0a17")
                 self.assertNotEqual(changed, original)
                 marker.write_bytes(changed)
                 fixture._run_bootstrap(plugin, "different", selected)
             # Isolate the package release guard from origin/hash rejection:
             # Current canonical preloads, same validated plugin origin, only
-            # the descriptive loaded package release marker becomes a12.
+            # the descriptive loaded package release marker becomes a17.
             probe = BOOTSTRAP_CASE.replace(
-                '__version__ = "9.9.9"', '__version__ = "0.1.0a12"'
+                '__version__ = "9.9.9"', '__version__ = "0.1.0a17"'
             )
             self.assertNotEqual(probe, BOOTSTRAP_CASE)
             rejected = subprocess.run(

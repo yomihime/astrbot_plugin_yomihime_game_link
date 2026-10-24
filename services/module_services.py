@@ -23,11 +23,13 @@ from yomihime_game_link_sdk.contexts import (
     MessageContext,
 )
 from yomihime_game_link_sdk.declarations import (
+    CapabilityEffect,
     ModuleManifest,
     PrivacyFloor,
 )
 from yomihime_game_link_sdk.errors import (
     AccessDenied,
+    CacheUnavailable,
     ParameterError,
     ServiceUnavailable,
 )
@@ -48,6 +50,7 @@ from yomihime_game_link_sdk.services import (
     InvocationServices,
     ModuleServices,
     ResolvedIdentity,
+    ResourceCacheStats,
     ResourceReference,
     SubscriptionOperations,
 )
@@ -55,12 +58,14 @@ from yomihime_game_link_sdk.storage import (
     CacheEntry,
     CacheLookup,
     CacheQuery,
+    CacheVisibility,
     DeclaredIndexQuery,
     GrantReference,
     OwnerScope,
     OwnershipKind,
     QueryOperator,
     RecordPage,
+    ResourceMetadata,
     VersionedRecord,
 )
 from yomihime_game_link_sdk.subscriptions import SubscriptionRequest, SubscriptionView
@@ -98,6 +103,7 @@ from .configuration.operations import ConfigurationCoordinator
 from .dependency_calls import DependencyInvoker
 from .diagnostics import BoundDiagnostics, DiagnosticPolicy, DiagnosticStore
 from .identity import IdentityResolverService, InvocationPrincipalResolver
+from .managed_resources import ResourceCapacityError
 from .module_storage import ModuleStorageRouter
 from .records import ModuleRecordsService, _collection_name
 from .resources import ResourceAccessService, _asset_id
@@ -740,17 +746,19 @@ class _BoundRecords:
 
 
 class _BoundCache:
-    __slots__ = ("__cache", "__check_sync", "__check")
+    __slots__ = ("__cache", "__check_sync", "__check", "__public_write")
 
     def __init__(
         self,
         cache: CacheAccessService,
         check_sync: Callable[[], None],
         check: Callable[[], Awaitable[None]],
+        public_write: bool = False,
     ) -> None:
         object.__setattr__(self, "_BoundCache__cache", cache)
         object.__setattr__(self, "_BoundCache__check_sync", check_sync)
         object.__setattr__(self, "_BoundCache__check", check)
+        object.__setattr__(self, "_BoundCache__public_write", public_write)
 
     @public_boundary("service")
     async def get(self, key: str) -> CacheEntry | None:
@@ -762,6 +770,66 @@ class _BoundCache:
             raise
         await self.__check()
         return result
+
+    async def _collage_public_lookup(self, resources, snapshot, size, fit):
+        """Core-only source-derived namespace, separate from module payloads."""
+        await self.__check()
+        key = self._collage_public_current(resources, snapshot, size, fit)
+        result = await self.__cache.lookup(CacheQuery(key, CacheVisibility.PUBLIC))
+        await self.__check()
+        self._collage_public_current(resources, snapshot, size, fit)
+        return result
+
+    async def _collage_public_put(self, derivative):
+        await self.__check()
+        if (
+            type(derivative) is not _PublicCollageDerivative
+            or derivative.reference is None
+        ):
+            raise AccessDenied()
+        key = self._collage_public_current(
+            derivative.resources, derivative.snapshot, derivative.size, derivative.fit
+        )
+        from hashlib import sha256
+
+        result = await self.__cache.put(
+            key,
+            {
+                "version": "core-tile-v1",
+                "id": derivative.reference.asset_id,
+                "sha256": sha256(derivative.content).hexdigest(),
+            },
+            ttl_seconds=7 * 86400,
+            visibility=CacheVisibility.PUBLIC,
+        )
+        await self.__check()
+        self._collage_public_current(
+            derivative.resources, derivative.snapshot, derivative.size, derivative.fit
+        )
+        return result
+
+    def _collage_public_current(self, resources, snapshot, size, fit):
+        from hashlib import sha256
+
+        from .managed_resources import ResourceIntegritySnapshot
+
+        if (
+            type(resources) is not _BoundResources
+            or type(snapshot) is not ResourceIntegritySnapshot
+            or snapshot.metadata.scope.kind is not OwnershipKind.PUBLIC
+            or type(size) is not tuple
+            or len(size) != 2
+            or any(type(value) is not int or not 1 <= value <= 1536 for value in size)
+            or fit not in ("cover", "contain")
+        ):
+            raise AccessDenied()
+        resources._collage_derivative_current(snapshot)
+        return (
+            "core-collage-public-v1-"
+            + sha256(
+                f"core-tile-v1:{snapshot.digest}:{size[0]}:{size[1]}:{fit}".encode()
+            ).hexdigest()
+        )
 
     @public_boundary("service")
     async def lookup(self, request: CacheQuery) -> CacheLookup:
@@ -775,10 +843,23 @@ class _BoundCache:
         return result
 
     @public_boundary("service")
-    async def put(self, key: str, payload: Mapping[str, object], *, ttl_seconds: float):
+    async def put(
+        self,
+        key: str,
+        payload: Mapping[str, object],
+        *,
+        ttl_seconds: float,
+        visibility: CacheVisibility | None = None,
+    ):
         await self.__check()
+        if type(key) is str and key.startswith("core-collage-public-v1-"):
+            raise ParameterError("cache key is reserved")
+        if visibility is CacheVisibility.PUBLIC and not self.__public_write:
+            raise InvocationBindingError()
         try:
-            result = await self.__cache.put(key, payload, ttl_seconds=ttl_seconds)
+            result = await self.__cache.put(
+                key, payload, ttl_seconds=ttl_seconds, visibility=visibility
+            )
         except Exception:
             await self.__check()
             raise
@@ -786,18 +867,39 @@ class _BoundCache:
         return result
 
 
+@dataclass(frozen=True, slots=True)
+class _PublicCollageDerivative:
+    resources: object
+    snapshot: object
+    size: tuple
+    fit: str
+    content: bytes
+    reference: ResourceReference | None
+
+
 class _BoundResources:
-    __slots__ = ("__resources", "__check_sync", "__check")
+    __slots__ = (
+        "__resources",
+        "__check_sync",
+        "__check",
+        "__public_write",
+        "__collage_evidence",
+        "__collage_sources",
+    )
 
     def __init__(
         self,
         resources: ResourceAccessService,
         check_sync: Callable[[], None],
         check: Callable[[], Awaitable[None]],
+        public_write: bool = False,
     ) -> None:
         object.__setattr__(self, "_BoundResources__resources", resources)
         object.__setattr__(self, "_BoundResources__check_sync", check_sync)
         object.__setattr__(self, "_BoundResources__check", check)
+        object.__setattr__(self, "_BoundResources__public_write", public_write)
+        object.__setattr__(self, "_BoundResources__collage_evidence", {})
+        object.__setattr__(self, "_BoundResources__collage_sources", {})
 
     @public_boundary("resource")
     async def register(self, asset_id: str, media_type: str, content: bytes):
@@ -817,13 +919,235 @@ class _BoundResources:
         return result
 
     @public_boundary("resource")
-    async def read(self, asset_id: str) -> bytes:
+    async def store(
+        self,
+        media_type: str,
+        content: bytes,
+        *,
+        visibility: CacheVisibility | None = None,
+        ttl_seconds: float | None = None,
+    ) -> ResourceReference:
+        await self.__check()
+        parameters(validate_contract, visibility)
+        if visibility is CacheVisibility.PUBLIC and not self.__public_write:
+            raise AccessDenied()
+        try:
+            result = await self.__resources.store(
+                media_type, content, visibility=visibility, ttl_seconds=ttl_seconds
+            )
+        except ResourceCapacityError:
+            await self.__check()
+            raise CacheUnavailable() from None
+        except (ValueError, TypeError):
+            await self.__check()
+            raise ParameterError("parameters are invalid") from None
+        await self.__check()
+        _canonical_input(result, ResourceReference)
+        return result
+
+    @public_boundary("resource")
+    async def read(
+        self, asset_id: str, *, visibility: CacheVisibility | None = None
+    ) -> bytes:
         await self.__check()
         parameters(_asset_id, asset_id)
-        result = await self.__resources.read(asset_id)
+        parameters(validate_contract, visibility)
+        result = await self.__resources.read(asset_id, visibility=visibility)
         await self.__check()
         if type(result) is not bytes:
             raise ValueError("resource response is invalid")
+        return result
+
+    @public_boundary("resource")
+    async def metadata(
+        self, asset_id: str, *, visibility: CacheVisibility | None = None
+    ) -> ResourceMetadata | None:
+        await self.__check()
+        parameters(_asset_id, asset_id)
+        parameters(validate_contract, visibility)
+        result = await self.__resources.metadata(asset_id, visibility=visibility)
+        await self.__check()
+        if result is not None:
+            _canonical_input(result, ResourceMetadata)
+        return result
+
+    @public_boundary("resource")
+    async def _read_collage_reference(
+        self, asset_id: str, visibility: CacheVisibility
+    ) -> tuple[ResourceMetadata, bytes | None]:
+        """Core-only snapshot with one outer authority check at each end.
+
+        The underlying services still check issuer/admission/grant/scope at
+        every awaited storage boundary. This facade additionally binds OWNER
+        principal/route authority to the complete metadata-and-bytes operation.
+        """
+        await self.__check()
+        parameters(_asset_id, asset_id)
+        parameters(validate_contract, visibility)
+        try:
+            snapshot = await self.__resources._collage_snapshot(asset_id, visibility)
+            if snapshot is None:
+                raise FileNotFoundError("resource is unavailable")
+            metadata = snapshot.metadata
+            _canonical_input(metadata, ResourceMetadata)
+            if metadata.asset_id != asset_id:
+                raise ValueError("resource response is invalid")
+            # Preserve the public resolver's pre-read source budget. Invalid
+            # metadata is returned without bytes for its existing optional/
+            # required fallback, rather than masking ValueError at this facade.
+            content = None
+            if metadata.media_type in ("image/png", "image/jpeg") and (
+                0 < metadata.size_bytes <= 1_048_576
+            ):
+                content = await self.__resources._collage_read(snapshot, visibility)
+                if type(content) is not bytes:
+                    raise ValueError("resource response is invalid")
+        except Exception:
+            await self.__check()
+            raise
+        await self.__check()
+        return metadata, content
+
+    @public_boundary("resource")
+    async def _collage_snapshot(self, asset_id, visibility):
+        await self.__check()
+        parameters(_asset_id, asset_id)
+        parameters(validate_contract, visibility)
+        try:
+            result = await self.__resources._collage_snapshot(asset_id, visibility)
+        except Exception:
+            await self.__check()
+            raise
+        await self.__check()
+        if result is not None:
+            self.__collage_evidence[id(result)] = result
+        return result
+
+    @public_boundary("resource")
+    async def _collage_snapshots(self, references):
+        await self.__check()
+        try:
+            result = await self.__resources._collage_snapshots(references)
+        except Exception:
+            await self.__check()
+            raise
+        await self.__check()
+        if not self.__collage_sources:
+            self.__collage_evidence.clear()
+        self.__collage_evidence.update(
+            (id(snapshot), snapshot)
+            for snapshot in result.values()
+            if snapshot is not None
+        )
+        return result
+
+    @public_boundary("resource")
+    async def _collage_read(self, snapshot, visibility):
+        await self.__check()
+        parameters(validate_contract, visibility)
+        try:
+            result = await self.__resources._collage_read(snapshot, visibility)
+        except Exception:
+            await self.__check()
+            raise
+        await self.__check()
+        return result
+
+    def _collage_source_leases(self, snapshots):
+        from contextlib import asynccontextmanager
+
+        @asynccontextmanager
+        async def retained():
+            await self.__check()
+            known = {
+                id(snapshot): snapshot
+                for snapshot in snapshots.values()
+                if snapshot is not None
+            }
+            if any(
+                self.__collage_evidence.get(key) is not value
+                for key, value in known.items()
+            ):
+                raise AccessDenied()
+            previous = dict(self.__collage_sources)
+            async with self.__resources._collage_source_leases(snapshots):
+                await self.__check()
+                self.__collage_sources.update(known)
+                try:
+                    yield
+                    await self.__check()
+                finally:
+                    self.__collage_sources.clear()
+                    self.__collage_sources.update(previous)
+                    if not previous:
+                        self.__collage_evidence.clear()
+            await self.__check()
+
+        return retained()
+
+    def _collage_derivative_current(self, snapshot):
+        self.__check_sync()
+        if self.__collage_sources.get(id(snapshot)) is not snapshot:
+            raise AccessDenied()
+        if snapshot.metadata.scope.kind is not OwnershipKind.PUBLIC:
+            raise AccessDenied()
+        if (
+            snapshot.metadata.expires_at is not None
+            and snapshot.metadata.expires_at <= datetime.now(UTC)
+        ):
+            raise FileNotFoundError("collage source expired")
+
+    async def _collage_store_derivative(self, snapshot, size, fit, source_content):
+        """Derive canonical PUBLIC pixels from verified PUBLIC bytes only.
+
+        No caller-provided PNG or cache payload enters this private namespace.
+        Source and invocation authority are rechecked around persistence.
+        """
+        from hashlib import sha256
+
+        from .collage_cache import _resize_derivative
+        from .managed_resources import ResourceIntegritySnapshot
+
+        await self.__check()
+        if (
+            type(snapshot) is not ResourceIntegritySnapshot
+            or snapshot.metadata.scope.kind is not OwnershipKind.PUBLIC
+            or type(source_content) is not bytes
+            or sha256(source_content).hexdigest() != snapshot.digest
+            or type(size) is not tuple
+            or len(size) != 2
+            or any(type(value) is not int or not 1 <= value <= 1536 for value in size)
+            or fit not in ("cover", "contain")
+        ):
+            raise AccessDenied()
+
+        self._collage_derivative_current(snapshot)
+        content = _resize_derivative(source_content, size, fit)
+        self._collage_derivative_current(snapshot)
+        await self.__check()
+        reference = None
+        try:
+            reference = await self.__resources.store(
+                "image/png",
+                content,
+                visibility=CacheVisibility.PUBLIC,
+                ttl_seconds=7 * 86400,
+            )
+        except (ResourceCapacityError, CacheUnavailable):
+            pass
+        await self.__check()
+        self._collage_derivative_current(snapshot)
+        return _PublicCollageDerivative(self, snapshot, size, fit, content, reference)
+
+    @public_boundary("resource")
+    async def stats(
+        self, *, visibility: CacheVisibility | None = None
+    ) -> ResourceCacheStats:
+        await self.__check()
+        parameters(validate_contract, visibility)
+        result = await self.__resources.stats(visibility=visibility)
+        await self.__check()
+        _canonical_input(result, ResourceCacheStats)
         return result
 
 
@@ -847,13 +1171,27 @@ class _BoundHttp:
             await self.__check()
         except (InvocationBindingError, AccessDenied):
             raise SourceHttpError("request_rejected") from None
-        response = await self.__http.fetch(request)
+
+        async def check_authority() -> None:
+            try:
+                await self.__check()
+            except (InvocationBindingError, AccessDenied):
+                raise SourceHttpError("request_rejected") from None
+
+        response = await self.__http.fetch(request, _check_authority=check_authority)
         try:
             await self.__check()
         except (InvocationBindingError, AccessDenied):
             raise SourceHttpError("request_rejected") from None
         _canonical_input(response, HttpResponse)
         return response
+
+    @public_boundary("service")
+    async def budget(self, source_id):
+        await self.__check()
+        result = await self.__http.budget(source_id)
+        await self.__check()
+        return validate_contract(result)
 
 
 class _BoundTasks:
@@ -1258,6 +1596,7 @@ class InvocationServiceBinder:
                     self._caller_issuer,
                     caller_capability,
                     private_authorizer=self._authorization.require_dependency_grant,
+                    owner_authority=self._owner_authority,
                     clock=self._clock,
                     utc_clock=self._utc_clock,
                 )
@@ -1285,8 +1624,17 @@ class InvocationServiceBinder:
             check_sync()
 
         grant_store = self._repositories.authorization
+
+        def record_write_check() -> None:
+            check_sync()
+            if is_owner and invocation.parent_id is not None:
+                # A current-actor dependency receives a read-only projection,
+                # never a reusable write grant for its provider's USER records.
+                raise InvocationBindingError()
+
         record_repository = self._repositories.records_for(module).with_write_check(
-            check_sync
+            record_write_check,
+            read_only=is_owner and invocation.parent_id is not None,
         )
 
         async def collection_for_invocation(name: str) -> object:
@@ -1370,9 +1718,23 @@ class InvocationServiceBinder:
                     f"records-write:{module.module_id}"
                 ),
             ),
-            cache=_BoundCache(cache, check_sync, check),
+            cache=_BoundCache(
+                cache,
+                check_sync,
+                check,
+                public_write=owner_capability is not None
+                and owner_capability.privacy_floor is PrivacyFloor.PUBLIC
+                and owner_capability.effect is CapabilityEffect.READ_ONLY,
+            ),
             http=_BoundHttp(self._http, check_sync, check),
-            resources=_BoundResources(resources, check_sync, check),
+            resources=_BoundResources(
+                resources,
+                check_sync,
+                check,
+                public_write=owner_capability is not None
+                and owner_capability.privacy_floor is PrivacyFloor.PUBLIC
+                and owner_capability.effect is CapabilityEffect.READ_ONLY,
+            ),
             dependencies=_BoundDependencies(dependencies, check),
             tasks=_BoundTasks(tasks, check_sync, check),
         )
@@ -1397,6 +1759,7 @@ class ModuleServicesFactory:
         "_identity_namespace",
         "_http_transport",
         "_source_credential_policies",
+        "_source_request_budget",
         "_exchange_verifier",
         "_caller_issuer",
         "_http_by_module",
@@ -1516,6 +1879,9 @@ class ModuleServicesFactory:
         self._identity_namespace = identity_namespace
         self._http_transport = http_transport
         self._source_credential_policies = credential_policies
+        from .source_request_budget import SourceRequestBudget
+
+        self._source_request_budget = SourceRequestBudget(repositories.database)
         self._exchange_verifier = exchange_verifier
         self._caller_issuer = _IssuerCallerCapabilityIssuer(issuer, registry)
         self._service_lifetimes: WeakSet[_ServiceLifetime] = WeakSet()
@@ -1741,6 +2107,8 @@ class ModuleServicesFactory:
                 self._http_transport,
                 module_id=module_id,
                 credential_service=credential_service,
+                request_budget=self._source_request_budget,
+                budget_config=config,
                 clock=self._clock,
             )
             self._http_by_module[module_id] = (manifest, http)

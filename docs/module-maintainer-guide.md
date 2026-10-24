@@ -62,7 +62,7 @@ Core 与模块的命名空间配置是当前读写权威；Core 目录不依赖 
 
 `disable` 关闭业务准入，继续允许模块设置与启用管理。显式 `unload` 退出 active 普通/凭据目录、页面、来源、工具和 owner 注册，但模块管理仍显示可信恢复候选；保留最大部署政策不允许旧请求在卸载后提交。精确 owner、epoch 和生命周期检查不授予配置字段读写权。
 
-当前 SDK 为 `0.1.0a11`，模块 ABI 为 `2.0`，输出/展示/存储合同为 `1.8.0`，磁盘/工厂协议为 `1`；这些版本各自描述不同合同。SDK a10 增加 invocation-scoped diagnostics 服务：现有模块消费者可继续使用原服务；实现 `InvocationServices` 的 Host provider 与测试替身须提供 diagnostics。依赖此属性的新模块不保证运行于不含它的旧 Host。构建时核对固定 wheel 字节与来源；版本和 ABI 声明不替代具体安装验证。
+当前 SDK 为 `0.1.0a16`，模块 ABI 为 `2.0`，输出/展示/存储合同为 `1.8.0`，磁盘/工厂协议为 `1`；这些版本各自描述不同合同。SDK a10 增加 invocation-scoped diagnostics 服务：现有模块消费者可继续使用原服务；实现 `InvocationServices` 的 Host provider 与测试替身须提供 diagnostics。依赖此属性的新模块不保证运行于不含它的旧 Host。构建时核对固定 wheel 字节与来源；版本和 ABI 声明不替代具体安装验证。
 
 SDK 的后台调度声明仍受 PUBLIC ownership、固定参数和 schema 验证约束；细节见[SDK 说明](module-sdk.md#background-collectors)。历史候选和验收流水不属于当前模块维护合同。
 

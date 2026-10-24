@@ -35,13 +35,6 @@ async def market_public_samples() -> dict:
         )
         samples["error"] = await fixture.public(dict(query="44091", quality=None))
 
-        async def partial(request):
-            if "/Japan/" in request.path:
-                return validate_contract(HttpResponse(429, {}, b"{}"))
-
-        fixture.transport.callback = partial
-        samples["partial"] = await fixture.public(dict(query="44091", region="global"))
-
         async def empty(request):
             if "/aggregated/" in request.path:
                 return {"results": [], "failedItems": []}
@@ -50,6 +43,15 @@ async def market_public_samples() -> dict:
         samples["empty"] = await fixture.public(
             dict(query="44091", quality="nq", intent="min")
         )
+
+        # A real 429 now establishes a shared persistent source cooldown.
+        # Exercise it last so the unrelated empty-result sample stays empty.
+        async def partial(request):
+            if "/Japan/" in request.path:
+                return validate_contract(HttpResponse(429, {}, b"{}"))
+
+        fixture.transport.callback = partial
+        samples["partial"] = await fixture.public(dict(query="44091", region="global"))
         return samples
     finally:
         if hasattr(fixture, "runtime"):

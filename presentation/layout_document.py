@@ -13,6 +13,9 @@ from yomihime_game_link_sdk.cards import (
     Cell as Cell,
 )
 from yomihime_game_link_sdk.cards import (
+    CollageItem as CollageItem,
+)
+from yomihime_game_link_sdk.cards import (
     Column as Column,
 )
 from yomihime_game_link_sdk.cards import (
@@ -32,6 +35,9 @@ from yomihime_game_link_sdk.cards import (
 )
 from yomihime_game_link_sdk.cards import (
     PropertyGrid as PropertyGrid,
+)
+from yomihime_game_link_sdk.cards import (
+    ResourceImage as ResourceImage,
 )
 from yomihime_game_link_sdk.cards import (
     Row as Row,
@@ -59,4 +65,7 @@ from yomihime_game_link_sdk.cards import (
 )
 from yomihime_game_link_sdk.cards import (
     VAlign as VAlign,
+)
+from yomihime_game_link_sdk.cards import (
+    WeightedCollage as WeightedCollage,
 )

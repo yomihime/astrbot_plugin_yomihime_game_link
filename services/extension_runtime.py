@@ -53,6 +53,12 @@ from ..infrastructure.sqlite.repositories_runtime import (
 from .module_services import ModuleServicesFactory
 
 
+def _consume_owned_completion(task):
+    """A cancelled waiter leaves the build owned until its cleanup completes."""
+    if not task.cancelled():
+        task.exception()
+
+
 class FactoryBundleLease(Protocol):
     """One immutable, runtime-owned source snapshot for a package."""
 
@@ -254,6 +260,11 @@ class ExtensionRuntime:
         self.cleanup_timeout = float(cleanup_timeout)
         self._scanner = scanner
         self._catalog: dict[str, ExtensionCandidate] = {}
+        self._external_candidates = {}
+        self._external_fences = {}
+        self._unload_pending = set()
+        self._detached_candidates = {}
+        self._host_stop_ids = {}
         self._built: dict[str, _CandidatePackage] = {}
         self._build_flights: dict[str, _BuildFlight] = {}
         self._repair_flights: dict[str, _BuildFlight] = {}
@@ -277,7 +288,10 @@ class ExtensionRuntime:
             raise ExtensionRuntimeError("extension runtime is closing")
         scan_root = self.extension_root if root is None else root
         try:
-            discovered = self._scanner(scan_root)
+            discovered = (
+                *self._scanner(scan_root),
+                *self._external_candidates.values(),
+            )
         except DiscoveryRootError as exc:
             raise ExtensionCandidateUnavailable(
                 "extension root is unavailable"
@@ -323,6 +337,157 @@ class ExtensionRuntime:
             if package_id not in seen and package_id not in self._built:
                 self._catalog.pop(package_id, None)
         return tuple(visible)
+
+    def attach_host_package(self, candidate, *, live):
+        """Host-only admission of one safely discovered outer-plugin package."""
+        self._require_open()
+        package_id = candidate.package.package_id
+        if (
+            not candidate.package.valid
+            or not callable(live)
+            or live() is not True
+            or package_id in self._catalog
+            or package_id in self._built
+        ):
+            raise ExtensionCandidateUnavailable(
+                "external package is unavailable or owned"
+            )
+        self._external_candidates[package_id] = candidate
+        self._external_fences[package_id] = live
+        self._catalog[package_id] = candidate
+        for module in candidate.package.manifest.modules:
+            owner = f"{package_id}/{module.module_id}"
+            getattr(self, "_unloaded_owners", set()).discard(owner)
+            getattr(self, "_unload_pending", set()).discard(owner)
+            getattr(self, "_detached_candidates", {}).pop(owner, None)
+
+    async def restore_host_package(self, candidate):
+        """Apply host-selected defaults, preserving every durable user choice."""
+        package_id = candidate.package.package_id
+        for module in candidate.package.manifest.modules:
+            self._check_host_package(package_id)
+            intent = await self.runtime_repository.seed_default_enabled_if_absent(
+                package_id,
+                module.module_id,
+                expected_registry_revision=self.registry.snapshot().revision,
+            )
+            self._check_host_package(package_id)
+            if intent is not None and intent.desired_enabled:
+                await self._restore_intent(intent)
+        self._restore_failures = tuple(
+            failure
+            for failure in self._restore_failures
+            if not failure.module_id.startswith(package_id + "/")
+        )
+
+    def _check_host_package(self, package_id):
+        fence = self._external_fences.get(package_id)
+        if fence is not None and fence() is not True:
+            raise ExtensionCandidateUnavailable("external package owner is unavailable")
+
+    async def detach_host_package(self, candidate, *, timeout=5.0):
+        """Withdraw runtime ownership without changing intents or deleting data.
+
+        Pending cleanup retains the exact candidate and its source lease. A later
+        call retries it; a replacement is never admitted over an unfinished stop.
+        """
+        package_id = candidate.package.package_id
+        if self._external_candidates.get(package_id) is not candidate:
+            return
+        if not _is_finite_positive(timeout):
+            raise ValueError("timeout must be finite and positive")
+        deadline = asyncio.get_running_loop().time() + timeout
+        owners = tuple(
+            f"{package_id}/{m.module_id}" for m in candidate.package.manifest.modules
+        )
+        if not hasattr(self, "_unload_pending"):
+            self._unload_pending = set()
+        self._unload_pending.update(owners)
+        tasks = set()
+        for operation in tuple(self._operations.values()):
+            if operation.package_id == package_id:
+                operation.cancel_requested = True
+                self._cancel_build_waiter(operation)
+                if (
+                    operation.task is not None
+                    and operation.task is not asyncio.current_task()
+                ):
+                    tasks.add(operation.task)
+        flight = self._build_flights.get(package_id)
+        if flight is not None:
+            flight.cancel_requested = True
+            if flight.task is not None:
+                tasks.add(flight.task)
+        # Revoke existing run identities before waiting for factory/stop work.
+        async with self.admission.mutation(f"external-withdraw:{package_id}"):
+            for owner in owners:
+                if not self._is_registered(owner):
+                    continue
+                identity = self.lifecycle.current_identity(owner)
+                if identity is not None:
+                    self.admission.close(identity, "external_plugin_unloaded")
+                state = self.lifecycle.state(owner)
+                if state.scope is not None:
+                    state.scope.cancel()
+        if tasks:
+            _, pending = await asyncio.wait(
+                tasks, timeout=max(0.0, deadline - asyncio.get_running_loop().time())
+            )
+            if pending:
+                raise ExtensionCleanupPending(
+                    "external package operations remain pending"
+                )
+        stops = []
+        async with self.admission.mutation(f"external-stop:{package_id}"):
+            for owner in owners:
+                if not self._is_registered(owner):
+                    continue
+                op_id = self._host_stop_ids.setdefault(owner, uuid4().hex)
+                identity = self.lifecycle.quiesce(
+                    owner, op_id, "external_plugin_unloaded"
+                )
+                self.lifecycle.publish_committed_intent(
+                    owner, op_id, identity, False, self.registry.snapshot().revision
+                )
+                stops.append((owner, op_id))
+        for owner, op_id in stops:
+            try:
+                state = await self.lifecycle.stop_candidate(
+                    owner, op_id, self._remaining(deadline)
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                raise ExtensionCleanupPending(
+                    "external package stop remains pending"
+                ) from exc
+            if state.cleanup_pending:
+                raise ExtensionCleanupPending("external package stop remains pending")
+            async with self.admission.mutation(f"external-detach:{owner}"):
+                await self.prepare_detach(owner)
+                self.lifecycle.detach_stopped(owner)
+                self.detached(owner)
+                self._host_stop_ids.pop(owner, None)
+        for operation_id, repair in tuple(self._repair_flights.items()):
+            if repair.package_id == package_id:
+                if not await self._discard_flight_candidates(repair, deadline=deadline):
+                    raise ExtensionCleanupPending(
+                        "external repair cleanup remains pending"
+                    )
+                self._repair_flights.pop(operation_id, None)
+        flight = self._build_flights.get(package_id)
+        if flight is not None:
+            if not flight.registered:
+                if not await self._discard_flight_candidates(flight, deadline=deadline):
+                    raise ExtensionCleanupPending(
+                        "external factory cleanup remains pending"
+                    )
+                if flight.lease is not None:
+                    flight.lease.release()
+            self._build_flights.pop(package_id, None)
+        self._catalog.pop(package_id, None)
+        self._external_candidates.pop(package_id, None)
+        self._external_fences.pop(package_id, None)
 
     def candidate(self, package_id: str) -> ExtensionCandidate | None:
         """Return the exact current catalog candidate used by capture."""
@@ -625,7 +790,7 @@ class ExtensionRuntime:
                     self.lifecycle.instance(module_id)
                 except Exception:
                     continue
-                op_id = uuid4().hex
+                op_id = self._host_stop_ids.get(module_id, uuid4().hex)
                 try:
                     async with self.admission.mutation(f"extension-close:{module_id}"):
                         state = self.lifecycle.state(module_id)
@@ -1077,6 +1242,7 @@ class ExtensionRuntime:
                     self._build_package(flight),
                     name=f"extension-build:{operation.package_id}",
                 )
+                flight.task.add_done_callback(_consume_owned_completion)
                 self._build_flights[operation.package_id] = flight
             flight.waiters += 1
             operation._build_flight = flight
@@ -1790,10 +1956,12 @@ class ExtensionRuntime:
         return grant
 
     def _check_build_live(self, flight: _BuildFlight) -> None:
+        self._check_host_package(flight.package_id)
         if flight.cancel_requested:
             raise asyncio.CancelledError
 
     def _check_operation(self, operation: ModuleOperation) -> None:
+        self._check_host_package(operation.package_id)
         key = (operation.package_id, operation.module_id)
         if self._operations.get(key) is not operation:
             raise ExtensionRuntimeError("module operation was superseded")

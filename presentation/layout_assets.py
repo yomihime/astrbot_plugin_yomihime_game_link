@@ -490,7 +490,16 @@ def _png_without_metadata(content):
     _invalid()
 
 
-def _raster(content, kind, width, height, *, fit="contain", exact_size=False):
+def _raster(
+    content,
+    kind,
+    width,
+    height,
+    *,
+    fit="contain",
+    exact_size=False,
+    min_cover_fraction=None,
+):
     Image, ImageOps = _pillow()
     if type(content) is not bytes or not content:
         _invalid()
@@ -514,6 +523,14 @@ def _raster(content, kind, width, height, *, fit="contain", exact_size=False):
                 _check_dimensions(*source.size)
                 if exact_size and source.size != (width, height):
                     _invalid()
+                if fit == "cover" and min_cover_fraction is not None:
+                    source_aspect = source.width / source.height
+                    target_aspect = width / height
+                    retained = min(
+                        source_aspect / target_aspect, target_aspect / source_aspect
+                    )
+                    if retained < min_cover_fraction:
+                        fit = "contain"
                 source.verify()
             with (
                 BytesIO(content) as stream,
@@ -554,6 +571,7 @@ def rasterize_asset(
     current_color: str,
     *,
     fit: Literal["contain", "cover"] = "contain",
+    min_cover_fraction: float | None = None,
 ):
     """Return a newly owned RGBA raster at exact requested, bounded dimensions.
 
@@ -564,6 +582,12 @@ def rasterize_asset(
     """
     _check_dimensions(width, height, output=True)
     if type(fit) is not str or fit not in ("contain", "cover"):
+        _invalid()
+    if min_cover_fraction is not None and (
+        type(min_cover_fraction) not in (int, float)
+        or not math.isfinite(min_cover_fraction)
+        or not 0 < min_cover_fraction <= 1
+    ):
         _invalid()
     color = _color(current_color)
     if (
@@ -577,8 +601,23 @@ def rasterize_asset(
     ):
         _invalid()
     if asset.kind != "svg":
-        return _raster(asset.content, asset.kind, width, height, fit=fit)
-    svg = _prepare_svg(asset.content, color, width, height, fit=fit)
+        return _raster(
+            asset.content,
+            asset.kind,
+            width,
+            height,
+            fit=fit,
+            min_cover_fraction=min_cover_fraction,
+        )
+    # SVG source aspect can depend on viewBox and transforms; contain it when
+    # a caller imposes a retained-cover guarantee.
+    svg = _prepare_svg(
+        asset.content,
+        color,
+        width,
+        height,
+        fit="contain" if min_cover_fraction is not None else fit,
+    )
     _pillow()
     try:
         import resvg_py

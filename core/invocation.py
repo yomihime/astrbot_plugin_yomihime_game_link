@@ -269,7 +269,13 @@ class Gateway:
         return not pending and not self._web_flights
 
     async def invoke_public_web(
-        self, proof: object, module_id: str, capability_id: str, parameters: object
+        self,
+        proof: object,
+        module_id: str,
+        capability_id: str,
+        parameters: object,
+        *,
+        _consume=None,
     ) -> CapabilityResult:
         """Consume trusted Host proof and return data without any chat output."""
         if self._web_closed or self._lifecycle is None or self._admission is None:
@@ -334,7 +340,22 @@ class Gateway:
         async def execute() -> CapabilityResult:
             with observe_tasks(flight):
                 flight.check()
-                return await self._invoke_web_view(view, parameters)
+                value = await self._invoke_web_view(view, parameters)
+                if _consume is not None and value.status in (
+                    ResultStatus.SUCCESS,
+                    ResultStatus.PARTIAL_SUCCESS,
+                ):
+
+                    async def current():
+                        flight.check()
+                        self._require_web_publication(
+                            flight, binding.generation, active=True
+                        )
+
+                    await current()
+                    await _consume(view, value, current)
+                    await current()
+                return value
 
         work = execute()
         result = _error(ErrorCode.MODULE_UNAVAILABLE)
@@ -1136,7 +1157,9 @@ class Gateway:
             raise TypeError("expected error detail")
         if not isinstance(value.code, ErrorCode) or not isinstance(value.message, str):
             raise TypeError("malformed error detail")
-        return validate_contract(ErrorDetail(value.code, value.message))
+        return validate_contract(
+            ErrorDetail(value.code, value.message, value.retry_after_seconds)
+        )
 
     @staticmethod
     def _current_view(snapshot, module: RegisteredModule, view: InvocationView) -> bool:

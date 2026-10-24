@@ -90,7 +90,7 @@ def _isolated_probe_main() -> None:
     sdk = importlib.import_module("yomihime_game_link_sdk")
     if not Path(sdk.__file__).resolve().is_relative_to(site_root.resolve()):
         raise AssertionError("canonical SDK did not load from the installed site")
-    if importlib.metadata.version("yomihime-game-link-sdk") != "0.1.0a11":
+    if importlib.metadata.version("yomihime-game-link-sdk") != "0.1.0a16":
         raise AssertionError("installed SDK version changed")
 
     sys.path.insert(1, str(repository_root))
@@ -154,6 +154,7 @@ def _isolated_probe_main() -> None:
     from ygl_core_hardening_subject.services.core_runtime import (
         CoreRuntime,
         HostIngress,
+        HostIngressUnavailable,
         TrustedSubscriptionGate,
     )
 
@@ -672,7 +673,7 @@ def _isolated_probe_main() -> None:
                 await runtime.invoke_command(
                     "offline_sample/status", "from source", {}, ingress=ingress("alice")
                 )
-            except PermissionError:
+            except HostIngressUnavailable:
                 dependency_denied = True
             else:
                 dependency_denied = False
@@ -694,7 +695,7 @@ def _isolated_probe_main() -> None:
                 await runtime.invoke_command(
                     "offline_sample/status", "configured", {}, ingress=ingress("alice")
                 )
-            except PermissionError:
+            except HostIngressUnavailable:
                 config_denied = True
             else:
                 config_denied = False
@@ -877,8 +878,8 @@ def _isolated_probe_main() -> None:
                         raise AssertionError("Gateway failure exposed private data")
                 if outcome.output.status.value == "sent":
                     expected_text = {
-                        "module_unavailable": "module temporarily unavailable",
-                        "unknown": "request failed",
+                        "module_unavailable": "模块或依赖服务暂时不可用。",
+                        "unknown": "请求未能完成。",
                     }.get(expected_code)
                     if (
                         expected_text is None

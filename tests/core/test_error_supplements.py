@@ -1029,7 +1029,7 @@ class ErrorSupplementMarketProducerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(result.model_facts)
         self.assertIn("无法判断", result.error.message)
         self.assertEqual(
-            current.output._message_port.calls[-1][1].text, "no records found"
+            current.output._message_port.calls[-1][1].text, "数据源暂无记录。"
         )
         projected = project_result(result)
         self.assertEqual(projected["error"]["code"], "no_records")

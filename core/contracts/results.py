@@ -28,6 +28,11 @@ def check_ErrorDetail(self) -> None:
     elif not isinstance(self.code, ErrorCode):
         raise TypeError("code must be ErrorCode")
     _text(self.message, "error message")
+    if self.retry_after_seconds is not None and (
+        type(self.retry_after_seconds) is not int
+        or not 0 <= self.retry_after_seconds <= 86400
+    ):
+        raise ValueError("retry hint must be bounded whole seconds")
 
 
 def _valid_fact_value(value):

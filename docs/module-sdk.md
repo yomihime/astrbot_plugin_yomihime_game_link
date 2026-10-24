@@ -1,16 +1,52 @@
 # Game Link module SDK
 
-The independently installable distribution is `yomihime-game-link-sdk==0.1.0a11`. Import its public declarations with `import yomihime_game_link_sdk as ygl`. It requires Python 3.11 or newer and has no third-party runtime dependencies.
+The independently installable distribution is `yomihime-game-link-sdk==0.1.0a16`. Import its public declarations with `import yomihime_game_link_sdk as ygl`. It requires Python 3.11 or newer and has no third-party runtime dependencies.
 
-The SDK (including its packaged examples) is licensed under MIT; see `SDK-LICENSE`. The AstrBot plugin implementation remains AGPL-3.0 under `LICENSE`. Third-party notices retain their own terms. The a10 source contract adds invocation-bound diagnostics, CacheUnavailable and generic page roles without changing module ABI 2.0. Built wheel identity and installation evidence are recorded separately; editing these declarations does not prove a published or installed wheel.
+The SDK (including its packaged examples) is licensed under MIT; see `SDK-LICENSE`. The AstrBot plugin implementation remains AGPL-3.0 under `LICENSE`. Third-party notices retain their own terms. The a12 source contract adds the outer-plugin extension bridge without changing module ABI 2.0. Built wheel identity and installation evidence are recorded separately; editing these declarations does not prove a published or installed wheel.
+
+## Independent AstrBot extension plugins
+
+The outer Star may locate the active Core through the public AstrBot
+`Context.get_registered_star` API and call its public
+`get_game_link_extension_host()`. A ready host implements SDK `ExtensionHost`
+bridge version 1. Check its SDK release and module ABI before registration.
+The outer plugin must delay importing the canonical SDK until Core bootstrap
+has completed; it must not vendor a second copy.
+
+`register_package(plugin_name=..., plugin_instance=..., package_root=...)`
+accepts a complete package contained in the active plugin's installation.
+The host verifies the exact Star instance from the public registry, safely
+captures all package Python sources and returns an opaque `PackageLease`.
+Use `unregister_package(lease)` on termination. Same-instance registrations
+are idempotent; a stale lease cannot withdraw a replacement. Public plugin
+loaded/unloaded hooks support reconnecting after either plugin reloads.
+There is no polling requirement. Changed source or SDK bytes remain subject
+to `restart_required`. User records and stored enable intents survive detach.
+This initial bridge accepts ordinary configuration and uncredentialed sources;
+external credential-bearing sources and sensitive configuration are rejected.
+
+## Read-only current-actor dependencies
+
+A capability may explicitly declare a module-qualified dependency on an OWNER
+read-only capability. Core admits this edge only from an exact active root
+COMMAND with a real adapter-scoped actor. Tool, Web, scheduler, writable OWNER
+targets and nested promotion remain denied. The child inherits the actor and
+deadline, receives its own provider epoch/admission, and receives no copied
+module grant. Provider USER records are readable but record writes are denied.
+Core revalidates both parent and child across awaits and discards late results.
+
+Private dependency data uses a bounded PRIVATE `DisplayDocument`, for example
+one `FieldsBlock` with the provider's minimal DTO. It is consumed through the
+SDK result only. PRIVATE results still cannot contain model facts, and this
+read proof does not authorize root private output or account management.
 
 ## Install and import
 
 Install the reviewed wheel into your module development environment:
 
 ```powershell
-python -m pip install --no-deps ./yomihime_game_link_sdk-0.1.0a11-py3-none-any.whl
-python -I -c "import yomihime_game_link_sdk as ygl; assert ygl.__version__ == '0.1.0a11'; assert ygl.MODULE_ABI_VERSION == '2.0'"
+python -m pip install --no-deps ./yomihime_game_link_sdk-0.1.0a16-py3-none-any.whl
+python -I -c "import yomihime_game_link_sdk as ygl; assert ygl.__version__ == '0.1.0a16'; assert ygl.MODULE_ABI_VERSION == '2.0'"
 ```
 
 The plugin release contains the exact content-pinned SDK from that wheel. Its bootstrap rejects changed contents, foreign package origins, partial preload graphs, and any preloaded retired `yomihime_sdk` graph. The retired root `api` and `yomihime_sdk.api` modules have no compatibility redirects. Historical stored-data readers are separate from module import compatibility.
@@ -95,6 +131,28 @@ Record duplicate and CAS errors use the unique SDK `UniqueConstraintViolation` a
 Subscriptions use only `create_request(invocation, SubscriptionRequest)`, `revise_request`, `list_current` and `cancel(invocation, id, *, expected_revision)`. Creation omits ID/revision; Core supplies a new ID and revision 1. Revision includes both and must match current CAS. A `SubscriptionView` omits collector command parameters and cannot replace a request. Repeated identical creates can make distinct subscriptions sharing one collection job; no idempotency or automatic deduplication is promised. Revision/cancellation conflicts raise `RevisionConflict`; cancellation removes only the selected association, preserving other subscribers' jobs/data. A paused owner with fresh current proof may list/revise/cancel but cannot create. Command root, exact issuer, route, principal, module epoch and grant checks apply across awaits; old contexts/handles never regain authority on restore. An unconfigured delegate raises `ServiceUnavailable`. Collector input normalization and matching remain module business rules.
 
 `OwnerScope.authorized` is the sole spelling for an authorization-bound descriptive scope; the historical `private` helper is retired. The Core-only `CacheService` synonym is also retired, without adding a module-facing repository API. Host administration remains outside `ModuleServices` and the SDK. Its Core-private unload/rollback receipts acknowledge observed facts only. An unload can disable before a later failure, and cancellation or late authorization failure after an accepted SQLite transaction can leave the commit outcome unknown. Refresh a newly authorized snapshot to reconcile; do not infer rollback or automatically retry from a missing receipt. Configuration, credentials and business data remain retained across unload/restore.
+
+## Declared anonymous HTTP redirects
+
+`SourceDeclaration.max_redirects` defaults to `0` (all redirects rejected).
+An anonymous source may opt in with a limit of `1` or `2` and explicit
+`redirect_path_prefixes`, for example `("/profiles/", "/id/")`. Prefixes match
+whole path segments; `/id` does not authorize `/identity`. Only GET requests
+and status 301/302/303/307/308 can follow a redirect. Every target must use
+HTTPS, the exact declared host, and port 443. Userinfo, fragments, encoded
+paths, traversal, loops, excess hops and undeclared paths are rejected with
+`SourceHttpError("redirect_disallowed")`. Credentialed sources cannot opt in;
+Cookie and authorization headers remain forbidden to modules.
+
+Each hop uses the existing transport with automatic redirects disabled, the
+same total deadline/concurrency slots, a fresh source quota reservation, and
+the same request and response size limits. Bound invocation authority is
+rechecked before and after each network attempt. Cancellation does not replay
+requests. SourceHttp returns `HttpResponse.final_url` as the verified final
+HTTPS origin and path only, with query and fragment omitted. It is optional
+(`None`) for compatibility with existing three-argument response constructors.
+Consumers must still validate upstream identity and login-wall content; a
+successful HTTP response and final path do not establish business identity.
 
 ## Current root Tool message
 
@@ -221,6 +279,30 @@ messages. SDK service APIs retain canonical safe typed failures and cancellation
 Gateway retains its existing ERROR-result protocol. Neither a DTO nor a recovery
 hint grants permission to retry or change a user's request.
 
+## Explicit public query cache and safe retry hints (a13)
+
+`CacheAccess.put(..., visibility=CacheVisibility.PUBLIC)` pairs an explicit
+public lookup with a public write. Core permits this selection only for an
+invocation's PUBLIC, READ_ONLY capability. It cannot publish OWNER or private
+capability data. Omitting visibility preserves the existing current-owner
+partition; this is not a change to USER isolation. Payloads returned from a HIT
+are deeply immutable mappings and tuples, so consumers must accept `Mapping`
+and finite sequences rather than require mutable `dict` or `list` values.
+
+`SourceHttpError.retry_after_seconds` carries only an optional integer in
+0..86400. Core parses Retry-After delta seconds or an HTTP date for 429/503,
+discards invalid or excessive values, and never forwards arbitrary headers or
+upstream bodies as error details. No automatic retry is introduced. A module can
+copy the bounded value to `ErrorDetail.retry_after_seconds`; receiving validation,
+Gateway reconstruction and the fixed Core error renderer preserve it. The hint
+does not extend the invocation deadline or grant retry authority.
+
+Explicit read-only OWNER dependency scopes can open an existing USER record
+collection without registering or modifying storage metadata. An absent catalog
+with no records is readable as empty; conflicting metadata and orphan rows fail
+closed. Read-only scopes retain worker-level epoch checks and reject all writes.
+This does not expose a new principal selector or a writable grant to modules.
+
 ## Packaged examples
 
 The wheel includes `_examples/empty_module` and `_examples/offline_sample`, each with manifest.json, module.py and README.md. Extract them using importlib.resources; rename manifest.json to yomihime.manifest.json when installing a package. The empty factory is inert; the offline sample uses deterministic data and the existing injected service contracts. Neither example introduces real model or upstream calls.
@@ -288,3 +370,27 @@ Current config may also contain `descriptors` for the exact authorized page fiel
 Host module page requests require a short-lived opaque page_session after actual Dashboard JWT/Origin authentication. Host validates current subject/session, owner/page/runtime/epoch, field grants and generation on each request and commit, then removes the proof before the strict Core helper body. The proof demonstrates scoped Host authority; AstrBot does not attest the originating DOM. Asset tokens, client labels and page names alone grant no management rights.
 
 Trusted legacy policies may register retained ordinary source names with a configuration coordinator. Such rows remain stored but are hidden from ordinary current snapshots and cannot be patched or cleared through current declarations. Unknown fields and secret metadata still fail. A bad legacy source value is independently rejected by destination-schema projection and does not prevent unrelated valid Core theme updates.
+
+## Managed binary resources and weighted collages (a15, updated a16)
+
+Bound resources provide `store(media_type, content, *, visibility=None, ttl_seconds=None)`, `read(asset_id, *, visibility=None)`, `metadata(asset_id, *, visibility=None)` and `stats(*, visibility=None)`. Core allocates an opaque content reference; modules never construct IDs, paths or owner hashes. PNG/JPEG bytes are validated in Core. New managed resources have a 4 MiB per-file limit; PUBLIC scope allows 256 MiB / 2048 items, other scopes retain 64 MiB / 512 items. The seven-day default TTL (at most thirty days), indexed expiry/LRU eviction and read leases remain. Cleanup is bounded and runs on writes; existing legacy resources are outside this managed eviction set. Missing or corrupt reads raise `FileNotFoundError`; metadata returns None. Expired unmanaged content is not silently adopted or renewed by storing identical bytes. Authority and cancellation failures remain errors. `ResourceCacheStats` reports bytes, items, max_bytes, max_items and evictions. Stats expose only the requested authorized partition.
+
+PUBLIC writes require a current PUBLIC, READ_ONLY capability. A private caller may invoke a declared public preparation dependency with public parameters, then read its public reference; this grants no right to publish private results or write personal data into PUBLIC. Personal list/result caches stay USER or AUTHORIZED as appropriate. Runtime bytes live in Host-managed data storage and survive ordinary restart; development directories and plugin installation paths are not cache locations.
+
+`cards.ResourceImage(asset_id, visibility=CacheVisibility.PUBLIC, alt=..., required=False)` refers to prepared bytes. A sole `cards.WeightedCollage(items, max_height=2800, max_pages=8, preferred_aspect=2/3)` block accepts up to 200 `cards.CollageItem(key, weight, image=None, title=..., caption=...)` values. Weights must be positive and finite; business filtering, units and weighting belong to the module. Core resolves references before rendering and never performs HTTP while painting. Missing optional images become placeholders with their supplied text. Keep complete ordered text blocks as fallback.
+
+The deterministic integer shelf layout fills each page body, assigns areas monotonically by weight and stable key, limits relative weights and cell aspect variation, and bounds cover cropping; unsuitable ratios use contain/placeholder behavior. It does not promise exact linear proportions. Collage PNGs use a local 4 MiB/page, 16 MiB total and eight-page budget, plus the existing pixel/conversion limits. Ordinary cards retain their existing limits. The command path prepares all pages before final admission and sends one exact-event chain; ambiguous sends are never retried. Commands without a grant may cache finished pages through current USER-scoped services with normalized content, resource versions, resolved theme and layout inputs in the key. Grant-authorized finished pages are not cached into USER storage. Sole weighted collages retain a local text fallback budget of 24,000 characters and 1,024 lines; exceeding it requests a smaller selection. Full layout details are in [the rendering specification](command-presentation/declarative-rendering-spec.md).
+
+## Dense integer-grid collages (a16)
+
+`cards.DenseCollageItem(key, span, image=None, title="", caption="")` and `cards.DenseCollage(items, columns=20, cell_width=54, cell_height=81, max_height=2592, max_pages=8, fit="cover")` form a sole dense document body. Document width must equal columns * cell_width, an explicit edge-to-edge content width; the header is Core-owned. Each span is an integer square k-by-k in grid cells. Tuple order is logical rank; physical placement sorts by descending span then logical rank and uses deterministic first-fit. Each item appears once without overlap, rotation, split or implicit duplication; tail whitespace is possible. Business filtering and time-to-span rules belong entirely to the module.
+
+The receiving boundary accepts 1–1000 items, unique keys, span1–8 within columns, columns8–32, cell width24–96, height24–192, total width400–2048, page body height128–6000 accommodating the largest tile, and at most8 pages. Dense text fallback allows160,000 characters/6000 lines. Aggregate source bytes are bounded at32MiB; actual image/pixel/page/PNG budgets still apply. These maxima are rejection boundaries, not a promise that every combination fits. `fit` is cover or contain with aspect-preserving resizing. WeightedCollage contracts remain unchanged.
+
+Core checks a current authority-bound resource integrity snapshot before looking up finished pages. Known unchanged file-version evidence avoids full source reads on a hit; changed or unknown evidence requires hashing. A miss reads each unique source once. Finished PNGs remain fully checked. Derivatives depend on source hash, size, fit and rendering version. None of these internal caches grant new module rights or survive revoked authority as readable results.
+
+## HTTP budgets and subscription events (a16)
+
+`SourceDeclaration` appends `requests_per_hour`, `request_budget_config` and `authorization_only`. `scope.http.budget(source_id)` returns `HttpBudgetStatus(source_id, requests_per_hour, used, remaining, next_available_at)`, with aware UTC time or None. `SourceHttpError.next_available_at` preserves cooldown information for trusted scheduler defer. Normal bound HTTP refuses authorization-only sources. Secrets and authorization runners remain Core-only; modules declare public protocol data and never receive the credential. See [trusted source policies](source-policies.md).
+
+`SubscriptionRequest.creation_key` optionally requests atomic active creation reuse within the exact trusted owner, route, type, CollectionKey and key. `EvaluationDecision.events` accepts at most3 independent `EvaluationEvent` values and is disjoint with legacy single-event fields. `PublicEventContribution` selects a declared pure composer in `ModuleHandlers.event_composers`; Core derives exact PUBLIC/full-route event aggregation, retaining every member's durable receipt and fence. `CommentaryRequest` is bounded and optional, executed after event persistence by the Host port with deterministic fallback. `SubscriptionDescriptor.enabled_config_key` declares an ordinary boolean pause control defaulting True, without granting bundled-module trust. `SubscriptionView.evaluation_state` is only returned by trusted own-current-session listing; evaluators/create/revise views retain None. See [subscription events](subscription-events.md) for limits, sealed membership and UNKNOWN handling.

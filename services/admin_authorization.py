@@ -125,6 +125,19 @@ class AdminAuthorizationService:
             self._sources[source_id] = source
             return source
 
+    def unregister_source(self, source):
+        """Retire only the exact Host-owned issuer, including its old proofs."""
+        with self._lock:
+            if self._sources.get(getattr(source, "source_id", None)) is not source:
+                return
+            source.close()
+            self._sources.pop(source.source_id, None)
+            self._grants = {
+                key: grant
+                for key, grant in self._grants.items()
+                if grant._effect.source is not source
+            }
+
     def close(self):
         with self._lock:
             self._closed = True

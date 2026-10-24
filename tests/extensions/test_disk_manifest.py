@@ -67,6 +67,25 @@ def valid_document() -> dict[str, object]:
 
 
 class DiskManifestTests(unittest.TestCase):
+    def test_anonymous_redirect_policy_roundtrips_and_rejects_invalid_shape(self):
+        document = valid_document()
+        source = {
+            "source_id": "public",
+            "host": "public.example.test",
+            "max_redirects": 2,
+            "redirect_path_prefixes": ["/profiles/", "/id/"],
+        }
+        document["modules"][0]["sources"] = [source]
+        declaration = (
+            parse_manifest(json.dumps(document).encode()).modules[0].sources[0]
+        )
+        self.assertEqual(declaration.max_redirects, 2)
+        self.assertEqual(declaration.redirect_path_prefixes, ("/profiles/", "/id/"))
+        for value in ("/id/", None, ["/id/../"]):
+            source["redirect_path_prefixes"] = value
+            with self.assertRaises(ManifestError):
+                parse_manifest(json.dumps(document).encode())
+
     def test_optional_config_value_schema_roundtrip_and_invalid_default(self):
         document = valid_document()
         module = document["modules"][0]

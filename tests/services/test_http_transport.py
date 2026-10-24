@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import gzip
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -419,6 +420,115 @@ class AioHttpTransportTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(caught.exception.code, "invalid_response")
         self.assertFalse(self.context.response.content.started.is_set())
         self.assertTrue(self.context.exited)
+
+    async def test_encoded_redirect_entity_remains_opaque_for_policy_validation(self):
+        # Even an entity with a huge decoded size is never decompressed here.
+        wire_body = gzip.compress(b"x" * 100_000)
+        for status in (301, 302, 303, 307, 308):
+            with self.subTest(status=status):
+                self.context.response.status = status
+                self.context.response.headers.update(
+                    {"Content-Encoding": "gzip", "Location": "/public/next"}
+                )
+                self.context.response.content = _Stream((wire_body,))
+                response = await self.transport.request(
+                    _request(max_response_bytes=len(wire_body))
+                )
+                self.assertEqual(response.status_code, status)
+                self.assertEqual(response.body, wire_body)
+                self.assertEqual(response.headers["Location"], "/public/next")
+                self.assertEqual(response.headers["Content-Encoding"], "gzip")
+                self.assertTrue(self.context.exited)
+                self.assertFalse(self.session.calls[-1][1]["allow_redirects"])
+
+    async def test_encoded_redirect_obeys_source_policy_through_real_transport(self):
+        for mode in ("declared", "default", "credential"):
+            with self.subTest(mode=mode):
+                first = _ResponseContext(chunks=(gzip.compress(b""),))
+                first.response.status = 302
+                first.response.headers.update(
+                    {
+                        "Content-Encoding": "gzip",
+                        "Location": "https://api.example.test/public/final",
+                    }
+                )
+                last = _ResponseContext(chunks=(b"final identity body",))
+                contexts = (first, last)
+
+                class _SequenceSession(_Session):
+                    def request(self, *args, **kwargs):
+                        context = contexts[len(self.calls)]
+                        self.calls.append((args, kwargs))
+                        return context
+
+                self.session = _SequenceSession(first)
+                self.transport._session = self.session  # type: ignore[assignment]
+                declaration = SourceDeclaration(
+                    "public",
+                    "api.example.test",
+                    credential_ref="credential_public"
+                    if mode == "credential"
+                    else None,
+                    max_redirects=1 if mode == "declared" else 0,
+                    redirect_path_prefixes=("/public/",) if mode == "declared" else (),
+                )
+                service = SourceHttpService(
+                    (validate_contract(declaration),),
+                    self.transport,
+                    module_id="sample_pkg/status",
+                    credential_service=_CredentialAuthorizer(),
+                )
+                request = validate_contract(HttpRequest("public", "/public/start"))
+                if mode == "declared":
+                    response = await service.fetch(request)
+                    self.assertEqual(response.body, b"final identity body")
+                    self.assertEqual(
+                        response.final_url, "https://api.example.test/public/final"
+                    )
+                    self.assertEqual(len(self.session.calls), 2)
+                else:
+                    with self.assertRaises(SourceHttpError) as caught:
+                        await service.fetch(request)
+                    self.assertEqual(caught.exception.code, "redirect_disallowed")
+                    self.assertEqual(len(self.session.calls), 1)
+                self.assertTrue(first.exited)
+                self.assertTrue(
+                    all(
+                        not kwargs["allow_redirects"]
+                        for _, kwargs in self.session.calls
+                    )
+                )
+
+    async def test_encoded_redirect_preserves_declared_and_streamed_wire_limits(self):
+        for length in (33, None):
+            with self.subTest(content_length=length):
+                self.context = _ResponseContext(chunks=(b"x" * 33,), length=length)
+                self.context.response.status = 302
+                self.context.response.headers.update(
+                    {"Content-Encoding": "gzip", "Location": "/public/next"}
+                )
+                self.session = _Session(self.context)
+                self.transport._session = self.session  # type: ignore[assignment]
+                with self.assertRaises(SourceHttpError) as caught:
+                    await self.transport.request(_request(max_response_bytes=32))
+                self.assertEqual(caught.exception.code, "response_too_large")
+                self.assertEqual(
+                    self.context.response.content.started.is_set(), length is None
+                )
+                self.assertTrue(self.context.exited)
+
+    async def test_compressed_non_followable_statuses_still_reject_before_body_read(
+        self,
+    ):
+        self.context.response.headers["Content-Encoding"] = "gzip"
+        for status in (200, 201, 300, 304, 400, 500):
+            with self.subTest(status=status):
+                self.context.response.status = status
+                with self.assertRaises(SourceHttpError) as caught:
+                    await self.transport.request(_request())
+                self.assertEqual(caught.exception.code, "invalid_response")
+                self.assertFalse(self.context.response.content.started.is_set())
+                self.assertTrue(self.context.exited)
 
     async def test_cancellation_unwinds_response_and_close_is_idempotent(self) -> None:
         gate = asyncio.Event()

@@ -20,6 +20,7 @@ from yomihime_game_link_sdk.declarations import (
     CapabilityDescriptor,
     CapabilityEffect,
     CommandDescriptor,
+    DiagnosticDeclaration,
     InvocationPolicy,
     ModuleCategory,
     ModuleManifest,
@@ -187,6 +188,39 @@ class _Scheduler:
 
 
 class AdmissionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_health_callback_cannot_bypass_manifest_revalidation(self):
+        mutate = [False]
+        manifest = None
+
+        def health_query(module_id, capability_id, base, revision):
+            if mutate[0]:
+                object.__setattr__(
+                    manifest,
+                    "diagnostics",
+                    (
+                        DiagnosticDeclaration(
+                            "Unsafe",
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "token": {"type": "string", "maxLength": 8}
+                                },
+                            },
+                        ),
+                    ),
+                )
+            return validate_contract(CapabilityHealth(HealthStatus.AVAILABLE)), 1
+
+        registry, controller, identity = await _activate(health_query=health_query)
+        manifest = registry.snapshot().module("pkg/mod").manifest
+        view = _view(controller, identity)
+        lease = controller.admission.admit(view, "read")
+        mutate[0] = True
+        with self.assertRaisesRegex(ValueError, "sensitive"):
+            controller.admission.check(lease)
+        controller.issuer.release(view)
+        controller.admission.release(lease)
+
     async def test_lease_is_exact_health_versioned_and_released_with_view(self):
         current = [validate_contract(CapabilityHealth(HealthStatus.AVAILABLE)), 4]
 

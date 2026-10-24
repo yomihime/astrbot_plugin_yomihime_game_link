@@ -15,6 +15,7 @@ from time import monotonic
 from yomihime_game_link_sdk.contexts import InvocationOrigin, InvocationView
 from yomihime_game_link_sdk.declarations import (
     CapabilityDescriptor,
+    CapabilityEffect,
     CapabilityReference,
     PrivacyFloor,
 )
@@ -93,6 +94,7 @@ class DependencyInvoker:
             [InvocationView, InvocationView], Awaitable[object]
         ]
         | None = None,
+        owner_authority: object | None = None,
         max_depth: int = 8,
         clock=monotonic,
         utc_clock: Callable[[], datetime] | None = None,
@@ -129,6 +131,7 @@ class DependencyInvoker:
         self._caller_issuer = caller_issuer
         self._caller_capability = caller_capability
         self._private_authorizer = private_authorizer
+        self._owner_authority = owner_authority
         self._max_depth = max_depth
         self._clock = clock
         self._utc_clock = utc_clock or (lambda: datetime.now(UTC))
@@ -242,6 +245,22 @@ class DependencyInvoker:
         if child is None or child_lease is None:
             self._release_child(child)
             return _error(ErrorCode.MODULE_UNAVAILABLE)
+
+        if target_descriptor.privacy_floor is PrivacyFloor.OWNER:
+            try:
+                if self._owner_authority is None:
+                    raise DependencyCallError("owner authority unavailable")
+                await self._owner_authority.capture_dependency(
+                    parent, child, child_lease
+                )
+                self._lifecycle.admission.check(parent_lease)
+                self._lifecycle.admission.check(child_lease)
+            except asyncio.CancelledError:
+                self._release_child(child)
+                raise
+            except Exception:
+                self._release_child(child)
+                return _error(ErrorCode.MODULE_UNAVAILABLE)
 
         if target_descriptor.privacy_floor is PrivacyFloor.PRIVATE:
             if self._private_authorizer is None:
@@ -370,9 +389,20 @@ class DependencyInvoker:
                     return _error(ErrorCode.MODULE_UNAVAILABLE)
             if not isinstance(result, CapabilityResult):
                 return _error(ErrorCode.UNKNOWN)
+            if target_descriptor.privacy_floor is PrivacyFloor.OWNER:
+                try:
+                    await self._owner_authority.require_current(child)
+                    self._issuer.require(parent)
+                    self._lifecycle.admission.check(parent_lease)
+                    self._lifecycle.admission.check(child_lease)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    return _error(ErrorCode.MODULE_UNAVAILABLE)
             expected_privacy = (
                 Privacy.PRIVATE
-                if target_descriptor.privacy_floor is PrivacyFloor.PRIVATE
+                if target_descriptor.privacy_floor
+                in (PrivacyFloor.PRIVATE, PrivacyFloor.OWNER)
                 else Privacy.PUBLIC
             )
             from ..core.invocation import Gateway
@@ -473,9 +503,15 @@ class DependencyInvoker:
         ):
             raise DependencyCallError("target is outside the public web surface")
         if target.privacy_floor is PrivacyFloor.OWNER:
-            raise DependencyCallError(
-                "owner capability cannot be invoked as a dependency"
-            )
+            if (
+                target.effect is not CapabilityEffect.READ_ONLY
+                or parent.origin is not InvocationOrigin.COMMAND
+                or parent.parent_id is not None
+                or not parent.actor_id
+                or parent.adapter_id is None
+                or parent.conversation_id is None
+            ):
+                raise DependencyCallError("owner dependency requires a real command")
         if parent.origin in (InvocationOrigin.LLM_TOOL, InvocationOrigin.SCHEDULER):
             if not tool_allowed(target):
                 raise DependencyCallError("target is outside the public Tool surface")
@@ -530,6 +566,8 @@ class DependencyInvoker:
         if child is None:
             return
         try:
+            if self._owner_authority is not None:
+                self._owner_authority.release(child)
             # Issuer release triggers Admission and CallerCapability cleanup.
             self._issuer.release(child)
         except InvalidInvocation:

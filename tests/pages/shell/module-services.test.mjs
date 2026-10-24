@@ -40,6 +40,18 @@ test('late bootstrap after disposal closes its own new proof and never mounts a 
  const promise=createModuleServices({bridge:{apiPost(action,body){calls.push({action,body});return action==='admin/module-page-session'?new Promise(done=>{resolve=done;}):Promise.resolve({closed:true});}},binding,capabilityId:null,isCurrent:()=>current,onDispose:fn=>{dispose=fn;},confirmClear:async()=>true});
  current=false;dispose();resolve({page_session:'late-proof',expires_at:Date.now()/1000+30});await assert.rejects(promise,/page_revoked/);await Promise.resolve();assert.deepEqual(calls.at(-1),{action:'admin/module-page-session-close',body:{page_session:'late-proof'}});
 });
+
+test('proof rotates at the ten-second margin while earlier reads keep the existing proof',async()=>{
+ const nativeNow=Date.now;let time=1000,issues=0;Date.now=()=>time*1000;const calls=[];
+ try{
+  const services=await createModuleServices({bridge:{async apiPost(action,body){calls.push({action,body});if(action==='admin/module-page-session')return {page_session:'proof-'+(++issues),expires_at:time+30};return {revision:1,fields:{}};}},binding,capabilityId:null,isCurrent:()=>true,onDispose(){},confirmClear:async()=>true});
+  time=1019.999;await services.config.current();assert.equal(issues,1);assert.equal(calls.at(-1).body.page_session,'proof-1');
+  time=1020;await Promise.all([services.config.current(),services.credentials.status()]);assert.equal(issues,2);
+  const rotation=calls.filter(call=>call.action==='admin/module-page-session')[1];assert.equal(rotation.body.previous_session,'proof-1');
+  assert.equal(rotation.body.owner,binding.owner);assert.equal(rotation.body.page,binding.page);
+  assert.equal(calls.at(-1).body.page_session,'proof-2');
+ }finally{Date.now=nativeNow;}
+});
 test('an uncertain mutation is sent once without automatically renewing or retrying it',async()=>{
  const h=await harness(()=>{throw Error('write_unknown');});await assert.rejects(h.services.config.save(1,{sample:'new'}),/operation_unavailable/);assert.equal(h.calls.length,1);assert.equal(h.calls[0].action,'admin/module-config-save');
 });

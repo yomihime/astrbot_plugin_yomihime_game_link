@@ -12,9 +12,9 @@ from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[2]
 CLIS = ("scripts/configure_source_credentials.py", "scripts/admin_credentials.py")
-REVIEWED_RELEASE = "0.1.0a11"
+REVIEWED_RELEASE = "0.1.0a16"
 REVIEWED_WHEEL_SHA256 = (
-    "466f10824c4a40a9046a982db06cdcf0d3b193c87b393e8868e7b7f7c95e1b24"
+    "562a6cd01dc47464a3c89b1406cf3931b5c67523acdcb2f3f2e9e8c1ac5b09e0"
 )
 
 
@@ -71,6 +71,13 @@ def _consumer_pins(overrides=None):
     if not member_versions or not metadata_versions:
         raise AssertionError("Dashboard member or metadata release guard is missing")
     pins["scripts/build_dashboard_zip.py"] = member_versions | metadata_versions
+    workflow = source(".github/workflows/build.yml")
+    pins[".github/workflows/build.yml"] = set(
+        re.findall(
+            r"YGL_TEST_SDK_WHEEL:.*?/yomihime_game_link_sdk-([^/\s]+)-py3-none-any\.whl",
+            workflow,
+        )
+    )
     return pins
 
 
@@ -138,7 +145,7 @@ class SDKReleasePinTests(unittest.TestCase):
                 else build_sdk_wheel(Path(temporary) / "build", ROOT)
             )
             self.assertEqual(
-                wheel.name, "yomihime_game_link_sdk-0.1.0a11-py3-none-any.whl"
+                wheel.name, "yomihime_game_link_sdk-0.1.0a16-py3-none-any.whl"
             )
             self.assertEqual(
                 hashlib.sha256(wheel.read_bytes()).hexdigest(), REVIEWED_WHEEL_SHA256
@@ -150,7 +157,7 @@ class SDKReleasePinTests(unittest.TestCase):
                 ).hexdigest()
                 for name, data in payload.items()
             }
-            self.assertEqual(len(actual_manifest), 18)
+            self.assertEqual(len(actual_manifest), 19)
             main_manifest = _literal(
                 (ROOT / "main.py").read_text(encoding="utf8"), "SDK_PACKAGE_MANIFEST"
             )

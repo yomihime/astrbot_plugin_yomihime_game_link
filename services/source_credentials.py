@@ -34,6 +34,58 @@ _TOKEN_RESPONSE_BYTES = 64 * 1024
 _MAX_CREDENTIAL_PAYLOAD_BYTES = 16 * 1024
 
 
+def credential_path_matches(pattern, path):
+    """One optional bounded ASCII path segment; never a regex or URL."""
+    if "*" not in pattern:
+        return pattern == path
+    prefix, suffix = pattern.split("*")
+    if not path.startswith(prefix) or (suffix and not path.endswith(suffix)):
+        return False
+    segment = path[len(prefix) : len(path) - len(suffix) if suffix else None]
+    return re.fullmatch(r"[A-Za-z0-9_-]{1,64}", segment) is not None
+
+
+@dataclass(frozen=True, slots=True)
+class CredentialInjection:
+    path: str
+    method: str
+    location: str
+    name: str
+    field: str = "token"
+    prefix: str = ""
+
+    def __post_init__(self):
+        if type(self.path) is not str or self.path.count("*") > 1:
+            raise ValueError("invalid static injection path")
+        if "*" in self.path and "/*" not in self.path:
+            raise ValueError("wildcard must occupy a complete path segment")
+        if (
+            "*" in self.path
+            and self.path.split("*")[1] not in ("",)
+            and not self.path.split("*")[1].startswith("/")
+        ):
+            raise ValueError("wildcard must occupy a complete path segment")
+        validate_contract(
+            HttpRequest("policy", self.path.replace("*", "segment"), self.method)
+        )
+        if self.method not in {"GET", "POST"} or self.location not in {
+            "header",
+            "json",
+        }:
+            raise ValueError("invalid static injection target")
+        if self.location == "json" and self.method != "POST":
+            raise ValueError("JSON injection requires POST")
+        if (
+            type(self.name) is not str
+            or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{0,63}", self.name)
+            or self.name.lower()
+            in {"host", "content-length", "cookie", "proxy-authorization"}
+            or self.field not in {"token", "subject"}
+            or self.prefix not in {"", "Bearer "}
+        ):
+            raise ValueError("invalid static injection field")
+
+
 @dataclass(frozen=True, slots=True)
 class SourceCredentialPolicy:
     """Host-trusted, immutable endpoint and path permissions for one alias."""
@@ -43,34 +95,63 @@ class SourceCredentialPolicy:
     credential_ref: str
     resource_host: str
     allowed_resource_paths: tuple[str, ...]
-    token_host: str
-    token_path: str
+    token_host: str = ""
+    token_path: str = ""
     scope: str | None = None
+    kind: str = "oauth_client_credentials"
+    injections: tuple = ()
+    optional: bool = False
 
     def __post_init__(self) -> None:
         validate_module_id(self.module_id, "credential policy module_id")
         resource = validate_contract(
             SourceDeclaration(self.source_id, self.resource_host, self.credential_ref)
         )
-        token = validate_contract(SourceDeclaration("oauth_token", self.token_host))
+        if self.kind not in {"oauth_client_credentials", "static"}:
+            raise ValueError("invalid credential kind")
+        if type(self.optional) is not bool:
+            raise ValueError("invalid credential optional marker")
+        token = (
+            validate_contract(SourceDeclaration("oauth_token", self.token_host))
+            if self.kind == "oauth_client_credentials"
+            else None
+        )
         if resource.credential_ref is None:
             raise ValueError("source credential policy requires a credential alias")
-        validate_contract(
-            HttpRequest(
-                "oauth_token",
-                self.token_path,
-                "POST",
-                body=b"grant_type=client_credentials",
+        if token is not None:
+            validate_contract(
+                HttpRequest(
+                    "oauth_token",
+                    self.token_path,
+                    "POST",
+                    body=b"grant_type=client_credentials",
+                )
             )
-        )
         paths = tuple(self.allowed_resource_paths)
         if not paths or len(paths) != len(set(paths)):
             raise ValueError("credential policy requires unique resource paths")
         for path in paths:
-            validate_contract(HttpRequest(self.source_id, path, "GET"))
+            validate_contract(
+                HttpRequest(
+                    self.source_id,
+                    path.replace("*", "segment") if self.kind == "static" else path,
+                    "GET",
+                )
+            )
         object.__setattr__(self, "resource_host", resource.host)
-        object.__setattr__(self, "token_host", token.host)
+        if token is not None:
+            object.__setattr__(self, "token_host", token.host)
         object.__setattr__(self, "allowed_resource_paths", paths)
+        injections = tuple(self.injections)
+        if self.kind == "static":
+            if not 1 <= len(injections) <= 32:
+                raise ValueError("static credential requires bounded injections")
+            for rule in injections:
+                if type(rule) is not CredentialInjection or rule.path not in paths:
+                    raise ValueError("invalid credential injection policy")
+        elif injections or self.optional:
+            raise ValueError("OAuth policy does not support static fields")
+        object.__setattr__(self, "injections", injections)
         if self.scope is not None and (
             type(self.scope) is not str
             or not self.scope
@@ -158,6 +239,11 @@ def bind_source_credential_declarations(
                     policy.credential_ref,
                     declaration.timeout_seconds,
                     declaration.requests_per_minute,
+                    declaration.max_redirects,
+                    declaration.redirect_path_prefixes,
+                    declaration.requests_per_hour,
+                    declaration.request_budget_config,
+                    declaration.authorization_only,
                 )
             )
         )
@@ -307,6 +393,8 @@ class SourceCredentialService:
         state = self._states[declaration.source_id]
         async with state.lock:
             self._ensure_active()
+            if policy.kind == "static":
+                return await self._static_lease(policy, request)
             secret_ref = await self._current_secret_ref(declaration.credential_ref)
             self._ensure_active()
             if state.secret_token != secret_ref.token:
@@ -341,6 +429,88 @@ class SourceCredentialService:
             state.expires_at = self._clock() + max(0.0, lifetime - early_expiry)
             state.generation += 1
             return self._lease(state)
+
+    async def _static_lease(self, policy, request):
+        rules = tuple(
+            rule
+            for rule in policy.injections
+            if credential_path_matches(rule.path, request.path)
+            and rule.method == request.method
+        )
+        if not rules:
+            raise SourceHttpError("credentials_unavailable")
+        target = ConfigTarget(self._config_principal_id, self._module_id)
+        snapshot = await self._config_repository.current(target)
+        self._ensure_active()
+        matches = [
+            item
+            for item in snapshot.secret_metadata
+            if item.field == policy.credential_ref
+        ]
+        if not matches or (
+            len(matches) == 1 and matches[0].state is SecretMetadataState.TOMBSTONED
+        ):
+            if policy.optional:
+                return None
+            raise SourceHttpError("credentials_unavailable")
+        secret_ref = await self._current_secret_ref(policy.credential_ref)
+        owner = SecretOwner(
+            self._config_principal_id,
+            self._module_id,
+            policy.credential_ref,
+            secret_ref.operation_id,
+        )
+        try:
+            payload = await self._secret_store.read(secret_ref, owner=owner)
+            self._ensure_active()
+            if (
+                type(payload) is not bytes
+                or not 0 < len(payload) <= _MAX_CREDENTIAL_PAYLOAD_BYTES
+            ):
+                raise ValueError
+            material = json.loads(payload, object_pairs_hook=_unique_object)
+            if (
+                type(material) is not dict
+                or set(material)
+                not in ({"schema", "token"}, {"schema", "token", "subject"})
+                or type(material["schema"]) is not int
+                or material["schema"] != 2
+            ):
+                raise ValueError
+            values = {
+                name: static_credential_field(value, name)
+                for name, value in material.items()
+                if name != "schema"
+            }
+            headers, body_fields = {}, {}
+            for rule in rules:
+                value = values[rule.field]
+                destination = headers if rule.location == "header" else body_fields
+                if rule.name in destination:
+                    raise ValueError
+                if rule.location == "header" and any(
+                    key.lower() == rule.name.lower() for key in (request.headers or {})
+                ):
+                    raise ValueError
+                destination[rule.name] = rule.prefix + value
+            if await self._current_secret_ref(policy.credential_ref) != secret_ref:
+                raise ValueError
+            self._ensure_active()
+            return CredentialLease(
+                "",
+                snapshot.revision,
+                secret_ref.token,
+                headers=tuple(headers.items()),
+                body_fields=tuple(body_fields.items()),
+                kind="static",
+                redactions=(values["token"],),
+            )
+        except asyncio.CancelledError:
+            raise
+        except SourceHttpError:
+            raise
+        except Exception:
+            raise SourceHttpError("credentials_unavailable") from None
 
     async def invalidate(
         self,
@@ -418,7 +588,12 @@ class SourceCredentialService:
             or policy.credential_ref != declaration.credential_ref
             or field is None
             or not field.sensitive
-            or request.path not in policy.allowed_resource_paths
+            or not any(
+                credential_path_matches(path, request.path)
+                if policy.kind == "static"
+                else path == request.path
+                for path in policy.allowed_resource_paths
+            )
         ):
             raise SourceHttpError("credentials_unavailable") from None
         return policy
@@ -581,6 +756,19 @@ class SourceCredentialService:
         return CredentialLease(
             f"Bearer {state.access_token}", state.generation, state.secret_token
         )
+
+
+def static_credential_field(value, name="token"):
+    maximum = 4096 if name == "token" else 512
+    if (
+        type(value) is not str
+        or not value
+        or value != value.strip()
+        or len(value) > maximum
+        or any(ord(char) < 32 or 0x7F <= ord(char) <= 0x9F for char in value)
+    ):
+        raise ValueError("invalid static credential material")
+    return value
 
 
 def _client_field(value: object) -> str:

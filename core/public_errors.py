@@ -59,6 +59,8 @@ def public_failure(error, phase="service"):
             status_code=status
             if type(status) is int and 100 <= status <= 599
             else None,
+            retry_after_seconds=getattr(error, "retry_after_seconds", None),
+            next_available_at=getattr(error, "next_available_at", None),
         )
     try:
         code = getattr(error, "code", None)

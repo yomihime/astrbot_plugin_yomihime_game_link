@@ -659,6 +659,119 @@ class PublicWebPagesTests(unittest.IsolatedAsyncioTestCase):
             )
 
 
+class ExternalPublicWebProofTests(unittest.TestCase):
+    def _fixture(self):
+        validator = HostPublicWebValidator(
+            1,
+            lambda *_: True,
+            bindings={"legacy": ("bundled/mod", "read")},
+            clock=lambda: 10.0,
+            wall_clock=lambda: 1000.0,
+        )
+        validator.attach(object())
+        endpoint = ("external/mod", "home", "read")
+        owner, live = object(), [True]
+        records = {endpoint: (("external/mod", "read"), owner, lambda: live[0])}
+        validator.replace_external_bindings(records)
+        return validator, endpoint, owner, live, records
+
+    def test_exact_route_snapshot_idempotency_target_and_replacement(self):
+        validator, endpoint, owner, live, records = self._fixture()
+        ticket = validator.begin(endpoint, "synthetic", 1060)
+        route = validator.route_for(ticket, endpoint)
+        validator.replace_external_bindings(records)
+        self.assertIs(validator.route_for(ticket, endpoint), route)
+        with self.assertRaises(WebPublicRejected):
+            validator.route_for(ticket, ("external/mod", "other", "read"))
+        validator.mint(ticket)
+        with self.assertRaises(WebPublicRejected):
+            validator.consume(
+                ticket, module_id="bundled/mod", capability_id="read", generation=2
+            )
+        binding = validator.consume(
+            ticket, module_id="external/mod", capability_id="read", generation=2
+        )
+        self.assertTrue(validator.is_current(ticket, binding))
+        with self.assertRaises(WebPublicRejected):
+            validator.consume(
+                ticket, module_id="external/mod", capability_id="read", generation=2
+            )
+        validator.replace_external_bindings(
+            {endpoint: (route.target, object(), lambda: True)}
+        )
+        self.assertFalse(validator.is_current(ticket, binding))
+        with self.assertRaises(WebPublicRejected):
+            validator.require_route_current(endpoint, route)
+
+    def test_live_owner_is_required_at_every_proof_phase_and_final_hop(self):
+        for phase in ("begin", "remaining", "mint", "consume", "is_current", "final"):
+            with self.subTest(phase=phase):
+                validator, endpoint, _owner, live, _records = self._fixture()
+                if phase == "begin":
+                    live[0] = False
+                    with self.assertRaises(WebPublicRejected):
+                        validator.begin(endpoint, "synthetic", 1060)
+                    continue
+                ticket = validator.begin(endpoint, "synthetic", 1060)
+                route = validator.route_for(ticket, endpoint)
+                if phase in ("consume", "is_current", "final"):
+                    validator.mint(ticket)
+                if phase in ("is_current", "final"):
+                    binding = validator.consume(
+                        ticket,
+                        module_id="external/mod",
+                        capability_id="read",
+                        generation=2,
+                    )
+                if phase == "final":
+                    validator.revoke(ticket)
+                    validator.require_route_current(endpoint, route)
+                live[0] = False
+                if phase == "is_current":
+                    self.assertFalse(validator.is_current(ticket, binding))
+                else:
+                    with self.assertRaises(WebPublicRejected):
+                        if phase == "remaining":
+                            validator.remaining(ticket)
+                        elif phase == "mint":
+                            validator.mint(ticket)
+                        elif phase == "consume":
+                            validator.consume(
+                                ticket,
+                                module_id="external/mod",
+                                capability_id="read",
+                                generation=2,
+                            )
+                        else:
+                            validator.require_route_current(endpoint, route)
+
+    def test_external_snapshot_is_atomic_and_cannot_replace_bundled_routes(self):
+        validator, endpoint, owner, _live, records = self._fixture()
+        ticket = validator.begin(endpoint, "synthetic", 1060)
+        route = validator.route_for(ticket, endpoint)
+        for rejected in (
+            {"legacy": (("external/mod", "read"), owner, lambda: True)},
+            {
+                ("bundled/mod", "extra", "read"): (
+                    ("bundled/mod", "read"),
+                    owner,
+                    lambda: True,
+                )
+            },
+            {endpoint: (("foreign/mod", "read"), owner, lambda: True)},
+        ):
+            with self.assertRaises(ValueError):
+                validator.replace_external_bindings({**records, **rejected})
+            self.assertIs(validator.route_for(ticket, endpoint), route)
+            self.assertEqual(validator._bindings["legacy"], ("bundled/mod", "read"))
+        # Owner cleanup follows the captured target even if the compatibility
+        # target view changes; route-table lookup must not let a ticket escape.
+        validator._bindings.pop(endpoint)
+        validator.revoke_owner("external/mod")
+        with self.assertRaises(WebPublicRejected):
+            validator.remaining(ticket)
+
+
 class _Context:
     def __init__(self, *, fail_second=False):
         self.registered_web_apis = []
@@ -704,19 +817,22 @@ class _PublicRuntime:
 
 
 class PublicPagesTests(unittest.IsolatedAsyncioTestCase):
-    async def test_exact_four_get_and_four_post_handlers_preserve_projections(self):
+    async def test_exact_four_get_and_six_post_handlers_preserve_projections(self):
         context, runtime = _Context(), _PublicRuntime()
         pages = PublicPages(context, runtime)
         pages.register()
         pages.register()
-        self.assertEqual(len(context.registered_web_apis), 9)
+        self.assertEqual(len(context.registered_web_apis), 10)
         self.assertEqual(
             [(entry[0], entry[2]) for entry in context.registered_web_apis],
             [
                 (f"/{PLUGIN_NAME}/{endpoint}", ["GET"])
                 for endpoint in ("overview", "settings", "catalog", "web-status")
             ]
-            + [(f"/{PLUGIN_NAME}/invoke", ["POST"])]
+            + [
+                (f"/{PLUGIN_NAME}/{endpoint}", ["POST"])
+                for endpoint in ("invoke", "invoke-images")
+            ]
             + [
                 (f"/{PLUGIN_NAME}/queries/{endpoint}", ["POST"])
                 for endpoint in ("items", "character", "calendar", "market")

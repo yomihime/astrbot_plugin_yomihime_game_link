@@ -57,6 +57,7 @@ _OPERATIONS = {
     "module-credential-status": AdminOperation.READ_CONFIG,
     "module-credential-replace": AdminOperation.UPDATE_CONFIG,
     "module-credential-clear": AdminOperation.UPDATE_CONFIG,
+    "module-credential-authorize": AdminOperation.UPDATE_CONFIG,
     "module-page-session": AdminOperation.READ_CONFIG,
     "module-page-session-close": AdminOperation.READ_CONFIG,
 }
@@ -69,6 +70,7 @@ _MODULE_PAGE_OPERATIONS = frozenset(
         "module-credential-status",
         "module-credential-replace",
         "module-credential-clear",
+        "module-credential-authorize",
         "module-page-session",
         "module-page-session-close",
     }

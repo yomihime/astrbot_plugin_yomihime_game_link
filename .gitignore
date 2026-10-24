@@ -232,3 +232,5 @@ data/
 
 # Local frontend build audit and test artifacts.
 /.build/
+/.local-dev/
+/AGENTS.md

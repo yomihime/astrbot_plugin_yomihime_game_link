@@ -296,6 +296,12 @@ def _map_module(value: object, contract_version: str) -> ModuleManifest:
     sources = []
     for raw in _list(obj, "sources"):
         item = _keys(raw, "source", {"source_id", "host"})
+        if "redirect_path_prefixes" in item:
+            item["redirect_path_prefixes"] = tuple(
+                _shape(
+                    item["redirect_path_prefixes"], "array", "redirect_path_prefixes"
+                )
+            )
         sources.append(
             validate_contract(SourceDeclaration(credential_ref=None, **item))
         )

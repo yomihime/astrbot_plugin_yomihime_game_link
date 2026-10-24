@@ -19,7 +19,7 @@ from scripts.build_release import build_release
 
 ROOT = Path(__file__).resolve().parents[2]
 EXPECTED_WHEEL_SHA256 = (
-    "466f10824c4a40a9046a982db06cdcf0d3b193c87b393e8868e7b7f7c95e1b24"
+    "562a6cd01dc47464a3c89b1406cf3931b5c67523acdcb2f3f2e9e8c1ac5b09e0"
 )
 EXPECTED_RESOURCES = {
     f"yomihime_game_link_sdk/_examples/{example}/{filename}"
@@ -61,7 +61,7 @@ installed_payload = {
     for path in installed_sdk_root.rglob("*")
     if path.is_file() and "__pycache__" not in path.parts
 }
-assert len(sdk_manifest) == 18
+assert len(sdk_manifest) == 19
 assert installed_payload == set(sdk_manifest)
 for relative, expected_digest in sdk_manifest.items():
     assert hashlib.sha256(
@@ -138,7 +138,7 @@ assert sdk.SourceHttpError is CanonicalSourceHttpError
 assert GatewayResultType is sdk.CapabilityResult
 assert OutputResultType is sdk.CapabilityResult
 
-assert sdk.__version__ == "0.1.0a11"
+assert sdk.__version__ == "0.1.0a16"
 assert sdk.MODULE_ABI_VERSION == "2.0"
 assert sdk.ScheduleTrigger.BACKGROUND.value == "background"
 assert sdk.ScheduleDescriptor.__dataclass_fields__["background_parameters"].default == ()
@@ -376,7 +376,7 @@ class InstalledArtifactTests(unittest.TestCase):
             wheel_digest = hashlib.sha256(wheel.read_bytes()).hexdigest()
             self.assertEqual(wheel_digest, EXPECTED_WHEEL_SHA256)
             self.assertEqual(
-                wheel.name, "yomihime_game_link_sdk-0.1.0a11-py3-none-any.whl"
+                wheel.name, "yomihime_game_link_sdk-0.1.0a16-py3-none-any.whl"
             )
             with zipfile.ZipFile(wheel) as archive:
                 entries = set(archive.namelist())
