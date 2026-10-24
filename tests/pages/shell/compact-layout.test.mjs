@@ -3,21 +3,14 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 const css=await readFile(new URL('../../../pages/frontend/src/shell.css',import.meta.url),'utf8');
-test('home query actions stay in one accessible scrolling row without redundant labels',async()=>{
- assert.match(css,/\.workspace-page-index\{display:flex;flex-wrap:nowrap;gap:0/);
- assert.match(css,/\.workspace-page-index>a\{[^}]*flex:1 0 auto;min-width:64px/);
- assert.match(css,/\.workspace-page-index>a\{[^}]*min-height:40px;padding:8px 16px/);
- assert.match(css,/\.workspace-page-index\{[^}]*overflow-x:auto;padding:6px;scroll-padding-inline:6px/);
- assert.match(css,/\.workspace-page-index>a\{[^}]*border:0/);
- assert.match(css,/\.workspace-page-index>a\+a:before\{[^}]*height:14px/);
- assert.match(css,/\.workspace-page-index:empty\{display:none\}/);
- assert.match(css,/\.workspace-page-copy strong\{[^}]*font-size:14px/);
+test('home stays module-only and auxiliary links remain inside each module',async()=>{
  const source=await readFile(new URL('../../../pages/frontend/src/main.ts',import.meta.url),'utf8');
- assert.doesNotMatch(source,/workspace-page-number/);
- assert.doesNotMatch(source,/项辅助查询，收在一处/);
- assert.match(source,/class:'workspace-page-copy'\},\[h\('strong',page.title\)\]/);
- assert.match(source,/aria-label':label\(module.module_id\)\+'快捷查询'/);
- assert.match(css,/\.workspace-emblem\{[^}]*width:60px;height:60px/);
+ assert.doesNotMatch(source,/workspace-page-index|workspace-page-number/);
+ assert.doesNotMatch(source,/查询偏好、日历与来源凭据|游戏业务由模块独立管理/);
+ assert.match(source,/link\('辅助查询','#\/module\/'/);
+ assert.match(source,/class:'query-links','aria-label':'辅助查询入口'/);
+ assert.match(source,/page.title,`#\/module\//);
+ assert.match(css,/\.workspace-module h2 a\{[^}]*min-height:40px/);
 });
 test('management surface follows shared theme tokens without shrinking action targets',()=>{
  assert.match(css,/\.module-management\{background:var\(--ui-panel\);border:1px solid var\(--ui-border\)/);
@@ -48,8 +41,11 @@ test('home copy avoids per-module boilerplate while preserving unavailable state
  assert.doesNotMatch(home,/workspace-kicker|workspace-scope-note|workspace-module-meta|进入模块|查看模块功能与设置|收在一处|MODULE/);
  assert.match(home,/暂无可用功能，请在模块管理中核对状态/);
  assert.match(home,/已加载.*已停用.*不可用/);
+ assert.match(home,/class:'workspace-loaded'/);
+ assert.match(home,/role:'tooltip'\},'已加载'/);
+ assert.match(css,/\.workspace-loaded:hover \.workspace-status-tooltip,\.workspace-module-title:focus-within \.workspace-status-tooltip\{visibility:visible\}/);
  assert.match(home,/class:'workspace-module-title'/);
- assert.match(css,/\.workspace-module\[data-has-queries=false\] \.workspace-emblem\{width:44px;height:44px/);
+ assert.match(css,/\.workspace-module \.workspace-emblem\{width:44px;height:44px/);
  const manifest=JSON.parse(await readFile(new URL('../../../modules/ff14/yomihime.manifest.json',import.meta.url),'utf8'));
  const entry=await readFile(new URL('../../../modules/ff14/pages/src/entry.ts',import.meta.url),'utf8');
  for(const [route,title] of Object.entries({items:'物品查询',market:'市场行情',logs:'角色 Logs',calendar:'活动日历'})){

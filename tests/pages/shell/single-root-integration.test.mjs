@@ -19,12 +19,34 @@ test('Core navigation confirmation cancels safely and re-entry preserves ordinar
  }finally{h.close();}
 });
 
-test('home inline query and sidebar links keep their real navigation targets',async()=>{
+test('home module entry leads to auxiliary queries and Back returns to module',async()=>{
  const h=await harness();try{
-  const query=h.doc.querySelector('.workspace-page-index a');assert.ok(query);
-  const route=query.getAttribute('href');query.click();await flush();assert.equal(h.window.location.hash,route);
-  const modules=h.doc.querySelector('.shell-sidebar a[href="#/modules"]');assert.ok(modules);
-  modules.click();await flush();assert.equal(h.window.location.hash,'#/modules');
-  assert.equal(h.doc.querySelector('.module-dashboard').hidden,false);
+  assert.equal(h.doc.querySelector('.workspace-page-index'),null);
+  const entry=h.doc.querySelector('.workspace-module-title h2 a');assert.ok(entry);
+  const description=h.doc.getElementById(entry.getAttribute('aria-describedby'));assert.equal(description.textContent,'已加载');
+  assert.equal(h.doc.querySelector('.workspace-loaded [tabindex]'),null);
+  entry.click();await flush();assert.equal(h.window.location.hash,'#/module/ff14%2Fff14');
+  const tab=[...h.doc.querySelectorAll('.module-tabs a')].find(a=>a.textContent==='辅助查询');assert.ok(tab);tab.click();await flush();
+  const query=h.doc.querySelector('.query-links a');assert.ok(query);const route=query.getAttribute('href');query.click();await flush();assert.equal(h.window.location.hash,route);
+  h.window.history.back();await flush();await flush();assert.equal(h.window.location.hash,'#/module/ff14%2Fff14/-/queries');
+  h.window.history.back();await flush();await flush();assert.equal(h.window.location.hash,'#/module/ff14%2Fff14');
+  const modules=h.doc.querySelector('.shell-sidebar a[href="#/modules"]');modules.click();await flush();assert.equal(h.window.location.hash,'#/modules');
+ }finally{h.close();}
+});
+
+test('home loaded icon has a named description while disabled and unavailable remain text',async()=>{
+ const {catalog}=await import('./fixtures.mjs');const data=catalog(),base=data.modules[0];
+ for(const state of ['disabled','unavailable'])data.modules.push({...base,module_id:'example/'+state,route:state,state,enabled:false,lifecycle:'stopped',runtime_id:null,pages:[],resources:[]});
+ const h=await harness(data);try{
+  const articles=[...h.doc.querySelectorAll('.workspace-module')];
+  assert.ok(articles[0].querySelector('.workspace-loaded svg circle'));
+  assert.ok(articles[0].querySelector('.workspace-loaded svg path'));
+  const title=articles[0].querySelector('h2 a');assert.equal(h.doc.getElementById(title.getAttribute('aria-describedby')).textContent,'已加载');
+  assert.equal(articles[0].querySelector('.workspace-loaded').hasAttribute('tabindex'),false);
+  for(const [index,text] of [[1,'已停用'],[2,'不可用']]){
+   assert.equal(articles[index].querySelector('.workspace-loaded'),null);
+   assert.equal(articles[index].querySelector('.workspace-state').textContent,text);
+   assert.match(articles[index].textContent,/暂无可用功能/);
+  }
  }finally{h.close();}
 });

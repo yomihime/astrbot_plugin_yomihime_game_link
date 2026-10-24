@@ -1,22 +1,45 @@
 // Build a local-only browser harness around exact production assets. No real Host.
 import {readFile,writeFile,mkdir,cp} from 'node:fs/promises';
 import {resolve} from 'node:path';
+import {execFileSync} from 'node:child_process';
+import {createHash} from 'node:crypto';
 const root=resolve(import.meta.dirname,'../../..'),out=resolve(process.argv[2]||'/tmp/game-link-oil-production');
 await mkdir(out,{recursive:true});await cp(resolve(root,'pages/00-game-link'),out,{recursive:true});
 const manifest=JSON.parse(await readFile(resolve(root,'modules/ff14/yomihime.manifest.json'),'utf8')),module=manifest.modules[0],prefix='module-assets/ff14/ff14/';
 const catalog={schema_version:1,catalog_revision:1,runtime:{state:'ready'},modules:[{...module,module_id:'ff14/ff14',display:{default_name:'最终幻想 XIV',localized_names:{},short_name:'FF14',logo_resource:prefix+module.display.logo_resource},state:'loaded',enabled:true,lifecycle:'active',module_epoch:1,runtime_id:'offline-fixture',asset_version:'a'.repeat(64),pages:module.pages.map(p=>({...p,capability_id:p.capability_id??null,entry:prefix+p.entry,styles:p.styles.map(s=>prefix+s)})),resources:module.resources.map(r=>({...r,path:prefix+r.path}))}]};
-// Optional home/management density fixture. External names, IDs and page roles
-// match steam_dlc manifest at 84cfb0fe4a7a1f58a42a1c45c5e2254b7ac00c1f.
-// Statuses/assets are synthetic; this does not preview external DLC page implementations.
+// Five-module navigation preview requires real, reviewed external package assets.
+// Only bridge state/data are synthetic; no external DLC code is modified.
 if(process.argv.includes('--five-modules')){
-  const original=catalog.modules[0];
-  for(const [id,name] of [['cs2','CS2'],['deadlock','Deadlock'],['dota2','Dota2'],['steam','Steam']]){
-    const owner=`steam_dlc/${id}`,target=`module-assets/${owner}/`;
-    const clone=JSON.parse(JSON.stringify(original).replaceAll(prefix,target));
-    clone.module_id=owner;clone.route=id;clone.display={default_name:name,localized_names:{},short_name:name,logo_resource:null};
-    clone.pages=clone.pages.filter(p=>p.role==='home'||p.role==='config').map(p=>({...p,route_id:p.role==='home'?'home':'settings',title:p.role==='home'?'帮助与状态':'设置'}));
-    catalog.modules.push(clone);
-    await cp(resolve(out,prefix),resolve(out,target),{recursive:true});
+  const argument=process.argv.find(value=>value.startsWith('--dlc-root='));
+  if(!argument)throw Error('--five-modules requires --dlc-root=<reviewed steam_dlc package directory>');
+  const dlcRoot=resolve(argument.slice('--dlc-root='.length));
+  // Use the same validated, hash-bound static projection as the release builder.
+  // This is not a full release ZIP or real Host/session verification.
+  execFileSync(process.env.YGL_TEST_PYTHON||'python',['-c',`
+from pathlib import Path
+import sys
+from scripts.build_dashboard_zip import projected_page_assets
+root,out,external=map(Path,sys.argv[1:])
+for name,content in projected_page_assets(root,external_page_roots=(external,)).items():
+    prefix='pages/00-game-link/'
+    if not name.startswith(prefix): continue
+    target=out/name[len(prefix):]
+    target.parent.mkdir(parents=True,exist_ok=True)
+    target.write_bytes(content)
+`,root,out,dlcRoot],{cwd:root,stdio:'pipe'});
+  const rawManifest=await readFile(resolve(dlcRoot,'yomihime.manifest.json'));
+  const digest=createHash('sha256').update(rawManifest).digest('hex');
+  const external=JSON.parse(rawManifest.toString('utf8'));
+  if(external.package_id!=='steam_dlc')throw Error('Expected steam_dlc fixture package');
+  for(const id of ['cs2','deadlock','dota2','steam']){
+    const descriptor=external.modules.find(value=>value.module_id===id);
+    if(!descriptor)throw Error('Missing external fixture module '+id);
+    const owner=`steam_dlc/${id}`,target=`module-assets/${owner}/pages/p${digest}/`;
+    catalog.modules.push({...catalog.modules[0],...descriptor,module_id:owner,
+      display:{...descriptor.display,localized_names:{},logo_resource:null},
+      pages:descriptor.pages.map(page=>({...page,capability_id:page.capability_id??null,entry:target+page.entry,styles:page.styles.map(style=>target+style)})),
+      resources:descriptor.resources.map(resource=>({...resource,path:target+resource.path})),
+    });
   }
 }
 const {sourceModule}=await import('./compile.mjs');
