@@ -966,7 +966,7 @@
       "pages": [
         {
           "route_id": "items",
-          "title": "物品",
+          "title": "物品查询",
           "entry": "pages/dist/entry.js",
           "order": 10,
           "access": "public_web",
@@ -977,7 +977,7 @@
         },
         {
           "route_id": "market",
-          "title": "市场",
+          "title": "市场行情",
           "entry": "pages/dist/entry.js",
           "order": 20,
           "access": "public_web",
@@ -988,7 +988,7 @@
         },
         {
           "route_id": "logs",
-          "title": "Logs",
+          "title": "角色 Logs",
           "entry": "pages/dist/entry.js",
           "order": 30,
           "access": "public_web",
@@ -999,7 +999,7 @@
         },
         {
           "route_id": "calendar",
-          "title": "日历",
+          "title": "活动日历",
           "entry": "pages/dist/entry.js",
           "order": 40,
           "access": "public_web",
@@ -1051,7 +1051,7 @@
         },
         {
           "path": "pages/dist/entry.js",
-          "sha256": "8d99184206f9df72a61cfb1ce4da405969d7cc3d0996ee70dd96637f4a481398"
+          "sha256": "32462acbd6aea651b8bd3aef76e6386f7965bf7bc86ae25fa06c158faaea744f"
         },
         {
           "path": "pages/dist/styles.css",

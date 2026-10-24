@@ -7,7 +7,7 @@ import {createQueryController,fields,queryTimeoutMs} from './query-controller';
 import './styles.css';
 import {createSelectA11y} from './select-a11y';
 function resultValue(value:any): string {if (value===null) return '—'; if (value && typeof value==='object' && !Array.isArray(value) && Object.hasOwn(value,'value')) return [String(value.value),value.currency||value.unit||value.timezone].filter(Boolean).join(' '); return value && typeof value==='object'?JSON.stringify(value):String(value);}
-const titles:Record<string,string>={items:'查找物品与公开详情',market:'按物品查询市场',logs:'查询角色 Logs',calendar:'查询活动日历'};
+const titles:Record<string,string>={items:'物品查询',market:'市场行情',logs:'角色 Logs',calendar:'活动日历'};
 const hints:Record<string,string>={items:'名称或 ID 查询；缺项与来源说明保留在结果中。',market:'范围可留空，由服务端解析默认区域的全服范围；名称与范围别名也由服务端判定。',logs:'选择对应区域和服务器，输入角色名；来源凭据由管理员维护，不在公开页面填写。',calendar:'仅手动查询选定窗口；来源失败和覆盖限制以本次结果为准。'};
 const errors:Record<string,string>={parameter_error:'参数未被来源接受；范围含糊时使用明确 World ID 或规范数据中心名。',auth_required:'来源凭据不可用，请联系管理员配置相应区域的来源凭据。',auth_expired:'授权已过期，请重新登录 Dashboard。',rate_limited:'查询受到限流，请稍后手动重试。',module_unavailable:'模块或查询期限不可用，请刷新状态后手动重试。',upstream_error:'来源暂时不可用，请稍后手动重试。',not_found:'来源未找到匹配内容，请检查名称或 ID。',no_records:'来源未返回记录；这不表示查询窗口已被完整覆盖。',not_public:'来源内容未公开。'};
 function blocks(result:any) {
