@@ -2287,16 +2287,20 @@ class CoreRuntimeTests(unittest.IsolatedAsyncioTestCase):
         request = asyncio.create_task(
             runtime.invoke_command("missing/module", "read", {}, ingress=ingress)
         )
-        await asyncio.wait_for(entered.wait(), timeout=1)
-        with self.assertRaises(CoreRuntimeCleanupPending) as caught:
-            await runtime.close(timeout=0.02)
-        self.assertEqual(caught.exception.component, "host_ingress")
-        release.set()
-        from yomihime_game_link_sdk.errors import InvalidInvocation
+        try:
+            await asyncio.wait_for(entered.wait(), timeout=1)
+            with self.assertRaises(CoreRuntimeCleanupPending) as caught:
+                await runtime.close(timeout=0.02)
+            self.assertEqual(caught.exception.component, "host_ingress")
+            release.set()
+            from yomihime_game_link_sdk.errors import InvalidInvocation
 
-        with self.assertRaises(InvalidInvocation):
-            await request
-        self.assertTrue(await runtime.close(timeout=0.5))
+            with self.assertRaises(InvalidInvocation):
+                await request
+        finally:
+            release.set()
+            await asyncio.gather(request, return_exceptions=True)
+            self.assertTrue(await runtime.close(timeout=0.5))
 
     async def test_close_quiesces_modules_before_pending_pump_drain(self) -> None:
         handler = _Handler()
@@ -2317,14 +2321,123 @@ class CoreRuntimeTests(unittest.IsolatedAsyncioTestCase):
         runtime._pump_task = asyncio.get_running_loop().create_task(
             runtime._pump_loop()
         )
-        await asyncio.wait_for(entered.wait(), timeout=1)
-        with self.assertRaises(CoreRuntimeCleanupPending) as caught:
-            await runtime.close(timeout=0.02)
-        self.assertEqual(caught.exception.component, "scheduler_pump")
-        self.assertFalse(runtime.closed)
-        self.assertIsNone(runtime.lifecycle.admission._open.get("private/mod"))
-        release.set()
-        self.assertTrue(await runtime.close(timeout=0.5))
+        try:
+            await asyncio.wait_for(entered.wait(), timeout=1)
+            with self.assertRaises(CoreRuntimeCleanupPending) as caught:
+                await runtime.close(timeout=0.02)
+            self.assertEqual(caught.exception.component, "scheduler_pump")
+            self.assertFalse(runtime.closed)
+            self.assertIsNone(runtime.lifecycle.admission._open.get("private/mod"))
+        finally:
+            release.set()
+            self.assertTrue(await runtime.close(timeout=0.5))
+
+    async def test_pending_durable_job_does_not_delay_module_shutdown_fence(self):
+        from ygl_test_subject.core.ports_jobs import JobError
+
+        from yomihime_game_link_sdk.jobs import JobRequest
+
+        class JobHandler:
+            def __init__(inner):
+                inner.entered, inner.release = asyncio.Event(), asyncio.Event()
+                inner.late_rejected = False
+
+            async def run(inner, invocation, parameters, control):
+                bound = await inner.services.scopes.bind(invocation)
+                await bound.cache.put("before-close", {"ok": True}, ttl_seconds=60)
+                inner.entered.set()
+                while not inner.release.is_set():
+                    try:
+                        await inner.release.wait()
+                    except asyncio.CancelledError:
+                        pass
+                try:
+                    await control.publish(({"late": True},))
+                except JobError:
+                    inner.late_rejected = True
+                return {}
+
+        handler = JobHandler()
+
+        class Instance(_Instance):
+            def handlers(inner):
+                return ModuleHandlers(
+                    {"private": inner._handler}, {}, {}, jobs={"wall": handler}
+                )
+
+        class Factory(_Factory):
+            async def create(inner, services):
+                handler.services = services
+                instance = Instance(inner.handler)
+                inner.instances.append(instance)
+                return instance
+
+        runtime = self._runtime(source=_FactorySource(Factory(_Handler())))
+        manifest = _private_manifest()
+        manifest["modules"][0]["jobs"] = [
+            {
+                "job_id": "wall",
+                "parameter_schema": {
+                    "type": "object",
+                    "properties": {},
+                    "required": [],
+                },
+                "timeout_seconds": 30,
+                "max_active_per_owner": 2,
+            }
+        ]
+        await self._activate_private(runtime, manifest=manifest)
+        ops = await runtime.jobs.for_dashboard(
+            subject="isolated-owner", module_id="private/mod", current=lambda: True
+        )
+        job = await ops.submit(JobRequest("wall", {}))
+        try:
+            await asyncio.wait_for(handler.entered.wait(), timeout=1)
+            with self.assertRaises(CoreRuntimeCleanupPending) as caught:
+                await runtime.close(timeout=0.02)
+            self.assertEqual(caught.exception.component, "durable_jobs")
+            self.assertIsNone(runtime.lifecycle.admission._open.get("private/mod"))
+            self.assertFalse(runtime.accepting)
+            self.assertFalse(runtime.closed)
+            self.assertTrue(runtime.jobs._busy_jobs())
+            self.assertFalse(runtime.admin_operations._accepting)
+            with self.assertRaises(JobError):
+                await ops.submit(JobRequest("wall", {}))
+            # The executor is retained while physical job work still owns it.
+            self.assertEqual(
+                await runtime.database.executor.run_read(
+                    lambda unit: unit.execute(
+                        "SELECT COUNT(*) FROM durable_job_results WHERE job_id=?",
+                        (job.job_id,),
+                    ).fetchone()[0]
+                ),
+                0,
+            )
+        finally:
+            handler.release.set()
+            self.assertTrue(await runtime.close(timeout=1))
+        self.assertTrue(handler.late_rejected)
+        self.assertFalse(runtime.jobs._busy_jobs())
+        self.assertEqual(runtime._command_message_port.calls, [])
+
+    async def test_close_fences_jobs_before_waiting_for_close_lock(self):
+        runtime = self._runtime()
+        await runtime.start()
+        await runtime._close_lock.acquire()
+        closing = asyncio.create_task(runtime.close(timeout=0.02))
+        started = asyncio.Event()
+        asyncio.get_running_loop().call_soon(started.set)
+        try:
+            await started.wait()
+            self.assertTrue(runtime.jobs._closed)
+            self.assertFalse(runtime.jobs._close_recovered)
+            with self.assertRaises(CoreRuntimeCleanupPending) as caught:
+                await closing
+            self.assertEqual(caught.exception.component, "close_lock")
+        finally:
+            runtime._close_lock.release()
+            await asyncio.gather(closing, return_exceptions=True)
+            self.assertTrue(await runtime.close(timeout=0.5))
 
     async def test_close_keeps_worker_open_until_renderer_root_flight_quiets(self):
         handler = _Handler()
@@ -2346,21 +2459,20 @@ class CoreRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 ),
             )
         )
-        await asyncio.wait_for(entered.wait(), timeout=1)
-        with self.assertRaises(CoreRuntimeCleanupPending) as caught:
-            await runtime.close(timeout=0.02)
-        self.assertEqual(caught.exception.component, "host_ingress")
-        self.assertFalse(runtime.closed)
-        self.assertEqual(
-            (await runtime.admin_credential_repository.current()).generation, 1
-        )
-        release.set()
         try:
-            await request
-        except BaseException:
-            pass
+            await asyncio.wait_for(entered.wait(), timeout=1)
+            with self.assertRaises(CoreRuntimeCleanupPending) as caught:
+                await runtime.close(timeout=0.02)
+            self.assertEqual(caught.exception.component, "host_ingress")
+            self.assertFalse(runtime.closed)
+            self.assertEqual(
+                (await runtime.admin_credential_repository.current()).generation, 1
+            )
+        finally:
+            release.set()
+            await asyncio.gather(request, return_exceptions=True)
+            self.assertTrue(await runtime.close(timeout=0.5))
         self.assertFalse(runtime._host_flights)
-        self.assertTrue(await runtime.close(timeout=0.5))
 
     async def test_close_during_route_publication_is_rechecked(self):
         runtime = self._runtime(source=_FactorySource(_Factory(_Handler())))
@@ -2382,14 +2494,18 @@ class CoreRuntimeTests(unittest.IsolatedAsyncioTestCase):
             request = asyncio.create_task(
                 runtime.invoke_command("private/mod", "read", {}, ingress=_ingress())
             )
-            await asyncio.wait_for(entered.wait(), timeout=1)
-            with self.assertRaises(CoreRuntimeCleanupPending) as caught:
-                await runtime.close(timeout=0.02)
-            self.assertEqual(caught.exception.component, "host_ingress")
-            release.set()
-            with self.assertRaises(RuntimeError):
-                await request
-        self.assertTrue(await runtime.close(timeout=0.5))
+            try:
+                await asyncio.wait_for(entered.wait(), timeout=1)
+                with self.assertRaises(CoreRuntimeCleanupPending) as caught:
+                    await runtime.close(timeout=0.02)
+                self.assertEqual(caught.exception.component, "host_ingress")
+                release.set()
+                with self.assertRaises(RuntimeError):
+                    await request
+            finally:
+                release.set()
+                await asyncio.gather(request, return_exceptions=True)
+                self.assertTrue(await runtime.close(timeout=0.5))
 
     async def test_close_during_startup_keeps_executor_owned_until_retry(self):
         runtime = self._runtime()
@@ -2409,16 +2525,20 @@ class CoreRuntimeTests(unittest.IsolatedAsyncioTestCase):
             type(runtime.database.executor), "initialize", blocked_initialize
         ):
             startup = asyncio.create_task(runtime.start())
-            await asyncio.wait_for(entered.wait(), timeout=1)
-            with self.assertRaises(CoreRuntimeCleanupPending) as caught:
-                await runtime.close(timeout=0.02)
-            self.assertEqual(caught.exception.component, "startup")
-            self.assertFalse(runtime.closed)
-            release.set()
-            with self.assertRaises(asyncio.CancelledError):
-                await startup
+            try:
+                await asyncio.wait_for(entered.wait(), timeout=1)
+                with self.assertRaises(CoreRuntimeCleanupPending) as caught:
+                    await runtime.close(timeout=0.02)
+                self.assertEqual(caught.exception.component, "startup")
+                self.assertFalse(runtime.closed)
+                release.set()
+                with self.assertRaises(asyncio.CancelledError):
+                    await startup
+            finally:
+                release.set()
+                await asyncio.gather(startup, return_exceptions=True)
+                self.assertTrue(await runtime.close(timeout=0.5))
         self.assertFalse(runtime.accepting)
-        self.assertTrue(await runtime.close(timeout=0.5))
 
     async def test_close_timeout_also_bounds_wait_for_close_owner(self):
         runtime = self._runtime()
@@ -2437,11 +2557,14 @@ class CoreRuntimeTests(unittest.IsolatedAsyncioTestCase):
             runtime._close_lock.release()
         self.assertTrue(await runtime.close(timeout=0.5))
 
-    async def _activate_private(self, runtime: CoreRuntime) -> _AdminContext:
+    async def _activate_private(
+        self, runtime: CoreRuntime, *, manifest=None
+    ) -> _AdminContext:
         package_root = self.root / "extensions" / "private"
         package_root.mkdir(parents=True, exist_ok=True)
         (package_root / "yomihime.manifest.json").write_text(
-            json.dumps(_private_manifest()), encoding="utf-8"
+            json.dumps(_private_manifest() if manifest is None else manifest),
+            encoding="utf-8",
         )
         await runtime.start()
         self.assertEqual(

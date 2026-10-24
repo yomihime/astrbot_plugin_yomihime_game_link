@@ -521,6 +521,30 @@ class DurableJobsTests(unittest.IsolatedAsyncioTestCase):
             (await self.terminal(ops, other.job_id)).status, JobStatus.SUCCEEDED
         )
 
+    async def test_stop_accepting_revokes_and_cancels_before_any_drain_await(self):
+        self.handler.block = True
+        ops = await self.web()
+        job = await ops.submit(JobRequest("wall", {"count": 1}))
+        await self.jobs.start()
+        await asyncio.wait_for(self.handler.entered.wait(), 5)
+        active = self.jobs._runs[job.job_id]
+        task = self.jobs._tasks[job.job_id]
+        self.jobs.stop_accepting()
+        self.assertTrue(active["revoked"])
+        self.assertTrue(active["scope"].cancelled)
+        self.assertGreater(task.cancelling(), 0)
+        self.assertFalse(self.jobs._close_recovered)
+        with self.assertRaises(JobError):
+            self.jobs._caller_check(ops._caller)()
+        cancellation_requests = task.cancelling()
+        self.jobs.stop_accepting()
+        self.assertEqual(task.cancelling(), cancellation_requests)
+        with self.assertRaises(JobError):
+            await self.handler.control.publish(({"late": True},))
+        self.handler.release.set()
+        self.assertTrue(await self.jobs.close())
+        self.assertFalse(self.jobs._busy_jobs())
+
     async def test_close_retains_cancel_resistant_run_until_real_cleanup_drains(self):
         self.handler = CancellationBarrierHandler()
         await self.reset_runtime()

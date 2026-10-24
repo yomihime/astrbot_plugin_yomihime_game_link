@@ -665,6 +665,22 @@ class JobsService:
                         self._runs.pop(row["job_id"])
                     self._wake.set()
 
+    def stop_accepting(self):
+        """Revoke execution/commit authority without waiting for physical work."""
+        with self._fence_lock:
+            if self._closed:
+                return
+            self._closed = True
+            for active in self._runs.values():
+                active["revoked"] = True
+                if active["scope"] is not None:
+                    active["scope"].cancel()
+            if self._driver is not None:
+                self._driver.cancel()
+            for task in self._tasks.values():
+                task.cancel()
+        self._wake.set()
+
     async def close(self):
         if (
             self._closed
@@ -674,19 +690,10 @@ class JobsService:
         ):
             self.issuer.unregister_job_source(self._source)
             return True
-        with self._fence_lock:
-            self._closed = True
-            for active in self._runs.values():
-                active["revoked"] = True
-                if active["scope"] is not None:
-                    active["scope"].cancel()
-        self._wake.set()
+        self.stop_accepting()
         if self._driver is not None:
-            self._driver.cancel()
             await asyncio.gather(self._driver, return_exceptions=True)
         tasks = tuple(self._tasks.values())
-        for task in tasks:
-            task.cancel()
         if tasks:
             await asyncio.wait(tasks, timeout=TaskScope.DEFAULT_CLEANUP_TIMEOUT)
         await asyncio.sleep(0)

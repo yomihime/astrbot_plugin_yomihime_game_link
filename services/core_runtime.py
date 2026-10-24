@@ -2018,6 +2018,7 @@ class CoreRuntime:
         _positive_finite(bound, "timeout")
         self.gateway.fence_public_web()  # Web-only synchronous fence before first await.
         self.admin_authorization.close()
+        self.jobs.stop_accepting()
         loop = asyncio.get_running_loop()
         deadline = loop.time() + float(bound)
         try:
@@ -2035,17 +2036,6 @@ class CoreRuntime:
             return True
         self._closing = True
         self._accepting = False
-        try:
-            jobs_closed = await asyncio.wait_for(
-                self.jobs.close(),
-                timeout=max(0.001, deadline - asyncio.get_running_loop().time()),
-            )
-        except TimeoutError as exc:
-            self._cleanup_pending = True
-            raise CoreRuntimeCleanupPending("durable_jobs") from exc
-        if not jobs_closed:
-            self._cleanup_pending = True
-            raise CoreRuntimeCleanupPending("durable_jobs")
         if self.output._generated_png is not None:
             self.output._generated_png.close()
         if self.output._collage_png is not None:
@@ -2132,6 +2122,21 @@ class CoreRuntime:
         ):
             self._cleanup_pending = True
             raise CoreRuntimeCleanupPending("admin_operations")
+
+        # Physical job cleanup can wait on resistant work/SQLite. Existing
+        # ingress, pump and Admission fences must already be closed first.
+        remaining = max(0.0, deadline - loop.time())
+        if remaining <= 0:
+            self._cleanup_pending = True
+            raise CoreRuntimeCleanupPending("durable_jobs")
+        try:
+            jobs_closed = await asyncio.wait_for(self.jobs.close(), timeout=remaining)
+        except TimeoutError as exc:
+            self._cleanup_pending = True
+            raise CoreRuntimeCleanupPending("durable_jobs") from exc
+        if not jobs_closed:
+            self._cleanup_pending = True
+            raise CoreRuntimeCleanupPending("durable_jobs")
 
         remaining = max(0.0, deadline - loop.time())
         if remaining <= 0:
