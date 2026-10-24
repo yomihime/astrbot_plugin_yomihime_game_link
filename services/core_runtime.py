@@ -1000,13 +1000,7 @@ class CoreRuntime:
             )
             # Built-in packages also use this local build path. Exact bundled
             # declarations take precedence; discovery alone proves no source.
-            kind = (
-                "builtin"
-                if builtin
-                else "extension"
-                if extension
-                else "unknown"
-            )
+            kind = "builtin" if builtin else "extension" if extension else "unknown"
             result[module_id] = (
                 kind,
                 external.display_name if kind == "extension" else None,

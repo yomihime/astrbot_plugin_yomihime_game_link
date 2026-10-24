@@ -1383,18 +1383,32 @@ class CoreRuntimeTests(unittest.IsolatedAsyncioTestCase):
         try:
             self.assertIsNotNone(runtime.extension_runtime.candidate("private"))
             self.assertEqual(runtime.public_module_catalog()["modules"], [])
-            await runtime.admin_credential_repository.bootstrap(_digest(token_urlsafe(32)))
+            await runtime.admin_credential_repository.bootstrap(
+                _digest(token_urlsafe(32))
+            )
             await runtime.admin_operations.set_enabled(
-                None, "private/mod", True,
+                None,
+                "private/mod",
+                True,
                 expected_registry_revision=runtime.registry.snapshot().revision,
                 authorization=_AdminContext(),
             )
+
             def source():
                 return runtime.public_module_catalog()["modules"][0]["source"]
-            expected = {"kind": "extension", "package_id": "private",
-                        "display_name": "Local package", "module_order": ["mod"]}
-            unknown = {"kind": "unknown", "package_id": "private",
-                       "display_name": None, "module_order": []}
+
+            expected = {
+                "kind": "extension",
+                "package_id": "private",
+                "display_name": "Local package",
+                "module_order": ["mod"],
+            }
+            unknown = {
+                "kind": "unknown",
+                "package_id": "private",
+                "display_name": None,
+                "module_order": [],
+            }
             self.assertEqual(source(), expected)
             built = runtime.extension_runtime._built["private"]
             self.assertTrue(built.complete)
@@ -1404,18 +1418,25 @@ class CoreRuntimeTests(unittest.IsolatedAsyncioTestCase):
             with patch.object(built, "complete", False):
                 self.assertEqual(source(), unknown)
             changed = replace(built.manifest.modules[0], module_version="9.0.0")
-            with patch.object(built, "manifest", replace(built.manifest, modules=(changed,))):
+            with patch.object(
+                built, "manifest", replace(built.manifest, modules=(changed,))
+            ):
                 self.assertEqual(source(), unknown)
             self.assertEqual(source(), expected)
             await runtime.admin_operations.set_enabled(
-                None, "private/mod", False,
+                None,
+                "private/mod",
+                False,
                 expected_registry_revision=runtime.registry.snapshot().revision,
                 authorization=_AdminContext(),
             )
             self.assertEqual(source(), expected)
-            self.assertEqual(runtime.public_module_catalog()["modules"][0]["state"], "disabled")
+            self.assertEqual(
+                runtime.public_module_catalog()["modules"][0]["state"], "disabled"
+            )
             await runtime.admin_operations.unload_module(
-                None, "private/mod",
+                None,
+                "private/mod",
                 expected_registry_revision=runtime.registry.snapshot().revision,
                 authorization=_AdminContext(),
             )
@@ -1427,6 +1448,7 @@ class CoreRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_catalog_trusted_bundle_stays_builtin_after_local_build(self):
         from ygl_test_subject.extensions.disk_manifest import parse_manifest
+
         document = _private_manifest()
         document.update(display_name="Not an external label", module_order=["mod"])
         encoded = json.dumps(document).encode()
@@ -1440,17 +1462,26 @@ class CoreRuntimeTests(unittest.IsolatedAsyncioTestCase):
         )
         await runtime.start()
         try:
-            await runtime.admin_credential_repository.bootstrap(_digest(token_urlsafe(32)))
+            await runtime.admin_credential_repository.bootstrap(
+                _digest(token_urlsafe(32))
+            )
             await runtime.admin_operations.set_enabled(
-                None, "private/mod", True,
+                None,
+                "private/mod",
+                True,
                 expected_registry_revision=runtime.registry.snapshot().revision,
                 authorization=_AdminContext(),
             )
             self.assertTrue(runtime.extension_runtime._built["private"].complete)
-            self.assertEqual(runtime.public_module_catalog()["modules"][0]["source"], {
-                "kind": "builtin", "package_id": "private",
-                "display_name": None, "module_order": [],
-            })
+            self.assertEqual(
+                runtime.public_module_catalog()["modules"][0]["source"],
+                {
+                    "kind": "builtin",
+                    "package_id": "private",
+                    "display_name": None,
+                    "module_order": [],
+                },
+            )
         finally:
             self.assertTrue(await runtime.close())
 

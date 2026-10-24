@@ -451,9 +451,14 @@ class ExtensionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(runtime.owner_generation("sample/mod"), 1)
         self.assertIs(source.candidates[0], candidate)
 
-    async def test_partial_package_build_filters_order_without_mutating_declaration(self):
-        manifest = replace(_package_manifest(("mod", "other")),
-                           display_name="Package", module_order=("other", "mod"))
+    async def test_partial_package_build_filters_order_without_mutating_declaration(
+        self,
+    ):
+        manifest = replace(
+            _package_manifest(("mod", "other")),
+            display_name="Package",
+            module_order=("other", "mod"),
+        )
         runtime, candidate, source = await self._runtime(manifest=manifest)
         runtime.scan()
         async with self.lifecycle.admission.mutation("test-candidate-detach"):
@@ -464,7 +469,9 @@ class ExtensionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self._enable(runtime, 0)
         self.assertEqual(set(self.registry.snapshot().modules), {"sample/mod"})
         self.assertTrue(self.registry.is_active("sample/mod"))
-        self.assertEqual(runtime._built["sample"].manifest.module_order, ("other", "mod"))
+        self.assertEqual(
+            runtime._built["sample"].manifest.module_order, ("other", "mod")
+        )
         self.assertEqual(candidate.package.manifest.module_order, ("other", "mod"))
         self.assertEqual(source.factory.create_calls, 1)
 
