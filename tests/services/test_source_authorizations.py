@@ -282,9 +282,7 @@ class AuthorizationTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.wait_for(entered.wait(), 1)
         self.assertFalse(session.slots)
         self.assertIsNone(session.qr_url)
-        cancel = asyncio.create_task(
-            self.runner.cancel(first.session_id, self.binding)
-        )
+        cancel = asyncio.create_task(self.runner.cancel(first.session_id, self.binding))
         await asyncio.wait_for(elapsed.wait(), 1)
         self.assertFalse(session.expiry_timer.cancelled())
         # _session also checks wall time; it must honor commit admission too.
