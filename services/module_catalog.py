@@ -33,7 +33,8 @@ def project_module_catalog(
     *,
     runtime_state: str,
     legacy_config_policies=(),
-    source_metadata: Mapping[str, tuple[str, str | None]] | None = None,
+    source_metadata: Mapping[str, tuple[str, str | None, tuple[str, ...]]]
+    | None = None,
 ) -> dict:
     """Copy only fixed public metadata fields, without performing IO."""
     if runtime_state not in ("ready", "not_ready", "closing", "closed"):
@@ -73,8 +74,8 @@ def project_module_catalog(
         manifest = module.manifest
         # Core-owned presentation metadata only. Registry identity establishes
         # package grouping, never whether a package is bundled or external.
-        source_kind, source_name = (source_metadata or {}).get(
-            module_id, ("unknown", None)
+        source_kind, source_name, source_order = (source_metadata or {}).get(
+            module_id, ("unknown", None, ())
         )
         if source_kind not in ("builtin", "extension"):
             source_kind = "unknown"
@@ -105,6 +106,9 @@ def project_module_catalog(
                     "kind": source_kind,
                     "package_id": module_id.split("/", 1)[0],
                     "display_name": source_name,
+                    "module_order": list(source_order)
+                    if source_kind == "extension"
+                    else [],
                 },
                 "route": manifest.route,
                 "category": manifest.category.value,

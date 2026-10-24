@@ -69,3 +69,14 @@ test('home directory uses two light columns and keeps mobile single-column',()=>
  assert.match(css,/@media\(max-width:719px\)\{\.workspace-package-grid\{grid-template-columns:minmax\(0,1fr\)/);
  assert.doesNotMatch(css,/\.workspace-module:last-child[^}]*grid-column/);
 });
+
+
+test('footer stays in normal flow and module statuses align right without arrows',async()=>{
+ const source=await readFile(new URL('../../../pages/frontend/src/main.ts',import.meta.url),'utf8');
+ assert.doesNotMatch(source,/label\(module.module_id\)\+' →'/);
+ assert.match(css,/\.shell-content\{display:flex;flex-direction:column;min-height:100vh;min-height:100dvh/);
+ assert.match(css,/\.shell-content>main\{flex:1 0 auto\}/);
+ assert.match(css,/\.shell-footer\{flex:none;margin-top:auto\}/);
+ assert.match(css,/\.workspace-module-title\{flex-wrap:nowrap;padding-right:14px\}/);
+ assert.match(css,/\.workspace-module-title \.workspace-status-icon\{margin-left:auto\}/);
+});

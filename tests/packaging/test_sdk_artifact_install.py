@@ -19,7 +19,7 @@ from scripts.build_release import build_release
 
 ROOT = Path(__file__).resolve().parents[2]
 EXPECTED_WHEEL_SHA256 = (
-    "7799484e8b674e1c2f48d7ed68030193ae8d6db90fc43ef369761a91c40ebe4d"
+    "daf26e06c9e53f445c1f5891d7225936722f2f9a6504e753dafb0b18ad813283"
 )
 EXPECTED_RESOURCES = {
     f"yomihime_game_link_sdk/_examples/{example}/{filename}"
@@ -138,11 +138,12 @@ assert sdk.SourceHttpError is CanonicalSourceHttpError
 assert GatewayResultType is sdk.CapabilityResult
 assert OutputResultType is sdk.CapabilityResult
 
-assert sdk.__version__ == "0.1.0a17"
+assert sdk.__version__ == "0.1.0a18"
 assert sdk.ModuleDisplay("Name").summary is None
 assert validate_contract(sdk.ModuleDisplay("Name", summary="Feature summary")).summary == "Feature summary"
 assert sdk.PackageManifest.__dataclass_fields__["display_name"].default is None
-assert tuple(sdk.PackageManifest.__dataclass_fields__)[-1] == "display_name"
+assert tuple(sdk.PackageManifest.__dataclass_fields__)[-2:] == ("display_name", "module_order")
+assert sdk.PackageManifest.__dataclass_fields__["module_order"].default is None
 assert sdk.MODULE_ABI_VERSION == "2.0"
 assert sdk.ScheduleTrigger.BACKGROUND.value == "background"
 assert sdk.ScheduleDescriptor.__dataclass_fields__["background_parameters"].default == ()
@@ -281,6 +282,19 @@ for example in ("empty_module", "offline_sample"):
 
         manifest_path = output / "yomihime.manifest.json"
         manifest = parse_manifest(manifest_path.read_bytes())
+        assert manifest.module_order == ()
+        ordered_json = json.loads(manifest_path.read_text())
+        ordered_json["module_order"] = ["source"]
+        ordered = parse_manifest(json.dumps(ordered_json).encode())
+        assert ordered.module_order == ("source",)
+        for invalid_order in (["source", "source"], ["absent"], ["other/source"], [1]):
+            ordered_json["module_order"] = invalid_order
+            try:
+                parse_manifest(json.dumps(ordered_json).encode())
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("installed SDK accepted invalid package module order")
         declared = {item.module_id: item for item in manifest.modules}
         assert set(declared) == {"status", "source"}
         registry = Registry()
@@ -380,7 +394,7 @@ class InstalledArtifactTests(unittest.TestCase):
             wheel_digest = hashlib.sha256(wheel.read_bytes()).hexdigest()
             self.assertEqual(wheel_digest, EXPECTED_WHEEL_SHA256)
             self.assertEqual(
-                wheel.name, "yomihime_game_link_sdk-0.1.0a17-py3-none-any.whl"
+                wheel.name, "yomihime_game_link_sdk-0.1.0a18-py3-none-any.whl"
             )
             with zipfile.ZipFile(wheel) as archive:
                 entries = set(archive.namelist())

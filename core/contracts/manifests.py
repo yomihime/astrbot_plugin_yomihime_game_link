@@ -75,7 +75,7 @@ EXTENSION_PACKAGE_FIELDS = frozenset(
     }
 )
 # Optional presentation fields do not replace any original required root key.
-EXTENSION_PACKAGE_OPTIONAL_FIELDS = frozenset({"display_name"})
+EXTENSION_PACKAGE_OPTIONAL_FIELDS = frozenset({"display_name", "module_order"})
 EXTENSION_DESCRIPTOR_FIELDS: Mapping[str, frozenset[str]] = MappingProxyType(
     {
         "module": frozenset(
@@ -757,6 +757,18 @@ def check_PackageManifest(self) -> None:
         self, "display_name", normalize_package_display_name(self.display_name)
     )
     _unique(tuple((item.module_id for item in self.modules)), "modules")
+    order = self.module_order
+    if order is None:
+        order = ()
+    if type(order) is not tuple or len(order) > len(self.modules):
+        raise ValueError("package module_order must be a bounded local ID sequence")
+    known = {module.module_id for module in self.modules}
+    for module_id in order:
+        _identifier(module_id, "module_order entry")
+        if module_id not in known:
+            raise ValueError("package module_order contains an undeclared local ID")
+    _unique(order, "package module_order")
+    object.__setattr__(self, "module_order", order)
     _unique(tuple((item.route for item in self.modules)), "module routes")
     _unique(
         tuple(

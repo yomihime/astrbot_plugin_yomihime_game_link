@@ -335,7 +335,12 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             projected["source"],
-            {"kind": "unknown", "package_id": "sample", "display_name": None},
+            {
+                "kind": "unknown",
+                "package_id": "sample",
+                "display_name": None,
+                "module_order": [],
+            },
         )
         self.assertIsNone(projected["display"])
         self.assertEqual(projected["pages"], [])

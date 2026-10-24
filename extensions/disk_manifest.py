@@ -442,6 +442,11 @@ def parse_manifest(data: bytes | bytearray | memoryview) -> PackageManifest:
                 license=_shape(root["license"], "string", "license"),
                 source=_shape(root["source"], "string", "source"),
                 display_name=root.get("display_name"),
+                module_order=(
+                    None
+                    if root.get("module_order") is None
+                    else tuple(_shape(root["module_order"], "array", "module_order"))
+                ),
             )
         )
     except ManifestError:

@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 from types import ModuleType
 
-SDK_VERSION = "0.1.0a17"
+SDK_VERSION = "0.1.0a18"
 SDK_MODULE_ABI_VERSION = "2.0"
 
 
@@ -17,7 +17,7 @@ SDK_PACKAGE_MANIFEST = {
     "__init__.py": "25e126c8a61420aaf06b25fd4757097129a582acf6f24a3e12a9dd92e5f4116b",
     "cards.py": "35adee0631a5dfed936b6b37b41e0ae3b218a179778b1c517624b00780aa7283",
     "contexts.py": "d9b44695677c47a0133dade501a0ca1cfc9847593062f5e5ff0337372bc34723",
-    "declarations.py": "8626125da9735efe21ee6ab77037afade5fb39ab2b3048676b25ce5e38845dfb",
+    "declarations.py": "2157f5d1c2fcedb44c955dae40dafda741d2bf45b8d065d30ba0cd50618522a6",
     "display.py": "21df4ef036ae54962fb2f37de3b55c812f635722796dacecdd278a7d811e68ff",
     "errors.py": "b991a5d73f3f70fb4b0377f274e972339c14754bd4fc3be2945c456643daf467",
     "host.py": "dbbfabc8b3655a124925dd1c489a403e38cfbd8f34ef6b3b9fb799b26bf2a168",
@@ -26,7 +26,7 @@ SDK_PACKAGE_MANIFEST = {
     "services.py": "a688d53fb7b7bed0d4355ce50e42fb8355bc2f1f47d930eeb19e777666f4f659",
     "storage.py": "6311b4754da6e37616debd68003d6993cf89c0b060845387288e2de575313260",
     "subscriptions.py": "036e472a0a80ffc955cb6ecac34707abead75497e9c00d4a71284e4be9de5bf3",
-    "version.py": "2e1f636a22e6331dcb6b64709e10539323afc5ceb2442afb441bc6b378ec9cd3",
+    "version.py": "bab5997e6cc5fc8b5dac2baa9a1b409f10ffb4b2d6448ea67fc9582ed206ec5c",
     "_examples/empty_module/README.md": "c1150018aa2eb2bfb9f9129ba753f6f26d132a0a245d245eb8a62f3c6debc1d7",
     "_examples/empty_module/manifest.json": "9de2d0e3cbb7e32acf029677e59381d1bb8893c6cae84a45f9a606b6e3a7e965",
     "_examples/empty_module/module.py": "21fdb6428bd422804ad00e98038b032c25b1d2488b3df5f17e3be855e0c8198f",

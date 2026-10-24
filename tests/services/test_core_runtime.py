@@ -1486,14 +1486,24 @@ class CoreRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertEqual(
                 source(),
-                {"kind": "unknown", "package_id": "ff14", "display_name": None},
+                {
+                    "kind": "unknown",
+                    "package_id": "ff14",
+                    "display_name": None,
+                    "module_order": [],
+                },
             )
             with patch.object(
                 runtime, "_trusted_bundled_manifests", {"ff14/mod": current}
             ):
                 self.assertEqual(
                     source(),
-                    {"kind": "builtin", "package_id": "ff14", "display_name": None},
+                    {
+                        "kind": "builtin",
+                        "package_id": "ff14",
+                        "display_name": None,
+                        "module_order": [],
+                    },
                 )
                 changed = replace(current, module_version="2.0.0")
                 snapshot = runtime.registry.snapshot()
@@ -1529,7 +1539,12 @@ class CoreRuntimeTests(unittest.IsolatedAsyncioTestCase):
             ):
                 self.assertEqual(
                     source(),
-                    {"kind": "extension", "package_id": "ff14", "display_name": None},
+                    {
+                        "kind": "extension",
+                        "package_id": "ff14",
+                        "display_name": None,
+                        "module_order": [],
+                    },
                 )
             runtime.admin_operations.detach_external_package(package)
             self.assertEqual(source()["kind"], "unknown")
@@ -1576,6 +1591,7 @@ class CoreRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 "kind": "extension",
                 "package_id": "dlc_fixture",
                 "display_name": None,
+                "module_order": [],
             }
             loaded = selected()
             self.assertEqual(loaded["source"], expected)
@@ -1665,6 +1681,7 @@ class CoreRuntimeTests(unittest.IsolatedAsyncioTestCase):
                             "kind": "extension",
                             "package_id": "dlc_fixture",
                             "display_name": expected,
+                            "module_order": [],
                         }
                     ]
                     * 2,
@@ -1673,8 +1690,24 @@ class CoreRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(
                     [item["display_name"] for item in sources()], [None, None]
                 )
+            for order in (None, (), ("two",), ("two", "one")):
+                declared = replace(package, module_order=order)
+                runtime.admin_operations.attach_external_package(declared)
+                self.assertEqual(
+                    [item["module_order"] for item in sources()],
+                    [list(order or ())] * 2,
+                )
+                detached = sources()
+                detached[0]["module_order"].append("injected")
+                self.assertEqual(
+                    [item["module_order"] for item in sources()],
+                    [list(order or ())] * 2,
+                )
+                runtime.admin_operations.detach_external_package(declared)
+                self.assertEqual([item["module_order"] for item in sources()], [[], []])
             changed = replace(
                 package,
+                module_order=("two", "one"),
                 modules=tuple(
                     replace(module, module_version="2.0.0")
                     for module in package.modules
@@ -1682,6 +1715,7 @@ class CoreRuntimeTests(unittest.IsolatedAsyncioTestCase):
             )
             runtime.admin_operations.attach_external_package(changed)
             self.assertEqual([item["display_name"] for item in sources()], [None, None])
+            self.assertEqual([item["module_order"] for item in sources()], [[], []])
             runtime.admin_operations.detach_external_package(changed)
         finally:
             self.assertTrue(await runtime.close())

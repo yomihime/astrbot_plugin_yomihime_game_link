@@ -48,6 +48,12 @@ const {themeCatalog,themeSnapshot}=await import('./theme-settings-fixtures.mjs')
 const declarations=themeCatalog();declarations.fields=declarations.fields.filter(f=>f.module_id==='game_link/core'&&f.name==='image_theme');
 const snapshot={'game_link/core':{revision:7,fields:{image_theme:themeSnapshot()['game_link/core'].fields.image_theme}}};
 const bridge=`const catalog=${JSON.stringify(catalog)},declarations=${JSON.stringify(declarations)},snapshot=${JSON.stringify(snapshot)};
+const orderExample=new URLSearchParams(location.search).get('order');
+if(['declared','partial','empty'].includes(orderExample)){
+ const order=orderExample==='declared'?['steam','dota2','deadlock','cs2']:orderExample==='partial'?['steam']:[];
+ for(const module of catalog.modules)if(module.source?.kind==='extension')module.source.module_order=order;
+ const notice=document.createElement('p');notice.textContent='模拟排序元数据，不是实际 DLC 声明';notice.style='position:fixed;right:12px;bottom:12px;z-index:99999;margin:0;padding:6px 12px;font:13px system-ui;background:#f7f4ed;color:#655071';document.body.append(notice);
+}
 const packageNameExample=new URLSearchParams(location.search).get('packageName');
 if(packageNameExample==='named'||packageNameExample==='blank'){
  for(const module of catalog.modules)if(module.source?.kind==='extension')module.source.display_name=packageNameExample==='named'?'游戏扩展合集':'   ';
@@ -85,5 +91,5 @@ window.YGLPreview={calls};
 `;
 await writeFile(resolve(out,'mock-bridge.js'),bridge);
 let html=await readFile(resolve(out,'index.html'),'utf8');html=html.replace('<script src="/api/plugin/page/bridge-sdk.js"></script>','<script src="./mock-bridge.js"></script>');await writeFile(resolve(out,'index.html'),html);
-await writeFile(resolve(out,'capture.html'),`<!doctype html><meta charset="utf-8"><style>body{margin:0;background:#ddd}iframe{border:0;display:block;width:1440px;height:1000px}</style><iframe id="view" title="Production UI"></iframe><script>const p=new URLSearchParams(location.search);view.style.width=(p.get('width')||1440)+'px';view.style.height=(p.get('height')||1000)+'px';view.src='./index.html?theme='+(p.get('theme')||'light')+'&controls='+(p.get('controls')||'0')+'&states='+(p.get('states')||'0')+'&packageName='+(p.get('packageName')||'')+'#'+(p.get('route')||'/module/ff14%2Fff14/config');</script>`);
+await writeFile(resolve(out,'capture.html'),`<!doctype html><meta charset="utf-8"><style>body{margin:0;background:#ddd}iframe{border:0;display:block;width:1440px;height:1000px}</style><iframe id="view" title="Production UI"></iframe><script>const p=new URLSearchParams(location.search);view.style.width=(p.get('width')||1440)+'px';view.style.height=(p.get('height')||1000)+'px';view.src='./index.html?theme='+(p.get('theme')||'light')+'&controls='+(p.get('controls')||'0')+'&states='+(p.get('states')||'0')+'&packageName='+(p.get('packageName')||'')+'&order='+(p.get('order')||'')+'#'+(p.get('route')||'/module/ff14%2Fff14/config');</script>`);
 console.log(out);

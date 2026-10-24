@@ -923,7 +923,12 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(
                 module["source"],
-                {"kind": "builtin", "package_id": "ff14", "display_name": None},
+                {
+                    "kind": "builtin",
+                    "package_id": "ff14",
+                    "display_name": None,
+                    "module_order": [],
+                },
             )
             self.assertTrue(
                 all(

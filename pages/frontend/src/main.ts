@@ -52,6 +52,7 @@ const App = defineComponent({setup() {
     if(!showModules)closeMaintenance();
     if(shell?.state.catalog&&!modulesView&&modulesRoot.value){modulesView=createModuleManagement(modulesRoot.value,window.AstrBotPluginView,window,pageName,()=>{void shell?.refresh();management?.resume();},operation=>{const snapshot=interactionKey(),impact=navigationImpact();if(impact.blocked){shell?.refuseNavigation();return false;}return !management?.dirty()&&!impact.requiresConfirmation||confirmation.ask({kind:'module-draft',owner:operation.owner,title:'确认模块操作 '+operation.owner,message:`存在未提交的配置草稿。模块状态变化可能撤销其字段，继续执行？取消可先保存草稿。${impact.credentialOwners.length?'当前页面凭据输入将在解除绑定时清空。':''}${impact.pending?'等待中的请求不能撤回，结果未确认时请重新读取，不会自动重试。':''}注册版本 ${operation.revision}。`,confirmLabel:'保留草稿并继续核对',isCurrent:()=>snapshot===interactionKey()&&operation.isCurrent(),canRestoreFocus:()=>snapshot===interactionKey()&&operation.canRestoreFocus()});},confirmation,interactionKey,{hasSettings:owner=>Boolean(shell?.state.catalog?.modules?.find(module=>module.module_id===owner)?.pages.some(page=>page.role==='config')),onSettings:owner=>void navigate(()=>shell?.selectSettings(owner)),labels:()=>moduleLabels(shell?.state.catalog?.modules||[],shell?.state.locale||'zh-CN'),catalog:configurationCatalog,snapshot:configurationSnapshot});modulesView.start();}
     modulesView?.setRenderVisible(showModules);
+    modulesView?.presentationCatalog(shell?.state.catalog?.modules||[]);
     modulesView?.presentationLabels(moduleLabels(shell?.state.catalog?.modules||[],shell?.state.locale||'zh-CN'));
     modulesView?.setHomeVisible(Boolean(shell?.state.modules));
     modulesView?.selectOwner(shell?.state.moduleOwner||null);
@@ -64,7 +65,7 @@ const App = defineComponent({setup() {
   onBeforeUnmount(() => {closed=true;contextGeneration++;closeMaintenance();confirmation.dispose();offContext?.();window.removeEventListener('hashchange',guardHash);management?.dispose();modulesView?.dispose();shell?.dispose();});
   return () => {
     revision.value;
-    const state = shell?.state, selection = shell?.selected(), modules = state?.catalog?.modules || [];
+    const state = shell?.state, selection = shell?.selected(), modules = moduleGroups(state?.catalog?.modules || [],state?.locale||'zh-CN').flatMap(group=>group.modules);
     const labels=moduleLabels(modules,state?.locale||'zh-CN'),label=(owner:string)=>labels.get(owner)||owner;
     const busy = state?.busy || false,home=state?.home??true;
     const currentModule=modules.find(m=>m.module_id===state?.moduleOwner),moduleHome=Boolean(currentModule&&state?.moduleSection==='home'),queries=Boolean(currentModule&&state?.moduleSection==='queries');
@@ -108,8 +109,8 @@ const App = defineComponent({setup() {
             home?h('section',{class:'workspace-index','aria-label':'游戏连结'},[
               h('div',{class:'workspace-catalog'},[
                 h('div',{class:'workspace-index-heading'},[h('h2',{class:'shell-eyebrow'},'游戏目录'),h('span',{class:'workspace-count'},modules.length+' 个模块')]),
-                ...moduleGroups(modules).map(group=>h('section',{class:'workspace-package',key:group.key,'aria-label':group.title},[h('h3',{class:'workspace-package-title'},group.title),h('div',{class:'workspace-package-grid'},group.modules.map(module=>h('article',{class:'workspace-module',key:module.module_id},[
-                  h('div',{class:'workspace-module-heading'},[h('div',[h('div',{class:'workspace-module-title'},[h('h2',{'aria-level':4},[link(label(module.module_id)+' →','#/module/'+encodeURIComponent(module.module_id),false,()=>shell?.selectModule(module.module_id),'workspace-status-'+encodeURIComponent(module.module_id))]),workspaceStatus(module.module_id,module.state)]),module.display?.summary?h('p',{class:'workspace-module-summary'},module.display.summary):null,!module.pages.length?h('p',{class:'workspace-module-description'},'暂无可用功能，请在模块管理中核对状态。'):null]),module.display?.logo_resource?h(LogoMark,{class:'workspace-emblem workspace-emblem-resource',style:{maskImage:`url("./${module.display.logo_resource}")`}}):h('span',{class:'workspace-emblem','aria-hidden':'true'},'✦')]),
+                ...moduleGroups(modules,state?.locale||'zh-CN').map(group=>h('section',{class:'workspace-package',key:group.key,'aria-label':group.title},[h('h3',{class:'workspace-package-title'},group.title),h('div',{class:'workspace-package-grid'},group.modules.map(module=>h('article',{class:'workspace-module',key:module.module_id},[
+                  h('div',{class:'workspace-module-heading'},[h('div',[h('div',{class:'workspace-module-title'},[h('h2',{'aria-level':4},[link(label(module.module_id),'#/module/'+encodeURIComponent(module.module_id),false,()=>shell?.selectModule(module.module_id),'workspace-status-'+encodeURIComponent(module.module_id))]),workspaceStatus(module.module_id,module.state)]),module.display?.summary?h('p',{class:'workspace-module-summary'},module.display.summary):null,!module.pages.length?h('p',{class:'workspace-module-description'},'暂无可用功能，请在模块管理中核对状态。'):null]),module.display?.logo_resource?h(LogoMark,{class:'workspace-emblem workspace-emblem-resource',style:{maskImage:`url("./${module.display.logo_resource}")`}}):h('span',{class:'workspace-emblem','aria-hidden':'true'},'✦')]),
                 ])))])),
                 !modules.length?h('p',{class:'shell-empty'},'暂无可用模块。可前往模块管理核对状态。'):null,
               ]),

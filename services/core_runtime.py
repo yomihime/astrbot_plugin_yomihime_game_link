@@ -1018,7 +1018,7 @@ class CoreRuntime:
 
     def _module_catalog_source_metadata(
         self, snapshot
-    ) -> dict[str, tuple[str, str | None]]:
+    ) -> dict[str, tuple[str, str | None, tuple[str, ...]]]:
         """Read exact host declarations for display, without granting authority."""
         # Snapshot Host admission metadata synchronously. Only presentation
         # strings leave here, never mutable maps, private paths or package objects.
@@ -1051,6 +1051,7 @@ class CoreRuntime:
             result[module_id] = (
                 kind,
                 external.display_name if kind == "extension" else None,
+                external.module_order if kind == "extension" else (),
             )
         return result
 

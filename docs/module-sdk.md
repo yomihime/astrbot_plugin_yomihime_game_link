@@ -1,6 +1,6 @@
 # Game Link module SDK
 
-The independently installable distribution is `yomihime-game-link-sdk==0.1.0a17`. Import its public declarations with `import yomihime_game_link_sdk as ygl`. It requires Python 3.11 or newer and has no third-party runtime dependencies.
+The independently installable distribution is `yomihime-game-link-sdk==0.1.0a18`. Import its public declarations with `import yomihime_game_link_sdk as ygl`. It requires Python 3.11 or newer and has no third-party runtime dependencies.
 
 The SDK (including its packaged examples) is licensed under MIT; see `SDK-LICENSE`. The AstrBot plugin implementation remains AGPL-3.0 under `LICENSE`. Third-party notices retain their own terms. The a12 source contract adds the outer-plugin extension bridge without changing module ABI 2.0. Built wheel identity and installation evidence are recorded separately; editing these declarations does not prove a published or installed wheel.
 
@@ -45,8 +45,8 @@ read proof does not authorize root private output or account management.
 Install the reviewed wheel into your module development environment:
 
 ```powershell
-python -m pip install --no-deps ./yomihime_game_link_sdk-0.1.0a17-py3-none-any.whl
-python -I -c "import yomihime_game_link_sdk as ygl; assert ygl.__version__ == '0.1.0a17'; assert ygl.MODULE_ABI_VERSION == '2.0'"
+python -m pip install --no-deps ./yomihime_game_link_sdk-0.1.0a18-py3-none-any.whl
+python -I -c "import yomihime_game_link_sdk as ygl; assert ygl.__version__ == '0.1.0a18'; assert ygl.MODULE_ABI_VERSION == '2.0'"
 ```
 
 The plugin release contains the exact content-pinned SDK from that wheel. Its bootstrap rejects changed contents, foreign package origins, partial preload graphs, and any preloaded retired `yomihime_sdk` graph. The retired root `api` and `yomihime_sdk.api` modules have no compatibility redirects. Historical stored-data readers are separate from module import compatibility.
@@ -321,7 +321,7 @@ isolation. See the packaged example README for cleanup and evidence boundaries.
 This Core exercise does not claim native AstrBot startup, model or IM delivery,
 global Core Ready, or a process sandbox.
 
-`ModuleDisplay.summary: str | None = None` (SDK a17) is optional display-only plain text, limited to 160 Unicode code points. Omission or null means no summary; blank strings and Unicode Cc/Cf/Cs characters are rejected. It does not declare capabilities or grant permissions. Current Core accepts ABI 2.0 manifests without this field; older Core rejects this new closed-schema key. SDK releases remain exactly paired: outer plugins pinned to a15 or a16 must be updated separately before use with a17.
+`ModuleDisplay.summary: str | None = None` (SDK a17) is optional display-only plain text, limited to 160 Unicode code points. Omission or null means no summary; blank strings and Unicode Cc/Cf/Cs characters are rejected. It does not declare capabilities or grant permissions. Current Core accepts ABI 2.0 manifests without this field; older Core rejects this new closed-schema key. SDK releases remain exactly paired: outer plugins pinned to earlier SDK releases must be updated separately before use with a18.
 
 ModuleDisplay metadata remains optional, bounded and localized; it never changes module IDs, owner identities, command routing or storage. Unloading a module preserves its existing persisted data. Existing 1.7 display read adaptation retains the historical codec, tags and identities; no data-format migration is included in this SDK change.
 
@@ -375,7 +375,13 @@ Trusted legacy policies may register retained ordinary source names with a confi
 
 ## Package display names (a17)
 
-`PackageManifest.display_name: str | None = None` is an optional trailing field. It is display-only package metadata, not module identity or authority. The disk root accepts the same optional key. Names are limited to 128 Unicode code points and reject Cc/Cf/Cs characters; omission, null, empty and valid whitespace-only strings normalize to null. Nonblank text preserves its original spacing. Core projects this name only from trusted package provenance whose module manifest matches the current registry; unknown and built-in sources do not acquire a package name. Missing names fall back to package_id. Old closed-schema Core rejects the new disk key. Existing DLC exact SDK pins need a separately reviewed update before deployment with this a17 Core; this change does not publish or modify those DLC packages.
+`PackageManifest.display_name: str | None = None` is an optional presentation field. It is display-only package metadata, not module identity or authority. The disk root accepts the same optional key. Names are limited to 128 Unicode code points and reject Cc/Cf/Cs characters; omission, null, empty and valid whitespace-only strings normalize to null. Nonblank text preserves its original spacing. Core projects this name only from trusted package provenance whose module manifest matches the current registry; unknown and built-in sources do not acquire a package name. Missing names fall back to package_id. Old closed-schema Core rejects the new disk key. Existing DLC exact SDK pins need a separately reviewed update before deployment with this a18 Core; this change does not publish or modify those DLC packages.
+
+## Package module ordering (a18)
+
+`PackageManifest.module_order: tuple[str, ...] | None = None` is an optional trailing presentation field. The disk root accepts a JSON array of local module IDs, or null. Omitted, null and empty orders normalize to an empty tuple in the validated Core model and an empty array in the public catalog. Nonempty orders may be partial: declared IDs appear first in the specified sequence; remaining modules sort by their actual localized display name, then stable module ID. Local IDs must belong to this package; duplicates, unknown IDs, qualified/cross-package IDs and non-string entries are rejected, never silently removed. The manifest module sequence itself is not reordered.
+
+Core projects `source.module_order` only from the current trusted external package when its module declaration matches the registry. Built-in and unknown sources receive an empty array. The field grants no invocation, resource or management authority and does not change lifecycle or leases. An order may mention declared modules absent from the current visible catalog. Older Core rejects the new disk root field; existing DLC exact SDK pins must be updated and verified separately before deployment with a18. This Core-only change neither edits nor deploys DLC packages.
 
 ## Managed binary resources and weighted collages (a15, updated a16)
 

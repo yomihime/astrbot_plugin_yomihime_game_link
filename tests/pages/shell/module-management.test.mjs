@@ -18,6 +18,7 @@ const {createInlineConfirmation}=await import(confirmationURL);
 let source=stripTypeScriptTypes(await readFile(new URL('pages/frontend/src/module-management.ts',root),'utf8'),{mode:'strip'});
 source=source.replace("from 'vue'",'from '+JSON.stringify(runtimeURL)).replace("from 'naive-ui'",'from '+JSON.stringify(runtimeURL)).replace("from './lifecycle'",'from '+JSON.stringify(new URL('pages/frontend/src/lifecycle.ts',root).href)).replace("from './confirmation'",'from '+JSON.stringify(confirmationURL));
 source=source.replace("from '@game-link/ui'",'from '+JSON.stringify(runtimeURL));
+source=source.replace("from './catalog'",'from '+JSON.stringify(new URL('pages/frontend/src/catalog.ts',root).href));
 source=source.replace("from './ui/notice'",'from '+JSON.stringify(new URL('pages/frontend/src/ui/notice.ts',root).href));
 const {createModuleManagement}=await import('data:text/javascript;base64,'+Buffer.from(source).toString('base64'));
 const {validateCatalog:configurationCatalog,validateSnapshot:configurationSnapshot}=await import('../management/source-management.mjs');
@@ -125,5 +126,17 @@ test('management uses shared Oil provider and theme changes preserve controls an
    assert.equal(button(f,'启用 / 恢复'),trigger);
    assert.equal(f.calls.length,1);
   }
+ }finally{f.close();}
+});
+
+
+test('management shares package grouping and declared module ordering',async()=>{
+ const f=fixture();try{
+  const ids=['pkg/a','core/base','pkg/z'];
+  f.view.presentationCatalog(ids.map(id=>({module_id:id,display:{default_name:id.endsWith('/a')?'Alpha':'Zeta',localized_names:{},short_name:null},source:{kind:id.startsWith('core/')?'builtin':'extension',package_id:id.split('/')[0],display_name:'扩展',module_order:['z']}})));
+  const data=status();data.modules=ids.map(module_id=>({...data.modules[0],module_id}));await load(f,data);
+  assert.deepEqual([...f.container.querySelectorAll('.module-management-group-title')].map(n=>n.textContent),['内置模块','扩展']);
+  assert.deepEqual([...f.container.querySelectorAll('.module-management-row')].map(n=>n.dataset.moduleOwner),['core/base','pkg/z','pkg/a']);
+  assert.equal(f.container.querySelectorAll('.module-management-actions button').length,9);
  }finally{f.close();}
 });

@@ -119,6 +119,51 @@ class DiskManifestTests(unittest.TestCase):
                 with self.assertRaises(ManifestError):
                     parse_manifest(json.dumps(document).encode())
 
+    def test_package_module_order_accepts_partial_local_ids_and_rejects_bad_ids(self):
+        document = valid_document()
+        self.assertEqual(parse_manifest(json.dumps(document).encode()).module_order, ())
+        second = {
+            **document["modules"][0],
+            "module_id": "second",
+            "route": "second",
+            "tools": [],
+        }
+        document["modules"].append(second)
+        for value, expected in (
+            (None, ()),
+            ([], ()),
+            (["second"], ("second",)),
+            (["second", "status"], ("second", "status")),
+        ):
+            with self.subTest(value=value):
+                document["module_order"] = value
+                package = parse_manifest(json.dumps(document).encode())
+                self.assertEqual(package.module_order, expected)
+                self.assertEqual(
+                    [m.module_id for m in package.modules], ["status", "second"]
+                )
+        for value in (
+            "status",
+            {},
+            True,
+            1,
+            [None],
+            [False],
+            [1],
+            [""],
+            ["unknown"],
+            ["sample_pkg/status"],
+            ["other/status"],
+            ["status", "status"],
+            ["status", "second", "status"],
+            [" status"],
+            ["status\n"],
+        ):
+            with self.subTest(invalid=value):
+                document["module_order"] = value
+                with self.assertRaises(ManifestError):
+                    parse_manifest(json.dumps(document).encode())
+
     def test_anonymous_redirect_policy_roundtrips_and_rejects_invalid_shape(self):
         document = valid_document()
         source = {
