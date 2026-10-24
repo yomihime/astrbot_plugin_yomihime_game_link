@@ -26,7 +26,7 @@ from yomihime_game_link_sdk.errors import (
     ParameterError,
     ServiceUnavailable,
 )
-from yomihime_game_link_sdk.services import CapabilityHealth, HealthStatus
+from yomihime_game_link_sdk.services import CapabilityHealth, ConfigTarget, HealthStatus
 from yomihime_game_link_sdk.subscriptions import ConversationKind, ConversationRef
 
 from ...core.contracts.administration import (
@@ -54,6 +54,7 @@ from ...presentation.command_card import CommandCardRenderer
 from ...presentation.command_text import project_command_heading
 from ...presentation.rendering import GenericDisplayRenderer, RenderingBounds
 from ...services.admin_authorization import AdminAuthorizationService
+from ...services.authorization_management import AuthorizationManagement
 from ...services.configuration.defaults import (
     CORE_CONFIG_FIELDS,
     core_config_target,
@@ -68,7 +69,9 @@ from ...services.core_runtime import (
 )
 from ...services.diagnostics import DiagnosticStore
 from ...services.external_packages import ExternalPackageHost
+from ...services.external_source_policies import ExternalSourcePolicies
 from ...services.managed_font import ManagedFont
+from ...services.source_authorizations import AuthorizationBinding
 from ...services.source_credentials import SourceCredentialPolicy
 from ...services.trusted_assembly import assemble_reviewed
 from .bundled import (
@@ -86,6 +89,7 @@ from .message_port import (
     PlainFactory,
 )
 from .page_sessions import HostModulePageSessions
+from .subscription_commentary import AstrBotSubscriptionCommentary
 from .web_public import (
     HostPublicWebValidator,
     WebPublicRejected,
@@ -553,6 +557,12 @@ class AstrBotRuntime:
         self._config_error: str | None = None
         # Injected Host config is hydrated and cannot establish raw key presence.
         self._plugin_root = Path(plugin_root)
+        # Credential authority has its own reviewed release input. Malformed
+        # policy aborts initialization; UI fallback cannot grant credentials.
+        self._external_source_policies = ExternalSourcePolicies.load(self._plugin_root)
+        self._source_authorizations = AuthorizationManagement(
+            self._external_source_policies
+        )
         try:
             self._static_page_projection = StaticPageProjection.load(self._plugin_root)
         except (OSError, ValueError, TypeError):
@@ -686,10 +696,82 @@ class AstrBotRuntime:
                     ):
                         bindings[endpoint] = (page.target, page.lease, page.current)
             deployment = frozenset(value[0] for value in bindings.values())
+            # Only declared read-only dependencies of an exact deployed parent
+            # can derive web contexts. They gain no independently routable page.
+            from ...core.policy import supports_public_read_only
+
+            dependencies = set(deployment)
+            pending = list(deployment)
+            while pending:
+                owner, capability_id = pending.pop()
+                module = core.registry.snapshot().modules.get(owner)
+                if module is None or not core.registry.is_active(module):
+                    continue
+                capability = next(
+                    (
+                        item
+                        for item in module.manifest.capabilities
+                        if item.capability_id == capability_id
+                    ),
+                    None,
+                )
+                if capability is None:
+                    continue
+                for reference in capability.required_capabilities:
+                    target = (reference.module_id, reference.capability_id)
+                    if target in dependencies:
+                        continue
+                    child = core.registry.snapshot().modules.get(reference.module_id)
+                    if child is None or not core.registry.is_active(child):
+                        continue
+                    if reference.module_id.partition("/")[
+                        0
+                    ] in manifests and not projection.permits(
+                        reference.module_id, manifests, child.manifest
+                    ):
+                        continue
+                    declared = next(
+                        (
+                            item
+                            for item in child.manifest.capabilities
+                            if item.capability_id == reference.capability_id
+                        ),
+                        None,
+                    )
+                    if (
+                        supports_public_read_only(declared)
+                        and InvocationOrigin.WEB_PUBLIC in declared.effective_origins
+                    ):
+                        dependencies.add(target)
+                        pending.append(target)
+                        if len(dependencies) > 128:
+                            raise ValueError(
+                                "public dependency deployment exceeds budget"
+                            )
+            deployment = frozenset(dependencies)
             # Neither operation awaits or invokes owner callbacks. If either
             # rejects the fully constructed snapshot, withdraw external access.
             core.issuer._replace_external_public_web_capabilities(deployment)
-            validator.replace_external_bindings(bindings)
+            selected_timeouts = getattr(
+                getattr(self, "_external_source_policies", None),
+                "capability_timeouts",
+                {},
+            )
+            route_targets = {value[0] for value in bindings.values()}
+            validator.replace_external_bindings(
+                bindings,
+                **(
+                    {
+                        "capability_timeouts": {
+                            target: seconds
+                            for target, seconds in selected_timeouts.items()
+                            if target in route_targets
+                        }
+                    }
+                    if selected_timeouts
+                    else {}
+                ),
+            )
         except BaseException:
             core.issuer._replace_external_public_web_capabilities(frozenset())
             validator.replace_external_bindings({})
@@ -735,6 +817,7 @@ class AstrBotRuntime:
             "module-credential-status",
             "module-credential-replace",
             "module-credential-clear",
+            "module-credential-authorize",
             "module-page-session",
             "module-page-session-close",
         }
@@ -764,9 +847,11 @@ class AstrBotRuntime:
         if action == "module-page-session-close":
             if set(data) != {"page_session"}:
                 raise ValueError("invalid page session close")
-            self._page_sessions.revoke(
+            lineage = self._page_sessions.revoke(
                 data["page_session"], subject=subject, bearer_digest=bearer_digest
             )
+            if lineage is not None:
+                self._source_authorizations.invalidate(page_session_id=lineage)
             if not request_current():
                 raise AdminAuthorizationDenied
             return {"closed": True}
@@ -972,15 +1057,32 @@ class AstrBotRuntime:
 
         watcher = asyncio.create_task(disconnect(), name="ygl:module-page-disconnect")
         try:
-            result = await module_page_operation(
-                core.admin_operations,
-                action,
-                {key: value for key, value in data.items() if key != "page_session"},
-                authorization=authorization,
-                runtime_id=binding.runtime_id,
-                check_page_binding=check_page_binding,
-                descriptor_choices=presentation_choices,
-            )
+            if action == "module-credential-authorize":
+                result = await self._module_source_authorization(
+                    core,
+                    data,
+                    binding=binding,
+                    subject=subject,
+                    bearer_digest=bearer_digest,
+                    authorization=authorization,
+                    source=source,
+                    current=still_current,
+                    raw=raw,
+                )
+            else:
+                result = await module_page_operation(
+                    core.admin_operations,
+                    action,
+                    {
+                        key: value
+                        for key, value in data.items()
+                        if key != "page_session"
+                    },
+                    authorization=authorization,
+                    runtime_id=binding.runtime_id,
+                    check_page_binding=check_page_binding,
+                    descriptor_choices=presentation_choices,
+                )
             await check_page_binding(
                 binding.owner, binding.page, binding.module_epoch, action
             )
@@ -1027,6 +1129,119 @@ class AstrBotRuntime:
                 finally:
                     if cancellation_pending:
                         raise asyncio.CancelledError
+
+    async def _module_source_authorization(
+        self,
+        core,
+        data,
+        *,
+        binding,
+        subject,
+        bearer_digest,
+        authorization,
+        source,
+        current,
+        raw,
+    ):
+        expected = {
+            "owner",
+            "page",
+            "runtime_id",
+            "module_epoch",
+            "page_session",
+            "flow_id",
+            "step",
+            "session_id",
+            "expected_revision",
+        }
+        if (
+            set(data) != expected
+            or type(data["expected_revision"]) is not int
+            or data["expected_revision"] < 1
+        ):
+            raise ValueError("invalid authorization request")
+        definitions = self._external_source_policies.authorizations.get(
+            binding.owner, {}
+        )
+        flow = definitions.get(data["flow_id"])
+        if flow is None or flow["credential_field"] not in binding.credential_fields:
+            raise AdminAuthorizationDenied
+        page = self._page_sessions.require(
+            data["page_session"],
+            subject=subject,
+            bearer_digest=bearer_digest,
+            binding=binding,
+            generation=self._generation,
+        )
+        target = ConfigTarget(core.admin_operations.config_principal_id, binding.owner)
+        material_binding = AuthorizationBinding(
+            binding.owner,
+            subject + ":" + bearer_digest.hex(),
+            page.lineage_id,
+            binding.runtime_id,
+            binding.module_epoch,
+            data["expected_revision"],
+        )
+
+        async def guard():
+            if not current(raw):
+                raise AdminAuthorizationDenied
+            source.check(
+                authorization,
+                AdminOperation.UPDATE_CONFIG,
+                {target: binding.credential_fields},
+            )
+            grant = await core.admin_authorization.authorize(
+                AdminOperation.UPDATE_CONFIG,
+                invocation=None,
+                context=authorization,
+                resources={target: binding.credential_fields},
+            )
+            snapshot = await core.admin_operations._config_repository.current(
+                target,
+                grant=grant,
+                operation=AdminOperation.UPDATE_CONFIG,
+            )
+            if snapshot.revision != material_binding.expected_revision:
+                from ...core.ports import RevisionConflict
+
+                raise RevisionConflict(
+                    "source.authorization",
+                    material_binding.expected_revision,
+                    snapshot.revision,
+                )
+            if not current(raw):
+                raise AdminAuthorizationDenied
+
+        async def commit(material):
+            await guard()
+            update = {
+                "field": flow["credential_field"],
+                "mode": "replace" if material else "clear",
+            }
+            if material:
+                update["value"] = material
+            return await core.admin_operations.credential_update(
+                {
+                    "module_id": binding.owner,
+                    "expected_revision": material_binding.expected_revision,
+                    "updates": [update],
+                },
+                authorization=authorization,
+            )
+
+        cached = core.module_services._http_by_module.get(binding.owner)
+        if cached is None:
+            raise AdminAuthorizationDenied
+        return await self._source_authorizations.execute(
+            binding=material_binding,
+            flow_id=data["flow_id"],
+            step=data["step"],
+            session_id=data["session_id"],
+            guard=guard,
+            commit=commit,
+            http=cached[1],
+        )
 
     async def recover_management(
         self, core, revisions, *, authorization
@@ -1116,13 +1331,26 @@ class AstrBotRuntime:
         return validator.remaining(ticket)
 
     async def invoke_public_web(
-        self, request_state, endpoint: str | tuple[str, str, str], parameters: dict
+        self,
+        request_state,
+        endpoint: str | tuple[str, str, str],
+        parameters: dict,
+        *,
+        images=False,
     ) -> dict:
         validator, ticket, core, generation, facts = request_state
         self.public_web_remaining(request_state)
         route = validator.route_for(ticket, endpoint)
         proof = validator.mint(ticket)
-        result = await core.invoke_public_web(*route.target, parameters, proof=proof)
+        pages = ()
+        if images:
+            result, pages = await core.preview_public_web(
+                *route.target, parameters, proof=proof
+            )
+        else:
+            result = await core.invoke_public_web(
+                *route.target, parameters, proof=proof
+            )
         # Core deliberately revokes proof after result publication. Keep the
         # independent Host request deadline/generation facts for this final hop.
         if validator is not self._web_validator or not self._web_current(
@@ -1133,6 +1361,18 @@ class AstrBotRuntime:
             raise WebPublicRejected("session_expired")
         validator.require_route_current(endpoint, route)
         data = project_result(result)
+        if images:
+            import base64
+
+            if len(pages) > 8 or sum(len(page) for page in pages) > 16 * 1024 * 1024:
+                raise WebPublicRejected("result_rejected")
+            data["images"] = [
+                {
+                    "media_type": "image/png",
+                    "base64": base64.b64encode(page).decode("ascii"),
+                }
+                for page in pages
+            ]
         validator.require_route_current(endpoint, route)
         if (
             not self._web_current(core, generation)
@@ -1208,6 +1448,9 @@ class AstrBotRuntime:
 
     def _cleanup_module_owner(self, owner):
         self._page_sessions.revoke_owner(owner)
+        manager = getattr(self, "_source_authorizations", None)
+        if manager is not None:
+            manager.invalidate(owner_id=owner)
         if self._web_validator is not None:
             self._web_validator.revoke_owner(owner)
         if self._tool_publisher is not None:
@@ -1293,7 +1536,10 @@ class AstrBotRuntime:
                     self._assembly.manifests,
                     self._assembly.gates,
                 )
-                self._source_credential_policies = self._assembly.credential_policies
+                self._source_credential_policies = (
+                    self._assembly.credential_policies
+                    + self._external_source_policies.credential_policies
+                )
             else:
                 self._isolated_extension_dir = tempfile.TemporaryDirectory(
                     prefix="ygl-disabled-extensions-", dir=self._data_dir
@@ -1301,7 +1547,9 @@ class AstrBotRuntime:
                 extension_root = Path(self._isolated_extension_dir.name)
                 defaults = {}
                 subscription_gates = MappingProxyType({})
-                self._source_credential_policies = ()
+                self._source_credential_policies = (
+                    self._external_source_policies.credential_policies
+                )
                 self._assembly = None
             message_port = AstrBotMessagePort(
                 self._context,
@@ -1385,10 +1633,12 @@ class AstrBotRuntime:
                     trusted_bundled_manifests=defaults,
                     trusted_subscription_gates=subscription_gates,
                     source_health=self._source_health,
+                    commentary_port=AstrBotSubscriptionCommentary(self._context),
                     source_credential_policies=self._source_credential_policies,
-                    managed_source_credentials=self._assembly.managed_credentials
-                    if self._assembly
-                    else (),
+                    managed_source_credentials=(
+                        (self._assembly.managed_credentials if self._assembly else ())
+                        + self._external_source_policies.managed_credentials
+                    ),
                     module_config_validators=self._assembly.validators
                     if self._assembly
                     else {},
@@ -1417,9 +1667,12 @@ class AstrBotRuntime:
                     public_web_capabilities=self._assembly.public_capabilities
                     if self._assembly
                     else (),
-                    capability_timeouts=self._assembly.capability_timeouts
-                    if self._assembly
-                    else None,
+                    capability_timeouts={
+                        **(
+                            self._assembly.capability_timeouts if self._assembly else {}
+                        ),
+                        **self._external_source_policies.capability_timeouts,
+                    },
                     collector_timeouts=self._assembly.collector_timeouts
                     if self._assembly
                     else None,
@@ -1549,6 +1802,7 @@ class AstrBotRuntime:
                     self._context,
                     core,
                     core.extension_runtime.factory_source,
+                    source_policies=self._external_source_policies,
                     generation=generation,
                     current=lambda: self._ready
                     and not self._closing
@@ -1583,6 +1837,9 @@ class AstrBotRuntime:
     async def terminate(self) -> None:
         """Stop ingress and close the owned pump/modules/database once."""
         self._page_sessions.close()
+        manager = getattr(self, "_source_authorizations", None)
+        if manager is not None:
+            await manager.close()
         if self._extension_host is not None:
             self._extension_host.stop_accepting()
         self._generation += 1

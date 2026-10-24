@@ -24,6 +24,7 @@ class _Session:
     binding: ModulePageGrant
     generation: int
     expiry: float
+    lineage_id: str
 
 
 class HostModulePageSessions:
@@ -80,14 +81,16 @@ class HostModulePageSessions:
             self._prune()
             if self._closed or type(subject) is not str or not subject:
                 raise AdminAuthorizationDenied
+            lineage = token_urlsafe(32)
             if previous_session is not None:
-                self.require(
+                previous = self.require(
                     previous_session,
                     subject=subject,
                     bearer_digest=bearer_digest,
                     binding=binding,
                     generation=generation,
                 )
+                lineage = previous.lineage_id
             if len(self._sessions) >= 128 and previous_session is None:
                 raise AdminAuthorizationDenied
             expiry = min(float(expiry), self._clock() + 30.0)
@@ -97,7 +100,7 @@ class HostModulePageSessions:
                 del self._sessions[previous_session]
             handle = token_urlsafe(32)
             self._sessions[handle] = _Session(
-                subject, bearer_digest, binding, generation, expiry
+                subject, bearer_digest, binding, generation, expiry, lineage
             )
             return {"page_session": handle, "expires_at": expiry}
 
@@ -113,6 +116,7 @@ class HostModulePageSessions:
             ):
                 raise AdminAuthorizationDenied
             del self._sessions[handle]
+            return session.lineage_id
 
     def revoke_owner(self, owner):
         with self._lock:

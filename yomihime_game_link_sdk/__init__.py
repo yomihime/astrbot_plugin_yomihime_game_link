@@ -79,6 +79,7 @@ from .services import DependencyInvoker as DependencyInvoker
 from .services import DiagnosticAccess as DiagnosticAccess
 from .services import HealthReport as HealthReport
 from .services import HealthStatus as HealthStatus
+from .services import HttpBudgetStatus as HttpBudgetStatus
 from .services import HttpRequest as HttpRequest
 from .services import HttpResponse as HttpResponse
 from .services import IdentityResolver as IdentityResolver
@@ -121,17 +122,32 @@ from .storage import VersionedRecord as VersionedRecord
 from .subscriptions import CollectionKey as CollectionKey
 from .subscriptions import CollectionView as CollectionView
 from .subscriptions import Collector as Collector
+from .subscriptions import (
+    CommentaryRequest as CommentaryRequest,
+)
+from .subscriptions import (
+    ComposedPublicEvent as ComposedPublicEvent,
+)
 from .subscriptions import ConversationKind as ConversationKind
 from .subscriptions import ConversationRef as ConversationRef
 from .subscriptions import DigestScheduleProfile as DigestScheduleProfile
 from .subscriptions import DstFoldPolicy as DstFoldPolicy
 from .subscriptions import DstGapPolicy as DstGapPolicy
 from .subscriptions import EvaluationDecision as EvaluationDecision
+from .subscriptions import (
+    EvaluationEvent as EvaluationEvent,
+)
 from .subscriptions import EvaluationState as EvaluationState
 from .subscriptions import IntervalLimits as IntervalLimits
 from .subscriptions import NormalizedInput as NormalizedInput
 from .subscriptions import Observation as Observation
 from .subscriptions import ObservationCompleteness as ObservationCompleteness
+from .subscriptions import (
+    PublicEventComposer as PublicEventComposer,
+)
+from .subscriptions import (
+    PublicEventContribution as PublicEventContribution,
+)
 from .subscriptions import ScheduleDescriptor as ScheduleDescriptor
 from .subscriptions import ScheduleTrigger as ScheduleTrigger
 from .subscriptions import SubscriptionDescriptor as SubscriptionDescriptor
@@ -143,6 +159,11 @@ from .version import __version__ as __version__
 
 __all__ = [
     "cards",
+    "CommentaryRequest",
+    "ComposedPublicEvent",
+    "EvaluationEvent",
+    "PublicEventContribution",
+    "PublicEventComposer",
     "InvocationConversationKind",
     "InvocationOrigin",
     "InvocationSubscriptionScope",
@@ -261,6 +282,7 @@ __all__ = [
     "ResourceReference",
     "ResourceCacheStats",
     "SourceHttp",
+    "HttpBudgetStatus",
     "SubscriptionOperations",
     "TaskScope",
     "AccessDenied",

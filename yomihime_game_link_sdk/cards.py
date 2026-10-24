@@ -74,6 +74,36 @@ class WeightedCollage:
 
 
 @dataclass(frozen=True)
+class DenseCollageItem:
+    """One square grid span; tuple order is the caller's logical ranking."""
+
+    key: str
+    span: int
+    image: Asset | ResourceImage | None = None
+    title: str = ""
+    caption: str = ""
+
+
+@dataclass(frozen=True)
+class DenseCollage:
+    """Deterministic bounded grid, with edge-to-edge public content width.
+
+    Document.width equals columns * cell_width. A span occupies k by k cells.
+    Pages may contain nonconsecutive logical ranks, without clipping tiles.
+    cover crops proportionally; contain preserves all of the source image.
+    No game-specific weights or thresholds belong in this declaration.
+    """
+
+    items: tuple[DenseCollageItem, ...]
+    columns: int = 20
+    cell_width: int = 54
+    cell_height: int = 81
+    max_height: int = 2592
+    max_pages: int = 8
+    fit: Literal["cover", "contain"] = "cover"
+
+
+@dataclass(frozen=True)
 class Span:
     """Explicit color is #rrggbb. ``gold`` requests the fixed gold glow style.
 
@@ -198,7 +228,9 @@ class Image:
     fit: Literal["contain", "cover"] = "contain"
 
 
-Block: TypeAlias = Text | Section | Row | PropertyGrid | Table | Image | WeightedCollage
+Block: TypeAlias = (
+    Text | Section | Row | PropertyGrid | Table | Image | WeightedCollage | DenseCollage
+)
 
 
 @dataclass(frozen=True)
@@ -224,6 +256,8 @@ __all__ = [
     "ResourceImage",
     "CollageItem",
     "WeightedCollage",
+    "DenseCollageItem",
+    "DenseCollage",
     "Span",
     "Inline",
     "Content",

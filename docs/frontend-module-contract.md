@@ -6,11 +6,11 @@
 
 唯一正式根和 pageName 为 `00-game-link`。壳按 role 展示模块主页、配置、辅助查询；没有 home 时显示简洁摘要，没有 config 时不显示业务配置入口。模块不能注册全局页面或替换壳导航。
 
-`PageOptions.services` 只包含当前 owner/page 的 invoke、config.current/save/clear 与 credentials.status/replace/clear。所有写操作携带已读 revision；同页重复写拒绝。clear 凭据由壳统一确认，确认期间切页或失去授权则不提交。config 返回自身字段安全 DTO，credentials 返回 configured、decryptable、upstream:unverified；不返回旧秘密、密文或全局存储管理对象。
+`PageOptions.services` 只包含当前 owner/page 的 invoke、preview、config.current/save/clear 与 credentials.status/replace/clear/authorize。所有写操作携带已读 revision；同页重复写拒绝。clear 凭据由壳统一确认，确认期间切页或失去授权则不提交。config 返回自身字段安全 DTO，credentials 返回 configured、decryptable、upstream:unverified；不返回旧秘密、密文或全局存储管理对象。preview 对当前页面声明的明确公共能力返回有界 PNG，不发送消息或读取默认私人身份。
 
-当前内部请求协议为六个闭合 `admin/module-*` 动作：config-current/save/clear、credential-status/replace/clear。请求身份包含 owner、page、runtime_id、module_epoch；save 携 values，config clear 携 fields，凭据 replace 携 field/pair，凭据 clear 携 field 与固定确认。身份闭包不是授权；后端每请求独立验证当前 token/page、受信政策、owner/epoch、字段资源 READ/UPDATE、capability 和 CAS。普通查询不因此获得管理权限。
+当前内部请求协议为闭合 `admin/module-*` 动作：config-current/save/clear、credential-status/replace/clear/authorize。请求身份包含 owner、page、runtime_id、module_epoch；save 携 values，config clear 携 fields，凭据 replace 携 field/pair，凭据 clear 携 field 与固定确认。静态pair为token及可选subject，OAuth仍用client_id/client_secret。authorize(revision,flow_id,step,session_id)只接受受信flow的begin/poll/cancel/qr/revoke，返回安全状态或当前管理会话的QR PNG，原始票据/秘密不返回。身份闭包不是授权；后端每请求独立验证当前 token/page、受信政策、owner/epoch、字段资源 READ/UPDATE、capability 和 CAS。普通查询不因此获得管理权限。
 
-壳每次挂载先通过固定 `admin/module-page-session` 用上述身份取得 server-issued page_session（expires_at 为 UTC epoch seconds，最长 30 秒）。proof 只在内部服务闭包，六动作随请求提交。到期前的并发读取共享一次续期，并仅携自身 previous_session；不能撤销另一视图的 proof。dispose 固定关闭自身 proof，迟到 bootstrap 结果也关闭自身 proof。已提交写入的失败或未知结果不自动重试；本地过期前续期不代表后台已完成写入。Host 必须校验真实会话及 Origin，客户端身份或字段声明本身不授权。
+壳每次挂载先通过固定 `admin/module-page-session` 用上述身份取得 server-issued page_session（expires_at 为 UTC epoch seconds，最长 30 秒）。proof 只在内部服务闭包，各管理动作随请求提交。到期前的并发读取共享一次续期，并仅携自身 previous_session；不能撤销另一视图的 proof。尚有效proof轮换保持私有授权lineage，旧proof立即失效；过期后fresh bootstrap不继承旧扫码会话。dispose 固定关闭自身 proof并失效对应授权lineage，迟到 bootstrap 结果也关闭自身 proof。已提交写入的失败或未知结果不自动重试；本地过期前续期不代表后台已完成写入。Host 必须校验真实会话及 Origin，客户端身份或字段声明本身不授权。
 
 到期后的旧 proof 已被 server registry 清除，不能再用作 previous_session。闲置超过 TTL 后采用 fresh bootstrap，重新校验当前 Host 会话与页面授权；只有未到期 proof 才轮换。并发读取仍只申请一次，授权失效不降级为旧 proof，已经发出的写入不因期间到期而重发。前端只把精确授权错误映射为受控授权失效，未知异常显示固定错误，保留未确认写的人工核对流程。
 

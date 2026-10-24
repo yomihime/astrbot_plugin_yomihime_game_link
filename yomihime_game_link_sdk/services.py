@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime
 from enum import Enum
 from types import MappingProxyType
 from typing import Protocol, runtime_checkable
@@ -24,6 +25,7 @@ from .storage import (
 from .storage import JsonValue as JsonValue
 from .subscriptions import (
     Collector,
+    PublicEventComposer,
     SubscriptionEvaluator,
     SubscriptionRequest,
     SubscriptionView,
@@ -152,7 +154,9 @@ class SubscriptionOperations(Protocol):
     on its own, and internal or Tool invocation cannot promote authority.
     Executable create_request/revise_request use collector command input.
     Creation omits ID/revision; Core generates both. Repeated creates can make
-    distinct subscriptions sharing a collection job; creation is not idempotent.
+    distinct subscriptions sharing a collection job unless creation_key is set.
+    creation_key atomically reuses an active subscription for this trusted owner,
+    full route, type and collection. Cancelled generations are never reused.
     Revision requires ID/revision and current CAS. cancel is revision-checked
     and removes this association while preserving other subscribers' jobs/data.
     SubscriptionView is matcher-facing and has no collector command data.
@@ -217,8 +221,21 @@ class CacheAccess(Protocol):
     ) -> CacheEntry: ...
 
 
+@dataclass(frozen=True, slots=True)
+class HttpBudgetStatus:
+    source_id: str
+    requests_per_hour: int | None
+    used: int
+    remaining: int | None
+    next_available_at: datetime | None = None
+
+
 class SourceHttp(Protocol):
     async def fetch(self, request: HttpRequest) -> HttpResponse: ...
+
+    async def budget(self, source_id: str) -> HttpBudgetStatus:
+        """Shared local rolling-hour wire-attempt budget, excluding cache hits."""
+        ...
 
 
 class ResourceAccess(Protocol):
@@ -360,6 +377,7 @@ class ModuleHandlers:
     capabilities: Mapping[str, CapabilityHandler]
     collectors: Mapping[str, "Collector"]
     evaluators: Mapping[str, "SubscriptionEvaluator"]
+    event_composers: Mapping[str, PublicEventComposer] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if isinstance(self.capabilities, Mapping):
@@ -369,6 +387,10 @@ class ModuleHandlers:
         if isinstance(self.collectors, Mapping):
             object.__setattr__(
                 self, "collectors", MappingProxyType(dict(self.collectors))
+            )
+        if isinstance(self.event_composers, Mapping):
+            object.__setattr__(
+                self, "event_composers", MappingProxyType(dict(self.event_composers))
             )
         if isinstance(self.evaluators, Mapping):
             object.__setattr__(

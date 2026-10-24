@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import base64
 import shutil
 import tempfile
 import time
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -221,8 +223,96 @@ class PublicWebTimeout15Tests(unittest.IsolatedAsyncioTestCase):
                 finally:
                     self.runtime.finish_public_web(state)
 
+    async def test_public_preview_uses_original_gateway_flight_until_png_is_checked(
+        self,
+    ):
+        from yomihime_game_link_sdk import cards
+
+        async def invoke(view, parameters):
+            value = await self.original(view, parameters)
+            return replace(
+                value,
+                document=replace(
+                    value.document,
+                    card=cards.Document(
+                        "Synthetic preview",
+                        (cards.DenseCollage((cards.DenseCollageItem("one", 2),)),),
+                        width=1080,
+                    ),
+                ),
+            )
+
+        self.handler.invoke = invoke
+        with self.clock_patch():
+            state = self.begin()
+            try:
+                value = await self.runtime.invoke_public_web(
+                    state,
+                    "calendar",
+                    {"region": "cn", "days": 7, "timezone": "UTC"},
+                    images=True,
+                )
+            finally:
+                self.runtime.finish_public_web(state)
+            self.assertEqual(value["status"], "success", value)
+            png = base64.b64decode(value["images"][0]["base64"], validate=True)
+            self.assertTrue(png.startswith(bytes.fromhex("89504e470d0a1a0a")))
+            self.assertFalse(self.runtime._context.calls)
+            self.assertFalse(self.runtime.core_runtime.gateway.public_web_pending)
+            original_render = self.runtime.core_runtime.output.render_public_preview
+
+            async def late(*args, **kwargs):
+                pages = await original_render(*args, **kwargs)
+                self.mono[0] += 46
+                self.wall[0] += 46
+                return pages
+
+            state = self.begin()
+            try:
+                with patch.object(
+                    self.runtime.core_runtime.output, "render_public_preview", late
+                ):
+                    with self.assertRaises(WebPublicRejected):
+                        await self.runtime.invoke_public_web(
+                            state,
+                            "calendar",
+                            {"region": "cn", "days": 7, "timezone": "UTC"},
+                            images=True,
+                        )
+            finally:
+                self.runtime.finish_public_web(state)
+            self.assertFalse(self.runtime.core_runtime.gateway.public_web_pending)
+
 
 class HostProofBudgetValidationTests(unittest.TestCase):
+    def test_selected_external_preview_timeout_is_bounded_and_withdrawn_with_route(
+        self,
+    ):
+        validator = HostPublicWebValidator(
+            1,
+            lambda *_: True,
+            clock=lambda: 100,
+            wall_clock=lambda: 1000,
+        )
+        validator.attach(object())
+        endpoint = ("neutral/module", "preview", "render")
+        target = ("neutral/module", "render")
+        binding = {endpoint: (target, object(), lambda: True)}
+        for invalid in (0, True, 91, float("nan")):
+            with self.assertRaises(ValueError):
+                validator.replace_external_bindings(
+                    binding, capability_timeouts={target: invalid}
+                )
+            self.assertNotIn(endpoint, validator._bindings)
+        validator.replace_external_bindings(binding, capability_timeouts={target: 90})
+        ticket = validator.begin(endpoint, "synthetic-session", 1200)
+        self.assertEqual(validator.deadline_facts(ticket), (190, 1200))
+        shorter = validator.begin(endpoint, "synthetic-session", 1020)
+        self.assertEqual(validator.deadline_facts(shorter), (120, 1020))
+        validator.replace_external_bindings({})
+        self.assertNotIn(target, validator._capability_timeouts)
+        self.assertNotIn(ticket, validator._requests)
+
     def test_mapping_is_closed_copied_and_old_constructor_default_is_compatible(self):
         bindings = {"calendar": ("neutral/module", "read")}
         supplied = {("neutral/module", "read"): 45}

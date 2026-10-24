@@ -3,21 +3,31 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import struct
 import tempfile
 import unittest
 import zlib
 from contextlib import AsyncExitStack
 from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
 from ygl_test_subject.core.contracts.services import Grant, GrantStatus
 from ygl_test_subject.core.contracts.validation_boundary import validate_contract
 from ygl_test_subject.core.registry import Registry
+from ygl_test_subject.presentation.card_bitmap import RenderedBitmap
+from ygl_test_subject.services.collage_cache import (
+    inspect_collage_resources,
+    load_finished_pages,
+    resolve_collage_resources,
+    store_finished_pages,
+)
 from ygl_test_subject.services.managed_resources import ResourceCachePolicy
 
 from tests.fixtures.b03_runtime import _Collector, _Handler, _manifest, build_runtime
+from yomihime_game_link_sdk import cards
 from yomihime_game_link_sdk.contexts import InvocationOrigin
 from yomihime_game_link_sdk.declarations import CapabilityReference, PackageManifest
 from yomihime_game_link_sdk.errors import (
@@ -27,7 +37,12 @@ from yomihime_game_link_sdk.errors import (
     ServiceUnavailable,
 )
 from yomihime_game_link_sdk.services import ModuleHandlers
-from yomihime_game_link_sdk.storage import CacheVisibility, OwnerScope, SecretRef
+from yomihime_game_link_sdk.storage import (
+    CacheVisibility,
+    OwnerScope,
+    ResourceMetadata,
+    SecretRef,
+)
 from yomihime_game_link_sdk.version import MODULE_ABI_VERSION
 
 
@@ -89,6 +104,361 @@ def consumer_registry():
 
 
 class ManagedResourceConsumerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_public_derivatives_cross_users_and_reject_private_source(self):
+        _, preparation = await self.bound()
+        with self.assertRaises(ParameterError):
+            await preparation.cache.put(
+                "core-collage-public-v1-forged",
+                {"id": "forged"},
+                ttl_seconds=60,
+                visibility=CacheVisibility.PUBLIC,
+            )
+        reference = await preparation.resources.store(
+            "image/png", png(), visibility=CacheVisibility.PUBLIC
+        )
+        _, alice = await self.bound(capability="private.read", grant=await self.grant())
+        _, bob = await self.bound(
+            "bob", capability="private.read", grant=await self.grant("bob")
+        )
+        card = cards.Document(
+            "Private selection",
+            (
+                cards.DenseCollage(
+                    (
+                        cards.DenseCollageItem(
+                            "2", 2, cards.ResourceImage(reference.asset_id)
+                        ),
+                    )
+                ),
+            ),
+            width=1080,
+        )
+
+        async def current():
+            return None
+
+        with self.assertRaises(AccessDenied):
+            await alice.resources.store(
+                "image/png", png(), visibility=CacheVisibility.PUBLIC
+            )
+        prepared, _, snapshots = await inspect_collage_resources(card, alice, current)
+        await resolve_collage_resources(
+            prepared, alice, current, snapshots=snapshots, may_cache_derivatives=True
+        )
+        files = self.runtime.repositories.resources.file_store
+        original = files.read
+        reads = []
+
+        async def read(asset_id, scope):
+            reads.append(asset_id)
+            return await original(asset_id, scope)
+
+        with patch.object(files, "read", read):
+            prepared, _, snapshots = await inspect_collage_resources(card, bob, current)
+            await resolve_collage_resources(
+                prepared, bob, current, snapshots=snapshots, may_cache_derivatives=True
+            )
+        self.assertEqual(len(reads), 1)  # derivative fully verified, original not read
+        self.assertNotIn(reference.asset_id, reads)
+        self.assertEqual(
+            (await alice.resources.stats(visibility=CacheVisibility.USER)).items, 0
+        )
+        self.assertEqual(
+            (await bob.resources.stats(visibility=CacheVisibility.USER)).items, 0
+        )
+        personal = await alice.resources.store(
+            "image/png", png(91), visibility=CacheVisibility.USER
+        )
+        snapshot = await alice.resources._collage_snapshot(
+            personal.asset_id, CacheVisibility.USER
+        )
+        with self.assertRaises(AccessDenied):
+            await alice.resources._collage_store_derivative(
+                snapshot, (108, 162), "cover", png(91)
+            )
+        with self.assertRaises(AccessDenied):
+            await alice.cache._collage_public_lookup(
+                alice.resources, snapshot, (108, 162), "cover"
+            )
+
+    async def test_public_derivative_write_rechecks_revoked_invocation(self):
+        view, bound = await self.bound(
+            capability="private.read", grant=await self.grant()
+        )
+        _, preparation = await self.bound()
+        reference = await preparation.resources.store(
+            "image/png", png(), visibility=CacheVisibility.PUBLIC
+        )
+        snapshot = await bound.resources._collage_snapshot(
+            reference.asset_id, CacheVisibility.PUBLIC
+        )
+        repository = self.runtime.repositories.cache
+        original = repository.put
+
+        async def revoke(*args, **kwargs):
+            self.runtime.issuer.release(view)
+            entry = next(pair for pair in self.views if pair[0] is view)
+            self.runtime.lifecycle.admission.release(entry[1])
+            self.views.remove(entry)
+            return await original(*args, **kwargs)
+
+        with self.assertRaises((InvalidInvocation, AccessDenied)):
+            async with bound.resources._collage_source_leases(
+                {(CacheVisibility.PUBLIC, reference.asset_id): snapshot}
+            ):
+                derivative = await bound.resources._collage_store_derivative(
+                    snapshot, (108, 162), "cover", png()
+                )
+                with patch.object(repository, "put", revoke):
+                    await bound.cache._collage_public_put(derivative)
+
+    async def test_dense_derivatives_cannot_evict_current_invocation_sources(self):
+        _, bound = await self.bound()
+        policy = self.runtime.repositories.resources.managed_cache
+        policy.policy = ResourceCachePolicy(max_items=2)
+        first = await bound.resources.store(
+            "image/png", png(1), visibility=CacheVisibility.PUBLIC
+        )
+        second = await bound.resources.store(
+            "image/png", png(2), visibility=CacheVisibility.PUBLIC
+        )
+        card = cards.Document(
+            "Capacity",
+            (
+                cards.DenseCollage(
+                    tuple(
+                        cards.DenseCollageItem(
+                            str(index), 2, cards.ResourceImage(reference.asset_id)
+                        )
+                        for index, reference in enumerate((first, second))
+                    )
+                ),
+            ),
+            width=1080,
+        )
+
+        async def current():
+            return None
+
+        prepared, _, snapshots = await inspect_collage_resources(card, bound, current)
+        resolved, _ = await resolve_collage_resources(
+            prepared, bound, current, snapshots=snapshots, may_cache_derivatives=True
+        )
+        self.assertTrue(
+            all(type(item.image) is cards.Asset for item in resolved.blocks[0].items)
+        )
+        self.assertEqual(
+            await bound.resources.read(
+                first.asset_id, visibility=CacheVisibility.PUBLIC
+            ),
+            png(1),
+        )
+        self.assertEqual(
+            await bound.resources.read(
+                second.asset_id, visibility=CacheVisibility.PUBLIC
+            ),
+            png(2),
+        )
+        # The invocation lease ends after preparation, so future bounded stores
+        # can make progress rather than retaining an unbounded pin.
+        await bound.resources.store(
+            "image/png", png(3), visibility=CacheVisibility.PUBLIC
+        )
+
+    async def test_dense_derivatives_reuse_per_size_and_unknown_identity_rehashes(self):
+        view, bound = await self.bound()
+        ref = await bound.resources.store(
+            "image/png", png(), visibility=CacheVisibility.PUBLIC
+        )
+        card = cards.Document(
+            "Career",
+            (
+                cards.DenseCollage(
+                    (
+                        cards.DenseCollageItem(
+                            "2", 2, cards.ResourceImage(ref.asset_id)
+                        ),
+                        cards.DenseCollageItem(
+                            "10", 1, cards.ResourceImage(ref.asset_id)
+                        ),
+                    )
+                ),
+            ),
+            width=1080,
+        )
+
+        async def current():
+            return None
+
+        files = self.runtime.repositories.resources.file_store
+        original = files.read
+        reads = []
+
+        async def read(asset_id, scope):
+            reads.append(asset_id)
+            return await original(asset_id, scope)
+
+        with patch.object(files, "read", read):
+            prepared, _, snapshots = await inspect_collage_resources(
+                card, bound, current
+            )
+            await resolve_collage_resources(
+                prepared,
+                bound,
+                current,
+                snapshots=snapshots,
+                may_cache_derivatives=True,
+            )
+            self.assertEqual(reads.count(ref.asset_id), 1)
+            reads.clear()
+            prepared, _, snapshots = await inspect_collage_resources(
+                card, bound, current
+            )
+            await resolve_collage_resources(
+                prepared,
+                bound,
+                current,
+                snapshots=snapshots,
+                may_cache_derivatives=True,
+            )
+            self.assertNotIn(ref.asset_id, reads)
+            self.assertEqual(len(reads), 2)  # each dimension's derivative verified
+            reads.clear()
+
+            async def unknown_identity(*args):
+                return None
+
+            with patch.object(files, "identity", unknown_identity):
+                await inspect_collage_resources(card, bound, current)
+            self.assertEqual(reads, [ref.asset_id])
+        self.runtime.issuer.release(view)
+        self.runtime.lifecycle.admission.release(self.views[-1][1])
+        self.views.pop()
+        with self.assertRaises(InvalidInvocation):
+            await bound.resources._collage_snapshot(
+                ref.asset_id, CacheVisibility.PUBLIC
+            )
+
+    async def test_collage_snapshot_reads_once_then_restart_hot_without_source_reads(
+        self,
+    ):
+        _, bound = await self.bound()
+        payload = png()
+        ref = await bound.resources.store(
+            "image/png", payload, visibility=CacheVisibility.PUBLIC
+        )
+        card = cards.Document(
+            "Career",
+            (
+                cards.DenseCollage(
+                    (
+                        cards.DenseCollageItem(
+                            "2", 2, cards.ResourceImage(ref.asset_id)
+                        ),
+                        cards.DenseCollageItem(
+                            "10", 1, cards.ResourceImage(ref.asset_id)
+                        ),
+                    )
+                ),
+            ),
+            width=1080,
+        )
+
+        async def current():
+            return None
+
+        files = self.runtime.repositories.resources.file_store
+
+        # Simulate a pre-upgrade index: first admission hashes exactly once.
+        def clear_integrity(unit):
+            unit.execute("DELETE FROM resource_integrity_snapshots")
+
+        await self.runtime.database.executor.run_transaction(clear_integrity)
+        original = files.read
+        reads = []
+
+        async def read(asset_id, scope):
+            reads.append(asset_id)
+            return await original(asset_id, scope)
+
+        with patch.object(files, "read", read):
+            prepared, versions, snapshots = await inspect_collage_resources(
+                card, bound, current
+            )
+            resolved, _ = await resolve_collage_resources(
+                prepared, bound, current, snapshots=snapshots
+            )
+            self.assertEqual(resolved.blocks[0].items[0].image.kind, "png")
+            self.assertEqual(reads, [ref.asset_id])
+            reads.clear()
+            _, hot_versions, _ = await inspect_collage_resources(card, bound, current)
+            self.assertEqual(versions, hot_versions)
+            self.assertEqual(reads, [])
+        page = RenderedBitmap(png(99), 1, 1)
+        await store_finished_pages(bound, "integrity-hot", (page,), current)
+        await self.close_runtime()
+        self.runtime = await build_runtime(self.root, registry=consumer_registry())
+        _, bound = await self.bound()
+        files = self.runtime.repositories.resources.file_store
+        original = files.read
+        with patch.object(files, "read", read):
+            _, restarted_versions, _ = await inspect_collage_resources(
+                card, bound, current
+            )
+            cached = await load_finished_pages(bound, "integrity-hot", current)
+        self.assertEqual(restarted_versions, versions)
+        self.assertEqual(cached, (page,))
+        self.assertNotIn(ref.asset_id, reads)
+        self.assertEqual(len(reads), 1)  # finished PNG still fully read/hash checked
+
+    async def test_integrity_detects_in_place_same_size_edit_with_restored_mtime(self):
+        _, bound = await self.bound()
+        payload = png()
+        ref = await bound.resources.store(
+            "image/png", payload, visibility=CacheVisibility.PUBLIC
+        )
+        self.assertIsNotNone(await bound.resources.metadata(ref.asset_id))
+        files = self.runtime.repositories.resources.file_store
+        path = files._final(ref.asset_id, OwnerScope.public())
+        before = path.stat()
+        altered = bytearray(payload)
+        altered[len(altered) // 2] ^= 1
+        with path.open("r+b") as stream:
+            stream.write(altered)
+        os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+        self.assertIsNone(await bound.resources.metadata(ref.asset_id))
+        healed = await bound.resources.store(
+            "image/png", payload, visibility=CacheVisibility.PUBLIC
+        )
+        self.assertEqual(healed, ref)
+        self.assertEqual(await bound.resources.read(ref.asset_id), payload)
+
+    async def test_expired_unmanaged_store_rejects_without_renewal_or_adoption(self):
+        _, bound = await self.bound()
+        repo = self.runtime.repositories.resources
+        stage = await repo.file_store.stage(
+            "expired-legacy", png(), OwnerScope.public()
+        )
+        expired = ResourceMetadata(
+            stage.asset_id,
+            "image/png",
+            OwnerScope.public(),
+            len(png()),
+            datetime.now(UTC) - timedelta(seconds=10),
+        )
+        await repo.file_store.commit(stage, expired)
+        registered = await repo.register(expired)
+        with self.assertRaises(ParameterError):
+            await bound.resources.store(
+                "image/png", png(), visibility=CacheVisibility.PUBLIC
+            )
+        self.assertEqual(
+            await repo.registration_state(stage.asset_id, OwnerScope.public()),
+            registered,
+        )
+        self.assertIsNone(await repo.managed_entry(stage.asset_id, OwnerScope.public()))
+        self.assertIsNone(await bound.resources.metadata(stage.asset_id))
+
     async def asyncSetUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
@@ -127,17 +497,19 @@ class ManagedResourceConsumerTests(unittest.IsolatedAsyncioTestCase):
         self.views.append((view, lease))
         return view, await self.runtime.services.for_module(module).scopes.bind(view)
 
-    async def grant(self):
+    async def grant(self, actor="alice"):
         grant = Grant(
-            "resource-test-grant",
+            "resource-test-grant"
+            if actor == "alice"
+            else "resource-test-grant-" + actor,
             1,
-            "alice",
+            actor,
             "sample/alpha",
             "account",
             ("private.read",),
             SecretRef(
                 "secret_resource",
-                "alice",
+                actor,
                 "sample/alpha",
                 "credential",
                 "test_exchange",

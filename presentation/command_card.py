@@ -179,8 +179,14 @@ class CommandCardRenderer:
             # The legacy facts and declarative card each have their own input
             # bounds. A large optional card must not consume the complete
             # fallback's budget or turn usable text into a size-only hint.
-            self._budget(replace(document, card=None))
-            spec, text = self._project(document, audience)
+            dense = (
+                document.card is not None
+                and len(document.card.blocks) == 1
+                and type(document.card.blocks[0]) is cards.DenseCollage
+            )
+            content_limit = 160_000 if dense else _MAX_CONTENT
+            self._budget(replace(document, card=None), limit=content_limit)
+            spec, text = self._project(document, audience, limit=content_limit)
         except BitmapUnavailable:
             return CommandPresentation(TOO_LARGE)
         fallback = text if self._fits_text(text) else TOO_LARGE
@@ -192,9 +198,9 @@ class CommandCardRenderer:
                 selected = apply_theme_selection(
                     document.card, core_theme, module_theme
                 )
-                if (
-                    len(selected.blocks) == 1
-                    and type(selected.blocks[0]) is cards.WeightedCollage
+                if len(selected.blocks) == 1 and type(selected.blocks[0]) in (
+                    cards.WeightedCollage,
+                    cards.DenseCollage,
                 ):
                     bitmaps = render_document_pages(
                         selected, font_provider=self._font_provider_factory()
@@ -247,7 +253,7 @@ class CommandCardRenderer:
         )
 
     @staticmethod
-    def _budget(document):
+    def _budget(document, *, limit=_MAX_CONTENT):
         # Preflight nested scalar structures before formatting or allocating a
         # bitmap. Container width, total text and nesting are all bounded.
         nodes = characters = 0
@@ -259,7 +265,7 @@ class CommandCardRenderer:
                 raise BitmapUnavailable("layout_overflow")
             if isinstance(value, str):
                 characters += len(value)
-                if characters > _MAX_CONTENT:
+                if characters > limit:
                     raise BitmapUnavailable("layout_overflow")
             elif type(value) is int and value.bit_length() > 16384:
                 raise BitmapUnavailable("layout_overflow")
@@ -280,7 +286,7 @@ class CommandCardRenderer:
 
         visit(document)
 
-    def _project(self, document, audience):
+    def _project(self, document, audience, *, limit=_MAX_CONTENT):
         lines = [document.title, document.subject]
         sections = []
         used = sum(map(len, lines)) + 1
@@ -310,7 +316,7 @@ class CommandCardRenderer:
                     paragraphs = (block.fallback_text,)
                 else:
                     paragraphs = tuple(
-                        self._text._render_grid_item(item, _MAX_CONTENT)
+                        self._text._render_grid_item(item, limit)
                         for item in items
                         if item.asset_id is None
                     )
@@ -322,12 +328,7 @@ class CommandCardRenderer:
                 section = Section(paragraphs=paragraphs)
             elif isinstance(block, TableBlock):
                 rows = tuple(
-                    Row(
-                        tuple(
-                            self._text._format_value(value, _MAX_CONTENT)
-                            for value in row
-                        )
-                    )
+                    Row(tuple(self._text._format_value(value, limit) for value in row))
                     for row in block.rows
                 )
                 section = Section(columns=block.columns, rows=rows)
@@ -339,10 +340,10 @@ class CommandCardRenderer:
                     section = Section(paragraphs=(block.fallback_text,))
                     paragraphs = (block.fallback_text,)
             else:
-                paragraphs = tuple(self._text._render_block(block, _MAX_CONTENT))
+                paragraphs = tuple(self._text._render_block(block, limit))
                 section = Section(paragraphs=paragraphs)
             used += sum(len(line) + 1 for line in paragraphs)
-            if used > _MAX_CONTENT:
+            if used > limit:
                 raise BitmapUnavailable("layout_overflow")
             lines.extend(paragraphs)
             sections.append(section)
@@ -350,7 +351,7 @@ class CommandCardRenderer:
         if sources:
             lines.append("来源：" + " / ".join(sources))
         text = "\n".join(lines)
-        if len(text) > _MAX_CONTENT:
+        if len(text) > limit:
             raise BitmapUnavailable("layout_overflow")
         return (
             CardSpec(

@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import math
 from collections.abc import AsyncIterator, Awaitable
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from time import monotonic
 from typing import Callable, TypeVar
@@ -558,14 +558,108 @@ class _ResourceAccessCoordinator:
                 if manager is not None:
                     try:
                         await self._await_boundary(
-                            lambda: manager.read(
-                                asset_id, scope, read=self.__repository.read
-                            )
+                            lambda: manager.snapshot(asset_id, scope)
                         )
                     except FileNotFoundError:
                         continue
                 return metadata
         return None
+
+    async def collage_snapshot(self, asset_id, visibility):
+        validate_contract(visibility)
+        await self._admit()
+        asset_id = _asset_id(asset_id)
+        manager = getattr(self.__repository, "managed_cache", None)
+        if manager is None:
+            return None
+        for scope in await self._read_scopes(visibility):
+            try:
+                return await self._await_boundary(
+                    lambda: manager.snapshot(asset_id, scope)
+                )
+            except FileNotFoundError:
+                continue
+        return None
+
+    async def collage_snapshots(self, references):
+        await self._admit()
+        if type(references) is not tuple or not 1 <= len(references) <= 1000:
+            raise ValueError("resource portfolio is invalid")
+        result = {}
+        grouped = {}
+        retained_budget = {"bytes": 0}
+        for asset_id, visibility in references:
+            _asset_id(asset_id)
+            validate_contract(visibility)
+            grouped.setdefault(visibility, []).append(asset_id)
+        manager = getattr(self.__repository, "managed_cache", None)
+        if manager is None:
+            return {(visibility, asset_id): None for asset_id, visibility in references}
+        for visibility, asset_ids in grouped.items():
+            pending = tuple(dict.fromkeys(asset_ids))
+            for scope in await self._read_scopes(visibility):
+                if not pending:
+                    break
+                found = await self._await_boundary(
+                    lambda: manager.snapshots(
+                        pending, scope, retained_budget=retained_budget
+                    )
+                )
+                for asset_id, snapshot in found.items():
+                    if snapshot is not None:
+                        result[visibility, asset_id] = snapshot
+                pending = tuple(
+                    asset_id
+                    for asset_id in pending
+                    if (visibility, asset_id) not in result
+                )
+            for asset_id in pending:
+                result[visibility, asset_id] = None
+        return result
+
+    async def collage_read(self, snapshot, visibility):
+        from .managed_resources import ResourceIntegritySnapshot
+
+        validate_contract(visibility)
+        await self._admit()
+        if (
+            type(snapshot) is not ResourceIntegritySnapshot
+            or snapshot.metadata.scope not in await self._read_scopes(visibility)
+        ):
+            raise FileNotFoundError("resource is unavailable")
+        manager = getattr(self.__repository, "managed_cache", None)
+        if manager is None:
+            raise FileNotFoundError("resource is unavailable")
+        return await self._await_boundary(lambda: manager.read_snapshot(snapshot))
+
+    @asynccontextmanager
+    async def collage_source_leases(self, snapshots):
+        from .managed_resources import ResourceIntegritySnapshot
+
+        await self._admit()
+        manager = getattr(self.__repository, "managed_cache", None)
+        allowed = {}
+        retained = []
+        async with AsyncExitStack() as leases:
+            for (visibility, asset_id), snapshot in snapshots.items():
+                if snapshot is None:
+                    continue
+                if visibility not in allowed:
+                    allowed[visibility] = await self._read_scopes(visibility)
+                if (
+                    type(snapshot) is not ResourceIntegritySnapshot
+                    or snapshot.metadata.asset_id != asset_id
+                    or snapshot.metadata.scope not in allowed[visibility]
+                ):
+                    raise FileNotFoundError("collage source is unavailable")
+                retained.append((asset_id, snapshot.metadata.scope))
+            if manager is not None and retained:
+                await self._await_boundary(
+                    lambda: leases.enter_async_context(manager.lease_many(retained))
+                )
+            await self._admit()
+            yield
+            await self._admit()
 
     async def delete(
         self, asset_id: str, *, visibility: CacheVisibility | None = None
@@ -697,6 +791,18 @@ class ResourceAccessService(ResourceAccess):
     ) -> ResourceMetadata | None:
         validate_contract(visibility)
         return await self.__coordinator.metadata(asset_id, visibility=visibility)
+
+    async def _collage_snapshot(self, asset_id, visibility):
+        return await self.__coordinator.collage_snapshot(asset_id, visibility)
+
+    async def _collage_snapshots(self, references):
+        return await self.__coordinator.collage_snapshots(references)
+
+    async def _collage_read(self, snapshot, visibility):
+        return await self.__coordinator.collage_read(snapshot, visibility)
+
+    def _collage_source_leases(self, snapshots):
+        return self.__coordinator.collage_source_leases(snapshots)
 
     async def delete(
         self, asset_id: str, *, visibility: CacheVisibility | None = None

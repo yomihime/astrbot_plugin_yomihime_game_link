@@ -192,6 +192,82 @@ class SQLiteConfigRepository:
             raise ValueError("subscription transition requires an aware datetime")
         return value.astimezone(UTC).isoformat()
 
+    async def register_declared_subscription_gate(
+        self, target: ConfigTarget, field: str
+    ) -> None:
+        """Register a validated module's own pause control exactly once.
+
+        Core composition validates the complete manifest before invoking this.
+        A removed row or invalid existing value stays closed after registration.
+        This never consumes or repairs the original bundled bootstrap.
+        """
+        validate_contract(target)
+        if type(field) is not str or not field or len(field) > 128:
+            raise ValueError("invalid declared gate field")
+
+        def register(unit):
+            identity = (target.principal_id, target.module_id, field)
+            registered = unit.execute(
+                "SELECT field FROM b04_declared_subscription_gate_registrations WHERE principal_id=? AND module_id=?",
+                identity[:2],
+            ).fetchone()
+            if registered is not None:
+                if registered[0] != field:
+                    raise ValueError(
+                        "a declared subscription pause control cannot be retargeted"
+                    )
+                return
+            if (
+                unit.execute(
+                    "SELECT 1 FROM b04_declared_subscription_gates WHERE principal_id=? AND module_id=?",
+                    identity[:2],
+                ).fetchone()
+                is not None
+            ):
+                raise ValueError("declared gate registration is incomplete")
+            existing = unit.execute(
+                "SELECT value_json,revision,subscription_transition_at FROM config_entries WHERE principal_id=? AND module_id=? AND field=?",
+                identity,
+            ).fetchone()
+            if existing is None:
+                self._ensure_state(unit, target)
+                revision = (
+                    unit.execute(
+                        "SELECT revision FROM config_state WHERE principal_id=? AND module_id=?",
+                        identity[:2],
+                    ).fetchone()[0]
+                    + 1
+                )
+                unit.execute(
+                    "UPDATE config_state SET revision=? WHERE principal_id=? AND module_id=?",
+                    (revision, *identity[:2]),
+                )
+                unit.execute(
+                    "INSERT INTO config_entries(principal_id,module_id,field,value_json,revision,subscription_transition_at) VALUES (?,?,?,'true',?,?)",
+                    (*identity, revision, self._subscription_timestamp()),
+                )
+            elif (
+                self._gate_value(existing) is True
+                and existing["subscription_transition_at"] is None
+            ):
+                # Existing true remains true; metadata is initialized once.
+                unit.execute(
+                    "UPDATE config_entries SET subscription_transition_at=? WHERE principal_id=? AND module_id=? AND field=?",
+                    (self._subscription_timestamp(), *identity),
+                )
+            unit.execute(
+                "INSERT INTO b04_declared_subscription_gates VALUES (?,?,?)", identity
+            )
+            unit.execute(
+                "INSERT INTO b04_declared_subscription_gate_registrations VALUES (?,?,?)",
+                identity,
+            )
+
+        await self.database.executor.run_transaction(register, begin_mode="IMMEDIATE")
+        policy = dict(self._subscription_gate_fields)
+        policy[target] = tuple(dict.fromkeys((*policy.get(target, ()), field)))
+        self._subscription_gate_fields = MappingProxyType(policy)
+
     @staticmethod
     def _gate_value(row: sqlite3.Row | None) -> bool | None:
         if row is None or row["value_json"] is None:

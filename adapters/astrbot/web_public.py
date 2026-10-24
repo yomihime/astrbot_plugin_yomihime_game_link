@@ -194,6 +194,7 @@ class HostPublicWebValidator:
         self._capability_timeouts = freeze_execution_timeouts(
             capability_timeouts, targets=set(self._bindings.values())
         )
+        self._bundled_capability_timeouts = self._capability_timeouts
         self._current = current
         self._clock, self._wall_clock = clock, wall_clock
         self._salt = secrets.token_bytes(32)
@@ -201,7 +202,7 @@ class HostPublicWebValidator:
         self._closed = False
         self._requests: dict[object, _RequestFacts] = {}
 
-    def replace_external_bindings(self, bindings) -> None:
+    def replace_external_bindings(self, bindings, *, capability_timeouts=None) -> None:
         """Publish only trusted Host-selected page declarations, never aliases."""
         routes = {key: self._routes[key] for key in self._bundled_bindings}
         bundled_targets = set(self._bundled_bindings.values())
@@ -227,6 +228,18 @@ class HostPublicWebValidator:
             )
         # Build everything first: rejected input must not partly publish routes.
         targets = {key: route.target for key, route in routes.items()}
+        extra_timeouts = freeze_execution_timeouts(
+            capability_timeouts,
+            targets={
+                route.target
+                for key, route in routes.items()
+                if key not in self._bundled_bindings
+            },
+        )
+        timeouts = freeze_execution_timeouts(
+            {**self._bundled_capability_timeouts, **extra_timeouts}
+        )
+        self._capability_timeouts = timeouts
         self._routes, self._bindings = routes, targets
         for ticket, facts in tuple(self._requests.items()):
             if routes.get(facts.endpoint) is not facts.route:

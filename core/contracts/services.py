@@ -35,6 +35,7 @@ from yomihime_game_link_sdk.services import ConfigView as ConfigView
 from yomihime_game_link_sdk.services import DependencyInvoker as DependencyInvoker
 from yomihime_game_link_sdk.services import HealthReport as HealthReport
 from yomihime_game_link_sdk.services import HealthStatus as HealthStatus
+from yomihime_game_link_sdk.services import HttpBudgetStatus as HttpBudgetStatus
 from yomihime_game_link_sdk.services import HttpRequest as HttpRequest
 from yomihime_game_link_sdk.services import HttpResponse as HttpResponse
 from yomihime_game_link_sdk.services import IdentityResolver as IdentityResolver
@@ -518,11 +519,35 @@ def check_CallerCapability(self) -> None:
             raise ValueError(f"caller {field} must be a positive integer")
 
 
+def check_HttpBudgetStatus(self) -> None:
+    if type(self.source_id) is not str or not self.source_id:
+        raise ValueError("budget source is required")
+    if type(self.used) is not int or self.used < 0:
+        raise ValueError("invalid budget usage")
+    if self.requests_per_hour is None:
+        if self.remaining is not None:
+            raise ValueError("unconfigured budget has no remaining count")
+    elif (
+        type(self.requests_per_hour) is not int
+        or self.requests_per_hour <= 0
+        or type(self.remaining) is not int
+        or self.remaining != max(0, self.requests_per_hour - self.used)
+    ):
+        raise ValueError("invalid hourly budget")
+    if self.next_available_at is not None and (
+        type(self.next_available_at) is not datetime
+        or self.next_available_at.tzinfo is None
+        or self.next_available_at.utcoffset() is None
+    ):
+        raise ValueError("budget recovery time must be timezone aware")
+
+
 def check_ModuleHandlers(self) -> None:
     for name, handlers in (
         ("capabilities", self.capabilities),
         ("collectors", self.collectors),
         ("evaluators", self.evaluators),
+        ("event_composers", self.event_composers),
     ):
         if not isinstance(handlers, Mapping) or any(
             (not isinstance(key, str) or not key for key in handlers)

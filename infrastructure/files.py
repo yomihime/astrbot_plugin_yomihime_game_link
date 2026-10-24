@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import stat
 from pathlib import Path
 
 from yomihime_game_link_sdk.storage import OwnerScope, ResourceMetadata
@@ -201,6 +202,77 @@ class LocalSafeFileStore:
             return path.read_bytes()
         except OSError as exc:
             raise FileNotFoundError("resource file is unavailable") from exc
+
+    async def identity(self, asset_id: str, scope: OwnerScope):
+        """OS file version for an already cryptographically verified resource.
+
+        Windows creation time is not a modification token. Read ChangeTime
+        from the open handle; if unavailable, callers must hash full bytes.
+        This is not a claim to detect silent bit rot or forged filesystem data.
+        """
+        path = self._final(asset_id, scope)
+        try:
+            link = path.lstat()
+            if (
+                not stat.S_ISREG(link.st_mode)
+                or getattr(link, "st_file_attributes", 0) & 0x400
+            ):
+                raise FileNotFoundError("resource file is unavailable")
+            with path.open("rb") as stream:
+                before = os.fstat(stream.fileno())
+                if not stat.S_ISREG(before.st_mode) or (link.st_dev, link.st_ino) != (
+                    before.st_dev,
+                    before.st_ino,
+                ):
+                    raise FileNotFoundError("resource file is unavailable")
+                change = before.st_ctime_ns
+                if os.name == "nt":
+                    import ctypes
+                    import msvcrt
+                    from ctypes import wintypes
+
+                    class BasicInfo(ctypes.Structure):
+                        _fields_ = [
+                            (name, ctypes.c_longlong)
+                            for name in ("creation", "access", "write", "change")
+                        ] + [("attributes", wintypes.DWORD)]
+
+                    info = BasicInfo()
+                    call = ctypes.windll.kernel32.GetFileInformationByHandleEx
+                    call.argtypes = (
+                        wintypes.HANDLE,
+                        ctypes.c_int,
+                        ctypes.c_void_p,
+                        wintypes.DWORD,
+                    )
+                    call.restype = wintypes.BOOL
+                    if not call(
+                        msvcrt.get_osfhandle(stream.fileno()),
+                        0,
+                        ctypes.byref(info),
+                        ctypes.sizeof(info),
+                    ):
+                        return None
+                    change = info.change
+                elif os.name != "posix":
+                    return None
+                after = os.fstat(stream.fileno())
+                if (
+                    before.st_dev,
+                    before.st_ino,
+                    before.st_size,
+                    before.st_mtime_ns,
+                ) != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns):
+                    raise FileNotFoundError("resource file changed")
+                return (
+                    before.st_dev,
+                    before.st_ino,
+                    before.st_size,
+                    before.st_mtime_ns,
+                    change,
+                )
+        except (OSError, ValueError):
+            raise FileNotFoundError("resource file is unavailable") from None
 
     async def discard(self, stage: FileStage) -> None:
         if not isinstance(stage, FileStage):

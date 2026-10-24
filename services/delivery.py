@@ -7,9 +7,11 @@ short CAS operations; no database transaction is held across a port await.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import inspect
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
@@ -25,9 +27,14 @@ from yomihime_game_link_sdk.display import (
     DisplayOutput,
     DisplayRenderer,
     Privacy,
+    TextBlock,
 )
 from yomihime_game_link_sdk.storage import OwnershipKind
-from yomihime_game_link_sdk.subscriptions import ConversationKind, ConversationRef
+from yomihime_game_link_sdk.subscriptions import (
+    ComposedPublicEvent,
+    ConversationKind,
+    ConversationRef,
+)
 
 from ..core.admission import AdmissionError
 from ..core.contracts.services import Grant, GrantStatus, TrustedPersistedRouteResolver
@@ -127,6 +134,7 @@ class DeliveryService:
         send_timeout: float = 30.0,
         retry_at: RetryAt | None = None,
         page_size: int = 100,
+        commentary_port=None,
     ) -> None:
         validate_contract(renderer)
         validate_contract(limits)
@@ -148,6 +156,7 @@ class DeliveryService:
         self._send_timeout = send_timeout
         self._retry_at = retry_at or (lambda _event, _now: None)
         self._page_size = page_size
+        self._commentary_port = commentary_port
 
     async def recover_startup(
         self,
@@ -156,7 +165,7 @@ class DeliveryService:
         now = self._utc_now()
         stale_events = await self._deliveries.recover_stale_sending(before=now)
         stale_envelopes = await self._windows.recover_expired_envelope_claims(
-            before=now, recovered_at=now
+            before=now, recovered_at=now, restart=True
         )
         return stale_events, stale_envelopes
 
@@ -172,6 +181,9 @@ class DeliveryService:
         )
         if event is None:
             return DeliveryResult(DeliveryState.CANCELLED, "subscription_unavailable")
+        if getattr(event, "public_contribution", None) is not None:
+            # Public aggregate members can only be dispatched via their envelope.
+            return DeliveryResult(event.state)
         now = self._utc_now()
         expected_state = event.state
         if expected_state not in (DeliveryState.PENDING, DeliveryState.FAILED):
@@ -220,8 +232,12 @@ class DeliveryService:
             )
 
         try:
+            document = await self._apply_commentary(
+                event.display_data, event.commentary, event.idempotency_key
+            )
+            self._admission.check(lease)
             rendered = await self._renderer.render(
-                event.display_data,
+                document,
                 limits=self._limits,
                 audience=(
                     DisplayAudience.PRIVATE
@@ -565,7 +581,8 @@ class DeliveryService:
                 return DeliveryResult(DeliveryState.CANCELLED, "subscription_cancelled")
 
             owners = {event.owner_id for _, event, _ in candidates}
-            if len(owners) != 1:
+            public_event = window_id.startswith("public-event:v1:")
+            if len(owners) != 1 and not public_event:
                 return await self._finish_digest_without_send(
                     claim, reconciled, "route_unavailable", current_time
                 )
@@ -601,9 +618,20 @@ class DeliveryService:
                         )
                     )
                     try:
-                        rendered = await self._renderer.render_batch(
-                            batch, self._limits
-                        )
+                        if public_event:
+                            document = await self._compose_public_event(
+                                window_id, candidates
+                            )
+                            self._admission.check(lease)
+                            rendered = await self._renderer.render(
+                                document,
+                                limits=self._limits,
+                                audience=DisplayAudience.PUBLIC,
+                            )
+                        else:
+                            rendered = await self._renderer.render_batch(
+                                batch, self._limits
+                            )
                         if type(rendered) is not DisplayOutput:
                             raise TypeError("renderer must return DisplayOutput")
                         validate_contract(rendered)
@@ -965,6 +993,103 @@ class DeliveryService:
                     self._admission.release(lease)
 
         return DeliveryResult(DeliveryState.CANCELLED, "subscription_revision_changed")
+
+    async def _compose_public_event(self, window_id, candidates):
+        """Compose only this claimed recipient's surviving public contributions."""
+        records = [check.record for _, _, check in candidates]
+        events = [event for _, event, _ in candidates]
+        first = events[0]
+        if any(
+            record is None
+            or record.collection_key.scope.kind is not OwnershipKind.PUBLIC
+            for record in records
+        ):
+            raise ValueError("aggregate members must have public observation scope")
+        if any(
+            event.recipient != first.recipient
+            or event.event_key != first.event_key
+            or event.event_version != first.event_version
+            or event.grant is not None
+            or event.display_data.privacy is not Privacy.PUBLIC
+            or event.public_contribution is None
+            for event in events
+        ):
+            raise ValueError("aggregate scope mismatch")
+        module_id = records[0].module_id
+        composer_id = first.public_contribution.composer_id
+        if any(record.module_id != module_id for record in records) or any(
+            event.public_contribution.composer_id != composer_id for event in events
+        ):
+            raise ValueError("aggregate module or composer mismatch")
+        module = self._registry.snapshot().module(module_id)
+        composer = module.handlers.event_composers.get(composer_id)
+        if composer is None:
+            raise ValueError("aggregate composer unavailable")
+        contributions = {}
+        for event in events:
+            contribution = event.public_contribution
+            if (
+                contribution.contribution_key in contributions
+                and contributions[contribution.contribution_key] != contribution
+            ):
+                raise ValueError("contradictory aggregate data")
+            contributions[contribution.contribution_key] = contribution
+        composed = composer.compose(
+            tuple(contributions[key] for key in sorted(contributions))
+        )
+        if inspect.isawaitable(composed):
+            if inspect.iscoroutine(composed):
+                composed.close()
+            raise ValueError("public event composition must be synchronous")
+        if type(composed) is not ComposedPublicEvent:
+            raise ValueError("invalid public event composition")
+        validate_contract(composed)
+        document = composed.display_data
+        request = composed.commentary
+        identities = tuple(sorted(event.idempotency_key for event in events))
+        return await self._apply_commentary(
+            document, request, repr((window_id, identities))
+        )
+
+    async def _apply_commentary(self, document, request, identity):
+        if request is None or self._commentary_port is None:
+            return document
+        key = hashlib.sha256(
+            repr(
+                (
+                    identity,
+                    request.template_id,
+                    request.template_version,
+                    request.prompt,
+                )
+            ).encode("utf-8")
+        ).hexdigest()
+        begin, text = await self._windows.begin_commentary(key)
+        if begin:
+            try:
+                async with asyncio.timeout(request.timeout_seconds):
+                    text = await self._commentary_port.generate(request)
+                if (
+                    type(text) is not str
+                    or not text.strip()
+                    or len(text) > request.max_output_chars
+                ):
+                    text = None
+            except asyncio.CancelledError:
+                # The STARTED row prevents a restart from spending this attempt again.
+                raise
+            except Exception:
+                text = None
+            await self._windows.complete_commentary(key, text)
+        if text:
+            document = replace(
+                document,
+                ordered_blocks=(
+                    *document.ordered_blocks,
+                    TextBlock("模型短评：" + text),
+                ),
+            )
+        return document
 
     async def _abort_digest_send(
         self,

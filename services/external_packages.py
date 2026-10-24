@@ -79,6 +79,7 @@ class ExternalPackageHost:
         changed,
         timeout=5.0,
         registration_timeout=30.0,
+        source_policies=None,
     ):
         self._context = context
         self._core = core
@@ -87,6 +88,7 @@ class ExternalPackageHost:
         self._current = current
         self._changed = changed
         self._timeout = timeout
+        self._source_policies = source_policies
         self._registration_timeout = registration_timeout
         self._packages = {}
         self._known_sources = {}
@@ -181,8 +183,7 @@ class ExternalPackageHost:
             raise ExtensionHostError("package_root_rejected") from None
         return root
 
-    @staticmethod
-    def _discover(root):
+    def _discover(self, root):
         packages = tuple(
             p for p in discover_packages(root.parent) if p.package_dir == root
         )
@@ -193,7 +194,10 @@ class ExternalPackageHost:
             if any(field.sensitive for field in module.config_fields) or any(
                 source.credential_ref is not None for source in module.sources
             ):
-                raise ExtensionHostError("external_credentials_unsupported")
+                if self._source_policies is None or not self._source_policies.permits(
+                    package
+                ):
+                    raise ExtensionHostError("external_credentials_unsupported")
         return ExtensionCandidate(package, CandidateState.DISABLED, "not_enabled")
 
     async def _discover_async(self, root):

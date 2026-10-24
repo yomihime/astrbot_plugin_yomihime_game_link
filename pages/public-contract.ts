@@ -11,9 +11,11 @@ export interface ConfigSnapshot {readonly revision: number; readonly fields: Rea
 export interface CredentialState {readonly configured: boolean; readonly decryptable: boolean; readonly upstream: 'unverified'}
 export interface CredentialSnapshot {readonly revision: number; readonly fields: Readonly<Record<string, CredentialState>>}
 export interface MutationReceipt {readonly revision: number}
-export interface CredentialPair {readonly client_id: string; readonly client_secret: string}
+export type CredentialPair = {readonly client_id: string; readonly client_secret: string}
+  | {readonly token: string; readonly subject?: string};
 export interface ModulePageServices {
   invoke(capabilityId: string, parameters: unknown): Promise<unknown>;
+  preview(capabilityId: string, parameters: unknown): Promise<unknown>;
   readonly config: {
     current(): Promise<ConfigSnapshot>;
     save(expectedRevision: number, values: Readonly<Record<string, JsonValue>>): Promise<MutationReceipt>;
@@ -24,6 +26,7 @@ export interface ModulePageServices {
     replace(expectedRevision: number, field: string, pair: CredentialPair): Promise<MutationReceipt>;
     /** The shell asks for an owner/page/revision-bound confirmation. */
     clear(expectedRevision: number, field: string): Promise<MutationReceipt>;
+    authorize(expectedRevision: number, flowId: string, step: 'begin'|'poll'|'cancel'|'qr'|'revoke', sessionId?: string): Promise<unknown>;
   };
 }
 /** Bounded draft/pending summary only; the shell derives the owning module. */

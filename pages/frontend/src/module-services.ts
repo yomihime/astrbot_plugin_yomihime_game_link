@@ -1,6 +1,6 @@
 import {assertConfigBudget,assertDescriptors} from './config-descriptors';
 import type {Bridge} from './contracts';
-import type {ModulePageServices, ConfigSnapshot, CredentialSnapshot, MutationReceipt, JsonValue} from '../../public-contract';
+import type {ModulePageServices, ConfigSnapshot, CredentialSnapshot, MutationReceipt, JsonValue, CredentialPair} from '../../public-contract';
 
 export interface ModuleBinding {readonly owner: string; readonly page: string; readonly runtime_id: string; readonly module_epoch: number}
 const plain=(value:unknown):value is Record<string,unknown>=>value!==null&&typeof value==='object'&&!Array.isArray(value)&&[Object.prototype,null].includes(Object.getPrototypeOf(value));
@@ -27,7 +27,9 @@ export async function createModuleServices({bridge,binding,capabilityId,isCurren
   const check=(late=false)=>{if(!isCurrent())throw Error(late?'page_revoked':'page_unavailable');};
   async function pageSession():Promise<string>{
     check();if(closed)throw Error('page_revoked');
-    if(proof&&Date.now()/1000<expiresAt-1)return proof;
+    // Rotate while the current proof still has enough life for the next poll.
+    // A 2s UI poll can otherwise land exactly on the 30s expiry boundary.
+    if(proof&&Date.now()/1000<expiresAt-10)return proof;
     if(!opening)opening=(async()=>{
       // An expired proof cannot authorize rotation: the registry already prunes it.
       // A fresh bootstrap still rechecks the ordinary Host session and page grants.
@@ -52,6 +54,7 @@ export async function createModuleServices({bridge,binding,capabilityId,isCurren
   }
   return Object.freeze({
     async invoke(id:string,parameters:unknown) {check();if(id!==capabilityId||!id)denied();const result=await bridge.apiPost('invoke',{owner:identity.owner,page:identity.page,capability_id:id,parameters});check(true);return result;},
+    async preview(id:string,parameters:unknown) {check();if(id!==capabilityId||!id)denied();const result=await bridge.apiPost('invoke-images',{owner:identity.owner,page:identity.page,capability_id:id,parameters});check(true);return result;},
     config:Object.freeze({
       async current() {const value=await request('config-current');assertConfigBudget(value);if(!plain(value)||!revision(value.revision)||!plain(value.fields)||!['fields,revision','descriptors,fields,revision'].includes(Object.keys(value).sort().join()))throw Error('operation_unavailable');
         for(const row of Object.values(value.fields))if(!plain(row)||Object.keys(row).sort().join()!==(row.source==='legacy'?'migration_pending,present,source,state,value':'present,source,state,value')||!['valid','invalid'].includes(String(row.state))||typeof row.present!=='boolean'||!['sqlite','default','legacy'].includes(String(row.source))||row.source==='legacy'&&(row.migration_pending!==true||row.present!==false||row.state!=='valid'))throw Error('operation_unavailable');
@@ -64,7 +67,12 @@ export async function createModuleServices({bridge,binding,capabilityId,isCurren
       async status() {const value=await request('credential-status');if(!plain(value)||!revision(value.revision)||!plain(value.fields)||Object.keys(value).sort().join()!=='fields,revision')throw Error('operation_unavailable');
         for(const row of Object.values(value.fields))if(!plain(row)||Object.keys(row).sort().join()!=='configured,decryptable,upstream'||typeof row.configured!=='boolean'||typeof row.decryptable!=='boolean'||row.upstream!=='unverified')throw Error('operation_unavailable');
         return immutable<CredentialSnapshot>(value);},
-      replace(expectedRevision:number,field:string,pair:{readonly client_id:string;readonly client_secret:string}) {if(typeof field!=='string'||!field||!plain(pair)||Object.keys(pair).sort().join()!=='client_id,client_secret'||Object.values(pair).some(value=>typeof value!=='string'||!value.length||value.length>512||/[\x00-\x1f\x7f-\x9f]/u.test(value)))return Promise.reject(Error('invalid_config'));return mutation('credential-replace',expectedRevision,{field,pair:{...pair}});},
+      replace(expectedRevision:number,field:string,pair:CredentialPair) {if(typeof field!=='string'||!field||!plain(pair)||!['client_id,client_secret','token','subject,token'].includes(Object.keys(pair).sort().join())||Object.values(pair).some(value=>typeof value!=='string'||!value.length||value.length>('token' in pair?4096:512)||/[\x00-\x1f\x7f-\x9f]/u.test(value)))return Promise.reject(Error('invalid_config'));return mutation('credential-replace',expectedRevision,{field,pair:{...pair}});},
+      async authorize(expectedRevision:number,flowId:string,step:'begin'|'poll'|'cancel'|'qr'|'revoke',sessionId='') {
+        check();if(writing)throw Error('operation_in_progress');
+        if(!revision(expectedRevision)||typeof flowId!=='string'||!flowId||flowId.length>64||!['begin','poll','cancel','qr','revoke'].includes(step)||typeof sessionId!=='string'||sessionId.length>256)throw Error('invalid_config');
+        writing=true;try {const value=await request('credential-authorize',{expected_revision:expectedRevision,flow_id:flowId,step,session_id:sessionId});if(!plain(value))throw Error('operation_unavailable');return immutable(value);}finally{writing=false;}
+      },
       async clear(expectedRevision:number,field:string) {check();if(writing)throw Error('operation_in_progress');if(!revision(expectedRevision)||typeof field!=='string'||!field)throw Error('invalid_config');writing=true;
         let confirmed=false;try {confirmed=await confirmClear(field,expectedRevision,isCurrent);check();}finally{writing=false;}
         if(!confirmed)throw Error('operation_cancelled');return mutation('credential-clear',expectedRevision,{field,confirmation:'CLEAR MODULE CREDENTIAL'});},

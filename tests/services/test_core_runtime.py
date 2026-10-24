@@ -759,6 +759,94 @@ class CoreRuntimeTests(unittest.IsolatedAsyncioTestCase):
             release.set()
             await runtime.close(timeout=0.5)
 
+    async def test_c3_declared_subscription_gate_initializes_without_bundled_trust_or_activation(
+        self,
+    ):
+        root = self.root / "extensions" / "private"
+        root.mkdir(parents=True)
+        manifest = _private_manifest()
+        module = manifest["modules"][0]
+        module["sources"] = [{"source_id": "source", "host": "example.test"}]
+        module["config_fields"] = [
+            {
+                "name": "subscription_enabled",
+                "default": True,
+                "value_schema": {"type": "boolean"},
+            },
+            {
+                "name": "poll_interval_seconds",
+                "default": 300,
+                "value_schema": {"type": "integer", "minimum": 60},
+            },
+        ]
+        module["schedules"] = [
+            {
+                "collector_id": "watch",
+                "key_version": 1,
+                "source_id": "source",
+                "data_version": 1,
+                "input_schema": {
+                    "type": "object",
+                    "properties": {},
+                    "required": [],
+                    "additionalProperties": False,
+                },
+                "shared_scope": "public",
+                "trigger": "periodic",
+                "minimum_interval_seconds": 60,
+                "default_interval_seconds": 300,
+                "interval_config_key": "poll_interval_seconds",
+            }
+        ]
+        module["subscriptions"] = [
+            {
+                "type_id": "watch",
+                "collector_id": "watch",
+                "matcher_id": "watch",
+                "filter_schema": {
+                    "type": "object",
+                    "properties": {},
+                    "required": [],
+                    "additionalProperties": False,
+                },
+                "notification_modes": ["instant"],
+                "enabled_config_key": "subscription_enabled",
+            }
+        ]
+        (root / "yomihime.manifest.json").write_text(
+            json.dumps(manifest), encoding="utf-8"
+        )
+        runtime = self._runtime(source=_FactorySource(_Factory(_Handler())))
+        try:
+            await runtime.start()
+            self.assertEqual(
+                runtime._declared_subscription_gate_specs,
+                {"private/mod": "subscription_enabled"},
+            )
+            self.assertEqual(dict(runtime._trusted_subscription_gates), {})
+            binding = runtime.b04_repositories.lifecycle._subscription_gate_bindings[
+                "private/mod"
+            ]
+            self.assertTrue(binding.declared)
+            state = await runtime.subscription_gate_state("private/mod")
+            self.assertTrue(state.supported)
+            self.assertFalse(state.can_run)
+            self.assertEqual(
+                self._gate_sql(
+                    runtime, "SELECT phase FROM subscription_gate_bootstrap"
+                ),
+                [("pending",)],
+            )
+            self.assertEqual(
+                self._gate_sql(
+                    runtime,
+                    "SELECT value_json FROM config_entries WHERE field='subscription_enabled'",
+                ),
+                [("true",)],
+            )
+        finally:
+            await runtime.close(timeout=0.5)
+
     def _gate_packages(self):
         extension_root = self.root / "extensions"
         extension_root.mkdir(exist_ok=True)
