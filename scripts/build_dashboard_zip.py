@@ -677,6 +677,7 @@ def _projected_page_assets(
         policy_module.ExternalSourcePolicies(selected)
         payload[policy_module.POLICY_FILE] = selected
     payload[prefix + "module-loader.js"] = (
+        "export const sharedRuntimeUrl = new URL('./runtime.js', import.meta.url).href;\n"
         "export async function loadPage(entry) {\nswitch (entry) {\n"
         + "\n".join(sorted(set(branches)))
         + "\ndefault: throw new Error('Unknown module page');\n}\n}\n"

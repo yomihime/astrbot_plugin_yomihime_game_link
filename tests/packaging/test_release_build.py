@@ -652,6 +652,26 @@ class ReleaseBuildTests(unittest.TestCase):
 
             with ZipFile(archive_path) as archive:
                 self.assertIsNone(archive.testzip())
+                # Test the generated ZIP loader, which can differ from Vite's
+                # source-build loader. The actual shell needs both exports.
+                loader = work_root / "module-loader.mjs"
+                loader.write_bytes(archive.read("pages/00-game-link/module-loader.js"))
+                entry = work_root / "packed-entry.mjs"
+                entry.write_text(
+                    "import {loadPage,sharedRuntimeUrl} from './module-loader.mjs';\n"
+                    "import {strict as assert} from 'node:assert';\n"
+                    "assert.equal(typeof loadPage,'function');\n"
+                    "assert.equal(sharedRuntimeUrl,new URL('./runtime.js',import.meta.url).href);\n",
+                    encoding="utf-8",
+                )
+                imported = subprocess.run(
+                    ["node", str(entry)],
+                    cwd=work_root,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                )
+                self.assertEqual(imported.returncode, 0, imported.stderr)
                 names = set(archive.namelist())
                 self.assertIn("requirements.txt", names)
                 for name in FONT_ASSETS:
