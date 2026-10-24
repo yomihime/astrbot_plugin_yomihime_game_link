@@ -1622,9 +1622,14 @@ class CoreRuntime:
 
         async def consume(invocation, result, current):
             nonlocal pages
-            pages = await self.output.render_public_preview(
-                invocation, result, current=current
-            )
+            if result.document is not None and result.document.card is not None:
+                pages = await self.output.render_public_preview(
+                    invocation, result, current=current
+                )
+            else:
+                # Empty and explanatory business documents are valid results.
+                # They still remain inside the original invocation fence.
+                await current()
 
         result = await self.gateway.invoke_public_web(
             proof, module_id, capability_id, parameters, _consume=consume

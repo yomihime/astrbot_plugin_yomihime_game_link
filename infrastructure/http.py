@@ -62,6 +62,48 @@ def _retry_after_seconds(response: HttpResponse) -> int | None:
     return seconds if 0 <= seconds <= 86400 else None
 
 
+def _redact_response_body(body: bytes, secrets: tuple[str, ...]) -> bytes:
+    """Redact decoded JSON strings as well as literal non-JSON echoes.
+
+    JSON permits multiple spellings of the same string (including mixed
+    unicode escapes). Matching only serialized bytes cannot enforce the
+    credential boundary seen by a module calling json.loads.
+    """
+
+    def redact(value):
+        if isinstance(value, str):
+            for secret in secrets:
+                value = value.replace(secret, "[redacted]")
+            return value
+        if isinstance(value, list):
+            return [redact(item) for item in value]
+        if isinstance(value, dict):
+            result = {}
+            for key, item in value.items():
+                safe_key = redact(key)
+                if safe_key in result:
+                    raise SourceHttpError("response_rejected")
+                result[safe_key] = redact(item)
+            return result
+        return value
+
+    try:
+        parsed = json.loads(body)
+    except (ValueError, UnicodeError):
+        pass
+    else:
+        safe = redact(parsed)
+        if safe != parsed:
+            return json.dumps(safe, ensure_ascii=True, separators=(",", ":")).encode(
+                "ascii"
+            )
+    for secret in secrets:
+        body = body.replace(secret.encode("utf-8"), b"[redacted]")
+        escaped = json.dumps(secret, ensure_ascii=True)[1:-1].encode("ascii")
+        body = body.replace(escaped, b"[redacted]")
+    return body
+
+
 class HttpTransport(Protocol):
     """The only execution port used by :class:`SourceHttpService`.
 
@@ -873,15 +915,9 @@ class SourceHttpService(SourceHttp):
                     declaration, _retry_after_seconds(response) or 60
                 )
             if lease is not None and lease.redactions:
-                safe_body = response.body
+                safe_body = _redact_response_body(response.body, lease.redactions)
                 safe_headers = dict(response.headers)
                 for secret in lease.redactions:
-                    safe_body = safe_body.replace(secret.encode("utf-8"), b"[redacted]")
-                    # JSON escaping may otherwise encode the same secret.
-                    escaped = json.dumps(secret, ensure_ascii=True)[1:-1].encode(
-                        "ascii"
-                    )
-                    safe_body = safe_body.replace(escaped, b"[redacted]")
                     safe_headers = {
                         name: value.replace(secret, "[redacted]")
                         for name, value in safe_headers.items()

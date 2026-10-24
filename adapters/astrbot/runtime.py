@@ -26,6 +26,7 @@ from yomihime_game_link_sdk.errors import (
     ParameterError,
     ServiceUnavailable,
 )
+from yomihime_game_link_sdk.results import ResultStatus
 from yomihime_game_link_sdk.services import CapabilityHealth, ConfigTarget, HealthStatus
 from yomihime_game_link_sdk.subscriptions import ConversationKind, ConversationRef
 
@@ -1366,6 +1367,14 @@ class AstrBotRuntime:
 
             if len(pages) > 8 or sum(len(page) for page in pages) > 16 * 1024 * 1024:
                 raise WebPublicRejected("result_rejected")
+            has_card = (
+                result.status in (ResultStatus.SUCCESS, ResultStatus.PARTIAL_SUCCESS)
+                and result.document is not None
+                and result.document.card is not None
+            )
+            if has_card != bool(pages):
+                raise WebPublicRejected("result_rejected")
+            data["image_state"] = "ready" if has_card else "none"
             data["images"] = [
                 {
                     "media_type": "image/png",

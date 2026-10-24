@@ -855,7 +855,7 @@ sys.exit(not r.wasSuccessful())
         with tempfile.TemporaryDirectory(prefix="source-release-") as workspace:
             for profile, release in (
                 ("current", "0.1.0a16"),
-                ("counterfactual", "0.1.0a16"),
+                ("counterfactual", "0.1.0a17"),
             ):
                 with self.subTest(profile=profile):
                     selected = Path(workspace) / profile
@@ -976,15 +976,15 @@ sys.exit(not r.wasSuccessful())
                 )
                 marker = selected / "yomihime_game_link_sdk/version.py"
                 original = marker.read_bytes()
-                changed = original.replace(b"0.1.0a16", b"0.1.0a16")
+                changed = original.replace(b"0.1.0a16", b"0.1.0a17")
                 self.assertNotEqual(changed, original)
                 marker.write_bytes(changed)
                 fixture._run_bootstrap(plugin, "different", selected)
             # Isolate the package release guard from origin/hash rejection:
             # Current canonical preloads, same validated plugin origin, only
-            # the descriptive loaded package release marker becomes a16.
+            # the descriptive loaded package release marker becomes a17.
             probe = BOOTSTRAP_CASE.replace(
-                '__version__ = "9.9.9"', '__version__ = "0.1.0a16"'
+                '__version__ = "9.9.9"', '__version__ = "0.1.0a17"'
             )
             self.assertNotEqual(probe, BOOTSTRAP_CASE)
             rejected = subprocess.run(

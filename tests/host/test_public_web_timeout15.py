@@ -255,6 +255,7 @@ class PublicWebTimeout15Tests(unittest.IsolatedAsyncioTestCase):
             finally:
                 self.runtime.finish_public_web(state)
             self.assertEqual(value["status"], "success", value)
+            self.assertEqual(value["image_state"], "ready")
             png = base64.b64decode(value["images"][0]["base64"], validate=True)
             self.assertTrue(png.startswith(bytes.fromhex("89504e470d0a1a0a")))
             self.assertFalse(self.runtime._context.calls)
@@ -282,6 +283,58 @@ class PublicWebTimeout15Tests(unittest.IsolatedAsyncioTestCase):
             finally:
                 self.runtime.finish_public_web(state)
             self.assertFalse(self.runtime.core_runtime.gateway.public_web_pending)
+
+    async def test_public_preview_preserves_text_only_and_selection_documents(self):
+        from yomihime_game_link_sdk import ResultStatus, TextBlock
+
+        for status in (
+            ResultStatus.SUCCESS,
+            ResultStatus.PARTIAL_SUCCESS,
+            ResultStatus.NEEDS_SELECTION,
+        ):
+            with self.subTest(status=status):
+
+                async def invoke(view, parameters):
+                    value = await self.original(view, parameters)
+                    return replace(
+                        value,
+                        status=status,
+                        document=replace(
+                            value.document,
+                            ordered_blocks=(
+                                TextBlock(
+                                    "No eligible games; configure the shared key or select a sample."
+                                ),
+                            ),
+                            card=None,
+                        ),
+                    )
+
+                self.handler.invoke = invoke
+                with self.clock_patch():
+                    state = self.begin()
+                    try:
+                        with patch.object(
+                            self.runtime.core_runtime.output,
+                            "render_public_preview",
+                            side_effect=AssertionError(
+                                "text-only result must not render"
+                            ),
+                        ):
+                            value = await self.runtime.invoke_public_web(
+                                state,
+                                "calendar",
+                                {"region": "cn", "days": 7, "timezone": "UTC"},
+                                images=True,
+                            )
+                    finally:
+                        self.runtime.finish_public_web(state)
+                self.assertEqual(value["status"], status.value, value)
+                self.assertEqual(value["image_state"], "none")
+                self.assertEqual(value["images"], [])
+                self.assertIn("No eligible games", repr(value["document"]))
+                self.assertFalse(self.runtime.core_runtime.gateway.public_web_pending)
+                self.assertFalse(self.runtime._context.calls)
 
 
 class HostProofBudgetValidationTests(unittest.TestCase):

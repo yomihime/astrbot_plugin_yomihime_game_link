@@ -172,6 +172,16 @@ class DisplayDocumentUpgradeTests(unittest.IsolatedAsyncioTestCase):
                 )
                 event = _load(raw)
                 converted = json.loads(_dump(event))
+                # Current DeliveryEvent adds optional fields; legacy rows must
+                # retain their default None and every original stored field.
+                defaults = {"commentary", "public_contribution"}
+                self.assertEqual(
+                    set(converted["fields"]) - set(original["fields"]), defaults
+                )
+                for field in defaults:
+                    self.assertNotIn(field, original["fields"])
+                    self.assertIsNone(getattr(event, field))
+                    self.assertIsNone(converted["fields"].pop(field))
                 converted["fields"]["display_data"]["fields"]["schema_version"] = (
                     "1.7.0"
                 )

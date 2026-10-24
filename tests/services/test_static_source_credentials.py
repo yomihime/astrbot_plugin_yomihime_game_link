@@ -157,6 +157,39 @@ class StaticCredentialsTests(unittest.IsolatedAsyncioTestCase):
             json.loads(self.calls[-1][2])["accessToken"], "rotated-private-key"
         )
 
+    async def test_json_equivalent_secret_spellings_are_redacted_after_decoding(self):
+        async def send(method, url, body, headers, timeout_seconds, maximum):
+            # These are distinct valid JSON spellings of the injected secret.
+            escaped = "".join(f"\\u{ord(char):04x}" for char in self.token)
+            mixed = self.token[:5] + "".join(
+                f"\\u{ord(char):04X}" for char in self.token[5:]
+            )
+            return HttpResponse(
+                200,
+                {},
+                (
+                    '{"nested":[{"value":"prefix-'
+                    + escaped
+                    + '-suffix"},"'
+                    + mixed
+                    + '"],"'
+                    + escaped
+                    + '":"key echo","business":{"id":"123","score":13}}'
+                ).encode(),
+            )
+
+        self.transport._send = send
+        response = await self.http().fetch(
+            HttpRequest(fixture_module.SOURCE_ID, fixture_module.RESOURCE_PATH, "POST")
+        )
+        decoded = json.loads(response.body)
+        self.assertNotIn(self.token, repr(decoded))
+        self.assertEqual(
+            decoded["nested"], [{"value": "prefix-[redacted]-suffix"}, "[redacted]"]
+        )
+        self.assertEqual(decoded["[redacted]"], "key echo")
+        self.assertEqual(decoded["business"], {"id": "123", "score": 13})
+
     async def test_wrong_path_method_body_collision_and_header_collision_reject_before_wire(
         self,
     ):

@@ -241,6 +241,125 @@ class AuthorizationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(str(caught.exception), "credential_update_failed")
         self.assertFalse(self.runner._session(first.session_id, self.binding).slots)
 
+    async def timed_session(self, update):
+        """Use the production call_later expiry with a real monotonic clock."""
+        old = self.runner
+        await old.close()
+        policy = replace(
+            old._policies["example_qr"],
+            ttl_seconds=0.08,
+            poll_interval_seconds=0.001,
+        )
+        loop = asyncio.get_running_loop()
+        self.runner = SourceAuthorizations(
+            policies={"example_qr": policy},
+            request=old._request,
+            guard=old._guard,
+            credential_update=update,
+            clock=loop.time,
+        )
+        first = await self.begin()
+        session = self.runner._session(first.session_id, self.binding)
+        elapsed = asyncio.Event()
+        # This later observer runs only after the real production expiry timer.
+        observer = loop.call_at(session.expiry_timer.when() + 0.005, elapsed.set)
+        self.addCleanup(observer.cancel)
+        await asyncio.sleep(0.002)
+        return first, session, elapsed
+
+    async def test_real_expiry_during_commit_reports_success_and_cancel_waits(self):
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def update(binding, material):
+            entered.set()
+            await release.wait()
+            # The Host writer still owns its final current/CAS transaction fence.
+            await self.runner._guard(binding)
+            self.writes.append((binding, dict(material)))
+
+        first, session, elapsed = await self.timed_session(update)
+        poll = asyncio.create_task(self.runner.poll(first.session_id, self.binding))
+        await asyncio.wait_for(entered.wait(), 1)
+        self.assertFalse(session.slots)
+        self.assertIsNone(session.qr_url)
+        cancel = asyncio.create_task(
+            self.runner.cancel(first.session_id, self.binding)
+        )
+        await asyncio.wait_for(elapsed.wait(), 1)
+        self.assertFalse(session.expiry_timer.cancelled())
+        # _session also checks wall time; it must honor commit admission too.
+        self.assertEqual(
+            self.runner._session(first.session_id, self.binding).state, "waiting"
+        )
+        self.assertTrue(session.committing)
+        self.assertFalse(cancel.done())
+        release.set()
+        result, cancelled = await asyncio.wait_for(asyncio.gather(poll, cancel), 1)
+        self.assertEqual(result.state, "authorized")
+        self.assertEqual(cancelled.state, "authorized")
+        self.assertEqual(result.authorized_subject, "user-one")
+        self.assertEqual(len(self.writes), 1)
+        self.assertFalse(session.committing)
+
+    async def test_real_expiry_does_not_turn_failed_commit_into_success(self):
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def update(binding, material):
+            entered.set()
+            await release.wait()
+            raise RuntimeError("private-final-token failed to persist")
+
+        first, session, elapsed = await self.timed_session(update)
+        task = asyncio.create_task(self.runner.poll(first.session_id, self.binding))
+        await asyncio.wait_for(entered.wait(), 1)
+        await asyncio.wait_for(elapsed.wait(), 1)
+        release.set()
+        with self.assertRaisesRegex(AuthorizationError, "^credential_update_failed$"):
+            await asyncio.wait_for(task, 1)
+        self.assertEqual(session.state, "error")
+        self.assertIsNone(session.subject)
+        self.assertFalse(session.slots)
+        self.assertFalse(self.writes)
+
+    async def test_real_expiry_does_not_bypass_invalidated_host_commit_fence(self):
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def update(binding, material):
+            entered.set()
+            await release.wait()
+            await self.runner._guard(binding)
+            self.writes.append((binding, dict(material)))
+
+        first, session, elapsed = await self.timed_session(update)
+        task = asyncio.create_task(self.runner.poll(first.session_id, self.binding))
+        await asyncio.wait_for(entered.wait(), 1)
+        self.valid = False
+        self.runner.invalidate(owner_id="owner", page_session_id="page")
+        await asyncio.wait_for(elapsed.wait(), 1)
+        release.set()
+        with self.assertRaisesRegex(AuthorizationError, "^credential_update_failed$"):
+            await asyncio.wait_for(task, 1)
+        self.assertEqual(session.state, "cancelled")
+        self.assertIsNone(session.subject)
+        self.assertFalse(session.slots)
+        self.assertFalse(self.writes)
+
+    async def test_real_expiry_before_commit_admission_still_prevents_write(self):
+        first, session, elapsed = await self.timed_session(
+            self.runner._credential_update
+        )
+        self.block_request = True
+        task = asyncio.create_task(self.runner.poll(first.session_id, self.binding))
+        await asyncio.wait_for(self.entered.wait(), 1)
+        await asyncio.wait_for(elapsed.wait(), 1)
+        self.assertEqual(session.state, "expired")
+        self.release.set()
+        with self.assertRaisesRegex(AuthorizationError, "^session_inactive$"):
+            await asyncio.wait_for(task, 1)
+        self.assertEqual(session.state, "expired")
+        self.assertFalse(session.slots)
+        self.assertFalse(self.writes)
+
     async def test_malformed_capture_and_unsafe_url_fail_closed(self):
         self.responses[:] = [
             {"result": {"url": "https://identity.example.test/?ticket=a&ticket=b"}}

@@ -377,7 +377,7 @@ class SourceAuthorizations:
         if session is None or session.binding != binding:
             raise AuthorizationError("session_unavailable")
         if session.state == "waiting" and self._clock() >= session.expires_at:
-            session.clear("expired")
+            self._expire(session)
         return session
 
     def _archive(self, session):
@@ -392,7 +392,10 @@ class SourceAuthorizations:
             self._terminal.popitem(last=False)
 
     def _expire(self, session):
-        if session.state == "waiting":
+        # TTL bounds admission to the atomic credential writer. Once admitted,
+        # its Host current/CAS fence decides the result, just as for cancel().
+        # Expiry must not report failure after that writer succeeds.
+        if session.state == "waiting" and not session.committing:
             session.clear("expired")
             self._archive(session)
 
@@ -417,7 +420,7 @@ class SourceAuthorizations:
             raise
         self._check_open()
         if self._clock() >= session.expires_at and session.state == "waiting":
-            session.clear("expired")
+            self._expire(session)
         if session.state != "waiting":
             raise AuthorizationError("session_inactive")
 
@@ -543,6 +546,10 @@ class SourceAuthorizations:
                     await self._current(session)
                     # Host callback MUST re-check its atomic CAS/current guard.
                     session.committing = True
+                    # The captured final material is local to this call. Erase
+                    # temporary tickets/QR now, even if the writer outlives TTL.
+                    session.slots.clear()
+                    session.qr_url = None
                     try:
                         await self._credential_update(
                             binding, MappingProxyType(captures)
