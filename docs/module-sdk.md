@@ -1,6 +1,6 @@
 # Game Link module SDK
 
-The independently installable distribution is `yomihime-game-link-sdk==0.1.0a15`. Import its public declarations with `import yomihime_game_link_sdk as ygl`. It requires Python 3.11 or newer and has no third-party runtime dependencies.
+The independently installable distribution is `yomihime-game-link-sdk==0.1.0a16`. Import its public declarations with `import yomihime_game_link_sdk as ygl`. It requires Python 3.11 or newer and has no third-party runtime dependencies.
 
 The SDK (including its packaged examples) is licensed under MIT; see `SDK-LICENSE`. The AstrBot plugin implementation remains AGPL-3.0 under `LICENSE`. Third-party notices retain their own terms. The a12 source contract adds the outer-plugin extension bridge without changing module ABI 2.0. Built wheel identity and installation evidence are recorded separately; editing these declarations does not prove a published or installed wheel.
 
@@ -45,8 +45,8 @@ read proof does not authorize root private output or account management.
 Install the reviewed wheel into your module development environment:
 
 ```powershell
-python -m pip install --no-deps ./yomihime_game_link_sdk-0.1.0a15-py3-none-any.whl
-python -I -c "import yomihime_game_link_sdk as ygl; assert ygl.__version__ == '0.1.0a15'; assert ygl.MODULE_ABI_VERSION == '2.0'"
+python -m pip install --no-deps ./yomihime_game_link_sdk-0.1.0a16-py3-none-any.whl
+python -I -c "import yomihime_game_link_sdk as ygl; assert ygl.__version__ == '0.1.0a16'; assert ygl.MODULE_ABI_VERSION == '2.0'"
 ```
 
 The plugin release contains the exact content-pinned SDK from that wheel. Its bootstrap rejects changed contents, foreign package origins, partial preload graphs, and any preloaded retired `yomihime_sdk` graph. The retired root `api` and `yomihime_sdk.api` modules have no compatibility redirects. Historical stored-data readers are separate from module import compatibility.
@@ -320,6 +320,8 @@ configuration, records and unexpired USER cache entries while enforcing owner
 isolation. See the packaged example README for cleanup and evidence boundaries.
 This Core exercise does not claim native AstrBot startup, model or IM delivery,
 global Core Ready, or a process sandbox.
+
+`ModuleDisplay.summary: str | None = None` (SDK a16) is optional display-only plain text, limited to 160 Unicode code points. Omission or null means no summary; blank strings and Unicode Cc/Cf/Cs characters are rejected. It does not declare capabilities or grant permissions. Current Core accepts ABI 2.0 manifests without this field; older Core rejects this new closed-schema key. SDK releases remain exactly paired: outer plugins pinned to a15 must be updated separately before use with a16.
 
 ModuleDisplay metadata remains optional, bounded and localized; it never changes module IDs, owner identities, command routing or storage. Unloading a module preserves its existing persisted data. Existing 1.7 display read adaptation retains the historical codec, tags and identities; no data-format migration is included in this SDK change.
 

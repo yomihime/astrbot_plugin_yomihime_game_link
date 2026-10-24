@@ -157,12 +157,13 @@ class ToolDescriptor:
 
 @dataclass(frozen=True, slots=True)
 class ModuleDisplay:
-    """Optional translated plain-text names; never identity or authority."""
+    """Optional plain-text presentation metadata; never identity or authority."""
 
     default_name: str
     localized_names: Mapping[str, str] = _dataclass_field(default_factory=dict)
     short_name: str | None = None
     logo_resource: str | None = None
+    summary: str | None = None
 
     def __post_init__(self) -> None:
         if isinstance(self.localized_names, Mapping):

@@ -13,10 +13,11 @@ function displayMetadata(value: unknown, prefix: string, resources: {path: strin
   if (value === undefined || value === null) return null;
   const name = (v: unknown, limit: number): v is string => typeof v === 'string' && v.trim().length > 0 && [...v].length <= limit && !/[\p{Cc}\p{Cf}\p{Cs}]/u.test(v);
   const fail = (): never => {throw Error('invalid_catalog');};
-  if (!record(value) || Object.keys(value).some(key => !['default_name','localized_names','short_name','logo_resource'].includes(key)) || !name(value.default_name,128)) fail();
+  if (!record(value) || Object.keys(value).some(key => !['default_name','localized_names','short_name','logo_resource','summary'].includes(key)) || !name(value.default_name,128)) fail();
   const raw=value as Record<string,unknown>;
   const names = Object.hasOwn(raw,'localized_names')?raw.localized_names:{}, short = raw.short_name ?? null;
   if (!record(names) || Object.keys(names).length > 16 || short !== null && !name(short,32)) fail();
+  const summary=raw.summary??null;if(summary!==null&&!name(summary,160))fail();
   const translations=names as Record<string,unknown>;
   const folded = new Set<string>();
   for (const [locale, text] of Object.entries(translations)) {
@@ -27,7 +28,7 @@ function displayMetadata(value: unknown, prefix: string, resources: {path: strin
   const logo = raw.logo_resource === '' ? null : raw.logo_resource ?? null;
   // Display assets use the same owner-scoped declared resource authority as pages.
   if (logo !== null && (!moduleAsset(logo) || !logo.startsWith(prefix) || !/\.(?:svg|png|jpg|jpeg)$/.test(logo) || !resources.some(resource => resource.path === logo))) fail();
-  return {logo_resource:logo as string|null, default_name:raw.default_name as string, localized_names:{...translations} as Record<string,string>, short_name:short as string|null};
+  return {summary:summary as string|null, logo_resource:logo as string|null, default_name:raw.default_name as string, localized_names:{...translations} as Record<string,string>, short_name:short as string|null};
 }
 export function moduleLabel(module: ModuleDescriptor, locale: string, compact = false): string {
   const display=module.display; if (!display) return module.module_id;

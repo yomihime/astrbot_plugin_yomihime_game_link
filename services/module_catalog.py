@@ -92,6 +92,7 @@ def project_module_catalog(
                         "default_name": manifest.display.default_name,
                         "localized_names": dict(manifest.display.localized_names),
                         "short_name": manifest.display.short_name,
+                        "summary": manifest.display.summary,
                         # Presentation only: reuse the already validated resource
                         # identity, and never expose assets for an unloaded module.
                         "logo_resource": (

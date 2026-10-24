@@ -3514,6 +3514,7 @@
           "en": "FINAL FANTASY XIV"
         },
         "short_name": "FF14",
+        "summary": "物品查询 · 市场行情 · 角色 Logs · 活动日历",
         "logo_resource": "assets/ff14-meteor.svg"
       }
     }

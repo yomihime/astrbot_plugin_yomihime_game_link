@@ -99,7 +99,13 @@ EXTENSION_DESCRIPTOR_FIELDS: Mapping[str, frozenset[str]] = MappingProxyType(
         ),
         "diagnostic": frozenset({"event_id", "payload_schema"}),
         "module_display": frozenset(
-            {"default_name", "localized_names", "short_name", "logo_resource"}
+            {
+                "default_name",
+                "localized_names",
+                "short_name",
+                "logo_resource",
+                "summary",
+            }
         ),
         "capability": frozenset(
             {
@@ -509,6 +515,8 @@ def _display_name(value: object, label: str, limit: int) -> None:
 
 
 def check_ModuleDisplay(self) -> None:
+    if self.summary is not None:
+        _display_name(self.summary, "summary", 160)
     if self.logo_resource is not None:
         validate_page_resource_path(self.logo_resource)
         if self.logo_resource.rsplit(".", 1)[-1] not in {"svg", "png", "jpg", "jpeg"}:

@@ -40,10 +40,10 @@ test('home copy avoids per-module boilerplate while preserving unavailable state
  const home=source.slice(source.indexOf("home?h('section',{class:'workspace-index'"),source.indexOf("h('div',{ref:root,id:'module-container'"));
  assert.doesNotMatch(home,/workspace-kicker|workspace-scope-note|workspace-module-meta|进入模块|查看模块功能与设置|收在一处|MODULE/);
  assert.match(home,/暂无可用功能，请在模块管理中核对状态/);
- assert.match(home,/已加载.*已停用.*不可用/);
- assert.match(home,/class:'workspace-loaded'/);
- assert.match(home,/role:'tooltip'\},'已加载'/);
- assert.match(css,/\.workspace-loaded:hover \.workspace-status-tooltip,\.workspace-module-title:focus-within \.workspace-status-tooltip\{visibility:visible\}/);
+ assert.match(source,/已加载.*已停用.*不可用/);
+ assert.match(source,/class:'workspace-status-icon'/);
+ assert.match(source,/role:'tooltip'\},state==='loaded'\?'已加载'/);
+ assert.match(css,/\.workspace-status-icon:hover \.workspace-status-tooltip,\.workspace-module-title:focus-within \.workspace-status-tooltip\{visibility:visible\}/);
  assert.match(home,/class:'workspace-module-title'/);
  assert.match(css,/\.workspace-module \.workspace-emblem\{width:44px;height:44px/);
  const manifest=JSON.parse(await readFile(new URL('../../../modules/ff14/yomihime.manifest.json',import.meta.url),'utf8'));
@@ -52,4 +52,11 @@ test('home copy avoids per-module boilerplate while preserving unavailable state
   assert.equal(manifest.modules[0].pages.find(page=>page.route_id===route).title,title);
   assert.ok(entry.includes(`${route}:'${title}'`));
  }
+});
+
+test('status motion is short and finite with static reduced-motion and readable summaries',()=>{
+ assert.match(css,/animation:workspace-status-enter \.24s ease-out 1/);
+ assert.doesNotMatch(css,/workspace-status-enter[^;}]*infinite/);
+ assert.match(css,/@media\(prefers-reduced-motion:reduce\)\{\.workspace-status-icon>svg\{animation:none;transition:none\}/);
+ assert.match(css,/\.workspace-module-summary\{font-size:13px;line-height:1.6;[^}]*overflow-wrap:anywhere/);
 });

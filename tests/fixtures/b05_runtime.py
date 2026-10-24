@@ -12,7 +12,7 @@ from pathlib import Path
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 EXPECTED_WHEEL_SHA256 = (
-    "04da3de7f5931e17ce53e1cafa4fdaad4f572863a8ac0a373c34d97d39b6bd07"
+    "9f429148ac8c469b9e92bf9b0097bf27c898afed3d20c933519d1851e991e481"
 )
 
 
@@ -48,7 +48,7 @@ def build_and_install_pinned_sdk(work_root: Path) -> InstalledSdk:
     # An invalid supplied artifact is an error, never a reason to rebuild.
     validate_wheel(wheel)
     digest = hashlib.sha256(wheel.read_bytes()).hexdigest()
-    if wheel.name != "yomihime_game_link_sdk-0.1.0a15-py3-none-any.whl":
+    if wheel.name != "yomihime_game_link_sdk-0.1.0a16-py3-none-any.whl":
         raise RuntimeError(
             "SDK wheel name or version does not match the reviewed artifact"
         )
@@ -107,7 +107,7 @@ from ygl_r_preflight_subject.services.b05_runtime import (
 )
 
 assert Path(yomihime_game_link_sdk.__file__).resolve().is_relative_to(site_root.resolve())
-assert importlib.metadata.version("yomihime-game-link-sdk") == "0.1.0a15"
+assert importlib.metadata.version("yomihime-game-link-sdk") == "0.1.0a16"
 before_threads = {thread.ident for thread in threading.enumerate()}
 registry = Registry()
 before_snapshot = registry.snapshot()
