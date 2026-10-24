@@ -630,13 +630,17 @@ class AdminOperationsService(AdminOperations):
             }
 
     def _active_credential_policies(self):
-        registered = self.registry.snapshot().modules
-        return tuple(
-            policy
-            for policy in self._managed_source_credentials
-            if policy.module_id in registered
-            and policy.module_id not in self.extension_runtime.unloaded_owners
-        )
+        snapshot = self.registry.snapshot()
+        policies = []
+        for policy in self._managed_source_credentials:
+            if policy.module_id in self.extension_runtime.unloaded_owners:
+                continue
+            try:
+                self._selection(policy.module_id, snapshot)
+            except AdminAuthorizationDenied:
+                continue
+            policies.append(policy)
+        return tuple(policies)
 
     def credential_resources(self, *, active=False):
         resources = {}
