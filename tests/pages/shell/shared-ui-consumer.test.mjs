@@ -2,7 +2,7 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import {JSDOM} from '../../../pages/frontend/node_modules/jsdom/lib/api.js';
-import {sourceApp, sourceBundle, sourceRuntimeURL} from './source-build.mjs';
+import {sourceApp, sourceBundle, sourceRuntimeURL, sourceArtifacts} from './source-build.mjs';
 
 const entry = 'examples/modules/shared-ui/pages/src/entry.ts';
 test('non-FF14 consumer imports public UI and externalizes the shared runtime', async () => {
@@ -15,6 +15,23 @@ test('non-FF14 consumer imports public UI and externalizes the shared runtime', 
   assert.ok(imports.every(path => path === './runtime.js'));
   assert.match(bundle, /UiProvider/);
   assert.doesNotMatch(bundle, /createRenderer|createHydrationRenderer/);
+  assert.match(bundle, /FormField/);
+  assert.match(bundle, /FormGrid/);
+  assert.equal((await sourceArtifacts(entry)).filter(item => item.type === 'asset' && item.fileName.endsWith('.css')).length, 0, 'module example does not copy Core CSS');
+});
+
+test('formal shell owns one public CSS layer without management-view side effects', async () => {
+  const main = await readFile(new URL('../../../pages/frontend/src/main.ts', import.meta.url), 'utf8');
+  const management = await readFile(new URL('../../../pages/frontend/src/management-view.ts', import.meta.url), 'utf8');
+  assert.equal((main.match(/import '\.\/ui\/tokens\.css'/g) || []).length, 1);
+  assert.doesNotMatch(management, /import ['"].*tokens\.css/);
+  const output = await sourceArtifacts('pages/frontend/src/main.ts');
+  const css = output.filter(item => item.type === 'asset' && item.fileName.endsWith('.css'));
+  assert.equal(css.length, 1);
+  const source = String(css[0].source);
+  assert.match(source, /--ui-control-height:40px/);
+  assert.match(source, /\.ui-form-grid/);
+  assert.equal((source.match(/--ui-space-1:4px/g) || []).length, 1, 'public token declarations are not duplicated');
 });
 
 test('public UI consumer keeps its instance across theme changes and fences expired requests', async () => {
@@ -44,12 +61,23 @@ test('public UI consumer keeps its instance across theme changes and fences expi
     assert.equal(container.querySelector('.ui-page').dataset.theme, 'light');
     assert.equal(container.querySelector('.ui-settings-layout').dataset.hasAside, 'true');
     assert.equal(container.querySelector('h1').textContent, 'Shared UI example');
+    const heading = container.querySelector('#example-view-heading');
+    assert.ok(heading);
+    assert.equal(container.querySelector('label[for="example-view-heading"]').textContent, 'Local heading');
+    assert.ok(dom.window.document.getElementById(heading.getAttribute('aria-describedby')));
+    heading.value = 'My module';
+    heading.dispatchEvent(new dom.window.Event('input', {bubbles: true}));
+    await flush();
+    heading.focus();
     const button = container.querySelector('button');
     button.click(); await flush();
     assert.equal(requests.length, 1);
     assert.deepEqual([requests[0].capability, requests[0].parameters], ['status', {}]);
     page.update({...context, theme: 'dark'}); await flush();
     assert.equal(container.querySelector('.ui-page').dataset.theme, 'dark');
+    assert.equal(container.querySelector('#example-view-heading'), heading);
+    assert.equal(heading.value, 'My module');
+    assert.equal(dom.window.document.activeElement, heading);
     assert.equal(container.querySelector('button'), button);
     assert.equal(button.disabled, true);
     requests[0].resolve({status: 'success'}); await flush();

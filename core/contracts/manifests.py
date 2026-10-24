@@ -74,6 +74,8 @@ EXTENSION_PACKAGE_FIELDS = frozenset(
         "source",
     }
 )
+# Optional presentation fields do not replace any original required root key.
+EXTENSION_PACKAGE_OPTIONAL_FIELDS = frozenset({"display_name", "module_order"})
 EXTENSION_DESCRIPTOR_FIELDS: Mapping[str, frozenset[str]] = MappingProxyType(
     {
         "module": frozenset(
@@ -99,7 +101,13 @@ EXTENSION_DESCRIPTOR_FIELDS: Mapping[str, frozenset[str]] = MappingProxyType(
         ),
         "diagnostic": frozenset({"event_id", "payload_schema"}),
         "module_display": frozenset(
-            {"default_name", "localized_names", "short_name", "logo_resource"}
+            {
+                "default_name",
+                "localized_names",
+                "short_name",
+                "logo_resource",
+                "summary",
+            }
         ),
         "capability": frozenset(
             {
@@ -502,6 +510,8 @@ def _display_name(value: object, label: str, limit: int) -> None:
 
 
 def check_ModuleDisplay(self) -> None:
+    if self.summary is not None:
+        _display_name(self.summary, "summary", 160)
     if self.logo_resource is not None:
         validate_page_resource_path(self.logo_resource)
         if self.logo_resource.rsplit(".", 1)[-1] not in {"svg", "png", "jpg", "jpeg"}:
@@ -688,6 +698,21 @@ class ExtensionManifestABI:
 EXTENSION_MANIFEST_ABI = ExtensionManifestABI()
 
 
+def normalize_package_display_name(value: object) -> str | None:
+    """Normalize optional package-owned plain text at the Core boundary."""
+    if value is None:
+        return None
+    if (
+        type(value) is not str
+        or len(value) > 128
+        or any(
+            unicodedata.category(character) in {"Cc", "Cf", "Cs"} for character in value
+        )
+    ):
+        raise ValueError("package display_name must be bounded plain text or null")
+    return value if value.strip() else None
+
+
 def check_PackageManifest(self) -> None:
     _identifier(self.package_id, "package_id")
     _version(self.package_version, "package_version")
@@ -700,7 +725,22 @@ def check_PackageManifest(self) -> None:
     _text(self.author, "author")
     _text(self.license, "license")
     _text(self.source, "source")
+    object.__setattr__(
+        self, "display_name", normalize_package_display_name(self.display_name)
+    )
     _unique(tuple((item.module_id for item in self.modules)), "modules")
+    order = self.module_order
+    if order is None:
+        order = ()
+    if type(order) is not tuple or len(order) > len(self.modules):
+        raise ValueError("package module_order must be a bounded local ID sequence")
+    known = {module.module_id for module in self.modules}
+    for module_id in order:
+        _identifier(module_id, "module_order entry")
+        if module_id not in known:
+            raise ValueError("package module_order contains an undeclared local ID")
+    _unique(order, "package module_order")
+    object.__setattr__(self, "module_order", order)
     _unique(tuple((item.route for item in self.modules)), "module routes")
     _unique(
         tuple(

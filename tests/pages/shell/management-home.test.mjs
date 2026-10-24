@@ -27,7 +27,8 @@ test('cold default home and fixed global settings never mount a query',async()=>
  }
 });
 test('each public app disables preflight and shell explicitly owns font geometry',async()=>{
- for(const file of ['management-view.ts','module-management.ts'])assert.match(await readFile(root+'pages/frontend/src/'+file,'utf8'),/preflightStyleDisabled\s*:\s*true/);
+ assert.match(await readFile(root+'pages/frontend/src/management-view.ts','utf8'),/import.*UiProvider.*from '@game-link\/ui'/);
+ assert.match(await readFile(root+'pages/frontend/src/module-management.ts','utf8'),/import.*UiProvider.*from '@game-link\/ui'/);
  assert.match(await readFile(root+'pages/frontend/src/main.ts','utf8'),/import.*UiProvider.*from '@game-link\/ui'/);
  assert.match(await readFile(root+'modules/ff14/pages/src/entry.ts','utf8'),/import.*UiProvider.*from '@game-link\/ui'/);
  assert.match(await readFile(root+'pages/frontend/src/ui/shared-components.ts','utf8'),/preflightStyleDisabled\s*:\s*true/);

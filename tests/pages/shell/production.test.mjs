@@ -38,25 +38,19 @@ test('production select names its actual focus node and tracks popup keyboard st
   await key(' ');assert.equal(quality.getAttribute('aria-expanded'),'true');assert.equal(container.querySelectorAll('#ff14-market-quality').length,1);
  } finally {scope.dispose();page.dispose();assert.equal(container.querySelector('[role=combobox]'),null);assert.equal(container.querySelector('[role=listbox]'),null);}
 });
-test('production module header rules outrank locked Naive transitions and shell scroll root disables anchoring',async()=>{
+test('production module uses public surfaces and fields without private Naive card overrides',async()=>{
  const scope=createScope(()=>true),page=mount(container,{routeId:'items',context,scope,services:{invoke(){throw Error('unexpected-request');}}});
- const stylesheet=window.document.createElement('style');stylesheet.textContent=await readFile(resolve(root,'modules/ff14/pages/dist/styles.css'),'utf8');window.document.head.append(stylesheet);
  try {
-  const header=container.querySelector('.n-card-header__main');assert.ok(header);
-  const native=container.querySelector('style[cssr-id="n-card"]');assert.ok(native);
-  const moduleRules=[...stylesheet.sheet.cssRules],nativeRules=[...native.sheet.cssRules];
-  const matching=rules=>rules.flatMap(rule=>rule.selectorText?.split(',').filter(selector=>header.matches(selector)).map(selector=>({selector,style:rule.style}))||[]);
-  const overrides=matching(moduleRules).filter(rule=>rule.style.getPropertyValue('transition')==='none');assert.equal(overrides.length,1);
-  const nativeTransitions=matching(nativeRules).filter(rule=>rule.style.getPropertyValue('transition').includes('color'));assert.ok(nativeTransitions.length);
-  // These locked selectors contain only class/type selectors and child/descendant combinators.
-  // Compare their class specificity independently of document order or JSDOM's cascade shortcuts.
-  const classes=selector=>(selector.match(/\.[\w-]+/g)||[]).length;
-  for(const rule of nativeTransitions)assert.ok(classes(overrides[0].selector)>classes(rule.selector),`${overrides[0].selector} must outrank ${rule.selector}`);
-  assert.equal(overrides[0].style.getPropertyValue('color'),'var(--ff14-text)');assert.equal(overrides[0].style.getPropertyPriority('transition'),'');
-  const shellStyle=window.document.createElement('style');shellStyle.textContent=await readFile(resolve(root,'pages/00-game-link/styles.css'),'utf8');window.document.head.append(shellStyle);
-  try {const html=[...shellStyle.sheet.cssRules].find(rule=>rule.selectorText==='html');assert.equal(html.style.getPropertyValue('overflow-anchor'),'none');assert.equal(html.style.getPropertyValue('overflow-y'),'auto');} finally {shellStyle.remove();}
- } finally {stylesheet.remove();scope.dispose();page.dispose();}
+  assert.equal(container.querySelectorAll('.ui-surface').length,2);
+  assert.ok(container.querySelector('.ui-form-grid .ui-form-field'));
+  assert.equal(container.querySelector('.n-card'),null);
+  const moduleCss=await readFile(resolve(root,'modules/ff14/pages/dist/styles.css'),'utf8');
+  assert.doesNotMatch(moduleCss,/\.n-card(?:-header|__content)?/);
+  const css=await readFile(resolve(root,'pages/00-game-link/styles.css'),'utf8');
+  assert.match(css,/overflow-anchor:none/);assert.match(css,/\.ui-form-field/);
+ }finally{scope.dispose();page.dispose();}
 });
+
 test('production cold evaluation needs no Node process/global/require shim',()=>{
   const result=spawnSync(process.execPath,['--experimental-vm-modules',resolve(root,'tests/pages/shell/browser-global-contract.mjs')],{encoding:'utf8'});
   assert.equal(result.status,0,result.stdout+'\n'+result.stderr);

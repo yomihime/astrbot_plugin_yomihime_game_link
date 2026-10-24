@@ -67,6 +67,88 @@ def _module(**changes: object) -> ModuleManifest:
 
 
 class ManifestContractTests(unittest.TestCase):
+    def test_package_display_name_is_trailing_optional_and_core_normalized(self):
+        from dataclasses import fields, replace
+
+        package = example_package()
+        self.assertEqual(fields(PackageManifest)[-2].name, "display_name")
+        self.assertIsNone(package.display_name)
+        for value, expected in (
+            (None, None),
+            ("", None),
+            ("   ", None),
+            ("　", None),
+            ("  星港扩展  ", "  星港扩展  "),
+            ("🚀" * 128, "🚀" * 128),
+        ):
+            with self.subTest(value=value):
+                declaration = replace(package, display_name=value)
+                self.assertEqual(validate_contract(declaration).display_name, expected)
+        for value in (
+            True,
+            1,
+            [],
+            {},
+            "x" * 129,
+            "\n",
+            "\t",
+            "\x00",
+            "\u200b",
+            "\u202e",
+            "\ud800",
+        ):
+            with self.subTest(value=value):
+                # SDK construction remains descriptive, never receiving authority.
+                declaration = replace(package, display_name=value)
+                with self.assertRaises((TypeError, ValueError)):
+                    validate_contract(declaration)
+
+    def test_package_module_order_is_optional_closed_and_immutable(self):
+        from dataclasses import fields, replace
+
+        package = replace(
+            example_package(),
+            modules=(
+                _module(module_id="alpha", route="alpha"),
+                _module(module_id="beta", route="beta"),
+            ),
+        )
+        self.assertEqual(fields(PackageManifest)[-1].name, "module_order")
+        for value, expected in (
+            (None, ()),
+            ([], ()),
+            ((), ()),
+            (["beta"], ("beta",)),
+            (("beta", "alpha"), ("beta", "alpha")),
+        ):
+            with self.subTest(value=value):
+                declaration = replace(package, module_order=value)
+                self.assertEqual(validate_contract(declaration).module_order, expected)
+        mutable = ["beta"]
+        declaration = replace(package, module_order=mutable)
+        mutable.append("alpha")
+        self.assertEqual(validate_contract(declaration).module_order, ("beta",))
+        for value in (
+            "alpha",
+            {},
+            {"alpha"},
+            True,
+            1,
+            [None],
+            [1],
+            [True],
+            [""],
+            ["alpha", "alpha"],
+            ["absent"],
+            ["other/alpha"],
+            ["alpha", "beta", "alpha"],
+            [" alpha"],
+            ["alpha\n"],
+        ):
+            with self.subTest(invalid=value):
+                with self.assertRaises((TypeError, ValueError)):
+                    validate_contract(replace(package, module_order=value))
+
     def test_optional_config_value_schema_is_frozen_and_backward_compatible(self):
         self.assertIsNone(validate_contract(ConfigField("mode")).group)
         self.assertEqual(

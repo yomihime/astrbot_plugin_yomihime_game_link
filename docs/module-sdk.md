@@ -1,6 +1,6 @@
 # Game Link module SDK
 
-The independently installable distribution is `yomihime-game-link-sdk==0.1.0a11`. Import its public declarations with `import yomihime_game_link_sdk as ygl`. It requires Python 3.11 or newer and has no third-party runtime dependencies.
+The independently installable distribution is `yomihime-game-link-sdk==0.1.0a19`. Import its public declarations with `import yomihime_game_link_sdk as ygl`. It requires Python 3.11 or newer and has no third-party runtime dependencies.
 
 The SDK (including its packaged examples) is licensed under MIT; see `SDK-LICENSE`. The AstrBot plugin implementation remains AGPL-3.0 under `LICENSE`. Third-party notices retain their own terms. The a10 source contract adds invocation-bound diagnostics, CacheUnavailable and generic page roles without changing module ABI 2.0. Built wheel identity and installation evidence are recorded separately; editing these declarations does not prove a published or installed wheel.
 
@@ -9,8 +9,8 @@ The SDK (including its packaged examples) is licensed under MIT; see `SDK-LICENS
 Install the reviewed wheel into your module development environment:
 
 ```powershell
-python -m pip install --no-deps ./yomihime_game_link_sdk-0.1.0a11-py3-none-any.whl
-python -I -c "import yomihime_game_link_sdk as ygl; assert ygl.__version__ == '0.1.0a11'; assert ygl.MODULE_ABI_VERSION == '2.0'"
+python -m pip install --no-deps ./yomihime_game_link_sdk-0.1.0a19-py3-none-any.whl
+python -I -c "import yomihime_game_link_sdk as ygl; assert ygl.__version__ == '0.1.0a19'; assert ygl.MODULE_ABI_VERSION == '2.0'"
 ```
 
 The plugin release contains the exact content-pinned SDK from that wheel. Its bootstrap rejects changed contents, foreign package origins, partial preload graphs, and any preloaded retired `yomihime_sdk` graph. The retired root `api` and `yomihime_sdk.api` modules have no compatibility redirects. Historical stored-data readers are separate from module import compatibility.
@@ -288,3 +288,18 @@ Current config may also contain `descriptors` for the exact authorized page fiel
 Host module page requests require a short-lived opaque page_session after actual Dashboard JWT/Origin authentication. Host validates current subject/session, owner/page/runtime/epoch, field grants and generation on each request and commit, then removes the proof before the strict Core helper body. The proof demonstrates scoped Host authority; AstrBot does not attest the originating DOM. Asset tokens, client labels and page names alone grant no management rights.
 
 Trusted legacy policies may register retained ordinary source names with a configuration coordinator. Such rows remain stored but are hidden from ordinary current snapshots and cannot be patched or cleared through current declarations. Unknown fields and secret metadata still fail. A bad legacy source value is independently rejected by destination-schema projection and does not prevent unrelated valid Core theme updates.
+
+
+## Core presentation metadata (a19)
+
+This release is based on master SDK a11 and adds only three optional presentation fields, not the parallel DLC development branch's services. Module ABI remains 2.0.
+
+`ModuleDisplay.summary: str | None = None` is optional plain text limited to 160 Unicode code points. Missing or null means absent; blank strings and Cc/Cf/Cs characters are rejected.
+
+`PackageManifest.display_name: str | None = None` is an optional trailing field, limited to 128 Unicode code points without Cc/Cf/Cs. Missing, null and whitespace-only values normalize to null; other spacing is preserved. Missing names fall back to package_id.
+
+`PackageManifest.module_order: tuple[str, ...] | None = None` is an optional trailing field. The disk root accepts a JSON array of local module IDs or null. Missing, null and empty normalize to an empty tuple. Partial lists put declared IDs first, followed by other modules sorted by their actual localized display name and stable ID. Duplicate, unknown, qualified/cross-package and non-string IDs are rejected.
+
+Source metadata is presentation only. Built-in classification requires an exact trusted bundled declaration. Extension labels and order require a completed package built by master's existing local extension runtime plus an exact current registered module manifest. Discovery alone and unclassified modules remain unknown. No external Host attachment, permission, lease, storage or credential behavior is added.
+
+Older closed-schema Core rejects these new disk keys. Exact SDK pins remain paired; existing DLC packages require their own separately reviewed update before joint deployment. This Core-only change neither updates nor publishes DLC packages.
