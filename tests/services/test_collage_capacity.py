@@ -158,11 +158,22 @@ class BoundCollageReferenceTests(unittest.IsolatedAsyncioTestCase):
                     ref.asset_id, CacheVisibility.USER
                 )
             )
-            await asyncio.wait_for(entered.wait(), timeout=2)
-            self.assertEqual(calls, 1)
-            task.cancel()
-            with self.assertRaises(asyncio.CancelledError):
-                await task
+            entered_wait = asyncio.create_task(entered.wait())
+            try:
+                done, _ = await asyncio.wait(
+                    (task, entered_wait),
+                    timeout=2,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                self.assertIn(entered_wait, done)
+                self.assertEqual(calls, 1)
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+            finally:
+                entered_wait.cancel()
+                task.cancel()
+                await asyncio.gather(entered_wait, task, return_exceptions=True)
         self.assertEqual(
             await scope.resources.read(ref.asset_id), fixtures._png("#345678").content
         )

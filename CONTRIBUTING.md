@@ -71,11 +71,11 @@ python scripts/build_release.py
 
 脚本要求 Python 3.13 和固定版本的 setuptools、wheel。它从临时 SDK 源码副本构建并验证固定的 SDK wheel，然后生成：
 
-- `dist/astrbot_plugin_yomihime_game_link-v0.1.6.zip`：上传到 AstrBot WebUI 的插件包；
+- `dist/astrbot_plugin_yomihime_game_link-v0.1.7.zip`：上传到 AstrBot WebUI 的插件包；
 - `dist/yomihime_game_link_sdk-0.1.0a17-py3-none-any.whl`：独立 SDK 工件，不是插件 ZIP；
 - `dist/SHA256SUMS`：上述工件的摘要。
 
-可用 `--tag v0.1.6` 校验 tag 必须与 `metadata.yaml` 中的版本相同。该参数只做版本校验，不创建 tag。发布工件的下载和安装步骤见[README](https://github.com/yomihime/astrbot_plugin_yomihime_game_link/blob/master/README.md)。
+可用 `--tag v0.1.7` 校验 tag 必须与 `metadata.yaml` 中的版本相同。该参数只做版本校验，不创建 tag。发布工件的下载和安装步骤见[README](https://github.com/yomihime/astrbot_plugin_yomihime_game_link/blob/master/README.md)。
 
 不要直接把未经构建的仓库快照安装到 AstrBot：SDK 运行文件由已验证的 wheel 注入插件 ZIP。SDK 契约与工件细节见[模块 SDK 说明](https://github.com/yomihime/astrbot_plugin_yomihime_game_link/blob/master/docs/module-sdk.md)。
 

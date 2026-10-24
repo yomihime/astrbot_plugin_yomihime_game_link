@@ -286,9 +286,18 @@ class ExternalPackageHost:
                     candidate.package.manifest
                 )
                 self._changed()
+
+                async def prepare_and_restore():
+                    await self._core._register_declared_subscription_gates(
+                        {
+                            f"{key}/{module.module_id}": module
+                            for module in candidate.package.manifest.modules
+                        }
+                    )
+                    await self._core.extension_runtime.restore_host_package(candidate)
+
                 await self._bounded(
-                    self._core.extension_runtime.restore_host_package(candidate),
-                    timeout=self._registration_timeout,
+                    prepare_and_restore(), timeout=self._registration_timeout
                 )
                 if not lease.active:
                     raise ExtensionHostError("plugin_instance_unavailable")
