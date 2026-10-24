@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+from contextlib import contextmanager
 from pathlib import Path
 from time import time
 
@@ -173,7 +174,15 @@ class ExternalInstallationTrust:
         }
 
     async def approve(
-        self, plugin_name, package_id, *, plan_id, expected_revision, actor, current
+        self,
+        plugin_name,
+        package_id,
+        *,
+        plan_id,
+        expected_revision,
+        actor,
+        current,
+        commit_fence,
     ):
         if (
             type(expected_revision) is not int
@@ -181,6 +190,7 @@ class ExternalInstallationTrust:
             or type(actor) is not str
             or not actor
             or not callable(current)
+            or not callable(commit_fence)
         ):
             raise ValueError("trusted installation approval required")
         current()
@@ -208,7 +218,7 @@ class ExternalInstallationTrust:
             )
         current()
 
-        def apply(unit):
+        def check_instance():
             current()
             metadata = self.context.get_registered_star(plugin_name)
             if (
@@ -217,6 +227,18 @@ class ExternalInstallationTrust:
                 or metadata.star_cls is not instance
             ):
                 raise ExtensionHostError("plugin_instance_unavailable")
+
+        @contextmanager
+        def authorized_commit():
+            # Revocation holds this same trusted Host authority lock. Keep it
+            # through SQLite commit, rather than only checking before return.
+            with commit_fence():
+                check_instance()
+                yield
+
+        def apply(unit):
+            check_instance()
+            unit.add_commit_guard(authorized_commit)
             row = unit.execute(
                 "SELECT revision,plugin_name,package_root FROM extension_installation_grants WHERE package_id=?",
                 (package_id,),

@@ -7,6 +7,7 @@ import sys
 import tempfile
 import weakref
 from collections.abc import Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
@@ -820,6 +821,12 @@ class AstrBotRuntime:
                 raise AdminAuthorizationDenied
             source.check(context, operation, resources)
 
+        @contextmanager
+        def commit_fence():
+            with source.fence(context, operation, resources):
+                guard()
+                yield
+
         guard()
         trust = self._installation_trust
         if trust is None:
@@ -839,6 +846,7 @@ class AstrBotRuntime:
                 expected_revision=data["expected_revision"],
                 actor=context.adapter_id + ":" + context.session_id,
                 current=guard,
+                commit_fence=commit_fence,
             )
         guard()
         return result

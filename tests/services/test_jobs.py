@@ -119,6 +119,49 @@ class Handler:
         return {"count": parameters["count"]}
 
 
+class CancellationBarrierHandler(Handler):
+    """Hold old cancellation cleanup while later real runs bind/publish."""
+
+    def __init__(self):
+        super().__init__()
+        self.cancelled = asyncio.Event()
+        self.restarted = asyncio.Event()
+        self.other_entered = asyncio.Event()
+        self.new_release = asyncio.Event()
+        self.other_release = asyncio.Event()
+        self.live = 0
+        self.maximum_live = 0
+
+    async def run(self, invocation, parameters, control):
+        self.invocations.append(invocation)
+        generation = len(self.invocations)
+        bound = await self.service.bind_services(invocation)
+        await bound.cache.put("race-generation", {"value": generation}, ttl_seconds=60)
+        self.live += 1
+        self.maximum_live = max(self.maximum_live, self.live)
+        try:
+            if generation == 1:
+                self.control = control
+                self.entered.set()
+                while not self.release.is_set():
+                    try:
+                        await self.release.wait()
+                    except asyncio.CancelledError:
+                        self.cancelled.set()
+            else:
+                if parameters["count"] == 1:
+                    self.restarted.set()
+                    await self.new_release.wait()
+                else:
+                    self.other_entered.set()
+                    await self.other_release.wait()
+                await control.publish(({"generation": generation},))
+                self.published.set()
+            return {"generation": generation}
+        finally:
+            self.live -= 1
+
+
 def registry(handler, *, timeout=30, active=2, credential=False):
     caps = fixtures._Handler()
     alpha = replace(
@@ -398,6 +441,209 @@ class DurableJobsTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(
             (await self.terminal(ops, job.job_id)).status, JobStatus.SUCCEEDED
         )
+
+    async def test_immediate_retry_waits_for_old_handler_cleanup_then_new_run_publishes(
+        self,
+    ):
+        self.handler = CancellationBarrierHandler()
+        await self.reset_runtime()
+        ops = await self.web()
+        job = await ops.submit(JobRequest("wall", {"count": 1}))
+        await self.jobs.start()
+        await asyncio.wait_for(self.handler.entered.wait(), 5)
+        old_task = self.jobs._tasks[job.job_id]
+        old_run = self.jobs._runs[job.job_id]
+        cancelled = await ops.cancel(
+            job.job_id, expected_revision=(await ops.status(job.job_id)).revision
+        )
+        await asyncio.wait_for(self.handler.cancelled.wait(), 5)
+        scanned = asyncio.Event()
+        queued = self.jobs.repository.queued
+
+        async def observe_queue(limit):
+            rows = await queued(limit)
+            if any(row["job_id"] == job.job_id for row in rows):
+                scanned.set()
+            return rows
+
+        self.jobs.repository.queued = observe_queue
+        try:
+            retried = await ops.retry(job.job_id, expected_revision=cancelled.revision)
+            await asyncio.wait_for(scanned.wait(), 5)
+            self.assertIs((await ops.status(job.job_id)).status, JobStatus.QUEUED)
+            self.assertFalse(self.handler.restarted.is_set())
+            self.assertIs(self.jobs._tasks[job.job_id], old_task)
+            self.assertIs(self.jobs._runs[job.job_id], old_run)
+            self.handler.release.set()
+            await asyncio.gather(old_task, return_exceptions=True)
+            await asyncio.wait_for(self.handler.restarted.wait(), 5)
+            new_task = self.jobs._tasks[job.job_id]
+            self.assertIsNot(new_task, old_task)
+            self.assertIsNot(self.jobs._runs[job.job_id], old_run)
+            self.assertEqual(self.handler.maximum_live, 1)
+            self.handler.new_release.set()
+            final = await self.terminal(ops, retried.job_id)
+            self.assertIs(final.status, JobStatus.SUCCEEDED, final)
+            self.assertEqual((await ops.result(job.job_id)).entries[0]["generation"], 2)
+            await asyncio.gather(new_task, return_exceptions=True)
+            self.assertNotIn(job.job_id, self.jobs._tasks)
+            self.assertNotIn(job.job_id, self.jobs._runs)
+        finally:
+            self.jobs.repository.queued = queued
+
+    async def test_waiting_retry_does_not_starve_other_job_or_exceed_worker_limit(self):
+        self.handler = CancellationBarrierHandler()
+        await self.reset_runtime()
+        ops = await self.web()
+        first = await ops.submit(JobRequest("wall", {"count": 1}))
+        await self.jobs.start()
+        await asyncio.wait_for(self.handler.entered.wait(), 5)
+        cancelled = await ops.cancel(
+            first.job_id, expected_revision=(await ops.status(first.job_id)).revision
+        )
+        await asyncio.wait_for(self.handler.cancelled.wait(), 5)
+        await ops.retry(first.job_id, expected_revision=cancelled.revision)
+        other = await ops.submit(JobRequest("wall", {"count": 2}))
+        await asyncio.wait_for(self.handler.other_entered.wait(), 5)
+        self.assertIs((await ops.status(first.job_id)).status, JobStatus.QUEUED)
+        self.assertFalse(self.handler.restarted.is_set())
+        self.assertEqual(self.handler.live, 2)
+        self.assertEqual(len(self.jobs._tasks), 2)
+        self.handler.release.set()
+        await asyncio.wait_for(self.handler.restarted.wait(), 5)
+        self.assertEqual(self.handler.maximum_live, 2)
+        self.handler.new_release.set()
+        self.handler.other_release.set()
+        self.assertIs(
+            (await self.terminal(ops, first.job_id)).status, JobStatus.SUCCEEDED
+        )
+        self.assertIs(
+            (await self.terminal(ops, other.job_id)).status, JobStatus.SUCCEEDED
+        )
+
+    async def test_close_retains_cancel_resistant_run_until_real_cleanup_drains(self):
+        self.handler = CancellationBarrierHandler()
+        await self.reset_runtime()
+        ops = await self.web()
+        job = await ops.submit(JobRequest("wall", {"count": 1}))
+        await self.jobs.start()
+        await asyncio.wait_for(self.handler.entered.wait(), 5)
+        cancelled = await ops.cancel(
+            job.job_id, expected_revision=(await ops.status(job.job_id)).revision
+        )
+        await asyncio.wait_for(self.handler.cancelled.wait(), 5)
+        await ops.retry(job.job_id, expected_revision=cancelled.revision)
+        released = asyncio.Event()
+        original = self.handler.invocations[0]
+        unsubscribe = self.runtime.issuer.add_release_observer(
+            lambda view: released.set() if view is original else None
+        )
+        try:
+            self.assertFalse(await self.jobs.close())
+            self.assertIn(job.job_id, self.jobs._runs)
+            self.assertFalse(self.handler.restarted.is_set())
+            self.handler.release.set()
+            await asyncio.wait_for(released.wait(), 5)
+            self.assertTrue(await self.jobs.close())
+            self.assertEqual(self.jobs._tasks, {})
+            self.assertEqual(self.jobs._runs, {})
+        finally:
+            unsubscribe()
+
+    async def test_retried_run_remains_owned_by_cancel_and_close(self):
+        self.handler = CancellationBarrierHandler()
+        await self.reset_runtime()
+        ops = await self.web()
+        job = await ops.submit(JobRequest("wall", {"count": 1}))
+        await self.jobs.start()
+        await asyncio.wait_for(self.handler.entered.wait(), 5)
+        old_task = self.jobs._tasks[job.job_id]
+        cancelled = await ops.cancel(
+            job.job_id, expected_revision=(await ops.status(job.job_id)).revision
+        )
+        await asyncio.wait_for(self.handler.cancelled.wait(), 5)
+        await ops.retry(job.job_id, expected_revision=cancelled.revision)
+        self.handler.release.set()
+        await asyncio.gather(old_task, return_exceptions=True)
+        await asyncio.wait_for(self.handler.restarted.wait(), 5)
+        new_task = self.jobs._tasks[job.job_id]
+        new_view = self.handler.invocations[-1]
+        self.assertIsNot(new_task, old_task)
+        stopped = await ops.cancel(
+            job.job_id, expected_revision=(await ops.status(job.job_id)).revision
+        )
+        self.assertIs(stopped.status, JobStatus.CANCELLED)
+        await asyncio.gather(new_task, return_exceptions=True)
+        with self.assertRaises(InvalidInvocation):
+            self.runtime.issuer.require(new_view)
+        self.assertIs((await ops.status(job.job_id)).status, JobStatus.CANCELLED)
+        self.assertTrue(await self.jobs.close())
+        self.assertEqual(self.jobs._tasks, {})
+        self.assertEqual(self.jobs._runs, {})
+
+    async def test_cancel_before_worker_entry_retains_claim_settlement_before_retry(
+        self,
+    ):
+        self.handler.block = True
+        ops = await self.web()
+        job = await ops.submit(JobRequest("wall", {"count": 1}))
+        scope = self.runtime.lifecycle.scope("sample/alpha")
+        create_task = scope.create_task
+        finish = self.jobs.repository.finish
+        queued = self.jobs.repository.queued
+        settle_entered, settle_release, scanned = (
+            asyncio.Event(),
+            asyncio.Event(),
+            asyncio.Event(),
+        )
+        first = [True]
+
+        def cancel_before_entry(work, *, name):
+            task = create_task(work, name=name)
+            if first[0]:
+                first[0] = False
+                task.cancel()
+            return task
+
+        async def hold_settlement(*args, **kwargs):
+            if args[2] == "interrupted" and not settle_release.is_set():
+                settle_entered.set()
+                await settle_release.wait()
+            return await finish(*args, **kwargs)
+
+        async def observe_queue(limit):
+            rows = await queued(limit)
+            if any(row["job_id"] == job.job_id for row in rows):
+                scanned.set()
+            return rows
+
+        scope.create_task = cancel_before_entry
+        self.jobs.repository.finish = hold_settlement
+        self.jobs.repository.queued = observe_queue
+        try:
+            await self.jobs.start()
+            await asyncio.wait_for(settle_entered.wait(), 5)
+            self.assertEqual(self.handler.invocations, [])
+            cancelled = await ops.cancel(
+                job.job_id, expected_revision=(await ops.status(job.job_id)).revision
+            )
+            scanned.clear()
+            await ops.retry(job.job_id, expected_revision=cancelled.revision)
+            await asyncio.wait_for(scanned.wait(), 5)
+            self.assertIs((await ops.status(job.job_id)).status, JobStatus.QUEUED)
+            self.assertEqual(self.handler.invocations, [])
+            settle_release.set()
+            await asyncio.wait_for(self.handler.entered.wait(), 5)
+            self.handler.release.set()
+            self.assertIs(
+                (await self.terminal(ops, job.job_id)).status, JobStatus.SUCCEEDED
+            )
+            self.assertEqual(len(self.handler.invocations), 1)
+        finally:
+            settle_release.set()
+            scope.create_task = create_task
+            self.jobs.repository.finish = finish
+            self.jobs.repository.queued = queued
 
     async def test_document_batches_have_no_total_eight_page_cap_and_owner_asset_reads(
         self,

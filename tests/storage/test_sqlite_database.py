@@ -162,6 +162,13 @@ class SQLiteDatabaseTests(unittest.IsolatedAsyncioTestCase):
         finally:
             connection.close()
 
+        # A schema170-only code rollback must refuse this newer database, not
+        # erase new state or silently downgrade the existing CAS values.
+        upgraded_bytes = path.read_bytes()
+        with self.assertRaises(MigrationChecksumError):
+            SQLiteDatabase(path, migrations_dir=historical).initialize()
+        self.assertEqual(path.read_bytes(), upgraded_bytes)
+
     def test_subscription_fence_migration_preserves_v80_rows_and_null_stamps(
         self,
     ) -> None:

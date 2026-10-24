@@ -4,12 +4,20 @@ import copy
 import hashlib
 import json
 import tempfile
+import time
 import unittest
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 
+from ygl_test_subject.adapters.astrbot.runtime import AstrBotRuntime
+from ygl_test_subject.core.contracts.administration import (
+    AdminAuthorizationDenied,
+    AdminOperation,
+)
 from ygl_test_subject.extensions.discovery import discover_packages
 from ygl_test_subject.infrastructure.sqlite.database import SQLiteDatabase
+from ygl_test_subject.services.admin_sources import TrustedAdminSource
 from ygl_test_subject.services.external_installations import ExternalInstallationTrust
 from ygl_test_subject.services.external_source_policies import ExternalSourcePolicies
 
@@ -19,6 +27,7 @@ from tests.services.test_external_source_policies import (
 )
 from yomihime_game_link_sdk.errors import RevisionConflict
 from yomihime_game_link_sdk.host import ExtensionHostError
+from yomihime_game_link_sdk.services import ConfigTarget
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -103,6 +112,7 @@ class InstallationTrustTests(unittest.IsolatedAsyncioTestCase):
             expected_revision=plan["expected_revision"],
             actor="verified-test-admin",
             current=lambda: None,
+            commit_fence=nullcontext,
         )
         await self.trust.load()
         return result
@@ -147,6 +157,7 @@ class InstallationTrustTests(unittest.IsolatedAsyncioTestCase):
                 expected_revision=0,
                 actor="verified-test-admin",
                 current=lambda: None,
+                commit_fence=nullcontext,
             )
         result = await self.approve()
         with self.assertRaises(RevisionConflict):
@@ -157,8 +168,110 @@ class InstallationTrustTests(unittest.IsolatedAsyncioTestCase):
                 expected_revision=0,
                 actor="verified-test-admin",
                 current=lambda: None,
+                commit_fence=nullcontext,
             )
         self.assertEqual(result["revision"], 1)
+
+    def runtime_approval(self):
+        resources = {ConfigTarget("synthetic", "game_link/core"): {"enabled"}}
+        source = TrustedAdminSource(
+            "synthetic-host", resources, {AdminOperation.SET_ENABLED}
+        )
+        self.addCleanup(source.close)
+        context = source.issue(
+            subject="synthetic-admin",
+            request=object(),
+            expiry=time.time() + 60,
+            operations={AdminOperation.SET_ENABLED},
+            resources=resources,
+            live=lambda request: True,
+        )
+        core = SimpleNamespace(
+            admin_operations=SimpleNamespace(module_resources=lambda: resources)
+        )
+        runtime = SimpleNamespace(
+            management_entry=lambda **kwargs: (core, source),
+            management_current=lambda candidate, authority: candidate is core
+            and authority is source,
+            _installation_trust=self.trust,
+        )
+        return runtime, source, context
+
+    async def test_actual_runtime_approval_uses_source_fence_and_commits(self):
+        plan = await self.trust.plan("example_plugin", "minimal")
+        runtime, _, context = self.runtime_approval()
+        result = await AstrBotRuntime.installation_operation(
+            runtime,
+            "module-install-approve",
+            {
+                "plugin_name": "example_plugin",
+                "package_id": "minimal",
+                "plan_id": plan["plan_id"],
+                "expected_revision": 0,
+            },
+            context,
+        )
+        self.assertEqual(result["revision"], 1)
+        count = await self.database.executor.run_read(
+            lambda unit: unit.execute(
+                "SELECT COUNT(*) FROM extension_installation_grants"
+            ).fetchone()[0]
+        )
+        self.assertEqual(count, 1)
+
+    async def test_request_ended_after_callback_before_commit_rolls_back_approval(self):
+        await self._reject_approval_at_commit("request")
+
+    async def test_plugin_removed_after_callback_before_commit_rolls_back_approval(
+        self,
+    ):
+        await self._reject_approval_at_commit("plugin")
+
+    async def _reject_approval_at_commit(self, reason):
+        plan = await self.trust.plan("example_plugin", "minimal")
+        runtime, source, context = self.runtime_approval()
+        original = self.database.executor.run_transaction
+
+        async def before_commit(callback, **kwargs):
+            def revoke(unit):
+                value = callback(unit)
+                if callback.__name__ == "apply":
+                    if reason == "request":
+                        source.end(context)
+                    else:
+                        self.metadata.activated = False
+                return value
+
+            return await original(revoke, **kwargs)
+
+        self.database.executor.run_transaction = before_commit
+        try:
+            with self.assertRaises(
+                AdminAuthorizationDenied if reason == "request" else ExtensionHostError
+            ):
+                await AstrBotRuntime.installation_operation(
+                    runtime,
+                    "module-install-approve",
+                    {
+                        "plugin_name": "example_plugin",
+                        "package_id": "minimal",
+                        "plan_id": plan["plan_id"],
+                        "expected_revision": 0,
+                    },
+                    context,
+                )
+        finally:
+            self.database.executor.run_transaction = original
+        counts = await self.database.executor.run_read(
+            lambda unit: tuple(
+                unit.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                for table in (
+                    "extension_installation_grants",
+                    "extension_installation_audit",
+                )
+            )
+        )
+        self.assertEqual(counts, (0, 0))
 
     async def test_no_module_self_approval_and_exact_owner_root_fence(self):
         with self.assertRaises(PermissionError):
@@ -169,6 +282,7 @@ class InstallationTrustTests(unittest.IsolatedAsyncioTestCase):
                 expected_revision=0,
                 actor="test",
                 current=lambda: (_ for _ in ()).throw(PermissionError()),
+                commit_fence=nullcontext,
             )
         await self.approve()
         with self.assertRaises(ExtensionHostError):

@@ -214,6 +214,7 @@ class JobsService:
         self._wake = asyncio.Event()
         self._tasks, self._runs = {}, {}
         self._settlements = set()
+        self._settling = {}
         self._driver = None
         issuer.register_job_source(self._source)
 
@@ -403,10 +404,11 @@ class JobsService:
                 active = self._runs.get(job_id)
                 if active is not None:
                     active["revoked"] = True
-                    active["scope"].cancel()
-                    task = self._tasks.get(job_id)
-                    if task is not None:
-                        task.cancel()
+                    if active["scope"] is not None:
+                        active["scope"].cancel()
+                task = self._tasks.get(job_id)
+                if task is not None:
+                    task.cancel()
         self._caller_check(caller)()
         self._wake.set()
         return view(updated)
@@ -466,14 +468,24 @@ class JobsService:
     def notify_changed(self):
         self._wake.set()
 
+    def _busy_jobs(self):
+        # A cancelled supervisor can finish before its resistant handler.
+        # Retain that run, and an unstarted claim's settlement, as worker slots.
+        return self._tasks.keys() | self._runs.keys() | self._settling.keys()
+
     async def _drive(self):
         while not self._closed:
             await self._wake.wait()
             self._wake.clear()
             await self.repository.expire(_now())
-            for candidate in await self.repository.queued(
-                self.max_running - len(self._tasks)
-            ):
+            # At most len(busy) leading rows can be waiting retries. Looking
+            # through max_running rows leaves every free slot a fair candidate.
+            for candidate in await self.repository.queued(self.max_running):
+                busy = self._busy_jobs()
+                if self._closed or len(busy) >= self.max_running:
+                    break
+                if candidate["job_id"] in busy:
+                    continue
                 row = None
                 try:
                     descriptor = self._descriptor(
@@ -520,10 +532,12 @@ class JobsService:
 
     def _done(self, row, task):
         job_id = row["job_id"]
-        self._tasks.pop(job_id, None)
+        owned = self._tasks.get(job_id) is task
+        if owned:
+            self._tasks.pop(job_id)
         if not task.cancelled():
             task.exception()
-        if not row.get("_entered"):
+        if owned and not row.get("_entered"):
             cleanup = asyncio.create_task(
                 self.repository.finish(
                     job_id,
@@ -536,11 +550,15 @@ class JobsService:
                 name="ygl:job-unstarted",
             )
             self._settlements.add(cleanup)
+            self._settling[job_id] = cleanup
 
             def settled(work):
                 self._settlements.discard(work)
+                if self._settling.get(job_id) is work:
+                    self._settling.pop(job_id)
                 if not work.cancelled():
                     work.exception()
+                self._wake.set()
 
             cleanup.add_done_callback(settled)
         self._wake.set()
@@ -643,20 +661,25 @@ class JobsService:
                             self.issuer.release(invocation)
                         except Exception:
                             pass
-                    self._runs.pop(row["job_id"], None)
+                    if self._runs.get(row["job_id"]) is active:
+                        self._runs.pop(row["job_id"])
+                    self._wake.set()
 
     async def close(self):
         if (
             self._closed
             and self._close_recovered
-            and not self._tasks
+            and not self._busy_jobs()
             and not self._settlements
         ):
+            self.issuer.unregister_job_source(self._source)
             return True
         with self._fence_lock:
             self._closed = True
             for active in self._runs.values():
                 active["revoked"] = True
+                if active["scope"] is not None:
+                    active["scope"].cancel()
         self._wake.set()
         if self._driver is not None:
             self._driver.cancel()
@@ -673,9 +696,9 @@ class JobsService:
             )
         await self.repository.recover(_now())
         self._close_recovered = True
-        if not self._tasks:
+        if not self._busy_jobs() and not self._settlements:
             self.issuer.unregister_job_source(self._source)
-        return not self._tasks and not self._settlements
+        return not self._busy_jobs() and not self._settlements
 
 
 class _Control:
