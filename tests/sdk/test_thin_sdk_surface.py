@@ -99,6 +99,106 @@ class CoreReceivingBoundaryTests(unittest.TestCase):
         with self.assertRaises((TypeError, ValueError)):
             Gateway._valid_result(result, expected_privacy=sdk.Privacy.PUBLIC)
 
+    def test_jobs_receiving_boundary_accepts_valid_nested_public_dtos(self):
+        from ygl_test_subject.core.contracts.validation_boundary import (
+            validate_contract,
+        )
+
+        import yomihime_game_link_sdk as sdk
+
+        descriptor = sdk.JobDescriptor("wall", {"type": "object"}, 60, 2)
+        module = sdk.ModuleManifest(
+            "wall",
+            "wall",
+            sdk.ModuleCategory.GAME,
+            "wall.module:Factory",
+            "1.0.0",
+            (),
+            jobs=(descriptor,),
+        )
+        request = sdk.JobRequest("wall", {"nested": {"values": [1, "two", None]}})
+        view = sdk.JobView("job-1", 1, "wall", sdk.JobStatus.RUNNING)
+        page = sdk.JobResultPage(view, ({"nested": {"values": [1, "two", None]}},))
+        for value in (descriptor, module, request, view, page):
+            with self.subTest(type=type(value).__name__):
+                self.assertIs(validate_contract(value), value)
+        self.assertEqual(request.parameters["nested"]["values"], (1, "two", None))
+        with self.assertRaises(TypeError):
+            request.parameters["nested"]["extra"] = True
+
+    def test_jobs_receiving_boundary_rejects_invalid_fields_and_nested_json(self):
+        from dataclasses import replace
+
+        from ygl_test_subject.core.contracts.validation_boundary import (
+            validate_contract,
+        )
+
+        import yomihime_game_link_sdk as sdk
+
+        descriptor = sdk.JobDescriptor("wall", {"type": "object"}, 60, 2)
+        request = sdk.JobRequest("wall", {})
+        view = sdk.JobView("job-1", 1, "wall", sdk.JobStatus.RUNNING)
+        page = sdk.JobResultPage(view, ({"value": 1},))
+        invalid = (
+            replace(descriptor, job_id="bad/handler"),
+            replace(descriptor, parameter_schema={"type": "unknown"}),
+            replace(descriptor, timeout_seconds=0),
+            replace(descriptor, timeout_seconds=True),
+            replace(descriptor, max_active_per_owner=5),
+            replace(request, handler_id="bad/handler"),
+            replace(request, idempotency_key="bad\nkey"),
+            replace(request, parameters={"nested": {"value": object()}}),
+            replace(request, parameters={"nested": {"value": float("nan")}}),
+            replace(request, parameters={"nested": {1: "non-string key"}}),
+            replace(view, revision=True),
+            replace(view, status="running"),
+            replace(page, job=object()),
+            replace(page, entries=[{"value": 1}]),
+            replace(page, entries=({},) * 101),
+            replace(page, entries=({"nested": {"value": object()}},)),
+            replace(page, entries=({"nested": {"value": float("nan")}},)),
+            replace(page, entries=({"nested": {1: "non-string key"}},)),
+            replace(page, next_cursor="x" * 257),
+        )
+        for index, value in enumerate(invalid):
+            with self.subTest(type=type(value).__name__, case=index):
+                with self.assertRaises((TypeError, ValueError)):
+                    validate_contract(value)
+            if type(value) is sdk.JobDescriptor:
+                module = sdk.ModuleManifest(
+                    "wall",
+                    "wall",
+                    sdk.ModuleCategory.GAME,
+                    "wall.module:Factory",
+                    "1.0.0",
+                    (),
+                    jobs=(value,),
+                )
+                with self.subTest(type="ModuleManifest", job_case=index):
+                    with self.assertRaises((TypeError, ValueError)):
+                        validate_contract(module)
+
+    def test_jobs_receiving_boundary_rejects_forged_public_dtos(self):
+        from ygl_test_subject.core.contracts.validation_boundary import (
+            validate_contract,
+        )
+
+        import yomihime_game_link_sdk as sdk
+
+        for kind in (
+            sdk.JobDescriptor,
+            sdk.JobRequest,
+            sdk.JobView,
+            sdk.JobResultPage,
+        ):
+            with self.subTest(type=kind.__name__, forgery="subclass"):
+                child = type("Forged" + kind.__name__, (kind,), {})
+                with self.assertRaises(TypeError):
+                    validate_contract(object.__new__(child))
+            with self.subTest(type=kind.__name__, forgery="new"):
+                with self.assertRaises((TypeError, ValueError)):
+                    validate_contract(object.__new__(kind))
+
     def test_dynamic_storage_decoder_revalidates_nested_values(self):
         import json
 

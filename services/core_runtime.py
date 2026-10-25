@@ -1970,7 +1970,9 @@ class CoreRuntime:
                 or self._storage_lease is not None
             ):
                 raise RuntimeError("storage quiesce identity changed")
+            deadline = asyncio.get_running_loop().time() + float(bound)
             self._accepting = False
+            self.jobs.stop_accepting()
             self.gateway.fence_public_web()
             self.extension_runtime.stop_accepting()
             current = asyncio.current_task()
@@ -1992,6 +1994,7 @@ class CoreRuntime:
                 if others:
                     await asyncio.gather(*others, return_exceptions=True)
                 await self._quiesce_admission_gates()
+                await self._drain_durable_jobs(deadline)
                 await self.extension_runtime.close(timeout=float(bound))
                 await self.module_services.close_credentials()
                 await self.database.executor.quiesce_storage(timeout=float(bound))
@@ -2012,6 +2015,41 @@ class CoreRuntime:
                 lease._active = False
                 self._storage_lease = None
                 self._storage_generation += 1
+
+    async def _drain_durable_jobs(self, deadline: float) -> None:
+        """Observe one owned cleanup before either path fences the executor."""
+        remaining = max(0.0, deadline - asyncio.get_running_loop().time())
+        if remaining <= 0:
+            self._cleanup_pending = True
+            raise CoreRuntimeCleanupPending("durable_jobs")
+        cleanup = self._jobs_cleanup_task
+        if cleanup is None:
+            cleanup = asyncio.create_task(self.jobs.close(), name="ygl:jobs-cleanup")
+            self._jobs_cleanup_task = cleanup
+
+            def completed(work):
+                if not work.cancelled():
+                    work.exception()
+
+            cleanup.add_done_callback(completed)
+        try:
+            _done, pending = await asyncio.wait({cleanup}, timeout=remaining)
+        except asyncio.CancelledError:
+            self._cleanup_pending = True
+            raise
+        if pending:
+            self._cleanup_pending = True
+            raise CoreRuntimeCleanupPending("durable_jobs")
+        try:
+            jobs_closed = cleanup.result()
+        except (Exception, asyncio.CancelledError) as exc:
+            self._jobs_cleanup_task = None
+            self._cleanup_pending = True
+            raise CoreRuntimeCleanupPending("durable_jobs") from exc
+        if not jobs_closed:
+            self._jobs_cleanup_task = None
+            self._cleanup_pending = True
+            raise CoreRuntimeCleanupPending("durable_jobs")
 
     async def close(self, *, timeout: float | None = None) -> bool:
         self._storage_generation += 1
@@ -2126,38 +2164,7 @@ class CoreRuntime:
 
         # Physical job cleanup can wait on resistant work/SQLite. Existing
         # ingress, pump and Admission fences must already be closed first.
-        remaining = max(0.0, deadline - loop.time())
-        if remaining <= 0:
-            self._cleanup_pending = True
-            raise CoreRuntimeCleanupPending("durable_jobs")
-        cleanup = self._jobs_cleanup_task
-        if cleanup is None:
-            cleanup = asyncio.create_task(self.jobs.close(), name="ygl:jobs-cleanup")
-            self._jobs_cleanup_task = cleanup
-
-            def completed(work):
-                if not work.cancelled():
-                    work.exception()
-
-            cleanup.add_done_callback(completed)
-        try:
-            _done, pending = await asyncio.wait({cleanup}, timeout=remaining)
-        except asyncio.CancelledError:
-            self._cleanup_pending = True
-            raise
-        if pending:
-            self._cleanup_pending = True
-            raise CoreRuntimeCleanupPending("durable_jobs")
-        try:
-            jobs_closed = cleanup.result()
-        except (Exception, asyncio.CancelledError) as exc:
-            self._jobs_cleanup_task = None
-            self._cleanup_pending = True
-            raise CoreRuntimeCleanupPending("durable_jobs") from exc
-        if not jobs_closed:
-            self._jobs_cleanup_task = None
-            self._cleanup_pending = True
-            raise CoreRuntimeCleanupPending("durable_jobs")
+        await self._drain_durable_jobs(deadline)
 
         remaining = max(0.0, deadline - loop.time())
         if remaining <= 0:

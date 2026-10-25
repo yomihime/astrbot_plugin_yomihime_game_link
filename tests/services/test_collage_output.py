@@ -55,7 +55,7 @@ from yomihime_game_link_sdk.cards import (
 from yomihime_game_link_sdk.contexts import InvocationOrigin
 from yomihime_game_link_sdk.display import DisplayAudience, TextBlock
 from yomihime_game_link_sdk.errors import AccessDenied, CacheUnavailable
-from yomihime_game_link_sdk.services import ResourceReference
+from yomihime_game_link_sdk.services import ResourceCacheClass, ResourceReference
 from yomihime_game_link_sdk.storage import (
     CacheEntry,
     CacheLookup,
@@ -129,9 +129,18 @@ class _CachingScope:
         assert ttl_seconds > 0
         self.manifests[key] = payload
 
-    async def store(self, media_type, content, *, visibility, ttl_seconds):
+    async def store(
+        self,
+        media_type,
+        content,
+        *,
+        visibility,
+        ttl_seconds,
+        cache_class=ResourceCacheClass.DERIVED,
+    ):
         assert media_type == "image/png"
         assert visibility is CacheVisibility.USER
+        assert cache_class is ResourceCacheClass.OUTPUT
         assert ttl_seconds > 0
         self.stores += 1
         asset_id = f"stored-page-{self.stores}"

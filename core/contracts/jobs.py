@@ -7,6 +7,9 @@ import re
 from collections.abc import Mapping
 
 from yomihime_game_link_sdk.jobs import (
+    JobDescriptor,
+    JobRequest,
+    JobResultPage,
     JobStatus,
     JobView,
 )
@@ -41,7 +44,7 @@ def _object(value, limit=65536):
     return freeze_json(value)
 
 
-def check_JobDescriptor(self):
+def check_JobDescriptor(self: JobDescriptor):
     _identifier(self.job_id)
     object.__setattr__(
         self, "parameter_schema", freeze_input_schema(self.parameter_schema)
@@ -55,7 +58,7 @@ def check_JobDescriptor(self):
         raise ValueError("invalid job owner concurrency")
 
 
-def check_JobRequest(self):
+def check_JobRequest(self: JobRequest):
     _identifier(self.handler_id)
     object.__setattr__(self, "parameters", _object(self.parameters))
     if self.idempotency_key is not None and (
@@ -82,7 +85,7 @@ def check_JobView(self):
         _identifier(self.error_code)
 
 
-def check_JobResultPage(self):
+def check_JobResultPage(self: JobResultPage):
     if (
         type(self.job) is not JobView
         or type(self.entries) is not tuple
