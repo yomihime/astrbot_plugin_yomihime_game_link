@@ -582,6 +582,7 @@ class RenderedMessage:
     text: str
     resource_ids: tuple[str, ...] = ()
     png_bytes: bytes | None = None
+    png_pages: tuple[bytes, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.text, str) or not self.text.strip():
@@ -591,6 +592,21 @@ class RenderedMessage:
             or not 1 <= len(self.png_bytes) <= 1_048_576
         ):
             raise ValueError("PNG payload exceeds its internal byte budget")
+        if self.png_pages:
+            if (
+                type(self.png_pages) is not tuple
+                or len(self.png_pages) > 8
+                or self.png_bytes is not None
+                or self.resource_ids
+                or any(
+                    type(page) is not bytes or not 1 <= len(page) <= 4_194_304
+                    for page in self.png_pages
+                )
+                or sum(map(len, self.png_pages)) > 16_777_216
+            ):
+                raise ValueError("collage pages exceed their local byte budget")
+        elif type(self.png_pages) is not tuple:
+            raise ValueError("collage pages must be immutable")
         resource_ids = tuple(self.resource_ids)
         for resource_id in resource_ids:
             _asset(resource_id)
@@ -1046,8 +1062,11 @@ class SubscriptionGateBinding:
     field: str
     package_id: str
     module_id: str
+    declared: bool = False
 
     def __post_init__(self) -> None:
+        if type(self.declared) is not bool:
+            raise ValueError("declared gate flag must be bool")
         ConfigTarget_validate(self.target)
         for name in ("field", "package_id", "module_id"):
             _bounded_identifier(getattr(self, name), name)
@@ -1203,9 +1222,17 @@ class SchedulerRepository(Protocol):
         self, lease: ExecutionLease
     ) -> Observation | None: ...
 
+    async def previous_observation(self, lease: ExecutionLease) -> Observation | None:
+        """Shared committed collection state, independent of subscriber cursors."""
+        ...
+
     async def claim_due(
         self, request: CollectionRunRequest, *, now: datetime
     ) -> ExecutionLease | None: ...
+
+    async def defer(self, lease: ExecutionLease, *, next_due_at: datetime) -> bool:
+        """CAS-release the current lease with a future due time, no state write."""
+        ...
 
     async def is_current(self, lease: ExecutionLease, *, now: datetime) -> bool:
         """Check one exact persistent lease immediately before scheduler admit.
@@ -1322,6 +1349,10 @@ class DigestWindowRepository(Protocol):
     """Persist stable windows and reuse their stored UTC bounds after restart."""
 
     async def create(self, window: DigestWindow) -> DigestWindow: ...
+
+    async def begin_commentary(self, key: str) -> tuple[bool, str | None]: ...
+
+    async def complete_commentary(self, key: str, text: str | None) -> None: ...
 
     async def get(self, window_id: str) -> DigestWindow | None: ...
 
@@ -1472,7 +1503,7 @@ class DigestWindowRepository(Protocol):
         ...
 
     async def recover_expired_envelope_claims(
-        self, *, before: datetime, recovered_at: datetime
+        self, *, before: datetime, recovered_at: datetime, restart: bool = False
     ) -> tuple[DigestEnvelope, ...]:
         """Recover expired claims without replaying uncertain network sends.
 
@@ -1481,6 +1512,9 @@ class DigestWindowRepository(Protocol):
         and gets a new revision/token boundary. An expired SENDING envelope
         moves its exact attempt to UNKNOWN, clears ownership, and remains
         non-claimable until explicit reconciliation; it is never blindly resent.
+        Cold-start ownership recovery sets ``restart=True`` to recover all
+        previous-process claims, including leases whose wall-clock expiry is
+        still in the future. Ordinary live recovery keeps the expiry cutoff.
         """
         ...
 

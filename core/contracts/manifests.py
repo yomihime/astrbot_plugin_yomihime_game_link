@@ -33,6 +33,7 @@ from yomihime_game_link_sdk.declarations import PageResource as PageResource
 from yomihime_game_link_sdk.declarations import PrivacyFloor as PrivacyFloor
 from yomihime_game_link_sdk.declarations import SourceDeclaration as SourceDeclaration
 from yomihime_game_link_sdk.declarations import ToolDescriptor as ToolDescriptor
+from yomihime_game_link_sdk.jobs import JobDescriptor
 from yomihime_game_link_sdk.storage import CollectionDescriptor as CollectionDescriptor
 from yomihime_game_link_sdk.storage import JsonValue as JsonValue
 from yomihime_game_link_sdk.subscriptions import (
@@ -58,6 +59,7 @@ EXTENSION_PACKAGE_MAX_MODULES = 64
 EXTENSION_MODULE_MAX_DECLARATIONS = 128
 EXTENSION_SCHEMA_MAX_DEPTH = 16
 EXTENSION_SCHEMA_MAX_NODES = 2048
+EXTENSION_MANIFEST_MAX_NODES = 4096
 EXTENSION_MANIFEST_MAX_STRING_LENGTH = 4096
 EXTENSION_MANIFEST_MAX_ARRAY_ITEMS = 256
 EXTENSION_MANIFEST_ROOT_POLICY = "host_supplied_read_only_root"
@@ -97,9 +99,13 @@ EXTENSION_DESCRIPTOR_FIELDS: Mapping[str, frozenset[str]] = MappingProxyType(
                 "resources",
                 "display",
                 "diagnostics",
+                "jobs",
             }
         ),
         "diagnostic": frozenset({"event_id", "payload_schema"}),
+        "job": frozenset(
+            {"job_id", "parameter_schema", "timeout_seconds", "max_active_per_owner"}
+        ),
         "module_display": frozenset(
             {
                 "default_name",
@@ -174,6 +180,7 @@ EXTENSION_DESCRIPTOR_FIELDS: Mapping[str, frozenset[str]] = MappingProxyType(
                 "matcher_id",
                 "filter_schema",
                 "notification_modes",
+                "enabled_config_key",
             }
         ),
         "config_field": frozenset(
@@ -188,7 +195,17 @@ EXTENSION_DESCRIPTOR_FIELDS: Mapping[str, frozenset[str]] = MappingProxyType(
             }
         ),
         "source": frozenset(
-            {"source_id", "host", "timeout_seconds", "requests_per_minute"}
+            {
+                "source_id",
+                "host",
+                "timeout_seconds",
+                "requests_per_minute",
+                "requests_per_hour",
+                "request_budget_config",
+                "authorization_only",
+                "max_redirects",
+                "redirect_path_prefixes",
+            }
         ),
         "collection": frozenset(
             {"name", "schema_version", "owner_kind", "indexes", "retention_category"}
@@ -539,6 +556,10 @@ def check_ModuleDisplay(self) -> None:
 
 
 def check_ModuleManifest(self) -> None:
+    _descriptor_tuple(self.jobs, JobDescriptor, "jobs")
+    if len(self.jobs) > 16:
+        raise ValueError("job declaration budget exceeded")
+    _unique(tuple(item.job_id for item in self.jobs), "jobs")
     _identifier(self.module_id, "module_id")
     _route(self.route)
     if not isinstance(self.category, ModuleCategory):
@@ -589,6 +610,23 @@ def check_ModuleManifest(self) -> None:
             raise ValueError("page fields mismatch module declarations")
 
     capabilities = {item.capability_id: item for item in self.capabilities}
+    gate_keys = {item.enabled_config_key for item in self.subscriptions}
+    if len(gate_keys) > 1:
+        raise ValueError("module subscription gates must share one configuration key")
+    for key in gate_keys - {None}:
+        field = next((field for field in self.config_fields if field.name == key), None)
+        if (
+            field is None
+            or field.sensitive
+            or field.default is not True
+            or (
+                field.value_schema is None
+                or field.value_schema.get("type") != "boolean"
+            )
+        ):
+            raise ValueError(
+                "subscription gate must reference a default-enabled boolean"
+            )
     _unique(tuple((item.capability_id for item in self.capabilities)), "capabilities")
     _unique(tuple((item.operation_path for item in self.commands)), "commands")
     _unique(tuple((item.name for item in self.tools)), "tools")
@@ -664,6 +702,7 @@ class ExtensionManifestABI:
     max_declarations_per_module: int = EXTENSION_MODULE_MAX_DECLARATIONS
     max_schema_depth: int = EXTENSION_SCHEMA_MAX_DEPTH
     max_schema_nodes: int = EXTENSION_SCHEMA_MAX_NODES
+    max_manifest_nodes: int = EXTENSION_MANIFEST_MAX_NODES
     max_string_length: int = EXTENSION_MANIFEST_MAX_STRING_LENGTH
     max_array_items: int = EXTENSION_MANIFEST_MAX_ARRAY_ITEMS
     root_policy: str = EXTENSION_MANIFEST_ROOT_POLICY
@@ -685,6 +724,7 @@ class ExtensionManifestABI:
             "max_declarations_per_module": EXTENSION_MODULE_MAX_DECLARATIONS,
             "max_schema_depth": EXTENSION_SCHEMA_MAX_DEPTH,
             "max_schema_nodes": EXTENSION_SCHEMA_MAX_NODES,
+            "max_manifest_nodes": EXTENSION_MANIFEST_MAX_NODES,
             "max_string_length": EXTENSION_MANIFEST_MAX_STRING_LENGTH,
             "max_array_items": EXTENSION_MANIFEST_MAX_ARRAY_ITEMS,
             "factory_abi_version": EXTENSION_FACTORY_ABI_VERSION,
@@ -875,6 +915,23 @@ def ConfigField_validate_value(self, value: object) -> None:
 
 
 def check_SourceDeclaration(self) -> None:
+    if type(self.authorization_only) is not bool:
+        raise ValueError("authorization-only marker must be a boolean")
+    if self.authorization_only and (
+        self.credential_ref is not None or self.max_redirects
+    ):
+        raise ValueError(
+            "authorization sources cannot redirect or use stored credentials"
+        )
+    if self.requests_per_hour is not None and (
+        type(self.requests_per_hour) is not int
+        or not 1 <= self.requests_per_hour <= 1000000
+    ):
+        raise ValueError("hourly budget must be a positive bounded integer")
+    if self.request_budget_config is not None:
+        _identifier(self.request_budget_config, "request_budget_config")
+        if self.requests_per_hour is None:
+            raise ValueError("configurable budget requires an explicit default")
     _identifier(self.source_id, "source_id")
     host = (
         unicodedata.normalize("NFKC", self.host) if isinstance(self.host, str) else ""
@@ -907,6 +964,30 @@ def check_SourceDeclaration(self) -> None:
         or self.requests_per_minute < 1
     ):
         raise ValueError("source quota must be a positive integer")
+    if type(self.max_redirects) is not int or not 0 <= self.max_redirects <= 2:
+        raise ValueError("source redirect limit must be between zero and two")
+    if (
+        type(self.redirect_path_prefixes) is not tuple
+        or len(self.redirect_path_prefixes) > 16
+    ):
+        raise ValueError("source redirect prefixes must be a bounded tuple")
+    from .services import HttpRequest, check_HttpRequest
+
+    for prefix in self.redirect_path_prefixes:
+        if type(prefix) is not str or len(prefix) > 2048:
+            raise ValueError("source redirect prefixes must be paths")
+        candidate = HttpRequest(self.source_id, prefix)
+        check_HttpRequest(candidate)
+        if candidate.path != prefix:
+            raise ValueError("source redirect prefixes must be canonical paths")
+    if len(set(self.redirect_path_prefixes)) != len(self.redirect_path_prefixes):
+        raise ValueError("source redirect prefixes must be unique")
+    if self.max_redirects and (
+        self.credential_ref is not None or not self.redirect_path_prefixes
+    ):
+        raise ValueError(
+            "redirects require an anonymous source and explicit path prefixes"
+        )
 
 
 def check_DiagnosticDeclaration(self):

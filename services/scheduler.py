@@ -14,7 +14,7 @@ import random
 import sys
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, time, timedelta
 from math import isfinite
 from threading import RLock
@@ -25,6 +25,7 @@ from zoneinfo import ZoneInfo
 
 from yomihime_game_link_sdk.contexts import InvocationOrigin, InvocationView
 from yomihime_game_link_sdk.declarations import SourceDeclaration
+from yomihime_game_link_sdk.errors import SourceHttpError
 from yomihime_game_link_sdk.services import ConfigSnapshot, InvocationServiceBinder
 from yomihime_game_link_sdk.storage import (
     GrantReference,
@@ -927,6 +928,43 @@ class SharedCollectionScheduler:
                 candidate.key
             )
             background = schedule.trigger is ScheduleTrigger.BACKGROUND
+            if (
+                not background
+                and self.background_config_for is not None
+                and schedule.interval_config_key is not None
+            ):
+                config = await self.background_config_for(module)
+                validate_contract(config)
+                if config.target is None or config.target.module_id != module.module_id:
+                    raise CandidateRejected(
+                        "collection config has no exact module target"
+                    )
+                field = next(
+                    (
+                        item
+                        for item in module.manifest.config_fields
+                        if item.name == schedule.interval_config_key
+                        and not item.sensitive
+                    ),
+                    None,
+                )
+                if field is not None:
+                    requested = config.values.get(field.name, field.default)
+                    if requested is None or requested == "":
+                        requested = schedule.default_interval_seconds
+                    if (
+                        type(requested) not in (int, float)
+                        or not isfinite(requested)
+                        or requested <= 0
+                    ):
+                        raise CandidateRejected("collection cadence is invalid")
+                    if field.value_schema is not None:
+                        _validate_schema(field.value_schema, requested, "interval", 0)
+                    candidate = replace(
+                        candidate,
+                        cadence_seconds=float(requested),
+                        config_revision=config.revision,
+                    )
             principal = None if background else await self._principal_for(candidate.key)
             if not background and principal is None:
                 return None
@@ -1044,15 +1082,7 @@ class SharedCollectionScheduler:
                         lease
                     )
                 else:
-                    checkpoint = await self.repository.current_checkpoint(
-                        principal.subscription_id, candidate.key
-                    )
-                    previous = (
-                        None
-                        if checkpoint is None
-                        or checkpoint.fence != lease.subscription_fence
-                        else checkpoint.snapshot.observation
-                    )
+                    previous = await self.repository.previous_observation(lease)
                 await self._require_current_execution(
                     candidate.key, principal, lease, scheduled_lease
                 )
@@ -1171,6 +1201,28 @@ class SharedCollectionScheduler:
                 if result.observation is None
                 else result.observation.completeness.value
             )
+            return result
+        except SourceHttpError as exc:
+            next_available = exc.next_available_at
+            if (
+                lease is not None
+                and next_available is not None
+                and next_available > _utc_now(self.now())
+            ):
+                await self._require_current_execution(
+                    candidate.key, principal, lease, scheduled_lease
+                )
+                deferred = await self.repository.defer(
+                    lease, next_due_at=next_available
+                )
+                core_final = "deferred" if deferred else "not_committed"
+                return CollectionResult(lease, None, False)
+            if lease is None:
+                return None
+            result = await self._commit_failed_outcome(
+                candidate, principal, lease, cadence_seconds, source, scheduled_lease
+            )
+            core_final = "error" if result.committed else "not_committed"
             return result
         except Exception:
             trace_event("core_failure", code="error")

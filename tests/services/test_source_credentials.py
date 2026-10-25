@@ -312,6 +312,27 @@ class SourceCredentialTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotIn(ALIAS, self.snapshot.values)
 
+    async def test_credential_binding_cannot_enable_redirects_or_follow_them(self):
+        anonymous = validate_contract(
+            SourceDeclaration(
+                SOURCE_ID,
+                RESOURCE_HOST,
+                max_redirects=1,
+                redirect_path_prefixes=("/public/",),
+            )
+        )
+        with self.assertRaises(ValueError):
+            bind_source_credential_declarations(
+                MODULE_ID, (anonymous,), (self.field,), (self.policy,)
+            )
+        self.transport.resource_response = HttpResponse(
+            302, {"Location": f"https://{RESOURCE_HOST}/public/"}, b""
+        )
+        with self.assertRaises(SourceHttpError) as caught:
+            await self._source_http().fetch(HttpRequest(SOURCE_ID, RESOURCE_PATH))
+        self.assertEqual(caught.exception.code, "redirect_disallowed")
+        self.assertEqual(len(self.transport.resources), 1)
+
     async def test_cached_token_still_requires_current_key_and_intact_payload(self):
         service = self._credential_service()
         http = self._source_http(service)

@@ -7,6 +7,7 @@ from enum import StrEnum
 from types import MappingProxyType
 
 from .contexts import InvocationOrigin
+from .jobs import JobDescriptor
 from .storage import CollectionDescriptor, JsonValue
 from .subscriptions import ScheduleDescriptor, SubscriptionDescriptor
 
@@ -205,8 +206,11 @@ class ModuleManifest:
     resources: tuple[PageResource, ...] = ()
     display: ModuleDisplay | None = None
     diagnostics: tuple[DiagnosticDeclaration, ...] = ()
+    jobs: tuple["JobDescriptor", ...] = ()
 
     def __post_init__(self) -> None:
+        if self.jobs is not None:
+            object.__setattr__(self, "jobs", tuple(self.jobs))
         if self.diagnostics is not None:
             object.__setattr__(self, "diagnostics", tuple(self.diagnostics))
         if self.capabilities is not None:
@@ -283,10 +287,21 @@ class ConfigField:
 
 @dataclass(frozen=True, slots=True)
 class SourceDeclaration:
-    """A bounded source target; credentials and paths are never supplied by modules."""
+    """A bounded source target with optional anonymous GET redirect policy."""
 
     source_id: str
     host: str
     credential_ref: str | None = None
     timeout_seconds: float = 10.0
     requests_per_minute: int = 60
+    max_redirects: int = 0
+    redirect_path_prefixes: tuple[str, ...] = ()
+    requests_per_hour: int | None = None
+    request_budget_config: str | None = None
+    authorization_only: bool = False
+
+    def __post_init__(self) -> None:
+        if self.redirect_path_prefixes is not None:
+            object.__setattr__(
+                self, "redirect_path_prefixes", tuple(self.redirect_path_prefixes)
+            )

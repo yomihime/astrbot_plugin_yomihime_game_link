@@ -15,11 +15,17 @@ from dataclasses import fields
 from unicodedata import category
 
 from yomihime_game_link_sdk import cards
+from yomihime_game_link_sdk.storage import CacheVisibility
 
 _TYPES = {
     name: getattr(cards, name)
     for name in (
         "Asset",
+        "ResourceImage",
+        "CollageItem",
+        "WeightedCollage",
+        "DenseCollageItem",
+        "DenseCollage",
         "Span",
         "Inline",
         "TaggedText",
@@ -45,6 +51,12 @@ def _invalid():
 def validate_card(document: cards.Document) -> cards.Document:
     """Admit the complete immutable graph before copying, storage or painting."""
     total = raw_extra = lines = nodes = rows = sections = asset_count = asset_bytes = 0
+    dense = (
+        type(document) is cards.Document
+        and type(document.blocks) is tuple
+        and len(document.blocks) == 1
+        and type(document.blocks[0]) is cards.DenseCollage
+    )
 
     def sequence(value, limit):
         if type(value) is not tuple or len(value) > limit:
@@ -73,7 +85,7 @@ def validate_card(document: cards.Document) -> cards.Document:
             if (
                 type(source) is not str
                 or len(source) > 4096
-                or total + raw_extra + len(source) > 24000
+                or total + raw_extra + len(source) > (160000 if dense else 24000)
             ):
                 _invalid()
             from ...presentation.layout_markup import parse_inline_markup
@@ -110,10 +122,12 @@ def validate_card(document: cards.Document) -> cards.Document:
             _invalid()
         total += len(text)
         lines += text.count("\n") + 1
-        if total + raw_extra > 24000 or lines > 1000:
+        if total + raw_extra > (160000 if dense else 24000) or lines > (
+            6000 if dense else 1000
+        ):
             _invalid()
 
-    def asset(value):
+    def asset(value, *, collage=False):
         nonlocal asset_count, asset_bytes
         if (
             type(value) is not cards.Asset
@@ -141,7 +155,9 @@ def validate_card(document: cards.Document) -> cards.Document:
             _invalid()
         asset_count += 1
         asset_bytes += size
-        if asset_count > 32 or asset_bytes > 8388608:
+        if asset_count > (1001 if dense else 201 if collage else 32) or asset_bytes > (
+            33554432 if collage else 8388608
+        ):
             _invalid()
 
     def align(value):
@@ -227,6 +243,85 @@ def validate_card(document: cards.Document) -> cards.Document:
                 _invalid()
             content(value.caption)
             choice(value.fit, ("contain", "cover"))
+        elif type(value) in (cards.WeightedCollage, cards.DenseCollage):
+            if depth != 0 or document.blocks != (value,):
+                _invalid()
+            is_dense = type(value) is cards.DenseCollage
+            sequence(value.items, 1000 if is_dense else 200)
+            if not value.items:
+                _invalid()
+            if type(value.max_height) is not int or not 128 <= value.max_height <= (
+                6000 if is_dense else 2800
+            ):
+                _invalid()
+            if type(value.max_pages) is not int or not 1 <= value.max_pages <= 8:
+                _invalid()
+            if is_dense:
+                for field, low, high in (
+                    (value.columns, 8, 32),
+                    (value.cell_width, 24, 96),
+                    (value.cell_height, 24, 192),
+                ):
+                    if type(field) is not int or not low <= field <= high:
+                        _invalid()
+                if document.width != value.columns * value.cell_width:
+                    _invalid()
+                choice(value.fit, ("cover", "contain"))
+            else:
+                number(value.preferred_aspect, 0.5, 2)
+            keys = set()
+            for item in value.items:
+                if type(item) is not (
+                    cards.DenseCollageItem if is_dense else cards.CollageItem
+                ):
+                    _invalid()
+                if (
+                    type(item.key) is not str
+                    or not 0 < len(item.key) <= 128
+                    or item.key in keys
+                ):
+                    _invalid()
+                keys.add(item.key)
+                content(item.key)
+                # Reject enormous integers without coercing them to overflowing floats.
+                if is_dense:
+                    if (
+                        type(item.span) is not int
+                        or not 1 <= item.span <= min(8, value.columns)
+                        or item.span * value.cell_height > value.max_height
+                    ):
+                        _invalid()
+                else:
+                    if type(item.weight) not in (int, float) or (
+                        type(item.weight) is int and item.weight.bit_length() > 1024
+                    ):
+                        _invalid()
+                    number(item.weight, 0, float("inf"))
+                    if item.weight <= 0:
+                        _invalid()
+                for label in (item.title, item.caption):
+                    if type(label) is not str or len(label) > 512:
+                        _invalid()
+                    content(label)
+                if type(item.image) is cards.Asset:
+                    asset(item.image, collage=True)
+                elif type(item.image) is cards.ResourceImage:
+                    image = item.image
+                    if (
+                        type(image.asset_id) is not str
+                        or not 0 < len(image.asset_id) <= 256
+                        or any(category(c).startswith("C") for c in image.asset_id)
+                        or image.visibility
+                        not in (CacheVisibility.PUBLIC, CacheVisibility.USER)
+                        or type(image.visibility) is not CacheVisibility
+                        or type(image.alt) is not str
+                        or len(image.alt) > 512
+                        or type(image.required) is not bool
+                    ):
+                        _invalid()
+                    content(image.alt)
+                elif item.image is not None:
+                    _invalid()
         else:
             _invalid()
 
@@ -285,6 +380,8 @@ def encode_card(document: cards.Document) -> dict:
     validate_card(document)
 
     def encode(value):
+        if type(value) is CacheVisibility:
+            return {"$card_visibility": value.value}
         if type(value) in _TYPES.values():
             return {
                 "$card_type": type(value).__name__,
@@ -305,6 +402,17 @@ def encode_card(document: cards.Document) -> dict:
 def decode_card(payload: object) -> cards.Document:
     """Reject unknown versions/types/fields rather than losing card information."""
     count = decoded_bytes = 0
+    # This closed structural check admits the larger byte cap only for a sole
+    # WeightedCollage; ordinary documents retain their original decoder cap.
+    try:
+        body = payload["document"]["fields"]["blocks"]
+        collage = (
+            type(body) is list
+            and len(body) == 1
+            and body[0]["$card_type"] in ("WeightedCollage", "DenseCollage")
+        )
+    except (KeyError, TypeError, IndexError):
+        collage = False
 
     def decode(value, depth=0):
         nonlocal count, decoded_bytes
@@ -312,16 +420,20 @@ def decode_card(payload: object) -> cards.Document:
         if depth > 40 or count > 200000:
             _invalid()
         if type(value) is list:
-            if len(value) > 200:
+            if len(value) > (1000 if collage else 200):
                 _invalid()
             return tuple(decode(item, depth + 1) for item in value)
         if type(value) is dict:
+            if set(value) == {"$card_visibility"}:
+                if value["$card_visibility"] not in ("public", "user"):
+                    _invalid()
+                return CacheVisibility(value["$card_visibility"])
             if set(value) == {"$card_bytes"}:
                 encoded = value["$card_bytes"]
                 if type(encoded) is not str or len(encoded) > 1398104:
                     _invalid()
                 decoded_bytes += (len(encoded) // 4) * 3
-                if decoded_bytes > 8388672:  # At most 32 assets with two padding bytes.
+                if decoded_bytes > (33554834 if collage else 8388672):
                     _invalid()
                 try:
                     return base64.b64decode(encoded, validate=True)

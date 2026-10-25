@@ -118,3 +118,51 @@ class PageSessionRegistryTests(unittest.TestCase):
             self.require(handle)
         with self.assertRaises(AdminAuthorizationDenied):
             self.issue()
+
+    def test_repeated_rotation_preserves_lineage_and_immediately_retires_old_proof(
+        self,
+    ):
+        proof = self.issue()
+        lineage = self.require(proof).lineage_id
+        other = self.issue()
+        other_lineage = self.require(other).lineage_id
+        self.assertNotEqual(lineage, other_lineage)
+        for elapsed in (20, 40, 60):
+            self.now = 100.0 + elapsed
+            previous = proof
+            proof = self.issue(previous_session=previous)
+            self.assertEqual(self.require(proof).lineage_id, lineage)
+            self.assertEqual(self.require(proof).expiry, self.now + 30)
+            with self.assertRaises(AdminAuthorizationDenied):
+                self.require(previous)
+        self.assertEqual(len(self.registry._sessions), 1)
+
+    def test_expired_proof_cannot_rotate_or_transfer_lineage_to_a_new_view(self):
+        proof = self.issue()
+        lineage = self.require(proof).lineage_id
+        self.now += 30
+        with self.assertRaises(AdminAuthorizationDenied):
+            self.issue(previous_session=proof)
+        fresh = self.issue()
+        self.assertNotEqual(self.require(fresh).lineage_id, lineage)
+        with self.assertRaises(AdminAuthorizationDenied):
+            self.require(proof)
+
+    def test_binding_changes_cannot_inherit_a_views_lineage(self):
+        proof = self.issue()
+        lineage = self.require(proof).lineage_id
+        for binding in (
+            replace(self.binding, page="other"),
+            replace(self.binding, credential_fields=frozenset({"another"})),
+            replace(self.binding, runtime_id="runtime-b"),
+        ):
+            with (
+                self.subTest(binding=binding),
+                self.assertRaises(AdminAuthorizationDenied),
+            ):
+                self.registry.issue(
+                    **(self.authority | {"binding": binding}),
+                    expiry=1000,
+                    previous_session=proof,
+                )
+        self.assertEqual(self.require(proof).lineage_id, lineage)

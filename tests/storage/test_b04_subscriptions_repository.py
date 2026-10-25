@@ -38,12 +38,16 @@ from ygl_test_subject.core.contracts.validation_boundary import validate_contrac
 from ygl_test_subject.core.ports import (
     CollectionRunRequest,
     RevisionConflict,
+    SubscriptionGateBinding,
     UniqueConstraintViolation,
 )
 from ygl_test_subject.infrastructure.sqlite import repositories_subscriptions
 from ygl_test_subject.infrastructure.sqlite.database import (
     SQLiteDatabase,
     SQLiteUnitOfWork,
+)
+from ygl_test_subject.infrastructure.sqlite.repositories_config import (
+    SQLiteConfigRepository,
 )
 from ygl_test_subject.infrastructure.sqlite.repositories_subscriptions import (
     SQLiteDeliveryRepository,
@@ -67,6 +71,7 @@ from yomihime_game_link_sdk.display import (
     Privacy,
     TextBlock,
 )
+from yomihime_game_link_sdk.services import ConfigTarget
 from yomihime_game_link_sdk.storage import GrantReference, OwnerScope
 from yomihime_game_link_sdk.subscriptions import (
     CollectionKey,
@@ -79,6 +84,7 @@ from yomihime_game_link_sdk.subscriptions import (
     NormalizedInput,
     Observation,
     ObservationCompleteness,
+    PublicEventContribution,
 )
 
 
@@ -956,11 +962,12 @@ class B04SubscriptionRepositoryTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(await self.scheduler.is_current(lease, now=self.now))
 
     async def test_r01_real_full_migration_reopens_at_0120(self) -> None:
-        self.assertEqual(self.db.initialize(), 130)
-        self.assertEqual(self.db.initialize(), 130)
-        self.assertEqual(self.db.schema_version(), 130)
+        version = self.db.initialize()
+        self.assertGreaterEqual(version, 150)
+        self.assertEqual(self.db.initialize(), version)
+        self.assertEqual(self.db.schema_version(), version)
         reopened = SQLiteDatabase(self.path)
-        self.assertEqual(reopened.schema_version(), 130)
+        self.assertEqual(reopened.schema_version(), version)
 
     async def test_repository_sql_callbacks_run_on_worker_thread(self) -> None:
         caller_thread = threading.get_ident()
@@ -3801,6 +3808,322 @@ class B04SubscriptionRepositoryTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertNotIn("secret-grant", str(caught.exception))
         self.assertNotIn("do-not-log", str(caught.exception))
+
+    async def test_c3_concurrent_create_reuses_active_identity_and_cancel_recreates_generation(
+        self,
+    ):
+        a = replace(self._record("first", type_id="watch"), creation_key="watch:123")
+        b = replace(a, subscription_id="second")
+        left, right = await asyncio.gather(self._create(a), self._create(b))
+        self.assertEqual(left.subscription_id, right.subscription_id)
+        self.assertEqual(
+            len(await self.subscriptions.list_for_owner("u1", limit=10)), 1
+        )
+        cancelled = replace(left, revision=2, status=SubscriptionStatus.CANCELLED)
+        await self.lifecycle.apply(
+            SubscriptionJobChange(
+                SubscriptionJobChangeKind.CANCEL, cancelled, None, 1, 1
+            )
+        )
+        fresh = await self._create(replace(a, subscription_id="new-generation"))
+        self.assertNotEqual(fresh.subscription_id, left.subscription_id)
+        checkpoint = await self.scheduler.current_checkpoint(
+            fresh.subscription_id, fresh.collection_key
+        )
+        self.assertIsNone(checkpoint.snapshot.state)
+
+    async def test_c3_public_event_joins_accounts_in_one_route_and_suppresses_sealed_late_member(
+        self,
+    ):
+        group = ConversationRef("adapter", ConversationKind.GROUP, "g1", "group-g1")
+        records = []
+        for index in range(3):
+            key = replace(
+                self._key(), parameters=NormalizedInput({"account": index + 1})
+            )
+            record = replace(
+                self._record(f"member-{index}", owner=f"u{index}", key=key),
+                recipient=group,
+            )
+            await self._create(record)
+            records.append(record)
+
+        async def commit(record, identity, version=1, composer="compose"):
+            doc = DisplayDocument(
+                "title",
+                "public facts",
+                (TextBlock(record.subscription_id),),
+                privacy=Privacy.PUBLIC,
+            )
+            event = replace(
+                self._event(record, version=version),
+                display_data=doc,
+                public_contribution=PublicEventContribution(
+                    composer,
+                    record.subscription_id,
+                    {"account": record.subscription_id},
+                ),
+            )
+            observation = self._observation(record.collection_key, identity=identity)
+            cursor = ObservationCursor(
+                observation.observation_id, 1, observation.completeness, ()
+            )
+            change = SubscriptionEvaluationCommit(
+                record.subscription_id,
+                1,
+                None,
+                EvaluationState(1, {"seen": ["event-1"]}),
+                cursor,
+                (event,),
+            )
+            lease = await self._lease(record.collection_key)
+            self.assertTrue(
+                await self.scheduler.commit_observation_with_evaluations(
+                    lease, ObservationEvaluationCommit(observation, (change,))
+                )
+            )
+            return event
+
+        await commit(records[0], "obs-a")
+        await commit(records[1], "obs-b")
+        due = self.now + timedelta(seconds=31)
+        routes = await self.windows.list_due_routes(now=due, limit=10)
+        self.assertEqual(len(routes), 1)
+        self.assertTrue(routes[0].window_id.startswith("public-event:v1:"))
+        window = await self.windows.get(routes[0].window_id)
+        self.assertEqual(len(window.members), 2)
+        self.assertEqual(await self.delivery.list_due_events(now=due, limit=10), ())
+        claim = await self.windows.claim_due_envelope(
+            window.window_id,
+            group,
+            now=due,
+            lease_expires_at=due + timedelta(minutes=1),
+        )
+        self.assertEqual(len(claim.envelope.member_associations), 2)
+        # A formatter/composer upgrade must not make the same business match new.
+        late = await commit(records[2], "obs-c", version=2, composer="compose-v2")
+        saved_late = await self.delivery.current_event(
+            late.event_key,
+            2,
+            subscription_id=late.subscription_id,
+            subscription_revision=1,
+        )
+        self.assertIs(saved_late.state, DeliveryState.CANCELLED)
+        count = await self.db.executor.run_read(
+            lambda unit: unit.execute(
+                "SELECT COUNT(*) FROM b04_public_event_suppressed WHERE reason='sealed_membership'"
+            ).fetchone()[0]
+        )
+        self.assertEqual(count, 1)
+
+    async def test_i02_shared_committed_observation_survives_new_representative_and_reopen(
+        self,
+    ):
+        old = await self._create(self._record("old"))
+        first = self._observation(identity="shared-baseline")
+        lease = await self._lease()
+        state = SubscriptionEvaluationCommit(
+            old.subscription_id,
+            1,
+            None,
+            EvaluationState(1, {"initialized": True}),
+            ObservationCursor(
+                first.observation_id, 1, first.completeness, first.covered_ids
+            ),
+        )
+        self.assertTrue(
+            await self.scheduler.commit_observation_with_evaluations(
+                lease, ObservationEvaluationCommit(first, (state,))
+            )
+        )
+        new = await self._create(self._record("aaa-new"))
+        checkpoint = await self.scheduler.current_checkpoint(
+            new.subscription_id, new.collection_key
+        )
+        self.assertIsNone(checkpoint.snapshot.observation)
+        self.now += timedelta(seconds=31)
+        lease = await self._lease()
+        self.assertEqual(await self.scheduler.previous_observation(lease), first)
+        reopened = SQLiteSchedulerRepository(
+            SQLiteDatabase(self.path), subscription_gate_bindings=self.bindings
+        )
+        self.assertEqual(await reopened.previous_observation(lease), first)
+        self.assertIsNone(
+            await reopened.previous_observation(replace(lease, token="stale-token"))
+        )
+        failed = self._observation(
+            identity="failed-new-details", completeness=ObservationCompleteness.FAILED
+        )
+        self.assertTrue(await self.scheduler.commit_observation(lease, failed))
+        self.now += timedelta(seconds=31)
+        next_lease = await self._lease()
+        self.assertEqual(await reopened.previous_observation(next_lease), first)
+
+    async def test_0190_backfill_adopts_existing_sealed_business_event(self):
+        record = await self._create(self._record("legacy"))
+        event = replace(
+            self._event(record),
+            display_data=DisplayDocument("public", "facts", (TextBlock("public"),)),
+            public_contribution=PublicEventContribution("old-composer", "a", {"a": 1}),
+        )
+        obs = self._observation(identity="legacy-sample")
+        change = SubscriptionEvaluationCommit(
+            record.subscription_id,
+            1,
+            None,
+            EvaluationState(1, {}),
+            ObservationCursor(obs.observation_id, 1, obs.completeness, obs.covered_ids),
+            (event,),
+        )
+        self.assertTrue(
+            await self.scheduler.commit_observation_with_evaluations(
+                await self._lease(), ObservationEvaluationCommit(obs, (change,))
+            )
+        )
+        expected_key = repositories_subscriptions._dump(
+            (record.module_id, event.recipient, event.event_key)
+        )
+        migration = (
+            Path(__file__).resolve().parents[2]
+            / "infrastructure/sqlite/migrations/0190_public_event_identity.sql"
+        ).read_text(encoding="utf-8")
+
+        def backfill(unit):
+            original = unit.execute(
+                "SELECT window_id FROM b04_public_event_identity WHERE business_key=?",
+                (expected_key,),
+            ).fetchone()[0]
+            unit.execute("DELETE FROM b04_public_event_identity")
+            for statement in migration.split(";"):
+                if statement.strip():
+                    unit.execute(statement)
+            restored = unit.execute(
+                "SELECT window_id FROM b04_public_event_identity WHERE business_key=?",
+                (expected_key,),
+            ).fetchone()
+            return original, None if restored is None else restored[0]
+
+        original, restored = await self.db.executor.run_transaction(
+            backfill, begin_mode="IMMEDIATE"
+        )
+        self.assertEqual(restored, original)
+
+    async def test_public_projection_membership_over_budget_is_explicit_rejection(self):
+        source = await self._create(self._record("source", type_id="public-alert"))
+
+        # Use schema column names explicitly: the real store remains the reader.
+        def insert_rows(unit):
+            for index in range(100):
+                candidate = replace(source, subscription_id=f"candidate-{index}")
+                unit.execute(
+                    "INSERT INTO b04_subscriptions(subscription_id,revision,owner_id,scope_kind,scope_user,grant_id,grant_revision,status,record_json) VALUES (?,?,?,?,?,?,?,?,?)",
+                    (
+                        candidate.subscription_id,
+                        1,
+                        candidate.owner_id,
+                        "public",
+                        None,
+                        None,
+                        None,
+                        "active",
+                        repositories_subscriptions._dump(candidate),
+                    ),
+                )
+
+        await self.db.executor.run_transaction(insert_rows, begin_mode="IMMEDIATE")
+        with self.assertRaisesRegex(ValueError, "exceeds bounded projection"):
+            await self.scheduler.public_event_candidates(source)
+
+    async def test_c3_defer_releases_without_observation_or_evaluation(self):
+        record = await self._create()
+        lease = await self._lease()
+        due = self.now + timedelta(hours=1)
+        self.assertTrue(await self.scheduler.defer(lease, next_due_at=due))
+        self.assertIsNone(
+            (
+                await self.scheduler.current_checkpoint(
+                    record.subscription_id, record.collection_key
+                )
+            ).snapshot.observation
+        )
+        self.assertFalse(await self.scheduler.is_current(lease, now=self.now))
+        self.assertEqual(
+            (await self._stored_job_schedule(record.collection_key))[0], due.isoformat()
+        )
+
+    async def test_c3_commentary_one_attempt_survives_restart_and_fallback(self):
+        self.assertEqual(await self.windows.begin_commentary("one"), (True, None))
+        reopened = SQLiteDigestWindowRepository(
+            self.db, subscription_gate_bindings=self.bindings
+        )
+        self.assertEqual(await reopened.begin_commentary("one"), (False, None))
+        await self.windows.complete_commentary("one", "bounded public commentary")
+        self.assertEqual(
+            await reopened.begin_commentary("one"), (False, "bounded public commentary")
+        )
+
+    async def test_c3_declared_gate_preserves_existing_false_invalid_and_revision(self):
+        for index, raw in enumerate(("false", '"invalid"')):
+            target = ConfigTarget(f"declared-owner-{index}", "sample/game")
+            field = "subscription_enabled"
+
+            def seed(unit):
+                unit.execute(
+                    "INSERT INTO config_state VALUES (?,?,7)",
+                    (target.principal_id, target.module_id),
+                )
+                unit.execute(
+                    "INSERT INTO config_entries(principal_id,module_id,field,value_json,revision) VALUES (?,?,?,?,7)",
+                    (target.principal_id, target.module_id, field, raw),
+                )
+
+            await self.db.executor.run_transaction(seed, begin_mode="IMMEDIATE")
+            config = SQLiteConfigRepository(self.db, clock=lambda: self.now)
+            await config.register_declared_subscription_gate(target, field)
+            stored = await self.db.executor.run_read(
+                lambda unit: tuple(
+                    unit.execute(
+                        "SELECT value_json,revision FROM config_entries WHERE principal_id=? AND module_id=? AND field=?",
+                        (target.principal_id, target.module_id, field),
+                    ).fetchone()
+                )
+            )
+            self.assertEqual(stored, (raw, 7))
+            binding = SubscriptionGateBinding(
+                target, field, "sample", "game", declared=True
+            )
+            lifecycle = SQLiteSubscriptionLifecycleRepository(
+                self.db, subscription_gate_bindings={"sample/game": binding}
+            )
+            self.assertIsNone(await lifecycle.current_fence("sample/game"))
+
+    async def test_c3_declared_gate_deleted_row_or_marker_is_not_recreated(self):
+        for index, table in enumerate(
+            ("config_entries", "b04_declared_subscription_gates")
+        ):
+            target = ConfigTarget(f"declared-owner-delete-{index}", "sample/game")
+            config = SQLiteConfigRepository(self.db, clock=lambda: self.now)
+            await config.register_declared_subscription_gate(
+                target, "subscription_enabled"
+            )
+            binding = SubscriptionGateBinding(
+                target, "subscription_enabled", "sample", "game", declared=True
+            )
+            lifecycle = SQLiteSubscriptionLifecycleRepository(
+                self.db, subscription_gate_bindings={"sample/game": binding}
+            )
+            self.assertIsNotNone(await lifecycle.current_fence("sample/game"))
+            await self.db.executor.run_transaction(
+                lambda unit: unit.execute(
+                    f"DELETE FROM {table} WHERE principal_id=? AND module_id=?",
+                    (target.principal_id, target.module_id),
+                ).rowcount,
+                begin_mode="IMMEDIATE",
+            )
+            await SQLiteConfigRepository(
+                self.db, clock=lambda: self.now
+            ).register_declared_subscription_gate(target, "subscription_enabled")
+            self.assertIsNone(await lifecycle.current_fence("sample/game"))
 
 
 def json_load(value: str):

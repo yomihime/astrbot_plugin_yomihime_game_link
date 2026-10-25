@@ -370,6 +370,34 @@ class NeutralModuleSettingsTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(AdminAuthorizationDenied):
             await ops.credential_status(authorization=credentials)
 
+    async def test_uninstalled_credential_policy_does_not_expose_or_activate_owner(
+        self,
+    ):
+        await self.core.close(timeout=1)
+        missing = "uninstalled/demo"
+        self.core_arguments["managed_source_credentials"] += (
+            ManagedSourceCredentialPolicy(
+                missing, "credential_demo", "source", "Absent source"
+            ),
+        )
+        await self._start_core()
+        ops = self.core.admin_operations
+        credentials = self.proof(self.credentials)
+        status = await ops.credential_status(authorization=credentials)
+        self.assertEqual(set(status), {self.owner})
+        catalog = await ops.credential_catalog(authorization=credentials)
+        self.assertEqual({row["module_id"] for row in catalog["fields"]}, {self.owner})
+        self.assertNotIn(missing, self.core.registry.snapshot().modules)
+        with self.assertRaises(AdminAuthorizationDenied):
+            await ops.credential_update(
+                {
+                    "module_id": missing,
+                    "expected_revision": 0,
+                    "updates": [{"field": "credential_demo", "mode": "clear"}],
+                },
+                authorization=credentials,
+            )
+
     async def _queued_write_across_unload(
         self, *, credential, restore=False, unload=True
     ):

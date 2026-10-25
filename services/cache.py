@@ -40,6 +40,7 @@ from ..core.ports import (
     RevisionConflict,
     ScheduledLease,
 )
+from ..core.ports_jobs import JobRunLease
 from ..core.public_errors import parameters, public_boundary
 from .identity import (
     InvocationPrincipalResolver,
@@ -200,7 +201,7 @@ class _CacheAccessCoordinator:
         try:
             issuer.require(self.__invocation)
             lease = issuer.lease_for(self.__invocation)
-            if not isinstance(lease, (AdmissionLease, ScheduledLease)):
+            if not isinstance(lease, (AdmissionLease, ScheduledLease, JobRunLease)):
                 raise InvalidInvocation("invocation has no admission lease")
             admission.check(lease)
         except (CacheAccessError, InvalidInvocation):

@@ -31,6 +31,7 @@ from yomihime_game_link_sdk.errors import (
 from .contracts.validation_boundary import validate_contract
 from .policy import public_web_allowed
 from .ports import PublicWebBinding, PublicWebProofValidator
+from .ports_jobs import JobRunProof
 from .public_errors import public_boundary
 
 
@@ -82,6 +83,7 @@ class ContextIssuer:
         self._clock = clock
         self._web_validator = public_web_validator
         self._web_deployment = deployment
+        self._external_web_deployment = frozenset()
         self._web_proofs: dict[str, tuple[object, PublicWebBinding]] = {}
         self._issued: dict[str, InvocationView] = {}
         self._messages: dict[str, _OwnedMessage] = {}
@@ -89,6 +91,71 @@ class ContextIssuer:
         self._children: dict[str, set[str]] = {}
         self._leases: dict[str, object] = {}
         self._release_observers: set[Callable[[InvocationView], None]] = set()
+        self._job_sources: set[object] = set()
+        self._job_proofs: dict[str, tuple[object, JobRunProof]] = {}
+
+    def register_job_source(self, source: object) -> None:
+        """Trusted Core assembly only; never exported through ModuleServices."""
+        self._job_sources.add(source)
+
+    def unregister_job_source(self, source: object) -> None:
+        self._job_sources.discard(source)
+
+    def issue_job(
+        self,
+        source,
+        proof: JobRunProof,
+        *,
+        module_id,
+        module_epoch,
+        registry_revision,
+        deadline,
+    ):
+        if (
+            source not in self._job_sources
+            or type(proof) is not JobRunProof
+            or proof.current() is not True
+        ):
+            raise InvalidInvocation("job claim is unavailable")
+        view = validate_contract(
+            InvocationView(
+                uuid4().hex,
+                InvocationOrigin.JOB,
+                proof.owner_id,
+                None,
+                module_id,
+                module_epoch,
+                registry_revision,
+                deadline=deadline,
+            )
+        )
+        self._check_deadline(view)
+        self._issued[view.invocation_id] = view
+        self._job_proofs[view.invocation_id] = (source, proof)
+        return view
+
+    def job_binding(self, view):
+        self.require(view)
+        pair = self._job_proofs.get(view.invocation_id)
+        if pair is None or pair[0] not in self._job_sources:
+            raise InvalidInvocation("job claim is unavailable")
+        return pair[1]
+
+    def _replace_external_public_web_capabilities(self, deployment) -> None:
+        """Trusted Host composition only; modules cannot obtain this issuer."""
+        if type(deployment) is not frozenset or any(
+            type(item) is not tuple
+            or len(item) != 2
+            or any(type(value) is not str or not value.strip() for value in item)
+            for item in deployment
+        ):
+            raise TypeError("external public web deployment must be exact pairs")
+        if deployment & self._web_deployment:
+            raise ValueError("external public web deployment overlaps bundled targets")
+        self._external_web_deployment = deployment
+
+    def _public_web_deployment(self):
+        return self._web_deployment | self._external_web_deployment
 
     def issue(
         self,
@@ -117,6 +184,8 @@ class ContextIssuer:
             raise InvalidInvocation(
                 "Public web invocations require an owned host proof"
             )
+        if origin is InvocationOrigin.JOB:
+            raise InvalidInvocation("Job invocations require a current worker claim")
         if origin in (InvocationOrigin.COMMAND, InvocationOrigin.LLM_TOOL) and (
             actor_id is None or conversation_id is None
         ):
@@ -287,7 +356,10 @@ class ContextIssuer:
     ) -> InvocationView:
         """Consume an exact host proof, without fabricating any chat identity."""
         validator = self._web_validator
-        if validator is None or (module_id, capability_id) not in self._web_deployment:
+        if (
+            validator is None
+            or (module_id, capability_id) not in self._public_web_deployment()
+        ):
             raise InvalidInvocation("Public web capability is not deployed")
         binding = validator.consume(
             proof,
@@ -341,7 +413,7 @@ class ContextIssuer:
         return pair[1]
 
     def allows_public_web(self, module_id: str, capability: object) -> bool:
-        return public_web_allowed(module_id, capability, self._web_deployment)
+        return public_web_allowed(module_id, capability, self._public_web_deployment())
 
     def require(self, view: InvocationView) -> InvocationView:
         """Validate identity and the entire still-active parent chain."""
@@ -355,7 +427,21 @@ class ContextIssuer:
         while True:
             if self._issued.get(current.invocation_id) is not current:
                 raise InvalidInvocation("Invocation is not active in this runtime")
+            if current.origin is InvocationOrigin.JOB:
+                pair = self._job_proofs.get(current.invocation_id)
+                if (
+                    pair is None
+                    or pair[0] not in self._job_sources
+                    or pair[1].current() is not True
+                ):
+                    raise InvalidInvocation("job claim is no longer current")
             self._check_deadline(current)
+            if (
+                current.origin is InvocationOrigin.WEB_PUBLIC
+                and (current.module_id, current.capability_id)
+                not in self._public_web_deployment()
+            ):
+                raise InvalidInvocation("Public web capability is no longer deployed")
             if current.parent_id is None:
                 if current.origin is InvocationOrigin.WEB_PUBLIC:
                     pair = self._web_proofs.get(current.invocation_id)
@@ -413,9 +499,11 @@ class ContextIssuer:
         except (TypeError, ValueError, AttributeError):
             raise InvalidInvocation() from None
         self.require(parent)
+        if parent.origin is InvocationOrigin.JOB:
+            raise InvalidInvocation("job scopes cannot derive capability authority")
         if parent.origin is InvocationOrigin.WEB_PUBLIC and (
             capability_id is None
-            or (module_id, capability_id) not in self._web_deployment
+            or (module_id, capability_id) not in self._public_web_deployment()
         ):
             raise InvalidInvocation("Public web dependency is not deployed")
         grant_id = parent.grant_id
@@ -564,6 +652,7 @@ class ContextIssuer:
             released = self._issued.pop(key, None)
             self._leases.pop(key, None)
             self._messages.pop(key, None)
+            self._job_proofs.pop(key, None)
             proof = self._web_proofs.pop(key, None)
             if proof is not None and self._web_validator is not None:
                 try:

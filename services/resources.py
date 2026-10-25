@@ -5,14 +5,19 @@ from __future__ import annotations
 import asyncio
 import math
 from collections.abc import AsyncIterator, Awaitable
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from time import monotonic
 from typing import Callable, TypeVar
 from uuid import uuid4
 
 from yomihime_game_link_sdk.contexts import InvocationView
-from yomihime_game_link_sdk.services import ResourceAccess, ResourceReference
+from yomihime_game_link_sdk.services import (
+    ResourceAccess,
+    ResourceCacheClass,
+    ResourceCacheStats,
+    ResourceReference,
+)
 from yomihime_game_link_sdk.storage import CacheVisibility, OwnerScope, ResourceMetadata
 
 from ..core.context_issuer import ContextIssuer, InvalidInvocation
@@ -26,11 +31,13 @@ from ..core.ports import (
     SafeFileStore,
     ScheduledLease,
 )
+from ..core.ports_jobs import JobRunLease
 from .identity import (
     InvocationPrincipalResolver,
     PrincipalResolutionDenied,
     PrincipalResolutionUnavailable,
 )
+from .managed_resources import drain_on_cancel
 
 _T = TypeVar("_T")
 
@@ -202,7 +209,7 @@ class _ResourceAccessCoordinator:
         try:
             issuer.require(self.__invocation)
             lease = issuer.lease_for(self.__invocation)
-            if not isinstance(lease, (AdmissionLease, ScheduledLease)):
+            if not isinstance(lease, (AdmissionLease, ScheduledLease, JobRunLease)):
                 raise InvalidInvocation("invocation has no admission lease")
             admission.check(lease)
         except ResourceAccessError:
@@ -472,13 +479,137 @@ class _ResourceAccessCoordinator:
             )
             if metadata is None or metadata.scope != scope:
                 continue
+            manager = getattr(self.__repository, "managed_cache", None)
             content = await self._await_boundary(
                 lambda: self.__repository.read(asset_id, scope)
+                if manager is None
+                else manager.read(asset_id, scope, read=self.__repository.read)
             )
             if not isinstance(content, bytes):
                 raise ValueError("resource repository returned invalid content")
             return content
         raise FileNotFoundError("resource is unavailable")
+
+    async def store(
+        self,
+        media_type: str,
+        content: bytes,
+        *,
+        visibility: CacheVisibility | None = None,
+        ttl_seconds: float | None = None,
+        cache_class: ResourceCacheClass = ResourceCacheClass.DEFAULT,
+    ) -> ResourceReference:
+        validate_contract(visibility)
+        if type(cache_class) is not ResourceCacheClass:
+            raise ValueError("invalid resource cache class")
+        await self._admit()
+        scope = await self._scope(visibility)
+        manager = getattr(self.__repository, "managed_cache", None)
+        if manager is None:
+            raise ResourceAccessError(
+                "resource storage is unavailable", code="resource_unavailable"
+            )
+
+        async def operation():
+            async with self._write_mutation("resource-store"):
+                deadline = await self._assert_grant_current()
+                metadata = await manager.store(
+                    media_type,
+                    content,
+                    scope,
+                    module_id=self.__invocation.module_id,
+                    ttl_seconds=ttl_seconds,
+                    cache_class=cache_class,
+                    check=self._admit,
+                    authorization_deadline=deadline
+                    if scope.grant is not None
+                    else None,
+                )
+                await self._admit()
+                return validate_contract(
+                    ResourceReference(
+                        metadata.asset_id, metadata.media_type, metadata.scope
+                    )
+                )
+
+        return await drain_on_cancel(operation())
+
+    async def pin(self, asset_ids, *, lease_seconds=300):
+        await self._admit()
+        if type(asset_ids) is not tuple or not 1 <= len(asset_ids) <= 1000:
+            raise ValueError("invalid resource pin batch")
+        if type(lease_seconds) is not int or not 1 <= lease_seconds <= 1800:
+            raise ValueError("invalid resource pin lifetime")
+        invocation = self.__invocation
+        owner = (
+            await self._principal_id()
+            if invocation.actor_id is not None
+            else invocation.public_session_id
+        )
+        if not owner:
+            raise ResourceAccessError(code="scope_denied")
+        references = []
+        for asset_id in tuple(dict.fromkeys(asset_ids)):
+            metadata = await self.metadata(asset_id)
+            if metadata is None:
+                raise FileNotFoundError("resource is unavailable")
+            references.append((asset_id, metadata.scope))
+        now = datetime.now(UTC)
+        ttl = lease_seconds
+        if invocation.deadline is not None:
+            ttl = min(ttl, max(0, invocation.deadline - self.__clock()))
+        if ttl <= 0:
+            raise ResourceAccessError(code="invocation_expired")
+        manager = self.__repository.managed_cache
+        async with manager._lock:
+            await self._admit()
+            pin_id = await self.__repository.pin_resources(
+                tuple(references),
+                module_id=invocation.module_id,
+                invocation_id=invocation.invocation_id,
+                owner_key=owner,
+                expires_at=now + timedelta(seconds=ttl),
+                now=now,
+                commit_guard=lambda: self.__admission.commit_guard(
+                    self.__issuer.lease_for(invocation)
+                ),
+            )
+            await self._admit()
+            return pin_id
+
+    async def unpin(self, pin_id):
+        await self._admit()
+        invocation = self.__invocation
+        owner = (
+            await self._principal_id()
+            if invocation.actor_id is not None
+            else invocation.public_session_id
+        )
+        await self.__repository.unpin_resources(
+            _asset_id(pin_id),
+            module_id=invocation.module_id,
+            invocation_id=invocation.invocation_id,
+            owner_key=owner,
+            commit_guard=lambda: self.__admission.commit_guard(
+                self.__issuer.lease_for(invocation)
+            ),
+        )
+        await self._admit()
+
+    async def stats(
+        self, *, visibility: CacheVisibility | None = None
+    ) -> ResourceCacheStats:
+        validate_contract(visibility)
+        await self._admit()
+        scope = await self._scope(visibility)
+        manager = getattr(self.__repository, "managed_cache", None)
+        if manager is None:
+            raise ResourceAccessError(
+                "resource storage is unavailable", code="resource_unavailable"
+            )
+        return validate_contract(
+            await self._await_boundary(lambda: manager.stats(scope))
+        )
 
     async def metadata(
         self, asset_id: str, *, visibility: CacheVisibility | None = None
@@ -491,8 +622,112 @@ class _ResourceAccessCoordinator:
                 lambda: self.__repository.metadata(asset_id, scope)
             )
             if metadata is not None and metadata.scope == scope:
+                manager = getattr(self.__repository, "managed_cache", None)
+                if manager is not None:
+                    try:
+                        await self._await_boundary(
+                            lambda: manager.snapshot(asset_id, scope)
+                        )
+                    except FileNotFoundError:
+                        continue
                 return metadata
         return None
+
+    async def collage_snapshot(self, asset_id, visibility):
+        validate_contract(visibility)
+        await self._admit()
+        asset_id = _asset_id(asset_id)
+        manager = getattr(self.__repository, "managed_cache", None)
+        if manager is None:
+            return None
+        for scope in await self._read_scopes(visibility):
+            try:
+                return await self._await_boundary(
+                    lambda: manager.snapshot(asset_id, scope)
+                )
+            except FileNotFoundError:
+                continue
+        return None
+
+    async def collage_snapshots(self, references):
+        await self._admit()
+        if type(references) is not tuple or not 1 <= len(references) <= 1000:
+            raise ValueError("resource portfolio is invalid")
+        result = {}
+        grouped = {}
+        retained_budget = {"bytes": 0}
+        for asset_id, visibility in references:
+            _asset_id(asset_id)
+            validate_contract(visibility)
+            grouped.setdefault(visibility, []).append(asset_id)
+        manager = getattr(self.__repository, "managed_cache", None)
+        if manager is None:
+            return {(visibility, asset_id): None for asset_id, visibility in references}
+        for visibility, asset_ids in grouped.items():
+            pending = tuple(dict.fromkeys(asset_ids))
+            for scope in await self._read_scopes(visibility):
+                if not pending:
+                    break
+                found = await self._await_boundary(
+                    lambda: manager.snapshots(
+                        pending, scope, retained_budget=retained_budget
+                    )
+                )
+                for asset_id, snapshot in found.items():
+                    if snapshot is not None:
+                        result[visibility, asset_id] = snapshot
+                pending = tuple(
+                    asset_id
+                    for asset_id in pending
+                    if (visibility, asset_id) not in result
+                )
+            for asset_id in pending:
+                result[visibility, asset_id] = None
+        return result
+
+    async def collage_read(self, snapshot, visibility):
+        from .managed_resources import ResourceIntegritySnapshot
+
+        validate_contract(visibility)
+        await self._admit()
+        if (
+            type(snapshot) is not ResourceIntegritySnapshot
+            or snapshot.metadata.scope not in await self._read_scopes(visibility)
+        ):
+            raise FileNotFoundError("resource is unavailable")
+        manager = getattr(self.__repository, "managed_cache", None)
+        if manager is None:
+            raise FileNotFoundError("resource is unavailable")
+        return await self._await_boundary(lambda: manager.read_snapshot(snapshot))
+
+    @asynccontextmanager
+    async def collage_source_leases(self, snapshots):
+        from .managed_resources import ResourceIntegritySnapshot
+
+        await self._admit()
+        manager = getattr(self.__repository, "managed_cache", None)
+        allowed = {}
+        retained = []
+        async with AsyncExitStack() as leases:
+            for (visibility, asset_id), snapshot in snapshots.items():
+                if snapshot is None:
+                    continue
+                if visibility not in allowed:
+                    allowed[visibility] = await self._read_scopes(visibility)
+                if (
+                    type(snapshot) is not ResourceIntegritySnapshot
+                    or snapshot.metadata.asset_id != asset_id
+                    or snapshot.metadata.scope not in allowed[visibility]
+                ):
+                    raise FileNotFoundError("collage source is unavailable")
+                retained.append((asset_id, snapshot.metadata.scope))
+            if manager is not None and retained:
+                await self._await_boundary(
+                    lambda: leases.enter_async_context(manager.lease_many(retained))
+                )
+            await self._admit()
+            yield
+            await self._admit()
 
     async def delete(
         self, asset_id: str, *, visibility: CacheVisibility | None = None
@@ -602,11 +837,51 @@ class ResourceAccessService(ResourceAccess):
         validate_contract(visibility)
         return await self.__coordinator.read(asset_id, visibility=visibility)
 
+    async def store(
+        self,
+        media_type: str,
+        content: bytes,
+        *,
+        visibility: CacheVisibility | None = None,
+        ttl_seconds: float | None = None,
+        cache_class: ResourceCacheClass = ResourceCacheClass.DEFAULT,
+    ) -> ResourceReference:
+        return await self.__coordinator.store(
+            media_type,
+            content,
+            visibility=visibility,
+            ttl_seconds=ttl_seconds,
+            cache_class=cache_class,
+        )
+
+    async def pin(self, asset_ids, *, lease_seconds=300):
+        return await self.__coordinator.pin(asset_ids, lease_seconds=lease_seconds)
+
+    async def unpin(self, pin_id):
+        return await self.__coordinator.unpin(pin_id)
+
+    async def stats(
+        self, *, visibility: CacheVisibility | None = None
+    ) -> ResourceCacheStats:
+        return await self.__coordinator.stats(visibility=visibility)
+
     async def metadata(
         self, asset_id: str, *, visibility: CacheVisibility | None = None
     ) -> ResourceMetadata | None:
         validate_contract(visibility)
         return await self.__coordinator.metadata(asset_id, visibility=visibility)
+
+    async def _collage_snapshot(self, asset_id, visibility):
+        return await self.__coordinator.collage_snapshot(asset_id, visibility)
+
+    async def _collage_snapshots(self, references):
+        return await self.__coordinator.collage_snapshots(references)
+
+    async def _collage_read(self, snapshot, visibility):
+        return await self.__coordinator.collage_read(snapshot, visibility)
+
+    def _collage_source_leases(self, snapshots):
+        return self.__coordinator.collage_source_leases(snapshots)
 
     async def delete(
         self, asset_id: str, *, visibility: CacheVisibility | None = None

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import stat
 from pathlib import Path
 
 from yomihime_game_link_sdk.storage import OwnerScope, ResourceMetadata
@@ -52,6 +53,15 @@ class LocalSafeFileStore:
             raise ValueError("asset id is invalid")
         return asset_id
 
+    @staticmethod
+    def content_id(content: bytes, scope: OwnerScope) -> str:
+        """Host-only allocation; modules never need the scope hash algorithm."""
+        validate_contract(scope)
+        return (
+            "asset_"
+            + hashlib.sha256(f"{_scope_token(scope)}\0".encode() + content).hexdigest()
+        )
+
     def _final(self, asset_id: str, scope: OwnerScope) -> Path:
         validate_contract(scope)
         asset_id = self._asset(asset_id)
@@ -80,10 +90,7 @@ class LocalSafeFileStore:
         if not isinstance(content, bytes):
             raise TypeError("resource content must be bytes")
         scope = OwnerScope_validate(scope)
-        digest = hashlib.sha256(
-            f"{_scope_token(scope)}\0".encode() + content
-        ).hexdigest()
-        asset_id = f"asset_{digest}"
+        asset_id = self.content_id(content, scope)
         path = self._temp(operation_id, asset_id)
         path.parent.mkdir(parents=True, exist_ok=True)
         if path.exists():
@@ -163,6 +170,31 @@ class LocalSafeFileStore:
         except FileNotFoundError:
             return
 
+    async def replace_managed(self, stage: FileStage) -> None:
+        """Replace one verified managed content address, retaining crash marker."""
+        source = self._temp(stage.operation_id, stage.asset_id)
+        content = source.read_bytes()
+        if self.content_id(content, stage.scope) != stage.asset_id:
+            raise ValueError("staged resource identity is invalid")
+        target = self._final(stage.asset_id, stage.scope)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        self._pending(stage.asset_id, stage.scope).write_text(
+            "index pending", encoding="utf-8"
+        )
+        os.replace(source, target)
+
+    async def remove_managed(self, asset_id: str, scope: OwnerScope) -> None:
+        """Unlink exact indexed resource paths; never enumerate directories."""
+        for path in (
+            self._final(asset_id, scope),
+            self._pending(asset_id, scope),
+            self._orphan(asset_id, scope),
+        ):
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+
     async def read(self, asset_id: str, scope: OwnerScope) -> bytes:
         validate_contract(scope)
         path = self._final(asset_id, scope)
@@ -170,6 +202,77 @@ class LocalSafeFileStore:
             return path.read_bytes()
         except OSError as exc:
             raise FileNotFoundError("resource file is unavailable") from exc
+
+    async def identity(self, asset_id: str, scope: OwnerScope):
+        """OS file version for an already cryptographically verified resource.
+
+        Windows creation time is not a modification token. Read ChangeTime
+        from the open handle; if unavailable, callers must hash full bytes.
+        This is not a claim to detect silent bit rot or forged filesystem data.
+        """
+        path = self._final(asset_id, scope)
+        try:
+            link = path.lstat()
+            if (
+                not stat.S_ISREG(link.st_mode)
+                or getattr(link, "st_file_attributes", 0) & 0x400
+            ):
+                raise FileNotFoundError("resource file is unavailable")
+            with path.open("rb") as stream:
+                before = os.fstat(stream.fileno())
+                if not stat.S_ISREG(before.st_mode) or (link.st_dev, link.st_ino) != (
+                    before.st_dev,
+                    before.st_ino,
+                ):
+                    raise FileNotFoundError("resource file is unavailable")
+                change = before.st_ctime_ns
+                if os.name == "nt":
+                    import ctypes
+                    import msvcrt
+                    from ctypes import wintypes
+
+                    class BasicInfo(ctypes.Structure):
+                        _fields_ = [
+                            (name, ctypes.c_longlong)
+                            for name in ("creation", "access", "write", "change")
+                        ] + [("attributes", wintypes.DWORD)]
+
+                    info = BasicInfo()
+                    call = ctypes.windll.kernel32.GetFileInformationByHandleEx
+                    call.argtypes = (
+                        wintypes.HANDLE,
+                        ctypes.c_int,
+                        ctypes.c_void_p,
+                        wintypes.DWORD,
+                    )
+                    call.restype = wintypes.BOOL
+                    if not call(
+                        msvcrt.get_osfhandle(stream.fileno()),
+                        0,
+                        ctypes.byref(info),
+                        ctypes.sizeof(info),
+                    ):
+                        return None
+                    change = info.change
+                elif os.name != "posix":
+                    return None
+                after = os.fstat(stream.fileno())
+                if (
+                    before.st_dev,
+                    before.st_ino,
+                    before.st_size,
+                    before.st_mtime_ns,
+                ) != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns):
+                    raise FileNotFoundError("resource file changed")
+                return (
+                    before.st_dev,
+                    before.st_ino,
+                    before.st_size,
+                    before.st_mtime_ns,
+                    change,
+                )
+        except (OSError, ValueError):
+            raise FileNotFoundError("resource file is unavailable") from None
 
     async def discard(self, stage: FileStage) -> None:
         if not isinstance(stage, FileStage):

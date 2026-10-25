@@ -35,7 +35,7 @@ class SQLiteRootOutputRepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.temp.cleanup()
 
     async def test_r01_claim_is_single_owner_and_exact_replay_returns_receipt(self):
-        self.assertEqual(self.db.initialize(), 130)
+        self.assertEqual(self.db.initialize(), 210)
         claims = await asyncio.gather(
             self.repo.claim(
                 *self.key,

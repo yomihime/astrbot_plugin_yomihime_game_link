@@ -26,6 +26,15 @@ class _OwnerRouteProof:
     route: ConversationRef
 
 
+@dataclass(frozen=True, slots=True)
+class _OwnerDependencyProof:
+    invocation: InvocationView
+    lease: AdmissionLease
+    parent: InvocationView
+    parent_lease: AdmissionLease
+    principal_id: str
+
+
 class OwnerRouteProofAuthority:
     """Capture and revalidate one private owner/route binding per invocation.
 
@@ -61,7 +70,51 @@ class OwnerRouteProofAuthority:
         self._admission = admission
         self._principals = principal_resolver
         self._conversations = conversations
-        self._proofs: dict[str, _OwnerRouteProof] = {}
+        self._proofs: dict[str, _OwnerRouteProof | _OwnerDependencyProof] = {}
+
+    async def capture_dependency(
+        self, parent: InvocationView, child: InvocationView, lease: AdmissionLease
+    ) -> None:
+        """Bind a read-only dependency to an admitted real command actor.
+
+        The controlled dependency invoker has checked the explicit edge and
+        read-only OWNER declaration. This proof never authorizes root output
+        or account writes, and does not inherit the caller module's grant.
+        """
+        self._require_dependency_views(parent, child, lease)
+        if child.invocation_id in self._proofs:
+            raise OwnerRouteProofError("owner proof already exists")
+        principal_id = await self._principal(child)
+        self._require_dependency_views(parent, child, lease)
+        if child.invocation_id in self._proofs:
+            raise OwnerRouteProofError("owner proof already exists")
+        self._proofs[child.invocation_id] = _OwnerDependencyProof(
+            child, lease, parent, self._issuer.lease_for(parent), principal_id
+        )
+
+    def _require_dependency_views(self, parent, child, lease) -> None:
+        try:
+            if (
+                self._issuer.require_adapter(parent) is not parent
+                or self._issuer.require_adapter(child) is not child
+                or parent.origin is not InvocationOrigin.COMMAND
+                or parent.parent_id is not None
+                or child.origin is not InvocationOrigin.COMMAND
+                or child.parent_id != parent.invocation_id
+                or not parent.actor_id
+                or child.actor_id != parent.actor_id
+                or child.adapter_id != parent.adapter_id
+                or child.conversation_id != parent.conversation_id
+                or child.grant_id is not None
+                or child.grant_revision is not None
+                or not isinstance(lease, AdmissionLease)
+                or self._issuer.lease_for(child) is not lease
+            ):
+                raise ValueError
+            self._require_active_invocation(parent)
+            self._require_active_invocation(child)
+        except Exception:
+            raise OwnerRouteProofError("owner dependency is not admitted") from None
 
     async def capture(self, invocation: InvocationView, lease: AdmissionLease) -> None:
         """Freeze a direct owner binding before the selected handler runs."""
@@ -98,6 +151,18 @@ class OwnerRouteProofAuthority:
         proof = self._proofs.get(getattr(invocation, "invocation_id", ""))
         if proof is None or proof.invocation is not invocation:
             raise OwnerRouteProofError("owner proof is missing")
+        if isinstance(proof, _OwnerDependencyProof):
+            self._require_dependency_views(proof.parent, invocation, proof.lease)
+            if self._issuer.lease_for(proof.parent) is not proof.parent_lease:
+                raise OwnerRouteProofError("owner parent lease changed")
+            principal_id = await self._principal(invocation)
+            self._require_dependency_views(proof.parent, invocation, proof.lease)
+            if (
+                principal_id != proof.principal_id
+                or self._issuer.lease_for(proof.parent) is not proof.parent_lease
+            ):
+                raise OwnerRouteProofError("owner dependency binding changed")
+            return principal_id
         self._require_exact_view(invocation, proof)
         principal_id = await self._principal(invocation)
         route = await self._route(invocation)

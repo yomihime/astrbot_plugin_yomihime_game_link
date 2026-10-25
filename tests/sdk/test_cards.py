@@ -173,6 +173,65 @@ assert not any(n == "PIL" or n.startswith(("PIL.", "presentation.", "core.", "as
                 decode_card(payload)
         self.assertEqual(validate_card(self.card()), self.card())
 
+    def test_collage_roundtrip_and_closed_resource_visibility(self):
+        image = cards.ResourceImage("library/570", alt="cover", required=False)
+        original = cards.Document(
+            "Library",
+            (
+                cards.WeightedCollage(
+                    (
+                        cards.CollageItem("570", 4, image, "Dota", "Game"),
+                        cards.CollageItem("1091500", 1, None, "Cyberpunk", "Game"),
+                    )
+                ),
+            ),
+        )
+        self.assertEqual(decode_card(encode_card(original)), original)
+        self.assertEqual(validate_card(original), original)
+        payload = encode_card(original)
+        node = payload["document"]["fields"]["blocks"][0]["fields"]["items"][0]
+        node["fields"]["image"]["fields"]["visibility"] = {
+            "$card_visibility": "private"
+        }
+        with self.assertRaises(ValueError):
+            decode_card(payload)
+
+    def test_collage_rejects_invalid_weights_keys_and_nested_position(self):
+        valid = cards.CollageItem("a", 1)
+        invalid = (
+            cards.WeightedCollage((valid, cards.CollageItem("a", 2))),
+            cards.WeightedCollage((cards.CollageItem("b", 0),)),
+            cards.WeightedCollage((cards.CollageItem("b", float("nan")),)),
+            cards.WeightedCollage((cards.CollageItem("b", float("inf")),)),
+        )
+        for node in invalid:
+            with self.subTest(node=node), self.assertRaises(ValueError):
+                validate_card(cards.Document("Library", (node,)))
+        with self.assertRaises(ValueError):
+            validate_card(
+                cards.Document(
+                    "Library", (cards.Section("x", (cards.WeightedCollage((valid,)),)),)
+                )
+            )
+
+    def test_collage_local_asset_count_does_not_raise_ordinary_limit(self):
+        image = cards.Asset("png", b"\x89PNG\r\n\x1a\nexample", required=False)
+        collage = cards.Document(
+            "Library",
+            (
+                cards.WeightedCollage(
+                    tuple(cards.CollageItem(str(i), 1, image) for i in range(200))
+                ),
+            ),
+        )
+        self.assertEqual(validate_card(collage), collage)
+        self.assertEqual(decode_card(encode_card(collage)), collage)
+        ordinary = cards.Document(
+            "Ordinary", tuple(cards.Image(image) for _ in range(33))
+        )
+        with self.assertRaises(ValueError):
+            validate_card(ordinary)
+
     def test_logo_reference_must_be_declared_static_resource(self):
         for value in ("https://example.test/logo.svg", "../logo.svg", "script.js"):
             with self.assertRaises(ValueError):

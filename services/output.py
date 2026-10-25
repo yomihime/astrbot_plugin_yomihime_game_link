@@ -14,6 +14,7 @@ from enum import Enum, StrEnum
 from typing import Any, Protocol, TypeAlias
 from uuid import uuid4
 
+from yomihime_game_link_sdk.cards import DenseCollage, WeightedCollage
 from yomihime_game_link_sdk.contexts import (
     InvocationOrigin,
     InvocationSubscriptionScope,
@@ -77,6 +78,7 @@ from ..core.ports import (
     SubscriptionStore,
 )
 from ..core.registry import Registry
+from .analysis import CommandAnalysisService
 from .identity import (
     InvocationPrincipalResolver,
     PrincipalResolutionDenied,
@@ -208,6 +210,9 @@ class OutputService:
         command_theme_settings=None,
         command_card_logo=None,
         command_sender=None,
+        command_preparer=None,
+        collage_scope_binder=None,
+        analysis_port=None,
         claim_lease: timedelta,
         send_timeout: float,
         now: Callable[[], datetime] | None = None,
@@ -232,10 +237,18 @@ class OutputService:
         if command_theme_settings is not None and not callable(command_theme_settings):
             raise TypeError("command theme settings must be a trusted reader")
         self._command_sender = command_sender
+        self._command_preparer = command_preparer
+        self._collage_scope_binder = collage_scope_binder
+        self._analysis = CommandAnalysisService(analysis_port)
         self._generated_png = None
+        self._collage_png = None
         if command_card_renderer is not None:
             if not callable(command_card_renderer) or not callable(command_sender):
                 raise TypeError("command images require a trusted command sender")
+        if command_preparer is not None and not callable(command_preparer):
+            raise TypeError("command preparer must be trusted")
+        if collage_scope_binder is not None and not callable(collage_scope_binder):
+            raise TypeError("collage scope binder must be trusted")
         self._limits = limits
         self._conversations = conversations
         self._message_port = message_port
@@ -335,6 +348,192 @@ class OutputService:
             raise ValueError("invocation capability is no longer declared")
         return capability
 
+    async def render_public_preview(self, invocation, result, *, current):
+        return await self._render_bounded_document(
+            invocation,
+            result,
+            current=current,
+            expected_origin=InvocationOrigin.WEB_PUBLIC,
+        )
+
+    async def render_job_document(self, invocation, document, *, current):
+        if invocation.origin is not InvocationOrigin.JOB:
+            raise ValueError("job rendering requires a current job run")
+        result = CapabilityResult(
+            result_id="durable-job-page",
+            status=ResultStatus.SUCCESS,
+            document=document,
+            privacy=document.privacy,
+        )
+        pages = await self._render_bounded_document(
+            invocation, result, current=current, expected_origin=InvocationOrigin.JOB
+        )
+        return tuple(("image/png", page) for page in pages)
+
+    async def _render_bounded_document(
+        self, invocation, result, *, current, expected_origin
+    ):
+        """Render bounded public web bytes inside the caller's live proof.
+
+        This path has no message target, send claim, personal finished cache,
+        or reusable grant pixels. Gateway retains ownership of the invocation.
+        """
+        from yomihime_game_link_sdk.cards import ResourceImage
+        from yomihime_game_link_sdk.storage import CacheVisibility
+
+        from ..presentation.command_card import CommandCardRenderer, CommandPresentation
+        from ..presentation.png_validation import PngValidationLimits, validate_png
+        from .collage_cache import (
+            collage_snapshots_current,
+            inspect_collage_resources,
+            load_finished_pages,
+            resolve_collage_resources,
+            store_finished_pages,
+        )
+
+        validate_contract(invocation)
+        validate_contract(result)
+        if (
+            not callable(current)
+            or invocation.origin is not expected_origin
+            or invocation.grant_id is not None
+            or (
+                expected_origin is InvocationOrigin.WEB_PUBLIC
+                and result.privacy is not Privacy.PUBLIC
+            )
+            or result.status not in (ResultStatus.SUCCESS, ResultStatus.PARTIAL_SUCCESS)
+            or result.document is None
+            or (
+                expected_origin is InvocationOrigin.WEB_PUBLIC
+                and result.document.privacy is not Privacy.PUBLIC
+            )
+            or result.document.card is None
+        ):
+            raise ValueError("public preview is unavailable")
+
+        async def check():
+            await current()
+            self._issuer.require(invocation)
+            self._admission.check(
+                self._issuer.lease_for(invocation)
+                if expected_origin is InvocationOrigin.JOB
+                else self._root_lease(invocation)
+            )
+            capability = self._require_current_module(invocation)
+            if expected_origin is InvocationOrigin.WEB_PUBLIC and (
+                not supports_public_read_only(capability)
+                or InvocationOrigin.WEB_PUBLIC not in capability.effective_origins
+            ):
+                raise ValueError("public preview is unavailable")
+
+        await check()
+        card = result.document.card
+        snapshots = None
+        scope = None
+        versions = ()
+        if len(card.blocks) == 1 and type(card.blocks[0]) in (
+            DenseCollage,
+            WeightedCollage,
+        ):
+            if self._collage_scope_binder is None:
+                raise ValueError("public preview is unavailable")
+            if any(
+                type(item.image) is ResourceImage
+                and item.image.visibility is not CacheVisibility.PUBLIC
+                for item in card.blocks[0].items
+            ):
+                raise ValueError("public preview is unavailable")
+            if type(card.blocks[0]) is DenseCollage:
+                from ..presentation.layout_dense import plan_dense
+
+                plan_dense(card.blocks[0])
+            scope = await self._collage_scope_binder(invocation)
+            await check()
+            card, versions, snapshots = await inspect_collage_resources(
+                card, scope, check
+            )
+            await check()
+        theme = {"core_theme": "warm_paper"}
+        if self._command_theme_settings is not None:
+            settings = await self._command_theme_settings(invocation.module_id)
+            await check()
+            theme = {
+                "core_theme": settings.core_theme,
+                "module_theme": settings.module_theme,
+            }
+        renderer = self._command_card_renderer or CommandCardRenderer()
+        cache_key = None
+        pages = None
+        if (
+            expected_origin is InvocationOrigin.JOB
+            and scope is not None
+            and snapshots is not None
+        ):
+            from ..presentation.layout_collage import LAYOUT_VERSION
+            from ..presentation.layout_dense import DENSE_LAYOUT_VERSION
+            from ..presentation.layout_renderer import apply_theme_selection
+
+            cache_key = "job-collage-v1-" + _fingerprint(
+                {
+                    "card": apply_theme_selection(card, **theme),
+                    "resources": versions,
+                    "layout": DENSE_LAYOUT_VERSION
+                    if type(card.blocks[0]) is DenseCollage
+                    else LAYOUT_VERSION,
+                }
+            )
+            pages = await load_finished_pages(scope, cache_key, check)
+            if pages is not None and not await collage_snapshots_current(
+                scope, snapshots, check
+            ):
+                raise ValueError("job source changed")
+        cache_hit = pages is not None
+        if not cache_hit:
+            if scope is not None and snapshots is not None:
+                card, resolved = await resolve_collage_resources(
+                    card,
+                    scope,
+                    check,
+                    snapshots=snapshots,
+                    may_cache_derivatives=True,
+                    derivative_visibility=CacheVisibility.PUBLIC,
+                )
+                if resolved != versions:
+                    cache_key = None
+                await check()
+            presentation = renderer(
+                replace(result.document, card=card),
+                audience=DisplayAudience.PRIVATE
+                if expected_origin is InvocationOrigin.JOB
+                else DisplayAudience.PUBLIC,
+                **theme,
+            )
+            if type(presentation) is not CommandPresentation:
+                raise ValueError("bounded rendering is unavailable")
+            pages = presentation.bitmaps or (
+                (presentation.bitmap,) if presentation.bitmap is not None else ()
+            )
+        if (
+            not pages
+            or len(pages) > 8
+            or sum(len(page.content) for page in pages) > 16_777_216
+        ):
+            raise ValueError("public preview exceeds image budget")
+        limits = PngValidationLimits(
+            max_bytes=4_194_304, max_pixels=(128 * 1024 * 1024) // 36
+        )
+        for page in pages:
+            validate_png(page, limits=limits, collage_profile=True)
+        await check()
+        if snapshots is not None and not await collage_snapshots_current(
+            scope, snapshots, check
+        ):
+            raise ValueError("public preview source changed")
+        if cache_key is not None and not cache_hit:
+            await store_finished_pages(scope, cache_key, pages, check)
+        await check()
+        return tuple(page.content for page in pages)
+
     def _root_lease(self, invocation: InvocationView) -> AdmissionLease:
         validate_contract(invocation)
         lease = self._issuer.lease_for(invocation)
@@ -367,6 +566,8 @@ class OutputService:
             context = image.get("context")
             if context is not None:
                 self._generated_png.release(context)
+            if image.get("collage") and not image.get("transferred"):
+                self._release_collage_image(image)
 
     async def _command_output(self, invocation, request, image) -> OutputResult:
         validate_contract(invocation)
@@ -381,13 +582,46 @@ class OutputService:
                     and invocation.grant_id is None
                     and capability.privacy_floor is not PrivacyFloor.OWNER
                 )
+                collage = self._is_collage(result)
+                from yomihime_game_link_sdk.display import ImageBlock
+
+                owned_image = (
+                    result.privacy is Privacy.PRIVATE
+                    and result.document is not None
+                    and result.document.card is None
+                    and invocation.grant_id is None
+                    and sum(
+                        type(block) is ImageBlock
+                        for block in result.document.ordered_blocks
+                    )
+                    == 1
+                )
                 await self._check_result_authority(invocation, capability, result)
                 target = await self._target(invocation, result.privacy)
+                if result.analysis_request is not None:
+
+                    async def analysis_current():
+                        await self._validate_command_current(invocation, result, target)
+
+                    result = await self._analysis.apply(
+                        invocation, target, result, current=analysis_current
+                    )
                 rendered = await self._render(
                     result,
                     invocation=invocation,
-                    image=image if public_command else None,
+                    target=target,
+                    image=image if (public_command or collage or owned_image) else None,
                 )
+                if image.get("collage"):
+                    try:
+                        await self._prepare_collage_image(
+                            invocation, result, target, rendered, image
+                        )
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        self._release_collage_image(image)
+                        image.clear()
                 self._admission.check(self._root_lease(invocation))
             except _OutputFailure as exc:
                 return await self._controlled(
@@ -409,7 +643,13 @@ class OutputService:
                     "result_id": result.result_id,
                     "route": target,
                     "payload": rendered,
-                    "image_digest": image["reference"].digest if image else None,
+                    "image_digest": (
+                        tuple(ref.digest for _, ref in image["pages"])
+                        if image.get("collage")
+                        else image["reference"].digest
+                        if image
+                        else None
+                    ),
                     "privacy": result.privacy,
                     "module_id": invocation.module_id,
                     "capability_id": invocation.capability_id,
@@ -524,6 +764,7 @@ class OutputService:
                         raise _OutputFailure("invocation_unavailable")
                     if grant_expiry is not None and grant_expiry <= self._utc_now():
                         raise _OutputFailure("grant_unavailable")
+                    state["grant_expiry"] = grant_expiry
                 except BaseException as exc:
                     code = (
                         exc.code
@@ -542,7 +783,26 @@ class OutputService:
                 if not isinstance(sending, RootOutputClaim):
                     raise RuntimeError("root send has no persisted SENDING claim")
                 try:
-                    if image:
+                    if image.get("collage"):
+                        prepared = image["prepared"]
+                        try:
+                            prepared.require(invocation, result, target)
+                            self._issuer.require(invocation)
+                            self._require_current_module(invocation)
+                            self._admission.check(lease)
+                            if sending.lease_expires_at <= self._utc_now():
+                                raise _OutputFailure("invocation_unavailable")
+                            grant_expiry = state.get("grant_expiry")
+                            if (
+                                isinstance(grant_expiry, datetime)
+                                and grant_expiry <= self._utc_now()
+                            ):
+                                raise _OutputFailure("grant_unavailable")
+                        except Exception:
+                            receipt = MessageReceipt(MessageStatus.FAILED)
+                        else:
+                            receipt = await prepared.dispatch()
+                    elif image:
                         audience = (
                             DisplayAudience.PRIVATE
                             if result.privacy is Privacy.PRIVATE
@@ -613,27 +873,47 @@ class OutputService:
                     )
                 return receipt
 
+            send_name = f"root-output:{invocation.module_id}:{invocation.invocation_id}"
+            observer_registered = False
+            if image.get("collage"):
+                observer = getattr(self._send_scheduler, "observe_completion", None)
+                if not callable(observer):
+                    self._release_collage_image(image)
+                    return await self._complete_controlled_claim(
+                        claim, "output_unavailable"
+                    )
+                observer(send_name, lambda _task: self._release_collage_image(image))
+                observer_registered = True
+
             try:
                 permit = await self._admission.approve_and_schedule_send(
                     lease,
-                    name=f"root-output:{invocation.module_id}",
+                    name=send_name,
                     final_check=final_check,
                     sender=send,
                     scheduler=self._send_scheduler,
                     abort_before_dispatch=abort_before_dispatch,
                 )
             except asyncio.CancelledError:
+                if observer_registered:
+                    self._send_scheduler.clear_completion_observer(send_name)
                 raise
             except AdmissionError:
+                if observer_registered:
+                    self._send_scheduler.clear_completion_observer(send_name)
                 return await self._complete_controlled_claim(
                     claim, "invocation_unavailable"
                 )
             except Exception:
+                if observer_registered:
+                    self._send_scheduler.clear_completion_observer(send_name)
                 failure = state.get("failure")
                 return _failure(
                     failure if isinstance(failure, str) else "output_unavailable"
                 )
             if permit is None:
+                if observer_registered:
+                    self._send_scheduler.clear_completion_observer(send_name)
                 value = state.get("result")
                 if isinstance(value, OutputResult):
                     return value
@@ -641,6 +921,8 @@ class OutputService:
                 if isinstance(failure, str):
                     return _failure(failure)
                 return OutputResult(OutputStatus.IN_PROGRESS, result=request)
+            if image.get("collage"):
+                image["transferred"] = True
             try:
                 return await asyncio.wait_for(
                     asyncio.shield(completed), timeout=self._send_timeout
@@ -657,9 +939,12 @@ class OutputService:
         invocation: InvocationView,
         result: CapabilityResult,
         expected_target: MessageTarget,
+        *,
+        _validated_result: bool = False,
     ) -> datetime | None:
         validate_contract(invocation)
-        validate_contract(result)
+        if not _validated_result:
+            validate_contract(result)
         try:
             self._issuer.require(invocation)
             capability = self._require_current_module(invocation)
@@ -668,7 +953,7 @@ class OutputService:
         if capability is None:
             raise _OutputFailure("invocation_unavailable")
         grant_expiry = await self._check_result_authority(
-            invocation, capability, result
+            invocation, capability, result, _validated_result=_validated_result
         )
         current_target = await self._target(invocation, result.privacy)
         if current_target != expected_target:
@@ -764,10 +1049,13 @@ class OutputService:
         invocation: InvocationView,
         capability: CapabilityDescriptor,
         result: CapabilityResult,
+        *,
+        _validated_result: bool = False,
     ) -> datetime | None:
         validate_contract(invocation)
         validate_contract(capability)
-        validate_contract(result)
+        if not _validated_result:
+            validate_contract(result)
         if not isinstance(result, CapabilityResult):
             raise _OutputFailure("invalid_result")
         owner_floor = capability.privacy_floor is PrivacyFloor.OWNER
@@ -845,17 +1133,166 @@ class OutputService:
             authorized=authorized,
         )
 
+    @staticmethod
+    def _is_collage(result: CapabilityResult) -> bool:
+        document = result.document
+        card = None if document is None else document.card
+        return (
+            card is not None
+            and len(card.blocks) == 1
+            and type(card.blocks[0]) in (WeightedCollage, DenseCollage)
+        )
+
+    def _release_collage_image(self, image: dict) -> None:
+        if not image.get("collage") or image.get("released"):
+            return
+        image["released"] = True
+        for pin in tuple(image.get("pins", ())):
+            try:
+                pin.release()
+            except Exception:
+                pass
+        coordinator = self._collage_png
+        if coordinator is not None:
+            for context, _ in tuple(image.get("pages", ())):
+                try:
+                    coordinator.release(context)
+                except Exception:
+                    pass
+
+    async def _prepare_collage_image(
+        self, invocation, result, target, rendered, image: dict
+    ) -> None:
+        if not image.get("collage"):
+            return
+        coordinator = self._collage_png
+        if coordinator is None or self._command_preparer is None:
+            raise RuntimeError("collage output is unavailable")
+        audience = (
+            DisplayAudience.PRIVATE
+            if result.privacy is Privacy.PRIVATE
+            else DisplayAudience.PUBLIC
+        )
+        contents = []
+        for context, reference in image["pages"]:
+            pin = await coordinator.acquire(
+                context,
+                reference,
+                invocation=invocation,
+                result=result,
+                expected_target=target,
+                audience=audience,
+            )
+            image["pins"].append(pin)
+            contents.append(await pin.read_once())
+
+        def image_current() -> None:
+            for pin in image["pins"]:
+                coordinator._lease(pin)
+
+        prepared = await self._command_preparer(
+            invocation,
+            result,
+            target,
+            RenderedMessage(rendered.text, png_pages=tuple(contents)),
+            image_current=image_current,
+        )
+        from .prepared_command import PreparedCommand
+
+        if type(prepared) is not PreparedCommand:
+            raise TypeError("command preparer returned an invalid result")
+        prepared.require(invocation, result, target)
+        image["prepared"] = prepared
+
+    async def _render_owned_png(
+        self, invocation, result, target, document, image, block
+    ):
+        """Explicit one-image private reply through the existing prepared sender."""
+        import struct
+
+        from yomihime_game_link_sdk.storage import CacheVisibility
+
+        from ..presentation.card_bitmap import RenderedBitmap
+        from ..presentation.command_card import CommandCardRenderer, CommandPresentation
+        from ..presentation.png_validation import PngValidationLimits, validate_png
+        from .generated_png import GeneratedPngCoordinator, GeneratedPngLimits
+
+        async def current():
+            await self._validate_command_current(
+                invocation, result, target, _validated_result=True
+            )
+            self._admission.check(self._root_lease(invocation))
+
+        await current()
+        scope = await self._collage_scope_binder(invocation)
+        await current()
+        metadata = await scope.resources.metadata(
+            block.asset_id, visibility=CacheVisibility.USER
+        )
+        await current()
+        if (
+            metadata is None
+            or metadata.scope.kind is not OwnershipKind.USER
+            or metadata.media_type != "image/png"
+            or not 24 <= metadata.size_bytes <= 4194304
+        ):
+            raise ValueError("owned PNG is unavailable")
+        content = await scope.resources.read(
+            block.asset_id, visibility=CacheVisibility.USER
+        )
+        await current()
+        if len(content) < 24:
+            raise ValueError("owned PNG is invalid")
+        width, height = struct.unpack(">II", content[16:24])
+        bitmap = RenderedBitmap(content, width, height)
+        validate_png(
+            bitmap,
+            limits=PngValidationLimits(
+                max_bytes=4194304, max_pixels=(128 * 1024 * 1024) // 36
+            ),
+            collage_profile=True,
+        )
+        await current()
+        renderer = self._command_card_renderer or CommandCardRenderer()
+        from yomihime_game_link_sdk.display import ImageBlock, TextBlock
+
+        text_blocks = tuple(
+            item for item in document.ordered_blocks if type(item) is not ImageBlock
+        )
+        text_document = replace(
+            document,
+            ordered_blocks=text_blocks or (TextBlock(block.alt_text or "图片"),),
+        )
+        text = renderer(text_document, audience=DisplayAudience.PRIVATE, image=False)
+        if type(text) is not CommandPresentation:
+            raise ValueError("owned PNG presentation is invalid")
+        if self._collage_png is None:
+            self._collage_png = GeneratedPngCoordinator(
+                output_authority=self,
+                limits=GeneratedPngLimits.collage(),
+                collage_profile=True,
+            )
+        context = await self._collage_png.bind(invocation, result)
+        image.update(collage=True, pages=[(context, None)], pins=[], released=False)
+        reference = await self._collage_png.register(context, bitmap)
+        image["pages"][0] = (context, reference)
+        await current()
+        return RenderedMessage(text.text)
+
     async def _render(
         self,
         result: CapabilityResult,
         *,
         invocation: InvocationView | None = None,
+        target: MessageTarget | None = None,
         image: dict | None = None,
     ) -> RenderedMessage:
         validate_contract(result)
         if result.status is ResultStatus.ERROR:
             # Use stable core error text, never module or exception strings.
             message = _ERROR_MESSAGES.get(result.error.code, "request failed")
+            if result.error.retry_after_seconds is not None:
+                message += f" 建议等待 {result.error.retry_after_seconds} 秒后重试。"
             return RenderedMessage(message)
         if result.document is None:
             raise _OutputFailure("invalid_result")
@@ -895,8 +1332,34 @@ class OutputService:
                 document = replace(document, title=heading[0], subject=heading[1])
                 validate_contract(document)
             if image is not None and self._command_card_renderer is not None:
+                from yomihime_game_link_sdk.display import ImageBlock
+
                 from ..presentation.command_card import CommandPresentation
                 from .generated_png import GeneratedPngCoordinator, GeneratedPngError
+
+                owned_images = tuple(
+                    block
+                    for block in document.ordered_blocks
+                    if type(block) is ImageBlock
+                )
+                if (
+                    len(owned_images) == 1
+                    and document.card is None
+                    and invocation is not None
+                    and target is not None
+                    and invocation.origin is InvocationOrigin.COMMAND
+                    and invocation.grant_id is None
+                    and result.privacy is Privacy.PRIVATE
+                    and self._collage_scope_binder is not None
+                ):
+                    return await self._render_owned_png(
+                        invocation, result, target, document, image, owned_images[0]
+                    )
+
+                if self._is_collage(result):
+                    return await self._render_collage(
+                        invocation, result, target, document, audience, image
+                    )
 
                 theme = {}
                 if document.card is not None and self._command_card_logo is not None:
@@ -962,6 +1425,186 @@ class OutputService:
         if type(output) is not DisplayOutput:
             raise _OutputFailure("display_render_failed")
         return RenderedMessage(output.text, output.resource_ids)
+
+    async def _render_collage(
+        self, invocation, result, target, document, audience, image
+    ) -> RenderedMessage:
+        """Select only the validated sole collage for the larger local profile."""
+        from ..presentation.card_bitmap import BitmapUnavailable
+        from ..presentation.command_card import (
+            TOO_LARGE,
+            CommandCardRenderer,
+            CommandPresentation,
+        )
+        from ..presentation.layout_collage import LAYOUT_VERSION
+        from ..presentation.layout_dense import DENSE_LAYOUT_VERSION, plan_dense
+        from ..presentation.layout_renderer import apply_theme_selection
+        from .collage_cache import (
+            CollageBudgetExceeded,
+            RequiredCollageResourceUnavailable,
+            collage_snapshots_current,
+            inspect_collage_resources,
+            load_finished_pages,
+            resolve_collage_resources,
+            store_finished_pages,
+        )
+        from .generated_png import (
+            GeneratedPngCoordinator,
+            GeneratedPngError,
+            GeneratedPngLimits,
+        )
+
+        text_presentation = self._command_card_renderer(
+            document, audience=audience, image=False
+        )
+        if type(text_presentation) is not CommandPresentation:
+            raise ValueError("invalid collage presentation")
+        if (
+            text_presentation.text == TOO_LARGE
+            and type(self._command_card_renderer) is CommandCardRenderer
+        ):
+            # A 200-row poster can exceed the ordinary 6,000-character/
+            # 200-line command budget. The existing projector still enforces
+            # its 24,000-character complete-content bound for this local case.
+            text_presentation = CommandCardRenderer(
+                max_text_chars=24_000,
+                max_text_lines=1_024,
+            )(document, audience=audience, image=False)
+        fallback = RenderedMessage(text_presentation.text)
+        # Keep the immutable declaration's structural validation outside the
+        # per-resource authority loop. Current permissions/routes are still
+        # checked at each storage boundary and immediately before sending.
+        validate_contract(result)
+        if (
+            invocation is None
+            or target is None
+            or self._collage_scope_binder is None
+            or self._command_preparer is None
+        ):
+            return fallback
+
+        async def current():
+            await self._validate_command_current(
+                invocation, result, target, _validated_result=True
+            )
+            self._admission.check(self._root_lease(invocation))
+
+        try:
+            scope = await self._collage_scope_binder(invocation)
+            await current()
+            card = document.card
+            if card.logo is None and self._command_card_logo is not None:
+                try:
+                    logo = await self._command_card_logo(invocation.module_id)
+                    await current()
+                    card = replace(card, logo=logo)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    return fallback
+            if type(card.blocks[0]) is DenseCollage:
+                # Admission geometry must precede even the initial source IO.
+                plan_dense(card.blocks[0])
+            card, versions, snapshots = await inspect_collage_resources(
+                card, scope, current
+            )
+            theme = {"core_theme": "warm_paper"}
+            if self._command_theme_settings is not None:
+                settings = await self._command_theme_settings(invocation.module_id)
+                await current()
+                theme = {
+                    "core_theme": settings.core_theme,
+                    "module_theme": settings.module_theme,
+                }
+            selected = apply_theme_selection(card, **theme)
+            cache_key = "collage-v2-" + _fingerprint(
+                {
+                    "layout": DENSE_LAYOUT_VERSION
+                    if type(card.blocks[0]) is DenseCollage
+                    else LAYOUT_VERSION,
+                    "card": selected,
+                    "resources": versions,
+                }
+            )
+            # Grant results can contain authorized facts even when their image
+            # references are public. Never persist such finished pixels in the
+            # user-wide partition; revoked grants must not leave reusable art.
+            may_cache_finished = invocation.grant_id is None
+            bitmaps = (
+                await load_finished_pages(scope, cache_key, current)
+                if may_cache_finished
+                else None
+            )
+            cache_hit = bitmaps is not None
+            if cache_hit and not await collage_snapshots_current(
+                scope, snapshots, current
+            ):
+                bitmaps = None
+                cache_hit = False
+                may_cache_finished = False
+            if not cache_hit:
+                if snapshots is not None:
+                    card, resolved_versions = await resolve_collage_resources(
+                        card,
+                        scope,
+                        current,
+                        snapshots=snapshots,
+                        may_cache_derivatives=may_cache_finished,
+                    )
+                    if resolved_versions != versions:
+                        may_cache_finished = False
+                presentation = self._command_card_renderer(
+                    replace(document, card=card), audience=audience, **theme
+                )
+                if type(presentation) is not CommandPresentation:
+                    raise ValueError("invalid collage presentation")
+                bitmaps = presentation.bitmaps
+            if not bitmaps or len(bitmaps) > 8:
+                return RenderedMessage(
+                    fallback.text
+                    + "\n拼图未能在输出预算内生成；请降低清晰度或数量，或选用较小倍率预设后重试。"
+                )
+            if sum(len(bitmap.content) for bitmap in bitmaps) > 16_777_216:
+                return fallback
+            if self._collage_png is None:
+                self._collage_png = GeneratedPngCoordinator(
+                    output_authority=self,
+                    limits=GeneratedPngLimits.collage(),
+                    collage_profile=True,
+                )
+            image.update(collage=True, pages=[], pins=[], released=False)
+            for bitmap in bitmaps:
+                context = await self._collage_png.bind(invocation, result)
+                image["pages"].append((context, None))
+                reference = await self._collage_png.register(context, bitmap)
+                image["pages"][-1] = (context, reference)
+            if not cache_hit and may_cache_finished:
+                await store_finished_pages(scope, cache_key, bitmaps, current)
+            return fallback
+        except asyncio.CancelledError:
+            self._release_collage_image(image)
+            raise
+        except RequiredCollageResourceUnavailable:
+            self._release_collage_image(image)
+            image.clear()
+            return fallback
+        except (CollageBudgetExceeded, BitmapUnavailable):
+            self._release_collage_image(image)
+            image.clear()
+            return RenderedMessage(
+                fallback.text
+                + "\n拼图超过页面或素材预算；请降低清晰度或数量，或选用较小倍率预设后重试。"
+            )
+        except GeneratedPngError as exc:
+            self._release_collage_image(image)
+            image.clear()
+            if exc.reason in ("image_invalid", "image_budget", "dependency_missing"):
+                return fallback
+            raise
+        except Exception:
+            self._release_collage_image(image)
+            image.clear()
+            raise
 
     async def _tool_result(
         self, invocation: InvocationView, source: CapabilityResult
@@ -1513,19 +2156,19 @@ async def _require_public_fact_resources(
 
 
 _ERROR_MESSAGES = {
-    ErrorCode.PARAMETER_ERROR: "invalid parameters",
-    ErrorCode.UNBOUND: "account binding required",
+    ErrorCode.PARAMETER_ERROR: "参数无效，请查看命令帮助。",
+    ErrorCode.UNBOUND: "尚未关联账号，请先私聊关联账号。",
     ErrorCode.AUTH_REQUIRED: "此来源需要授权。请联系管理员配置对应来源的凭据后重试；请勿在聊天中发送凭据。",
     ErrorCode.AUTH_EXPIRED: "此来源授权已失效。请联系管理员更新对应来源的凭据后重试；请勿在聊天中发送凭据。",
-    ErrorCode.NOT_FOUND: "not found",
-    ErrorCode.NOT_PUBLIC: "result is not public",
-    ErrorCode.NO_RECORDS: "no records found",
-    ErrorCode.UNPARSED: "result could not be interpreted",
-    ErrorCode.RATE_LIMITED: "request rate limited",
-    ErrorCode.UPSTREAM_ERROR: "source temporarily unavailable",
-    ErrorCode.MODULE_UNAVAILABLE: "module temporarily unavailable",
-    ErrorCode.UNSUPPORTED: "operation unsupported",
-    ErrorCode.UNKNOWN: "request failed",
+    ErrorCode.NOT_FOUND: "未找到请求的数据。",
+    ErrorCode.NOT_PUBLIC: "数据不可公开访问。",
+    ErrorCode.NO_RECORDS: "数据源暂无记录。",
+    ErrorCode.UNPARSED: "数据不完整或无法解析。",
+    ErrorCode.RATE_LIMITED: "请求过于频繁，请稍后重试。",
+    ErrorCode.UPSTREAM_ERROR: "上游服务暂时不可用。",
+    ErrorCode.MODULE_UNAVAILABLE: "模块或依赖服务暂时不可用。",
+    ErrorCode.UNSUPPORTED: "当前入口不支持此操作。",
+    ErrorCode.UNKNOWN: "请求未能完成。",
 }
 
 

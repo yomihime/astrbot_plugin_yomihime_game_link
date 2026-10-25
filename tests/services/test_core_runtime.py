@@ -761,6 +761,94 @@ class CoreRuntimeTests(unittest.IsolatedAsyncioTestCase):
             release.set()
             await runtime.close(timeout=0.5)
 
+    async def test_c3_declared_subscription_gate_initializes_without_bundled_trust_or_activation(
+        self,
+    ):
+        root = self.root / "extensions" / "private"
+        root.mkdir(parents=True)
+        manifest = _private_manifest()
+        module = manifest["modules"][0]
+        module["sources"] = [{"source_id": "source", "host": "example.test"}]
+        module["config_fields"] = [
+            {
+                "name": "subscription_enabled",
+                "default": True,
+                "value_schema": {"type": "boolean"},
+            },
+            {
+                "name": "poll_interval_seconds",
+                "default": 300,
+                "value_schema": {"type": "integer", "minimum": 60},
+            },
+        ]
+        module["schedules"] = [
+            {
+                "collector_id": "watch",
+                "key_version": 1,
+                "source_id": "source",
+                "data_version": 1,
+                "input_schema": {
+                    "type": "object",
+                    "properties": {},
+                    "required": [],
+                    "additionalProperties": False,
+                },
+                "shared_scope": "public",
+                "trigger": "periodic",
+                "minimum_interval_seconds": 60,
+                "default_interval_seconds": 300,
+                "interval_config_key": "poll_interval_seconds",
+            }
+        ]
+        module["subscriptions"] = [
+            {
+                "type_id": "watch",
+                "collector_id": "watch",
+                "matcher_id": "watch",
+                "filter_schema": {
+                    "type": "object",
+                    "properties": {},
+                    "required": [],
+                    "additionalProperties": False,
+                },
+                "notification_modes": ["instant"],
+                "enabled_config_key": "subscription_enabled",
+            }
+        ]
+        (root / "yomihime.manifest.json").write_text(
+            json.dumps(manifest), encoding="utf-8"
+        )
+        runtime = self._runtime(source=_FactorySource(_Factory(_Handler())))
+        try:
+            await runtime.start()
+            self.assertEqual(
+                runtime._declared_subscription_gate_specs,
+                {"private/mod": "subscription_enabled"},
+            )
+            self.assertEqual(dict(runtime._trusted_subscription_gates), {})
+            binding = runtime.b04_repositories.lifecycle._subscription_gate_bindings[
+                "private/mod"
+            ]
+            self.assertTrue(binding.declared)
+            state = await runtime.subscription_gate_state("private/mod")
+            self.assertTrue(state.supported)
+            self.assertFalse(state.can_run)
+            self.assertEqual(
+                self._gate_sql(
+                    runtime, "SELECT phase FROM subscription_gate_bootstrap"
+                ),
+                [("pending",)],
+            )
+            self.assertEqual(
+                self._gate_sql(
+                    runtime,
+                    "SELECT value_json FROM config_entries WHERE field='subscription_enabled'",
+                ),
+                [("true",)],
+            )
+        finally:
+            await runtime.close(timeout=0.5)
+
     def _gate_packages(self):
         extension_root = self.root / "extensions"
         extension_root.mkdir(exist_ok=True)
@@ -2199,16 +2287,20 @@ class CoreRuntimeTests(unittest.IsolatedAsyncioTestCase):
         request = asyncio.create_task(
             runtime.invoke_command("missing/module", "read", {}, ingress=ingress)
         )
-        await asyncio.wait_for(entered.wait(), timeout=1)
-        with self.assertRaises(CoreRuntimeCleanupPending) as caught:
-            await runtime.close(timeout=0.02)
-        self.assertEqual(caught.exception.component, "host_ingress")
-        release.set()
-        from yomihime_game_link_sdk.errors import InvalidInvocation
+        try:
+            await asyncio.wait_for(entered.wait(), timeout=1)
+            with self.assertRaises(CoreRuntimeCleanupPending) as caught:
+                await runtime.close(timeout=0.02)
+            self.assertEqual(caught.exception.component, "host_ingress")
+            release.set()
+            from yomihime_game_link_sdk.errors import InvalidInvocation
 
-        with self.assertRaises(InvalidInvocation):
-            await request
-        self.assertTrue(await runtime.close(timeout=0.5))
+            with self.assertRaises(InvalidInvocation):
+                await request
+        finally:
+            release.set()
+            await asyncio.gather(request, return_exceptions=True)
+            self.assertTrue(await runtime.close(timeout=0.5))
 
     async def test_close_quiesces_modules_before_pending_pump_drain(self) -> None:
         handler = _Handler()
@@ -2229,14 +2321,238 @@ class CoreRuntimeTests(unittest.IsolatedAsyncioTestCase):
         runtime._pump_task = asyncio.get_running_loop().create_task(
             runtime._pump_loop()
         )
-        await asyncio.wait_for(entered.wait(), timeout=1)
-        with self.assertRaises(CoreRuntimeCleanupPending) as caught:
-            await runtime.close(timeout=0.02)
-        self.assertEqual(caught.exception.component, "scheduler_pump")
-        self.assertFalse(runtime.closed)
-        self.assertIsNone(runtime.lifecycle.admission._open.get("private/mod"))
-        release.set()
-        self.assertTrue(await runtime.close(timeout=0.5))
+        try:
+            await asyncio.wait_for(entered.wait(), timeout=1)
+            with self.assertRaises(CoreRuntimeCleanupPending) as caught:
+                await runtime.close(timeout=0.02)
+            self.assertEqual(caught.exception.component, "scheduler_pump")
+            self.assertFalse(runtime.closed)
+            self.assertIsNone(runtime.lifecycle.admission._open.get("private/mod"))
+        finally:
+            release.set()
+            self.assertTrue(await runtime.close(timeout=0.5))
+
+    async def test_pending_durable_job_does_not_delay_module_shutdown_fence(self):
+        from ygl_test_subject.core.ports_jobs import JobError
+
+        from yomihime_game_link_sdk.jobs import JobRequest
+
+        class JobHandler:
+            def __init__(inner):
+                inner.entered, inner.release = asyncio.Event(), asyncio.Event()
+                inner.late_rejected = False
+
+            async def run(inner, invocation, parameters, control):
+                bound = await inner.services.scopes.bind(invocation)
+                await bound.cache.put("before-close", {"ok": True}, ttl_seconds=60)
+                inner.entered.set()
+                while not inner.release.is_set():
+                    try:
+                        await inner.release.wait()
+                    except asyncio.CancelledError:
+                        pass
+                try:
+                    await control.publish(({"late": True},))
+                except JobError:
+                    inner.late_rejected = True
+                return {}
+
+        handler = JobHandler()
+
+        class Instance(_Instance):
+            def handlers(inner):
+                return ModuleHandlers(
+                    {"private": inner._handler}, {}, {}, jobs={"wall": handler}
+                )
+
+        class Factory(_Factory):
+            async def create(inner, services):
+                handler.services = services
+                instance = Instance(inner.handler)
+                inner.instances.append(instance)
+                return instance
+
+        runtime = self._runtime(source=_FactorySource(Factory(_Handler())))
+        manifest = _private_manifest()
+        manifest["modules"][0]["jobs"] = [
+            {
+                "job_id": "wall",
+                "parameter_schema": {
+                    "type": "object",
+                    "properties": {},
+                    "required": [],
+                },
+                "timeout_seconds": 30,
+                "max_active_per_owner": 2,
+            }
+        ]
+        await self._activate_private(runtime, manifest=manifest)
+        ops = await runtime.jobs.for_dashboard(
+            subject="isolated-owner", module_id="private/mod", current=lambda: True
+        )
+        job = await ops.submit(JobRequest("wall", {}))
+        try:
+            await asyncio.wait_for(handler.entered.wait(), timeout=1)
+            with self.assertRaises(CoreRuntimeCleanupPending) as caught:
+                await runtime.close(timeout=0.02)
+            self.assertEqual(caught.exception.component, "durable_jobs")
+            self.assertIsNone(runtime.lifecycle.admission._open.get("private/mod"))
+            self.assertFalse(runtime.accepting)
+            self.assertFalse(runtime.closed)
+            self.assertTrue(runtime.jobs._busy_jobs())
+            self.assertFalse(runtime.admin_operations._accepting)
+            with self.assertRaises(JobError):
+                await ops.submit(JobRequest("wall", {}))
+            # The executor is retained while physical job work still owns it.
+            self.assertEqual(
+                await runtime.database.executor.run_read(
+                    lambda unit: unit.execute(
+                        "SELECT COUNT(*) FROM durable_job_results WHERE job_id=?",
+                        (job.job_id,),
+                    ).fetchone()[0]
+                ),
+                0,
+            )
+        finally:
+            handler.release.set()
+            self.assertTrue(await runtime.close(timeout=1))
+        self.assertTrue(handler.late_rejected)
+        self.assertFalse(runtime.jobs._busy_jobs())
+        self.assertEqual(runtime._command_message_port.calls, [])
+
+    async def test_close_deadline_keeps_owned_jobs_cleanup_while_real_SQL_is_locked(
+        self,
+    ):
+        def awaiting(task):
+            cursor, names = task.get_coro(), []
+            while cursor is not None:
+                code = getattr(cursor, "cr_code", None)
+                if code is not None:
+                    names.append(code.co_name)
+                cursor = getattr(cursor, "cr_await", None)
+            return names
+
+        async def until(predicate):
+            async with asyncio.timeout(1):
+                while not predicate():
+                    await asyncio.sleep(0.001)
+
+        runtime = self._runtime()
+        await runtime.start()
+        locker, observations = None, []
+        try:
+            await until(
+                lambda: "sleep" in awaiting(runtime._pump_task)
+                and "wait" in awaiting(runtime.jobs._driver)
+                and runtime.database.executor._outstanding == 0
+            )
+            locker = runtime.database.connect()
+            locker.execute("BEGIN IMMEDIATE")
+            runtime.jobs.notify_changed()
+            await until(
+                lambda: "expire" in awaiting(runtime.jobs._driver)
+                and runtime.database.executor._outstanding > 0
+            )
+            cleanup = None
+            for _attempt in range(2):
+                observation = asyncio.create_task(runtime.close(timeout=0.02))
+                observations.append(observation)
+                done, _pending = await asyncio.wait({observation}, timeout=0.15)
+                self.assertIn(
+                    observation,
+                    done,
+                    "Core deadline must return pending before external SQL lock is released",
+                )
+                with self.assertRaises(CoreRuntimeCleanupPending) as caught:
+                    observation.result()
+                self.assertEqual(caught.exception.component, "durable_jobs")
+                if cleanup is None:
+                    cleanup = runtime._jobs_cleanup_task
+                self.assertIs(runtime._jobs_cleanup_task, cleanup)
+                self.assertFalse(cleanup.done())
+                self.assertEqual(cleanup.cancelling(), 0)
+                self.assertEqual(runtime.database.executor.state, "OPEN")
+                self.assertGreater(runtime.database.executor._outstanding, 0)
+            observer = asyncio.create_task(runtime.close(timeout=1))
+            observations.append(observer)
+            await until(
+                lambda: "_close_with_lock" in awaiting(observer)
+                and "wait" in awaiting(observer)
+            )
+            observer.cancel()
+            done, _pending = await asyncio.wait({observer}, timeout=0.15)
+            self.assertIn(observer, done)
+            with self.assertRaises(asyncio.CancelledError):
+                observer.result()
+            self.assertIs(runtime._jobs_cleanup_task, cleanup)
+            self.assertEqual(cleanup.cancelling(), 0)
+            self.assertFalse(runtime.closed)
+        finally:
+            if locker is not None:
+                locker.rollback()
+                locker.close()
+            await asyncio.gather(*observations, return_exceptions=True)
+            self.assertTrue(await runtime.close(timeout=1))
+
+    async def test_late_jobs_cleanup_error_is_consumed_and_retry_can_recover(self):
+        runtime = self._runtime()
+        await runtime.start()
+        original = runtime.jobs.repository.recover
+        entered, release = asyncio.Event(), asyncio.Event()
+        calls = 0
+
+        async def fail_after_real_recovery(now):
+            nonlocal calls
+            await original(now)
+            calls += 1
+            if calls == 1:
+                entered.set()
+                await release.wait()
+                raise RuntimeError("synthetic post-SQL cleanup failure")
+
+        runtime.jobs.repository.recover = fail_after_real_recovery
+        try:
+            with self.assertRaises(CoreRuntimeCleanupPending) as caught:
+                await runtime.close(timeout=0.02)
+            self.assertEqual(caught.exception.component, "durable_jobs")
+            await asyncio.wait_for(entered.wait(), 1)
+            cleanup = runtime._jobs_cleanup_task
+            release.set()
+            done, _pending = await asyncio.wait({cleanup}, timeout=1)
+            self.assertIn(cleanup, done)
+            # asyncio.wait does not retrieve task exceptions. The Core callback
+            # must consume it even when the original close observer has left.
+            self.assertFalse(cleanup._log_traceback)
+            with self.assertRaises(CoreRuntimeCleanupPending) as caught:
+                await runtime.close(timeout=0.5)
+            self.assertEqual(caught.exception.component, "durable_jobs")
+            self.assertIsInstance(caught.exception.__cause__, RuntimeError)
+            self.assertIsNone(runtime._jobs_cleanup_task)
+            self.assertTrue(await runtime.close(timeout=0.5))
+            self.assertEqual(calls, 2)
+        finally:
+            release.set()
+            if not runtime.closed:
+                await runtime.close(timeout=1)
+
+    async def test_close_fences_jobs_before_waiting_for_close_lock(self):
+        runtime = self._runtime()
+        await runtime.start()
+        await runtime._close_lock.acquire()
+        closing = asyncio.create_task(runtime.close(timeout=0.02))
+        started = asyncio.Event()
+        asyncio.get_running_loop().call_soon(started.set)
+        try:
+            await started.wait()
+            self.assertTrue(runtime.jobs._closed)
+            self.assertFalse(runtime.jobs._close_recovered)
+            with self.assertRaises(CoreRuntimeCleanupPending) as caught:
+                await closing
+            self.assertEqual(caught.exception.component, "close_lock")
+        finally:
+            runtime._close_lock.release()
+            await asyncio.gather(closing, return_exceptions=True)
+            self.assertTrue(await runtime.close(timeout=0.5))
 
     async def test_close_keeps_worker_open_until_renderer_root_flight_quiets(self):
         handler = _Handler()
@@ -2258,21 +2574,20 @@ class CoreRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 ),
             )
         )
-        await asyncio.wait_for(entered.wait(), timeout=1)
-        with self.assertRaises(CoreRuntimeCleanupPending) as caught:
-            await runtime.close(timeout=0.02)
-        self.assertEqual(caught.exception.component, "host_ingress")
-        self.assertFalse(runtime.closed)
-        self.assertEqual(
-            (await runtime.admin_credential_repository.current()).generation, 1
-        )
-        release.set()
         try:
-            await request
-        except BaseException:
-            pass
+            await asyncio.wait_for(entered.wait(), timeout=1)
+            with self.assertRaises(CoreRuntimeCleanupPending) as caught:
+                await runtime.close(timeout=0.02)
+            self.assertEqual(caught.exception.component, "host_ingress")
+            self.assertFalse(runtime.closed)
+            self.assertEqual(
+                (await runtime.admin_credential_repository.current()).generation, 1
+            )
+        finally:
+            release.set()
+            await asyncio.gather(request, return_exceptions=True)
+            self.assertTrue(await runtime.close(timeout=0.5))
         self.assertFalse(runtime._host_flights)
-        self.assertTrue(await runtime.close(timeout=0.5))
 
     async def test_close_during_route_publication_is_rechecked(self):
         runtime = self._runtime(source=_FactorySource(_Factory(_Handler())))
@@ -2294,14 +2609,18 @@ class CoreRuntimeTests(unittest.IsolatedAsyncioTestCase):
             request = asyncio.create_task(
                 runtime.invoke_command("private/mod", "read", {}, ingress=_ingress())
             )
-            await asyncio.wait_for(entered.wait(), timeout=1)
-            with self.assertRaises(CoreRuntimeCleanupPending) as caught:
-                await runtime.close(timeout=0.02)
-            self.assertEqual(caught.exception.component, "host_ingress")
-            release.set()
-            with self.assertRaises(RuntimeError):
-                await request
-        self.assertTrue(await runtime.close(timeout=0.5))
+            try:
+                await asyncio.wait_for(entered.wait(), timeout=1)
+                with self.assertRaises(CoreRuntimeCleanupPending) as caught:
+                    await runtime.close(timeout=0.02)
+                self.assertEqual(caught.exception.component, "host_ingress")
+                release.set()
+                with self.assertRaises(RuntimeError):
+                    await request
+            finally:
+                release.set()
+                await asyncio.gather(request, return_exceptions=True)
+                self.assertTrue(await runtime.close(timeout=0.5))
 
     async def test_close_during_startup_keeps_executor_owned_until_retry(self):
         runtime = self._runtime()
@@ -2321,16 +2640,20 @@ class CoreRuntimeTests(unittest.IsolatedAsyncioTestCase):
             type(runtime.database.executor), "initialize", blocked_initialize
         ):
             startup = asyncio.create_task(runtime.start())
-            await asyncio.wait_for(entered.wait(), timeout=1)
-            with self.assertRaises(CoreRuntimeCleanupPending) as caught:
-                await runtime.close(timeout=0.02)
-            self.assertEqual(caught.exception.component, "startup")
-            self.assertFalse(runtime.closed)
-            release.set()
-            with self.assertRaises(asyncio.CancelledError):
-                await startup
+            try:
+                await asyncio.wait_for(entered.wait(), timeout=1)
+                with self.assertRaises(CoreRuntimeCleanupPending) as caught:
+                    await runtime.close(timeout=0.02)
+                self.assertEqual(caught.exception.component, "startup")
+                self.assertFalse(runtime.closed)
+                release.set()
+                with self.assertRaises(asyncio.CancelledError):
+                    await startup
+            finally:
+                release.set()
+                await asyncio.gather(startup, return_exceptions=True)
+                self.assertTrue(await runtime.close(timeout=0.5))
         self.assertFalse(runtime.accepting)
-        self.assertTrue(await runtime.close(timeout=0.5))
 
     async def test_close_timeout_also_bounds_wait_for_close_owner(self):
         runtime = self._runtime()
@@ -2349,11 +2672,14 @@ class CoreRuntimeTests(unittest.IsolatedAsyncioTestCase):
             runtime._close_lock.release()
         self.assertTrue(await runtime.close(timeout=0.5))
 
-    async def _activate_private(self, runtime: CoreRuntime) -> _AdminContext:
+    async def _activate_private(
+        self, runtime: CoreRuntime, *, manifest=None
+    ) -> _AdminContext:
         package_root = self.root / "extensions" / "private"
         package_root.mkdir(parents=True, exist_ok=True)
         (package_root / "yomihime.manifest.json").write_text(
-            json.dumps(_private_manifest()), encoding="utf-8"
+            json.dumps(_private_manifest() if manifest is None else manifest),
+            encoding="utf-8",
         )
         await runtime.start()
         self.assertEqual(

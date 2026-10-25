@@ -6,6 +6,7 @@ import json
 import os
 import time
 import unittest
+from dataclasses import replace
 from unittest.mock import patch
 
 from ygl_test_subject.core.contracts.administration import (
@@ -23,6 +24,19 @@ class ManagedCredentialPagesTests(unittest.IsolatedAsyncioTestCase):
     asyncSetUp = admin_fixture.AdminPagesTests.asyncSetUp
     asyncTearDown = admin_fixture.AdminPagesTests.asyncTearDown
     call = admin_fixture.AdminPagesTests.call
+
+    async def test_paired_optional_module_absent_does_not_break_builtin_selection(self):
+        operations = self.runtime.core_runtime.admin_operations
+        original = operations._managed_source_credentials
+        extra = replace(original[0], module_id="external/absent")
+        operations._managed_source_credentials = (*original, extra)
+        try:
+            self.assertNotIn(extra, operations._active_credential_policies())
+            _, selected = operations._credential_selections()
+            self.assertIn("ff14/ff14", selected)
+            self.assertNotIn("external/absent", selected)
+        finally:
+            operations._managed_source_credentials = original
 
     async def status(self):
         response = await self.call("credential-status", {})

@@ -31,11 +31,12 @@ from yomihime_game_link_sdk.declarations import (
 )
 from yomihime_game_link_sdk.display import DisplayLimits, DisplayRenderer, Privacy
 from yomihime_game_link_sdk.errors import AccessDenied, InvalidInvocation
-from yomihime_game_link_sdk.results import CapabilityResult
+from yomihime_game_link_sdk.results import CapabilityResult, ResultStatus
 from yomihime_game_link_sdk.services import CapabilityHealth, ConfigTarget
 from yomihime_game_link_sdk.storage import GrantReference
 from yomihime_game_link_sdk.subscriptions import ConversationKind, ConversationRef
 
+from ..core.admission import CapabilityUnavailable
 from ..core.context_issuer import ContextIssuer
 from ..core.contracts.administration import (
     AdminAuthorizationDenied,
@@ -47,7 +48,7 @@ from ..core.contracts.validation_boundary import validate_contract
 from ..core.health import HealthResolver
 from ..core.invocation import Gateway
 from ..core.lifecycle import LifecycleController
-from ..core.policy import tool_allowed
+from ..core.policy import supports_public_read_only, tool_allowed
 from ..core.ports import (
     AdmissionLease,
     PublicWebProofValidator,
@@ -343,6 +344,17 @@ class CoreInvocationOutcome:
     output: object
 
 
+class HostIngressUnavailable(RuntimeError):
+    """Known capability refusal before any handler or output dispatch began.
+
+    Only the admission call in trusted Host ingress creates this signal. It is
+    not a failure classification for arbitrary exceptions after dispatch.
+    """
+
+    def __init__(self):
+        super().__init__("module_unavailable")
+
+
 @dataclass(frozen=True, slots=True)
 class CoreRuntimeFailure:
     component: str
@@ -475,6 +487,7 @@ class CoreRuntime:
         identity_namespace: str,
         trusted_bundled_defaults: Mapping[str, tuple[str, ...]] | None = None,
         trusted_bundled_manifests: Mapping[str, ModuleManifest] | None = None,
+        trusted_external_timeout_manifests: Mapping[str, ModuleManifest] | None = None,
         trusted_subscription_gates: Mapping[str, TrustedSubscriptionGate] | None = None,
         module_host_config_snapshots: Mapping[str, Mapping[str, object]] | None = None,
         public_web_validator: PublicWebProofValidator | None = None,
@@ -483,6 +496,8 @@ class CoreRuntime:
         collector_timeouts: Mapping[tuple[str, str], float] | None = None,
         source_credential_policies: Sequence[SourceCredentialPolicy] = (),
         managed_source_credentials=(),
+        commentary_port=None,
+        analysis_port=None,
         factory_source: FactorySourcePort | None = None,
         source_health: Callable[[str, str], Awaitable[CapabilityHealth]] | None = None,
         utc_clock: Callable[[], datetime] = lambda: datetime.now(UTC),
@@ -509,6 +524,7 @@ class CoreRuntime:
         validate_contract(renderer)
         validate_contract(display_limits)
         validate_contract(trusted_bundled_manifests)
+        validate_contract(trusted_external_timeout_manifests)
         validate_contract(source_health)
         if not isinstance(database, SQLiteDatabase):
             database = SQLiteDatabase(database)
@@ -518,6 +534,15 @@ class CoreRuntime:
             raise ValueError("identity_namespace is required")
         bundled_defaults = _normalize_bundled_defaults(trusted_bundled_defaults)
         bundled_manifests = _normalize_bundled_manifests(trusted_bundled_manifests)
+        # External declarations validate reviewed timeout targets only. They
+        # never join bundled startup defaults, registration or web deployment.
+        external_timeout_manifests = _normalize_bundled_manifests(
+            trusted_external_timeout_manifests
+        )
+        if set(external_timeout_manifests).intersection(
+            set(bundled_manifests) | set(bundled_defaults)
+        ):
+            raise ValueError("external timeout owners overlap trusted bundled owners")
         from ..core.invocation_budget import (
             InvocationBudgetPolicy,
             freeze_execution_timeouts,
@@ -529,6 +554,13 @@ class CoreRuntime:
                 (owner, item.capability_id)
                 for owner, manifest in bundled_manifests.items()
                 for item in manifest.capabilities
+            }
+            | {
+                (owner, item.capability_id)
+                for owner, manifest in external_timeout_manifests.items()
+                for item in manifest.capabilities
+                if supports_public_read_only(item)
+                and InvocationOrigin.WEB_PUBLIC in item.effective_origins
             },
         )
         collector_timeouts = freeze_execution_timeouts(
@@ -595,6 +627,8 @@ class CoreRuntime:
         self._trusted_bundled_defaults = bundled_defaults
         self._trusted_bundled_manifests = bundled_manifests
         self._trusted_subscription_gates = subscription_gates
+        self._declared_subscription_gate_specs = {}
+        self._config_principal_id = config_principal_id
         self.module_storage = ModuleStorageRouter(Path(file_root).parent / "modules")
         self.file_store = LocalSafeFileStore(file_root)
         self.secret_store = SQLiteSecretStore(
@@ -726,6 +760,7 @@ class CoreRuntime:
         self._command_ingresses = {}
         self._command_message_port = message_port
         self.output = OutputService(
+            analysis_port=analysis_port,
             issuer=self.issuer,
             admission=self.lifecycle.admission,
             send_scheduler=self.send_scheduler,
@@ -740,6 +775,14 @@ class CoreRuntime:
                 if callable(getattr(message_port, "send_command", None))
                 else None
             ),
+            command_preparer=(
+                self._prepare_command_image
+                if callable(getattr(message_port, "prepare_command", None))
+                else None
+            ),
+            collage_scope_binder=lambda invocation: self.module_services.for_module(
+                invocation.module_id
+            ).scopes.bind(invocation),
             limits=display_limits,
             conversations=self._conversation_resolver,
             message_port=message_port,
@@ -754,7 +797,25 @@ class CoreRuntime:
             send_timeout=send_timeout,
             now=utc_clock,
         )
+        from .jobs import JobsService
+
+        self.jobs = JobsService(
+            database=database,
+            registry=self.registry,
+            issuer=self.issuer,
+            lifecycle=self.lifecycle,
+            identities=self.repositories.identities,
+            principal_resolver=self.principal_resolver,
+            identity_namespace=identity_namespace,
+            bind_services=lambda invocation: self.module_services.for_module(
+                invocation.module_id
+            ).scopes.bind(invocation),
+            resource_repository=self.repositories.resources,
+            render_document=self._render_job_document,
+        )
+        self.module_services.set_jobs(self.jobs)
         self.delivery = DeliveryService(
+            commentary_port=commentary_port,
             deliveries=self.b04_repositories.deliveries,
             subscriptions=self.b04_repositories.subscriptions,
             grants=self.repositories.authorization,
@@ -897,6 +958,7 @@ class CoreRuntime:
         self._closed = False
         self._cleanup_pending = False
         self._pump_task: asyncio.Task[None] | None = None
+        self._jobs_cleanup_task: asyncio.Task[bool] | None = None
         self._host_flights: set[asyncio.Task[object]] = set()
         self._pump_failures: tuple[CoreRuntimeFailure, ...] = ()
         self._startup_report: CoreStartupReport | None = None
@@ -1054,6 +1116,17 @@ class CoreRuntime:
         self.require_help_source_current(source)
         return card, settings.core_theme
 
+    async def _render_job_document(self, invocation, document):
+        async def current():
+            self.issuer.require(invocation)
+            if self._closing or not self._started:
+                raise InvalidInvocation()
+            self.lifecycle.admission.check(self.issuer.lease_for(invocation))
+
+        return await self.output.render_job_document(
+            invocation, document, current=current
+        )
+
     async def _command_card_logo(self, module_id):
         """Bind only the current manifest's declared, hash-verified static logo."""
         from yomihime_game_link_sdk.cards import Asset
@@ -1091,7 +1164,10 @@ class CoreRuntime:
 
     async def subscription_gate_state(self, module_id: str) -> SubscriptionGateState:
         """Read exact persistent eligibility and live state under the original gate."""
-        if module_id not in self._trusted_subscription_gates:
+        if (
+            module_id not in self._trusted_subscription_gates
+            and module_id not in self._declared_subscription_gate_specs
+        ):
             return SubscriptionGateState(False, None, None, "unsupported")
         try:
             async with self.lifecycle.admission.mutation("subscription-gate-read"):
@@ -1260,6 +1336,27 @@ class CoreRuntime:
             self._check_recovery(recovery_grant)
             if self._closing:
                 raise asyncio.CancelledError
+            declared_manifests = {}
+            package_counts = {}
+            for candidate in candidates:
+                package_counts[candidate.package.package_id] = (
+                    package_counts.get(candidate.package.package_id, 0) + 1
+                )
+            for candidate in candidates:
+                package = candidate.package
+                if (
+                    isinstance(package, DiscoveredPackage)
+                    and package.valid
+                    and package.manifest is not None
+                    and package_counts[package.package_id] == 1
+                ):
+                    declared_manifests.update(
+                        {
+                            f"{package.package_id}/{module.module_id}": module
+                            for module in package.manifest.modules
+                        }
+                    )
+            await self._register_declared_subscription_gates(declared_manifests)
             if self._subscription_gate_candidates_match(candidates):
                 await self.config_repository.initialize_subscription_gates()
             self._check_recovery(recovery_grant)
@@ -1314,6 +1411,7 @@ class CoreRuntime:
             )
             self._startup_report = report
             self._started = True
+            await self.jobs.start()
             if not self._closing:
                 self._accepting = True
                 self._pump_task = asyncio.get_running_loop().create_task(
@@ -1323,6 +1421,62 @@ class CoreRuntime:
         finally:
             self._starting = False
             self._startup_done.set()
+
+    async def _register_declared_subscription_gates(self, manifests) -> None:
+        """Bind validated self-pause declarations without granting module intent.
+
+        Independent once-only markers preserve original bootstrap and deleted-row
+        fail-closed behavior. Persisted desired_enabled is still required by every
+        collection/delivery fence; a declaration cannot activate its module.
+        """
+        for module_id, manifest in manifests.items():
+            if module_id in self._trusted_subscription_gates:
+                continue
+            keys = {
+                item.enabled_config_key
+                for item in manifest.subscriptions
+                if item.enabled_config_key is not None
+            }
+            if not keys:
+                continue
+            if len(keys) != 1 or any(
+                item.enabled_config_key is None for item in manifest.subscriptions
+            ):
+                continue
+            field = next(iter(keys))
+            if not _is_subscription_gate_field(manifest, field):
+                continue
+            if self._declared_subscription_gate_specs.get(module_id) == field:
+                continue
+            target = validate_contract(
+                ConfigTarget(self._config_principal_id, module_id)
+            )
+            async with self.lifecycle.admission.mutation(
+                "declared-subscription-gate-register"
+            ):
+                await self.config_repository.register_declared_subscription_gate(
+                    target, field
+                )
+                binding = SubscriptionGateBinding(
+                    target, field, *module_id.split("/", 1), declared=True
+                )
+                for repository in (
+                    self.b04_repositories.subscriptions,
+                    self.b04_repositories.jobs,
+                    self.b04_repositories.lifecycle,
+                    self.b04_repositories.scheduler,
+                    self.b04_repositories.windows,
+                    self.b04_repositories.deliveries,
+                ):
+                    bindings = dict(repository._subscription_gate_bindings)
+                    bindings[module_id] = binding
+                    repository._subscription_gate_bindings = MappingProxyType(bindings)
+                fields = dict(self.admin_operations._subscription_gate_fields)
+                fields[target] = (field,)
+                self.admin_operations._subscription_gate_fields = MappingProxyType(
+                    fields
+                )
+                self._declared_subscription_gate_specs[module_id] = field
 
     def _subscription_gate_candidates_match(
         self, candidates: tuple[ExtensionCandidate, ...]
@@ -1434,6 +1588,13 @@ class CoreRuntime:
     async def _pump_loop(self) -> None:
         while self._accepting:
             try:
+                await self._register_declared_subscription_gates(
+                    {
+                        module.module_id: module.manifest
+                        for module in self.registry.snapshot().modules.values()
+                        if module.enabled
+                    }
+                )
                 await self.scheduler.run_due_page()
                 await self.scheduler.create_digest_windows_page()
                 await self.delivery.dispatch_due_events()
@@ -1537,6 +1698,31 @@ class CoreRuntime:
             proof, module_id, capability_id, parameters
         )
 
+    async def preview_public_web(
+        self, module_id: str, capability_id: str, parameters: object, *, proof: object
+    ):
+        """Render public data while its original web invocation is still live."""
+        self._require_accepting_ingress()
+        pages = ()
+
+        async def consume(invocation, result, current):
+            nonlocal pages
+            if result.document is not None and result.document.card is not None:
+                pages = await self.output.render_public_preview(
+                    invocation, result, current=current
+                )
+            else:
+                # Empty and explanatory business documents are valid results.
+                # They still remain inside the original invocation fence.
+                await current()
+
+        result = await self.gateway.invoke_public_web(
+            proof, module_id, capability_id, parameters, _consume=consume
+        )
+        if result.status not in (ResultStatus.SUCCESS, ResultStatus.PARTIAL_SUCCESS):
+            pages = ()
+        return result, pages
+
     async def invoke_tool(
         self,
         module_id: str,
@@ -1636,7 +1822,10 @@ class CoreRuntime:
                 ),
             )
             try:
-                self.lifecycle.admission.admit(view, capability_id)
+                try:
+                    self.lifecycle.admission.admit(view, capability_id)
+                except CapabilityUnavailable:
+                    raise HostIngressUnavailable() from None
                 if origin is InvocationOrigin.LLM_TOOL:
                     self._host_ingress_authority.attach_message(
                         self.issuer, view, accepted_ingress
@@ -1673,7 +1862,12 @@ class CoreRuntime:
             finally:
                 self._command_ingresses.pop(view.invocation_id, None)
                 self.owner_authority.release(view)
-                self.issuer.release(view)
+                try:
+                    self.issuer.release(view)
+                except InvalidInvocation:
+                    # Revocation may already have retired this exact Host view.
+                    # Cleanup must preserve the controlled no-send outcome.
+                    pass
         finally:
             self._host_flights.discard(task)
 
@@ -1712,6 +1906,45 @@ class CoreRuntime:
             owned[1], target, payload, image_current=image_current
         )
 
+    async def _prepare_command_image(
+        self, invocation, result, target, payload, *, image_current
+    ):
+        """Prepare one exact Host chain while async authority checks are allowed."""
+        from .prepared_command import PreparedCommand
+
+        owned = self._command_ingresses.get(invocation.invocation_id)
+        if owned is None or owned[0] is not invocation:
+            raise PermissionError("command ingress is unavailable")
+        ingress = owned[1]
+        self._require_accepting_ingress()
+        self.issuer.require(invocation)
+        self.lifecycle.admission.check(self.output._root_lease(invocation))
+        await self._host_ingress(InvocationOrigin.COMMAND, ingress)
+        await self.output._validate_command_current(invocation, result, target)
+        self._require_accepting_ingress()
+        self.issuer.require(invocation)
+        self.lifecycle.admission.check(self.output._root_lease(invocation))
+        image_current()
+        if self._command_ingresses.get(invocation.invocation_id) is not owned:
+            raise PermissionError("command ingress changed")
+        host_prepared = self._command_message_port.prepare_command(
+            ingress, target, payload, image_current=image_current
+        )
+
+        def current() -> None:
+            if self._command_ingresses.get(invocation.invocation_id) is not owned:
+                raise PermissionError("command ingress changed")
+            self._require_accepting_ingress()
+            self.issuer.require(invocation)
+            self.lifecycle.admission.check(self.output._root_lease(invocation))
+            image_current()
+            host_prepared.check_current()
+
+        current()
+        return PreparedCommand(
+            invocation, result, target, current, host_prepared.dispatch
+        )
+
     @property
     def storage_migration_identity(self):
         return self._storage_runtime_id, self._storage_generation
@@ -1737,7 +1970,9 @@ class CoreRuntime:
                 or self._storage_lease is not None
             ):
                 raise RuntimeError("storage quiesce identity changed")
+            deadline = asyncio.get_running_loop().time() + float(bound)
             self._accepting = False
+            self.jobs.stop_accepting()
             self.gateway.fence_public_web()
             self.extension_runtime.stop_accepting()
             current = asyncio.current_task()
@@ -1759,6 +1994,7 @@ class CoreRuntime:
                 if others:
                     await asyncio.gather(*others, return_exceptions=True)
                 await self._quiesce_admission_gates()
+                await self._drain_durable_jobs(deadline)
                 await self.extension_runtime.close(timeout=float(bound))
                 await self.module_services.close_credentials()
                 await self.database.executor.quiesce_storage(timeout=float(bound))
@@ -1780,12 +2016,48 @@ class CoreRuntime:
                 self._storage_lease = None
                 self._storage_generation += 1
 
+    async def _drain_durable_jobs(self, deadline: float) -> None:
+        """Observe one owned cleanup before either path fences the executor."""
+        remaining = max(0.0, deadline - asyncio.get_running_loop().time())
+        if remaining <= 0:
+            self._cleanup_pending = True
+            raise CoreRuntimeCleanupPending("durable_jobs")
+        cleanup = self._jobs_cleanup_task
+        if cleanup is None:
+            cleanup = asyncio.create_task(self.jobs.close(), name="ygl:jobs-cleanup")
+            self._jobs_cleanup_task = cleanup
+
+            def completed(work):
+                if not work.cancelled():
+                    work.exception()
+
+            cleanup.add_done_callback(completed)
+        try:
+            _done, pending = await asyncio.wait({cleanup}, timeout=remaining)
+        except asyncio.CancelledError:
+            self._cleanup_pending = True
+            raise
+        if pending:
+            self._cleanup_pending = True
+            raise CoreRuntimeCleanupPending("durable_jobs")
+        try:
+            jobs_closed = cleanup.result()
+        except (Exception, asyncio.CancelledError) as exc:
+            self._jobs_cleanup_task = None
+            self._cleanup_pending = True
+            raise CoreRuntimeCleanupPending("durable_jobs") from exc
+        if not jobs_closed:
+            self._jobs_cleanup_task = None
+            self._cleanup_pending = True
+            raise CoreRuntimeCleanupPending("durable_jobs")
+
     async def close(self, *, timeout: float | None = None) -> bool:
         self._storage_generation += 1
         bound = self._cleanup_timeout if timeout is None else timeout
         _positive_finite(bound, "timeout")
         self.gateway.fence_public_web()  # Web-only synchronous fence before first await.
         self.admin_authorization.close()
+        self.jobs.stop_accepting()
         loop = asyncio.get_running_loop()
         deadline = loop.time() + float(bound)
         try:
@@ -1805,6 +2077,8 @@ class CoreRuntime:
         self._accepting = False
         if self.output._generated_png is not None:
             self.output._generated_png.close()
+        if self.output._collage_png is not None:
+            self.output._collage_png.close()
         # Fence pending durable activation before close can suspend on the
         # shared Admission mutation gate.
         self.extension_runtime.stop_accepting()
@@ -1887,6 +2161,10 @@ class CoreRuntime:
         ):
             self._cleanup_pending = True
             raise CoreRuntimeCleanupPending("admin_operations")
+
+        # Physical job cleanup can wait on resistant work/SQLite. Existing
+        # ingress, pump and Admission fences must already be closed first.
+        await self._drain_durable_jobs(deadline)
 
         remaining = max(0.0, deadline - loop.time())
         if remaining <= 0:

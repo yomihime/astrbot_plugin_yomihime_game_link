@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import inspect
 import secrets
 from collections.abc import Callable, Mapping
+from dataclasses import replace
 from datetime import UTC, datetime
 from math import isfinite
 from typing import Protocol
@@ -18,6 +20,7 @@ from yomihime_game_link_sdk.subscriptions import (
     CollectionKey,
     ConversationKind,
     ConversationRef,
+    EvaluationEvent,
     EvaluationState,
     NormalizedInput,
     Observation,
@@ -564,6 +567,7 @@ class SubscriptionOperationsService(SubscriptionOperations):
             SubscriptionStatus.ACTIVE,
             request.type_id,
             request.digest_schedule,
+            request.creation_key,
         )
         association = SubscriptionJobAssociation(
             subscription_id,
@@ -604,7 +608,7 @@ class SubscriptionOperationsService(SubscriptionOperations):
             owner_id, limit=self._max_subscriptions + 1
         )
         self._check_command_current(view)
-        if len(current) >= self._max_subscriptions:
+        if len(current) >= self._max_subscriptions and request.creation_key is None:
             raise SubscriptionOperationError("subscription limit reached")
         record, association = await self._build_record(
             view,
@@ -624,6 +628,33 @@ class SubscriptionOperationsService(SubscriptionOperations):
                 owner_id, limit=self._max_subscriptions + 1
             )
             self._check_command_current(view)
+            if record.creation_key is not None:
+                duplicate = next(
+                    (
+                        item
+                        for item in current
+                        if (
+                            item.status is SubscriptionStatus.ACTIVE
+                            and item.module_id == record.module_id
+                            and item.owner_id == record.owner_id
+                            and item.recipient == record.recipient
+                            and item.type_id == record.type_id
+                            and item.collection_key == record.collection_key
+                            and item.creation_key == record.creation_key
+                        )
+                    ),
+                    None,
+                )
+                if duplicate is not None:
+                    await self._require_record_grant(duplicate)
+                    self._check_command_current(view)
+                    if (
+                        await self._recipient(view, duplicate.collection_key.scope.kind)
+                        != duplicate.recipient
+                    ):
+                        raise PrivateRecipientRequired()
+                    self._check_command_current(view)
+                    return self._view(duplicate)
             if len(current) >= self._max_subscriptions:
                 raise SubscriptionOperationError("subscription limit reached")
             await self._require_record_grant(record)
@@ -687,6 +718,15 @@ class SubscriptionOperationsService(SubscriptionOperations):
         if not self._owns(view, current, principal_id, owner_floor=owner_floor):
             raise SubscriptionOperationError()
         assert current is not None
+        if not owner_floor:
+            if (
+                await self._recipient(view, current.collection_key.scope.kind)
+                != current.recipient
+            ):
+                if current.grant is not None:
+                    raise PrivateRecipientRequired()
+                raise SubscriptionOperationError("subscription route changed")
+            self._check_command_current(view)
         await self._require_record_grant(current)
         self._check_command_current(view)
         if current.grant is not None:
@@ -700,6 +740,8 @@ class SubscriptionOperationsService(SubscriptionOperations):
         self._check_command_current(view)
         if link is None or link.subscription_revision != current.revision:
             raise SubscriptionOperationError("subscription job is unavailable")
+        if request.creation_key is None and current.creation_key is not None:
+            request = replace(request, creation_key=current.creation_key)
         record, association = await self._build_record(
             view,
             module,
@@ -817,7 +859,38 @@ class SubscriptionOperationsService(SubscriptionOperations):
                 self._check_command_current(view)
             except SubscriptionOperationError:
                 continue
-            output.append(self._view(record))
+            checkpoint = await self._scheduler.current_checkpoint(
+                record.subscription_id, record.collection_key
+            )
+            self._check_command_current(view)
+            state = None
+            if checkpoint is not None:
+                fence = await self._lifecycle.current_fence(view.module_id)
+                self._check_command_current(view)
+                latest = await self._subscriptions.current(record.subscription_id)
+                self._check_command_current(view)
+                if latest != record:
+                    continue
+                await self._require_record_grant(record)
+                self._check_command_current(view)
+                if (
+                    checkpoint.fence == fence
+                    and checkpoint.snapshot.subscription == record
+                ):
+                    state = checkpoint.snapshot.state
+            if await self._principal_id(view) != record.owner_id:
+                raise SubscriptionOperationError("identity changed")
+            self._check_command_current(view)
+            if (
+                not owner_floor
+                and await self._recipient(view, record.collection_key.scope.kind)
+                != record.recipient
+            ):
+                continue
+            self._check_command_current(view)
+            output.append(
+                validate_contract(replace(self._view(record), evaluation_state=state))
+            )
         self._check_command_current(view)
         if owner_floor:
             await self._owner_proof_current(view)
@@ -903,6 +976,7 @@ class SubscriptionOperationsService(SubscriptionOperations):
             SubscriptionStatus.CANCELLED,
             current.type_id,
             current.digest_schedule,
+            current.creation_key,
         )
         async with self._admission.mutation(f"subscription:cancel:{view.module_id}"):
             self._check_command_current(view)
@@ -914,6 +988,15 @@ class SubscriptionOperationsService(SubscriptionOperations):
             if not self._owns(view, latest, principal_id, owner_floor=owner_floor):
                 raise SubscriptionOperationError()
             assert latest is not None
+            if not owner_floor:
+                if (
+                    await self._recipient(view, latest.collection_key.scope.kind)
+                    != latest.recipient
+                ):
+                    if latest.grant is not None:
+                        raise PrivateRecipientRequired()
+                    raise SubscriptionOperationError("subscription route changed")
+                self._check_command_current(view)
             if latest != current:
                 raise SubscriptionOperationError("subscription changed")
             if latest.revision != expected_revision:
@@ -1060,29 +1143,45 @@ class SubscriptionOperationsService(SubscriptionOperations):
             )
             events: tuple[DeliveryEvent, ...] = ()
             digest_members: tuple[DigestMemberAssociation, ...] = ()
+            selected_events = decision.events
             if decision.triggered:
-                assert decision.event_key is not None
-                assert decision.event_version is not None
-                assert decision.display_data is not None
+                selected_events = (
+                    EvaluationEvent(
+                        decision.event_key,
+                        decision.event_version,
+                        decision.display_data,
+                    ),
+                )
+            for selected in selected_events:
+                if selected.public_contribution is not None:
+                    composer = module.handlers.event_composers.get(
+                        selected.public_contribution.composer_id
+                    )
+                    if composer is None or record.notification_mode != "instant":
+                        raise SubscriptionOperationError(
+                            "public event composer is unavailable"
+                        )
                 event = DeliveryEvent(
-                    decision.event_key,
-                    decision.event_version,
+                    selected.event_key,
+                    selected.event_version,
                     record.subscription_id,
                     record.revision,
                     record.owner_id,
                     record.grant,
                     record.recipient,
-                    decision.display_data,
+                    selected.display_data,
                     delivery_idempotency_key(
-                        decision.event_key,
-                        decision.event_version,
+                        selected.event_key,
+                        selected.event_version,
                         record.subscription_id,
                         record.revision,
                         record.recipient,
                     ),
                     DeliveryState.PENDING,
+                    public_contribution=selected.public_contribution,
+                    commentary=selected.commentary,
                 )
-                events = (event,)
+                events = (*events, event)
                 if record.notification_mode == "digest":
                     if record.digest_schedule is None:
                         raise SubscriptionOperationError(
@@ -1111,6 +1210,7 @@ class SubscriptionOperationsService(SubscriptionOperations):
                         )
                     )
                     digest_members = (
+                        *digest_members,
                         DigestMemberAssociation(
                             window.window_id, record.recipient, member, event
                         ),
@@ -1129,7 +1229,161 @@ class SubscriptionOperationsService(SubscriptionOperations):
                     digest_members,
                 )
             )
+        commits = await self._project_public_members(
+            lease, observation, module, commits
+        )
         return ObservationEvaluationCommit(observation, tuple(commits))
+
+    async def _project_public_members(self, lease, observation, module, commits):
+        """Re-evaluate only current members of the already public event's target."""
+        projectors = module.handlers.event_projectors
+        if not projectors or observation.key.scope.kind is not OwnershipKind.PUBLIC:
+            return commits
+        reader = getattr(self._scheduler, "public_event_candidates", None)
+        if not callable(reader):
+            raise SubscriptionOperationError("public event projection unavailable")
+        prepared = {item.subscription_id: item for item in commits}
+        # Only ordinary evaluator events seed projection. Never recursively fan out.
+        for seed in tuple(commits):
+            source = await self._subscriptions.current(seed.subscription_id)
+            await self._require_execution_fence(lease)
+            if source is None or source.revision != seed.subscription_revision:
+                raise SubscriptionOperationError("public event source changed")
+            for event in seed.delivery_events:
+                contribution = event.public_contribution
+                if contribution is None:
+                    continue
+                projector = projectors.get(contribution.composer_id)
+                if projector is None:
+                    continue
+                candidates = await reader(source)
+                await self._require_execution_fence(lease)
+                for record in candidates:
+                    if (
+                        record.module_id != source.module_id
+                        or record.type_id != source.type_id
+                        or record.recipient != source.recipient
+                        or record.grant is not None
+                        or record.status is not SubscriptionStatus.ACTIVE
+                        or record.notification_mode != "instant"
+                        or record.collection_key.scope.kind is not OwnershipKind.PUBLIC
+                        or record.collection_key.source_id
+                        != source.collection_key.source_id
+                        or record.collection_key.collector_id
+                        != source.collection_key.collector_id
+                        or record.collection_key.key_version
+                        != source.collection_key.key_version
+                    ):
+                        continue
+                    checkpoint = await self._scheduler.current_checkpoint(
+                        record.subscription_id, record.collection_key
+                    )
+                    await self._require_execution_fence(lease)
+                    if (
+                        checkpoint is None
+                        or checkpoint.fence != lease.subscription_fence
+                        or checkpoint.snapshot.subscription != record
+                    ):
+                        # Projection must not establish a new subscriber's baseline.
+                        continue
+                    prior = prepared.get(record.subscription_id)
+                    state = (
+                        prior.state if prior is not None else checkpoint.snapshot.state
+                    )
+                    view = replace(self._view(record), evaluation_state=state)
+                    decision = projector.project(
+                        view, contribution, observed_at=observation.collected_at
+                    )
+                    if inspect.isawaitable(decision):
+                        if inspect.iscoroutine(decision):
+                            decision.close()
+                        raise SubscriptionOperationError(
+                            "public event projector must be synchronous"
+                        )
+                    if decision is None:
+                        continue
+                    decision = validate_evaluation_decision(view, observation, decision)
+                    if decision.triggered:
+                        raise SubscriptionOperationError(
+                            "projected event requires public contributions"
+                        )
+                    events = list(prior.delivery_events if prior is not None else ())
+                    for selected in decision.events:
+                        if (
+                            selected.event_key != event.event_key
+                            or selected.public_contribution is None
+                            or selected.public_contribution.composer_id
+                            != contribution.composer_id
+                        ):
+                            raise SubscriptionOperationError(
+                                "public event projection widened its identity"
+                            )
+                        projected = DeliveryEvent(
+                            selected.event_key,
+                            selected.event_version,
+                            record.subscription_id,
+                            record.revision,
+                            record.owner_id,
+                            None,
+                            record.recipient,
+                            selected.display_data,
+                            delivery_idempotency_key(
+                                selected.event_key,
+                                selected.event_version,
+                                record.subscription_id,
+                                record.revision,
+                                record.recipient,
+                            ),
+                            DeliveryState.PENDING,
+                            public_contribution=selected.public_contribution,
+                            commentary=selected.commentary,
+                        )
+                        if not any(
+                            (old.event_key, old.event_version)
+                            == (projected.event_key, projected.event_version)
+                            for old in events
+                        ):
+                            events.append(projected)
+                    expected = (
+                        prior.expected_state_revision
+                        if prior is not None
+                        else checkpoint.expected_state_revision
+                    )
+                    projected_observation = Observation(
+                        hashlib.sha256(
+                            f"{observation.observation_id}:{record.subscription_id}:{record.revision}".encode()
+                        ).hexdigest(),
+                        record.collection_key,
+                        observation.data_version,
+                        observation.source_observed_at,
+                        observation.collected_at,
+                        ObservationCompleteness.PARTIAL,
+                        tuple(dict.fromkeys(e.event_key for e in events)),
+                        {
+                            "source_observation_id": observation.observation_id,
+                            "subscription_id": record.subscription_id,
+                            "kind": "public_event_projection",
+                        },
+                    )
+                    prepared[record.subscription_id] = SubscriptionEvaluationCommit(
+                        record.subscription_id,
+                        record.revision,
+                        expected,
+                        EvaluationState(
+                            1 if expected is None else expected + 1, decision.state
+                        ),
+                        ObservationCursor(
+                            projected_observation.observation_id,
+                            projected_observation.data_version,
+                            projected_observation.completeness,
+                            projected_observation.covered_ids,
+                        ),
+                        tuple(events),
+                        prior.digest_members if prior is not None else (),
+                        projected_observation,
+                    )
+                    await self._require_execution_fence(lease)
+        return list(prepared.values())
 
     async def _require_execution_fence(self, lease: ExecutionLease) -> None:
         if lease.subscription_fence is None or not await self._scheduler.is_current(

@@ -25,19 +25,50 @@ test('explicit skip focuses without implicit scroll then reveals the main start'
  skipToMain(null);assert.equal(calls.length,0);skipToMain(main);
  assert.deepEqual(calls,[['focus',{preventScroll:true}],['scroll',{block:'start',inline:'nearest',behavior:'instant'}]]);dom.window.close();
 });
-function harness({data=catalog(),loader,initialContext,readyTask,expectedPage='00-game-link',assetEvent=()=> 'load',hash='#/module/ff14%2Fff14/items'}={}) {
+function harness({data=catalog(),loader,initialContext,readyTask,sessionHandler,expectedPage='00-game-link',assetEvent=()=> 'load',hash='#/module/ff14%2Fff14/items'}={}) {
   const dom=new JSDOM('<template id="module-style-assets"></template><div id="container"></div>',{url:'http://localhost/'+hash}),window=dom.window,container=window.document.getElementById('container');
   for(const module of data.modules || []) for(const page of module.pages) for(const path of page.styles) {const link=window.document.createElement('link');link.rel='stylesheet';link.dataset.resource=path;link.setAttribute('href','./'+path+'?fixture-authorized');window.document.getElementById('module-style-assets').content.append(link);}
   const styleRequests=[],imports=[],append=window.document.head.append.bind(window.document.head);
   window.document.head.append=(...nodes)=>{append(...nodes);for(const node of nodes)if(node.matches?.('link[data-module-style]')){styleRequests.push(node);const event=assetEvent(node);if(event)queueMicrotask(()=>node.dispatchEvent(new window.Event(event)));}};
-  const gets=[],posts=[],mounts=[]; let callback;
+  const gets=[],posts=[],mounts=[],pageSessions=[]; let callback;
   window.scrollTo=()=>{};
   const context={pluginName:'astrbot_plugin_yomihime_game_link',pageName:'00-game-link',binding:1,isDark:false,locale:'zh-CN'};
-  const bridge={ready:()=>readyTask?.promise || Promise.resolve(initialContext === undefined ? context : initialContext),onContext(fn){callback=fn;return()=>{callback=null;};},apiGet(path){const p=deferred();gets.push({path,...p});return p.promise;},apiPost(path,body){if(path==='admin/module-page-session')return Promise.resolve({page_session:'synthetic-proof',expires_at:Date.now()/1000+30});if(path==='admin/module-page-session-close')return Promise.resolve({closed:true});const p=deferred();posts.push({path,body,...p});return p.promise;}};
+  const bridge={ready:()=>readyTask?.promise || Promise.resolve(initialContext === undefined ? context : initialContext),onContext(fn){callback=fn;return()=>{callback=null;};},apiGet(path){const p=deferred();gets.push({path,...p});return p.promise;},apiPost(path,body){if(path==='admin/module-page-session'){pageSessions.push({path,body});return sessionHandler?sessionHandler(body):Promise.resolve({page_session:'synthetic-proof',expires_at:Date.now()/1000+30});}if(path==='admin/module-page-session-close'){pageSessions.push({path,body});return Promise.resolve({closed:true});}const p=deferred();posts.push({path,body,...p});return p.promise;}};
   const loadPage=loader||(async(entry)=>({mount(view,options){const input=window.document.createElement('input');input.value='draft';view.append(input);const mount={view,input,options,updates:[],disposed:0};mounts.push(mount);return{update(context){mount.updates.push(context);},dispose(){mount.disposed++;view.replaceChildren();}};}}));
   const shell=createShell({bridge,container,window,expectedPage,loadPage:entry=>{imports.push(entry);return loadPage(entry);},changed(){},timeoutMs:100}); shell.start();
-  return {shell,dom,container,gets,posts,mounts,styleRequests,imports,context,emit:c=>callback?.(c),async start(){await flush();gets[0].resolve(data);await flush();},close(){shell.dispose();dom.window.close();}};
+  return {shell,dom,container,gets,posts,mounts,pageSessions,styleRequests,imports,context,emit:c=>callback?.(c),async start(){await flush();gets[0].resolve(data);await flush();},close(){shell.dispose();dom.window.close();}};
 }
+for(const outcome of ['resolve','reject'])test(`late ${outcome} of a disposed home bootstrap preserves the same owner's current settings`,async()=>{
+ const data=catalog('steam_dlc/cs2'),module=data.modules[0],late=deferred();
+ module.pages=module.pages.map((page,index)=>({...page,route_id:index?'settings':'home',role:index?'config':'home',capability_id:index?null:'status'}));
+ const h=harness({data,hash:'#/module/steam_dlc%2Fcs2/home',sessionHandler:body=>body.page==='home'?late.promise:Promise.resolve({page_session:'settings-proof',expires_at:Date.now()/1000+30})});
+ try{
+  await h.start();assert.equal(h.mounts.length,0);assert.equal(h.pageSessions.length,1);
+  h.shell.selectSettings('steam_dlc/cs2');await flush();const settings=h.mounts[0];
+  assert.ok(settings);assert.equal(settings.options.routeId,'settings');const message=h.shell.state.message;
+  settings.input.focus();settings.input.setSelectionRange(1,3);
+  if(outcome==='resolve')late.resolve({page_session:'late-home-proof',expires_at:Date.now()/1000+30});else late.reject(Error('admin_authorization_denied'));
+  await flush();
+  assert.equal(h.shell.state.mounted,true);assert.equal(h.mounts.length,1);assert.equal(settings.disposed,0);
+  assert.equal(h.container.firstElementChild,settings.view);assert.equal(settings.options.scope.isCurrent(),true);
+  assert.equal(h.shell.state.message,message);assert.equal(h.dom.window.document.activeElement,settings.input);assert.equal(settings.input.selectionStart,1);
+  assert.deepEqual(h.pageSessions.filter(call=>call.path==='admin/module-page-session-close').map(call=>call.body.page_session),outcome==='resolve'?['late-home-proof']:[]);
+  const current=settings.options.services.config.current();await flush();assert.equal(h.posts.at(-1).body.page_session,'settings-proof');
+  h.posts.at(-1).resolve({revision:1,fields:{}});assert.deepEqual(await current,{revision:1,fields:{}});
+ }finally{h.close();}
+});
+test('a current bootstrap rejection still retires its owner without a query or automatic retry',async()=>{
+ const data=catalog('steam_dlc/cs2'),module=data.modules[0],opening=deferred();
+ module.pages=module.pages.map((page,index)=>({...page,route_id:index?'settings':'home',role:index?'config':'home',capability_id:index?null:'status'}));
+ const h=harness({data,hash:'#/module/steam_dlc%2Fcs2/home',sessionHandler:()=>opening.promise});
+ try{
+  await h.start();assert.equal(h.pageSessions.length,1);opening.reject({status:403});await flush();
+  assert.equal(h.shell.state.mounted,false);assert.equal(h.mounts.length,0);assert.equal(h.container.children.length,0);
+  assert.match(h.shell.state.message,/宿主插件详情重新打开/);assert.equal(h.posts.length,0);
+  h.shell.selectSettings('steam_dlc/cs2');await flush();
+  assert.equal(h.pageSessions.length,1);assert.equal(h.imports.length,1);assert.equal(h.shell.state.mounted,false);
+ }finally{h.close();}
+});
 test('catalog rejects traversal undeclared assets inactive pages and duplicates; second module is data-only',()=>{
   const second=catalog('micro/demo');assert.equal(validateCatalog(second).modules[0].pages.length,2);
   for(const mutate of [c=>c.modules[0].pages[0].entry='https://example.com/x.js',c=>c.modules[0].pages[0].entry='module-assets/ff14/ff14/pages/../evil.js',c=>c.modules[0].pages[0].entry='module-assets/ff14/ff14/pages/dist/unknown.js',c=>c.modules[0].state='disabled',c=>c.modules.push({...c.modules[0]})]) {const c=catalog();mutate(c);assert.throws(()=>validateCatalog(c));}

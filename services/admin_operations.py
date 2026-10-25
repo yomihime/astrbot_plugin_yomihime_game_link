@@ -207,9 +207,64 @@ class AdminOperationsService(AdminOperations):
             ):
                 raise ValueError("invalid ordinary resource policy")
         self._managed_module_owners = frozenset(managed_module_owners)
+        self._external_packages = {}
         self._owner_cleanup = owner_cleanup
         for owner in self._managed_module_owners:
             validate_contract(ConfigTarget(config_principal_id, owner))
+
+    def attach_external_package(self, manifest):
+        """Host composition only: grant ordinary declared fields, never secrets."""
+        validate_contract(manifest)
+        if manifest.package_id in self._external_packages:
+            raise ValueError("external package is already attached")
+        owners = {f"{manifest.package_id}/{m.module_id}" for m in manifest.modules}
+        if owners & self._managed_module_owners:
+            raise ValueError("external module owner conflicts")
+        resources = {}
+        for module in manifest.modules:
+            fields = module_configuration_fields(module.config_fields)
+            allowed_secrets = {
+                policy.name
+                for policy in self._managed_source_credentials
+                if policy.module_id == f"{manifest.package_id}/{module.module_id}"
+            }
+            if any(
+                field.sensitive and field.name not in allowed_secrets
+                for field in fields
+            ):
+                raise ValueError("external sensitive configuration is unsupported")
+            target = validate_contract(
+                ConfigTarget(
+                    self.config_principal_id,
+                    f"{manifest.package_id}/{module.module_id}",
+                )
+            )
+            resources[target] = frozenset(
+                field.name for field in fields if not field.sensitive
+            )
+        self._ordinary_config_resources = MappingProxyType(
+            {
+                **self._ordinary_config_resources,
+                **resources,
+            }
+        )
+        self._managed_module_owners = self._managed_module_owners | owners
+        self._external_packages[manifest.package_id] = manifest
+
+    def detach_external_package(self, manifest):
+        """Remove exact live policy while retaining all stored user values."""
+        if self._external_packages.get(manifest.package_id) is not manifest:
+            return
+        owners = {f"{manifest.package_id}/{m.module_id}" for m in manifest.modules}
+        self._ordinary_config_resources = MappingProxyType(
+            {
+                target: fields
+                for target, fields in self._ordinary_config_resources.items()
+                if target.module_id not in owners
+            }
+        )
+        self._managed_module_owners = self._managed_module_owners - owners
+        self._external_packages.pop(manifest.package_id)
 
     def module_resources(self, module_id=None):
         owners = self._managed_module_owners if module_id is None else {module_id}
@@ -575,11 +630,17 @@ class AdminOperationsService(AdminOperations):
             }
 
     def _active_credential_policies(self):
-        return tuple(
-            policy
-            for policy in self._managed_source_credentials
-            if policy.module_id not in self.extension_runtime.unloaded_owners
-        )
+        snapshot = self.registry.snapshot()
+        policies = []
+        for policy in self._managed_source_credentials:
+            if policy.module_id in self.extension_runtime.unloaded_owners:
+                continue
+            try:
+                self._selection(policy.module_id, snapshot)
+            except AdminAuthorizationDenied:
+                continue
+            policies.append(policy)
+        return tuple(policies)
 
     def credential_resources(self, *, active=False):
         resources = {}

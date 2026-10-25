@@ -28,7 +28,7 @@ const sources=new Map([
   ['/runtime.js',await readFile(root+'pages/00-game-link/runtime.js','utf8')],
   ['/app.js',await readFile(root+'pages/00-game-link/app.js','utf8')],
   ['/module-assets/ff14/ff14/pages/dist/entry.js',await readFile(root+'modules/ff14/pages/dist/entry.js','utf8')],
-  ['/module-loader.js',`export function loadPage(entry){if(entry==='module-assets/ff14/ff14/pages/dist/entry.js')return import('./module-assets/ff14/ff14/pages/dist/entry.js');throw Error('unknown_page')}`],
+  ['/module-loader.js',`export const sharedRuntimeUrl='http://localhost/runtime.js';export function loadPage(entry){if(entry==='module-assets/ff14/ff14/pages/dist/entry.js')return import('./module-assets/ff14/ff14/pages/dist/entry.js');throw Error('unknown_page')}`],
 ]);
 const cache=new Map();
 function getModule(path){

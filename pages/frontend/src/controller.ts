@@ -3,12 +3,12 @@ import {validateCatalog, readRoute, routeHash} from './catalog';
 import {createScope, contextBoundary, mountIdentity} from './lifecycle';
 import {createModuleAssets, assetIdentity} from './module-assets';
 import type {Bridge, Catalog, ModuleDescriptor, PageDescriptor, PageContext, PageModule, MountedPage} from './contracts';
-export function createShell({bridge, container, window, loadPage, changed, timeoutMs = 8000, expectedPlugin = 'astrbot_plugin_yomihime_game_link', expectedPage = '00-game-link', confirmClear = async () => false}: {bridge: Bridge; container: HTMLElement; window: Window; loadPage(entry: string): Promise<PageModule>; changed(): void; timeoutMs?: number; expectedPlugin?: string; expectedPage?: string; confirmClear?(owner:string,field:string,revision:number,isCurrent:()=>boolean):Promise<boolean>}) {
+export function createShell({bridge, container, window, loadPage, runtimeUrl, changed, timeoutMs = 8000, expectedPlugin = 'astrbot_plugin_yomihime_game_link', expectedPage = '00-game-link', confirmClear = async () => false}: {bridge: Bridge; container: HTMLElement; window: Window; loadPage(entry: string): Promise<PageModule>; runtimeUrl?:string; changed(): void; timeoutMs?: number; expectedPlugin?: string; expectedPage?: string; confirmClear?(owner:string,field:string,revision:number,isCurrent:()=>boolean):Promise<boolean>}) {
   const state = {catalog: null as Catalog | null, busy: false, stale: false, message: '正在连接宿主。', theme: 'light' as 'light'|'dark', locale: 'zh-CN', selected: null as {owner: string; route: string}|null, mounted: false, cleanupPending: false, home: true, modules: false, settings: false, settingsOwner: null as string|null, moduleOwner:null as string|null, moduleSection:null as 'home'|'config'|'queries'|null};
   let closed = false, ready = false, sequence = 0, generation = 0, boundary = '', contextSeen = false;
   let off: (() => void) | undefined, mounted: MountedPage | null = null, identity = '', pendingIdentity = '';
   let scope: ReturnType<typeof createScope> | null = null;
-  const assets = createModuleAssets(container.ownerDocument, loadPage, timeoutMs), bindings = new Map<string, string>(), revokedOwners = new Set<string>();
+  const assets = createModuleAssets(container.ownerDocument, loadPage, timeoutMs, runtimeUrl?{bridge,runtimeUrl}:undefined), bindings = new Map<string, string>(), revokedOwners = new Set<string>();
   const reopenMessage = '模块资源已失效。请关闭此页，并从宿主插件详情重新打开页面。';
   let projectionRevoked = false, catalogSeen = false, activeOwner = '';
   let navigationVersion=0,lastPageNavigationVersion=-1;
@@ -68,7 +68,15 @@ export function createShell({bridge, container, window, loadPage, changed, timeo
       if (!ownScope.isCurrent() || pendingIdentity !== target) return;
       if (!code || typeof code.mount !== 'function') throw Error('invalid_page_entry');
       const view = container.ownerDocument.createElement('div'); view.className = 'module-view'; view.dataset.owner = module.module_id; container.append(view);
-      const services = await createModuleServices({onDispose:callback=>ownScope.onDispose(callback),bridge, binding:{owner:module.module_id,page:page.route_id,runtime_id:module.runtime_id!,module_epoch:module.module_epoch}, capabilityId:page.capability_id, isCurrent:()=>ownScope.isCurrent() && !state.stale && !state.busy && ready, confirmClear:(field,revision,isCurrent)=>confirmClear(module.module_id,field,revision,isCurrent)});
+      let services: Awaited<ReturnType<typeof createModuleServices>>;
+      try {
+        services = await createModuleServices({onDispose:callback=>ownScope.onDispose(callback),bridge, binding:{owner:module.module_id,page:page.route_id,runtime_id:module.runtime_id!,module_epoch:module.module_epoch}, capabilityId:page.capability_id, isCurrent:()=>ownScope.isCurrent() && !state.stale && !state.busy && ready, confirmClear:(field,revision,isCurrent)=>confirmClear(module.module_id,field,revision,isCurrent)});
+      } catch (error) {
+        // A disposed view's bootstrap cannot revoke a newer view of the same owner.
+        // Asset failures above still retire their owner, even after navigation.
+        if (!ownScope.isCurrent() || pendingIdentity !== target) return;
+        throw error;
+      }
       if (!ownScope.isCurrent() || pendingIdentity !== target) return;
       const instance = code.mount(view, Object.freeze({routeId: page.route_id, context: pageContext(module), services, scope: ownScope,onNavigationStateChange:()=>{if(ownScope.isCurrent()){navigationVersion++;changed();}}}));
       if (!instance || typeof instance.update !== 'function' || typeof instance.dispose !== 'function') throw Error('invalid_page_instance');

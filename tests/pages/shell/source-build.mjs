@@ -19,7 +19,7 @@ export async function managementModule(){
 }
 export async function sourceApp(entry='pages/frontend/src/main.ts'){
  const runtime='data:text/javascript;base64,'+Buffer.from(await sourceBundle('pages/frontend/src/runtime.ts')).toString('base64');
- const loader='data:text/javascript;base64,'+Buffer.from('export function loadPage(entry){return globalThis.__loadFixturePage(entry)}').toString('base64');
+ const loader='data:text/javascript;base64,'+Buffer.from('export const sharedRuntimeUrl='+JSON.stringify(runtime)+';export function loadPage(entry){return globalThis.__loadFixturePage(entry)}').toString('base64');
  const code=(await sourceBundle(entry)).replaceAll('"./runtime.js"',JSON.stringify(runtime)).replaceAll("'./runtime.js'",JSON.stringify(runtime)).replaceAll('"./module-loader.js"',JSON.stringify(loader)).replaceAll("'./module-loader.js'",JSON.stringify(loader));
  return import('data:text/javascript;base64,'+Buffer.from(code).toString('base64')+'#'+Math.random());
 }

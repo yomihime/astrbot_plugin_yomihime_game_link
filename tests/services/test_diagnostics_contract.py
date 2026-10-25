@@ -5,6 +5,8 @@ import builtins
 import copy
 import unittest
 from collections.abc import Mapping
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
 from unittest.mock import patch
 
@@ -38,6 +40,172 @@ class DiagnosticSchemaWalkTests(unittest.TestCase):
     @staticmethod
     def root(child):
         return {"type": "object", "properties": {"item": child}}
+
+    def test_mapping_membership_and_evicted_refreeze_preserve_enum(self):
+        with patch.object(schemas, "_FROZEN_SCHEMAS", {}):
+            first = schemas.freeze_diagnostic_schema(SCHEMA)
+            state = first["properties"]["state"]
+            self.assertIn("enum", state)
+            self.assertIn("enum", state.keys())
+            self.assertNotIn(("enum", state["enum"]), state)
+            self.assertEqual(tuple(state), ("type", "maxLength", "enum"))
+            for _ in range(schemas._FROZEN_SCHEMA_LIMIT):
+                schemas.freeze_diagnostic_schema({"type": "object", "properties": {}})
+            self.assertNotIn(id(first), schemas._FROZEN_SCHEMAS)
+            again = schemas.freeze_diagnostic_schema(first)
+            self.assertEqual(again, first)
+            self.assertEqual(again["properties"]["state"]["enum"], ("ok", "failed"))
+            with self.assertRaisesRegex(ValueError, "enum"):
+                schemas.diagnostic_payload(again, {"count": 1, "state": "unknown"})
+
+    def test_real_ff14_manifest_equals_same_bytes_after_schema_cache_churn(self):
+        from ygl_test_subject.extensions.disk_manifest import parse_manifest
+
+        raw = (
+            Path(__file__).resolve().parents[2] / "modules/ff14/yomihime.manifest.json"
+        ).read_bytes()
+        with patch.object(schemas, "_FROZEN_SCHEMAS", {}):
+            first = parse_manifest(raw)
+            for _ in range(schemas._FROZEN_SCHEMA_LIMIT):
+                schemas.freeze_diagnostic_schema({"type": "object", "properties": {}})
+            validate_contract(first)
+            self.assertEqual(parse_manifest(raw), first)
+
+    def test_comparison_never_exposes_writable_schema_backing(self):
+        class Mutator:
+            def __eq__(self, other):
+                if type(other) is dict:
+                    other["token"] = {"type": "string", "maxLength": 8}
+                return False
+
+        class MappingMutator(dict):
+            def __eq__(self, other):
+                if type(other) is dict:
+                    other["token"] = {"type": "string", "maxLength": 8}
+                return False
+
+        declaration = validate_contract(DiagnosticDeclaration("SafeEvent", SCHEMA))
+        frozen = declaration.payload_schema
+        for layer in (frozen, frozen["properties"], frozen["properties"]["count"]):
+            for attacker in (Mutator(), MappingMutator()):
+                self.assertFalse(layer == attacker)
+                self.assertNotIn("token", layer)
+            with self.assertRaises((AttributeError, TypeError)):
+                object.__setattr__(layer, "backing", {"token": True})
+            self.assertIs(type(layer.items()), tuple)
+        self.assertIs(validate_contract(declaration), declaration)
+        self.assertIs(declaration.payload_schema, frozen)
+
+    def test_same_class_forgery_and_foreign_wrappers_still_fully_validate(self):
+        frozen = schemas.freeze_diagnostic_schema(SCHEMA)
+        cls = type(frozen)
+        forged = tuple.__new__(
+            cls,
+            tuple(
+                {
+                    "type": ("object",),
+                    "properties": {"token": {"type": "string", "maxLength": 8}},
+                }.items()
+            ),
+        )
+        self.assertNotIn(id(forged), schemas._FROZEN_SCHEMAS)
+        with self.assertRaisesRegex(ValueError, "sensitive"):
+            schemas.freeze_diagnostic_schema(forged)
+        with self.assertRaisesRegex(ValueError, "sensitive"):
+            schemas.freeze_diagnostic_schema(MappingProxyType(dict(forged)))
+        backing = {"item": {"type": "boolean"}}
+        benign = tuple.__new__(cls, (("type", ("object",)), ("properties", backing)))
+        detached = schemas.freeze_diagnostic_schema(benign)
+        self.assertIsNot(benign, detached)
+        self.assertNotIn(id(benign), schemas._FROZEN_SCHEMAS)
+        backing["token"] = {"type": "string", "maxLength": 8}
+        self.assertNotIn("token", detached["properties"])
+        with self.assertRaisesRegex(ValueError, "sensitive"):
+            schemas.freeze_diagnostic_schema(benign)
+
+    def test_only_self_created_deep_immutable_roots_are_reused(self):
+        with patch.object(schemas, "_FROZEN_SCHEMAS", {}):
+            with self.assertRaises(ValueError):
+                schemas.freeze_diagnostic_schema(None)
+            raw = copy.deepcopy(SCHEMA)
+            frozen = schemas.freeze_diagnostic_schema(raw)
+            self.assertIs(schemas.freeze_diagnostic_schema(frozen), frozen)
+            with patch.object(
+                schemas, "_sensitive_field", wraps=schemas._sensitive_field
+            ) as checked:
+                foreign = MappingProxyType(dict(frozen))
+                detached = schemas.freeze_diagnostic_schema(foreign)
+                self.assertIsNot(detached, foreign)
+                self.assertTrue(checked.call_count)
+                self.assertIs(schemas.freeze_diagnostic_schema(detached), detached)
+            raw["properties"]["token"] = {"type": "string", "maxLength": 8}
+            with self.assertRaises(ValueError):
+                schemas.freeze_diagnostic_schema(raw)
+            self.assertNotIn("token", frozen["properties"])
+
+    def test_subclass_type_and_required_leaves_are_never_trusted_outputs(self):
+        class Token(str):
+            pass
+
+        class SpoofedType(type):
+            def __eq__(self, other):
+                return other is str
+
+            def __hash__(self):
+                return hash(str)
+
+        class SpoofedToken(str, metaclass=SpoofedType):
+            pass
+
+        for raw in (
+            self.root({"type": (Token("string"),), "maxLength": 16}),
+            self.root({"type": (SpoofedToken("string"),), "maxLength": 16}),
+            {
+                "type": "object",
+                "properties": {"item": {"type": "boolean"}},
+                "required": [Token("item")],
+            },
+        ):
+            with self.subTest(raw=raw), patch.object(schemas, "_FROZEN_SCHEMAS", {}):
+                frozen = schemas.freeze_diagnostic_schema(raw)
+                self.assertNotIn(id(frozen), schemas._FROZEN_SCHEMAS)
+                with patch.object(
+                    schemas, "_sensitive_field", wraps=schemas._sensitive_field
+                ) as checked:
+                    again = schemas.freeze_diagnostic_schema(frozen)
+                    self.assertIsNot(again, frozen)
+                    self.assertTrue(checked.call_count)
+
+    def test_output_cache_is_bounded_thread_safe_and_holds_exact_roots(self):
+        with patch.object(schemas, "_FROZEN_SCHEMAS", {}):
+            first = schemas.freeze_diagnostic_schema(copy.deepcopy(SCHEMA))
+            for _ in range(schemas._FROZEN_SCHEMA_LIMIT):
+                schemas.freeze_diagnostic_schema(copy.deepcopy(SCHEMA))
+            self.assertEqual(len(schemas._FROZEN_SCHEMAS), schemas._FROZEN_SCHEMA_LIMIT)
+            self.assertNotIn(id(first), schemas._FROZEN_SCHEMAS)
+            self.assertIsNot(schemas.freeze_diagnostic_schema(first), first)
+            trusted = schemas.freeze_diagnostic_schema(copy.deepcopy(SCHEMA))
+            with ThreadPoolExecutor(max_workers=4) as executor:
+                results = list(
+                    executor.map(schemas.freeze_diagnostic_schema, [trusted] * 64)
+                )
+                fresh = list(
+                    executor.map(
+                        schemas.freeze_diagnostic_schema,
+                        [copy.deepcopy(SCHEMA) for _ in range(64)],
+                    )
+                )
+            self.assertTrue(all(value is trusted for value in results))
+            self.assertTrue(all(value is not trusted for value in fresh))
+            self.assertTrue(
+                all(
+                    key == id(value[0])
+                    for key, value in schemas._FROZEN_SCHEMAS.items()
+                )
+            )
+            self.assertLessEqual(
+                len(schemas._FROZEN_SCHEMAS), schemas._FROZEN_SCHEMA_LIMIT
+            )
 
     def test_single_builtin_types_avoid_per_node_type_sets(self):
         schema = {

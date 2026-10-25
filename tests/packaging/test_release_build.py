@@ -8,6 +8,7 @@ import hashlib
 import io
 import os
 import stat
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -29,6 +30,7 @@ from scripts.build_dashboard_zip import (
     RUNTIME_DIRS,
     _reviewed_bundle_payloads,
     included_files,
+    validate_public_paths,
 )
 from scripts.build_release import (
     build_release,
@@ -296,6 +298,27 @@ class ReleaseBuildTests(unittest.TestCase):
         self.assertNotIn("scripts/build_dashboard_zip.py", names)
         self.assertNotIn("scripts/build_release.py", names)
         self.assertFalse(any(Path(name).suffix in {".pyc", ".pyo"} for name in names))
+
+    def test_tracked_files_exclude_local_development_material(self) -> None:
+        tracked = subprocess.check_output(["git", "-C", str(ROOT), "ls-files", "-z"])
+        validate_public_paths(tracked.decode("utf-8").split("\0"))
+
+    def test_release_rejects_local_process_paths(self) -> None:
+        for name in (
+            "AGENTS.md",
+            ".local-dev/ai/prompt.md",
+            "extensions/.local-dev/private.py",
+        ):
+            with self.subTest(name=name):
+                with self.assertRaisesRegex(ValueError, "Local development material"):
+                    validate_public_paths((name,))
+        validate_public_paths(("docs/module-sdk.md", "modules/ff14/runtime_prompt.py"))
+        from scripts.build_dashboard_zip import _write_entry
+
+        with ZipFile(io.BytesIO(), "w") as archive:
+            with self.assertRaisesRegex(ValueError, "Local development material"):
+                _write_entry(archive, ".local-dev/private.py", b"private")
+            self.assertEqual(archive.namelist(), [])
 
     def test_runtime_manifest_skips_cache_and_local_data_directories(self) -> None:
         with tempfile.TemporaryDirectory(prefix="yomihime-release-manifest-") as work:
@@ -607,7 +630,7 @@ class ReleaseBuildTests(unittest.TestCase):
     def test_reused_sdk_wheel_still_requires_the_independent_pin(self) -> None:
         with tempfile.TemporaryDirectory(prefix="yomihime-release-wheel-") as work:
             root = Path(work)
-            wheel = root / "yomihime_game_link_sdk-0.1.0a19-py3-none-any.whl"
+            wheel = root / "yomihime_game_link_sdk-0.1.0a22-py3-none-any.whl"
             wheel.write_bytes(b"not the reviewed wheel")
             output = root / "artifacts"
 
@@ -629,6 +652,26 @@ class ReleaseBuildTests(unittest.TestCase):
 
             with ZipFile(archive_path) as archive:
                 self.assertIsNone(archive.testzip())
+                # Test the generated ZIP loader, which can differ from Vite's
+                # source-build loader. The actual shell needs both exports.
+                loader = work_root / "module-loader.mjs"
+                loader.write_bytes(archive.read("pages/00-game-link/module-loader.js"))
+                entry = work_root / "packed-entry.mjs"
+                entry.write_text(
+                    "import {loadPage,sharedRuntimeUrl} from './module-loader.mjs';\n"
+                    "import {strict as assert} from 'node:assert';\n"
+                    "assert.equal(typeof loadPage,'function');\n"
+                    "assert.equal(sharedRuntimeUrl,new URL('./runtime.js',import.meta.url).href);\n",
+                    encoding="utf-8",
+                )
+                imported = subprocess.run(
+                    ["node", str(entry)],
+                    cwd=work_root,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                )
+                self.assertEqual(imported.returncode, 0, imported.stderr)
                 names = set(archive.namelist())
                 self.assertIn("requirements.txt", names)
                 for name in FONT_ASSETS:

@@ -7,6 +7,7 @@ import sys
 import tempfile
 import weakref
 from collections.abc import Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
@@ -26,7 +27,8 @@ from yomihime_game_link_sdk.errors import (
     ParameterError,
     ServiceUnavailable,
 )
-from yomihime_game_link_sdk.services import CapabilityHealth, HealthStatus
+from yomihime_game_link_sdk.results import ResultStatus
+from yomihime_game_link_sdk.services import CapabilityHealth, ConfigTarget, HealthStatus
 from yomihime_game_link_sdk.subscriptions import ConversationKind, ConversationRef
 
 from ...core.contracts.administration import (
@@ -39,9 +41,12 @@ from ...core.help_catalog import HelpCatalog
 from ...core.ports import MessageTarget, RenderedMessage
 from ...core.public_errors import public_boundary
 from ...extensions.factory_resolver import (
+    FilesystemFactorySource,
+    PackageFactorySources,
     ReviewedInventoryFactorySource,
     ReviewedSupportLease,
 )
+from ...extensions.static_page_projection import StaticPageProjection
 from ...infrastructure.key_provider import EnvironmentKeyProvider
 from ...infrastructure.managed_key_manager import ManagedKeyManager
 from ...infrastructure.private_storage import resolve_private_storage
@@ -51,6 +56,7 @@ from ...presentation.command_card import CommandCardRenderer
 from ...presentation.command_text import project_command_heading
 from ...presentation.rendering import GenericDisplayRenderer, RenderingBounds
 from ...services.admin_authorization import AdminAuthorizationService
+from ...services.authorization_management import AuthorizationManagement
 from ...services.configuration.defaults import (
     CORE_CONFIG_FIELDS,
     core_config_target,
@@ -61,11 +67,17 @@ from ...services.core_runtime import (
     CoreRuntime,
     CoreRuntimeCleanupPending,
     HostIngress,
+    HostIngressUnavailable,
 )
 from ...services.diagnostics import DiagnosticStore
+from ...services.external_installations import ExternalInstallationTrust
+from ...services.external_packages import ExternalPackageHost
+from ...services.external_source_policies import ExternalSourcePolicies
 from ...services.managed_font import ManagedFont
+from ...services.source_authorizations import AuthorizationBinding
 from ...services.source_credentials import SourceCredentialPolicy
 from ...services.trusted_assembly import assemble_reviewed
+from .analysis import AstrBotCommandAnalysis
 from .bundled import (
     DEFAULT_BUNDLE_SELECTION,
     BundledExtensionError,
@@ -81,6 +93,7 @@ from .message_port import (
     PlainFactory,
 )
 from .page_sessions import HostModulePageSessions
+from .subscription_commentary import AstrBotSubscriptionCommentary
 from .web_public import (
     HostPublicWebValidator,
     WebPublicRejected,
@@ -548,6 +561,17 @@ class AstrBotRuntime:
         self._config_error: str | None = None
         # Injected Host config is hydrated and cannot establish raw key presence.
         self._plugin_root = Path(plugin_root)
+        # Credential authority has its own reviewed release input. Malformed
+        # policy aborts initialization; UI fallback cannot grant credentials.
+        self._external_source_policies = ExternalSourcePolicies.load(self._plugin_root)
+        self._source_authorizations = AuthorizationManagement(
+            self._external_source_policies
+        )
+        try:
+            self._static_page_projection = StaticPageProjection.load(self._plugin_root)
+        except (OSError, ValueError, TypeError):
+            # A malformed optional UI composition cannot grant external pages.
+            self._static_page_projection = StaticPageProjection()
         self._data_dir = Path(data_dir)
         self._plain_factory = plain_factory
         self._chain_factory = chain_factory
@@ -591,6 +615,53 @@ class AstrBotRuntime:
         self._credential_admin_source = None
         self._key_admin_source = None
         self._module_admin_source = None
+        self._extension_host = None
+        self._installation_trust = None
+
+    @property
+    def extension_host(self):
+        """Public outer-plugin bridge; unavailable until this Core is ready."""
+        return self._extension_host if self.ready else None
+
+    def _external_packages_changed(self):
+        """Reissue exact management policies after Host-selected owners change."""
+        core = self._core
+        if core is None or self._closing:
+            return
+        self._refresh_external_public_web_bindings()
+        if getattr(core, "jobs", None) is not None:
+            core.jobs.notify_changed()
+        for source in (self._admin_source, self._module_admin_source):
+            if source is not None:
+                core.admin_authorization.unregister_source(source)
+        self._admin_source = core.admin_authorization.register_source(
+            "astrbot-dashboard",
+            resources=_merge_resources(
+                core.admin_operations.ordinary_resources(),
+                core.admin_operations.legacy_config_resources(),
+            ),
+            operations={
+                AdminOperation.READ_CONFIG,
+                AdminOperation.UPDATE_CONFIG,
+                AdminOperation.RECOVER_CONFIG,
+            },
+        )
+        try:
+            resources = core.admin_operations.module_resources()
+        except AdminAuthorizationDenied:
+            self._module_admin_source = None
+        else:
+            self._module_admin_source = core.admin_authorization.register_source(
+                "astrbot-dashboard-modules",
+                resources=resources,
+                operations={
+                    AdminOperation.LIST_MODULES,
+                    AdminOperation.SET_ENABLED,
+                    AdminOperation.UNLOAD_MODULE,
+                },
+            )
+        if self._tool_publisher is not None:
+            self._tool_publisher.publish()
 
     def management_current(self, core, source):
         return (
@@ -606,6 +677,122 @@ class AstrBotRuntime:
             and getattr(core, "management_available", False) is True
         )
 
+    def _external_page_bindings(self):
+        host = getattr(self, "_extension_host", None)
+        return host.page_manifest_bindings() if host is not None else {}
+
+    def _external_projection(self):
+        host = getattr(self, "_extension_host", None)
+        return host.page_projection() if host is not None else StaticPageProjection()
+
+    def _refresh_external_public_web_bindings(self):
+        """One synchronous, fail-closed publication from captured live owners."""
+        validator = self._web_validator
+        core = self._core
+        if validator is None or core is None:
+            return
+        try:
+            host = self._extension_host
+            bindings = {}
+            if host is not None:
+                manifests = host.page_manifest_bindings()
+                projection = self._external_projection()
+                for endpoint, page in host.public_web_page_bindings().items():
+                    owner = page.target[0]
+                    package_id = owner.partition("/")[0]
+                    if (
+                        manifests.get(package_id) is not None
+                        and projection.permits(owner, manifests, page.manifest)
+                        and page.current() is True
+                    ):
+                        bindings[endpoint] = (page.target, page.lease, page.current)
+            deployment = frozenset(value[0] for value in bindings.values())
+            # Only declared read-only dependencies of an exact deployed parent
+            # can derive web contexts. They gain no independently routable page.
+            from ...core.policy import supports_public_read_only
+
+            dependencies = set(deployment)
+            pending = list(deployment)
+            while pending:
+                owner, capability_id = pending.pop()
+                module = core.registry.snapshot().modules.get(owner)
+                if module is None or not core.registry.is_active(module):
+                    continue
+                capability = next(
+                    (
+                        item
+                        for item in module.manifest.capabilities
+                        if item.capability_id == capability_id
+                    ),
+                    None,
+                )
+                if capability is None:
+                    continue
+                for reference in capability.required_capabilities:
+                    target = (reference.module_id, reference.capability_id)
+                    if target in dependencies:
+                        continue
+                    child = core.registry.snapshot().modules.get(reference.module_id)
+                    if child is None or not core.registry.is_active(child):
+                        continue
+                    if reference.module_id.partition("/")[
+                        0
+                    ] in manifests and not projection.permits(
+                        reference.module_id, manifests, child.manifest
+                    ):
+                        continue
+                    declared = next(
+                        (
+                            item
+                            for item in child.manifest.capabilities
+                            if item.capability_id == reference.capability_id
+                        ),
+                        None,
+                    )
+                    if (
+                        supports_public_read_only(declared)
+                        and InvocationOrigin.WEB_PUBLIC in declared.effective_origins
+                    ):
+                        dependencies.add(target)
+                        pending.append(target)
+                        if len(dependencies) > 128:
+                            raise ValueError(
+                                "public dependency deployment exceeds budget"
+                            )
+            deployment = frozenset(dependencies)
+            # Neither operation awaits or invokes owner callbacks. If either
+            # rejects the fully constructed snapshot, withdraw external access.
+            core.issuer._replace_external_public_web_capabilities(deployment)
+            selected_timeouts = getattr(
+                getattr(self, "_external_source_policies", None),
+                "capability_timeouts",
+                {},
+            )
+            route_targets = {value[0] for value in bindings.values()}
+            validator.replace_external_bindings(
+                bindings,
+                **(
+                    {
+                        "capability_timeouts": {
+                            target: seconds
+                            for target, seconds in selected_timeouts.items()
+                            if target in route_targets
+                        }
+                    }
+                    if selected_timeouts
+                    else {}
+                ),
+            )
+        except BaseException:
+            core.issuer._replace_external_public_web_capabilities(frozenset())
+            validator.replace_external_bindings({})
+            raise
+
+    def _external_page_permitted(self, owner, manifest=None):
+        projection = self._external_projection()
+        bindings = self._external_page_bindings()
+        return (projection or StaticPageProjection()).permits(owner, bindings, manifest)
+
     def management_entry(self, *, credentials=False, modules=False, master_key=False):
         source = (
             self._module_admin_source
@@ -619,6 +806,132 @@ class AstrBotRuntime:
         if not self.management_current(self._core, source) or source is None:
             raise AdminAuthorizationDenied
         return self._core, source
+
+    async def installation_operation(self, action, data, context):
+        core, source = self.management_entry(modules=True)
+        resources = core.admin_operations.module_resources()
+        operation = (
+            AdminOperation.LIST_MODULES
+            if action == "module-install-plan"
+            else AdminOperation.SET_ENABLED
+        )
+
+        def guard():
+            if not self.management_current(core, source):
+                raise AdminAuthorizationDenied
+            source.check(context, operation, resources)
+
+        @contextmanager
+        def commit_fence():
+            with source.fence(context, operation, resources):
+                guard()
+                yield
+
+        guard()
+        trust = self._installation_trust
+        if trust is None:
+            raise AdminAuthorizationDenied
+        required = {"plugin_name", "package_id"}
+        if action == "module-install-plan":
+            if set(data) != required:
+                raise ValueError("invalid installation plan")
+            result = await trust.plan(data["plugin_name"], data["package_id"])
+        else:
+            if set(data) != required | {"plan_id", "expected_revision"}:
+                raise ValueError("invalid installation approval")
+            result = await trust.approve(
+                data["plugin_name"],
+                data["package_id"],
+                plan_id=data["plan_id"],
+                expected_revision=data["expected_revision"],
+                actor=context.adapter_id + ":" + context.session_id,
+                current=guard,
+                commit_fence=commit_fence,
+            )
+        guard()
+        return result
+
+    async def _module_job_operation(
+        self, action, data, *, core, binding, subject, current, check
+    ):
+        import base64
+
+        from yomihime_game_link_sdk.jobs import JobRequest
+
+        from ...services.extension_permissions import plain
+
+        identity = {"owner", "page", "runtime_id", "module_epoch", "page_session"}
+
+        def guard():
+            if (
+                not current()
+                or core is not self._core
+                or not core.registry.is_active(
+                    core.registry.snapshot().module(binding.owner)
+                )
+            ):
+                return False
+            identity_now = core.lifecycle.current_identity(binding.owner)
+            return (
+                identity_now is not None
+                and identity_now.runtime_id == binding.runtime_id
+                and identity_now.module_epoch == binding.module_epoch
+                and self._external_page_permitted(
+                    binding.owner,
+                    core.registry.snapshot().module(binding.owner).manifest,
+                )
+            )
+
+        bound = await core.jobs.for_dashboard(
+            subject=subject, module_id=binding.owner, current=guard
+        )
+        if action == "module-job-submit":
+            if (
+                set(data) - identity - {"request"}
+                or type(data.get("request")) is not dict
+                or set(data["request"])
+                - {"handler_id", "parameters", "idempotency_key"}
+            ):
+                raise ValueError("invalid job request")
+            result = await bound.submit(JobRequest(**data["request"]))
+        elif action in {"module-job-status", "module-job-resource"}:
+            required = (
+                {"job_id", "asset_id"} if action.endswith("resource") else {"job_id"}
+            )
+            if set(data) != identity | required:
+                raise ValueError("invalid job selector")
+            if action.endswith("resource"):
+                mime, content = await bound.read_result_asset(
+                    data["job_id"], data["asset_id"]
+                )
+                result = {
+                    "media_type": mime,
+                    "base64": base64.b64encode(content).decode("ascii"),
+                }
+            else:
+                result = await bound.status(data["job_id"])
+        elif action == "module-job-result":
+            if (
+                set(data) - identity - {"job_id", "cursor", "page_size"}
+                or "job_id" not in data
+            ):
+                raise ValueError("invalid job result selector")
+            result = await bound.result(
+                data["job_id"],
+                cursor=data.get("cursor"),
+                page_size=data.get("page_size", 20),
+            )
+        elif action in {"module-job-cancel", "module-job-retry"}:
+            if set(data) != identity | {"job_id", "expected_revision"}:
+                raise ValueError("invalid job mutation")
+            method = bound.cancel if action.endswith("cancel") else bound.retry
+            result = await method(
+                data["job_id"], expected_revision=data["expected_revision"]
+            )
+        else:
+            raise ValueError("unknown job operation")
+        await check(binding.owner, binding.page, binding.module_epoch, action)
+        return plain(result)
 
     async def module_page_operation(self, action, data, *, request):
         """Bind a real Dashboard session to a current, selected module page.
@@ -641,8 +954,16 @@ class AstrBotRuntime:
             "module-credential-status",
             "module-credential-replace",
             "module-credential-clear",
+            "module-credential-authorize",
             "module-page-session",
             "module-page-session-close",
+            "module-page-assets",
+            "module-job-submit",
+            "module-job-status",
+            "module-job-result",
+            "module-job-cancel",
+            "module-job-retry",
+            "module-job-resource",
         }
         if action not in actions or type(data) is not dict:
             raise AdminAuthorizationDenied
@@ -666,13 +987,15 @@ class AstrBotRuntime:
                 and dashboard_fence.current(raw)
             )
 
-        bootstrap = action == "module-page-session"
+        bootstrap = action in {"module-page-session", "module-page-assets"}
         if action == "module-page-session-close":
             if set(data) != {"page_session"}:
                 raise ValueError("invalid page session close")
-            self._page_sessions.revoke(
+            lineage = self._page_sessions.revoke(
                 data["page_session"], subject=subject, bearer_digest=bearer_digest
             )
+            if lineage is not None:
+                self._source_authorizations.invalidate(page_session_id=lineage)
             if not request_current():
                 raise AdminAuthorizationDenied
             return {"closed": True}
@@ -700,6 +1023,7 @@ class AstrBotRuntime:
             module = core.registry.snapshot().modules.get(owner)
             if (
                 module is None
+                or not self._external_page_permitted(owner, module.manifest)
                 or not module.enabled
                 or module.epoch != epoch
                 or not core.registry.is_active(module)
@@ -754,6 +1078,25 @@ class AstrBotRuntime:
         )
         if data.get("runtime_id") != binding.runtime_id:
             raise AdminAuthorizationDenied
+        if action == "module-page-assets":
+            host = self._extension_host
+            if host is None:
+                raise AdminAuthorizationDenied
+            result = host.page_assets(binding.owner, binding.page)
+            await check_page_binding(
+                binding.owner, binding.page, binding.module_epoch, action
+            )
+            return result
+        if action.startswith("module-job-"):
+            return await self._module_job_operation(
+                action,
+                data,
+                core=core,
+                binding=binding,
+                subject=subject,
+                current=request_current,
+                check=check_page_binding,
+            )
         target = ConfigTarget(core.admin_operations.config_principal_id, binding.owner)
         if bootstrap:
             # Authentication alone does not establish field rights. Mint only
@@ -855,7 +1198,11 @@ class AstrBotRuntime:
             subject=subject,
             request=raw,
             expiry=expiry,
-            operations={operation},
+            # Authorization flows read the selected credential revision before
+            # any exchange, then retain separate UPDATE authority for commit.
+            operations={operation, AdminOperation.READ_CONFIG}
+            if action == "module-credential-authorize"
+            else {operation},
             resources=resources,
             live=still_current,
         )
@@ -877,15 +1224,32 @@ class AstrBotRuntime:
 
         watcher = asyncio.create_task(disconnect(), name="ygl:module-page-disconnect")
         try:
-            result = await module_page_operation(
-                core.admin_operations,
-                action,
-                {key: value for key, value in data.items() if key != "page_session"},
-                authorization=authorization,
-                runtime_id=binding.runtime_id,
-                check_page_binding=check_page_binding,
-                descriptor_choices=presentation_choices,
-            )
+            if action == "module-credential-authorize":
+                result = await self._module_source_authorization(
+                    core,
+                    data,
+                    binding=binding,
+                    subject=subject,
+                    bearer_digest=bearer_digest,
+                    authorization=authorization,
+                    source=source,
+                    current=still_current,
+                    raw=raw,
+                )
+            else:
+                result = await module_page_operation(
+                    core.admin_operations,
+                    action,
+                    {
+                        key: value
+                        for key, value in data.items()
+                        if key != "page_session"
+                    },
+                    authorization=authorization,
+                    runtime_id=binding.runtime_id,
+                    check_page_binding=check_page_binding,
+                    descriptor_choices=presentation_choices,
+                )
             await check_page_binding(
                 binding.owner, binding.page, binding.module_epoch, action
             )
@@ -932,6 +1296,119 @@ class AstrBotRuntime:
                 finally:
                     if cancellation_pending:
                         raise asyncio.CancelledError
+
+    async def _module_source_authorization(
+        self,
+        core,
+        data,
+        *,
+        binding,
+        subject,
+        bearer_digest,
+        authorization,
+        source,
+        current,
+        raw,
+    ):
+        expected = {
+            "owner",
+            "page",
+            "runtime_id",
+            "module_epoch",
+            "page_session",
+            "flow_id",
+            "step",
+            "session_id",
+            "expected_revision",
+        }
+        if (
+            set(data) != expected
+            or type(data["expected_revision"]) is not int
+            or data["expected_revision"] < 1
+        ):
+            raise ValueError("invalid authorization request")
+        definitions = self._external_source_policies.authorizations.get(
+            binding.owner, {}
+        )
+        flow = definitions.get(data["flow_id"])
+        if flow is None or flow["credential_field"] not in binding.credential_fields:
+            raise AdminAuthorizationDenied
+        page = self._page_sessions.require(
+            data["page_session"],
+            subject=subject,
+            bearer_digest=bearer_digest,
+            binding=binding,
+            generation=self._generation,
+        )
+        target = ConfigTarget(core.admin_operations.config_principal_id, binding.owner)
+        material_binding = AuthorizationBinding(
+            binding.owner,
+            subject + ":" + bearer_digest.hex(),
+            page.lineage_id,
+            binding.runtime_id,
+            binding.module_epoch,
+            data["expected_revision"],
+        )
+
+        async def guard():
+            if not current(raw):
+                raise AdminAuthorizationDenied
+            source.check(
+                authorization,
+                AdminOperation.UPDATE_CONFIG,
+                {target: binding.credential_fields},
+            )
+            grant = await core.admin_authorization.authorize(
+                AdminOperation.READ_CONFIG,
+                invocation=None,
+                context=authorization,
+                resources={target: binding.credential_fields},
+            )
+            snapshot = await core.admin_operations._config_repository.current(
+                target,
+                grant=grant,
+                operation=AdminOperation.READ_CONFIG,
+            )
+            if snapshot.revision != material_binding.expected_revision:
+                from ...core.ports import RevisionConflict
+
+                raise RevisionConflict(
+                    "source.authorization",
+                    material_binding.expected_revision,
+                    snapshot.revision,
+                )
+            if not current(raw):
+                raise AdminAuthorizationDenied
+
+        async def commit(material):
+            await guard()
+            update = {
+                "field": flow["credential_field"],
+                "mode": "replace" if material else "clear",
+            }
+            if material:
+                update["value"] = material
+            return await core.admin_operations.credential_update(
+                {
+                    "module_id": binding.owner,
+                    "expected_revision": material_binding.expected_revision,
+                    "updates": [update],
+                },
+                authorization=authorization,
+            )
+
+        cached = core.module_services._http_by_module.get(binding.owner)
+        if cached is None:
+            raise AdminAuthorizationDenied
+        return await self._source_authorizations.execute(
+            binding=material_binding,
+            flow_id=data["flow_id"],
+            step=data["step"],
+            session_id=data["session_id"],
+            guard=guard,
+            commit=commit,
+            http=cached[1],
+        )
 
     async def recover_management(
         self, core, revisions, *, authorization
@@ -1021,14 +1498,26 @@ class AstrBotRuntime:
         return validator.remaining(ticket)
 
     async def invoke_public_web(
-        self, request_state, endpoint: str, parameters: dict
+        self,
+        request_state,
+        endpoint: str | tuple[str, str, str],
+        parameters: dict,
+        *,
+        images=False,
     ) -> dict:
         validator, ticket, core, generation, facts = request_state
         self.public_web_remaining(request_state)
+        route = validator.route_for(ticket, endpoint)
         proof = validator.mint(ticket)
-        result = await core.invoke_public_web(
-            *validator._bindings[endpoint], parameters, proof=proof
-        )
+        pages = ()
+        if images:
+            result, pages = await core.preview_public_web(
+                *route.target, parameters, proof=proof
+            )
+        else:
+            result = await core.invoke_public_web(
+                *route.target, parameters, proof=proof
+            )
         # Core deliberately revokes proof after result publication. Keep the
         # independent Host request deadline/generation facts for this final hop.
         if validator is not self._web_validator or not self._web_current(
@@ -1037,7 +1526,29 @@ class AstrBotRuntime:
             raise WebPublicRejected("entry_unavailable")
         if facts[0] <= monotonic() or facts[1] <= time():
             raise WebPublicRejected("session_expired")
+        validator.require_route_current(endpoint, route)
         data = project_result(result)
+        if images:
+            import base64
+
+            if len(pages) > 8 or sum(len(page) for page in pages) > 16 * 1024 * 1024:
+                raise WebPublicRejected("result_rejected")
+            has_card = (
+                result.status in (ResultStatus.SUCCESS, ResultStatus.PARTIAL_SUCCESS)
+                and result.document is not None
+                and result.document.card is not None
+            )
+            if has_card != bool(pages):
+                raise WebPublicRejected("result_rejected")
+            data["image_state"] = "ready" if has_card else "none"
+            data["images"] = [
+                {
+                    "media_type": "image/png",
+                    "base64": base64.b64encode(page).decode("ascii"),
+                }
+                for page in pages
+            ]
+        validator.require_route_current(endpoint, route)
         if (
             not self._web_current(core, generation)
             or facts[0] <= monotonic()
@@ -1082,7 +1593,10 @@ class AstrBotRuntime:
                 if module["state"] == "loaded":
                     module["state"] = "unavailable"
                     module["reason"] = "runtime_not_ready"
-        return data
+        projection = self._external_projection()
+        return (projection or StaticPageProjection()).catalog(
+            data, self._external_page_bindings()
+        )
 
     async def public_ff14_page_state(self, *, include_values: bool = False) -> dict:
         """Deprecated locator only; no module defaults, gates or credential state."""
@@ -1109,6 +1623,9 @@ class AstrBotRuntime:
 
     def _cleanup_module_owner(self, owner):
         self._page_sessions.revoke_owner(owner)
+        manager = getattr(self, "_source_authorizations", None)
+        if manager is not None:
+            manager.invalidate(owner_id=owner)
         if self._web_validator is not None:
             self._web_validator.revoke_owner(owner)
         if self._tool_publisher is not None:
@@ -1194,7 +1711,10 @@ class AstrBotRuntime:
                     self._assembly.manifests,
                     self._assembly.gates,
                 )
-                self._source_credential_policies = self._assembly.credential_policies
+                self._source_credential_policies = (
+                    self._assembly.credential_policies
+                    + self._external_source_policies.credential_policies
+                )
             else:
                 self._isolated_extension_dir = tempfile.TemporaryDirectory(
                     prefix="ygl-disabled-extensions-", dir=self._data_dir
@@ -1202,7 +1722,9 @@ class AstrBotRuntime:
                 extension_root = Path(self._isolated_extension_dir.name)
                 defaults = {}
                 subscription_gates = MappingProxyType({})
-                self._source_credential_policies = ()
+                self._source_credential_policies = (
+                    self._external_source_policies.credential_policies
+                )
                 self._assembly = None
             message_port = AstrBotMessagePort(
                 self._context,
@@ -1243,6 +1765,19 @@ class AstrBotRuntime:
                 storage_guard.__enter__()
                 self._private_storage_guard = storage_guard
                 database = SQLiteDatabase(layout.database_path)
+                self._installation_trust = ExternalInstallationTrust(
+                    database,
+                    self._context,
+                    self._external_source_policies,
+                    config_principal_id=PLUGIN_NAME,
+                )
+                self._external_source_policies = await self._installation_trust.load()
+                self._source_authorizations = AuthorizationManagement(
+                    self._external_source_policies
+                )
+                self._source_credential_policies = (
+                    self._assembly.credential_policies if self._assembly else ()
+                ) + self._external_source_policies.credential_policies
                 managed_keys = ManagedKeyManager(
                     database,
                     layout.key_data_root,
@@ -1276,18 +1811,26 @@ class AstrBotRuntime:
                     host_message_current_validator=self._message_current,
                     config_principal_id=PLUGIN_NAME,
                     identity_namespace=PLUGIN_NAME,
-                    factory_source=ReviewedInventoryFactorySource(
-                        installation.inventory, selected=True
+                    factory_source=PackageFactorySources(
+                        ReviewedInventoryFactorySource(
+                            installation.inventory, selected=True
+                        )
                     )
                     if installation.trusted
-                    else None,
+                    else PackageFactorySources(FilesystemFactorySource()),
                     trusted_bundled_manifests=defaults,
+                    trusted_external_timeout_manifests=(
+                        self._external_source_policies.timeout_manifests
+                    ),
                     trusted_subscription_gates=subscription_gates,
                     source_health=self._source_health,
+                    commentary_port=AstrBotSubscriptionCommentary(self._context),
+                    analysis_port=AstrBotCommandAnalysis(self._context),
                     source_credential_policies=self._source_credential_policies,
-                    managed_source_credentials=self._assembly.managed_credentials
-                    if self._assembly
-                    else (),
+                    managed_source_credentials=(
+                        (self._assembly.managed_credentials if self._assembly else ())
+                        + self._external_source_policies.managed_credentials
+                    ),
                     module_config_validators=self._assembly.validators
                     if self._assembly
                     else {},
@@ -1316,9 +1859,12 @@ class AstrBotRuntime:
                     public_web_capabilities=self._assembly.public_capabilities
                     if self._assembly
                     else (),
-                    capability_timeouts=self._assembly.capability_timeouts
-                    if self._assembly
-                    else None,
+                    capability_timeouts={
+                        **(
+                            self._assembly.capability_timeouts if self._assembly else {}
+                        ),
+                        **self._external_source_policies.capability_timeouts,
+                    },
                     collector_timeouts=self._assembly.collector_timeouts
                     if self._assembly
                     else None,
@@ -1443,6 +1989,21 @@ class AstrBotRuntime:
                 ),
             )
             self._ready = True
+            if isinstance(core, CoreRuntime):
+                self._extension_host = ExternalPackageHost(
+                    self._context,
+                    core,
+                    core.extension_runtime.factory_source,
+                    source_policies=self._external_source_policies,
+                    installation_trust=self._installation_trust,
+                    generation=generation,
+                    current=lambda: self._ready
+                    and not self._closing
+                    and self._core is core
+                    and self._generation == generation,
+                    changed=self._external_packages_changed,
+                    registration_timeout=core._handler_timeout,
+                )
             await self._publish_tools_or_close(core)
 
     async def _publish_tools_or_close(self, core) -> None:
@@ -1469,6 +2030,11 @@ class AstrBotRuntime:
     async def terminate(self) -> None:
         """Stop ingress and close the owned pump/modules/database once."""
         self._page_sessions.close()
+        manager = getattr(self, "_source_authorizations", None)
+        if manager is not None:
+            await manager.close()
+        if self._extension_host is not None:
+            self._extension_host.stop_accepting()
         self._generation += 1
         self._message_receipts.close()
         if self._tool_publisher is not None:
@@ -1495,6 +2061,8 @@ class AstrBotRuntime:
             self._closing = False
 
     async def _close_owned_runtime(self) -> None:
+        if self._extension_host is not None:
+            await self._extension_host.close()
         await self._managed_font.close()
         self._message_receipts.close()
         pending = []
@@ -1563,6 +2131,7 @@ class AstrBotRuntime:
                 pending.append(("core_runtime_close", exc))
             else:
                 self._core = None
+                self._extension_host = None
         # A pending Core may still own workers using these resources. Preserve
         # its existing retry contract; failed tool removal alone does not block
         # transport/directory closure once Core is quiet.
@@ -1641,6 +2210,19 @@ class AstrBotRuntime:
         unavailable = validate_contract(
             CapabilityHealth(HealthStatus.UNAVAILABLE, "source_unavailable")
         )
+        if self._extension_host is not None and self._extension_host.source_ready(
+            module_id, source_id
+        ):
+            transport = self._http_transport
+            if (
+                transport is not None
+                and not self._transport_closed
+                and not getattr(transport, "closed", False)
+            ):
+                return validate_contract(
+                    CapabilityHealth(HealthStatus.AVAILABLE, "local_transport_ready")
+                )
+            return unavailable
         if (
             not self._trusted_bundle
             or self._assembly is None
@@ -1756,6 +2338,13 @@ class AstrBotRuntime:
                 action.parameters,
                 ingress=ingress,
             )
+        except HostIngressUnavailable:
+            # This narrow signal is emitted before Gateway/OutputService ran.
+            # Recheck the exact event; later/unknown failures still never cause
+            # a speculative second reply.
+            if self._command_current(ingress):
+                return "模块或依赖服务暂时不可用。"
+            return None
         except Exception:
             # Core output may have started before an unexpected exception.
             # Never create a second reply that could duplicate an UNKNOWN send.
@@ -1879,11 +2468,17 @@ class AstrBotRuntime:
         )
         if not self._validate_ingress(InvocationOrigin.LLM_TOOL, ingress):
             raise PermissionError("validated Host event required")
-        outcome = await self._core.invoke_tool(
-            module_id, tool_name, parameters, ingress=ingress
-        )
+        unavailable = False
+        try:
+            outcome = await self._core.invoke_tool(
+                module_id, tool_name, parameters, ingress=ingress
+            )
+        except HostIngressUnavailable:
+            unavailable = True
         if not self._message_current(InvocationOrigin.LLM_TOOL, ingress):
             raise PermissionError("Host message unavailable")
+        if unavailable:
+            raise HostIngressUnavailable()
         return outcome
 
     def _tool_owner_current(self, handle):

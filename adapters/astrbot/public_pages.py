@@ -58,6 +58,12 @@ class PublicPages:
             self._context.register_web_api(
                 route, handler, ["POST"], "Owner-bound public invocation"
             )
+            route = f"/{PLUGIN_NAME}/invoke-images"
+            handler = self._query_handler(None, images=True)
+            self._registrations.append((route, handler))
+            self._context.register_web_api(
+                route, handler, ["POST"], "Owner-bound public image preview"
+            )
             for endpoint in self._runtime.compatibility_query_routes():
                 route = f"/{PLUGIN_NAME}/queries/{endpoint}"
                 handler = self._query_handler(endpoint)
@@ -115,11 +121,13 @@ class PublicPages:
         if not task.cancelled():
             task.exception()
 
-    def _query_handler(self, endpoint: str):
+    def _query_handler(self, endpoint: str, *, images=False):
         generation = self._generation
         suffix = (
             f"{PLUGIN_NAME}/queries/{endpoint}"
             if endpoint is not None
+            else f"{PLUGIN_NAME}/invoke-images"
+            if images
             else f"{PLUGIN_NAME}/invoke"
         )
         v1_path = f"/api/v1/plugins/extensions/{suffix}"
@@ -189,7 +197,9 @@ class PublicPages:
                 else:
                     self._runtime.public_web_remaining(state)
                     parameters = self._runtime.public_query_parameters(endpoint, body)
-                data = await self._runtime.invoke_public_web(state, target, parameters)
+                data = await self._runtime.invoke_public_web(
+                    state, target, parameters, **({"images": True} if images else {})
+                )
                 if self._closed or generation != self._generation:
                     raise WebPublicRejected("entry_unavailable")
                 return json_response(

@@ -1,4 +1,4 @@
-import {sourceRuntimeURL} from './source-build.mjs';
+import {sourceBundle,sourceRuntimeURL} from './source-build.mjs';
 // Offline Vue/JSDOM test: a sandboxed Host has no native modal permission.
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
@@ -20,6 +20,9 @@ source=source.replace("from 'vue'",'from '+JSON.stringify(runtimeURL)).replace("
 source=source.replace("from '@game-link/ui'",'from '+JSON.stringify(runtimeURL));
 source=source.replace("from './catalog'",'from '+JSON.stringify(new URL('pages/frontend/src/catalog.ts',root).href));
 source=source.replace("from './ui/notice'",'from '+JSON.stringify(new URL('pages/frontend/src/ui/notice.ts',root).href));
+const installationSource=(await sourceBundle('pages/frontend/src/installation-management.ts')).replaceAll('"./runtime.js"',JSON.stringify(runtimeURL)).replaceAll("'./runtime.js'",JSON.stringify(runtimeURL));
+const installationURL='data:text/javascript;base64,'+Buffer.from(installationSource).toString('base64');
+source=source.replace("from './installation-management'",'from '+JSON.stringify(installationURL));
 const {createModuleManagement}=await import('data:text/javascript;base64,'+Buffer.from(source).toString('base64'));
 const {validateCatalog:configurationCatalog,validateSnapshot:configurationSnapshot}=await import('../management/source-management.mjs');
 const configurationFixture=await import('../management/fixtures.mjs');

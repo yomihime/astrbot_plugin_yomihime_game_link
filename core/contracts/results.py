@@ -10,6 +10,7 @@ from typing import Mapping
 from yomihime_game_link_sdk.display import DisplayDocument as DisplayDocument
 from yomihime_game_link_sdk.display import Privacy as Privacy
 from yomihime_game_link_sdk.display import TimeValue as TimeValue
+from yomihime_game_link_sdk.results import AnalysisRequest as AnalysisRequest
 from yomihime_game_link_sdk.results import CapabilityResult as CapabilityResult
 from yomihime_game_link_sdk.results import ErrorCode as ErrorCode
 from yomihime_game_link_sdk.results import ErrorDetail as ErrorDetail
@@ -28,6 +29,11 @@ def check_ErrorDetail(self) -> None:
     elif not isinstance(self.code, ErrorCode):
         raise TypeError("code must be ErrorCode")
     _text(self.message, "error message")
+    if self.retry_after_seconds is not None and (
+        type(self.retry_after_seconds) is not int
+        or not 0 <= self.retry_after_seconds <= 86400
+    ):
+        raise ValueError("retry hint must be bounded whole seconds")
 
 
 def _valid_fact_value(value):
@@ -58,7 +64,39 @@ def check_FactDocument(self) -> None:
     )
 
 
+def check_AnalysisRequest(self) -> None:
+    for name in ("template_id", "focus_key"):
+        value = getattr(self, name)
+        if (
+            type(value) is not str
+            or not 1 <= len(value) <= 256
+            or any(ord(c) < 32 for c in value)
+        ):
+            raise ValueError("invalid analysis identity")
+    if type(self.template_version) is not int or self.template_version < 1:
+        raise ValueError("invalid analysis template version")
+    if type(self.instructions) is not str or not 1 <= len(self.instructions) <= 4096:
+        raise ValueError("analysis instructions exceed budget")
+    if (
+        type(self.timeout_seconds) not in (int, float)
+        or not isfinite(self.timeout_seconds)
+        or not 0 < self.timeout_seconds <= 60
+    ):
+        raise ValueError("analysis timeout exceeds budget")
+    if (
+        type(self.max_output_chars) is not int
+        or not 128 <= self.max_output_chars <= 12000
+    ):
+        raise ValueError("analysis output exceeds budget")
+
+
 def check_CapabilityResult(self) -> None:
+    if self.analysis_request is not None:
+        if (
+            type(self.analysis_request) is not AnalysisRequest
+            or self.model_facts is None
+        ):
+            raise ValueError("analysis requires an exact request and public facts")
     if self.schema_version != "1.8.0":
         raise ValueError("unsupported result contract version")
     _text(self.result_id, "result_id")
@@ -89,6 +127,7 @@ def check_CapabilityResult(self) -> None:
         ("document", DisplayDocument),
         ("model_facts", FactDocument),
         ("error", ErrorDetail),
+        ("analysis_request", AnalysisRequest),
     ):
         value = getattr(self, name)
         if value is not None and (not isinstance(value, expected)):

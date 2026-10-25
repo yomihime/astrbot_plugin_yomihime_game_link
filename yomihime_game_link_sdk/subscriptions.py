@@ -44,6 +44,7 @@ class SubscriptionRequest:
     digest_schedule: DigestScheduleProfile | None = None
     subscription_id: str | None = None
     expected_revision: int | None = None
+    creation_key: str | None = None
 
     def __post_init__(self) -> None:
         if isinstance(self.collector_parameters, Mapping):
@@ -136,6 +137,7 @@ class SubscriptionView:
     grant: GrantReference | None
     notification_conversation_id: str
     filters: JsonObject
+    evaluation_state: EvaluationState | None = None
 
     def __post_init__(self) -> None:
         if isinstance(self.filters, Mapping):
@@ -149,6 +151,59 @@ class EvaluationState:
 
 
 @dataclass(frozen=True, slots=True)
+class CommentaryRequest:
+    template_id: str
+    template_version: int
+    prompt: str
+    timeout_seconds: float = 8.0
+    max_output_chars: int = 400
+
+
+@dataclass(frozen=True, slots=True)
+class PublicEventContribution:
+    composer_id: str
+    contribution_key: str
+    payload: JsonObject
+
+    def __post_init__(self) -> None:
+        if isinstance(self.payload, Mapping):
+            object.__setattr__(self, "payload", MappingProxyType(dict(self.payload)))
+
+
+@dataclass(frozen=True, slots=True)
+class ComposedPublicEvent:
+    display_data: DisplayDocument
+    commentary: CommentaryRequest | None = None
+
+
+class PublicEventComposer(Protocol):
+    def compose(
+        self, contributions: tuple[PublicEventContribution, ...]
+    ) -> ComposedPublicEvent: ...
+
+
+class PublicEventProjector(Protocol):
+    """Pure projection for one Core-filtered current PUBLIC recipient member."""
+
+    def project(
+        self,
+        subscription: SubscriptionView,
+        contribution: PublicEventContribution,
+        *,
+        observed_at: datetime,
+    ) -> EvaluationDecision | None: ...
+
+
+@dataclass(frozen=True, slots=True)
+class EvaluationEvent:
+    event_key: str
+    event_version: int
+    display_data: DisplayDocument
+    public_contribution: PublicEventContribution | None = None
+    commentary: CommentaryRequest | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class EvaluationDecision:
     """Pure matcher output, committed atomically by the owning service."""
 
@@ -157,6 +212,10 @@ class EvaluationDecision:
     event_key: str | None = None
     event_version: int | None = None
     display_data: DisplayDocument | None = None
+    events: tuple[EvaluationEvent, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "events", tuple(self.events))
 
 
 @dataclass(frozen=True, slots=True)
@@ -237,6 +296,7 @@ class SubscriptionDescriptor:
     matcher_id: str
     filter_schema: JsonObject
     notification_modes: tuple[str, ...]
+    enabled_config_key: str | None = None
 
     def __post_init__(self) -> None:
         if isinstance(self.filter_schema, Mapping):

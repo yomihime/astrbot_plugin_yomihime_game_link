@@ -63,6 +63,7 @@ from yomihime_game_link_sdk.display import (
     Privacy,
     TextBlock,
 )
+from yomihime_game_link_sdk.errors import AccessDenied
 from yomihime_game_link_sdk.services import (
     CapabilityHealth,
     HealthReport,
@@ -72,12 +73,15 @@ from yomihime_game_link_sdk.services import (
 from yomihime_game_link_sdk.storage import GrantReference, OwnerScope, OwnershipKind
 from yomihime_game_link_sdk.subscriptions import (
     CollectionKey,
+    CommentaryRequest,
+    ComposedPublicEvent,
     ConversationKind,
     ConversationRef,
     DigestScheduleProfile,
     DstFoldPolicy,
     DstGapPolicy,
     NormalizedInput,
+    PublicEventContribution,
     ScheduleDescriptor,
     ScheduleTrigger,
 )
@@ -142,6 +146,20 @@ class _Grants:
 
     async def current_grant(self, _grant_id):
         return self.grant
+
+
+class _PublicComposer:
+    def compose(self, contributions):
+        names = ",".join(item.payload["name"] for item in contributions)
+        return ComposedPublicEvent(
+            DisplayDocument(
+                "composed:" + names,
+                "public",
+                (TextBlock(names),),
+                privacy=Privacy.PUBLIC,
+            ),
+            CommentaryRequest("test", 1, names),
+        )
 
 
 class _GatedDeliveryRepository:
@@ -245,7 +263,9 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
                 "source",
                 1,
                 {"type": "object", "properties": {}, "required": []},
-                OwnershipKind.USER,
+                OwnershipKind.PUBLIC
+                if self._testMethodName.startswith("test_c3_public")
+                else OwnershipKind.USER,
                 ScheduleTrigger.PERIODIC,
                 60,
                 60,
@@ -268,7 +288,10 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
         )
         handlers = validate_contract(
             ModuleHandlers(
-                {"read": _DeliveryHandler()}, {"collector": _DeliveryCollector()}, {}
+                {"read": _DeliveryHandler()},
+                {"collector": _DeliveryCollector()},
+                {},
+                event_composers={"compose": _PublicComposer()},
             )
         )
         self.registry.register_package(
@@ -310,9 +333,15 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.renderer = _Renderer()
         self.port = _MessagePort()
         self.recipient = validate_contract(
-            ConversationRef("adapter", ConversationKind.DIRECT, "u1", "private-u1")
+            ConversationRef("adapter", ConversationKind.GROUP, "g1", "group-g1")
+            if self._testMethodName.startswith("test_c3_public")
+            else ConversationRef("adapter", ConversationKind.DIRECT, "u1", "private-u1")
         )
-        self.scope = OwnerScope.user("u1")
+        self.scope = (
+            OwnerScope.public()
+            if self._testMethodName.startswith("test_c3_public")
+            else OwnerScope.user("u1")
+        )
         self.key = validate_contract(
             CollectionKey(
                 "sample/game",
@@ -413,8 +442,6 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.port.calls[0][1].text, "saved-title")
 
     async def test_eligibility_structure_rejection_preserves_authority_and_cancel(self):
-        from yomihime_game_link_sdk.errors import AccessDenied
-
         async def check(recipient, privacy):
             return await self.service._eligibility(
                 "sub-1", 1, "u1", None, recipient, privacy, self.now
@@ -432,6 +459,7 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(result.code, "privacy_rejected")
         self.assertEqual(await self.subscriptions.current("sub-1"), before)
         self.assertEqual(self.port.calls, [])
+
         for failure in (
             AccessDenied(),
             RuntimeError("internal"),
@@ -447,6 +475,173 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
                 ):
                     await check(self.recipient, Privacy.PUBLIC)
         self.assertEqual(await self.subscriptions.current("sub-1"), before)
+        self.assertEqual(self.port.calls, [])
+
+    async def _c3_public_fixture(self, suffix):
+        other = replace(
+            self.record,
+            subscription_id="sub-2",
+            owner_id="u2",
+            collection_key=replace(
+                self.key, parameters=NormalizedInput({"account": 456})
+            ),
+        )
+        await self.subscriptions.create(other)
+        events = []
+        for record, name in ((self.record, "Alice"), (other, "Bob")):
+            event_key = "public-match-" + suffix
+            event = DeliveryEvent(
+                event_key,
+                1,
+                record.subscription_id,
+                1,
+                record.owner_id,
+                None,
+                record.recipient,
+                self.event.display_data,
+                delivery_idempotency_key(
+                    event_key, 1, record.subscription_id, 1, record.recipient
+                ),
+                public_contribution=PublicEventContribution(
+                    "compose", record.subscription_id, {"name": name}
+                ),
+            )
+            events.append(event)
+        window = DigestWindow(
+            "public-event:v1:" + suffix,
+            "UTC",
+            "public-event",
+            self.now - timedelta(seconds=31),
+            self.now - timedelta(seconds=30),
+            self.now,
+            DstFoldPolicy.FIRST_OCCURRENCE,
+            DstGapPolicy.SKIP,
+            (),
+        )
+        await self.windows.create(window)
+        associations = tuple(
+            DigestMemberAssociation(
+                window.window_id,
+                self.recipient,
+                DigestMember(event.subscription_id, 1, event.event_key, 1),
+                event,
+            )
+            for event in events
+        )
+        await create_digest_envelope_fixture(
+            self.deliveries,
+            self.bindings,
+            DigestEnvelope(
+                "public-envelope-" + suffix,
+                window.window_id,
+                self.recipient,
+                tuple(item.member for item in associations),
+                member_associations=associations,
+            ),
+        )
+        return window, events
+
+    async def test_c3_public_combined_send_retains_each_receipt_and_model_failure_falls_back(
+        self,
+    ):
+        window, events = await self._c3_public_fixture("fallback")
+        calls = []
+
+        async def generate(request):
+            calls.append(request.prompt)
+            raise RuntimeError("provider offline")
+
+        self.service._commentary_port = SimpleNamespace(generate=generate)
+        result = await self.service.dispatch_digest(
+            window.window_id, self.recipient, now=self.now
+        )
+        self.assertIs(result.state, DeliveryState.SENT)
+        self.assertEqual(len(self.port.calls), 1)
+        self.assertIn("Alice", self.port.calls[0][1].text)
+        self.assertIn("Bob", self.port.calls[0][1].text)
+        self.assertEqual(calls, ["Alice,Bob"])
+        for event in events:
+            saved = await self.deliveries.current_event(
+                event.event_key,
+                1,
+                subscription_id=event.subscription_id,
+                subscription_revision=1,
+            )
+            self.assertIs(saved.state, DeliveryState.SENT)
+            self.assertEqual(saved.attempt.idempotency_key, event.idempotency_key)
+
+    async def test_c3_public_cancel_during_model_removes_facts_before_combined_send(
+        self,
+    ):
+        window, _ = await self._c3_public_fixture("cancel-model")
+        prompts = []
+
+        async def generate(request):
+            prompts.append(request.prompt)
+            if len(prompts) == 1:
+                await self.subscriptions.cancel("sub-2", expected_revision=1)
+            return "bounded comment"
+
+        self.service._commentary_port = SimpleNamespace(generate=generate)
+        result = await self.service.dispatch_digest(
+            window.window_id, self.recipient, now=self.now
+        )
+        self.assertIs(result.state, DeliveryState.SENT)
+        self.assertEqual(len(self.port.calls), 1)
+        self.assertIn("Alice", self.port.calls[0][1].text)
+        self.assertNotIn("Bob", self.port.calls[0][1].text)
+        self.assertEqual(prompts, ["Alice,Bob", "Alice"])
+
+    async def test_c3_public_renderer_failure_sends_bounded_deterministic_settlement_text(
+        self,
+    ):
+        window, _ = await self._c3_public_fixture("renderer-fallback")
+
+        async def failed_renderer(*args, **kwargs):
+            raise RuntimeError("renderer unavailable")
+
+        self.service._renderer = SimpleNamespace(render=failed_renderer)
+        result = await self.service.dispatch_digest(
+            window.window_id, self.recipient, now=self.now
+        )
+        self.assertIs(result.state, DeliveryState.SENT)
+        self.assertEqual(len(self.port.calls), 1)
+        text = self.port.calls[0][1].text
+        self.assertIn("文字战报", text)
+        self.assertIn("Alice", text)
+        self.assertIn("Bob", text)
+
+    async def test_c3_public_restart_unknown_retains_original_member_receipts(self):
+        window, events = await self._c3_public_fixture("restart-unknown")
+        claim = await self.windows.claim_due_envelope(
+            window.window_id,
+            self.recipient,
+            now=self.now,
+            lease_expires_at=self.now + timedelta(minutes=1),
+        )
+        sending = await self.windows.begin_envelope_send(
+            claim,
+            expected_revision=claim.envelope.revision,
+            attempt_number=1,
+            started_at=self.now,
+        )
+        self.assertIs(sending.state, DigestEnvelopeState.SENDING)
+        _, envelopes = await self.service.recover_startup()
+        self.assertEqual(len(envelopes), 1)
+        for event in events:
+            saved = await self.deliveries.current_event(
+                event.event_key,
+                1,
+                subscription_id=event.subscription_id,
+                subscription_revision=1,
+            )
+            self.assertIs(saved.state, DeliveryState.UNKNOWN)
+            self.assertEqual(saved.public_contribution, event.public_contribution)
+        self.assertIsNone(
+            await self.service.dispatch_digest(
+                window.window_id, self.recipient, now=self.now
+            )
+        )
         self.assertEqual(self.port.calls, [])
 
     async def test_scheduled_pause_resume_aborts_before_actual_io(self):

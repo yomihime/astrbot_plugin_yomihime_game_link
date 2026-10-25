@@ -73,7 +73,7 @@ class BuildOutputSafetyTests(unittest.TestCase):
             (root / "metadata.yaml").write_text("name: sample\nversion: v0.1.2\n")
             out = root / "dist"
             out.mkdir()
-            wheel = out / "yomihime_game_link_sdk-0.1.0a19-py3-none-any.whl"
+            wheel = out / "yomihime_game_link_sdk-0.1.0a22-py3-none-any.whl"
             wheel.write_bytes(b"verified wheel fixture")
             before = wheel.stat()
 
@@ -105,7 +105,7 @@ class BuildOutputSafetyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             (root / "metadata.yaml").write_text("name: sample\nversion: v0.1.2\n")
-            wheel = root / "yomihime_game_link_sdk-0.1.0a19-py3-none-any.whl"
+            wheel = root / "yomihime_game_link_sdk-0.1.0a22-py3-none-any.whl"
             wheel.write_bytes(b"retained sentinel")
             os.link(wheel, root / "other-link")
             with self.assertRaisesRegex(ValueError, "hard link"):
@@ -184,7 +184,7 @@ class BuildOutputSafetyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             (root / "metadata.yaml").write_text("name: sample\nversion: v0.1.2\n")
-            wheel = root / "yomihime_game_link_sdk-0.1.0a19-py3-none-any.whl"
+            wheel = root / "yomihime_game_link_sdk-0.1.0a22-py3-none-any.whl"
             wheel.write_bytes(b"wheel")
             out = root / "out"
             out.mkdir()

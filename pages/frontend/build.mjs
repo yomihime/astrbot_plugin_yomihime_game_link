@@ -110,7 +110,7 @@ for(const bundleRoot of bundleRoots)for(const packageName of (await readdir(reso
  }
  projected.push({package:packageName,resources:generated});
 }
-await writeFile(resolve(shell,'module-loader.js'),"export async function loadPage(entry){switch(entry){\n"+[...new Set(branches)].sort().join('\n')+"\ndefault:throw Error('Unknown module page');}}\n");
+await writeFile(resolve(shell,'module-loader.js'),"export const sharedRuntimeUrl=new URL('./runtime.js',import.meta.url).href;\nexport async function loadPage(entry){switch(entry){\n"+[...new Set(branches)].sort().join('\n')+"\ndefault:throw Error('Unknown module page');}}\n");
 const template='<template id="module-style-assets"></template>';
 let index=await readFile(resolve(frontend,'src/index.html'),'utf8');
 if(index.split(template).length!==2)throw Error('Expected one inert module style template');

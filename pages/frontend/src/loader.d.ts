@@ -1,1 +1,1 @@
-declare module '*module-loader.js' {import type {PageModule} from './contracts'; export function loadPage(entry: string): Promise<PageModule>;}
+declare module '*module-loader.js' {import type {PageModule} from './contracts'; export function loadPage(entry: string): Promise<PageModule>; export const sharedRuntimeUrl:string;}

@@ -26,6 +26,7 @@ from yomihime_game_link_sdk.declarations import (
     SourceDeclaration,
     ToolDescriptor,
 )
+from yomihime_game_link_sdk.jobs import JobDescriptor
 from yomihime_game_link_sdk.storage import (
     CollectionDescriptor,
     CollectionIndex,
@@ -71,7 +72,7 @@ def _walk_budget(value: object) -> tuple[int, int]:
     def visit(item: object, depth: int, in_schema: bool = False) -> None:
         nonlocal nodes, schemas
         nodes += 1
-        if nodes > EXTENSION_MANIFEST_ABI.max_schema_nodes:
+        if nodes > EXTENSION_MANIFEST_ABI.max_manifest_nodes:
             raise ManifestError("manifest node budget exceeded")
         if depth > EXTENSION_MANIFEST_ABI.max_schema_depth:
             raise ManifestError("manifest nesting budget exceeded")
@@ -100,6 +101,7 @@ def _walk_budget(value: object) -> tuple[int, int]:
                     "input_schema",
                     "filter_schema",
                     "value_schema",
+                    "parameter_schema",
                 }
                 if is_schema:
                     schemas += 1
@@ -297,6 +299,12 @@ def _map_module(value: object, contract_version: str) -> ModuleManifest:
     sources = []
     for raw in _list(obj, "sources"):
         item = _keys(raw, "source", {"source_id", "host"})
+        if "redirect_path_prefixes" in item:
+            item["redirect_path_prefixes"] = tuple(
+                _shape(
+                    item["redirect_path_prefixes"], "array", "redirect_path_prefixes"
+                )
+            )
         sources.append(
             validate_contract(SourceDeclaration(credential_ref=None, **item))
         )
@@ -374,6 +382,12 @@ def _map_module(value: object, contract_version: str) -> ModuleManifest:
             ),
             display=display,
             diagnostics=tuple(diagnostics),
+            jobs=tuple(
+                validate_contract(
+                    JobDescriptor(**_keys(item, "job", {"job_id", "parameter_schema"}))
+                )
+                for item in _list(obj, "jobs")
+            ),
         )
     )
 

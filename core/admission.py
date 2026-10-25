@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from threading import RLock
 from uuid import uuid4
 
-from yomihime_game_link_sdk.contexts import InvocationView
+from yomihime_game_link_sdk.contexts import InvocationOrigin, InvocationView
 from yomihime_game_link_sdk.declarations import CapabilityReference, ModuleManifest
 from yomihime_game_link_sdk.services import CapabilityHealth, HealthReport, HealthStatus
 from yomihime_game_link_sdk.subscriptions import ScheduleTrigger
@@ -32,6 +32,7 @@ from .ports import (
     SendApproval,
     SendPermit,
 )
+from .ports_jobs import JobRunLease, declaration_digest
 from .registry import RegisteredModule, Registry, RegistryError
 
 
@@ -66,7 +67,7 @@ UtcClock = Callable[[], datetime]
 
 @dataclass(slots=True)
 class _LeaseRecord:
-    lease: AdmissionLease | ScheduledLease | DeliveryLease
+    lease: AdmissionLease | ScheduledLease | DeliveryLease | JobRunLease
     identity: RunIdentity
     view: InvocationView | None = None
     capability_id: str | None = None
@@ -167,6 +168,43 @@ class AdmissionController(AdmissionPort):
         except BaseException:
             self.issuer.detach_lease_for_cleanup(trusted, lease)
             raise
+        return lease
+
+    def admit_job(self, view: InvocationView) -> JobRunLease:
+        proof = self.issuer.job_binding(view)
+        if view.origin is not InvocationOrigin.JOB or view.actor_id != proof.owner_id:
+            raise AdmissionError("invalid job invocation")
+        snapshot, module = self._registered(view.module_id)
+        identity = self._active_identity(module)
+        descriptor = next(
+            (job for job in module.manifest.jobs if job.job_id == proof.handler_id),
+            None,
+        )
+        if (
+            descriptor is None
+            or view.module_epoch != identity.module_epoch
+            or declaration_digest(descriptor) != proof.declaration_digest
+        ):
+            raise AdmissionError("job declaration changed")
+        if self.issuer.lease_for(view) is not None:
+            raise AdmissionError("job invocation already admitted")
+        lease = JobRunLease(
+            uuid4().hex,
+            view.invocation_id,
+            proof.job_id,
+            proof.run_token,
+            view.module_id,
+            view.module_epoch,
+            snapshot.revision,
+            proof.handler_id,
+            proof.owner_id,
+            view.deadline,
+            proof.declaration_digest,
+            proof.current,
+        )
+        self.issuer.attach_lease(view, lease)
+        self._record(lease, identity, view=view)
+        self._view_leases[view.invocation_id] = lease.lease_id
         return lease
 
     def admit_schedule(
@@ -276,6 +314,17 @@ class AdmissionController(AdmissionPort):
             )
             if dependencies != lease.dependencies:
                 raise CapabilityUnavailable("required capability identity changed")
+        elif isinstance(lease, JobRunLease):
+            descriptor = next(
+                (job for job in module.manifest.jobs if job.job_id == lease.handler_id),
+                None,
+            )
+            if (
+                descriptor is None
+                or declaration_digest(descriptor) != lease.declaration_digest
+                or lease.current() is not True
+            ):
+                raise AdmissionError("job execution is no longer current")
         else:
             self._schedule(module.manifest, lease.collector_id, lease.key_version)
             if isinstance(lease, ScheduledLease):
@@ -301,7 +350,9 @@ class AdmissionController(AdmissionPort):
 
     def release(self, lease: AdmissionLease | ScheduledLease | DeliveryLease) -> None:
         """Drop one exact lease record; repeated release is harmless."""
-        if not isinstance(lease, (AdmissionLease, ScheduledLease, DeliveryLease)):
+        if not isinstance(
+            lease, (AdmissionLease, ScheduledLease, DeliveryLease, JobRunLease)
+        ):
             raise InvalidAdmissionLease("unrecognized lease")
         with self._commit_lock:
             record = self._leases.get(lease.lease_id)
@@ -564,7 +615,9 @@ class AdmissionController(AdmissionPort):
     def _require_record(
         self, lease: AdmissionLease | ScheduledLease | DeliveryLease
     ) -> _LeaseRecord:
-        if not isinstance(lease, (AdmissionLease, ScheduledLease, DeliveryLease)):
+        if not isinstance(
+            lease, (AdmissionLease, ScheduledLease, DeliveryLease, JobRunLease)
+        ):
             raise InvalidAdmissionLease("unrecognized lease")
         record = self._leases.get(lease.lease_id)
         if record is None or record.lease is not lease:

@@ -156,6 +156,69 @@ class PublicWebIssuerTests(unittest.TestCase):
         with self.assertRaises(InvalidInvocation):
             self.issuer.require(view)
 
+    def test_external_deployment_is_explicit_replaceable_and_not_public_dto_authority(
+        self,
+    ):
+        target = ("external/mod", "read")
+
+        def issue(proof):
+            return self.issuer.issue_public_web(
+                proof,
+                module_id=target[0],
+                capability_id=target[1],
+                module_epoch=1,
+                registry_revision=1,
+                generation=1,
+                deadline=30.0,
+            )
+
+        with self.assertRaises(InvalidInvocation):
+            issue(self.proofs.new(*target))
+        self.issuer._replace_external_public_web_capabilities(frozenset({target}))
+        for forged in (object(), PublicWebBinding(*target, 1, "opaque", 20.0)):
+            with self.assertRaises(InvalidInvocation):
+                issue(forged)
+        proof = self.proofs.new(*target)
+        view = issue(proof)
+        self.assertIs(self.issuer.require(view), view)
+        with self.assertRaises(InvalidInvocation):
+            issue(proof)
+        with self.assertRaises(InvalidInvocation):
+            self.issuer.derive(
+                view, module_id="other/mod", module_epoch=1, capability_id="read"
+            )
+        child = self.issuer.derive(
+            view, module_id="pkg/child", module_epoch=1, capability_id="read"
+        )
+        self.assertIs(self.issuer.require(child), child)
+        self.issuer._replace_external_public_web_capabilities(frozenset())
+        for stale in (view, child):
+            with self.assertRaises(InvalidInvocation):
+                self.issuer.require(stale)
+        with self.assertRaises(InvalidInvocation):
+            issue(self.proofs.new(*target))
+        # An external update never erases the original static deployment.
+        static = self._issue(self.proofs.new("pkg/mod", "read"))
+        self.assertIs(self.issuer.require(static), static)
+        self.issuer.release(view)
+        self.issuer.release(static)
+
+    def test_external_deployment_rejects_invalid_snapshot_and_static_collision(self):
+        target = ("external/mod", "read")
+        self.issuer._replace_external_public_web_capabilities(frozenset({target}))
+        for rejected in (
+            {target},
+            frozenset({("external/mod",)}),
+            frozenset({("external/mod", "")}),
+            frozenset({("pkg/mod", "read")}),
+        ):
+            with (
+                self.subTest(rejected=rejected),
+                self.assertRaises((TypeError, ValueError)),
+            ):
+                self.issuer._replace_external_public_web_capabilities(rejected)
+            self.assertIn(target, self.issuer._public_web_deployment())
+
     def test_public_session_is_only_descriptive_exact_proof_bound_data(self):
         proof = self.proofs.new("pkg/mod", "read", key="session-one")
         view = self._issue(proof)

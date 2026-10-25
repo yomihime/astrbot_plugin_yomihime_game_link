@@ -6,7 +6,7 @@ import json
 import math
 import re
 from collections.abc import Mapping
-from types import MappingProxyType
+from threading import RLock
 
 _LABEL = re.compile(r"[a-zA-Z][a-zA-Z0-9_.-]{0,95}\Z")
 _TYPES = {"object", "array", "string", "integer", "number", "boolean", "null"}
@@ -38,6 +38,110 @@ _AUTH_MATERIAL = re.compile(
     re.I,
 )
 
+_FROZEN_SCHEMA_LIMIT = 32
+_FROZEN_SCHEMAS = {}
+_FROZEN_SCHEMA_LOCK = RLock()
+
+
+class _FrozenDiagnosticMapping(tuple, Mapping):
+    """Data-only mapping whose entire storage is an immutable builtin tuple.
+
+    MappingProxyType can delegate comparison to its writable backing dict.
+    This object has no dict or assignable slots; comparisons expose at most a
+    fresh detached dict. All schema mapping layers use the same representation.
+    """
+
+    __slots__ = ()
+
+    def __new__(cls, pairs):
+        return tuple.__new__(cls, pairs)
+
+    def __getitem__(self, key):
+        for name, value in tuple.__iter__(self):
+            if name == key:
+                return value
+        raise KeyError(key)
+
+    def __iter__(self):
+        return (name for name, _ in tuple.__iter__(self))
+
+    def __len__(self):
+        return tuple.__len__(self)
+
+    def __contains__(self, key):
+        # tuple storage contains pairs; the public Mapping contains keys.
+        return any(name == key for name, _ in tuple.__iter__(self))
+
+    def items(self):
+        return tuple.__getitem__(self, slice(None))
+
+    def __eq__(self, other):
+        if isinstance(other, Mapping):
+            return dict(self.items()) == other
+        return NotImplemented
+
+    def __ne__(self, other):
+        result = self.__eq__(other)
+        return NotImplemented if result is NotImplemented else not result
+
+    def __repr__(self):
+        return repr(dict(self.items()))
+
+
+def _detached_immutable_depth(value):
+    """Qualify only a freshly built output; never use this as input authority.
+
+    Compatibility permits str subclasses in some type/required tuples. Those
+    caller-owned leaves can carry mutable comparison behavior and disqualify
+    the entire root from identity reuse.
+    """
+    depths = {}
+
+    def visit(item):
+        kind = type(item)
+        if (
+            kind is str
+            or kind is int
+            or kind is float
+            or kind is bool
+            or kind is type(None)
+        ):
+            return 0
+        if kind is not _FrozenDiagnosticMapping and kind is not tuple:
+            return None
+        if id(item) in depths:
+            return depths[id(item)]
+        children = []
+        if kind is _FrozenDiagnosticMapping:
+            for key, child in item.items():
+                if type(key) is not str:
+                    return None
+                children.append(child)
+        else:
+            children.extend(item)
+        maximum = 0
+        for child in children:
+            depth = visit(child)
+            if depth is None:
+                return None
+            maximum = max(maximum, depth)
+        result = 1 + maximum
+        depths[id(item)] = result
+        return result
+
+    return visit(value)
+
+
+def _proven_diagnostic_schema_depth(schema):
+    """Private constant-time proof for an exact retained output root only."""
+    if type(schema) is not _FrozenDiagnosticMapping:
+        return None
+    with _FROZEN_SCHEMA_LOCK:
+        cached = _FROZEN_SCHEMAS.get(id(schema))
+        if cached is not None and cached[0] is schema:
+            return cached[1]
+    return None
+
 
 def _sensitive_field(name, rule):
     compact = re.sub(r"[^a-z0-9]", "", name.lower())
@@ -65,6 +169,10 @@ def _sensitive_field(name, rule):
 
 
 def freeze_diagnostic_schema(schema):
+    # Hold the exact output root strongly: identity alone must not permit id
+    # reuse. Foreign dict/proxy/custom mappings always take the full walk.
+    if _proven_diagnostic_schema_depth(schema) is not None:
+        return schema
     nodes = 0
     definitions = schema.get("$defs", {}) if isinstance(schema, Mapping) else {}
     if not isinstance(definitions, Mapping) or len(definitions) > 128:
@@ -144,7 +252,7 @@ def freeze_diagnostic_schema(schema):
             if any(_sensitive_field(key, child) for key, child in children.items()):
                 raise ValueError("sensitive diagnostic field rejected")
             result.update(
-                properties=MappingProxyType(children),
+                properties=_FrozenDiagnosticMapping(tuple(children.items())),
                 required=tuple(required),
                 additionalProperties=False,
             )
@@ -186,7 +294,7 @@ def freeze_diagnostic_schema(schema):
             ):
                 raise ValueError("invalid diagnostic enum")
             result["enum"] = tuple(values)
-        return MappingProxyType(result)
+        return _FrozenDiagnosticMapping(tuple(result.items()))
 
     frozen = walk(schema)
     for name, definition in definitions.items():
@@ -195,6 +303,14 @@ def freeze_diagnostic_schema(schema):
         walk({"$ref": "#/$defs/" + name})
     if frozen["type"] != ("object",):
         raise ValueError("diagnostic root must be an object")
+    # This is the sole insertion point, after full validation/detachment and
+    # only for outputs entirely composed of our containers and builtin leaves.
+    immutable_depth = _detached_immutable_depth(frozen)
+    if immutable_depth is not None:
+        with _FROZEN_SCHEMA_LOCK:
+            if len(_FROZEN_SCHEMAS) >= _FROZEN_SCHEMA_LIMIT:
+                _FROZEN_SCHEMAS.pop(next(iter(_FROZEN_SCHEMAS)))
+            _FROZEN_SCHEMAS[id(frozen)] = (frozen, immutable_depth)
     return frozen
 
 

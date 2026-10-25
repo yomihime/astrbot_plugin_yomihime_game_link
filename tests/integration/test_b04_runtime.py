@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
+from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
 from ygl_test_subject.core.contracts.services import (
@@ -1043,11 +1044,19 @@ class B04RuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
             (prior_state, prior_cursor, prior_observation),
         )
 
-    async def test_pause_resume_during_collector_await_discards_old_work_and_restarts_previous(
+    async def test_pause_resume_discards_stale_work_and_separates_collection_and_evaluation(
         self,
     ):
-        await self._create("alice", minimum=0)
+        view = await self._create("alice", minimum=0)
         await self.runtime.scheduler.run_due_page()
+        record = await self.runtime.repositories.subscriptions.current(
+            view.subscription_id
+        )
+        checkpoint = await self.runtime.repositories.scheduler.current_checkpoint(
+            view.subscription_id, record.collection_key
+        )
+        previous_observation = checkpoint.snapshot.observation
+        self.assertIsNotNone(previous_observation)
         before = self._count("b04_observations")
         self.assertEqual(before, 1)
         self.clock.advance(timedelta(seconds=61))
@@ -1059,7 +1068,9 @@ class B04RuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.runtime.collector.block = True
         run = asyncio.create_task(self.runtime.scheduler.run_due_job(candidate))
         await asyncio.wait_for(self.runtime.collector.started.wait(), timeout=2)
-        self.assertIsNotNone(self.runtime.collector.previous_inputs[-1])
+        self.assertEqual(
+            self.runtime.collector.previous_inputs[-1], previous_observation
+        )
         bindings = self.runtime.repositories.lifecycle._subscription_gate_bindings
         await replace_subscription_gate_fixture(
             self.runtime.database, bindings, "sample/feed", False, self.clock()
@@ -1070,9 +1081,32 @@ class B04RuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.runtime.collector.release.set()
         self.assertIsNone(await asyncio.wait_for(run, timeout=2))
         self.assertEqual(self._count("b04_observations"), before)
-        fresh = await self.runtime.scheduler.run_due_job(candidate)
+        self.assertEqual(
+            await self.runtime.repositories.scheduler.current_checkpoint(
+                view.subscription_id, record.collection_key
+            ),
+            checkpoint,
+        )
+        matcher = self.runtime.lifecycle.handlers("sample/feed").evaluators[
+            "feed-matcher"
+        ]
+        with patch.object(matcher, "evaluate", wraps=matcher.evaluate) as evaluate:
+            fresh = await self.runtime.scheduler.run_due_job(candidate)
         self.assertTrue(fresh.committed)
-        self.assertIsNone(self.runtime.collector.previous_inputs[-1])
+        # The shared collector keeps its last successful sample. Each
+        # subscription's evaluation state is fenced across pause/resume.
+        self.assertEqual(
+            self.runtime.collector.previous_inputs[-1], previous_observation
+        )
+        self.assertEqual(evaluate.call_count, 1)
+        self.assertIsNone(evaluate.call_args.args[2])
+        saved = await self.runtime.repositories.scheduler.current_checkpoint(
+            view.subscription_id, record.collection_key
+        )
+        self.assertNotEqual(saved.fence, checkpoint.fence)
+        self.assertEqual(
+            saved.expected_state_revision, checkpoint.expected_state_revision + 1
+        )
         self.assertEqual(self._count("b04_observations"), before + 1)
         self.assertEqual(self.runtime.message_port.calls, [])
 
@@ -1352,7 +1386,7 @@ class B04RuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(failing_runtime.message_port.calls, [])
         self.assertEqual(len(self.runtime.message_port.calls), 1)
         reopened = type(self.runtime.database)(self.root / "runtime.sqlite3")
-        self.assertEqual(reopened.schema_version(), 130)
+        self.assertEqual(reopened.schema_version(), 210)
         recovered = build_runtime(self.root, clock=self.clock)
         self.assertTrue(
             await recovered.resource_visibility.contains_non_public_resource_reference(

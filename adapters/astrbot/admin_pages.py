@@ -10,6 +10,7 @@ from math import isfinite
 from time import time
 
 from yomihime_game_link_sdk.declarations import ConfigUpdateMode
+from yomihime_game_link_sdk.errors import AccessDenied, InvalidInvocation
 from yomihime_game_link_sdk.services import ConfigTarget
 
 from ...core.contracts.administration import (
@@ -57,8 +58,18 @@ _OPERATIONS = {
     "module-credential-status": AdminOperation.READ_CONFIG,
     "module-credential-replace": AdminOperation.UPDATE_CONFIG,
     "module-credential-clear": AdminOperation.UPDATE_CONFIG,
+    "module-credential-authorize": AdminOperation.UPDATE_CONFIG,
     "module-page-session": AdminOperation.READ_CONFIG,
     "module-page-session-close": AdminOperation.READ_CONFIG,
+    "module-page-assets": AdminOperation.READ_CONFIG,
+    "module-job-submit": AdminOperation.READ_CONFIG,
+    "module-job-status": AdminOperation.READ_CONFIG,
+    "module-job-result": AdminOperation.READ_CONFIG,
+    "module-job-cancel": AdminOperation.READ_CONFIG,
+    "module-job-retry": AdminOperation.READ_CONFIG,
+    "module-job-resource": AdminOperation.READ_CONFIG,
+    "module-install-plan": AdminOperation.LIST_MODULES,
+    "module-install-approve": AdminOperation.SET_ENABLED,
 }
 
 _MODULE_PAGE_OPERATIONS = frozenset(
@@ -69,8 +80,16 @@ _MODULE_PAGE_OPERATIONS = frozenset(
         "module-credential-status",
         "module-credential-replace",
         "module-credential-clear",
+        "module-credential-authorize",
         "module-page-session",
         "module-page-session-close",
+        "module-page-assets",
+        "module-job-submit",
+        "module-job-status",
+        "module-job-result",
+        "module-job-cancel",
+        "module-job-retry",
+        "module-job-resource",
     }
 )
 
@@ -314,7 +333,7 @@ class AdminPages:
                 )
             except RevisionConflict:
                 code, status = "revision_conflict", 409
-            except AdminAuthorizationDenied:
+            except (AdminAuthorizationDenied, AccessDenied, InvalidInvocation):
                 code, status = "admin_authorization_denied", 403
             except SecretStoreUnavailable:
                 code, status = "secret_encryption_unavailable", 503
@@ -417,6 +436,8 @@ class AdminPages:
         return handler
 
     async def _invoke(self, endpoint, core, data, context):
+        if endpoint in {"module-install-plan", "module-install-approve"}:
+            return await self.runtime.installation_operation(endpoint, data, context)
         ops = core.admin_operations
         if endpoint == "legacy-config-plan":
             if set(data) != {"policy_id"}:

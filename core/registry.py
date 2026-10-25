@@ -434,3 +434,7 @@ class Registry:
             _require_callable_method(
                 evaluator, "evaluate", "evaluator evaluate is not callable"
             )
+        for composer in handlers.event_composers.values():
+            _require_callable_method(
+                composer, "compose", "event composer compose is not callable"
+            )

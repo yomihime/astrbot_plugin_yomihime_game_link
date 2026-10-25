@@ -12,7 +12,7 @@ import json
 import secrets
 import sqlite3
 from contextlib import contextmanager, nullcontext
-from dataclasses import fields, is_dataclass
+from dataclasses import fields, is_dataclass, replace
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from enum import Enum
@@ -43,6 +43,7 @@ from yomihime_game_link_sdk.display import (
 from yomihime_game_link_sdk.storage import GrantReference, OwnerScope, OwnershipKind
 from yomihime_game_link_sdk.subscriptions import (
     CollectionKey,
+    CommentaryRequest,
     ConversationKind,
     ConversationRef,
     DigestScheduleProfile,
@@ -52,6 +53,7 @@ from yomihime_game_link_sdk.subscriptions import (
     NormalizedInput,
     Observation,
     ObservationCompleteness,
+    PublicEventContribution,
 )
 
 from ...core.contracts.subscriptions import (
@@ -121,6 +123,8 @@ _DATACLASSES = {
     cls.__name__: cls
     for cls in (
         CollectionKey,
+        CommentaryRequest,
+        PublicEventContribution,
         ActiveDigestSchedule,
         NormalizedInput,
         OwnerScope,
@@ -300,8 +304,187 @@ def _route_key(recipient: object) -> str:
     return hashlib.sha256(_dump(recipient).encode("utf-8")).hexdigest()
 
 
+def _creation_identity(record: SubscriptionRecord) -> str | None:
+    if record.creation_key is None:
+        return None
+    return hashlib.sha256(
+        _dump(
+            (
+                record.module_id,
+                record.type_id,
+                record.owner_id,
+                record.recipient,
+                record.collection_key,
+                record.creation_key,
+            )
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _attach_public_event(unit, event, record, collected_at):
+    """Attach an exact event in the same observation transaction as its state."""
+    contribution = event.public_contribution
+    if contribution is None:
+        return
+    if (
+        record.collection_key.scope.kind is not OwnershipKind.PUBLIC
+        or event.display_data.privacy is not Privacy.PUBLIC
+        or event.grant is not None
+    ):
+        raise ValueError("public aggregate cannot include private observations")
+    identity = _dump((record.module_id, event.recipient, event.event_key))
+    prior_identity = unit.execute(
+        "SELECT window_id FROM b04_public_event_identity WHERE business_key=?",
+        (identity,),
+    ).fetchone()
+    window_id = (
+        prior_identity[0]
+        if prior_identity is not None
+        else ("public-event:v1:" + hashlib.sha256(identity.encode("utf-8")).hexdigest())
+    )
+    route = _route_key(event.recipient)
+    existing_member = unit.execute(
+        "SELECT 1 FROM b04_digest_members WHERE window_id=? AND recipient_key=? AND subscription_id=? AND subscription_revision=? AND event_key=? AND event_version=?",
+        (
+            window_id,
+            route,
+            event.subscription_id,
+            event.subscription_revision,
+            event.event_key,
+            event.event_version,
+        ),
+    ).fetchone()
+    if existing_member is not None:
+        return
+    sealed = unit.execute(
+        "SELECT 1 FROM b04_digest_envelopes WHERE window_id=? AND recipient_key=?",
+        (window_id, route),
+    ).fetchone()
+    count = unit.execute(
+        "SELECT COUNT(*) FROM b04_digest_members WHERE window_id=? AND recipient_key=?",
+        (window_id, route),
+    ).fetchone()[0]
+    if sealed is not None or count >= 100:
+        reason = "sealed_membership" if sealed is not None else "member_limit"
+        unit.execute(
+            "INSERT OR IGNORE INTO b04_public_event_suppressed VALUES (?,?,?,?,?,?,?)",
+            (
+                window_id,
+                event.subscription_id,
+                event.subscription_revision,
+                event.event_key,
+                event.event_version,
+                reason,
+                _iso(collected_at),
+            ),
+        )
+        cancelled = replace(event, state=DeliveryState.CANCELLED)
+        unit.execute(
+            "UPDATE b04_delivery_events SET state='cancelled',event_json=? WHERE event_key=? AND event_version=? AND subscription_id=? AND subscription_revision=?",
+            (
+                _dump(cancelled),
+                event.event_key,
+                event.event_version,
+                event.subscription_id,
+                event.subscription_revision,
+            ),
+        )
+        return
+    # Same contribution key from different owners must agree before any send.
+    for row in unit.execute(
+        "SELECT association_json FROM b04_digest_members WHERE window_id=? AND recipient_key=?",
+        (window_id, route),
+    ).fetchall():
+        prior = _load(row[0]).event.public_contribution
+        if (
+            prior is not None
+            and prior.contribution_key == contribution.contribution_key
+            and prior != contribution
+        ):
+            raise ValueError("contradictory public aggregate contribution")
+    if (
+        unit.execute(
+            "SELECT 1 FROM b04_digest_windows WHERE window_id=?", (window_id,)
+        ).fetchone()
+        is None
+    ):
+        window = DigestWindow(
+            window_id,
+            "UTC",
+            "public-event",
+            collected_at - timedelta(seconds=1),
+            collected_at,
+            collected_at + timedelta(seconds=30),
+            DstFoldPolicy.FIRST_OCCURRENCE,
+            DstGapPolicy.SKIP,
+            (),
+        )
+        unit.execute(
+            "INSERT INTO b04_digest_windows VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (
+                window.window_id,
+                window.timezone_name,
+                window.local_schedule_key,
+                _iso(window.utc_start),
+                _iso(window.utc_end),
+                _iso(window.due_at),
+                window.fold_policy.value,
+                window.gap_policy.value,
+                window.policy_revision,
+                _dump(window),
+            ),
+        )
+    unit.execute(
+        "INSERT OR IGNORE INTO b04_public_event_identity VALUES (?,?)",
+        (identity, window_id),
+    )
+    member = DigestMember(
+        event.subscription_id,
+        event.subscription_revision,
+        event.event_key,
+        event.event_version,
+    )
+    _insert_digest_member(
+        unit, DigestMemberAssociation(window_id, event.recipient, member, event)
+    )
+
+
 def _iso(value: datetime) -> str:
     return value.astimezone(UTC).isoformat()
+
+
+def _project_public_attempt(unit, envelope, attempt):
+    """Expose aggregate in-flight/known-unsent states on every original key."""
+    if not envelope.window_id.startswith("public-event:v1:"):
+        return
+    for association in envelope.member_associations:
+        event = association.event
+        member_attempt = replace(attempt, idempotency_key=event.idempotency_key)
+        member_event = replace(event, state=attempt.state, attempt=member_attempt)
+        unit.execute(
+            "UPDATE b04_delivery_events SET state=?,attempt_number=?,retry_at=NULL,event_json=? WHERE event_key=? AND event_version=? AND subscription_id=? AND subscription_revision=?",
+            (
+                attempt.state.value,
+                attempt.attempt_number,
+                _dump(member_event),
+                event.event_key,
+                event.event_version,
+                event.subscription_id,
+                event.subscription_revision,
+            ),
+        )
+        unit.execute(
+            "INSERT OR REPLACE INTO b04_delivery_attempts VALUES (?,?,?,?,?,?,?)",
+            (
+                event.event_key,
+                event.event_version,
+                event.subscription_id,
+                event.subscription_revision,
+                attempt.attempt_number,
+                attempt.state.value,
+                _dump(member_attempt),
+            ),
+        )
 
 
 def _utc_instant(value: datetime, field: str) -> datetime:
@@ -360,13 +543,28 @@ def _read_subscription_admission(
     """Read only the exact ordinary gate and intent in the caller's transaction."""
     if binding is None:
         return None
-    phase = unit.execute(
-        "SELECT phase FROM subscription_gate_bootstrap WHERE singleton=1"
-    ).fetchone()
-    if phase is None or phase[0] != "complete":
+    if (
+        binding.declared
+        and unit.execute(
+            "SELECT 1 FROM b04_declared_subscription_gate_registrations WHERE principal_id=? AND module_id=? AND field=?",
+            (binding.target.principal_id, binding.target.module_id, binding.field),
+        ).fetchone()
+        is None
+    ):
         return None
+    if not binding.declared:
+        phase = unit.execute(
+            "SELECT phase FROM subscription_gate_bootstrap WHERE singleton=1"
+        ).fetchone()
+        if phase is None or phase[0] != "complete":
+            return None
+    marker_table = (
+        "b04_declared_subscription_gates"
+        if binding.declared
+        else "subscription_gate_initializations"
+    )
     marker = unit.execute(
-        "SELECT 1 FROM subscription_gate_initializations WHERE principal_id=? AND module_id=? AND field=?",
+        f"SELECT 1 FROM {marker_table} WHERE principal_id=? AND module_id=? AND field=?",
         (binding.target.principal_id, binding.target.module_id, binding.field),
     ).fetchone()
     gate = unit.execute(
@@ -920,14 +1118,35 @@ class SQLiteSubscriptionLifecycleRepository(_Repository):
             def invalid(reason: str) -> PersistedSubscriptionGateRead:
                 return PersistedSubscriptionGateRead(True, None, None, reason)
 
+            if (
+                binding.declared
+                and unit.execute(
+                    "SELECT 1 FROM b04_declared_subscription_gate_registrations WHERE principal_id=? AND module_id=? AND field=?",
+                    (
+                        binding.target.principal_id,
+                        binding.target.module_id,
+                        binding.field,
+                    ),
+                ).fetchone()
+                is None
+            ):
+                return invalid("initialization_invalid")
+
             phase = unit.execute(
                 "SELECT phase FROM subscription_gate_bootstrap WHERE singleton=1"
             ).fetchone()
+            marker_table = (
+                "b04_declared_subscription_gates"
+                if binding.declared
+                else "subscription_gate_initializations"
+            )
             marker = unit.execute(
-                "SELECT 1 FROM subscription_gate_initializations WHERE principal_id=? AND module_id=? AND field=?",
+                f"SELECT 1 FROM {marker_table} WHERE principal_id=? AND module_id=? AND field=?",
                 (binding.target.principal_id, binding.target.module_id, binding.field),
             ).fetchone()
-            if phase is None or phase[0] != "complete" or marker is None:
+            if marker is None or (
+                not binding.declared and (phase is None or phase[0] != "complete")
+            ):
                 return invalid("initialization_invalid")
             gate = unit.execute(
                 "SELECT value_json,revision,subscription_transition_at FROM config_entries WHERE principal_id=? AND module_id=? AND field=?",
@@ -1020,9 +1239,22 @@ class SQLiteSubscriptionLifecycleRepository(_Repository):
                     is None
                 ):
                     raise PermissionError("subscription admission is unavailable")
+                creation = _creation_identity(record)
+                if creation is not None:
+                    winner = unit.execute(
+                        "SELECT s.record_json FROM b04_subscription_creation_keys c JOIN b04_subscriptions s USING(subscription_id) WHERE c.creation_key=? AND s.status='active'",
+                        (creation,),
+                    ).fetchone()
+                    if winner is not None:
+                        return _load(winner[0])
                 assert assoc is not None
                 job = _put_job(unit, assoc.collection_key, initial_run)
                 _record_row(unit, record)
+                if creation is not None:
+                    unit.execute(
+                        "INSERT INTO b04_subscription_creation_keys VALUES (?,?)",
+                        (creation, record.subscription_id),
+                    )
                 unit.execute(
                     "INSERT INTO b04_subscription_jobs VALUES (?,?,?,?,?,?)",
                     (
@@ -1089,6 +1321,16 @@ class SQLiteSubscriptionLifecycleRepository(_Repository):
                         if row is None
                         else int(row[0]),
                     )
+                unit.execute(
+                    "DELETE FROM b04_subscription_creation_keys WHERE subscription_id=?",
+                    (record.subscription_id,),
+                )
+                creation = _creation_identity(record)
+                if creation is not None:
+                    unit.execute(
+                        "INSERT INTO b04_subscription_creation_keys VALUES (?,?)",
+                        (creation, record.subscription_id),
+                    )
             else:
                 assert (
                     change.expected_subscription_revision is not None
@@ -1123,6 +1365,7 @@ class SQLiteSubscriptionLifecycleRepository(_Repository):
                     SubscriptionStatus.CANCELLED,
                     existing.type_id,
                     existing.digest_schedule,
+                    existing.creation_key,
                 )
                 if record != expected_cancelled:
                     raise ValueError(
@@ -1165,9 +1408,15 @@ class SQLiteSubscriptionLifecycleRepository(_Repository):
                         if row is None
                         else int(row[0]),
                     )
+                unit.execute(
+                    "DELETE FROM b04_subscription_creation_keys WHERE subscription_id=?",
+                    (record.subscription_id,),
+                )
+            return record
 
-        await self.database.executor.run_transaction(_run, begin_mode="IMMEDIATE")
-        return record
+        return await self.database.executor.run_transaction(
+            _run, begin_mode="IMMEDIATE"
+        )
 
 
 class SQLiteSchedulerRepository(_Repository):
@@ -1314,6 +1563,68 @@ class SQLiteSchedulerRepository(_Repository):
                 (_job_key(lease.key), lease.token),
             ).fetchone()
             return None if row is None else _load(row[0])
+
+        return await self.database.executor.run_read(read)
+
+    async def previous_observation(self, lease: ExecutionLease) -> Observation | None:
+        """Read the collection's last committed sample under its exact live lease."""
+
+        def read(unit):
+            current = _read_subscription_fence(
+                unit, self._subscription_gate_bindings.get(lease.key.module_id)
+            )
+            row = unit.execute(
+                "SELECT * FROM b04_collection_jobs WHERE job_key=?",
+                (_job_key(lease.key),),
+            ).fetchone()
+            if (
+                row is None
+                or current != lease.subscription_fence
+                or _row_fence(row) != current
+                or row["lease_token"] != lease.token
+                or row["key_json"] != _key_json(lease.key)
+                or row["config_revision"] != lease.config_revision
+                or row["module_epoch"] != lease.module_epoch
+                or row["registry_revision"] != lease.registry_revision
+                or _StoredDateTime.fromisoformat(row["lease_expires_at"])
+                <= _utc_instant(self._utc_clock(), "utc_clock")
+            ):
+                return None
+            saved = unit.execute(
+                "SELECT observation_json FROM b04_observations WHERE observation_id=?",
+                (row["observation_id"],),
+            ).fetchone()
+            return None if saved is None else _load(saved[0])
+
+        return await self.database.executor.run_read(read)
+
+    async def public_event_candidates(self, source: SubscriptionRecord):
+        """Core-only restricted view; never supplied to an extension service."""
+        if (
+            source.collection_key.scope.kind is not OwnershipKind.PUBLIC
+            or source.grant is not None
+        ):
+            return ()
+
+        def read(unit):
+            rows = unit.execute(
+                "SELECT record_json FROM b04_subscriptions WHERE status='active' AND scope_kind='public' "
+                "AND json_extract(record_json,'$.fields.module_id')=? "
+                "AND json_extract(record_json,'$.fields.type_id')=? "
+                "AND json_extract(record_json,'$.fields.collection_key.fields.source_id')=? "
+                "AND json_extract(record_json,'$.fields.recipient')=json(?) ORDER BY subscription_id LIMIT 101",
+                (
+                    source.module_id,
+                    source.type_id,
+                    source.collection_key.source_id,
+                    _dump(source.recipient),
+                ),
+            ).fetchall()
+            if len(rows) > 100:
+                raise ValueError(
+                    "public event target membership exceeds bounded projection"
+                )
+            return tuple(_load(row[0]) for row in rows)
 
         return await self.database.executor.run_read(read)
 
@@ -1621,9 +1932,36 @@ class SQLiteSchedulerRepository(_Repository):
                     <= committed_at
                 ):
                     return False
+                public_sources = set()
+                for item in commit.subscriptions:
+                    source_row = unit.execute(
+                        "SELECT record_json FROM b04_subscriptions WHERE subscription_id=?",
+                        (item.subscription_id,),
+                    ).fetchone()
+                    source_record = None if source_row is None else _load(source_row[0])
+                    if (
+                        source_record is not None
+                        and source_record.collection_key == lease.key
+                        and source_record.collection_key.scope.kind
+                        is OwnershipKind.PUBLIC
+                        and any(
+                            event.public_contribution is not None
+                            for event in item.delivery_events
+                        )
+                    ):
+                        public_sources.update(
+                            (
+                                source_record.module_id,
+                                source_record.type_id,
+                                _dump(source_record.recipient),
+                                event.event_key,
+                            )
+                            for event in item.delivery_events
+                            if event.public_contribution is not None
+                        )
                 for item in commit.subscriptions:
                     sub = unit.execute(
-                        "SELECT revision,status FROM b04_subscriptions WHERE subscription_id=?",
+                        "SELECT revision,status,record_json FROM b04_subscriptions WHERE subscription_id=?",
                         (item.subscription_id,),
                     ).fetchone()
                     link = unit.execute(
@@ -1635,12 +1973,50 @@ class SQLiteSchedulerRepository(_Repository):
                         (item.subscription_id,),
                     ).fetchone()
                     actual_state = None if state is None else int(state[0])
+                    if item.projected_observation is not None:
+                        if (
+                            sub is None
+                            or item.projected_observation.key
+                            != _load(sub["record_json"]).collection_key
+                        ):
+                            return False
+                    projected_allowed = False
+                    if sub is not None and link is not None and link["job_key"] != job:
+                        candidate = _load(sub["record_json"])
+                        projected_allowed = (
+                            candidate.collection_key.scope.kind is OwnershipKind.PUBLIC
+                            and item.projected_observation is not None
+                            and candidate.grant is None
+                            and candidate.notification_mode == "instant"
+                            and candidate.collection_key.source_id
+                            == lease.key.source_id
+                            and candidate.collection_key.collector_id
+                            == lease.key.collector_id
+                            and candidate.collection_key.key_version
+                            == lease.key.key_version
+                            and link["job_key"] == _job_key(candidate.collection_key)
+                            and not item.digest_members
+                            and all(
+                                event.public_contribution is not None
+                                and event.owner_id == candidate.owner_id
+                                and event.recipient == candidate.recipient
+                                and event.grant is None
+                                and (
+                                    candidate.module_id,
+                                    candidate.type_id,
+                                    _dump(candidate.recipient),
+                                    event.event_key,
+                                )
+                                in public_sources
+                                for event in item.delivery_events
+                            )
+                        )
                     if (
                         sub is None
                         or int(sub["revision"]) != item.subscription_revision
                         or sub["status"] != "active"
                         or link is None
-                        or link["job_key"] != job
+                        or (link["job_key"] != job and not projected_allowed)
                         or int(link["subscription_revision"])
                         != item.subscription_revision
                         or actual_state != item.expected_state_revision
@@ -1682,6 +2058,19 @@ class SQLiteSchedulerRepository(_Repository):
                 )
                 if observation.completeness is not ObservationCompleteness.FAILED:
                     for item in commit.subscriptions:
+                        projected = item.projected_observation
+                        if projected is not None:
+                            unit.execute(
+                                "INSERT INTO b04_observations VALUES (?,?,?,?,?,?)",
+                                (
+                                    projected.observation_id,
+                                    _job_key(projected.key),
+                                    projected.data_version,
+                                    projected.completeness.value,
+                                    _dump(projected.payload),
+                                    _dump(projected),
+                                ),
+                            )
                         state_json, cursor_json = _dump(item.state), _dump(item.cursor)
                         if item.expected_state_revision is None:
                             unit.execute(
@@ -1713,6 +2102,16 @@ class SQLiteSchedulerRepository(_Repository):
                                 raise _StaleEvaluationCommit
                         for event in item.delivery_events:
                             _upsert_event(unit, event, fence=current)
+                            record_row = unit.execute(
+                                "SELECT record_json FROM b04_subscriptions WHERE subscription_id=?",
+                                (item.subscription_id,),
+                            ).fetchone()
+                            _attach_public_event(
+                                unit,
+                                event,
+                                _load(record_row[0]),
+                                observation.collected_at,
+                            )
                         for assoc in item.digest_members:
                             _insert_digest_member(unit, assoc)
                     unit.execute(
@@ -1739,6 +2138,52 @@ class SQLiteSchedulerRepository(_Repository):
             )
         except _StaleEvaluationCommit:
             return False
+
+    async def defer(self, lease: ExecutionLease, *, next_due_at: datetime) -> bool:
+        """Release one still-current collection without advancing its checkpoint."""
+        next_due_at = _utc_instant(next_due_at, "next_due_at")
+
+        def _run(unit):
+            now = _utc_instant(self._utc_clock(), "utc_clock")
+            if next_due_at <= now:
+                return False
+            row = unit.execute(
+                "SELECT * FROM b04_collection_jobs WHERE job_key=?",
+                (_job_key(lease.key),),
+            ).fetchone()
+            if (
+                row is None
+                or row["lease_token"] != lease.token
+                or row["key_json"] != _key_json(lease.key)
+            ):
+                return False
+            if (
+                int(row["config_revision"] or 0) != lease.config_revision
+                or int(row["module_epoch"] or 0) != lease.module_epoch
+                or int(row["registry_revision"] or 0) != lease.registry_revision
+                or _StoredDateTime.fromisoformat(row["lease_expires_at"]) <= now
+            ):
+                return False
+            if lease.background_fence is not None:
+                if _read_background_fence(unit, lease.key) != lease.background_fence:
+                    return False
+            elif (
+                _read_subscription_fence(
+                    unit, self._subscription_gate_bindings.get(lease.key.module_id)
+                )
+                != lease.subscription_fence
+                or _row_fence(row) != lease.subscription_fence
+            ):
+                return False
+            unit.execute(
+                "UPDATE b04_collection_jobs SET due_at=?,lease_token=NULL,lease_expires_at=NULL WHERE job_key=? AND lease_token=?",
+                (_iso(next_due_at), _job_key(lease.key), lease.token),
+            )
+            return True
+
+        return await self.database.executor.run_transaction(
+            _run, begin_mode="IMMEDIATE"
+        )
 
     async def release(self, lease: ExecutionLease) -> None:
         def _run(unit: SQLiteUnitOfWork) -> Any:
@@ -1811,6 +2256,39 @@ def _save_envelope(
 
 
 class SQLiteDigestWindowRepository(_Repository):
+    async def begin_commentary(self, key: str) -> tuple[bool, str | None]:
+        """One persisted model attempt; a crashed STARTED attempt falls back."""
+
+        def _run(unit):
+            saved = unit.execute(
+                "SELECT state,text FROM b04_event_commentary WHERE commentary_key=?",
+                (key,),
+            ).fetchone()
+            if saved is not None:
+                return False, saved["text"] if saved["state"] == "complete" else None
+            unit.execute(
+                "INSERT INTO b04_event_commentary VALUES (?,'started',NULL)", (key,)
+            )
+            return True, None
+
+        return await self.database.executor.run_transaction(
+            _run, begin_mode="IMMEDIATE"
+        )
+
+    async def complete_commentary(self, key: str, text: str | None) -> None:
+        if text is not None and (
+            type(text) is not str or not text.strip() or len(text) > 1000
+        ):
+            raise ValueError("invalid bounded commentary")
+
+        def _run(unit):
+            unit.execute(
+                "UPDATE b04_event_commentary SET state=?,text=? WHERE commentary_key=? AND state='started'",
+                ("complete" if text else "fallback", text, key),
+            )
+
+        await self.database.executor.run_transaction(_run, begin_mode="IMMEDIATE")
+
     async def create(self, window: DigestWindow) -> DigestWindow:
         def _run(unit: SQLiteUnitOfWork) -> Any:
             row = unit.execute(
@@ -2329,6 +2807,7 @@ class SQLiteDigestWindowRepository(_Repository):
             )
             if not _save_envelope(unit, updated, expected_revision=expected_revision):
                 return None
+            _project_public_attempt(unit, current, attempt)
             return updated
 
         return await self.database.executor.run_transaction(
@@ -2413,6 +2892,50 @@ class SQLiteDigestWindowRepository(_Repository):
             )
             if not _save_envelope(unit, updated, expected_revision=expected_revision):
                 return None
+            if current.window_id.startswith("public-event:v1:"):
+                # Aggregate receipts retain every original subscriber identity.
+                for association in current.member_associations:
+                    event = association.event
+                    member_attempt = DeliveryAttempt(
+                        attempt.attempt_number,
+                        attempt.state,
+                        event.idempotency_key,
+                        attempt.started_at,
+                        attempt.completed_at,
+                        attempt.error_code,
+                        attempt.platform_message_id,
+                    )
+                    member_event = replace(
+                        event,
+                        state=attempt.state,
+                        attempt=member_attempt,
+                        retry_at=retry_at,
+                    )
+                    unit.execute(
+                        "UPDATE b04_delivery_events SET state=?,attempt_number=?,retry_at=?,event_json=? WHERE event_key=? AND event_version=? AND subscription_id=? AND subscription_revision=?",
+                        (
+                            attempt.state.value,
+                            attempt.attempt_number,
+                            None if retry_at is None else _iso(retry_at),
+                            _dump(member_event),
+                            event.event_key,
+                            event.event_version,
+                            event.subscription_id,
+                            event.subscription_revision,
+                        ),
+                    )
+                    unit.execute(
+                        "INSERT OR REPLACE INTO b04_delivery_attempts VALUES (?,?,?,?,?,?,?)",
+                        (
+                            event.event_key,
+                            event.event_version,
+                            event.subscription_id,
+                            event.subscription_revision,
+                            attempt.attempt_number,
+                            attempt.state.value,
+                            _dump(member_attempt),
+                        ),
+                    )
             return updated
 
         return await self.database.executor.run_transaction(
@@ -2472,6 +2995,7 @@ class SQLiteDigestWindowRepository(_Repository):
             )
             if not _save_envelope(unit, updated, expected_revision=expected_revision):
                 return None
+            _project_public_attempt(unit, current, attempt)
             return updated
 
         return await self.database.executor.run_transaction(
@@ -2479,7 +3003,7 @@ class SQLiteDigestWindowRepository(_Repository):
         )
 
     async def recover_expired_envelope_claims(
-        self, *, before: datetime, recovered_at: datetime
+        self, *, before: datetime, recovered_at: datetime, restart: bool = False
     ) -> tuple[DigestEnvelope, ...]:
         before = _utc_instant(before, "before")
         recovered_at = _utc_instant(recovered_at, "recovered_at")
@@ -2489,8 +3013,8 @@ class SQLiteDigestWindowRepository(_Repository):
 
         def _run(unit: SQLiteUnitOfWork) -> Any:
             rows = unit.execute(
-                "SELECT envelope_json FROM b04_digest_envelopes WHERE state IN ('claimed','sending') AND claim_expires_at<=? ORDER BY envelope_id",
-                (_iso(before),),
+                "SELECT envelope_json FROM b04_digest_envelopes WHERE state IN ('claimed','sending') AND (?=1 OR claim_expires_at<=?) ORDER BY envelope_id",
+                (int(restart), _iso(before)),
             ).fetchall()
             for row in rows:
                 current = _load(row[0])
@@ -2774,6 +3298,8 @@ class SQLiteDeliveryRepository(_Repository):
                 attempt.state,
                 attempt,
                 retry_at,
+                public_contribution=event.public_contribution,
+                commentary=event.commentary,
             )
             cursor = unit.execute(
                 "UPDATE b04_delivery_events SET state=?,attempt_number=?,retry_at=?,event_json=? WHERE event_key=? AND event_version=? AND subscription_id=? AND subscription_revision=? AND state=? AND attempt_number=?",
@@ -2848,6 +3374,7 @@ class SQLiteDeliveryRepository(_Repository):
             sql = (
                 "SELECT e.event_json FROM b04_delivery_events AS e WHERE "
                 "(e.state='pending' OR (e.state='failed' AND e.retry_at IS NOT NULL AND e.retry_at<=?)) "
+                "AND json_extract(e.event_json,'$.fields.public_contribution') IS NULL "
                 "AND (NOT EXISTS (SELECT 1 FROM b04_subscriptions AS s "
                 "WHERE s.subscription_id=e.subscription_id AND s.revision=e.subscription_revision AND s.status='active') "
                 "OR EXISTS (SELECT 1 FROM b04_subscriptions AS s "
@@ -2955,6 +3482,8 @@ class SQLiteDeliveryRepository(_Repository):
                 event.idempotency_key,
                 DeliveryState.SENDING,
                 attempt,
+                public_contribution=event.public_contribution,
+                commentary=event.commentary,
             )
             cur = unit.execute(
                 "UPDATE b04_delivery_events SET state='sending',attempt_number=?,retry_at=NULL,event_json=? WHERE event_key=? AND event_version=? AND subscription_id=? AND subscription_revision=? AND state=? AND attempt_number=?",
@@ -3043,6 +3572,8 @@ class SQLiteDeliveryRepository(_Repository):
                 event.idempotency_key,
                 DeliveryState.UNKNOWN,
                 attempt,
+                public_contribution=event.public_contribution,
+                commentary=event.commentary,
             )
             cur = unit.execute(
                 "UPDATE b04_delivery_events SET state='unknown',retry_at=NULL,event_json=? WHERE event_key=? AND event_version=? AND subscription_id=? AND subscription_revision=? AND state='sending' AND attempt_number=?",
@@ -3182,6 +3713,8 @@ class SQLiteDeliveryRepository(_Repository):
                     event.idempotency_key,
                     DeliveryState.UNKNOWN,
                     unknown,
+                    public_contribution=event.public_contribution,
+                    commentary=event.commentary,
                 )
                 changed = unit.execute(
                     "UPDATE b04_delivery_events SET state='unknown',retry_at=NULL,event_json=? WHERE event_key=? AND event_version=? AND subscription_id=? AND subscription_revision=? AND state='sending' AND attempt_number=?",

@@ -4,6 +4,8 @@
 - [开发、构建与测试](../CONTRIBUTING.md)
 - [当前代码分层](code-architecture.md)
 - [模块开发 SDK](module-sdk.md)
+- [受信外包来源、凭据与请求预算](source-policies.md)
+- [订阅多事件、合并与可选短评](subscription-events.md)
 - [模块维护速查](module-maintainer-guide.md)
 - [凭据及存储](credential-storage.md)
 - [公开前端模块合同](frontend-module-contract.md)

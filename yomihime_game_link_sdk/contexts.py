@@ -13,6 +13,7 @@ class InvocationOrigin(StrEnum):
     SCHEDULER = "scheduler"
     SUBSCRIPTION = "subscription"
     ADMIN = "admin"
+    JOB = "job"
 
 
 class InvocationConversationKind(StrEnum):

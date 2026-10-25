@@ -17,6 +17,6 @@ test('decorative logo is public and module-agnostic; absent logos keep static fa
  const facade=await read('pages/public-ui.ts'),shared=await read('pages/frontend/src/ui/shared-components.ts');
  assert.match(facade,/LogoMark/);assert.match(shared,/class:'ui-logo-rebound','aria-hidden':'true'/);
  assert.doesNotMatch(shared,/ff14|meteor|setTimeout|requestAnimationFrame|addEventListener/i);
- const shell=await read('pages/frontend/src/main.ts');assert.match(shell,/module\.display\?\.logo_resource\?h\(LogoMark/);
+ const shell=await read('pages/frontend/src/main.ts');assert.match(shell,/moduleLogo\(module\)\?h\(LogoMark/);
  const module=await read('modules/ff14/pages/src/settings-page.ts');assert.match(module,/LogoMark.*from '@game-link\/ui'/);assert.match(module,/h\(LogoMark,\{class:'ff14-module-mark'/);
 });
