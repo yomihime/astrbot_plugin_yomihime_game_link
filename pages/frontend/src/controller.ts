@@ -68,7 +68,15 @@ export function createShell({bridge, container, window, loadPage, runtimeUrl, ch
       if (!ownScope.isCurrent() || pendingIdentity !== target) return;
       if (!code || typeof code.mount !== 'function') throw Error('invalid_page_entry');
       const view = container.ownerDocument.createElement('div'); view.className = 'module-view'; view.dataset.owner = module.module_id; container.append(view);
-      const services = await createModuleServices({onDispose:callback=>ownScope.onDispose(callback),bridge, binding:{owner:module.module_id,page:page.route_id,runtime_id:module.runtime_id!,module_epoch:module.module_epoch}, capabilityId:page.capability_id, isCurrent:()=>ownScope.isCurrent() && !state.stale && !state.busy && ready, confirmClear:(field,revision,isCurrent)=>confirmClear(module.module_id,field,revision,isCurrent)});
+      let services: Awaited<ReturnType<typeof createModuleServices>>;
+      try {
+        services = await createModuleServices({onDispose:callback=>ownScope.onDispose(callback),bridge, binding:{owner:module.module_id,page:page.route_id,runtime_id:module.runtime_id!,module_epoch:module.module_epoch}, capabilityId:page.capability_id, isCurrent:()=>ownScope.isCurrent() && !state.stale && !state.busy && ready, confirmClear:(field,revision,isCurrent)=>confirmClear(module.module_id,field,revision,isCurrent)});
+      } catch (error) {
+        // A disposed view's bootstrap cannot revoke a newer view of the same owner.
+        // Asset failures above still retire their owner, even after navigation.
+        if (!ownScope.isCurrent() || pendingIdentity !== target) return;
+        throw error;
+      }
       if (!ownScope.isCurrent() || pendingIdentity !== target) return;
       const instance = code.mount(view, Object.freeze({routeId: page.route_id, context: pageContext(module), services, scope: ownScope,onNavigationStateChange:()=>{if(ownScope.isCurrent()){navigationVersion++;changed();}}}));
       if (!instance || typeof instance.update !== 'function' || typeof instance.dispose !== 'function') throw Error('invalid_page_instance');
