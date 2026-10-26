@@ -7,6 +7,7 @@ import asyncio
 import json
 import re
 import unittest
+from copy import copy
 from types import SimpleNamespace
 
 from ygl_test_subject.adapters.astrbot.tool_publisher import ToolPublicationError
@@ -28,16 +29,29 @@ from . import test_astrbot_runtime as fixture
 from .test_market_integration import FixtureTransport
 from .tool_contract import tool_contracts
 
+FF14_MODEL_TOOL = "ff14"
+FF14_ACTIONS = {
+    "ff14_market_query": "market_query",
+    "ff14_market_select": "market_select",
+    "ff14_item_lookup": "item_lookup",
+    "ff14_item_select": "item_select",
+    "ff14_logs_character": "logs_character",
+}
+
 
 class ControlledProvider:
     """Deterministic model stub consuming user events and actual Host schemas."""
 
-    def __init__(self):
+    def __init__(self, publisher):
         self.trace, self.pending = [], None
+        self.publisher = publisher
 
     async def chat(self, wrapper, toolset):
         import jsonschema
 
+        request = SimpleNamespace(func_tool=toolset, conversation=None)
+        await self.publisher.scope_request(wrapper.context.event, request)
+        toolset = request.func_tool
         text = wrapper.context.event.get_message_str()
         schemas = {tool.name: tool.parameters for tool in toolset.tools}
         selected = re.fullmatch(r"选择物品 ([0-9]+)", text)
@@ -75,8 +89,11 @@ class ControlledProvider:
                 raise AssertionError(
                     "stub has no tool-selection fixture for this message"
                 )
-        jsonschema.validate(args, schemas[name])
-        facts = json.loads(await toolset.get_tool(name).call(wrapper, **args))
+        call = {"action": FF14_ACTIONS[name], "arguments": args}
+        jsonschema.validate(call, schemas[FF14_MODEL_TOOL])
+        facts = json.loads(
+            await toolset.get_tool(FF14_MODEL_TOOL).call(wrapper, **call)
+        )
         if facts["status"] == "needs_selection":
             self.pending = facts
             reply = "请选择候选：" + ", ".join(
@@ -126,6 +143,20 @@ class LLMToolTests(unittest.IsolatedAsyncioTestCase):
                 manager = host.Manager.__new__(host.Manager)
                 manager.func_list = []
                 self.provider_manager = SimpleNamespace(llm_tools=manager)
+                self.config_umos = []
+                self.config = {"subagent_orchestrator": {}}
+                self.global_config = {"subagent_orchestrator": {}}
+
+            def get_config(self, *, umo=None):
+                if umo is None:
+                    return self.global_config
+                if type(umo) is not str or not umo:
+                    raise AssertionError("configuration must be event-bound")
+                self.config_umos.append(umo)
+                return self.config
+
+            def get_llm_tool_manager(self):
+                return self.provider_manager.llm_tools
 
         self.context = Context()
         self.transport = FixtureTransport()
@@ -142,7 +173,9 @@ class LLMToolTests(unittest.IsolatedAsyncioTestCase):
         self.initial_background_requests = tuple(self.transport.requests)
         self.transport.requests.clear()
         self.manager = self.context.provider_manager.llm_tools
-        self.provider = ControlledProvider()
+        self.host.tool_exec.llm_tools = self.manager
+        self.host.provider_register.llm_tools = self.manager
+        self.provider = ControlledProvider(self.runtime._tool_publisher)
 
     def wrapper(
         self,
@@ -157,13 +190,14 @@ class LLMToolTests(unittest.IsolatedAsyncioTestCase):
         host = self.host
         event = host.Event()
         event.message_str, event.role = text, role
-        event.platform_meta = SimpleNamespace(id=adapter)
+        event.platform_meta = SimpleNamespace(id=adapter, name="test-platform")
         event.message_obj = SimpleNamespace(
             sender=SimpleNamespace(user_id=sender), type=host.MessageType.GROUP_MESSAGE
         )
         event.session = SimpleNamespace(
             session_id=session, message_type=host.MessageType.GROUP_MESSAGE
         )
+        event.unified_msg_origin = f"{adapter}:{session}"
         return host.ContextWrapper(
             context=host.AstrAgentContext(context=context or self.context, event=event)
         )
@@ -172,9 +206,34 @@ class LLMToolTests(unittest.IsolatedAsyncioTestCase):
         self, name="ff14_market_query", parameters=None, wrapper=None, toolset=None
     ):
         tools = toolset or self.manager.get_full_tool_set()
-        value = await tools.get_tool(name).call(
-            wrapper or self.wrapper(),
-            **(parameters or {"query": "44091", "region": "cn"}),
+        wrapper = wrapper or self.wrapper()
+        parameters = parameters or {"query": "44091", "region": "cn"}
+        if name in FF14_ACTIONS:
+            request = SimpleNamespace(func_tool=tools, conversation=None)
+            await self.runtime._tool_publisher.scope_request(
+                wrapper.context.event, request
+            )
+            value = await request.func_tool.get_tool(FF14_MODEL_TOOL).call(
+                wrapper,
+                action=FF14_ACTIONS[name],
+                arguments=parameters,
+            )
+        else:
+            value = await tools.get_tool(name).call(wrapper, **parameters)
+        return json.loads(value) if value.startswith("{") else value
+
+    async def call_captured_parent(
+        self,
+        parent,
+        wrapper,
+        name="ff14_market_query",
+        parameters=None,
+    ):
+        parameters = parameters or {"query": "44091", "region": "cn"}
+        value = await parent.call(
+            wrapper,
+            action=FF14_ACTIONS[name],
+            arguments=parameters,
         )
         return json.loads(value) if value.startswith("{") else value
 
@@ -221,12 +280,11 @@ class LLMToolTests(unittest.IsolatedAsyncioTestCase):
             )
 
         handler.invoke = success
-        tool = self.manager.get_full_tool_set().get_tool("ff14_market_query")
-        first = await tool.call(self.wrapper(), query="44091", region="cn")
-        second = await tool.call(self.wrapper(), query="44091", region="cn")
-        self.assertEqual(json.loads(first), facts)
-        self.assertEqual(json.loads(second), facts)
-        self.assertNotIn("sources-only-not-serialized", first)
+        first = await self.call(parameters={"query": "44091", "region": "cn"})
+        second = await self.call(parameters={"query": "44091", "region": "cn"})
+        self.assertEqual(first, facts)
+        self.assertEqual(second, facts)
+        self.assertNotIn("sources-only-not-serialized", json.dumps(first))
         self.assertEqual(self.context.calls, [])
 
         for supplement in (
@@ -254,8 +312,8 @@ class LLMToolTests(unittest.IsolatedAsyncioTestCase):
                 )
 
             handler.invoke = error
-            serialized = await tool.call(self.wrapper(), query="44091", region="cn")
-            self.assertEqual(json.loads(serialized), expected)
+            returned = await self.call(parameters={"query": "44091", "region": "cn"})
+            self.assertEqual(returned, expected)
             self.assertEqual(self.context.calls, [])
 
     async def assert_core_closed(self, core, module):
@@ -527,8 +585,22 @@ class LLMToolTests(unittest.IsolatedAsyncioTestCase):
         pending = await self.call(
             parameters={"query": "Synthetic"}, wrapper=self.wrapper("Synthetic什么价")
         )
-        query_tool = self.manager.get_full_tool_set().get_tool("ff14_market_query")
-        self.assertEqual(query_tool.parameters["required"], [])
+        wrapper = self.wrapper()
+        request = SimpleNamespace(
+            func_tool=self.manager.get_full_tool_set(), conversation=None
+        )
+        await self.runtime._tool_publisher.scope_request(wrapper.context.event, request)
+        aggregate = request.func_tool.get_tool(FF14_MODEL_TOOL)
+        self.assertEqual(
+            aggregate.parameters["properties"]["arguments"]["required"], []
+        )
+
+        async def call_query(call_wrapper, **parameters):
+            return json.dumps(
+                await self.call(parameters=parameters, wrapper=call_wrapper)
+            )
+
+        query_tool = SimpleNamespace(call=call_query)
         before = len(self.transport.requests)
         missing = json.loads(
             await query_tool.call(self.wrapper("Synthetic什么价"), region="global")
@@ -713,7 +785,7 @@ class LLMToolTests(unittest.IsolatedAsyncioTestCase):
         self,
     ):
         await self.start()
-        self.assertEqual(len(self.manager.func_list), 5)
+        self.assertEqual(len(self.manager.func_list), 1)
         raw = self.manager.func_list[0]
         self.assertIsNone(raw.handler)
         self.assertNotIn("command", raw.parameters["properties"])
@@ -884,9 +956,10 @@ class LLMToolTests(unittest.IsolatedAsyncioTestCase):
             return None
 
         self.transport.callback = one_item
-        tools = self.manager.get_full_tool_set()
         for text in ("帮我看看犎牛牛排国服哪里最便宜", "帮我看看犎牛牛排哪里最便宜"):
-            facts, reply = await self.provider.chat(self.wrapper(text), tools)
+            facts, reply = await self.provider.chat(
+                self.wrapper(text), self.manager.get_full_tool_set()
+            )
             self.assertEqual(facts["status"], "success")
             self.assertEqual(facts["market"]["query"], "犎牛牛排")
             self.assertEqual(facts["market"]["intent"], "min")
@@ -899,6 +972,1303 @@ class LLMToolTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("仅已返回范围", reply)
         self.assertEqual(self.provider.trace[0]["arguments"]["region"], "cn")
         self.assertNotIn("region", self.provider.trace[1]["arguments"])
+
+    async def test_malformed_enabled_subagent_scope_rejects_aggregate_reconstruction(
+        self,
+    ):
+        await self.start()
+        event = self.wrapper().context.event
+        enabled = {
+            "main_enable": True,
+            "remove_main_duplicate_tools": True,
+        }
+        cases = (
+            ("missing runtime", {**enabled, "agents": []}, None),
+            ("agents not list", {**enabled, "agents": "invalid"}, ()),
+            ("agent not mapping", {**enabled, "agents": [object()]}, ()),
+            ("tools not list", {**enabled, "agents": [{"tools": "invalid"}]}, ()),
+        )
+        for label, orchestrator, handoffs in cases:
+            with self.subTest(label=label):
+                self.context.global_config = {"subagent_orchestrator": orchestrator}
+                if handoffs is None:
+                    if hasattr(self.context, "subagent_orchestrator"):
+                        del self.context.subagent_orchestrator
+                else:
+                    self.context.subagent_orchestrator = SimpleNamespace(
+                        handoffs=handoffs
+                    )
+                request = SimpleNamespace(
+                    func_tool=self.manager.get_full_tool_set(), conversation=None
+                )
+                with self.assertRaisesRegex(
+                    PermissionError, "cannot prove Host subagent tool scope"
+                ):
+                    await self.runtime._tool_publisher.scope_request(event, request)
+
+        del self.context.subagent_orchestrator
+        for label, orchestrator in (
+            ("disabled", {"main_enable": False}),
+            (
+                "duplicate removal disabled",
+                {"main_enable": True, "remove_main_duplicate_tools": False},
+            ),
+        ):
+            with self.subTest(label=label):
+                self.context.global_config = {"subagent_orchestrator": orchestrator}
+                if orchestrator["main_enable"]:
+                    self.context.subagent_orchestrator = SimpleNamespace(handoffs=[])
+                request = SimpleNamespace(
+                    func_tool=self.manager.get_full_tool_set(), conversation=None
+                )
+                await self.runtime._tool_publisher.scope_request(event, request)
+                self.assertEqual(
+                    request.func_tool.get_tool(FF14_MODEL_TOOL).parameters[
+                        "properties"
+                    ]["action"]["enum"],
+                    list(FF14_ACTIONS.values()),
+                )
+
+    async def test_subagent_replay_uses_default_config_not_event_profile(self):
+        await self.start()
+        self.context.subagent_orchestrator = SimpleNamespace(handoffs=[])
+        enabled = {
+            "main_enable": True,
+            "remove_main_duplicate_tools": True,
+            "agents": [{"tools": ["ff14_market_query"]}],
+        }
+        disabled = {
+            "main_enable": False,
+            "remove_main_duplicate_tools": False,
+        }
+        cases = (
+            (
+                "default removes while event disables",
+                enabled,
+                disabled,
+                [
+                    "market_select",
+                    "item_lookup",
+                    "item_select",
+                    "logs_character",
+                ],
+            ),
+            (
+                "event cannot remove while default disables",
+                disabled,
+                enabled,
+                list(FF14_ACTIONS.values()),
+            ),
+        )
+        for label, default, event_profile, expected in cases:
+            with self.subTest(label=label):
+                self.context.global_config = {"subagent_orchestrator": default}
+                self.context.config = {"subagent_orchestrator": event_profile}
+                event = self.wrapper().context.event
+                handoff = self.host.HandoffTool(
+                    self.host.Agent(name="scope", tools=["ff14_market_query"])
+                )
+                self.context.subagent_orchestrator = SimpleNamespace(handoffs=[handoff])
+                self.assertEqual(
+                    self.runtime._tool_publisher._subagent_assigned_tools(event),
+                    frozenset({"ff14_market_query"})
+                    if default is enabled
+                    else frozenset(),
+                )
+                request = SimpleNamespace(
+                    func_tool=self.manager.get_full_tool_set(), conversation=None
+                )
+                request.func_tool.add_tool(handoff)
+                await self.runtime._tool_publisher.scope_request(event, request)
+                self.assertEqual(
+                    request.func_tool.get_tool(FF14_MODEL_TOOL).parameters[
+                        "properties"
+                    ]["action"]["enum"],
+                    expected,
+                )
+
+    async def test_handoff_clones_exact_event_scope_with_native_global_dispatch(self):
+        await self.start()
+        passthrough = self.host.FunctionTool(
+            name="synthetic_passthrough",
+            description="synthetic",
+            parameters={"type": "object", "properties": {}},
+            handler=lambda: None,
+        )
+        original_agent = self.host.Agent(
+            name="scope",
+            instructions="synthetic instructions",
+            tools=["ff14_market_query", passthrough],
+            begin_dialogs=[{"role": "user", "content": "synthetic"}],
+        )
+        original = self.host.HandoffTool(original_agent)
+        original.provider_id = "synthetic-provider"
+        self.context.subagent_orchestrator = SimpleNamespace(handoffs=[original])
+        self.context.global_config = {
+            "subagent_orchestrator": {
+                "main_enable": True,
+                "remove_main_duplicate_tools": True,
+                "agents": [{"tools": ["ff14_market_query"]}],
+            }
+        }
+        self.context.config = {
+            "provider_settings": {
+                "computer_use_runtime": "none",
+                "sandbox": {"booter": None},
+            }
+        }
+
+        wrappers = (self.wrapper(), self.wrapper(session="group-43"))
+        clones = []
+        for wrapper in wrappers:
+            request = SimpleNamespace(
+                func_tool=self.manager.get_full_tool_set(), conversation=None
+            )
+            request.func_tool.add_tool(original)
+            runtime_calls = len(self.host.runtime_tool_calls)
+            await self.runtime._tool_publisher.scope_request(
+                wrapper.context.event, request
+            )
+            self.assertEqual(len(self.host.runtime_tool_calls), runtime_calls)
+            clone = request.func_tool.get_tool(original.name)
+            clones.append(clone)
+            self.assertIsInstance(clone, self.host.HandoffTool)
+            self.assertIsNot(clone, original)
+            self.assertIsNot(clone.agent, original.agent)
+            self.assertEqual(clone.provider_id, original.provider_id)
+            self.assertEqual(clone.parameters, original.parameters)
+            self.assertEqual(clone.description, original.description)
+            self.assertEqual(clone.active, original.active)
+            self.assertEqual(clone.agent.instructions, original.agent.instructions)
+            self.assertEqual(clone.agent.begin_dialogs, original.agent.begin_dialogs)
+            self.assertEqual(original.agent.tools, ["ff14_market_query", passthrough])
+            self.assertEqual(
+                request.func_tool.get_tool(FF14_MODEL_TOOL).parameters["properties"][
+                    "action"
+                ]["enum"],
+                [
+                    "market_select",
+                    "item_lookup",
+                    "item_select",
+                    "logs_character",
+                ],
+            )
+            handoff_tools = self.host.FunctionToolExecutor._build_handoff_toolset(
+                wrapper, clone.agent.tools
+            )
+            self.assertEqual(len(self.host.runtime_tool_calls), runtime_calls + 1)
+            self.assertIsNotNone(handoff_tools)
+            self.assertIs(handoff_tools.get_tool(passthrough.name), passthrough)
+            scoped = handoff_tools.get_tool(FF14_MODEL_TOOL)
+            self.assertEqual(
+                scoped.parameters["properties"]["action"]["enum"],
+                ["market_query"],
+            )
+            native_result = await (
+                self.manager.get_full_tool_set()
+                .get_tool(FF14_MODEL_TOOL)
+                .call(
+                    wrapper,
+                    action="market_query",
+                    arguments={"query": "44091"},
+                )
+            )
+            self.assertIsInstance(json.loads(native_result), dict)
+
+        self.assertIsNot(clones[0], clones[1])
+        self.assertIsNot(clones[0].agent.tools, clones[1].agent.tools)
+        first_tools = self.host.FunctionToolExecutor._build_handoff_toolset(
+            wrappers[0], clones[0].agent.tools
+        )
+        with self.assertRaisesRegex(PermissionError, "exact Host request event"):
+            await first_tools.get_tool(FF14_MODEL_TOOL).call(
+                wrappers[1],
+                action="market_query",
+                arguments={"query": "44091"},
+            )
+
+        self.host.preferences.permissions = {"_default": {"ff14_market_query": "admin"}}
+        denied = await first_tools.get_tool(FF14_MODEL_TOOL).call(
+            wrappers[0],
+            action="market_query",
+            arguments={"query": "44091"},
+        )
+        self.assertIn("requires admin privileges", denied)
+        self.host.preferences.permissions = {"_default": {FF14_MODEL_TOOL: "admin"}}
+        denied = await first_tools.get_tool(FF14_MODEL_TOOL).call(
+            wrappers[0],
+            action="market_query",
+            arguments={"query": "44091"},
+        )
+        self.assertIn("requires admin privileges", denied)
+        wrappers[0].context.event.role = "admin"
+        allowed = await first_tools.get_tool(FF14_MODEL_TOOL).call(
+            wrappers[0],
+            action="market_query",
+            arguments={"query": "44091", "region": "cn"},
+        )
+        self.assertIsInstance(json.loads(allowed), dict)
+        wrappers[0].context.event.role = "member"
+        self.host.preferences.permissions = {}
+        handle = next(
+            item
+            for item in self.runtime._tool_publisher.handles
+            if item.published_name == FF14_MODEL_TOOL
+        )
+        handle.revoked = True
+        with self.assertRaisesRegex(PermissionError, "no longer current"):
+            await first_tools.get_tool(FF14_MODEL_TOOL).call(
+                wrappers[0],
+                action="market_query",
+                arguments={"query": "44091"},
+            )
+
+    async def test_handoff_preserves_none_empty_parent_and_nested_semantics(self):
+        await self.start()
+        publisher = self.runtime._tool_publisher
+        all_actions = list(FF14_ACTIONS.values())
+
+        async def scoped(configured, assigned):
+            agent = self.host.Agent(name="scope", tools=configured)
+            handoff = self.host.HandoffTool(agent)
+            self.context.subagent_orchestrator = SimpleNamespace(handoffs=[handoff])
+            self.context.global_config = {
+                "subagent_orchestrator": {
+                    "main_enable": True,
+                    "remove_main_duplicate_tools": True,
+                    "agents": [{"tools": assigned}],
+                }
+            }
+            self.context.config = {
+                "provider_settings": {
+                    "computer_use_runtime": "none",
+                    "sandbox": {"booter": None},
+                }
+            }
+            wrapper = self.wrapper()
+            request = SimpleNamespace(
+                func_tool=self.manager.get_full_tool_set(), conversation=None
+            )
+            request.func_tool.add_tool(handoff)
+            await publisher.scope_request(wrapper.context.event, request)
+            clone = request.func_tool.get_tool(handoff.name)
+            return (
+                wrapper,
+                request,
+                clone,
+                self.host.FunctionToolExecutor._build_handoff_toolset(
+                    wrapper, clone.agent.tools
+                ),
+            )
+
+        runtime_calls = len(self.host.runtime_tool_calls)
+        _, request, clone, built = await scoped(None, None)
+        self.assertEqual(len(self.host.runtime_tool_calls), runtime_calls + 1)
+        self.assertIsNone(clone.agent.tools)
+        self.assertFalse(hasattr(clone, "_ygl_handoff_parent"))
+        self.assertIsNone(request.func_tool.get_tool(FF14_MODEL_TOOL))
+        self.assertEqual(
+            built.get_tool(FF14_MODEL_TOOL).parameters["properties"]["action"]["enum"],
+            all_actions,
+        )
+
+        runtime_calls = len(self.host.runtime_tool_calls)
+        _, request, clone, built = await scoped([], [])
+        self.assertEqual(len(self.host.runtime_tool_calls), runtime_calls + 1)
+        self.assertEqual(clone.agent.tools, [])
+        self.assertFalse(hasattr(clone, "_ygl_handoff_parent"))
+        self.assertIsNotNone(request.func_tool.get_tool(FF14_MODEL_TOOL))
+        self.assertIsNone(built)
+
+        runtime_calls = len(self.host.runtime_tool_calls)
+        _, request, _, built = await scoped([FF14_MODEL_TOOL], [FF14_MODEL_TOOL])
+        self.assertEqual(len(self.host.runtime_tool_calls), runtime_calls + 1)
+        self.assertIsNone(request.func_tool.get_tool(FF14_MODEL_TOOL))
+        self.assertEqual(
+            built.get_tool(FF14_MODEL_TOOL).parameters["properties"]["action"]["enum"],
+            all_actions,
+        )
+
+        original_runtime_builder = (
+            self.host.FunctionToolExecutor._get_runtime_computer_tools
+        )
+        runtime_objects = []
+
+        def synthetic_runtime(runtime, manager, booter):
+            self.assertEqual(runtime, "local")
+            self.assertIs(manager, self.manager)
+            self.assertIsNone(booter)
+            tool = self.host.FunctionTool(
+                name="astrbot_execute_shell",
+                description="synthetic",
+                parameters={"type": "object", "properties": {}},
+                handler=lambda: None,
+            )
+            runtime_objects.append(tool)
+            return {tool.name: tool}
+
+        self.host.FunctionToolExecutor._get_runtime_computer_tools = staticmethod(
+            synthetic_runtime
+        )
+        try:
+            runtime_a = self.host.HandoffTool(
+                self.host.Agent(name="runtime_a", tools=None)
+            )
+            runtime_b = self.host.HandoffTool(
+                self.host.Agent(name="runtime_b", tools=None)
+            )
+            self.context.subagent_orchestrator = SimpleNamespace(
+                handoffs=[runtime_a, runtime_b]
+            )
+            self.context.global_config = {
+                "subagent_orchestrator": {
+                    "main_enable": True,
+                    "remove_main_duplicate_tools": False,
+                    "agents": [],
+                }
+            }
+            self.context.config = {
+                "provider_settings": {
+                    "computer_use_runtime": "local",
+                    "sandbox": {"booter": None},
+                }
+            }
+            request = SimpleNamespace(
+                func_tool=self.manager.get_full_tool_set(), conversation=None
+            )
+            request.func_tool.add_tool(runtime_a)
+            request.func_tool.add_tool(runtime_b)
+            await publisher.scope_request(self.wrapper().context.event, request)
+            clone_a = request.func_tool.get_tool(runtime_a.name)
+            clone_b = request.func_tool.get_tool(runtime_b.name)
+            self.assertEqual(runtime_objects, [])
+            built_a = self.host.FunctionToolExecutor._build_handoff_toolset(
+                self.wrapper(), clone_a.agent.tools
+            )
+            built_b = self.host.FunctionToolExecutor._build_handoff_toolset(
+                self.wrapper(), clone_b.agent.tools
+            )
+            tool_a = built_a.get_tool("astrbot_execute_shell")
+            tool_b = built_b.get_tool("astrbot_execute_shell")
+            self.assertIsNot(tool_a, tool_b)
+            self.assertEqual(runtime_objects, [tool_a, tool_b])
+        finally:
+            self.host.FunctionToolExecutor._get_runtime_computer_tools = (
+                original_runtime_builder
+            )
+
+        self.host.preferences.inactivated_llm_tools = ["ff14_market_query"]
+        _, _, _, built = await scoped(
+            ["ff14_market_query", "ff14_item_lookup"],
+            ["ff14_market_query", "ff14_item_lookup"],
+        )
+        self.assertEqual(
+            built.get_tool(FF14_MODEL_TOOL).parameters["properties"]["action"]["enum"],
+            ["item_lookup"],
+        )
+        self.host.preferences.inactivated_llm_tools = [FF14_MODEL_TOOL]
+        parent_handle = next(
+            item for item in publisher.handles if item.published_name == FF14_MODEL_TOOL
+        )
+        parent_handle.tool.active = False
+        _, _, _, built = await scoped([FF14_MODEL_TOOL], [FF14_MODEL_TOOL])
+        self.assertIsNone(built)
+        parent_handle.tool.active = True
+        self.host.preferences.inactivated_llm_tools = []
+
+        handle = next(
+            item for item in publisher.handles if item.published_name == FF14_MODEL_TOOL
+        )
+        foreign_parent = self.host.FunctionTool(
+            name=FF14_MODEL_TOOL,
+            description="foreign parent object",
+            parameters={"type": "object", "properties": {}},
+            handler=lambda: None,
+        )
+        other_manager = self.host.Manager.__new__(self.host.Manager)
+        other_manager.func_list = [handle.tool]
+        other_wrapper = other_manager.get_full_tool_set().get_tool(FF14_MODEL_TOOL)
+        same_manager_wrapper = self.manager.get_full_tool_set().get_tool(
+            FF14_MODEL_TOOL
+        )
+
+        class CustomSameFields(self.host.FunctionTool):
+            async def call(self, _context, **_kwargs):
+                return "custom child semantics"
+
+        custom_same_fields = CustomSameFields(
+            name=FF14_MODEL_TOOL,
+            description="custom child same-fields wrapper",
+            parameters={"type": "object", "properties": {}},
+        )
+        custom_same_fields._wrapped = handle.tool
+        custom_same_fields._mgr = self.manager
+        for collision in (
+            foreign_parent,
+            other_wrapper,
+            same_manager_wrapper,
+            custom_same_fields,
+        ):
+            with self.subTest(collision=collision.description):
+                _, _, _, built = await scoped([collision, "ff14_market_query"], [])
+                self.assertIs(built.get_tool(FF14_MODEL_TOOL), collision)
+        self.assertEqual(
+            await built.get_tool(FF14_MODEL_TOOL).call(self.wrapper()),
+            "custom child semantics",
+        )
+
+        nested = self.host.HandoffTool(
+            self.host.Agent(name="nested", tools=["ff14_item_lookup"])
+        )
+        _, _, outer, built = await scoped([nested], [])
+        nested_clone = built.get_tool(nested.name)
+        self.assertIsInstance(nested_clone, self.host.HandoffTool)
+        self.assertIsNot(nested_clone, nested)
+        nested_tools = self.host.FunctionToolExecutor._build_handoff_toolset(
+            self.wrapper(), nested_clone.agent.tools
+        )
+        # The nested scope is still bound to the outer request event.
+        self.assertEqual(
+            nested_tools.get_tool(FF14_MODEL_TOOL).parameters["properties"]["action"][
+                "enum"
+            ],
+            ["item_lookup"],
+        )
+        self.assertIn(nested_clone, list(outer.agent.tools))
+
+        cyclic_a = self.host.HandoffTool(self.host.Agent(name="cyclic_a", tools=[]))
+        cyclic_b = self.host.HandoffTool(self.host.Agent(name="cyclic_b", tools=[]))
+        cyclic_a.agent.tools.extend([cyclic_b, "ff14_market_query"])
+        cyclic_b.agent.tools.extend([cyclic_a, "ff14_item_lookup"])
+        self.context.subagent_orchestrator = SimpleNamespace(
+            handoffs=[cyclic_a, cyclic_b]
+        )
+        self.context.global_config = {
+            "subagent_orchestrator": {
+                "main_enable": True,
+                "remove_main_duplicate_tools": False,
+                "agents": [],
+            }
+        }
+        request = SimpleNamespace(
+            func_tool=self.manager.get_full_tool_set(), conversation=None
+        )
+        request.func_tool.add_tool(cyclic_a)
+        request.func_tool.add_tool(cyclic_b)
+        await publisher.scope_request(self.wrapper().context.event, request)
+        clone_a = request.func_tool.get_tool(cyclic_a.name)
+        clone_b = request.func_tool.get_tool(cyclic_b.name)
+        self.assertIsInstance(clone_a, self.host.HandoffTool)
+        self.assertIsInstance(clone_b, self.host.HandoffTool)
+        clone_a_tools = list(clone_a.agent.tools)
+        clone_b_tools = list(clone_b.agent.tools)
+        self.assertIs(clone_a_tools[0], clone_b)
+        self.assertIs(clone_b_tools[0], clone_a)
+        self.assertEqual(
+            clone_a_tools[1].parameters["properties"]["action"]["enum"],
+            ["market_query"],
+        )
+        self.assertEqual(
+            clone_b_tools[1].parameters["properties"]["action"]["enum"],
+            ["item_lookup"],
+        )
+        self.assertIs(cyclic_a.agent.tools[0], cyclic_b)
+        self.assertIs(cyclic_b.agent.tools[0], cyclic_a)
+
+        valid = self.host.HandoffTool(
+            self.host.Agent(name="valid", tools=["ff14_market_query"])
+        )
+        malformed = self.host.HandoffTool(self.host.Agent(name="malformed", tools=[]))
+        malformed.agent.tools = object()
+        self.context.subagent_orchestrator = SimpleNamespace(
+            handoffs=[valid, malformed]
+        )
+        request = SimpleNamespace(
+            func_tool=self.manager.get_full_tool_set(), conversation=None
+        )
+        request.func_tool.add_tool(valid)
+        request.func_tool.add_tool(malformed)
+        with self.assertRaisesRegex(
+            PermissionError, "cannot scope Host subagent handoff"
+        ):
+            await publisher.scope_request(self.wrapper().context.event, request)
+        self.assertIs(request.func_tool.get_tool(valid.name), valid)
+        self.assertIs(request.func_tool.get_tool(malformed.name), malformed)
+
+    async def test_handoff_clones_module_global_nested_string_resolution(self):
+        await self.start()
+        child = self.host.HandoffTool(
+            self.host.Agent(name="child", tools=["ff14_item_lookup"])
+        )
+        parent = self.host.HandoffTool(
+            self.host.Agent(name="parent", tools=[child.name, "synthetic_foreign_name"])
+        )
+        self.manager.func_list.append(child)
+        try:
+            self.context.subagent_orchestrator = SimpleNamespace(handoffs=[parent])
+            self.context.global_config = {
+                "subagent_orchestrator": {
+                    "main_enable": True,
+                    "remove_main_duplicate_tools": False,
+                    "agents": [],
+                }
+            }
+            self.context.config = {
+                "provider_settings": {
+                    "computer_use_runtime": "none",
+                    "sandbox": {"booter": None},
+                }
+            }
+
+            async def prepared(session):
+                wrapper = self.wrapper(session=session)
+                request = SimpleNamespace(
+                    func_tool=self.manager.get_full_tool_set(), conversation=None
+                )
+                request.func_tool.add_tool(parent)
+                await self.runtime._tool_publisher.scope_request(
+                    wrapper.context.event, request
+                )
+                clone = request.func_tool.get_tool(parent.name)
+                self.assertIsInstance(clone, self.host.HandoffTool)
+                return wrapper, clone
+
+            wrapper, parent_clone = await prepared("group-42")
+            parent_tools = self.host.FunctionToolExecutor._build_handoff_toolset(
+                wrapper, parent_clone.agent.tools
+            )
+            child_clone = parent_tools.get_tool(child.name)
+            self.assertIsInstance(child_clone, self.host.HandoffTool)
+            self.assertIsNot(child_clone, child)
+            child_tools = self.host.FunctionToolExecutor._build_handoff_toolset(
+                wrapper, child_clone.agent.tools
+            )
+            self.assertEqual(
+                child_tools.get_tool(FF14_MODEL_TOOL).parameters["properties"][
+                    "action"
+                ]["enum"],
+                ["item_lookup"],
+            )
+            self.assertIn("synthetic_foreign_name", list(parent_clone.agent.tools))
+            self.assertEqual(parent.agent.tools, [child.name, "synthetic_foreign_name"])
+            self.assertEqual(child.agent.tools, ["ff14_item_lookup"])
+
+            # String registration stays late-bound: prepare while active, then
+            # disable before Host actually builds the child toolset.
+            wrapper, parent_clone = await prepared("group-43")
+            child.active = False
+            inactive_tools = self.host.FunctionToolExecutor._build_handoff_toolset(
+                wrapper, parent_clone.agent.tools
+            )
+            self.assertTrue(
+                inactive_tools is None or inactive_tools.get_tool(child.name) is None
+            )
+
+            # The reverse transition also matches Host: an inactive target at
+            # prepare time may become the current active registration later.
+            wrapper, parent_clone = await prepared("group-44")
+            child.active = True
+            reenabled = self.host.FunctionToolExecutor._build_handoff_toolset(
+                wrapper, parent_clone.agent.tools
+            ).get_tool(child.name)
+            self.assertIsInstance(reenabled, self.host.HandoffTool)
+            self.assertEqual(
+                self.host.FunctionToolExecutor._build_handoff_toolset(
+                    wrapper, reenabled.agent.tools
+                )
+                .get_tool(FF14_MODEL_TOOL)
+                .parameters["properties"]["action"]["enum"],
+                ["item_lookup"],
+            )
+
+            # Replacing the module-global registration between prepare and
+            # execute must clone the new target rather than the old object.
+            wrapper, parent_clone = await prepared("group-45")
+            replacement = self.host.HandoffTool(
+                self.host.Agent(name="child", tools=["ff14_market_query"])
+            )
+            self.manager.func_list.append(replacement)
+            try:
+                replaced = self.host.FunctionToolExecutor._build_handoff_toolset(
+                    wrapper, parent_clone.agent.tools
+                ).get_tool(child.name)
+                self.assertIsInstance(replaced, self.host.HandoffTool)
+                self.assertIsNot(replaced._ygl_handoff_parent, child)
+                self.assertIs(replaced._ygl_handoff_parent, replacement)
+                self.assertEqual(
+                    self.host.FunctionToolExecutor._build_handoff_toolset(
+                        wrapper, replaced.agent.tools
+                    )
+                    .get_tool(FF14_MODEL_TOOL)
+                    .parameters["properties"]["action"]["enum"],
+                    ["market_query"],
+                )
+            finally:
+                self.manager.func_list.remove(replacement)
+        finally:
+            child.active = True
+            self.manager.func_list.remove(child)
+
+    async def test_handoff_actual_agent_scope_may_differ_from_main_fallback(self):
+        await self.start()
+
+        class Personas:
+            def get_persona_v3_by_id(self, persona_id):
+                self.persona_id = persona_id
+                return {"tools": None}
+
+        self.context.persona_manager = Personas()
+        handoff = self.host.HandoffTool(self.host.Agent(name="scope", tools=None))
+        self.context.subagent_orchestrator = SimpleNamespace(handoffs=[handoff])
+        self.context.global_config = {
+            "subagent_orchestrator": {
+                "main_enable": True,
+                "remove_main_duplicate_tools": True,
+                "agents": [
+                    {
+                        "persona_id": "all-tools",
+                        "tools": ["ff14_item_lookup"],
+                    }
+                ],
+            }
+        }
+        self.context.config = {
+            "provider_settings": {
+                "computer_use_runtime": "none",
+                "sandbox": {"booter": None},
+            }
+        }
+        wrapper = self.wrapper()
+        request = SimpleNamespace(
+            func_tool=self.manager.get_full_tool_set(), conversation=None
+        )
+        request.func_tool.add_tool(handoff)
+        await self.runtime._tool_publisher.scope_request(wrapper.context.event, request)
+        main = request.func_tool.get_tool(FF14_MODEL_TOOL)
+        self.assertNotIn(
+            "item_lookup",
+            main.parameters["properties"]["action"]["enum"],
+        )
+        clone = request.func_tool.get_tool(handoff.name)
+        built = self.host.FunctionToolExecutor._build_handoff_toolset(
+            wrapper, clone.agent.tools
+        )
+        self.assertEqual(
+            built.get_tool(FF14_MODEL_TOOL).parameters["properties"]["action"]["enum"],
+            list(FF14_ACTIONS.values()),
+        )
+
+    async def test_native_parent_direct_call_preserves_owned_policy_boundary(self):
+        await self.start()
+        publisher = self.runtime._tool_publisher
+        handle = next(
+            item for item in publisher.handles if item.published_name == FF14_MODEL_TOOL
+        )
+        wrapper = self.wrapper()
+        value = await handle.tool.call(
+            wrapper,
+            action="market_query",
+            arguments={"query": "44091", "region": "cn"},
+        )
+        self.assertIsInstance(json.loads(value), dict)
+        for kwargs in (
+            {
+                "action": "market_query",
+                "arguments": {"query": "44091"},
+                "forged": True,
+            },
+            {"action": "forged", "arguments": {"query": "44091"}},
+            {
+                "action": "market_query",
+                "arguments": {"query": "44091", "character": "forged"},
+            },
+        ):
+            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+                await handle.tool.call(wrapper, **kwargs)
+
+        foreign_parent = self.host.FunctionTool(
+            name=FF14_MODEL_TOOL,
+            description="foreign",
+            parameters={"type": "object", "properties": {}},
+            handler=lambda: None,
+        )
+        self.manager.func_list.append(foreign_parent)
+        try:
+            with self.assertRaisesRegex(PermissionError, "no longer current"):
+                await handle.tool.call(
+                    wrapper,
+                    action="market_query",
+                    arguments={"query": "44091"},
+                )
+        finally:
+            self.manager.func_list.remove(foreign_parent)
+
+        wrapper.context.event.plugins_name = []
+        with self.assertRaisesRegex(PermissionError, "plugin scope"):
+            await handle.tool.call(
+                wrapper,
+                action="market_query",
+                arguments={"query": "44091"},
+            )
+        wrapper.context.event.plugins_name = None
+
+        self.host.preferences.permissions = {"_default": {"ff14_market_query": "admin"}}
+        denied = await handle.tool.call(
+            wrapper,
+            action="market_query",
+            arguments={"query": "44091"},
+        )
+        self.assertIn("requires admin privileges", denied)
+        self.host.preferences.permissions = {}
+
+        wrong_context = self.wrapper(context=self.host.Context())
+        with self.assertRaisesRegex(PermissionError, "official Host event"):
+            await handle.tool.call(
+                wrong_context,
+                action="market_query",
+                arguments={"query": "44091"},
+            )
+
+        descriptor = handle.action_descriptors["market_query"]
+        for label, forged_handle, forged_descriptor, forged_action in (
+            ("handle", copy(handle), descriptor, "market_query"),
+            ("descriptor", handle, copy(descriptor), "market_query"),
+            ("action", handle, descriptor, "item_lookup"),
+        ):
+            with self.subTest(label=label), self.assertRaises(PermissionError):
+                await self.runtime.invoke_tool(
+                    handle.module_id,
+                    descriptor.name,
+                    {"query": "44091"},
+                    wrapper.context.event,
+                    tool_handle=forged_handle,
+                    tool_descriptor=forged_descriptor,
+                    tool_action=forged_action,
+                )
+
+        handle.revoked = True
+        with self.assertRaisesRegex(PermissionError, "no longer current"):
+            await handle.tool.call(
+                wrapper,
+                action="market_query",
+                arguments={"query": "44091"},
+            )
+
+    async def test_aggregate_schema_factors_exact_description_sentences_only(self):
+        await self.start()
+        publisher = self.runtime._tool_publisher
+        handle = next(
+            item for item in publisher.handles if item.published_name == FF14_MODEL_TOOL
+        )
+        tool = self.manager.get_full_tool_set().get_tool(FF14_MODEL_TOOL)
+        parameters = tool.parameters
+        action_help = parameters["properties"]["action"]["description"]
+        sentences = {
+            sentence
+            for descriptor in handle.action_descriptors.values()
+            for sentence in re.split(r"(?<=[.!?])\s+", descriptor.description.strip())
+            if sentence
+        }
+        for sentence in sentences:
+            with self.subTest(sentence=sentence):
+                self.assertEqual(action_help.count(sentence), 1)
+
+        naive = "；".join(
+            f"{descriptor.action}: {descriptor.description}"
+            for descriptor in handle.action_descriptors.values()
+        )
+        naive_parameters = json.loads(json.dumps(parameters, ensure_ascii=False))
+        naive_parameters["properties"]["action"]["description"] = naive
+        optimized_bytes = len(
+            json.dumps(
+                parameters,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+        )
+        naive_bytes = len(
+            json.dumps(
+                naive_parameters,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+        )
+        self.assertLess(optimized_bytes, naive_bytes)
+        naive_parameters["properties"]["action"]["description"] = action_help
+        self.assertEqual(naive_parameters, parameters)
+        self.assertEqual(len(parameters["properties"]["arguments"]["properties"]), 23)
+
+    async def _assert_native_final_policy_transition(self, transition):
+        await self.start()
+        publisher = self.runtime._tool_publisher
+        handle = next(
+            item for item in publisher.handles if item.published_name == FF14_MODEL_TOOL
+        )
+        wrapper = self.wrapper()
+        original_inactive = publisher._inactive_tool_names
+        calls = 0
+
+        async def suspended_final_read():
+            nonlocal calls
+            calls += 1
+            inactive = await original_inactive()
+            if calls == 2:
+                await asyncio.sleep(0)
+                transition(publisher, handle)
+            return inactive
+
+        publisher._inactive_tool_names = suspended_final_read
+        try:
+            with self.assertRaisesRegex(
+                PermissionError, "changed during final policy check"
+            ):
+                await handle.tool.call(
+                    wrapper,
+                    action="market_query",
+                    arguments={"query": "44091", "region": "cn"},
+                )
+            self.assertEqual(calls, 2)
+        finally:
+            publisher._inactive_tool_names = original_inactive
+
+    async def test_native_final_policy_await_rechecks_handle_revoke(self):
+        def revoke(_publisher, handle):
+            handle.revoked = True
+
+        await self._assert_native_final_policy_transition(revoke)
+
+    async def test_native_final_policy_await_rechecks_manager_replacement(self):
+        state = {}
+
+        def replace(_publisher, handle):
+            tools = handle.manager.func_list
+            state["index"] = tools.index(handle.tool)
+            state["handle"] = handle
+            tools[state["index"]] = self.host.FunctionTool(
+                name=handle.published_name,
+                description="foreign replacement",
+                parameters={"type": "object", "properties": {}},
+                handler=lambda: None,
+            )
+
+        try:
+            await self._assert_native_final_policy_transition(replace)
+        finally:
+            handle = state.get("handle")
+            if handle is not None:
+                handle.manager.func_list[state["index"]] = handle.tool
+
+    async def test_native_final_policy_await_rechecks_epoch_change(self):
+        state = {}
+
+        def advance(_publisher, handle):
+            registry = self.runtime.core_runtime.registry
+            state["registry"] = registry
+            state["module_id"] = handle.module_id
+            state["epoch"] = handle.epoch
+            registry._publish_lifecycle_projection(
+                handle.module_id,
+                enabled=True,
+                epoch=handle.epoch + 1,
+            )
+
+        try:
+            await self._assert_native_final_policy_transition(advance)
+        finally:
+            registry = state.get("registry")
+            if registry is not None:
+                registry._publish_lifecycle_projection(
+                    state["module_id"],
+                    enabled=True,
+                    epoch=state["epoch"],
+                )
+
+    async def test_scope_request_sanitizes_before_fault_and_commits_atomically(self):
+        await self.start()
+        publisher = self.runtime._tool_publisher
+        handle = next(
+            item for item in publisher.handles if item.published_name == FF14_MODEL_TOOL
+        )
+        unrelated = self.host.FunctionTool(
+            name="synthetic_unrelated",
+            description="synthetic",
+            parameters={"type": "object", "properties": {}},
+            handler=lambda: None,
+        )
+
+        def request_with_raw():
+            tools = self.manager.get_full_tool_set()
+            tools.add_tool(unrelated)
+            return SimpleNamespace(func_tool=tools, conversation=None)
+
+        request = request_with_raw()
+        self.context.global_config = None
+        with self.assertRaisesRegex(PermissionError, "subagent tool scope"):
+            await publisher.scope_request(self.wrapper().context.event, request)
+        self.assertIsNone(request.func_tool.get_tool(FF14_MODEL_TOOL))
+        self.assertIs(request.func_tool.get_tool(unrelated.name), unrelated)
+
+        self.context.global_config = {"subagent_orchestrator": {}}
+        original_scope_handoffs = publisher._scope_handoffs
+        partial = self.host.FunctionTool(
+            name="synthetic_partial",
+            description="synthetic",
+            parameters={"type": "object", "properties": {}},
+            handler=lambda: None,
+        )
+
+        async def fail_after_partial(_event, proposed, _inactive):
+            proposed.add_tool(partial)
+            raise PermissionError("synthetic projection failure")
+
+        publisher._scope_handoffs = fail_after_partial
+        try:
+            request = request_with_raw()
+            with self.assertRaisesRegex(PermissionError, "projection failure"):
+                await publisher.scope_request(self.wrapper().context.event, request)
+            self.assertIsNone(request.func_tool.get_tool(FF14_MODEL_TOOL))
+            self.assertIsNone(request.func_tool.get_tool(partial.name))
+            self.assertIs(request.func_tool.get_tool(unrelated.name), unrelated)
+        finally:
+            publisher._scope_handoffs = original_scope_handoffs
+
+        original_inactive = publisher._inactive_tool_names
+
+        async def cancel_policy_read():
+            raise asyncio.CancelledError()
+
+        publisher._inactive_tool_names = cancel_policy_read
+        try:
+            request = request_with_raw()
+            with self.assertRaises(asyncio.CancelledError):
+                await publisher.scope_request(self.wrapper().context.event, request)
+            self.assertIsNone(request.func_tool.get_tool(FF14_MODEL_TOOL))
+            self.assertIs(request.func_tool.get_tool(unrelated.name), unrelated)
+        finally:
+            publisher._inactive_tool_names = original_inactive
+
+        foreign_during_await = self.host.FunctionTool(
+            name=FF14_MODEL_TOOL,
+            description="foreign during projection",
+            parameters={"type": "object", "properties": {}},
+            handler=lambda: None,
+        )
+        request = request_with_raw()
+
+        async def mutate_during_policy_read():
+            values = await original_inactive()
+            request.func_tool.add_tool(foreign_during_await)
+            return values
+
+        publisher._inactive_tool_names = mutate_during_policy_read
+        try:
+            with self.assertRaisesRegex(PermissionError, "changed during projection"):
+                await publisher.scope_request(self.wrapper().context.event, request)
+            self.assertIs(
+                request.func_tool.get_tool(FF14_MODEL_TOOL), foreign_during_await
+            )
+            self.assertIs(request.func_tool.get_tool(unrelated.name), unrelated)
+        finally:
+            publisher._inactive_tool_names = original_inactive
+
+        invalid = SimpleNamespace(func_tool=object(), conversation=None)
+        with self.assertRaisesRegex(PermissionError, "valid Host request ToolSet"):
+            await publisher.scope_request(self.wrapper().context.event, invalid)
+        self.assertIsInstance(invalid.func_tool, self.host.ToolSet)
+        self.assertTrue(invalid.func_tool.empty())
+
+        foreign = self.host.FunctionTool(
+            name=FF14_MODEL_TOOL,
+            description="foreign request tool",
+            parameters={"type": "object", "properties": {}},
+            handler=lambda: None,
+        )
+        wrapped_foreign = self.host.FunctionTool(
+            name=FF14_MODEL_TOOL,
+            description="wrapped foreign request tool",
+            parameters={"type": "object", "properties": {}},
+            handler=lambda: None,
+        )
+        wrapped_foreign._wrapped = foreign
+
+        class CustomSameFields(self.host.FunctionTool):
+            async def call(self, _context, **_kwargs):
+                return "custom guard semantics"
+
+        custom_same_fields = CustomSameFields(
+            name=FF14_MODEL_TOOL,
+            description="custom same-fields wrapper",
+            parameters={"type": "object", "properties": {}},
+        )
+        custom_same_fields._wrapped = handle.tool
+        custom_same_fields._mgr = self.manager
+        for selected in (foreign, wrapped_foreign, custom_same_fields):
+            with self.subTest(selected=selected.description):
+                request = request_with_raw()
+                request.func_tool.add_tool(selected)
+                await publisher.scope_request(self.wrapper().context.event, request)
+                self.assertIs(request.func_tool.get_tool(FF14_MODEL_TOOL), selected)
+                self.assertIs(request.func_tool.get_tool(unrelated.name), unrelated)
+        self.assertEqual(
+            await custom_same_fields.call(self.wrapper()), "custom guard semantics"
+        )
+
+        owned_wrapper = self.manager.get_full_tool_set().get_tool(FF14_MODEL_TOOL)
+        self.assertIs(owned_wrapper._wrapped, handle.tool)
+        self.assertIs(owned_wrapper._mgr, self.manager)
+        request = SimpleNamespace(
+            func_tool=self.host.ToolSet([owned_wrapper, unrelated]), conversation=None
+        )
+        await publisher.scope_request(self.wrapper().context.event, request)
+        scoped = request.func_tool.get_tool(FF14_MODEL_TOOL)
+        self.assertIsNot(scoped, owned_wrapper)
+        self.assertIs(scoped._ygl_parent, handle)
+
+        other_manager = self.host.Manager.__new__(self.host.Manager)
+        other_manager.func_list = [handle.tool]
+
+        async def other_manager_denies(_name, _context):
+            return "other manager denied"
+
+        other_manager._check_tool_permission = other_manager_denies
+        other_wrapper = other_manager.get_full_tool_set().get_tool(FF14_MODEL_TOOL)
+        self.assertIs(other_wrapper._wrapped, handle.tool)
+        self.assertIs(other_wrapper._mgr, other_manager)
+        request = request_with_raw()
+        request.func_tool.add_tool(other_wrapper)
+        await publisher.scope_request(self.wrapper().context.event, request)
+        selected = request.func_tool.get_tool(FF14_MODEL_TOOL)
+        self.assertIs(selected, other_wrapper)
+        before = len(self.transport.requests)
+        self.assertEqual(
+            await selected.call(
+                self.wrapper(),
+                action="market_query",
+                arguments={"query": "44091"},
+            ),
+            "other manager denied",
+        )
+        self.assertEqual(len(self.transport.requests), before)
+
+        request = request_with_raw()
+        await publisher.scope_request(self.wrapper().context.event, request)
+        committed = request.func_tool.get_tool(FF14_MODEL_TOOL)
+        self.assertIsNotNone(committed)
+        self.assertIsNot(committed, handle.tool)
+        self.assertIs(request.func_tool.get_tool(unrelated.name), unrelated)
+
+    async def test_inactive_parent_is_not_reconstructed_and_revokes_scoped_actions(
+        self,
+    ):
+        await self.start()
+        publisher = self.runtime._tool_publisher
+        handle = next(
+            item for item in publisher.handles if item.published_name == FF14_MODEL_TOOL
+        )
+        handle.tool.active = False
+        publisher.publish()
+        self.assertIs(
+            next(
+                item
+                for item in publisher.handles
+                if item.published_name == FF14_MODEL_TOOL
+            ),
+            handle,
+        )
+        self.assertFalse(handle.tool.active)
+        event = self.wrapper().context.event
+        before_umos = tuple(self.context.config_umos)
+        filtered = self.manager.get_full_tool_set()
+        wrapped = filtered.get_tool(FF14_MODEL_TOOL)
+        self.assertIsNotNone(wrapped)
+        self.assertFalse(wrapped.active)
+        request = SimpleNamespace(func_tool=filtered, conversation=None)
+        await publisher.scope_request(event, request)
+        self.assertIsNone(request.func_tool.get_tool(FF14_MODEL_TOOL))
+        self.assertEqual(tuple(self.context.config_umos), before_umos)
+
+        filtered = self.manager.get_full_tool_set()
+        filtered.remove_tool(FF14_MODEL_TOOL)
+        request = SimpleNamespace(func_tool=filtered, conversation=None)
+        await publisher.scope_request(event, request)
+        self.assertIsNone(request.func_tool.get_tool(FF14_MODEL_TOOL))
+
+        class Personas:
+            async def resolve_selected_persona(self, **_kwargs):
+                return None, {"tools": ["ff14_market_query"]}, None, None
+
+        handle.tool.active = True
+        self.context.persona_manager = Personas()
+        self.context.config = {
+            "subagent_orchestrator": {},
+            "provider_settings": {},
+            "agent_runner": {"config": {"persona": {}}},
+        }
+        request = SimpleNamespace(
+            func_tool=self.host.ToolSet(),
+            conversation=SimpleNamespace(persona_id=None),
+        )
+        await publisher.scope_request(event, request)
+        scoped = request.func_tool.get_tool(FF14_MODEL_TOOL)
+        self.assertEqual(
+            tuple(self.context.config_umos),
+            (*before_umos, event.unified_msg_origin),
+        )
+        self.assertEqual(
+            scoped.parameters["properties"]["action"]["enum"], ["market_query"]
+        )
+        descriptor = handle.action_descriptors["market_query"]
+        self.assertTrue(publisher.scoped_current(handle, "market_query", descriptor))
+        self.assertTrue(self.runtime._tool_owner_current(handle))
+        handle.tool.active = False
+        self.assertFalse(publisher.scoped_current(handle, "market_query", descriptor))
+        self.assertFalse(self.runtime._tool_owner_current(handle))
+
+    async def test_legacy_inactive_action_survives_aggregate_upgrade_and_reactivation(
+        self,
+    ):
+        await self.start()
+        publisher = self.runtime._tool_publisher
+        handle = next(
+            item for item in publisher.handles if item.published_name == FF14_MODEL_TOOL
+        )
+        self.assertTrue(handle.tool.active)
+        self.host.preferences.inactivated_llm_tools = ["ff14_market_query"]
+        event = self.wrapper().context.event
+        request = SimpleNamespace(
+            func_tool=self.manager.get_full_tool_set(), conversation=None
+        )
+        await publisher.scope_request(event, request)
+        self.assertEqual(
+            request.func_tool.get_tool(FF14_MODEL_TOOL).parameters["properties"][
+                "action"
+            ]["enum"],
+            ["market_select", "item_lookup", "item_select", "logs_character"],
+        )
+
+        class Personas:
+            tools = None
+
+            async def resolve_selected_persona(self, **_kwargs):
+                return None, {"tools": self.tools}, None, None
+
+        personas = Personas()
+        self.context.persona_manager = personas
+        self.context.config = {
+            "subagent_orchestrator": {},
+            "provider_settings": {},
+            "agent_runner": {"config": {"persona": {}}},
+        }
+        for persona_tools, expected in (
+            (
+                None,
+                ["market_select", "item_lookup", "item_select", "logs_character"],
+            ),
+            (["ff14_market_query", "ff14_item_lookup"], ["item_lookup"]),
+        ):
+            with self.subTest(persona_tools=persona_tools):
+                personas.tools = persona_tools
+                request = SimpleNamespace(
+                    func_tool=self.host.ToolSet(),
+                    conversation=SimpleNamespace(persona_id=None),
+                )
+                await publisher.scope_request(event, request)
+                self.assertEqual(
+                    request.func_tool.get_tool(FF14_MODEL_TOOL).parameters[
+                        "properties"
+                    ]["action"]["enum"],
+                    expected,
+                )
+
+        self.host.preferences.inactivated_llm_tools = []
+        live_wrapper = self.wrapper()
+        live_event = live_wrapper.context.event
+        request = SimpleNamespace(
+            func_tool=self.manager.get_full_tool_set(), conversation=None
+        )
+        await publisher.scope_request(live_event, request)
+        self.assertEqual(self.host.preferences.calls[-1], ("inactivated_llm_tools", ()))
+        stale = request.func_tool.get_tool(FF14_MODEL_TOOL)
+        self.assertIn("market_query", stale.parameters["properties"]["action"]["enum"])
+        self.host.preferences.inactivated_llm_tools = ["ff14_market_query"]
+        with self.assertRaisesRegex(PermissionError, "Host tool is inactive"):
+            await stale.call(
+                live_wrapper,
+                action="market_query",
+                arguments={"query": "44091"},
+            )
+
+        self.host.preferences.inactivated_llm_tools = []
+        deactivated = []
+
+        async def deactivate_during_request(_request):
+            if not deactivated:
+                deactivated.append(True)
+                self.host.preferences.inactivated_llm_tools = ["ff14_market_query"]
+            return None
+
+        self.transport.callback = deactivate_during_request
+        with self.assertRaisesRegex(PermissionError, "Host tool became inactive"):
+            await stale.call(
+                live_wrapper,
+                action="market_query",
+                arguments={"query": "44091", "region": "cn"},
+            )
+        self.assertEqual(deactivated, [True])
+        self.transport.callback = None
+
+        self.host.preferences.inactivated_llm_tools = [FF14_MODEL_TOOL]
+        request = SimpleNamespace(
+            func_tool=self.manager.get_full_tool_set(), conversation=None
+        )
+        await publisher.scope_request(self.wrapper().context.event, request)
+        self.assertIsNone(request.func_tool.get_tool(FF14_MODEL_TOOL))
+
+        self.host.preferences.inactivated_llm_tools = []
+        request = SimpleNamespace(
+            func_tool=self.manager.get_full_tool_set(), conversation=None
+        )
+        await publisher.scope_request(self.wrapper().context.event, request)
+        self.assertIn(
+            "market_query",
+            request.func_tool.get_tool(FF14_MODEL_TOOL).parameters["properties"][
+                "action"
+            ]["enum"],
+        )
+        self.host.preferences.inactivated_llm_tools = "invalid"
+        with self.assertRaisesRegex(
+            PermissionError, "cannot prove Host inactive tool scope"
+        ):
+            await publisher.scope_request(
+                self.wrapper().context.event,
+                SimpleNamespace(
+                    func_tool=self.manager.get_full_tool_set(), conversation=None
+                ),
+            )
+
+        original_global_get = self.host.preferences.global_get
+
+        async def unavailable(key, default):
+            if key == "inactivated_llm_tools":
+                raise RuntimeError("private preference failure")
+            return await original_global_get(key, default)
+
+        self.host.preferences.global_get = unavailable
+        try:
+            with self.assertRaisesRegex(
+                PermissionError, "cannot prove Host inactive tool scope"
+            ):
+                await publisher.scope_request(
+                    self.wrapper().context.event,
+                    SimpleNamespace(
+                        func_tool=self.manager.get_full_tool_set(), conversation=None
+                    ),
+                )
+        finally:
+            self.host.preferences.global_get = original_global_get
+            self.host.preferences.inactivated_llm_tools = []
 
     async def test_controlled_model_chat_asks_and_continues_explicit_user_selection(
         self,
@@ -1529,7 +2899,7 @@ class LLMToolTests(unittest.IsolatedAsyncioTestCase):
         handle = next(
             h
             for h in self.runtime._tool_publisher.handles
-            if h.descriptor.name == "ff14_market_query"
+            if h.published_name == FF14_MODEL_TOOL
         )
         # The missing owner closes its own receipt; a fresh official event is
         # the positive control for the independent actor-only forgery.
@@ -1640,7 +3010,18 @@ class LLMToolTests(unittest.IsolatedAsyncioTestCase):
         await self.start()
         core = self.runtime.core_runtime
         module = core.registry.snapshot().module("ff14/ff14")
-        old = self.manager.get_full_tool_set()
+        publisher = self.runtime._tool_publisher
+        wrapper = self.wrapper()
+        request = SimpleNamespace(
+            func_tool=self.manager.get_full_tool_set(), conversation=None
+        )
+        await publisher.scope_request(wrapper.context.event, request)
+        captured = request.func_tool.get_tool(FF14_MODEL_TOOL)
+        self.assertIsNotNone(captured)
+        self.assertEqual(
+            (await self.call_captured_parent(captured, wrapper))["status"], "success"
+        )
+        self.transport.requests.clear()
         replacement = self.host.FunctionTool(
             name="ff14_market_query",
             description="other owner",
@@ -1648,25 +3029,26 @@ class LLMToolTests(unittest.IsolatedAsyncioTestCase):
         )
         self.manager.func_list[0] = replacement
         with self.assertRaises(PermissionError):
-            await self.call(toolset=old)
+            await self.call_captured_parent(captured, wrapper)
         self.assertEqual(self.transport.requests, [])
-        publisher = self.runtime._tool_publisher
         real_cleanup = publisher.cleanup
         publisher.cleanup = lambda: (_ for _ in ()).throw(
             ToolPublicationError("synthetic pending")
         )
-        with self.assertRaises(CoreRuntimeCleanupPending) as pending:
-            await self.runtime.terminate()
-        self.assertEqual(pending.exception.component, "tool_publication")
-        with self.assertRaises(PermissionError):
-            await self.call(toolset=old)
-        self.assertIs(self.runtime._tool_publisher, publisher)
-        self.assertFalse(core._accepting)
-        self.assertIsNone(self.runtime.core_runtime)
-        await self.assert_core_closed(core, module)
-        self.assertTrue(self.transport.closed)
-        self.assertEqual(self.transport.close_calls, 1)
-        publisher.cleanup = real_cleanup
+        try:
+            with self.assertRaises(CoreRuntimeCleanupPending) as pending:
+                await self.runtime.terminate()
+            self.assertEqual(pending.exception.component, "tool_publication")
+            with self.assertRaises(PermissionError):
+                await self.call_captured_parent(captured, wrapper)
+            self.assertIs(self.runtime._tool_publisher, publisher)
+            self.assertFalse(core._accepting)
+            self.assertIsNone(self.runtime.core_runtime)
+            await self.assert_core_closed(core, module)
+            self.assertTrue(self.transport.closed)
+            self.assertEqual(self.transport.close_calls, 1)
+        finally:
+            publisher.cleanup = real_cleanup
         await self.runtime.terminate()
         self.assertEqual(self.manager.func_list, [replacement])
         self.assertIsNone(self.runtime.core_runtime)
@@ -1739,34 +3121,47 @@ class LLMToolTests(unittest.IsolatedAsyncioTestCase):
             nonlocal count
             count += 1
             original(*tools)
-            if count == 2:
+            if count == 1:
                 raise RuntimeError("synthetic registration failure")
 
         self.context.add_llm_tools = partial
         with self.assertRaises(RuntimeError):
             await self.runtime.initialize()
-        self.assertEqual(count, 2)
+        self.assertEqual(count, 1)
         self.assertEqual(self.manager.func_list, [])
         self.assertIsNone(self.runtime.core_runtime)
         self.context.add_llm_tools = original
         await self.runtime.initialize()
-        self.assertEqual(len(self.manager.func_list), 5)
+        self.assertEqual(len(self.manager.func_list), 1)
 
     async def test_module_stop_revoke_and_pending_observer_cleanup(self):
         await self.start()
-        old = self.manager.get_full_tool_set()
         publisher = self.runtime._tool_publisher
+        wrapper = self.wrapper()
+        request = SimpleNamespace(
+            func_tool=self.manager.get_full_tool_set(), conversation=None
+        )
+        await publisher.scope_request(wrapper.context.event, request)
+        captured = request.func_tool.get_tool(FF14_MODEL_TOOL)
+        self.assertIsNotNone(captured)
+        self.assertEqual(
+            (await self.call_captured_parent(captured, wrapper))["status"], "success"
+        )
+        self.transport.requests.clear()
         original = publisher.cleanup
         publisher.cleanup = lambda: (_ for _ in ()).throw(
             ToolPublicationError("synthetic pending")
         )
-        await self.runtime.core_runtime.lifecycle.stop("ff14/ff14")
-        self.assertTrue(all(handle.revoked for handle in publisher.handles))
-        with self.assertRaises(PermissionError):
-            await self.call(toolset=old)
-        self.assertEqual(publisher.failure, "ToolPublicationError")
-        publisher.cleanup = original
-        publisher.cleanup()
+        try:
+            await self.runtime.core_runtime.lifecycle.stop("ff14/ff14")
+            self.assertTrue(all(handle.revoked for handle in publisher.handles))
+            with self.assertRaises(PermissionError):
+                await self.call_captured_parent(captured, wrapper)
+            self.assertEqual(self.transport.requests, [])
+            self.assertEqual(publisher.failure, "ToolPublicationError")
+        finally:
+            publisher.cleanup = original
+            publisher.cleanup()
         self.assertEqual(self.manager.func_list, [])
 
     async def test_initialization_pending_cleanup_retains_owner_and_retries(self):
@@ -1792,24 +3187,29 @@ class LLMToolTests(unittest.IsolatedAsyncioTestCase):
         self.context.add_llm_tools = failed_registration
         self.transport.closed = False
         close_calls = self.transport.close_calls
-        with self.assertRaises(CoreRuntimeCleanupPending) as pending:
-            await self.runtime.initialize()
-        self.assertEqual(pending.exception.component, "tool_publication")
-        publisher = retained["publisher"]
-        self.assertIs(self.runtime._tool_publisher, publisher)
-        self.assertIsNone(self.runtime.core_runtime)
-        self.assertFalse(retained["core"]._accepting)
-        await self.assert_core_closed(retained["core"], retained["module"])
-        self.assertTrue(self.transport.closed)
-        self.assertEqual(self.transport.close_calls, close_calls + 1)
-        self.assertIsNone(self.runtime._http_transport)
-        self.assertFalse(self.runtime._ready)
-        old = self.manager.get_full_tool_set()
-        with self.assertRaises(PermissionError):
-            await self.call(toolset=old)
-        self.assertEqual(self.transport.requests, [])
-        publisher.cleanup = retained["cleanup"]
-        self.context.add_llm_tools = original
+        try:
+            with self.assertRaises(CoreRuntimeCleanupPending) as pending:
+                await self.runtime.initialize()
+            self.assertEqual(pending.exception.component, "tool_publication")
+            publisher = retained["publisher"]
+            self.assertIs(self.runtime._tool_publisher, publisher)
+            self.assertIsNone(self.runtime.core_runtime)
+            self.assertFalse(retained["core"]._accepting)
+            await self.assert_core_closed(retained["core"], retained["module"])
+            self.assertTrue(self.transport.closed)
+            self.assertEqual(self.transport.close_calls, close_calls + 1)
+            self.assertIsNone(self.runtime._http_transport)
+            self.assertFalse(self.runtime._ready)
+            captured = self.manager.get_full_tool_set().get_tool(FF14_MODEL_TOOL)
+            self.assertIsNotNone(captured)
+            self.assertIs(captured._wrapped, publisher.handles[0].tool)
+            with self.assertRaises(PermissionError):
+                await self.call_captured_parent(captured, self.wrapper())
+            self.assertEqual(self.transport.requests, [])
+        finally:
+            if "publisher" in retained:
+                retained["publisher"].cleanup = retained["cleanup"]
+            self.context.add_llm_tools = original
         other = self.host.FunctionTool(
             name="ff14_market_query", description="other", parameters={"type": "object"}
         )

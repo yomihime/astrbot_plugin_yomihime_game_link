@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 from types import ModuleType
 
-SDK_VERSION = "0.1.0a22"
+SDK_VERSION = "0.1.0a23"
 SDK_MODULE_ABI_VERSION = "2.0"
 
 
@@ -17,7 +17,7 @@ SDK_PACKAGE_MANIFEST = {
     "__init__.py": "cf6363d5ab21686c8445eb02de14a8b94b8bfef86c887bda5b3a6af12aca704a",
     "cards.py": "35adee0631a5dfed936b6b37b41e0ae3b218a179778b1c517624b00780aa7283",
     "contexts.py": "874944d5183ad8717620589d0b1541ac9748529e63e425df1b6ca9216bc4c614",
-    "declarations.py": "2a9d0d5c9e5cd1f7b38e4cf2bd4d81e0752b4bb46d6f3b73b8abf3d48455a7ef",
+    "declarations.py": "3d14f0cc794692c59064eb5bef14b17b1920dcd76a043141b177e47d76534097",
     "display.py": "21df4ef036ae54962fb2f37de3b55c812f635722796dacecdd278a7d811e68ff",
     "errors.py": "b991a5d73f3f70fb4b0377f274e972339c14754bd4fc3be2945c456643daf467",
     "host.py": "dbbfabc8b3655a124925dd1c489a403e38cfbd8f34ef6b3b9fb799b26bf2a168",
@@ -27,7 +27,7 @@ SDK_PACKAGE_MANIFEST = {
     "services.py": "603697d623595a7175465c1289c18b65f52309a7125ed94e0ff9a21ec9f7edce",
     "storage.py": "6311b4754da6e37616debd68003d6993cf89c0b060845387288e2de575313260",
     "subscriptions.py": "c3458ed30bc90481e17b1e8ca27676f19eaf7097ab79817a3a3554532dcef00a",
-    "version.py": "744eaeb6860285c1782eaca6a262bafd56e0ebe0cc9f437f85e08c1119860587",
+    "version.py": "332ada3b4509f7ebcad3df887a7c404d3ed66bb180ecd7841abc6e9df75ec864",
     "_examples/empty_module/manifest.json": "9de2d0e3cbb7e32acf029677e59381d1bb8893c6cae84a45f9a606b6e3a7e965",
     "_examples/empty_module/module.py": "21fdb6428bd422804ad00e98038b032c25b1d2488b3df5f17e3be855e0c8198f",
     "_examples/empty_module/README.md": "c1150018aa2eb2bfb9f9129ba753f6f26d132a0a245d245eb8a62f3c6debc1d7",
@@ -263,6 +263,11 @@ class YomihimeGameLink(Star):
     def get_game_link_extension_host(self):
         """Public SDK bridge for separately installed AstrBot extension plugins."""
         return self._runtime.extension_host
+
+    @filter.on_llm_request()
+    async def scope_model_tools(self, event: AstrMessageEvent, req) -> None:
+        """Mint exact-request aggregate wrappers after Host tool filtering."""
+        await self._runtime.scope_model_tools(event, req)
 
     @filter.command("ygl")
     async def game_link(self, event: AstrMessageEvent):

@@ -13,6 +13,8 @@
       "category": "game",
       "factory_entry": "module:Factory",
       "module_version": "0.3.0",
+      "model_tool_name": "ff14",
+      "model_tool_description": "查询 FF14 物品资料、市场价格与公开 FFLogs 角色战绩；按 action 选择具体能力。",
       "capabilities": [
         {
           "capability_id": "ff14.market.query",
@@ -626,6 +628,7 @@
       "tools": [
         {
           "name": "ff14_market_query",
+          "action": "market_query",
           "capability_id": "ff14.market.query",
           "parameter_mapping": {
             "query": "query",
@@ -642,6 +645,7 @@
         },
         {
           "name": "ff14_market_select",
+          "action": "market_select",
           "capability_id": "ff14.market.select",
           "parameter_mapping": {
             "batch_id": "batch_id",
@@ -656,6 +660,7 @@
         },
         {
           "name": "ff14_item_lookup",
+          "action": "item_lookup",
           "capability_id": "item.lookup",
           "parameter_mapping": {
             "query": "query",
@@ -665,6 +670,7 @@
         },
         {
           "name": "ff14_item_select",
+          "action": "item_select",
           "capability_id": "ff14.item.select",
           "parameter_mapping": {
             "batch_id": "batch_id",
@@ -676,6 +682,7 @@
         },
         {
           "name": "ff14_logs_character",
+          "action": "logs_character",
           "capability_id": "ff14.logs.character",
           "parameter_mapping": {
             "realm": "realm",

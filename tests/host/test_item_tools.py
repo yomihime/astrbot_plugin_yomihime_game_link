@@ -1,6 +1,8 @@
 """Official Host publisher/Core composition; synthetic upstream and tool arguments."""
 
+import json
 import unittest
+from types import SimpleNamespace
 
 from . import test_astrbot_runtime as runtime_fixture
 from . import test_llm_tools as tools_fixture
@@ -76,11 +78,21 @@ class ItemToolHostTests(unittest.IsolatedAsyncioTestCase):
     async def test_formal_tools_schema_exact_id_and_public_fact_gate(self):
         await self.start_items()
         tools = self.manager.get_full_tool_set()
-        schema = tools.get_tool("ff14_item_lookup").parameters
-        self.assertEqual(set(schema["properties"]), {"query", "action"})
+        schema = tools.get_tool("ff14").parameters
+        self.assertEqual(set(schema["required"]), {"action", "arguments"})
         self.assertEqual(
-            set(tools.get_tool("ff14_item_select").parameters["properties"]),
-            {"batch_id", "generation", "item_id", "action"},
+            set(schema["properties"]["action"]["enum"]),
+            {
+                "market_query",
+                "market_select",
+                "item_lookup",
+                "item_select",
+                "logs_character",
+            },
+        )
+        self.assertTrue(
+            {"query", "batch_id", "generation", "item_id"}
+            <= set(schema["properties"]["arguments"]["properties"])
         )
         exact = await self.item("查Exact怎么获得", "Exact")
         self.assertEqual(exact["status"], "success")
@@ -186,19 +198,34 @@ class ItemToolHostTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_module_stop_clears_pending_and_revokes_item_tools(self):
         await self.start_items()
-        pending = await self.item("查Synthetic")
         module = self.runtime.core_runtime.registry.snapshot().module("ff14/ff14")
         handler = module.handlers.capabilities["item.lookup"]
-        old = self.manager.get_full_tool_set()
+        old_wrapper = self.wrapper("查Synthetic")
+        request = SimpleNamespace(
+            func_tool=self.manager.get_full_tool_set(), conversation=None
+        )
+        await self.runtime._tool_publisher.scope_request(
+            old_wrapper.context.event, request
+        )
+        old = request.func_tool
+        old_aggregate = old.get_tool(tools_fixture.FF14_MODEL_TOOL)
+        positive = json.loads(
+            await old_aggregate.call(
+                old_wrapper,
+                action=tools_fixture.FF14_ACTIONS["ff14_item_lookup"],
+                arguments={"query": "Synthetic"},
+            )
+        )
+        self.assertEqual(positive["status"], "needs_selection")
+        pending = positive
         self.assertEqual(handler._chat.registry.size, 1)
         await self.runtime.terminate()
         self.assertEqual(handler._chat.registry.size, 0)
         with self.assertRaises(PermissionError):
-            await self.call(
-                "ff14_item_select",
-                self.selection(pending),
-                self.wrapper("选择物品 44091"),
-                toolset=old,
+            await old_aggregate.call(
+                old_wrapper,
+                action=tools_fixture.FF14_ACTIONS["ff14_item_select"],
+                arguments=self.selection(pending),
             )
 
     async def test_duplicate_exact_original_name_new_event_replaces_batch(self):

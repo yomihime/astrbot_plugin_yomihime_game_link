@@ -246,6 +246,60 @@ class ManifestContractTests(unittest.TestCase):
         with self.assertRaises(FrozenInstanceError):
             package.package_id = "other"  # type: ignore[misc]
 
+    def test_model_tool_fields_are_paired_and_actions_are_closed(self) -> None:
+        first = validate_contract(
+            ToolDescriptor("catalog_search", "lookup", {"query": "query"}, "Search")
+        )
+        self.assertIsNone(_module(tools=(first,)).model_tool_name)
+        for changes in (
+            {"model_tool_name": "catalog"},
+            {"model_tool_description": "Catalog queries"},
+            {
+                "tools": (first,),
+                "model_tool_name": "catalog",
+                "model_tool_description": "Catalog queries",
+            },
+        ):
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                _module(**changes)
+
+        migrated = _module(
+            tools=(
+                validate_contract(
+                    ToolDescriptor(
+                        "catalog_search",
+                        "lookup",
+                        {"query": "query"},
+                        "Search",
+                        action="search",
+                    )
+                ),
+            ),
+            model_tool_name="catalog",
+            model_tool_description="Catalog queries",
+        )
+        self.assertEqual(migrated.tools[0].action, "search")
+        self.assertEqual(migrated.model_tool_name, "catalog")
+
+        duplicate = tuple(
+            validate_contract(
+                ToolDescriptor(
+                    name,
+                    "lookup",
+                    {"query": "query"},
+                    "Search",
+                    action="search",
+                )
+            )
+            for name in ("catalog_search", "catalog_lookup")
+        )
+        with self.assertRaisesRegex(ValueError, "actions"):
+            _module(
+                tools=duplicate,
+                model_tool_name="catalog",
+                model_tool_description="Catalog queries",
+            )
+
     def test_invalid_ids_versions_and_reserved_help_are_rejected(self) -> None:
         with self.assertRaises(ValueError):
             _capability("UPPER")

@@ -1629,7 +1629,13 @@ class CoreRuntime:
             raise RuntimeError("CoreRuntime is not accepting host ingress")
 
     def _active_module(
-        self, module_id: str, *, origin: InvocationOrigin, target: str
+        self,
+        module_id: str,
+        *,
+        origin: InvocationOrigin,
+        target: str,
+        tool_action: str | None = None,
+        tool_parent_name: str | None = None,
     ) -> tuple[RegisteredModule, str]:
         validate_contract(origin)
         module = self.registry.snapshot().module(module_id)
@@ -1658,6 +1664,17 @@ class CoreRuntime:
             )
             if not isinstance(descriptor, ToolDescriptor):
                 raise PermissionError("Tool is not declared")
+            if module.manifest.model_tool_name is None:
+                if tool_action is not None or tool_parent_name not in (
+                    None,
+                    descriptor.name,
+                ):
+                    raise PermissionError("legacy Tool binding is invalid")
+            elif (
+                descriptor.action != tool_action
+                or module.manifest.model_tool_name != tool_parent_name
+            ):
+                raise PermissionError("model Tool action binding is invalid")
             capability_id = descriptor.capability_id
             capability = next(
                 (
@@ -1730,6 +1747,8 @@ class CoreRuntime:
         parameters: object,
         *,
         ingress: HostIngress,
+        tool_action: str | None = None,
+        tool_parent_name: str | None = None,
     ) -> CoreInvocationOutcome:
         return await self._invoke_host(
             InvocationOrigin.LLM_TOOL,
@@ -1737,6 +1756,8 @@ class CoreRuntime:
             tool_name,
             parameters,
             ingress=ingress,
+            tool_action=tool_action,
+            tool_parent_name=tool_parent_name,
         )
 
     async def _invoke_host(
@@ -1747,6 +1768,8 @@ class CoreRuntime:
         parameters: object,
         *,
         ingress: HostIngress,
+        tool_action: str | None = None,
+        tool_parent_name: str | None = None,
     ) -> CoreInvocationOutcome:
         validate_contract(origin)
         task = asyncio.current_task()
@@ -1757,7 +1780,11 @@ class CoreRuntime:
             self._require_accepting_ingress()
             accepted_ingress = await self._host_ingress(origin, ingress)
             module, capability_id = self._active_module(
-                module_id, origin=origin, target=target
+                module_id,
+                origin=origin,
+                target=target,
+                tool_action=tool_action,
+                tool_parent_name=tool_parent_name,
             )
             if origin is InvocationOrigin.COMMAND:
                 # The ingress validator above is the authority boundary. Keep
@@ -1836,7 +1863,13 @@ class CoreRuntime:
                     self._command_ingresses[view.invocation_id] = (view, ingress)
                     result = await self.gateway.invoke_command(view, target, parameters)
                 else:
-                    result = await self.gateway.invoke_tool(view, target, parameters)
+                    result = await self.gateway.invoke_tool(
+                        view,
+                        target,
+                        parameters,
+                        tool_action=tool_action,
+                        tool_parent_name=tool_parent_name,
+                    )
                 if origin is InvocationOrigin.LLM_TOOL:
                     self.issuer._require_message_current(view)
                 routed = await self.output.route(view, result)

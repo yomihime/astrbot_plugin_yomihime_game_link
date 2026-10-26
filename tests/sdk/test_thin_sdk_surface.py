@@ -10,7 +10,7 @@ class ThinSDKSurfaceTests(unittest.TestCase):
         ports = importlib.import_module("ygl_test_subject.core.ports")
         self.assertIs(sdk.RevisionConflict, ports.RevisionConflict)
         self.assertIs(sdk.UniqueConstraintViolation, ports.UniqueConstraintViolation)
-        self.assertEqual(sdk.__version__, "0.1.0a22")
+        self.assertEqual(sdk.__version__, "0.1.0a23")
         for name in (
             "CacheRepository",
             "PersistedConfigPatch",

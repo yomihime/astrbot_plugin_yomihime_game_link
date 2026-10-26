@@ -20,7 +20,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 ARCHIVE = ROOT / "dist" / "astrbot_plugin_yomihime_game_link-local.zip"
 EXPECTED_WHEEL_SHA256 = (
-    "daa4d3d0f109d52af75c7f7e87b5ce8e8bcc2100a7131b87181121e097b10392"
+    "5888988cf1e3173a76b4a6e16beea222196f6d495ad2a917542f8a24602fdf0f"
 )
 EXPECTED_WHEEL_ENTRIES = {
     "yomihime_game_link_sdk/jobs.py",
@@ -36,17 +36,17 @@ EXPECTED_WHEEL_ENTRIES = {
     "yomihime_game_link_sdk/version.py",
     "yomihime_game_link_sdk/results.py",
     "yomihime_game_link_sdk/_examples/empty_module/README.md",
-    "yomihime_game_link_sdk-0.1.0a22.dist-info/licenses/SDK-LICENSE",
-    "yomihime_game_link_sdk-0.1.0a22.dist-info/METADATA",
+    "yomihime_game_link_sdk-0.1.0a23.dist-info/licenses/SDK-LICENSE",
+    "yomihime_game_link_sdk-0.1.0a23.dist-info/METADATA",
     "yomihime_game_link_sdk/_examples/empty_module/module.py",
     "yomihime_game_link_sdk/storage.py",
-    "yomihime_game_link_sdk-0.1.0a22.dist-info/top_level.txt",
+    "yomihime_game_link_sdk-0.1.0a23.dist-info/top_level.txt",
     "yomihime_game_link_sdk/subscriptions.py",
     "yomihime_game_link_sdk/contexts.py",
-    "yomihime_game_link_sdk-0.1.0a22.dist-info/WHEEL",
+    "yomihime_game_link_sdk-0.1.0a23.dist-info/WHEEL",
     "yomihime_game_link_sdk/py.typed",
     "yomihime_game_link_sdk/__init__.py",
-    "yomihime_game_link_sdk-0.1.0a22.dist-info/RECORD",
+    "yomihime_game_link_sdk-0.1.0a23.dist-info/RECORD",
     "yomihime_game_link_sdk/_examples/empty_module/manifest.json",
 }
 PACKAGE_ENTRY_NAMES = {
@@ -425,11 +425,11 @@ def validate_wheel(path: Path) -> dict[str, bytes]:
                 "SDK wheel entry manifest differs from the reviewed artifact"
             )
         metadata_lines = set(
-            wheel.read("yomihime_game_link_sdk-0.1.0a22.dist-info/METADATA")
+            wheel.read("yomihime_game_link_sdk-0.1.0a23.dist-info/METADATA")
             .decode("utf-8")
             .splitlines()
         )
-        if not {"Name: yomihime-game-link-sdk", "Version: 0.1.0a22"} <= metadata_lines:
+        if not {"Name: yomihime-game-link-sdk", "Version: 0.1.0a23"} <= metadata_lines:
             raise ValueError("SDK wheel distribution metadata is unsupported")
         package = {name: wheel.read(name) for name in sorted(PACKAGE_ENTRY_NAMES)}
     return package
@@ -630,18 +630,17 @@ def _projected_page_assets(
             if len(policy_bytes) > 262144:
                 raise ValueError("external source policy exceeds byte budget")
             policy = json.loads(policy_bytes, object_pairs_hook=policy_module._object)
+            required_policy_fields = {
+                "schema_version",
+                "credentials",
+                "authorizations",
+            }
             if (
                 type(policy) is not dict
+                or not required_policy_fields <= set(policy)
                 or set(policy)
-                not in (
-                    {"schema_version", "credentials", "authorizations"},
-                    {
-                        "schema_version",
-                        "credentials",
-                        "authorizations",
-                        "capability_timeouts",
-                    },
-                )
+                - required_policy_fields
+                - {"capability_timeouts", "config_migrations"}
                 or type(policy["schema_version"]) is not int
                 or policy["schema_version"] != 1
             ):
@@ -651,11 +650,11 @@ def _projected_page_assets(
                     "manifest": raw.decode("utf-8"),
                     "credentials": policy["credentials"],
                     "authorizations": policy["authorizations"],
-                    **(
-                        {"capability_timeouts": policy["capability_timeouts"]}
-                        if "capability_timeouts" in policy
-                        else {}
-                    ),
+                    **{
+                        name: policy[name]
+                        for name in ("capability_timeouts", "config_migrations")
+                        if name in policy
+                    },
                 }
             )
             if (

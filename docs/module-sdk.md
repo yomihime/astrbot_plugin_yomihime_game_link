@@ -1,6 +1,6 @@
 # Game Link module SDK
 
-Import public declarations with `import yomihime_game_link_sdk as ygl`. SDK `0.1.0a22` combines the a16 service contracts and the a19 catalog metadata contract. The a19 branch alone was not a complete superset of a16. Core and extensions pin the exact canonical wheel; version ranges are not a substitute for content identity. The SDK requires Python 3.11 or newer and has no third-party runtime dependencies. Module ABI remains 2.0 and the outer registration bridge remains 1: new declarations are optional trailing fields and existing registration signatures are unchanged. New consumers require a22 and its matching Core implementation.
+Import public declarations with `import yomihime_game_link_sdk as ygl`. SDK `0.1.0a23` combines the a16 service contracts and the a19 catalog metadata contract. The a19 branch alone was not a complete superset of a16. Core and extensions pin the exact canonical wheel; version ranges are not a substitute for content identity. The SDK requires Python 3.11 or newer and has no third-party runtime dependencies. Module ABI remains 2.0 and the outer registration bridge remains 1: new declarations are optional trailing fields and existing registration signatures are unchanged. New consumers require a23 and its matching Core implementation.
 
 The SDK (including its packaged examples) is licensed under MIT; see `SDK-LICENSE`. The AstrBot plugin implementation remains AGPL-3.0 under `LICENSE`. Third-party notices retain their own terms. The a12 source contract adds the outer-plugin extension bridge without changing module ABI 2.0. Built wheel identity and installation evidence are recorded separately; editing these declarations does not prove a published or installed wheel.
 
@@ -54,6 +54,37 @@ Package manifests use `contract_version: "2.0"` as the current module ABI select
 SDK constructors describe data and freeze supported containers; they do not establish permissions or perform Core receiving validation. Core checks the current canonical types and nested invariants at registration, invocation, service, renderer and storage boundaries. Constructing or copying an InvocationView, OwnerScope or grant reference grants no authority. Only the exact issued invocation with its current lifetime and admission proof can bind services.
 
 Core admits exact canonical nominal dataclasses and rejects their subclasses, including nested instances made without constructors. Its internal ancestry-based type classification preserves recursive validation, existing nesting/schema limits and original invocation deadlines; it neither grants a validation bypass nor changes the SDK contract/version. Contract catalogs cannot add virtual ABC or custom metaclass instance checks.
+
+## Module model-tool aggregation (a23)
+
+A module may publish one model-facing tool by declaring the paired
+`ModuleManifest.model_tool_name` and `model_tool_description` fields and a
+unique non-empty `ToolDescriptor.action` on every declared tool. A module that
+omits the aggregate fields must leave every action unset and keeps the legacy
+one-tool-per-descriptor publication path. Mixed declarations are rejected.
+
+For an aggregated module, the model calls the parent with the closed shape
+`{"action": <declared action>, "arguments": <legacy mapped parameters>}`.
+The provider-facing `arguments` schema is only a portable envelope across the
+actions. Core validates the selected action against that action's original
+capability schema, required fields, types, unknown fields and illegal field
+combinations before invoking module code. Modules therefore keep their
+existing handlers and capability schemas; they do not implement a dispatcher.
+
+`ToolDescriptor.name` remains the durable persona and Host permission identity.
+Core publishes no legacy model entry for a migrated module, but reconstructs
+legacy persona subsets action by action as limited exact-event tools. Main
+requests first remove the raw parent, then atomically commit their permitted
+limited projection. Native Host handoffs with `tools=None` or an explicit new
+parent string/object retain Host lookup semantics and may select the callable
+full-module parent; an explicit legacy subset remains limited to those exact
+actions. Both full and limited calls recheck the current owned parent handle,
+module epoch, action-to-descriptor mapping, parent and legacy Host permissions,
+inactive preferences and public result authorization. The full parent does not
+claim runner provenance: trusted in-process Python that already holds the exact
+current object and an official event/Context retains the baseline direct-call
+boundary and still passes those checks. A declaration alone is not authority,
+and module code receives no Host event, parent handle or permission object.
 
 ## Declarative cards
 

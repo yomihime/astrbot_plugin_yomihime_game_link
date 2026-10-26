@@ -55,7 +55,7 @@ class ExternalSourcePolicyProjectionTests(unittest.TestCase):
         (self.root / "metadata.yaml").write_text(
             "name: synthetic_core\nversion: v0.1.2\n", encoding="utf-8"
         )
-        self.wheel = self.root / "yomihime_game_link_sdk-0.1.0a22-py3-none-any.whl"
+        self.wheel = self.root / "yomihime_game_link_sdk-0.1.0a23-py3-none-any.whl"
         self.wheel.write_bytes(b"wheel validation has independent pinned tests")
 
     def assets(self, *, page_roots=None, policy_roots=None):
@@ -103,6 +103,37 @@ class ExternalSourcePolicyProjectionTests(unittest.TestCase):
             selected.manifests["minimal"], hashlib.sha256(self.raw).hexdigest()
         )
         self.assertIn("example_qr", selected.authorizations[OWNER])
+
+    def test_selected_source_policy_preserves_valid_config_migrations(self):
+        self.manifest["modules"][0]["config_fields"].append(
+            {
+                "name": "history_limit",
+                "sensitive": False,
+                "required": False,
+                "default": 2,
+                "description": "Synthetic compatibility floor.",
+                "value_schema": {"type": "integer", "minimum": 2},
+            }
+        )
+        self.raw = json.dumps(self.manifest, indent=2).encode("utf-8")
+        (self.package / "yomihime.manifest.json").write_bytes(self.raw)
+        migration = {
+            "owner": OWNER,
+            "field": "history_limit",
+            "kind": "integer_floor",
+            "from_minimum": 1,
+            "to_minimum": 2,
+        }
+        self.policy["config_migrations"] = [migration]
+        self.policy_path.write_text(json.dumps(self.policy), encoding="utf-8")
+
+        captured = json.loads(self.assets()[POLICY_FILE])
+        self.assertEqual(captured["packages"][0]["config_migrations"], [migration])
+        selected = ExternalSourcePolicies(json.dumps(captured).encode("utf-8"))
+        self.assertEqual(
+            [dict(rule) for rule in selected.config_migrations["minimal"]],
+            [migration],
+        )
 
     def test_ordinary_external_page_selection_does_not_grant_source_authority(self):
         assets = self.assets(policy_roots=())

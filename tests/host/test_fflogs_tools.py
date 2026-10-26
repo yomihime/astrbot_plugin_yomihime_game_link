@@ -5,6 +5,7 @@ import json
 import os
 import time
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from ygl_test_subject.core.contracts.administration import AdminOperation
@@ -154,10 +155,22 @@ class FFLogsToolHostTests(unittest.IsolatedAsyncioTestCase):
     ):
         await self.start_logs()
         tools = self.manager.get_full_tool_set()
-        schema = tools.get_tool("ff14_logs_character").parameters
-        self.assertEqual(set(schema.get("required", [])), set())
+        aggregate = tools.get_tool("ff14")
+        outer = aggregate.parameters
+        self.assertEqual(set(outer["required"]), {"action", "arguments"})
         self.assertEqual(
-            set(schema["properties"]),
+            set(outer["properties"]["action"]["enum"]),
+            {
+                "market_query",
+                "market_select",
+                "item_lookup",
+                "item_select",
+                "logs_character",
+            },
+        )
+        schema = outer["properties"]["arguments"]
+        self.assertEqual(set(schema.get("required", [])), set())
+        self.assertTrue(
             {
                 "realm",
                 "server",
@@ -173,17 +186,12 @@ class FFLogsToolHostTests(unittest.IsolatedAsyncioTestCase):
                 "batch_id",
                 "generation",
                 "server_id",
-            },
+            }
+            <= set(schema["properties"]),
         )
         self.assertEqual(
             {tool.name for tool in tools.tools},
-            {
-                "ff14_market_query",
-                "ff14_market_select",
-                "ff14_item_lookup",
-                "ff14_item_select",
-                "ff14_logs_character",
-            },
+            {"ff14"},
         )
         result = await self.role()
         self.assertEqual(result["status"], "success")
@@ -283,11 +291,29 @@ class FFLogsToolHostTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("FFLogs", reply)
         self.assertEqual(self.provider.trace, [])
         self.assertGreater(self.transport.exchanges, 0)
-        old = self.manager.get_full_tool_set()
+        old_wrapper = self.wrapper(MESSAGE)
+        request = SimpleNamespace(
+            func_tool=self.manager.get_full_tool_set(), conversation=None
+        )
+        await self.runtime._tool_publisher.scope_request(
+            old_wrapper.context.event, request
+        )
+        old = request.func_tool
+        old_aggregate = old.get_tool(tools_fixture.FF14_MODEL_TOOL)
+        positive = json.loads(
+            await old_aggregate.call(
+                old_wrapper,
+                action=tools_fixture.FF14_ACTIONS["ff14_logs_character"],
+                arguments=TARGET,
+            )
+        )
+        self.assertEqual(positive["status"], "success")
         await self.runtime.terminate()
         with self.assertRaises(PermissionError):
-            await self.call(
-                "ff14_logs_character", TARGET, self.wrapper(MESSAGE), toolset=old
+            await old_aggregate.call(
+                old_wrapper,
+                action=tools_fixture.FF14_ACTIONS["ff14_logs_character"],
+                arguments=TARGET,
             )
 
 

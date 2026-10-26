@@ -100,6 +100,8 @@ EXTENSION_DESCRIPTOR_FIELDS: Mapping[str, frozenset[str]] = MappingProxyType(
                 "display",
                 "diagnostics",
                 "jobs",
+                "model_tool_name",
+                "model_tool_description",
             }
         ),
         "diagnostic": frozenset({"event_id", "payload_schema"}),
@@ -156,7 +158,7 @@ EXTENSION_DESCRIPTOR_FIELDS: Mapping[str, frozenset[str]] = MappingProxyType(
         ),
         "page_resource": frozenset({"path", "sha256"}),
         "tool": frozenset(
-            {"name", "capability_id", "parameter_mapping", "description"}
+            {"name", "capability_id", "parameter_mapping", "description", "action"}
         ),
         "schedule": frozenset(
             {
@@ -508,6 +510,8 @@ def check_ToolDescriptor(self) -> None:
     mapping = _frozen_mapping(self.parameter_mapping, "parameter_mapping")
     if not all((isinstance(value, str) and value for value in mapping.values())):
         raise ValueError("parameter_mapping values must be non-empty strings")
+    if self.action is not None:
+        _identifier(self.action, "action")
     object.__setattr__(self, "parameter_mapping", mapping)
 
 
@@ -582,6 +586,19 @@ def check_ModuleManifest(self) -> None:
     _descriptor_tuple(self.collections, CollectionDescriptor, "collections")
     _descriptor_tuple(self.pages, PageDescriptor, "pages")
     _descriptor_tuple(self.resources, PageResource, "resources")
+    if (self.model_tool_name is None) != (self.model_tool_description is None):
+        raise ValueError("model tool name and description must be declared together")
+    if self.model_tool_name is None:
+        if any(tool.action is not None for tool in self.tools):
+            raise ValueError("legacy tool publication cannot declare actions")
+    else:
+        _identifier(self.model_tool_name, "model_tool_name")
+        _text(self.model_tool_description, "model_tool_description")
+        if not self.tools or any(tool.action is None for tool in self.tools):
+            raise ValueError("model tool publication requires an action per tool")
+        _unique(tuple(tool.action for tool in self.tools), "model tool actions")
+        if self.model_tool_name in {tool.name for tool in self.tools}:
+            raise ValueError("model tool name collides with a legacy tool name")
     if len(self.pages) > 128 or len(self.resources) > 128:
         raise ValueError("page declaration budget exceeded")
     for role in ("home", "config"):
@@ -802,7 +819,14 @@ def check_PackageManifest(self) -> None:
         ),
         "commands",
     )
-    _unique(tuple((tool.name for item in self.modules for tool in item.tools)), "tools")
+    legacy_names = tuple(tool.name for item in self.modules for tool in item.tools)
+    _unique(legacy_names, "tools")
+    model_names = tuple(
+        item.model_tool_name
+        for item in self.modules
+        if item.model_tool_name is not None
+    )
+    _unique((*legacy_names, *model_names), "model and legacy tools")
 
 
 def _descriptor_tuple(
