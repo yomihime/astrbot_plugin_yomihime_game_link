@@ -131,7 +131,7 @@ def build_item_card(record: ItemRecord) -> cards.Document:
             cards.Section(
                 "获取途径",
                 tuple(block for route in routes for block in _route_blocks(route)),
-                subtitle="已记录的有限途径；缺少关联不代表不可获得",
+                subtitle="来源已记录的有限途径",
             )
         )
     quests = tuple(
@@ -172,7 +172,7 @@ def build_item_card(record: ItemRecord) -> cards.Document:
                 "获取途径",
                 (
                     cards.Text(
-                        "Garland 当前未提供可解析的获取途径；这不代表物品不可获得。"
+                        "Garland 当前未提供可解析的获取途径；实际获取途径待确认。"
                     ),
                 ),
             )

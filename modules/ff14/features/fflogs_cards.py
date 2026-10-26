@@ -23,7 +23,7 @@ CATALOG_LIMITATION = (
 )
 PROVIDER_CATALOG_SCOPE = (
     "绝境战为已查询来源返回的最高百分位；零式按来源默认副本所属资料片及八人目录，"
-    "不代表独立地区开放状态。"
+    "各地区开放状态需另行确认。"
 )
 HISTORY_INCOMPLETE = "历史成绩未查全，可能遗漏旧版本记录"
 DETAIL_LIMITATION = "次数仅为当前筛选范围；最高数值与最佳百分位可能来自不同记录。"

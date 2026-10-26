@@ -57,7 +57,7 @@ test('module initial read is silent and ACK followed by read failure stays fence
 const confirm=f=>f.container.querySelector('[data-action="confirm-unload"]');
 const cancel=f=>f.container.querySelector('[data-action="cancel-unload"]');
 test('sandboxed unload uses accessible in-page confirmation, cancellation and one exact CAS request',async()=>{
- const f=fixture();try{await load(f);const trigger=button(f,'解除挂载（保留数据）');trigger.focus();await open(f);assert.equal(f.confirmCalls,0);const group=f.container.querySelector('[data-unload-confirm]');assert.ok(group);assert.equal(group.getAttribute('role'),'group');assert.match(group.getAttribute('aria-label'),/ff14\/ff14/);assert.match(group.textContent,/配置、凭据、缓存及业务数据全部保留/);assert.match(group.textContent,/注册版本 5/);assert.equal(f.calls.length,1);assert.equal(dom.window.document.activeElement,cancel(f));cancel(f).click();await flush();assert.equal(f.container.querySelector('[data-unload-confirm]'),null);assert.equal(dom.window.document.activeElement,trigger);assert.equal(trigger.disabled,false);assert.equal(f.calls.length,1);
+ const f=fixture();try{await load(f);const trigger=button(f,'解除挂载（保留数据）');trigger.focus();await open(f);assert.equal(f.confirmCalls,0);const group=f.container.querySelector('[data-unload-confirm]');assert.ok(group);assert.equal(group.getAttribute('role'),'group');assert.match(group.getAttribute('aria-label'),/该模块/);assert.match(group.textContent,/配置、凭据、缓存及业务数据全部保留/);assert.match(group.textContent,/注册版本 5/);assert.equal(f.calls.length,1);assert.equal(dom.window.document.activeElement,cancel(f));cancel(f).click();await flush();assert.equal(f.container.querySelector('[data-unload-confirm]'),null);assert.equal(dom.window.document.activeElement,trigger);assert.equal(trigger.disabled,false);assert.equal(f.calls.length,1);
  await open(f);const oldConfirm=confirm(f);oldConfirm.click();oldConfirm.click();await flush();assert.equal(f.calls.length,2);assert.deepEqual(pending(f,'admin/module-unload').body,{module_id:'ff14/ff14',expected_registry_revision:5});assert.equal(f.container.querySelector('[data-unload-confirm]'),null);pending(f,'admin/module-unload').resolve({module_id:'ff14/ff14',registry_revision:6,state:'unloaded',data_retained:true,reopen_required:true});await flush();await load(f,{registry_revision:6,modules:[]});assert.equal(f.changed,1);assert.match(f.container.textContent,/模块已解除挂载，持久数据保留/);
  }finally{f.close();}
 });
@@ -142,4 +142,13 @@ test('management shares package grouping and declared module ordering',async()=>
   assert.deepEqual([...f.container.querySelectorAll('.module-management-row')].map(n=>n.dataset.moduleOwner),['core/base','pkg/z','pkg/a']);
   assert.equal(f.container.querySelectorAll('.module-management-actions button').length,9);
  }finally{f.close();}
+});
+
+test('uncertain module writes name the requested action and require a refresh before retry',async()=>{
+ for(const [action,label,expected] of [['enable','启用 / 恢复','启用结果尚未确认'],['disable','禁用','停用结果尚未确认'],['unload','解除挂载（保留数据）','解除挂载结果尚未确认']]){
+  const f=fixture();try{const value=status();value.modules[0].enabled=action==='disable';await load(f,value);f.view.presentationLabels(new Map([['ff14/ff14','最终幻想 XIV']]));button(f,label).click();await flush();
+   if(action==='unload'){assert.match(f.container.querySelector('[data-unload-confirm]').textContent,/最终幻想 XIV/);assert.doesNotMatch(f.container.querySelector('[data-unload-confirm]').textContent,/ff14\/ff14/);confirm(f).click();await flush();}
+   pending(f,action==='unload'?'admin/module-unload':'admin/module-enabled').reject(Error('offline'));await flush();const notice=f.container.querySelector('.module-management-notice').textContent;assert.ok(notice.includes(expected));assert.match(notice,/刷新核对/);if(action!=='unload')assert.doesNotMatch(notice,/解除挂载|清理/);assert.equal(button(f,label).disabled,true);assert.equal(f.calls.length,2);
+  }finally{f.close();}
+ }
 });

@@ -20,6 +20,9 @@ test('actual source settings UI preserves mask/choices and editable fenced draft
  const page=mountSettings(container,{routeId:'config',context,scope:{isCurrent:()=>true,onDispose:f=>callbacks.push(f)},services:{config:{current:async()=>({revision,fields:{reply_theme:{value:storedTheme,state:'valid',present:storedTheme!==null,source:storedTheme===null?'default':'sqlite'}},descriptors:{reply_theme:{description:'Theme',default:null,value_schema:{},choices:[{value:'host-choice',label:'Host provided label'}]}}}),save:async(r,v)=>{calls.push([r,v]);if(heldWrite)await new Promise(resolve=>releaseWrite=resolve);if(writeError)throw Error(writeError);storedTheme=v.reply_theme;return{revision:++revision};}},credentials:{status:async()=>({revision,fields:{credential_fflogs_cn:{configured:true,decryptable:true,upstream:'unverified'}}}),replace:async(r,f,p)=>{calls.push([r,f,p]);return{revision:++revision};},clear:async()=>{confirmation++;throw Error('operation_cancelled');}}}});
  try{
   await flush();const theme=container.querySelector('#ff14-config-reply_theme');assert.deepEqual([...theme.options].map(o=>o.textContent),['跟随全局设置','Host provided label']);
+  assert.match(container.textContent,/默认值用于后续订阅，已有订阅保留原设置/);
+  assert.match(container.textContent,/提醒按调度周期检查，实际送达可能延迟/);
+  assert.match(container.textContent,/凭据保存后，上游验证状态仍为待验证/);
   const inputs=[...container.querySelectorAll('input')].filter(i=>i.id.includes('credential_fflogs'));assert.equal(inputs.length,4);assert.ok(inputs.every(i=>i.type==='password'&&i.maxLength===512));
   const edit=(id,value)=>{const input=container.querySelector('#'+id);input.value=value;input.dispatchEvent(new window.Event('input',{bubbles:true}));};
   edit('credential_fflogs_global-client_id','synthetic');edit('credential_fflogs_global-client_secret','synthetic-secret');await flush();

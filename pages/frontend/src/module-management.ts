@@ -68,7 +68,7 @@ export function createModuleManagement(container:HTMLElement,bridge:Bridge,windo
     const canProceed=()=>waiting.value===ticket&&canRestoreFocus();
     try {
       if(!await beforeOperate({owner:row.module_id,action,revision,isCurrent:canProceed,canRestoreFocus})||!canProceed())return;
-      if(action==='unload'&&!await confirmation.ask({kind:'unload',owner:row.module_id,title:`确认解除挂载 ${row.module_id}`,message:`配置、凭据、缓存及业务数据全部保留。注册版本 ${revision}；确认后需从宿主插件详情正式重开页面。`,confirmLabel:'确认解除挂载（保留数据）',isCurrent:canProceed,canRestoreFocus}))return;
+      if(action==='unload'&&!await confirmation.ask({kind:'unload',owner:row.module_id,title:`确认解除挂载 ${labels.value.get(row.module_id)||'该模块'}`,message:`配置、凭据、缓存及业务数据全部保留。注册版本 ${revision}；确认后需从宿主插件详情正式重开页面。`,confirmLabel:'确认解除挂载（保留数据）',isCurrent:canProceed,canRestoreFocus}))return;
       if(!canProceed())return;
     }finally{if(waiting.value===ticket)waiting.value=null;}
     if(!current(version)||busy.value||stale.value||registryRevision!==revision||interactionKey()!==interaction||!rows.value.includes(row))return;
@@ -80,7 +80,7 @@ export function createModuleManagement(container:HTMLElement,bridge:Bridge,windo
       if(!valid(result)||result.module_id!==row.module_id||!Number.isSafeInteger(result.registry_revision)||(action==='unload'&&(result.state!=='unloaded'||result.data_retained!==true||result.reopen_required!==true)))throw Error('operation_unavailable');
       busy.value=false;const verified=await refresh();if(!current(version))return;if(!verified){notice.show('已提交，模块状态暂未核实，请刷新确认。','warning');return;}onChanged();
       if(current(version))notice.show(action==='enable'?'已恢复模块。请从宿主插件详情重新打开页面，以取得新的模块资源授权。':action==='unload'?'模块已解除挂载，持久数据保留。恢复后请从宿主插件详情正式重开页面。':'模块已禁用，设置与持久数据保留。','warning');
-    } catch(error) {if(current(version)){notice.show((error as Error)?.message==='revision_conflict'?'模块状态已变化，请刷新后重新核对。':'未确认清理完成；可能仍在排空或清理。请刷新核对，并重试解除挂载。不会创建替代实例。');stale.value=true;}}
+    } catch(error) {if(current(version)){notice.show((error as Error)?.message==='revision_conflict'?'模块状态已变化，请刷新后重新核对。':action==='enable'?'启用结果尚未确认，请刷新核对模块状态后再决定是否重试。':action==='disable'?'停用结果尚未确认，请刷新核对模块状态后再决定是否重试。':'解除挂载结果尚未确认，模块可能仍在清理。请刷新核对状态后再决定是否重试解除挂载。');stale.value=true;}}
     finally {if(current(version))busy.value=false;}
   }
   const app=createApp(defineComponent({setup(){return()=>h(UiProvider,{theme:typeof presentation.value.isDark==='boolean'?(presentation.value.isDark?'dark':'light'):presentation.value.theme==='dark'?'dark':'light',locale:typeof presentation.value.locale==='string'?presentation.value.locale:'zh-CN',styleMountTarget:container},{default:()=>renderVisible.value?h('section',{class:'module-management','aria-label':'模块管理'}, [

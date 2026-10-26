@@ -108,9 +108,7 @@ def _item_result(record: ItemRecord, *, partial: bool) -> CapabilityResult:
     if record.description:
         blocks.append(TextBlock(record.description))
     if record.routes:
-        blocks.append(
-            TextBlock("获取途径与关联记录（有限展示，缺少关联不代表不可获得）：")
-        )
+        blocks.append(TextBlock("获取途径与关联记录（来源已记录的有限途径）："))
         for route in record.routes:
             completeness = "（部分信息）" if route.partial else ""
             blocks.append(
@@ -118,7 +116,7 @@ def _item_result(record: ItemRecord, *, partial: bool) -> CapabilityResult:
             )
     else:
         blocks.append(
-            TextBlock("Garland 当前未提供可解析的获取途径；这不代表物品不可获得。")
+            TextBlock("Garland 当前未提供可解析的获取途径；实际获取途径待确认。")
         )
     # Source routes are capped at 24. Keep the independently bounded warnings
     # together so a valid item stays within the public 32-block contract.

@@ -662,7 +662,7 @@ class CalendarSummaryRenderingTests(unittest.IsolatedAsyncioTestCase):
                 text = rendered.text
                 self.assertIn("已使用合格备用日历来源", text)
                 self.assertIn("来源更新时间未知", text)
-                self.assertIn("不保证覆盖全部活动", text)
+                self.assertIn("活动范围为所选公开日历来源", text)
                 self.assertIn("该公开来源在当前窗口未返回活动", text)
                 self.assertNotIn("synthetic-secret", text)
                 self.assertNotIn("primary_source", text)

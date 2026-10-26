@@ -549,7 +549,7 @@
           "parameter_mapping": {},
           "parameter_mode": "raw_tail",
           "raw_tail_parameter": "command",
-          "help_text": "查询物品市场价格与有限挂牌样本。\n概览：/ygl ff14 market <物品名或ID>\n用法：/ygl ff14 market <物品名或ID> [server=World dc=大区 region=cn|global quality=all|nq|hq intent=overview|min|listings]\n参数：server / dc / region 指定范围，可组合但必须一致；优先级 server > dc > region。省略范围读取 Core 默认区域，quality 默认 all，intent 默认 overview。\n限制：含空格的物品名用双引号；歧义名称需明确选择。最低价用 intent=min，挂牌明细最多五条，不代表完整覆盖或实时可买；时间为来源上传时间。\n参数：choose <批次> <generation> <物品ID> 续接当前候选。\n示例：/ygl ff14 market 犎牛牛排 region=cn intent=min"
+          "help_text": "查询物品市场价格与有限挂牌样本。\n概览：/ygl ff14 market <物品名或ID>\n用法：/ygl ff14 market <物品名或ID> [server=World dc=大区 region=cn|global quality=all|nq|hq intent=overview|min|listings]\n参数：server / dc / region 指定范围，可组合但必须一致；优先级 server > dc > region。省略范围读取 Core 默认区域，quality 默认 all，intent 默认 overview。\n限制：含空格的物品名用双引号；歧义名称需明确选择。最低价用 intent=min，挂牌明细最多五条，覆盖范围为来源返回的样本，实际在售情况以游戏内为准；时间为来源上传时间。\n参数：choose <批次> <generation> <物品ID> 续接当前候选。\n示例：/ygl ff14 market 犎牛牛排 region=cn intent=min"
         },
         {
           "operation_path": "item",
@@ -592,7 +592,7 @@
             "timezone": "timezone",
             "time": "time"
           },
-          "help_text": "创建本人的每日活动摘要订阅。\n概览：/ygl ff14 calendar subscribe <国服|国际服>\n用法：/ygl ff14 calendar subscribe <国服|国际服> [timezone=Asia/Shanghai] [time=08:00]\n参数：省略 timezone 与 time 读取模块配置。\n限制：每 15 分钟采集一次，不承诺设定时刻精准投递。\n示例：/ygl ff14 calendar subscribe 国服 time=08:00"
+          "help_text": "创建本人的每日活动摘要订阅。\n概览：/ygl ff14 calendar subscribe <国服|国际服>\n用法：/ygl ff14 calendar subscribe <国服|国际服> [timezone=Asia/Shanghai] [time=08:00]\n参数：省略 timezone 与 time 读取模块配置。\n限制：每 15 分钟采集一次，实际送达时间可能延迟。\n示例：/ygl ff14 calendar subscribe 国服 time=08:00"
         },
         {
           "operation_path": "calendar subscriptions",
@@ -1051,7 +1051,7 @@
         },
         {
           "path": "pages/dist/entry.js",
-          "sha256": "faee14883b4695a9ce96dbd2b727bbc6b6a5609848c90b7c9fa81000b97eee6e"
+          "sha256": "286fb3d0a9ae67a252c1939f710c88e3cf3486138c555122c116a3afd232df16"
         },
         {
           "path": "pages/dist/styles.css",

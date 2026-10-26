@@ -21,7 +21,7 @@ env:
 
 jobs:
   verify:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       YGL_TEST_ASTRBOT_SOURCE: ${{ github.workspace }}/.architecture-refactor/host-contract/astrbot
     steps:
@@ -174,7 +174,7 @@ jobs:
     needs: [verify, windows-boundaries]
     # Hosted Windows Server images are outside the native NTFS qualification matrix.
     # Build the same platform-neutral ZIP through the reviewed POSIX path.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       YGL_TEST_ASTRBOT_SOURCE: ${{ github.workspace }}/.architecture-refactor/host-contract/astrbot
     steps:

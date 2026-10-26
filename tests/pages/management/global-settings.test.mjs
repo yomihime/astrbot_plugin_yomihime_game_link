@@ -51,18 +51,18 @@ test('invalid page context cancels confirmation and cannot reuse the old ready r
 test('storage plan is read-only and unavailable production execution is not offered',async()=>{
  const h=await harness(keyStatus({storage_security:'legacy_review_required'}));try{
   await h.click('#storage-migration-plan');assert.equal(h.writes('master-key-migration-execute').length,0);assert.match(h.doc.querySelector('.master-key-panel').textContent,/尚未迁移/);
-  assert.equal(h.doc.querySelector('#storage-migration-execute'),null);assert.match(h.doc.querySelector('.master-key-panel').textContent,/仅支持.*计划.*没有.*执行适配器/);assert.equal(h.writes('master-key-migration-execute').length,0);
+  assert.equal(h.doc.querySelector('#storage-migration-execute'),null);assert.match(h.doc.querySelector('.master-key-panel').textContent,/支持查看.*迁移计划.*执行迁移需要.*适配支持/);assert.equal(h.writes('master-key-migration-execute').length,0);
  }finally{h.close();}
 });
 test('registered policy copy uses dual revisions and never sends source value, owner or path',async()=>{
  const h=await harness();try{
-  h.page.setLegacyPolicies([{policy_id:'sample.copy',target_owner:'example/demo'}]);await flush();await h.click('[data-action=legacy-plan]');assert.deepEqual(h.writes('legacy-config-plan')[0].body,{policy_id:'sample.copy'});
+  h.page.setModuleLabels(new Map([['example/demo','示例模块']]));h.page.setLegacyPolicies([{policy_id:'sample.copy',target_owner:'example/demo'}]);await flush();assert.match(h.doc.querySelector('[data-legacy-policy]').textContent,/示例模块/);assert.doesNotMatch(h.doc.querySelector('[data-legacy-policy]').textContent,/example\/demo/);await h.click('[data-action=legacy-plan]');assert.deepEqual(h.writes('legacy-config-plan')[0].body,{policy_id:'sample.copy'});
   await h.click('[data-action=legacy-execute]');await h.click('[data-action=cancel-legacy-config]');assert.equal(h.writes('legacy-config-execute').length,0);
   await h.click('[data-action=legacy-execute]');await h.click('[data-action=confirm-legacy-config]');assert.deepEqual(h.writes('legacy-config-execute')[0].body,{policy_id:'sample.copy',source_revision:3,target_revision:4,confirmed:true});
  }finally{h.close();}
 });
 test('policy revocation and late plan cannot restore a removed owner or replay confirmation',async()=>{
  let release;const h=await harness(keyStatus(),endpoint=>endpoint==='admin/legacy-config-plan'?new Promise(resolve=>{release=resolve;}):undefined);try{
-  h.page.setLegacyPolicies([{policy_id:'sample.copy',target_owner:'example/demo'}]);await flush();await h.click('[data-action=legacy-plan]');h.page.setLegacyPolicies([]);release({policy_id:'sample.copy',status:'migration_pending',source_revision:3,target_revision:4,migration_pending:true,written:false});await flush();assert.equal(h.doc.querySelector('[data-legacy-policy]'),null);assert.equal(h.writes('legacy-config-execute').length,0);
+  h.page.setModuleLabels(new Map([['example/demo','示例模块']]));h.page.setLegacyPolicies([{policy_id:'sample.copy',target_owner:'example/demo'}]);await flush();assert.match(h.doc.querySelector('[data-legacy-policy]').textContent,/示例模块/);assert.doesNotMatch(h.doc.querySelector('[data-legacy-policy]').textContent,/example\/demo/);await h.click('[data-action=legacy-plan]');h.page.setLegacyPolicies([]);release({policy_id:'sample.copy',status:'migration_pending',source_revision:3,target_revision:4,migration_pending:true,written:false});await flush();assert.equal(h.doc.querySelector('[data-legacy-policy]'),null);assert.equal(h.writes('legacy-config-execute').length,0);
  }finally{h.close();}
 });

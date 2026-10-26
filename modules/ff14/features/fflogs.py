@@ -2087,7 +2087,7 @@ def _character_result(
     if catalog_requested:
         blocks.append(
             TextBlock(
-                "范围：绝境战取已查询来源返回的最高百分位；零式按默认副本所属资料片八人目录；不代表独立地区开放状态。"
+                "范围：绝境战取已查询来源返回的最高百分位；零式按默认副本所属资料片八人目录；各地区开放状态需另行确认。"
                 if character.catalog_evaluated or character.groups
                 else CATALOG_LIMITATION
             )

@@ -134,7 +134,7 @@ class FF14DeclarativeCommandTests(unittest.IsolatedAsyncioTestCase):
                         for marker in (
                             "SyntheticChina",
                             "Universalis",
-                            "非实时全量报价",
+                            "实际在售情况以游戏内为准",
                         ):
                             self.assertIn(marker, text(card))
                         self.assertNotIn("synthetic-private-retainer", text(card))
