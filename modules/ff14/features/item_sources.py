@@ -287,9 +287,9 @@ def parse_garland_acquisition(
                 warnings.append(f"Garland 的{label}关联信息不完整。")
 
     if recognized_groups == 0:
-        warnings.append("Garland 未提供可识别的获取途径记录；这不代表物品不可获得。")
+        warnings.append("Garland 未提供可识别的获取途径记录；实际获取途径待确认。")
     elif not routes and not warnings:
-        warnings.append("Garland 本次没有可解析的获取途径；这不代表物品不可获得。")
+        warnings.append("Garland 本次没有可解析的获取途径；实际获取途径待确认。")
     if len(routes) > MAX_TOTAL_ROUTES:
         routes = routes[:MAX_TOTAL_ROUTES]
         warnings.append("获取途径总数已截断。")
@@ -409,7 +409,7 @@ def _source_warning(error: SourceHttpError) -> str:
     if error.code == "rate_limited" or error.status_code == 429:
         return "Garland 请求频率受限；基础物品信息仍来自 XIVAPI-compatible。"
     if error.status_code == 404:
-        return "Garland 未返回该 ID 的详情；这不代表物品不可获得。"
+        return "Garland 未返回该 ID 的详情；实际获取途径待确认。"
     return "Garland 暂不可用；基础物品信息仍来自 XIVAPI-compatible。"
 
 

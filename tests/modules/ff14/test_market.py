@@ -706,7 +706,8 @@ class MarketExecutionTests(unittest.IsolatedAsyncioTestCase):
         text = "\n".join(
             getattr(b, "text", "") for b in execution.result.document.ordered_blocks
         )
-        self.assertIn("不能补零", text)
+        self.assertIn("来源未提供最低挂牌指标。", text)
+        self.assertNotIn("0 Gil/单位", text)
 
     async def test_cache_safe_fields_provenance_and_semantic_keys(self):
         cache = FakeCache()

@@ -194,7 +194,7 @@ class ResultCardTests(unittest.TestCase):
             "2030-02-06 13:00",
             "2030-02-13 13:00",
             "来源更新时间未知",
-            "不保证覆盖全部活动",
+            "活动范围为所选公开日历来源",
         ):
             self.assertIn(expected, content)
         self.assertEqual(
@@ -227,7 +227,7 @@ class ResultCardTests(unittest.TestCase):
             "默认采集间隔",
             "15 分钟",
             "未执行实时健康或凭据检查",
-            "实际可能延迟",
+            "实际送达时间可能受采集与调度周期影响而延迟",
         ):
             self.assertIn(expected, content)
         for absent in ("Ready", "HTTP 403", "输出统计", "已配置", "最多"):

@@ -167,7 +167,7 @@ class ItemCardTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             [prop.value for prop in grid.properties], ["77", "未提供", "未提供"]
         )
-        self.assertIn("这不代表物品不可获得", text(card))
+        self.assertIn("实际获取途径待确认", text(card))
         self.assertNotIn("犎牛牛排", text(card))
 
     def test_bundled_logo_resource_is_pinned_and_bytes_only(self):
@@ -283,6 +283,12 @@ class MarketCardTests(unittest.TestCase):
         self.assertNotIn("0 Gil / 件", content.splitlines())
         self.assertIn("来源未提供最低挂牌指标", content)
         self.assertIn("HQ：最低挂牌未知", content)
+        fallback = text(result.document.ordered_blocks)
+        self.assertIn("来源未提供最低挂牌指标。", fallback)
+        self.assertIn("NQ：最低挂牌未知。", fallback)
+        self.assertNotIn("其它成交指标存在", fallback)
+        self.assertNotIn("0 Gil/单位", fallback)
+        self.assertNotIn("不能补零", fallback)
 
     def test_overview_preserves_each_quality_scope_and_metric(self):
         request = query(region="global", intent="overview")
@@ -360,10 +366,10 @@ class MarketCardTests(unittest.TestCase):
         for caveat in (
             "最多 5 条",
             "已截断",
-            "不是全服库存",
-            "不代表上架时间",
-            "非实时全量报价",
-            "不保证此刻可买",
+            "数量是单条堆叠",
+            "上架时间未知",
+            "来源为已上传记录",
+            "实际在售情况以游戏内为准",
         ):
             self.assertIn(caveat, content)
         self.assertNotIn("seller", content)

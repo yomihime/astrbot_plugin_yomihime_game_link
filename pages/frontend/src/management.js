@@ -214,5 +214,5 @@ export function createManagementPage(document,bridge,window,{expectedPage='00-ga
   return {start(){
     if(!bridge||typeof bridge.apiPost!=='function'||typeof bridge.ready!=='function'||typeof bridge.onContext!=='function'){notice('请从宿主插件管理页面打开此页。');return;}
     off=bridge.onContext(accept);Promise.resolve(bridge.ready()).then(context=>{if(!contextSeen)accept(context);}).catch(()=>{if(!contextSeen&&!closed){ready=false;notice('宿主管理会话不可用。');buttons();}});window?.addEventListener('pagehide',close,{once:true});
-  },setLegacyPolicies,close,dirty,navigationImpact,suspend,resume,selectOwner(){selectedOwner='game_link/core';view.owner(selectedOwner);buttons();},dispose(){close();window?.removeEventListener('pagehide',close);view.dispose();}};
+  },setModuleLabels(labels){view.labels(labels);},setLegacyPolicies,close,dirty,navigationImpact,suspend,resume,selectOwner(){selectedOwner='game_link/core';view.owner(selectedOwner);buttons();},dispose(){close();window?.removeEventListener('pagehide',close);view.dispose();}};
 }

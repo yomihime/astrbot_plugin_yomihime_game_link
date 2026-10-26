@@ -270,9 +270,7 @@ def build_calendar_document(
             f"数据源：{source_label}；获取时间：{local_fetched:%Y-%m-%d %H:%M %Z}。"
         ),
     ]
-    blocks.append(
-        TextBlock("来源更新时间未知；仅汇总所选公开日历来源，不保证覆盖全部活动。")
-    )
+    blocks.append(TextBlock("来源更新时间未知；活动范围为所选公开日历来源。"))
     if source_variant in {"cn_icloud", "global_icloud"}:
         blocks.append(TextBlock("已使用合格备用日历来源。"))
     if completeness is ObservationCompleteness.PARTIAL:
@@ -316,7 +314,7 @@ def build_calendar_document(
     if interpretation_timezone is not None:
         blocks.append(
             TextBlock(
-                f"无时区标记的时间按 {interpretation_timezone} 解释；这不代表发布者时区。"
+                f"无时区标记的时间按 {interpretation_timezone} 解释；发布者时区未知。"
             )
         )
     card_blocks: list[cards.Block] = [
