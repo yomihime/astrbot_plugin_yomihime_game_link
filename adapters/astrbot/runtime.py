@@ -2467,6 +2467,7 @@ class AstrBotRuntime:
         tool_handle=None,
         tool_descriptor=None,
         tool_action=None,
+        final_policy_check=None,
     ):
         if not self._ready or self._closing or self._core is None:
             raise PermissionError("Host tool ingress unavailable")
@@ -2508,6 +2509,10 @@ class AstrBotRuntime:
             )
         except HostIngressUnavailable:
             unavailable = True
+        if final_policy_check is not None:
+            # Keep every awaited publisher policy read inside the original
+            # message proof. Never mint a fresh receipt to extend its deadline.
+            await final_policy_check()
         if not self._message_current(InvocationOrigin.LLM_TOOL, ingress):
             raise PermissionError("Host message unavailable")
         if unavailable:

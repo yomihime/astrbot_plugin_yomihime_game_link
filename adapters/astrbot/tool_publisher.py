@@ -791,7 +791,7 @@ class AstrBotToolPublisher:
             and tool._mgr is handle.manager
         )
 
-    def _sanitize_tool_set(self, tool_set):
+    def _sanitize_tool_set(self, tool_set, *, event):
         """Remove this owner's callable authority before any fallible projection."""
         from astrbot.api import ToolSet
 
@@ -808,7 +808,10 @@ class AstrBotToolPublisher:
                 continue
             if getattr(tool, "_ygl_scope_owner", None) is self.owner:
                 handoff_parent = getattr(tool, "_ygl_handoff_parent", None)
-                if handoff_parent is not None:
+                if (
+                    handoff_parent is not None
+                    and getattr(tool, "_ygl_event", None) is event
+                ):
                     kept.append(handoff_parent)
                 continue
             kept.append(tool)
@@ -819,7 +822,7 @@ class AstrBotToolPublisher:
         from astrbot.api import ToolSet
 
         sanitized, original_tools, valid = self._sanitize_tool_set(
-            getattr(request, "func_tool", None)
+            getattr(request, "func_tool", None), event=event
         )
         request.func_tool = sanitized
         if not valid:
@@ -892,7 +895,7 @@ class AstrBotToolPublisher:
                 for actual, expected in zip(current_tools, sanitized_tools, strict=True)
             )
         if not unchanged:
-            fail_closed, _, _ = self._sanitize_tool_set(current)
+            fail_closed, _, _ = self._sanitize_tool_set(current, event=event)
             request.func_tool = fail_closed
             raise PermissionError("Host request ToolSet changed during projection")
         request.func_tool = proposed
@@ -972,7 +975,8 @@ class AstrBotToolPublisher:
 
         from ...core.contracts.validation import _validate
 
-        actual_event = getattr(getattr(context, "context", None), "event", None)
+        actual_context = getattr(context, "context", None)
+        actual_event = getattr(actual_context, "event", None)
         if (
             not isinstance(context, ContextWrapper)
             or not isinstance(actual_event, AstrMessageEvent)
@@ -987,6 +991,18 @@ class AstrBotToolPublisher:
             raise PermissionError(message)
         if not self._plugin_allows_reconstruction(handle, actual_event):
             raise PermissionError("Host plugin scope does not allow this tool")
+
+        def require_current_context():
+            if (
+                getattr(context, "context", None) is not actual_context
+                or getattr(actual_context, "event", None) is not actual_event
+                or getattr(actual_context, "context", None) is not self.context
+                or (exact_event is not None and actual_event is not exact_event)
+            ):
+                raise PermissionError("Host request context changed during execution")
+            if not self._plugin_allows_reconstruction(handle, actual_event):
+                raise PermissionError("Host plugin scope does not allow this tool")
+
         _validate(parameters, kwargs, "parameters", 0)
         action = kwargs["action"]
         descriptor = actions.get(action)
@@ -1016,10 +1032,24 @@ class AstrBotToolPublisher:
             )
         except Exception:
             raise PermissionError("Host tool permission check failed") from None
+        require_current_context()
         if aggregate_error is not None:
             return aggregate_error
         if legacy_error is not None:
             return legacy_error
+
+        async def final_policy_check():
+            if not self.scoped_current(handle, action, descriptor):
+                raise PermissionError("model tool scope changed during execution")
+            inactive = await self._inactive_tool_names()
+            if not self.scoped_current(handle, action, descriptor):
+                raise PermissionError(
+                    "model tool scope changed during final policy check"
+                )
+            require_current_context()
+            if handle.published_name in inactive or descriptor.name in inactive:
+                raise PermissionError("Host tool became inactive")
+
         unavailable = False
         try:
             outcome = await self.invoke(
@@ -1030,16 +1060,13 @@ class AstrBotToolPublisher:
                 tool_handle=handle,
                 tool_descriptor=descriptor,
                 tool_action=action,
+                final_policy_check=final_policy_check,
             )
         except HostIngressUnavailable:
             unavailable = True
         if not self.scoped_current(handle, action, descriptor):
             raise PermissionError("model tool scope changed during execution")
-        inactive = await self._inactive_tool_names()
-        if not self.scoped_current(handle, action, descriptor):
-            raise PermissionError("model tool scope changed during final policy check")
-        if handle.published_name in inactive or descriptor.name in inactive:
-            raise PermissionError("Host tool became inactive")
+        require_current_context()
         if unavailable:
             return json.dumps(
                 {

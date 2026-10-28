@@ -30,7 +30,7 @@ export function mountSettings(container:HTMLElement,options:PageOptions):Mounted
           fieldGroup('查询与回复','01',['ff14_default_region','reply_theme']),
           fieldGroup('日历与订阅','02',['ff14_calendar_default_days','ff14_calendar_default_timezone','ff14_calendar_default_delivery_time','ff14_calendar_sync_interval_seconds','ff14_subscriptions_enabled']),
           h(ActionBar,{},()=>[button('保存配置',{type:'submit','data-variant':'primary',disabled:disabled||!s.dirty}),button('放弃修改',{disabled:s.pending||ordinaryDisabled||!s.dirty,onClick:controller.discard})]),
-          h(StatusHint,{},()=> '修改默认值不会重写已有订阅；提醒按既有调度检查，不承诺准点送达。'),
+          h(StatusHint,{},()=> '默认值用于后续订阅，已有订阅保留原设置；提醒按调度周期检查，实际送达可能延迟。'),
         ]),aside:()=>h(Surface,{title:'FFLogs 来源凭据',eyebrow:'SOURCE ACCESS'},{default:()=>[
           h(StatusHint,{},()=> '国服与国际服独立配置。保存与上游验证相互独立。'),
           h('div',{class:'ui-segmented','aria-label':'凭据区域'},credentialFields.map(f=>button(f.label,{'aria-pressed':activeRegion.value===f.name,onClick:()=>{activeRegion.value=f.name;}}))),

@@ -350,7 +350,7 @@ class CalendarCollectorAndQueryTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("自动摘要暂不可用", text)
                 self.assertIn("自动摘要暂不可用", text)
                 self.assertIn("来源更新时间未知", text)
-                self.assertIn("不保证覆盖全部活动", text)
+                self.assertIn("活动范围为所选公开日历来源", text)
                 self.assertNotIn("当前窗口未返回活动", text)
                 self.assertNotIn("暂无活动", text)
 

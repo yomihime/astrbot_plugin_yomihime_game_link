@@ -210,7 +210,7 @@ def build_market_card(
         if not minimums:
             blocks.append(cards.Text("来源未提供最低挂牌指标", style="caption"))
         notes = (
-            "已返回范围中的最低挂牌；非实时全量报价，不保证此刻可买",
+            "已返回范围中的最低挂牌；来源为已上传记录，实际在售情况以游戏内为准",
             "时间为对应世界的数据上传时间；来源未提供该条数量和上架时间",
         )
     elif query.intent == "listings":
@@ -220,8 +220,8 @@ def build_market_card(
                 cards.Text("结果已截断，未展示其余区域或挂牌", style="caption")
             )
         notes = (
-            "最多 5 条挂牌样本，按单价排序；非实时全量报价，不保证此刻可买",
-            "上传与审核均不代表上架时间；数量是单条堆叠，不是全服库存",
+            "最多 5 条挂牌样本，按单价排序；来源为已上传记录，实际在售情况以游戏内为准",
+            "时间为来源上传或审核时间，上架时间未知；数量是单条堆叠",
         )
     else:
         for outcome in outcomes:
@@ -261,8 +261,8 @@ def build_market_card(
                     )
                 )
         notes = (
-            "最低挂牌仅涵盖已返回范围；非实时全量报价，不保证此刻可买",
-            "世界上传时间不代表挂牌时间；均价与日均售出为来源近四天指标",
+            "最低挂牌仅涵盖已返回范围；来源为已上传记录，实际在售情况以游戏内为准",
+            "时间为对应服务器的数据上传时间；均价与日均售出为来源近四天指标",
         )
     blocks.extend(cards.Text(note, style="caption") for note in notes)
     quality = "" if query.quality == "all" else f"{query.quality.upper()} "

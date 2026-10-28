@@ -65,7 +65,7 @@ export function createSettingsController(options:PageOptions,onChanged:()=>void)
   }
   async function load(){
     if(state.pending||!current(sequence))return;const n=++sequence,startedAt=editVersion;state.pending=true;changed();
-    try{const pair=await snapshots(n);if(!pair)return;accept(...pair,startedAt);const invalid=Object.values(pair[0].fields).some(f=>f.state==='invalid');notify(invalid?'存在无效配置，请明确修正后保存；未使用默认值覆盖。':'配置已读取。保存凭据不代表上游验证成功。',invalid);}
+    try{const pair=await snapshots(n);if(!pair)return;accept(...pair,startedAt);const invalid=Object.values(pair[0].fields).some(f=>f.state==='invalid');notify(invalid?'存在无效配置，原值已保留；请修正后保存。':'配置已读取。凭据保存后，上游验证状态仍为待验证。',invalid);}
     catch(error){if(current(n))failure(error,undefined,acknowledgementPending,true);}
     finally{if(current(n)){state.pending=false;changed();}}
   }

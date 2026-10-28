@@ -118,6 +118,7 @@ class _OfflineHost:
         tool_handle=None,
         tool_descriptor=None,
         tool_action=None,
+        final_policy_check=None,
     ):
         self.require_accepting()
         if ingress is None:
@@ -177,6 +178,8 @@ class _OfflineHost:
             )
             self.runtime.issuer._require_message_current(view)
             routed = await self.output.route(view, result)
+            if final_policy_check is not None:
+                await final_policy_check()
             self.runtime.issuer._require_message_current(view)
             if not self.receiver.current(ygl.InvocationOrigin.LLM_TOOL, ingress):
                 raise PermissionError("Host message unavailable")

@@ -67,9 +67,11 @@ For an aggregated module, the model calls the parent with the closed shape
 `{"action": <declared action>, "arguments": <legacy mapped parameters>}`.
 The provider-facing `arguments` schema is only a portable envelope across the
 actions. Core validates the selected action against that action's original
-capability schema, required fields, types, unknown fields and illegal field
-combinations before invoking module code. Modules therefore keep their
-existing handlers and capability schemas; they do not implement a dispatcher.
+capability schema, required fields, types, ranges and unknown fields before
+invoking module code. Parameters that belong only to another action are
+rejected. Game-specific cross-field rules remain in the module's existing
+validation; aggregation does not move those rules into Core. Modules keep
+their existing handlers and capability schemas and do not implement a dispatcher.
 
 `ToolDescriptor.name` remains the durable persona and Host permission identity.
 Core publishes no legacy model entry for a migrated module, but reconstructs

@@ -47,7 +47,9 @@ def build_status_document() -> DisplayDocument:
                     ),
                     columns=3,
                 ),
-                cards.Text("实际可能延迟，不保证在设定时刻精准送达", style="caption"),
+                cards.Text(
+                    "实际送达时间可能受采集与调度周期影响而延迟", style="caption"
+                ),
             ),
         ),
         cards.Text(caveat, style="caption"),
@@ -62,7 +64,7 @@ def build_status_document() -> DisplayDocument:
             ),
             TextBlock(
                 f"日历每日摘要需显式订阅；默认采集间隔为 {minutes} 分钟。"
-                "按采集周期更新，实际可能延迟，不保证在设定时刻精准送达。"
+                "按采集周期更新，实际送达时间可能受采集与调度周期影响而延迟。"
             ),
             TextBlock(caveat),
         ),

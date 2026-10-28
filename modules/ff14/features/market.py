@@ -432,7 +432,7 @@ def _result(
         TextBlock(
             f"物品 ID：{query.item_id}；范围：{' / '.join(query.scope.regions)} / {query.scope.target or '全区'}（{query.scope.source}）；品质：{query.quality}；意图：{query.intent}"
         ),
-        TextBlock("覆盖为本次成功返回的来源范围；不保证全部 World 上传或实时可买。"),
+        TextBlock("覆盖为本次成功返回的来源范围；实际在售情况以游戏内为准。"),
     ]
     for outcome in outcomes:
         state = (
@@ -456,23 +456,21 @@ def _result(
     if query.intent == "listings":
         blocks.append(
             TextBlock(
-                "有限挂牌样本，最多 5 条，按每单位 Gil 排序；数量为该条堆叠，不是全服库存或完整最低价排行。"
+                "有限挂牌样本，最多 5 条，按每单位 Gil 排序；数量为单条堆叠，排序范围为本次返回的样本。"
             )
         )
         for listing in listings:
             blocks.append(
                 TextBlock(
-                    f"{listing.region} {'HQ' if listing.hq else 'NQ'} 有限挂牌样本（最多 5 条）：{listing.price_per_unit} Gil/单位 × {listing.quantity}；{quote_context(listing.region, listing.world_id, listing.uploaded_at)}；来源最近审核 {_age(listing.reviewed_at, observed_at)}；不代表上架时间"
+                    f"{listing.region} {'HQ' if listing.hq else 'NQ'} 有限挂牌样本（最多 5 条）：{listing.price_per_unit} Gil/单位 × {listing.quantity}；{quote_context(listing.region, listing.world_id, listing.uploaded_at)}；来源最近审核 {_age(listing.reviewed_at, observed_at)}；上架时间未知"
                 )
             )
         if truncated:
-            blocks.append(
-                TextBlock("仅展示有限前缀，结果已截断；不能据此判断其余区域/挂牌。")
-            )
+            blocks.append(TextBlock("结果已截断；展示范围为本次返回的有限挂牌样本。"))
     elif query.intent == "min":
         blocks.append(
             TextBlock(
-                "按品质列出本次返回数据中的最低挂牌；来源未提供该条数量与上架时间，World 上传不代表挂牌时间。"
+                "按品质列出本次返回数据中的最低挂牌；数量与上架时间未知，上传时间为对应服务器的数据更新时间。"
             )
         )
         for quality, region, quote in minimums:
@@ -483,26 +481,20 @@ def _result(
             )
         for quality in ("nq", "hq") if query.quality == "all" else (query.quality,):
             if not any(row[0] == quality for row in minimums):
-                blocks.append(
-                    TextBlock(
-                        f"{quality.upper()}：最低挂牌未知，不能补零或以成交价替代。"
-                    )
-                )
+                blocks.append(TextBlock(f"{quality.upper()}：最低挂牌未知。"))
         if not minimums:
-            blocks.append(
-                TextBlock("最低挂牌指标缺失；其它成交指标存在，不能补零或当作挂牌价。")
-            )
+            blocks.append(TextBlock("来源未提供最低挂牌指标。"))
     else:
         for outcome in usable:
             for quote in outcome.data.quotes:
                 blocks.append(
                     TextBlock(
-                        f"{outcome.region} {quote.quality.upper()}：本次返回数据中的最低挂牌 {_price(quote.minimum)} Gil/单位；{quote_context(outcome.region, quote.minimum_world, quote.minimum_uploaded_at)}；World 上传不代表挂牌时间；最近成交 {_price(quote.recent_purchase)} Gil/单位（成交时间 {_age(quote.recent_at, observed_at)}）；最近四天成交均价 {_price(quote.average_sale_price)}；最近四天日均售出数量 {_price(quote.daily_sale_velocity)}。"
+                        f"{outcome.region} {quote.quality.upper()}：本次返回数据中的最低挂牌 {_price(quote.minimum)} Gil/单位；{quote_context(outcome.region, quote.minimum_world, quote.minimum_uploaded_at)}；上传时间为对应服务器的数据更新时间；上架时间未知；最近成交 {_price(quote.recent_purchase)} Gil/单位（成交时间 {_age(quote.recent_at, observed_at)}）；最近四天成交均价 {_price(quote.average_sale_price)}；最近四天日均售出数量 {_price(quote.daily_sale_velocity)}。"
                     )
                 )
     blocks.append(
         TextBlock(
-            "缺值写未知，不补零；源更新时间只涉及所列 World，不证明整个区域全部挂牌新鲜。"
+            "缺失指标显示为未知；源更新时间仅适用于所列服务器，实际在售情况以游戏内为准。"
         )
     )
     blocks.append(
@@ -529,7 +521,9 @@ def _result(
         ResultStatus.PARTIAL_SUCCESS if partial else ResultStatus.SUCCESS,
         document=document,
         privacy=Privacy.PUBLIC,
-        warnings=("部分覆盖或指标缺失；不承诺完整全服最低价。",) if partial else (),
+        warnings=("部分覆盖或指标缺失；最低价范围为本次返回的挂牌。",)
+        if partial
+        else (),
     )
 
 
