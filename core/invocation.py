@@ -516,7 +516,13 @@ class Gateway:
         )
 
     async def invoke_tool(
-        self, view: InvocationView, tool_name: str, parameters: object
+        self,
+        view: InvocationView,
+        tool_name: str,
+        parameters: object,
+        *,
+        tool_action: str | None = None,
+        tool_parent_name: str | None = None,
     ) -> CapabilityResult:
         """Invoke a declared natural-language Tool."""
 
@@ -527,6 +533,8 @@ class Gateway:
             parameters,
             expected_origin=InvocationOrigin.LLM_TOOL,
             tool=True,
+            tool_action=tool_action,
+            tool_parent_name=tool_parent_name,
         )
 
     async def _invoke(
@@ -537,6 +545,8 @@ class Gateway:
         *,
         expected_origin: InvocationOrigin,
         tool: bool,
+        tool_action: str | None = None,
+        tool_parent_name: str | None = None,
     ) -> CapabilityResult:
         # ContextIssuer is the authority boundary.  It intentionally receives
         # the original object, rather than a reconstructed DTO.
@@ -580,6 +590,19 @@ class Gateway:
             )
         if descriptor is None:
             return _error(ErrorCode.NOT_FOUND)
+
+        if tool:
+            if module.manifest.model_tool_name is None:
+                if tool_action is not None or tool_parent_name not in (
+                    None,
+                    descriptor.name,
+                ):
+                    return _error(ErrorCode.UNSUPPORTED)
+            elif (
+                descriptor.action != tool_action
+                or module.manifest.model_tool_name != tool_parent_name
+            ):
+                return _error(ErrorCode.UNSUPPORTED)
 
         capability_id = descriptor.capability_id
         if trusted.capability_id != capability_id:

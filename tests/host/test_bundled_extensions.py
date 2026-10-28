@@ -72,6 +72,9 @@ class BundledExtensionTests(unittest.IsolatedAsyncioTestCase):
         # Historical module ABI versions are intentionally not compatible.
         old_module = old["modules"][0]
         old_module.pop("display")
+        # Legacy command-only modules predate aggregate model-tool metadata.
+        old_module.pop("model_tool_name")
+        old_module.pop("model_tool_description")
         old_module["tools"] = []
         old_module["capabilities"] = [
             capability
@@ -134,6 +137,8 @@ class BundledExtensionTests(unittest.IsolatedAsyncioTestCase):
         legacy = discover_packages(previous.extension_root)[0].manifest
         self.assertEqual(legacy.contract_version, "2.0")
         self.assertEqual(legacy.modules[0].tools, ())
+        self.assertIsNone(legacy.modules[0].model_tool_name)
+        self.assertIsNone(legacy.modules[0].model_tool_description)
         self.assertEqual(
             {capability.capability_id for capability in legacy.modules[0].capabilities},
             self.EXPECTED_CAPABILITIES - {"ff14.market.select"},
@@ -163,6 +168,8 @@ class BundledExtensionTests(unittest.IsolatedAsyncioTestCase):
         package15 = discover_packages(legacy15.extension_root)[0].manifest
         self.assertEqual(package15.contract_version, "2.0")
         self.assertEqual(package15.modules[0].tools, ())
+        self.assertIsNone(package15.modules[0].model_tool_name)
+        self.assertIsNone(package15.modules[0].model_tool_description)
         market15 = next(
             capability
             for capability in package15.modules[0].capabilities

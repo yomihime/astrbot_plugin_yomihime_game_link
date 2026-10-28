@@ -234,3 +234,8 @@ data/
 /.build/
 /.local-dev/
 /AGENTS.md
+/.project-memory/
+/.agents/
+/.codex/
+/.work/
+/worktrees/

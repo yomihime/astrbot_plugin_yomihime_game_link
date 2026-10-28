@@ -2,18 +2,13 @@
 
 import json
 import unittest
+from types import SimpleNamespace
 
 from . import test_fflogs_tools as logs_fixture
 from . import test_item_tools as item_fixture
 from . import test_llm_tools as tools_fixture
 
-TOOL_NAMES = {
-    "ff14_item_lookup",
-    "ff14_item_select",
-    "ff14_market_query",
-    "ff14_market_select",
-    "ff14_logs_character",
-}
+TOOL_NAMES = {"ff14"}
 MARKET_PARAMETERS = {
     "query": "Synthetic",
     "server": "90001",
@@ -173,6 +168,13 @@ class FF14ChatCapabilitiesHostTests(unittest.IsolatedAsyncioTestCase):
             (item_handler._chat.registry.size, market_handler.registry.size), (1, 1)
         )
         old = self.manager.get_full_tool_set()
+        old_wrapper = self.wrapper("old scoped aggregate")
+        request = SimpleNamespace(func_tool=old, conversation=None)
+        await self.runtime._tool_publisher.scope_request(
+            old_wrapper.context.event, request
+        )
+        old = request.func_tool
+        old_scoped = old.get_tool("ff14")
         old_transport = self.transport
         calls = (
             ("ff14_item_lookup", {"query": "44091"}, "物品ID 44091的信息"),
@@ -198,7 +200,11 @@ class FF14ChatCapabilitiesHostTests(unittest.IsolatedAsyncioTestCase):
                 self.subTest(tool=name, phase="stopped"),
                 self.assertRaises(PermissionError),
             ):
-                await self.call(name, args, self.wrapper(text), toolset=old)
+                await old_scoped.call(
+                    old_wrapper,
+                    action=tools_fixture.FF14_ACTIONS[name],
+                    arguments=args,
+                )
         self.assertEqual(len(old_transport.requests), before)
 
         # The runtime's existing factory closes over self.transport. Supply a
@@ -217,14 +223,18 @@ class FF14ChatCapabilitiesHostTests(unittest.IsolatedAsyncioTestCase):
         )
         fresh = self.manager.get_full_tool_set()
         self.assertEqual({tool.name for tool in fresh.tools}, TOOL_NAMES)
-        self.assertEqual(len(self.manager.func_list), 5)
+        self.assertEqual(len(self.manager.func_list), 1)
+        self.assertIsNot(fresh.get_tool("ff14"), old.get_tool("ff14"))
         for name, args, text in calls:
-            self.assertIsNot(fresh.get_tool(name), old.get_tool(name))
             with (
                 self.subTest(tool=name, phase="restarted"),
                 self.assertRaises(PermissionError),
             ):
-                await self.call(name, args, self.wrapper(text), toolset=old)
+                await old_scoped.call(
+                    old_wrapper,
+                    action=tools_fixture.FF14_ACTIONS[name],
+                    arguments=args,
+                )
         self.assertEqual(self.transport.requests, [])
         for name, args in (
             ("ff14_item_select", item_args),

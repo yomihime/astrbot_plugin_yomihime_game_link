@@ -43,6 +43,31 @@ from .tool_contract import tool_contracts
 ROOT = Path(__file__).resolve().parents[2]
 
 
+def _legacy_descriptor(handle, tool_name="ff14_market_query"):
+    if handle.action_descriptors is None:
+        if handle.descriptor.name == tool_name:
+            return handle.descriptor
+        raise LookupError(tool_name)
+    return next(
+        descriptor
+        for descriptor in handle.action_descriptors.values()
+        if descriptor.name == tool_name
+    )
+
+
+async def _invoke_legacy_gateway(
+    gateway, view, handle, parameters, tool_name="ff14_market_query"
+):
+    descriptor = _legacy_descriptor(handle, tool_name)
+    return await gateway.invoke_tool(
+        view,
+        descriptor.name,
+        parameters,
+        tool_action=descriptor.action,
+        tool_parent_name=handle.published_name,
+    )
+
+
 class _OfflineHost:
     """Trusted controlled composition delegates the production receiver and ports."""
 
@@ -67,7 +92,7 @@ class _OfflineHost:
         return (
             self.accepting
             and any(h is handle for h in self.publisher.handles)
-            and self.publisher._current(handle)
+            and self.publisher.exposed_current(handle)
         )
 
     def require_accepting(self):
@@ -91,24 +116,45 @@ class _OfflineHost:
         *,
         ingress=None,
         tool_handle=None,
+        tool_descriptor=None,
+        tool_action=None,
+        final_policy_check=None,
     ):
         self.require_accepting()
         if ingress is None:
             if (
                 tool_handle is None
                 or tool_handle.module_id != module_id
-                or tool_handle.descriptor.name != tool_name
+                or not self.current_owner(tool_handle)
             ):
                 raise PermissionError("Host tool ingress unavailable")
+            if tool_handle.action_descriptors is None:
+                if (
+                    tool_descriptor is not None
+                    or tool_action is not None
+                    or tool_handle.descriptor.name != tool_name
+                ):
+                    raise PermissionError("Host tool ingress unavailable")
+                tool_descriptor = tool_handle.descriptor
+            elif (
+                tool_descriptor is None
+                or tool_descriptor.name != tool_name
+                or not self.publisher.scoped_current(
+                    tool_handle, tool_action, tool_descriptor
+                )
+            ):
+                raise PermissionError("Host model tool binding is invalid")
             ingress = self.receiver.make(
                 event, origin=ygl.InvocationOrigin.LLM_TOOL, tool_handle=tool_handle
             )
+        else:
+            if tool_handle is None or not self.current_owner(tool_handle):
+                raise PermissionError("Host tool ingress unavailable")
+            tool_descriptor = _legacy_descriptor(tool_handle, tool_name)
         accepted = await self.authority.validate(ygl.InvocationOrigin.LLM_TOOL, ingress)
         snapshot = self.registry.snapshot()
         module = snapshot.module(module_id)
-        capability = next(
-            t.capability_id for t in module.manifest.tools if t.name == tool_name
-        )
+        capability = tool_descriptor.capability_id
         view = self.runtime.issuer.issue(
             origin=ygl.InvocationOrigin.LLM_TOOL,
             module_id=module_id,
@@ -123,9 +169,17 @@ class _OfflineHost:
         try:
             self.lifecycle.admission.admit(view, capability)
             self.authority.attach_message(self.runtime.issuer, view, accepted)
-            result = await self.gateway.invoke_tool(view, tool_name, parameters)
+            result = await self.gateway.invoke_tool(
+                view,
+                tool_name,
+                parameters,
+                tool_action=tool_descriptor.action,
+                tool_parent_name=tool_handle.published_name,
+            )
             self.runtime.issuer._require_message_current(view)
             routed = await self.output.route(view, result)
+            if final_policy_check is not None:
+                await final_policy_check()
             self.runtime.issuer._require_message_current(view)
             if not self.receiver.current(ygl.InvocationOrigin.LLM_TOOL, ingress):
                 raise PermissionError("Host message unavailable")
@@ -302,6 +356,17 @@ class ControlledMessageTests(unittest.IsolatedAsyncioTestCase):
                 manager = host.Manager.__new__(host.Manager)
                 manager.func_list = []
                 self.provider_manager = SimpleNamespace(llm_tools=manager)
+                self.config_umos = []
+                self.config = {"subagent_orchestrator": {}}
+                self.global_config = {"subagent_orchestrator": {}}
+
+            def get_config(self, *, umo=None):
+                if umo is None:
+                    return self.global_config
+                if type(umo) is not str or not umo:
+                    raise AssertionError("configuration must be event-bound")
+                self.config_umos.append(umo)
+                return self.config
 
         self.context = Context()
         self.transport = FixtureTransport()
@@ -407,7 +472,7 @@ class ControlledMessageTests(unittest.IsolatedAsyncioTestCase):
         self.runtime.accepting = True
         self.runtime.publisher.publish()
         self.manager = self.context.provider_manager.llm_tools
-        self.provider = legacy.ControlledProvider()
+        self.provider = legacy.ControlledProvider(self.runtime.publisher)
 
     async def asyncTearDown(self):
         async def stop_owned(modules):
@@ -668,8 +733,14 @@ class ControlledMessageTests(unittest.IsolatedAsyncioTestCase):
 
     async def _r2_issued_read(self, event, *, tool_name="ff14_market_query"):
         handle = next(
-            h for h in self.runtime.publisher.handles if h.descriptor.name == tool_name
+            h
+            for h in self.runtime.publisher.handles
+            if any(
+                descriptor.name == tool_name
+                for descriptor in (h.action_descriptors or {}).values()
+            )
         )
+        descriptor = _legacy_descriptor(handle, tool_name)
         ingress = self.runtime.receiver.make(
             event, origin=ygl.InvocationOrigin.LLM_TOOL, tool_handle=handle
         )
@@ -686,10 +757,10 @@ class ControlledMessageTests(unittest.IsolatedAsyncioTestCase):
             actor_id=ingress.actor_id,
             conversation_id=ingress.conversation_id,
             adapter_id=ingress.adapter_id,
-            capability_id=handle.descriptor.capability_id,
+            capability_id=descriptor.capability_id,
             deadline=self.b03.issuer._clock() + 30,
         )
-        self.b03.lifecycle.admission.admit(view, handle.descriptor.capability_id)
+        self.b03.lifecycle.admission.admit(view, descriptor.capability_id)
         self.runtime.authority.attach_message(self.b03.issuer, view, accepted)
         bound = await self.b03.services.for_module(module.module_id).scopes.bind(view)
         return view, bound, ingress, handle
@@ -715,8 +786,8 @@ class ControlledMessageTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(ygl.OperationTimeout) as raised:
                 await self.b03.issuer._check_message_source(view)
             self._r2_safe_failure(raised.exception, ygl.OperationTimeout)
-            denied = await self.runtime.gateway.invoke_tool(
-                view, handle.descriptor.name, {"query": "44091"}
+            denied = await _invoke_legacy_gateway(
+                self.runtime.gateway, view, handle, {"query": "44091"}
             )
             self.assertIs(denied.status, ygl.ResultStatus.ERROR)
             self.assertIs(denied.error.code, ygl.ErrorCode.MODULE_UNAVAILABLE)
@@ -942,8 +1013,8 @@ class ControlledMessageTests(unittest.IsolatedAsyncioTestCase):
                                 ygl.InvocationOrigin.LLM_TOOL, ingress
                             )
                         self._r2_safe_failure(raised.exception, ygl.ServiceUnavailable)
-                        denied = await self.runtime.gateway.invoke_tool(
-                            view, handle.descriptor.name, {"query": "44091"}
+                        denied = await _invoke_legacy_gateway(
+                            self.runtime.gateway, view, handle, {"query": "44091"}
                         )
                         self.assertIs(denied.status, ygl.ResultStatus.ERROR)
                         self.assertIs(
@@ -1028,12 +1099,18 @@ class ControlledMessageTests(unittest.IsolatedAsyncioTestCase):
                     try:
                         if failure == "cancel":
                             with self.assertRaises(asyncio.CancelledError):
-                                await self.runtime.gateway.invoke_tool(
-                                    view, handle.descriptor.name, {"query": "44091"}
+                                await _invoke_legacy_gateway(
+                                    self.runtime.gateway,
+                                    view,
+                                    handle,
+                                    {"query": "44091"},
                                 )
                         else:
-                            denied = await self.runtime.gateway.invoke_tool(
-                                view, handle.descriptor.name, {"query": "44091"}
+                            denied = await _invoke_legacy_gateway(
+                                self.runtime.gateway,
+                                view,
+                                handle,
+                                {"query": "44091"},
                             )
                             self.assertIs(denied.status, ygl.ResultStatus.ERROR)
                             self.assertIs(
@@ -1096,17 +1173,19 @@ class ControlledMessageTests(unittest.IsolatedAsyncioTestCase):
         ingress = self.runtime._make_ingress(
             event, origin=ygl.InvocationOrigin.LLM_TOOL
         )
+        handle = next(
+            h for h in self.runtime.publisher.handles if h.published_name == "ff14"
+        )
         with self.assertRaises(ygl.AccessDenied) as error:
             await core.invoke_tool(
-                "ff14/ff14", "ff14_market_query", {"query": "44091"}, ingress=ingress
+                "ff14/ff14",
+                "ff14_market_query",
+                {"query": "44091"},
+                ingress=ingress,
+                tool_handle=handle,
             )
         self._r2_safe_failure(error.exception, ygl.AccessDenied)
         self._r2_cleared(ingress.evidence.receipt)
-        handle = next(
-            h
-            for h in self.runtime.publisher.handles
-            if h.descriptor.name == "ff14_market_query"
-        )
         with self.assertRaises(ygl.AccessDenied) as error:
             self.runtime._make_ingress(
                 event, origin=ygl.InvocationOrigin.LLM_TOOL, tool_handle=handle
@@ -1136,9 +1215,25 @@ class ControlledMessageTests(unittest.IsolatedAsyncioTestCase):
                 ],
                 ["actor_id"],
             )
+            control = await core.invoke_tool(
+                "ff14/ff14",
+                "ff14_market_query",
+                {"query": ""},
+                ingress=valid,
+                tool_handle=handle,
+            )
+            self.assertIs(control.result.status, ygl.ResultStatus.ERROR)
+            self.assertIs(control.result.error.code, ygl.ErrorCode.PARAMETER_ERROR)
+            self.assertTrue(
+                self.runtime.receiver.current(ygl.InvocationOrigin.LLM_TOOL, valid)
+            )
             with self.assertRaises(ygl.AccessDenied) as error:
                 await core.invoke_tool(
-                    "ff14/ff14", "ff14_market_query", {"query": "44091"}, ingress=wrong
+                    "ff14/ff14",
+                    "ff14_market_query",
+                    {"query": "44091"},
+                    ingress=wrong,
+                    tool_handle=handle,
                 )
             self._r2_safe_failure(error.exception, ygl.AccessDenied)
         finally:
@@ -1521,10 +1616,9 @@ class ControlledMessageTests(unittest.IsolatedAsyncioTestCase):
         await self.start()
         self.recovery_trace = []
         handle = next(
-            h
-            for h in self.runtime.publisher.handles
-            if h.descriptor.name == "ff14_market_query"
+            h for h in self.runtime.publisher.handles if h.published_name == "ff14"
         )
+        descriptor = _legacy_descriptor(handle)
         invalids = (
             None,
             SimpleNamespace(module_id="foreign/module", descriptor=handle.descriptor),
@@ -1541,10 +1635,12 @@ class ControlledMessageTests(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaises(PermissionError) as error:
                     await self.runtime.invoke_tool(
                         handle.module_id,
-                        handle.descriptor.name,
+                        descriptor.name,
                         {"query": "44091"},
                         wrapper.context.event,
                         tool_handle=invalid,
+                        tool_descriptor=descriptor,
+                        tool_action=descriptor.action,
                     )
                 self._r2_safe_failure(error.exception, PermissionError)
                 self.assertEqual(str(error.exception), "Host tool ingress unavailable")
@@ -1558,10 +1654,12 @@ class ControlledMessageTests(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaises(PermissionError) as error:
                     await self.runtime.invoke_tool(
                         handle.module_id,
-                        handle.descriptor.name,
+                        descriptor.name,
                         {"query": "44091"},
                         untouched.context.event,
                         tool_handle=invalid,
+                        tool_descriptor=descriptor,
+                        tool_action=descriptor.action,
                     )
                 self._r2_safe_failure(error.exception, PermissionError)
                 self.assertNotIn(id(untouched.context.event), self.receipts._records)

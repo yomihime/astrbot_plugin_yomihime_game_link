@@ -83,6 +83,9 @@ class Filter:
     @staticmethod
     def command(*args, **kwargs):
         return lambda fn: fn
+    @staticmethod
+    def on_llm_request(*args, **kwargs):
+        return lambda fn: fn
 def register(*args, **kwargs):
     return lambda cls: cls
 event.AstrMessageEvent = Event

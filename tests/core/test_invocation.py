@@ -563,7 +563,9 @@ def _capability(
     )
 
 
-def _package(capability: CapabilityDescriptor, *, command=True, tool=True):
+def _package(
+    capability: CapabilityDescriptor, *, command=True, tool=True, aggregate=False
+):
     commands = (
         (
             validate_contract(
@@ -583,6 +585,7 @@ def _package(capability: CapabilityDescriptor, *, command=True, tool=True):
                     capability.capability_id,
                     {"id": "record_id"},
                     "query",
+                    "lookup" if aggregate else None,
                 )
             ),
         )
@@ -599,6 +602,8 @@ def _package(capability: CapabilityDescriptor, *, command=True, tool=True):
             (capability,),
             commands,
             tools,
+            model_tool_name="records" if aggregate else None,
+            model_tool_description="Query records." if aggregate else None,
         )
     )
     package = validate_contract(
@@ -691,7 +696,15 @@ class GatewayTests(IsolatedAsyncioTestCase):
             lifecycle=self.lifecycle,
         )
 
-    async def _ready(self, capability=None, handler=None, *, command=True, tool=True):
+    async def _ready(
+        self,
+        capability=None,
+        handler=None,
+        *,
+        command=True,
+        tool=True,
+        aggregate=False,
+    ):
         if self.registry.snapshot().modules:
             self.registry = Registry()
             self.issuer = ContextIssuer()
@@ -699,7 +712,7 @@ class GatewayTests(IsolatedAsyncioTestCase):
         capability = capability or _capability()
         handler = handler or _Handler()
         self.registry.register_package(
-            _package(capability, command=command, tool=tool),
+            _package(capability, command=command, tool=tool, aggregate=aggregate),
             {
                 "records": validate_contract(
                     ModuleHandlers({capability.capability_id: handler}, {}, {})
@@ -799,6 +812,41 @@ class GatewayTests(IsolatedAsyncioTestCase):
         result = await gateway.invoke_tool(tool_view, "record_query", {"id": "two"})
         self.assertEqual(result.status, ResultStatus.SUCCESS)
         self.assertEqual(handler.calls[-1][1], {"record_id": "two"})
+
+    async def test_aggregate_tool_requires_exact_action_parent_and_legacy_mapping(self):
+        handler, command_view = await self._ready(aggregate=True)
+        snapshot = self.registry.snapshot()
+        tool_view = self.issuer.issue(
+            origin=InvocationOrigin.LLM_TOOL,
+            module_id=command_view.module_id,
+            module_epoch=command_view.module_epoch,
+            registry_revision=snapshot.revision,
+            actor_id="actor",
+            conversation_id="conversation",
+            adapter_id="offline",
+            capability_id="record.query",
+        )
+        self.lifecycle.admission.admit(tool_view, "record.query")
+        gateway = self._gateway()
+        for target, action, parent in (
+            ("record_query", None, "records"),
+            ("record_query", "wrong", "records"),
+            ("record_query", "lookup", None),
+            ("record_query", "lookup", "wrong"),
+            ("missing", "lookup", "records"),
+        ):
+            with self.subTest(target=target, action=action, parent=parent):
+                result = await gateway.invoke_tool(
+                    tool_view,
+                    target,
+                    {"id": "one"},
+                    tool_action=action,
+                    tool_parent_name=parent,
+                )
+                self.assertIn(
+                    result.error.code, (ErrorCode.NOT_FOUND, ErrorCode.UNSUPPORTED)
+                )
+        self.assertEqual(handler.calls, [])
 
     async def test_iv02_origin_and_policy_boundaries(self):
         handler, command_view = await self._ready()

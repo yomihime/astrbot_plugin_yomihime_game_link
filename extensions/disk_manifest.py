@@ -388,6 +388,8 @@ def _map_module(value: object, contract_version: str) -> ModuleManifest:
                 )
                 for item in _list(obj, "jobs")
             ),
+            model_tool_name=obj.get("model_tool_name"),
+            model_tool_description=obj.get("model_tool_description"),
         )
     )
 

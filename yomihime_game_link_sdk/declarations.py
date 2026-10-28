@@ -146,6 +146,7 @@ class ToolDescriptor:
     capability_id: str
     parameter_mapping: Mapping[str, str]
     description: str
+    action: str | None = None
 
     def __post_init__(self) -> None:
         if isinstance(self.parameter_mapping, Mapping):
@@ -207,6 +208,8 @@ class ModuleManifest:
     display: ModuleDisplay | None = None
     diagnostics: tuple[DiagnosticDeclaration, ...] = ()
     jobs: tuple["JobDescriptor", ...] = ()
+    model_tool_name: str | None = None
+    model_tool_description: str | None = None
 
     def __post_init__(self) -> None:
         if self.jobs is not None:

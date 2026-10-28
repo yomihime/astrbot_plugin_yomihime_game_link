@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import ast
 import contextlib
+import dataclasses
 import logging
 import sys
 from collections.abc import AsyncGenerator, Awaitable, Callable
@@ -58,8 +59,12 @@ def tool_contracts():
     validate_test_dependencies()
     names = (
         "astrbot",
+        "astrbot.api",
         "astrbot.core",
         "astrbot.core.agent",
+        "astrbot.core.agent.agent",
+        "astrbot.core.agent.handoff",
+        "astrbot.core.agent.hooks",
         "astrbot.core.agent.tool",
         "astrbot.core.agent.run_context",
         "astrbot.core.platform",
@@ -67,8 +72,10 @@ def tool_contracts():
         "astrbot.core.star",
         "astrbot.core.star.context",
         "astrbot.core.astr_agent_context",
+        "astrbot.core.astr_agent_tool_exec",
         "astrbot.core.provider",
         "astrbot.core.provider.func_tool_manager",
+        "astrbot.core.provider.register",
         "astrbot.core.pipeline.process_stage.stage",
     )
     modules = {name: ModuleType(name) for name in names}
@@ -105,6 +112,29 @@ def tool_contracts():
             sources["astrbot/core/agent/tool.py"],
             ("ToolSchema", "FunctionTool", "ToolSet"),
         )
+        agent_model = modules["astrbot.core.agent.agent"]
+        agent_model.__dict__.update(
+            dataclass=dataclasses.dataclass,
+            BaseAgentRunHooks=Any,
+            TContext=wrapper.TContext,
+            FunctionTool=tool.FunctionTool,
+        )
+        _execute(
+            agent_model,
+            sources["astrbot/core/agent/agent.py"],
+            ("Agent",),
+        )
+        handoff = modules["astrbot.core.agent.handoff"]
+        handoff.__dict__.update(
+            Agent=agent_model.Agent,
+            TContext=wrapper.TContext,
+            FunctionTool=tool.FunctionTool,
+        )
+        _execute(
+            handoff,
+            sources["astrbot/core/agent/handoff.py"],
+            ("HandoffTool",),
+        )
         event = modules["astrbot.core.platform.astr_message_event"]
         event.abc = SimpleNamespace(ABC=object)
         event.MessageType = StrEnum(
@@ -117,6 +147,7 @@ def tool_contracts():
             ("AstrMessageEvent",),
             {
                 "get_platform_id",
+                "get_platform_name",
                 "get_message_str",
                 "get_message_type",
                 "get_session_id",
@@ -137,6 +168,8 @@ def tool_contracts():
             _PLUGIN_MODULE_FLAGS={"builtin_stars", "plugins"},
             StarMetadata=Any,
             FunctionTool=tool.FunctionTool,
+            Agent=agent_model.Agent,
+            HandoffTool=handoff.HandoffTool,
         )
         _execute(
             context,
@@ -157,12 +190,28 @@ def tool_contracts():
         class Preferences:
             def __init__(self):
                 self.permissions = {}
+                self.inactivated_llm_tools = []
+                self.calls = []
 
             async def global_get(self, key, default):
-                assert key == "tool_permissions"
-                return self.permissions
+                self.calls.append(
+                    (key, tuple(default) if isinstance(default, list) else default)
+                )
+                if key == "tool_permissions":
+                    return self.permissions
+                if key == "inactivated_llm_tools":
+                    return self.inactivated_llm_tools
+                raise AssertionError(key)
 
         preferences = Preferences()
+        modules["astrbot.api"].__dict__.update(
+            FunctionTool=tool.FunctionTool,
+            ToolSet=tool.ToolSet,
+            sp=preferences,
+        )
+        modules["astrbot.core"].sp = preferences
+        provider_register = modules["astrbot.core.provider.register"]
+        provider_register.llm_tools = None
         manager.__dict__.update(
             FunctionTool=tool.FunctionTool, ToolSet=tool.ToolSet, sp=preferences
         )
@@ -200,6 +249,48 @@ def tool_contracts():
             ),
             manager.__dict__,
         )
+
+        def _missing_builtin_tool(self, tool):
+            del self, tool
+            raise KeyError("fixture has no registered builtin tools")
+
+        # FunctionToolManager.get_func() delegates unknown strings to the
+        # builtin registry.  The focused AST fixture intentionally omits the
+        # real registry dependencies, but must retain its unknown-name ABI.
+        manager.FunctionToolManager.get_builtin_tool = _missing_builtin_tool
+        tool_exec = modules["astrbot.core.astr_agent_tool_exec"]
+
+        class BaseFunctionToolExecutor(Generic[wrapper.TContext]):
+            pass
+
+        tool_exec.__dict__.update(
+            ContextWrapper=wrapper.ContextWrapper,
+            AstrAgentContext=agent.AstrAgentContext,
+            ToolSet=tool.ToolSet,
+            FunctionTool=tool.FunctionTool,
+            HandoffTool=handoff.HandoffTool,
+            BaseFunctionToolExecutor=BaseFunctionToolExecutor,
+            llm_tools=None,
+        )
+        _execute(
+            tool_exec,
+            sources["astrbot/core/astr_agent_tool_exec.py"],
+            ("FunctionToolExecutor",),
+            {"_build_handoff_toolset"},
+        )
+
+        runtime_tool_calls = []
+
+        def _runtime_tools(runtime, tool_mgr, sandbox_booter):
+            runtime_tool_calls.append((runtime, tool_mgr, sandbox_booter))
+            assert runtime == "none"
+            assert tool_mgr is not None
+            assert sandbox_booter is None
+            return {}
+
+        tool_exec.FunctionToolExecutor._get_runtime_computer_tools = staticmethod(
+            _runtime_tools
+        )
         stage = modules["astrbot.core.pipeline.process_stage.stage"]
         stage.__dict__.update(Stage=object, register_stage=lambda value: value)
         stage.ProviderRequest = type("ProviderRequest", (), {})
@@ -211,7 +302,10 @@ def tool_contracts():
         )
         yield SimpleNamespace(
             ProcessStage=stage.ProcessStage,
+            Agent=agent_model.Agent,
             FunctionTool=tool.FunctionTool,
+            FunctionToolExecutor=tool_exec.FunctionToolExecutor,
+            HandoffTool=handoff.HandoffTool,
             ToolSet=tool.ToolSet,
             ContextWrapper=wrapper.ContextWrapper,
             Context=context.Context,
@@ -220,4 +314,7 @@ def tool_contracts():
             MessageType=event.MessageType,
             Manager=manager.FunctionToolManager,
             preferences=preferences,
+            provider_register=provider_register,
+            runtime_tool_calls=runtime_tool_calls,
+            tool_exec=tool_exec,
         )

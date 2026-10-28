@@ -2448,8 +2448,26 @@ class AstrBotRuntime:
         )
         return capability is not None and capability.privacy_floor is PrivacyFloor.OWNER
 
+    async def scope_model_tools(self, event, request):
+        if not self._ready or self._closing or self._tool_publisher is None:
+            return
+        from astrbot.core.platform.astr_message_event import AstrMessageEvent
+
+        if not isinstance(event, AstrMessageEvent):
+            return
+        await self._tool_publisher.scope_request(event, request)
+
     async def invoke_tool(
-        self, module_id, tool_name, parameters, event, *, tool_handle=None
+        self,
+        module_id,
+        tool_name,
+        parameters,
+        event,
+        *,
+        tool_handle=None,
+        tool_descriptor=None,
+        tool_action=None,
+        final_policy_check=None,
     ):
         if not self._ready or self._closing or self._core is None:
             raise PermissionError("Host tool ingress unavailable")
@@ -2457,12 +2475,23 @@ class AstrBotRuntime:
 
         if not isinstance(event, AstrMessageEvent):
             raise PermissionError("official Host event required")
-        if (
-            tool_handle is None
-            or tool_handle.module_id != module_id
-            or tool_handle.descriptor.name != tool_name
-        ):
+        publisher = self._tool_publisher
+        if tool_handle is None or tool_handle.module_id != module_id:
             raise PermissionError("Host tool ingress unavailable")
+        if tool_handle.action_descriptors is None:
+            if (
+                tool_descriptor is not None
+                or tool_action is not None
+                or tool_handle.descriptor.name != tool_name
+            ):
+                raise PermissionError("Host tool ingress unavailable")
+        elif (
+            publisher is None
+            or tool_descriptor is None
+            or tool_descriptor.name != tool_name
+            or not publisher.scoped_current(tool_handle, tool_action, tool_descriptor)
+        ):
+            raise PermissionError("Host model tool binding is invalid")
         ingress = self._make_ingress(
             event, origin=InvocationOrigin.LLM_TOOL, tool_handle=tool_handle
         )
@@ -2471,10 +2500,19 @@ class AstrBotRuntime:
         unavailable = False
         try:
             outcome = await self._core.invoke_tool(
-                module_id, tool_name, parameters, ingress=ingress
+                module_id,
+                tool_name,
+                parameters,
+                ingress=ingress,
+                tool_action=tool_action,
+                tool_parent_name=tool_handle.published_name,
             )
         except HostIngressUnavailable:
             unavailable = True
+        if final_policy_check is not None:
+            # Keep every awaited publisher policy read inside the original
+            # message proof. Never mint a fresh receipt to extend its deadline.
+            await final_policy_check()
         if not self._message_current(InvocationOrigin.LLM_TOOL, ingress):
             raise PermissionError("Host message unavailable")
         if unavailable:
@@ -2489,7 +2527,7 @@ class AstrBotRuntime:
             and self._core is not None
             and publisher is not None
             and any(item is handle for item in publisher.handles)
-            and publisher._current(handle)
+            and publisher.exposed_current(handle)
         )
 
     def _command_current(self, ingress):
