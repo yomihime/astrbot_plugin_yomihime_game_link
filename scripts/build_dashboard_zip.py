@@ -20,7 +20,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 ARCHIVE = ROOT / "dist" / "astrbot_plugin_yomihime_game_link-local.zip"
 EXPECTED_WHEEL_SHA256 = (
-    "5888988cf1e3173a76b4a6e16beea222196f6d495ad2a917542f8a24602fdf0f"
+    "4c06251088152ccf09f5e30ba298bf233027171f26f74b0058639e2868da43a2"
 )
 EXPECTED_WHEEL_ENTRIES = {
     "yomihime_game_link_sdk/jobs.py",
