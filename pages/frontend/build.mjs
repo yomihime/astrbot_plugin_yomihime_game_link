@@ -45,7 +45,7 @@ const runtimeAudit = {name: 'runtime-package-notices', generateBundle(_options, 
 }};
 await mkdir(shell, {recursive: true});
 await build({...common, plugins:[runtimeAudit], build: {outDir: shell, emptyOutDir: false, lib: {entry: resolve(frontend, 'src/runtime.ts'), formats: ['es'], fileName: () => 'runtime.js'}, minify: true, sourcemap: false}});
-await build({...common, build: {outDir: shell, emptyOutDir: false, lib: {entry: resolve(frontend, 'src/main.ts'), formats: ['es'], fileName: () => 'app.js', cssFileName: 'styles'}, rolldownOptions: {external: ['vue', 'naive-ui', '@game-link/ui', './module-loader.js'], output: {paths: {'vue': './runtime.js', 'naive-ui': './runtime.js','@game-link/ui':'./runtime.js'}}}, minify: true}});
+await build({...common, plugins:[runtimeAudit], build: {outDir: shell, emptyOutDir: false, lib: {entry: resolve(frontend, 'src/main.ts'), formats: ['es'], fileName: () => 'app.js', cssFileName: 'styles'}, rolldownOptions: {external: ['vue', 'naive-ui', '@game-link/ui', './module-loader.js'], output: {paths: {'vue': './runtime.js', 'naive-ui': './runtime.js','@game-link/ui':'./runtime.js'}}}, minify: true}});
 const projected=[];
 const branches=[],stylePaths=new Set();
 for(const bundleRoot of bundleRoots)for(const packageName of (await readdir(resolve(root,bundleRoot))).sort()) {
@@ -118,7 +118,7 @@ const styles=[...stylePaths].sort().map(path=>'<link rel="stylesheet" data-resou
 index=index.replace(template,'<template id="module-style-assets">'+styles+'</template>').replace('<html ','<html data-page-name="00-game-link" ');
 await writeFile(resolve(shell,'index.html'),index);
 await mkdir(resolve(shell, 'licenses'), {recursive: true});
-const notices = ['Third-party notices for the production shared Vue / Naive UI runtime.\nSources are locked in pages/frontend/package-lock.json.\n'];
+const notices = ['Third-party notices for the production shell and shared Vue / Naive UI runtime.\nSources are locked in pages/frontend/package-lock.json.\n'];
 const licenseFiles=[];
 for (const name of [...runtimePackages].sort()) {
   const directory=resolve(frontend,'node_modules',name), metadata=JSON.parse(await readFile(resolve(directory,'package.json'),'utf8'));

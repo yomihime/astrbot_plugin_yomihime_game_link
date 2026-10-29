@@ -128,3 +128,41 @@ test('builtin declared static logos retain their packaged URL and never request 
  try{const logo=app.doc.querySelector('.workspace-emblem-resource');assert.ok(logo);assert.equal(logo.style.maskImage,'url("./'+path+'")');assert.equal(app.calls.filter(call=>call.path==='admin/module-page-assets').length,0);assert.equal(app.imports,0);}
  finally{app.close();}
 });
+
+test('actual asset loader validates all bytes without crypto/subtle and rejects tampering in both digest paths',async()=>{
+ const original=Object.getOwnPropertyDescriptor(globalThis,'crypto'),native=globalThis.crypto;
+ const dom=new JSDOM('',{url:'http://192.168.1.20/'}),urls=blobs();
+ try{for(const crypto of [native,undefined,{}]){
+  Object.defineProperty(globalThis,'crypto',{configurable:true,value:crypto});
+  const f=fixture(),before=urls.created.length;
+  const assets=createModuleAssets(dom.window.document,async()=>{throw Error('unexpected import');},100,{runtimeUrl:'/runtime.js',bridge:{apiPost:async()=>f.response}});
+  assert.match(await assets.image(f.module,f.module.display.logo_resource),/^blob:/);assets.invalidateAll();
+  assert.equal(urls.created.length,before+1);assert.ok(urls.revoked.includes(urls.created.at(-1).url));
+  f.response.resources[0].base64=Buffer.from('modified executable').toString('base64');
+  const tampered=createModuleAssets(dom.window.document,async()=>{throw Error('unexpected import');},100,{runtimeUrl:'/runtime.js',bridge:{apiPost:async()=>f.response}});
+  await assert.rejects(tampered.image(f.module,f.module.display.logo_resource),/asset_digest_mismatch/);
+  assert.equal(urls.created.length,before+1);tampered.invalidateAll();
+ }}finally{Object.defineProperty(globalThis,'crypto',original);urls.restore();dom.window.close();}
+});
+test('production-compiled mounted home resolves and cleans up an external SVG without SubtleCrypto',async()=>{
+ const original=Object.getOwnPropertyDescriptor(globalThis,'crypto'),urls=blobs();let app;
+ try{Object.defineProperty(globalThis,'crypto',{configurable:true,value:{}});
+  const f=fixture();app=await appHarness(f.data,()=>f.response);
+  const logo=app.doc.querySelector('.workspace-emblem-resource');assert.ok(logo);assert.match(logo.style.maskImage,/blob:/);
+  assert.equal(app.imports,0);assert.equal(urls.created.length,1);
+  app.close();app=null;assert.deepEqual(urls.revoked,[urls.created[0].url]);
+ }finally{app?.close();Object.defineProperty(globalThis,'crypto',original);urls.restore();}
+});
+test('malformed projections and invalid base64 report validation, not revision loss',async()=>{
+ const dom=new JSDOM('',{url:'http://192.168.1.20/'}),urls=blobs();
+ try{for(const [mutate,code] of [
+  [f=>f.response=null,'invalid_live_projection'],
+  [f=>f.response.resources=null,'invalid_live_projection'],
+  [f=>f.response.resources[0].base64='%%%','invalid_live_resource'],
+  [f=>f.response.asset_version='b'.repeat(64),'asset_revoked'],
+ ]){const f=fixture();mutate(f);
+  const assets=createModuleAssets(dom.window.document,async()=>{throw Error('unexpected import');},100,{runtimeUrl:'/runtime.js',bridge:{apiPost:async()=>f.response}});
+  await assert.rejects(assets.image(f.module,f.module.display.logo_resource),{message:code});assets.invalidateAll();
+ }assert.equal(urls.created.length,0);
+ }finally{urls.restore();dom.window.close();}
+});

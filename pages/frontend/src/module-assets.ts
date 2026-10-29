@@ -1,3 +1,4 @@
+import {sha256Hex} from './sha256';
 import {createScope} from './lifecycle';
 import type {Bridge, ModuleDescriptor, PageDescriptor, PageModule} from './contracts';
 
@@ -15,7 +16,9 @@ export function createModuleAssets(document: Document, loadPage: (entry: string)
   async function liveResources(module:ModuleDescriptor,page:PageDescriptor,value:Record):Promise<Projection>{
     if(!dynamic||!module.runtime_id)throw Error('missing_live_projection');
     const response=await dynamic.bridge.apiPost('admin/module-page-assets',{owner:module.module_id,page:page.route_id,runtime_id:module.runtime_id,module_epoch:module.module_epoch}) as {entry:string;styles:string[];asset_version:string;resources:{path:string;sha256:string;media_type:string;base64:string}[]};
-    if(value.revoked||!response||response.asset_version!==module.asset_version||!Array.isArray(response.resources)||response.resources.length>128||!Array.isArray(response.styles))throw Error('asset_revoked');
+    if(value.revoked)throw Error('asset_revoked');
+    if(!response||!Array.isArray(response.resources)||response.resources.length>128||!Array.isArray(response.styles))throw Error('invalid_live_projection');
+    if(response.asset_version!==module.asset_version)throw Error('asset_revoked');
     const prefix=`module-assets/${module.module_id}/pages/p${module.asset_version}/`;
     if(page.entry!==prefix+response.entry||JSON.stringify(page.styles)!==JSON.stringify(response.styles.map(path=>prefix+path)))throw Error('invalid_live_projection');
     const expected=new Map(module.resources.map(item=>[item.path,item.sha256])),payload:Payload=new Map();
@@ -24,10 +27,13 @@ export function createModuleAssets(document: Document, loadPage: (entry: string)
     let total=0;
     for(const item of response.resources){
       if(typeof item.path!=='string'||typeof item.base64!=='string'||item.base64.length>5592416||expected.get(prefix+item.path)!==item.sha256||payload.has(item.path)||typeof item.media_type!=='string'||!media[item.path.split('.').pop()||'']||media[item.path.split('.').pop()||'']!==item.media_type)throw Error('invalid_live_resource');
-      const bytes=Uint8Array.from(atob(item.base64),c=>c.charCodeAt(0));total+=bytes.length;
+      let bytes:Uint8Array;
+      try{bytes=Uint8Array.from(atob(item.base64),c=>c.charCodeAt(0));}catch{throw Error('invalid_live_resource');}
+      total+=bytes.length;
       if(total>16777216)throw Error('live_resource_budget');
-      const digest=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',bytes)),x=>x.toString(16).padStart(2,'0')).join('');
-      if(digest!==item.sha256||value.revoked)throw Error('asset_revoked');
+      const digest=await sha256Hex(bytes);
+      if(digest!==item.sha256)throw Error('asset_digest_mismatch');
+      if(value.revoked)throw Error('asset_revoked');
       payload.set(item.path,{bytes,mime:item.media_type});
     }
     if(payload.size!==expected.size)throw Error('incomplete_live_projection');
@@ -65,7 +71,8 @@ export function createModuleAssets(document: Document, loadPage: (entry: string)
     if(imports.some(path=>path!==runtimeUrl.href))throw Error('unsupported_live_import');
     const blob=URL.createObjectURL(new Blob([code],{type:'text/javascript'}));value.scope.onDispose(()=>URL.revokeObjectURL(blob));
     const mounted=await import(/* @vite-ignore */ blob);
-    if(value.revoked||typeof mounted.mount!=='function')throw Error('asset_revoked');
+    if(value.revoked)throw Error('asset_revoked');
+    if(typeof mounted.mount!=='function')throw Error('invalid_page_entry');
     return mounted;
   }
   function invalidate(owner:string){

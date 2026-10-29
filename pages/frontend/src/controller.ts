@@ -9,7 +9,23 @@ export function createShell({bridge, container, window, loadPage, runtimeUrl, ch
   let off: (() => void) | undefined, mounted: MountedPage | null = null, identity = '', pendingIdentity = '';
   let scope: ReturnType<typeof createScope> | null = null;
   const assets = createModuleAssets(container.ownerDocument, loadPage, timeoutMs, runtimeUrl?{bridge,runtimeUrl}:undefined), bindings = new Map<string, string>(), revokedOwners = new Set<string>();
-  const reopenMessage = '模块资源已失效。请关闭此页，并从宿主插件详情重新打开页面。';
+  const recoveryMessage = '请关闭此页，并从宿主插件详情重新打开页面。';
+  const reopenMessage = '模块资源已失效。' + recoveryMessage;
+  const ownerFailures = new Map<string,string>();
+  const revokedMessage = () => projectionRevoked ? reopenMessage : ownerFailures.get(state.selected?.owner || '') || reopenMessage;
+  function failureMessage(error:unknown, phase:'load'|'bootstrap'|'mount'):string {
+    // Show only our fixed messages, never a bridge/module exception or URL.
+    if (phase === 'mount') return '模块页面初始化失败。' + recoveryMessage;
+    const row=error as {code?:unknown;error_code?:unknown;message?:unknown;status?:unknown;response?:{status?:unknown}}|null;
+    const codes=[row?.code,row?.error_code,row?.message];
+    if ([row?.status,row?.response?.status].some(status=>status===401||status===403) || codes.includes('admin_authorization_denied')) return '宿主授权未通过或会话已失效，请确认宿主登录状态。' + recoveryMessage;
+    if (codes.some(code=>typeof code==='string'&&['asset_revoked','page_revoked','stale_context','revision_conflict'].includes(code))) return reopenMessage;
+    if (codes.includes('invalid_page_entry')) return '模块页面初始化失败。' + recoveryMessage;
+    if (codes.includes('asset_digest_unavailable')) return '模块资源摘要校验无法完成，已阻止加载。' + recoveryMessage;
+    if (codes.some(code=>typeof code==='string'&&['asset_digest_mismatch','invalid_live_projection','invalid_live_resource','incomplete_live_projection','live_resource_budget','invalid_live_style','invalid_live_entry','invalid_shared_runtime','unsupported_live_style_reference','unsupported_live_import'].includes(code))) return '模块资源校验失败，已阻止加载。' + recoveryMessage;
+    if (phase === 'bootstrap') return '模块页面服务暂不可用。' + recoveryMessage;
+    return '模块资源加载失败，请检查连接与浏览器是否允许加载页面资源。' + recoveryMessage;
+  }
   let projectionRevoked = false, catalogSeen = false, activeOwner = '';
   let navigationVersion=0,lastPageNavigationVersion=-1;
   function navigationImpact(){
@@ -55,19 +71,21 @@ export function createShell({bridge, container, window, loadPage, runtimeUrl, ch
   async function syncPage() {
     if (retiring) {changed(); return;}
     const selection = selected();
-    if (!selection || !ready) {disposePage(); if (!state.cleanupPending && (projectionRevoked || revokedOwners.has(state.selected?.owner || ''))) state.message=reopenMessage; changed(); return;}
+    if (!selection || !ready) {disposePage(); if (!state.cleanupPending && (projectionRevoked || revokedOwners.has(state.selected?.owner || ''))) state.message=revokedMessage(); changed(); return;}
     const {module,page} = selection, target = mountIdentity(module,page,boundary);
-    if (projectionRevoked || revokedOwners.has(module.module_id)) {disposePage(); if (!state.cleanupPending) state.message = reopenMessage; changed(); return;}
+    if (projectionRevoked || revokedOwners.has(module.module_id)) {disposePage(); if (!state.cleanupPending) state.message = revokedMessage(); changed(); return;}
     if (target === identity && mounted) {mounted.update(pageContext(module)); changed(); return;}
     if (target === pendingIdentity) return;
     disposePage(); if (retiring) {changed(); return;}
     pendingIdentity = target; activeOwner = module.module_id; const version = generation;
     const ownScope = createScope(() => !closed && generation === version && selected() !== null); scope = ownScope;
+    let phase:'load'|'bootstrap'|'mount'='load';
     try {
       const code = await deadline(assets.load(module, page));
       if (!ownScope.isCurrent() || pendingIdentity !== target) return;
-      if (!code || typeof code.mount !== 'function') throw Error('invalid_page_entry');
+      if (!code || typeof code.mount !== 'function') {phase='mount';throw Error('invalid_page_entry');}
       const view = container.ownerDocument.createElement('div'); view.className = 'module-view'; view.dataset.owner = module.module_id; container.append(view);
+      phase='bootstrap';
       let services: Awaited<ReturnType<typeof createModuleServices>>;
       try {
         services = await createModuleServices({onDispose:callback=>ownScope.onDispose(callback),bridge, binding:{owner:module.module_id,page:page.route_id,runtime_id:module.runtime_id!,module_epoch:module.module_epoch}, capabilityId:page.capability_id, isCurrent:()=>ownScope.isCurrent() && !state.stale && !state.busy && ready, confirmClear:(field,revision,isCurrent)=>confirmClear(module.module_id,field,revision,isCurrent)});
@@ -78,12 +96,14 @@ export function createShell({bridge, container, window, loadPage, runtimeUrl, ch
         throw error;
       }
       if (!ownScope.isCurrent() || pendingIdentity !== target) return;
+      phase='mount';
       const instance = code.mount(view, Object.freeze({routeId: page.route_id, context: pageContext(module), services, scope: ownScope,onNavigationStateChange:()=>{if(ownScope.isCurrent()){navigationVersion++;changed();}}}));
       if (!instance || typeof instance.update !== 'function' || typeof instance.dispose !== 'function') throw Error('invalid_page_instance');
       mounted = instance; identity = target; pendingIdentity = ''; state.mounted = true; changed();
-    } catch {if (!closed && !projectionRevoked && !revokedOwners.has(module.module_id)) {
+    } catch (error) {if (!closed && !projectionRevoked && !revokedOwners.has(module.module_id)) {
       // A first load failure still belongs to this owner after its view leaves.
-      revokeOwner(module.module_id); if (!state.cleanupPending && state.selected?.owner === module.module_id) state.message = reopenMessage; changed();
+      ownerFailures.set(module.module_id,failureMessage(error,phase));
+      revokeOwner(module.module_id); if (!state.cleanupPending && state.selected?.owner === module.module_id) state.message = revokedMessage(); changed();
     }}
   }
   function pickRoute() {
@@ -115,7 +135,7 @@ export function createShell({bridge, container, window, loadPage, runtimeUrl, ch
   }
   const hashChanged = () => {pickRoute(); void syncPage(); const main = container.ownerDocument.getElementById('page-root'); main?.focus({preventScroll:true}); window.scrollTo({top:0,left:0,behavior:'instant'});};
   return {state, selected, refresh,navigationImpact,refuseNavigation(){state.message='无法核对当前模块的离页状态，请重新打开页面。';changed();}, selectModules(){window.location.hash='#/modules';pickRoute();void syncPage();}, selectHome() {window.location.hash='#/'; pickRoute(); void syncPage();}, selectModule(owner:string,section:'home'|'queries'='home'){window.location.hash='#/module/'+encodeURIComponent(owner)+(section==='queries'?'/-/queries':'');pickRoute();void syncPage();}, selectSettings(owner?:string) {const config=state.catalog?.modules?.find(m=>m.module_id===owner)?.pages.find(p=>p.role==='config');window.location.hash=owner?(config?routeHash(owner,config.route_id):'#/module/'+encodeURIComponent(owner)):'#/settings'; pickRoute(); void syncPage();}, select(owner: string, route: string) {window.location.hash = routeHash(owner,route); pickRoute(); void syncPage();},
-    retryCleanup() {if (!state.cleanupPending) return; if (retiring) disposePage(); assets.retryCleanup(); cleanupState(); if (!state.cleanupPending) {state.message=projectionRevoked || revokedOwners.has(state.selected?.owner || '') ? reopenMessage : '页面清理完成，请手动刷新状态。'; if (!closed) void syncPage();} changed();},
+    retryCleanup() {if (!state.cleanupPending) return; if (retiring) disposePage(); assets.retryCleanup(); cleanupState(); if (!state.cleanupPending) {state.message=projectionRevoked || revokedOwners.has(state.selected?.owner || '') ? revokedMessage() : '页面清理完成，请手动刷新状态。'; if (!closed) void syncPage();} changed();},
     start() {if (closed) return; window.addEventListener('hashchange',hashChanged); if (!bridge?.ready || !bridge?.onContext || !bridge?.apiGet || !bridge?.apiPost) {state.message = '宿主连接尚未就绪，请重新打开页面。'; changed(); return;} off = bridge.onContext(context => accept(context,true)); deadline(Promise.resolve(bridge.ready())).then(context => accept(context)).catch(() => {if (!ready && !closed) {state.message = '连接宿主失败，请重新打开页面。'; changed();}});},
     dispose() {if (closed) return; closed = true; sequence++; ready = false; off?.(); window.removeEventListener('hashchange',hashChanged); for (const timer of timers) clearTimeout(timer); timers.clear(); disposePage(); assets.invalidateAll(); cleanupState();},
   };
