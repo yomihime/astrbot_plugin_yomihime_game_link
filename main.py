@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 from types import ModuleType
 
-SDK_VERSION = "0.1.0a23"
+SDK_VERSION = "0.1.0a24"
 SDK_MODULE_ABI_VERSION = "2.0"
 
 
@@ -27,7 +27,7 @@ SDK_PACKAGE_MANIFEST = {
     "services.py": "603697d623595a7175465c1289c18b65f52309a7125ed94e0ff9a21ec9f7edce",
     "storage.py": "6311b4754da6e37616debd68003d6993cf89c0b060845387288e2de575313260",
     "subscriptions.py": "c3458ed30bc90481e17b1e8ca27676f19eaf7097ab79817a3a3554532dcef00a",
-    "version.py": "332ada3b4509f7ebcad3df887a7c404d3ed66bb180ecd7841abc6e9df75ec864",
+    "version.py": "7f6e754b764e77bd430781b52483b61f7606bd8073a927c81acf59f1f0311850",
     "_examples/empty_module/manifest.json": "9de2d0e3cbb7e32acf029677e59381d1bb8893c6cae84a45f9a606b6e3a7e965",
     "_examples/empty_module/module.py": "21fdb6428bd422804ad00e98038b032c25b1d2488b3df5f17e3be855e0c8198f",
     "_examples/empty_module/README.md": "c1150018aa2eb2bfb9f9129ba753f6f26d132a0a245d245eb8a62f3c6debc1d7",
@@ -219,7 +219,7 @@ from astrbot.api.star import Star, register  # noqa: E402
     "astrbot_plugin_yomihime_game_link",
     "yomihime",
     "如月怜的游戏连结：聚合游戏角色、战绩与资讯。",
-    "0.1.11",
+    "0.1.12",
 )
 class YomihimeGameLink(Star):
     """Provide the entry point for the game information plugin."""

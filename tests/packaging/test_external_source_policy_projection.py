@@ -55,7 +55,7 @@ class ExternalSourcePolicyProjectionTests(unittest.TestCase):
         (self.root / "metadata.yaml").write_text(
             "name: synthetic_core\nversion: v0.1.2\n", encoding="utf-8"
         )
-        self.wheel = self.root / "yomihime_game_link_sdk-0.1.0a23-py3-none-any.whl"
+        self.wheel = self.root / "yomihime_game_link_sdk-0.1.0a24-py3-none-any.whl"
         self.wheel.write_bytes(b"wheel validation has independent pinned tests")
 
     def assets(self, *, page_roots=None, policy_roots=None):
