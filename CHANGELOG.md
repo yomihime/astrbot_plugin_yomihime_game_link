@@ -6,6 +6,13 @@
 
 暂无。
 
+## v0.1.13（2026-10-30）
+
+- 修复 LAN HTTP 非安全上下文缺少 `crypto.subtle` 时，动态模块页面和 SVG 图标无法加载的问题。优先 WebCrypto，仅 API 缺失时使用随包锁定的 `@noble/hashes@2.0.1` SHA-256；原生校验异常继续 fail closed，不跳过摘要、MIME、大小、声明或授权检查。
+- 加载失败改用固定脱敏分类，区分授权/会话、版本撤销、完整性、摘要不可用、加载、bootstrap 和 mount；随包补充 noble MIT 许可。
+- 与 Steam DLC `0.2.0-beta.4` 配对发布，canonical SDK `0.1.0a24`、ABI `2.0`、bridge `1`、schema `210` 不变；旧 `0.1.12` 和 beta.3 资产及 tag 保留。
+- 复用 PR17 已完成的 LAN/localhost 页面、四 SVG、12 声明页和生命周期验收；LAN 状态接口仍受原 localhost 单来源策略限制，Deadlock 无辅助页，业务供应商/模型/IM 未测，额外 CS2 localhost query 被拒未执行，原 `.230` 未更新。发布不操作运行实例。
+
 ## v0.1.12（2026-10-29）
 
 - 与 Steam DLC `0.2.0-beta.3` 配对发布，使用独立的新 canonical SDK `0.1.0a24` 身份及精确 wheel 摘要；模块 ABI `2.0`、外包桥接 `1`、存储 schema `210` 保持不变。SDK 无第三方运行依赖，不向 PyPI 发布。

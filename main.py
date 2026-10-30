@@ -219,7 +219,7 @@ from astrbot.api.star import Star, register  # noqa: E402
     "astrbot_plugin_yomihime_game_link",
     "yomihime",
     "如月怜的游戏连结：聚合游戏角色、战绩与资讯。",
-    "0.1.12",
+    "0.1.13",
 )
 class YomihimeGameLink(Star):
     """Provide the entry point for the game information plugin."""

@@ -4,6 +4,8 @@
 
 > Windows 存储：全新且没有旧库存的实例会在运行身份的 KnownFolder LocalAppData 下选择专属私密存储，不要求先修改整个 AstrBot 数据目录的 ACL。现有布局保留原位；只有权威根和数据库安全性确认后才可隔离不安全凭据子树。若凭据存储进入 `blocked/unknown`，不读取环境密钥、不降级到其他目录或新库，秘密读写均关闭；部署者修复运行身份/访问条件后，正常冷重启同一 Host。不要清 selector、改真实 ACL 或重填旧密钥。CLI 仅提供迁移计划，当前不支持生产旧库迁移；Windows 本地证据与 Ubuntu CI 分开，详见下方[Windows 资格](#windows-原生文件系统资格)。
 
+当前配对为 Core `0.1.13`、Steam DLC `0.2.0-beta.4`、canonical SDK `0.1.0a24`（ABI `2.0` / bridge `1` / schema `210`）。安装包随 [DLC beta.4 预发布](https://github.com/yomihime/astrbot_plugin_yomihime_game_link_steam_dlc/releases/tag/v0.2.0-beta.4) 提供，Core 不单独提供 Release。LAN HTTP 缺少 WebCrypto 时，动态模块页面与图标仍执行随包 SHA-256 校验；原生校验异常继续拒绝，来源策略与授权边界保持。
+
 ## FF14 功能
 
 - `/ygl help`：当前模块目录；`/ygl ff14 help`：FF14 能力目录；具体指令后加 `help` 查看参数。
