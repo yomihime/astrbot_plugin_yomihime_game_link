@@ -82,6 +82,9 @@ test('production runtime graph and module remain local and share one Vue/UI impl
   }
   const audit=JSON.parse(await readFile(resolve(root,'.build/frontend/runtime-packages.json'),'utf8'));
   for(const name of audit.packages) assert.ok(audit.licenseFiles.includes(`licenses/${name.replaceAll('/','_')}.txt`));
+  assert.ok(audit.packages.includes('@noble/hashes'));
+  const hashLicense=await readFile(resolve(root,'pages/00-game-link/licenses/@noble_hashes.txt'),'utf8');
+  assert.match(hashLicense,/@noble\/hashes 2\.0\.1/);assert.match(hashLicense,/MIT/);
   assert.ok(audit.packages.includes('css-render'));assert.ok(audit.packages.includes('lodash-es'));assert.ok(audit.packages.includes('vue'));assert.ok(audit.packages.includes('naive-ui'));
 });
 after(async()=>{dom.window.close();await rm(out,{recursive:true,force:true});});

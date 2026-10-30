@@ -266,3 +266,60 @@ test('generic services bind same local route to exact two owners',async()=>{
 test('Logs and calendar use module-owned capability inputs and retain manual error recovery',async()=>{
  for(const [route,expected] of [['logs',{realm:'cn',server:'白银乡',character:'测试角色',metric:'rdps'}],['calendar',{region:'cn',days:7,timezone:'Asia/Shanghai'}]]){const h=queryHarness(route);try{if(route==='logs'){h.controller.edit('server','白银乡');h.controller.edit('character','测试角色');}const p=h.controller.submit();assert.deepEqual(h.requests[0].body,expected);assert.equal(h.requests[0].cap,route==='logs'?'ff14.logs.character':'ff14.calendar.query');h.requests[0].reject(Error('upstream'));await p;assert.equal(h.controller.state.phase,'error');assert.equal(h.requests.length,1);const retry=h.controller.submit();h.requests[1].resolve(success);await retry;assert.equal(h.controller.state.result.status,'partial_success');}finally{h.scope.dispose();}}
 });
+
+for (const [error, expected] of [
+  [{status:401}, /宿主授权未通过或会话已失效/],
+  [{response:{status:403}}, /宿主授权未通过或会话已失效/],
+  [Error('admin_authorization_denied'), /宿主授权未通过或会话已失效/],
+  [Error('asset_revoked'), /模块资源已失效/],
+  [Error('asset_digest_mismatch'), /模块资源校验失败/],
+  [Error('invalid_live_resource'), /模块资源校验失败/],
+  [Error('invalid_page_entry'), /模块页面初始化失败/],
+  [Error('asset_digest_unavailable'), /摘要校验无法完成/],
+  [Error('private token=https://example.invalid/?secret=never-display'), /模块资源加载失败/],
+  [Error('style_load_failed'), /模块资源加载失败/],
+  [Error('timeout'), /模块资源加载失败/],
+]) test(`load failure is classified without exposing details: ${expected}`,async()=>{
+  const data=catalog();data.modules.push(catalog('micro/demo').modules[0]);
+  const h=harness({data,loader:async entry=>{
+    if(entry.includes('ff14/ff14'))throw error;
+    return {mount(){return {update(){},dispose(){}};}};
+  }});
+  try {
+    await h.start();assert.equal(h.shell.state.mounted,false);assert.match(h.shell.state.message,expected);
+    assert.doesNotMatch(h.shell.state.message,/never-display|example\.invalid/);
+    assert.equal(h.container.children.length,0);assert.equal(h.dom.window.document.head.querySelector('link[data-module-style="ff14/ff14"]'),null);
+    const failure=h.shell.state.message,imports=h.imports.length;
+    h.shell.select('micro/demo','items');await flush();assert.equal(h.shell.state.mounted,true);
+    h.shell.select('ff14/ff14','items');await flush();assert.equal(h.shell.state.mounted,false);
+    assert.equal(h.shell.state.message,failure);assert.equal(h.imports.length,imports+1);
+    assert.equal(h.posts.length,0);
+  } finally {h.close();}
+});
+
+for(const [error,expected] of [[{status:403},/宿主授权未通过或会话已失效/],[Error('private service failure'),/模块页面服务暂不可用/]])test(`bootstrap failure has its own fixed diagnosis: ${expected}`,async()=>{
+ const data=catalog();data.modules[0].pages[0].role='home';
+ const h=harness({data,sessionHandler:async()=>{throw error;}});
+ try {await h.start();assert.match(h.shell.state.message,expected);assert.equal(h.shell.state.mounted,false);assert.equal(h.container.children.length,0);assert.equal(h.pageSessions.length,1);assert.equal(h.posts.length,0);}
+ finally {h.close();}
+});
+
+test('mount failure disposes scope and clears partial DOM without claiming expired resources or exposing an exception',async()=>{
+ let cleanups=0;
+ const h=harness({loader:async()=>({mount(view,{scope}){view.textContent='partial private DOM';scope.onDispose(()=>{cleanups++;});throw Error('admin_authorization_denied');}})});
+ try {
+  await h.start();assert.match(h.shell.state.message,/模块页面初始化失败/);assert.doesNotMatch(h.shell.state.message,/资源已失效|授权未通过|admin_authorization/);
+  assert.equal(cleanups,1);assert.equal(h.container.children.length,0);assert.equal(h.shell.state.cleanupPending,false);
+  h.shell.select('ff14/ff14','market');await flush();assert.match(h.shell.state.message,/模块页面初始化失败/);assert.equal(cleanups,1);assert.equal(h.imports.length,1);
+ }finally{h.close();}
+});
+
+test('failed cleanup takes priority then restores the original load diagnosis after retry',async()=>{
+ const h=harness({loader:async()=>{throw Error('asset_digest_mismatch');}});
+ const original=h.container.replaceChildren.bind(h.container);let fail=true;
+ h.container.replaceChildren=(...nodes)=>{if(fail&&h.imports.length)throw Error('private cleanup error');return original(...nodes);};
+ try {
+  await h.start();assert.equal(h.shell.state.cleanupPending,true);assert.match(h.shell.state.message,/页面清理未完成/);
+  fail=false;h.shell.retryCleanup();await flush();assert.equal(h.shell.state.cleanupPending,false);assert.match(h.shell.state.message,/模块资源校验失败/);assert.equal(h.shell.state.mounted,false);assert.equal(h.imports.length,1);
+ }finally{fail=false;h.close();}
+});
