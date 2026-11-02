@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 import tempfile
 import weakref
@@ -933,6 +934,131 @@ class AstrBotRuntime:
         await check(binding.owner, binding.page, binding.module_epoch, action)
         return plain(result)
 
+    async def _module_invoke_operation(
+        self, action, data, *, core, binding, raw, expiry, bearer, current, check
+    ):
+        """A Dashboard page grant, never the optional external-origin ingress."""
+        from .web_public import invocation_envelope
+
+        identity = {"owner", "page", "runtime_id", "module_epoch", "page_session"}
+        if set(data) != identity | {"capability_id", "parameters"}:
+            raise ValueError("invalid module query")
+        try:
+            owner, page, capability, parameters = invocation_envelope(
+                json.dumps(
+                    {
+                        key: data[key]
+                        for key in ("owner", "page", "capability_id", "parameters")
+                    }
+                ).encode("utf-8")
+            )
+        except WebPublicRejected:
+            raise ValueError("invalid module query") from None
+        declared = next(
+            item
+            for item in core.registry.snapshot().module(binding.owner).manifest.pages
+            if item.route_id == binding.page
+        )
+        if capability != declared.capability_id or not current():
+            raise AdminAuthorizationDenied
+        validator = self._web_validator
+        if validator is None:
+            raise AdminAuthorizationDenied
+        connected = True
+
+        def live():
+            return connected and current()
+
+        endpoint = (owner, page, capability)
+        try:
+            ticket = validator.begin(endpoint, bearer, expiry, current=live)
+        except WebPublicRejected:
+            if not live():
+                raise AdminAuthorizationDenied from None
+            raise RuntimeError("module query unavailable") from None
+        try:
+            facts = validator.deadline_facts(ticket)
+            route = validator.route_for(ticket, endpoint)
+            state = (validator, ticket, core, self._generation, facts)
+            task = asyncio.current_task()
+            watcher_stop = False
+
+            async def disconnect():
+                nonlocal connected
+                while not watcher_stop:
+                    disconnected = await raw.is_disconnected()
+                    if watcher_stop:
+                        return
+                    if disconnected:
+                        connected = False
+                        task.cancel()
+                        return
+                    await asyncio.sleep(0.02)
+
+            def fence():
+                if (
+                    not live()
+                    or validator is not self._web_validator
+                    or facts[0] <= monotonic()
+                    or facts[1] <= time()
+                ):
+                    raise AdminAuthorizationDenied
+                try:
+                    validator.require_route_current(endpoint, route)
+                except WebPublicRejected:
+                    raise AdminAuthorizationDenied from None
+
+            watcher = asyncio.create_task(
+                disconnect(), name="ygl:module-invoke-disconnect"
+            )
+            try:
+                result = await asyncio.wait_for(
+                    self.invoke_public_web(
+                        state, endpoint, parameters, images=action == "module-preview"
+                    ),
+                    timeout=max(0, validator.remaining(ticket)),
+                )
+                await check(binding.owner, binding.page, binding.module_epoch, action)
+                fence()
+                return result
+            except WebPublicRejected as error:
+                fence()
+                if error.args == ("request_rejected",):
+                    raise ValueError("invalid module query") from None
+                raise RuntimeError("module query unavailable") from None
+            finally:
+                primary_error = sys.exception()
+                watcher_stop = True
+                cancellation_pending = False
+                watcher_error = None
+                try:
+                    watcher.cancel()
+                    try:
+                        await watcher
+                    except asyncio.CancelledError:
+                        cancellation_pending = task.cancelling() > 0
+                    except Exception as error:
+                        watcher_error = error
+                    cancellation_pending = cancellation_pending or task.cancelling() > 0
+                    if not cancellation_pending and not isinstance(
+                        primary_error, asyncio.CancelledError
+                    ):
+                        fence()
+                        if primary_error is None and watcher_error is not None:
+                            raise watcher_error
+                finally:
+                    validator.revoke(ticket)
+                if cancellation_pending and not isinstance(
+                    primary_error, asyncio.CancelledError
+                ):
+                    raise asyncio.CancelledError
+        except WebPublicRejected:
+            if not live():
+                raise AdminAuthorizationDenied from None
+            raise RuntimeError("module query unavailable") from None
+        finally:
+            validator.revoke(ticket)
+
     async def module_page_operation(self, action, data, *, request):
         """Bind a real Dashboard session to a current, selected module page.
 
@@ -958,6 +1084,8 @@ class AstrBotRuntime:
             "module-page-session",
             "module-page-session-close",
             "module-page-assets",
+            "module-invoke",
+            "module-preview",
             "module-job-submit",
             "module-job-status",
             "module-job-result",
@@ -1087,6 +1215,47 @@ class AstrBotRuntime:
                 binding.owner, binding.page, binding.module_epoch, action
             )
             return result
+        if action in {"module-invoke", "module-preview"}:
+
+            def query_current():
+                if not request_current():
+                    return False
+                try:
+                    current_binding = binding_now(
+                        binding.owner, binding.page, binding.module_epoch
+                    )
+                    self._page_sessions.require(
+                        data["page_session"],
+                        subject=subject,
+                        bearer_digest=bearer_digest,
+                        binding=current_binding,
+                        generation=generation,
+                    )
+                    return (
+                        current_binding == binding
+                        and data.get("runtime_id") == binding.runtime_id
+                        and any(
+                            page.route_id == binding.page
+                            and page.capability_id == data.get("capability_id")
+                            for page in core.registry.snapshot()
+                            .module(binding.owner)
+                            .manifest.pages
+                        )
+                    )
+                except Exception:
+                    return False
+
+            return await self._module_invoke_operation(
+                action,
+                data,
+                core=core,
+                binding=binding,
+                raw=raw,
+                expiry=expiry,
+                bearer=request.headers.getlist("authorization")[0].split(" ", 1)[1],
+                current=query_current,
+                check=check_page_binding,
+            )
         if action.startswith("module-job-"):
             return await self._module_job_operation(
                 action,

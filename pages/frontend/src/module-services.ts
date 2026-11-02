@@ -43,7 +43,7 @@ export async function createModuleServices({bridge,binding,capabilityId,isCurren
   }
   await pageSession();
   async function request(action:string,payload:Record<string,unknown>={}) {
-    check();const page_session=await pageSession();check();let result:unknown;try{result=await bridge.apiPost('admin/module-'+action,{...payload,...identity,page_session});}catch(error){check(true);throw publicError(error);}check(true);return result;
+    check();const page_session=await pageSession();check(true);let result:unknown;try{result=await bridge.apiPost('admin/module-'+action,{...payload,...identity,page_session});}catch(error){check(true);throw publicError(error);}check(true);return result;
   }
   async function mutation(action:string,expectedRevision:number,payload:Record<string,unknown>) {
     check();if(writing)throw Error('operation_in_progress');if(!revision(expectedRevision))throw Error('invalid_config');writing=true;
@@ -66,8 +66,8 @@ export async function createModuleServices({bridge,binding,capabilityId,isCurren
         return new Blob([bytes],{type:value.media_type});
       },
     }),
-    async invoke(id:string,parameters:unknown) {check();if(id!==capabilityId||!id)denied();const result=await bridge.apiPost('invoke',{owner:identity.owner,page:identity.page,capability_id:id,parameters});check(true);return result;},
-    async preview(id:string,parameters:unknown) {check();if(id!==capabilityId||!id)denied();const result=await bridge.apiPost('invoke-images',{owner:identity.owner,page:identity.page,capability_id:id,parameters});check(true);return result;},
+    async invoke(id:string,parameters:unknown) {check();if(id!==capabilityId||!id)denied();return request('invoke',{capability_id:id,parameters});},
+    async preview(id:string,parameters:unknown) {check();if(id!==capabilityId||!id)denied();return request('preview',{capability_id:id,parameters});},
     config:Object.freeze({
       async current() {const value=await request('config-current');assertConfigBudget(value);if(!plain(value)||!revision(value.revision)||!plain(value.fields)||!['fields,revision','descriptors,fields,revision'].includes(Object.keys(value).sort().join()))throw Error('operation_unavailable');
         for(const row of Object.values(value.fields))if(!plain(row)||Object.keys(row).sort().join()!==(row.source==='legacy'?'migration_pending,present,source,state,value':'present,source,state,value')||!['valid','invalid'].includes(String(row.state))||typeof row.present!=='boolean'||!['sqlite','default','legacy'].includes(String(row.source))||row.source==='legacy'&&(row.migration_pending!==true||row.present!==false||row.state!=='valid'))throw Error('operation_unavailable');

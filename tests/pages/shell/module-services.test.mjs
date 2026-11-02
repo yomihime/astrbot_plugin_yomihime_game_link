@@ -4,6 +4,14 @@ import {sourceModule} from './compile.mjs';
 const {createModuleServices}=await sourceModule('pages/frontend/src/module-services.ts');
 const binding={owner:'example/demo',page:'config',runtime_id:'synthetic-runtime',module_epoch:3};
 async function harness(handler,confirmClear=async()=>true){let current=true;const calls=[];const services=await createModuleServices({onDispose:()=>{},bridge:{apiPost:async(action,body)=>{if(action==='admin/module-page-session')return {page_session:'synthetic-proof',expires_at:Date.now()/1000+30};calls.push({action,body});return handler(action,body);}},binding,capabilityId:'example.query',isCurrent:()=>current,confirmClear});return {services,calls,revoke(){current=false;}};}
+test('native queries and image previews carry the current Host page grant and never use public ingress',async()=>{
+ const h=await harness(()=>({schema_version:1,status:'success'}));
+ await h.services.invoke('example.query',{query:'synthetic'});await h.services.preview('example.query',{});
+ assert.deepEqual(h.calls,[
+  {action:'admin/module-invoke',body:{capability_id:'example.query',parameters:{query:'synthetic'},...binding,page_session:'synthetic-proof'}},
+  {action:'admin/module-preview',body:{capability_id:'example.query',parameters:{},...binding,page_session:'synthetic-proof'}},
+ ]);
+});
 test('owner-bound services return immutable own DTOs without exposing transport',async()=>{
  const h=await harness(()=>({revision:4,fields:{sample:{value:'safe',state:'valid',present:true,source:'sqlite'}}}));
  const value=await h.services.config.current();assert.ok(Object.isFrozen(value.fields.sample));assert.equal(h.services.apiPost,undefined);
