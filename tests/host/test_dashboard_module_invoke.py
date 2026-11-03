@@ -4,6 +4,7 @@ import asyncio
 import copy
 import json
 import math
+import os
 import time
 import unittest
 from dataclasses import replace
@@ -17,6 +18,7 @@ from ygl_test_subject.adapters.astrbot.web_public import (
     WebPublicRejected,
 )
 from ygl_test_subject.extensions.static_page_projection import StaticPageProjection
+from ygl_test_subject.infrastructure.private_storage import resolve_private_storage
 
 from tests.host import test_admin_pages as harness
 from tests.host import test_module_page_http as page_fixture
@@ -31,9 +33,24 @@ class DashboardModuleInvokeTests(page_fixture.unittest.IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self):
         factory = harness.AstrBotRuntime
+        environment = patch.dict(os.environ, {"YGL_SECRET_KEY": ""})
+        environment.start()
+        self.addCleanup(environment.stop)
 
         def runtime(context, **kwargs):
             plugin = kwargs["plugin_root"]
+            if os.name == "nt":
+                from ygl_test_subject.infrastructure.windows.private_storage import (
+                    create_private_directory,
+                )
+
+                private = create_private_directory(plugin.parent, "private")
+                layout = patch(
+                    "ygl_test_subject.adapters.astrbot.runtime.resolve_private_storage",
+                    lambda data: resolve_private_storage(data, private_base=private),
+                )
+                layout.start()
+                self.addCleanup(layout.stop)
             package = plugin.parent / "dlc/packages/minimal"
             package.mkdir(parents=True)
             example = ROOT / "examples/modules/minimal"
