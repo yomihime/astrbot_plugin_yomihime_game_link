@@ -51,7 +51,7 @@ try{
   for(let i=0;i<12;i++){await Promise.resolve();await runtime.nextTick();}
   const queries=calls.filter(c=>c.kind==='post'&&c.endpoint==='admin/module-invoke');
   assert.equal(queries.length,1);assert.ok(window.document.querySelector('.ff14-result'));
-  assert.equal(calls.filter(c=>c.kind==='post'&&['invoke','preview'].includes(c.endpoint)).length,0);
+  assert.equal(calls.filter(c=>c.kind==='post'&&['invoke','invoke-images','preview'].includes(c.endpoint)).length,0);
   assert.deepEqual(Object.keys(queries[0].body).sort(),['capability_id','module_epoch','owner','page','page_session','parameters','runtime_id']);
   assert.deepEqual(JSON.parse(JSON.stringify(queries[0].body)),{capability_id:'item.lookup',parameters:{query:'44091'},owner:'ff14/ff14',page:'items',runtime_id:'runtime-1',module_epoch:1,page_session:'synthetic-proof'});
   assert.ok(calls.filter(c=>c.kind==='post').every(c=>['admin/catalog','admin/modules','admin/read','admin/master-key-status','admin/credential-catalog','admin/credential-status','admin/credential-readiness','admin/module-page-session','admin/module-page-session-close','admin/module-invoke'].includes(c.endpoint)));
