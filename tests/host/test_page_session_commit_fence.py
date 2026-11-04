@@ -258,6 +258,7 @@ class PageCommitFenceTests(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual(receive_calls, 1)
                         self.assertEqual(observation, (True, True, 1))
                     observations.append(observation)
+                    self.last_starlette_resumed = resumed_after_cancel.is_set()
             if primary_error is not None:
                 raise primary_error
 
@@ -453,10 +454,11 @@ class PageCommitFenceTests(unittest.IsolatedAsyncioTestCase):
         for monitor in ("starlette", "starlette-revoke"):
             with self.subTest(monitor=monitor):
                 self.assertEqual(await self.scenario(None, monitor=monitor), 1)
-                watcher = self.last_watchers[0]
                 self.assertEqual(
                     self.last_observations,
-                    [(True, True, 1)] if watcher.cancelled() else [(False, False, 1)],
+                    [(False, False, 1)]
+                    if self.last_starlette_resumed
+                    else [(True, True, 1)],
                 )
                 self.assert_request_released()
                 await self.database.executor.run_transaction(

@@ -875,9 +875,9 @@ class GlobalAdminCommitFenceTests(unittest.IsolatedAsyncioTestCase):
                         response = await handler
                         self.assertEqual(
                             observations,
-                            [(True, True, 1)]
-                            if watchers[0].cancelled()
-                            else [(False, False, 1)],
+                            [(False, False, 1)]
+                            if resumed_after_cancel.is_set()
+                            else [(True, True, 1)],
                         )
                         self.assertEqual(
                             response.status_code, 403 if revoke_at_cleanup else 200
