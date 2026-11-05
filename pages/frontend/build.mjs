@@ -1,4 +1,4 @@
-import {resolve, dirname, basename} from 'node:path';
+import {resolve, dirname, basename, relative, isAbsolute} from 'node:path';
 import {tmpdir} from 'node:os';
 import {fileURLToPath} from 'node:url';
 import {readFile, writeFile, mkdir, readdir, lstat, realpath, mkdtemp, rm} from 'node:fs/promises';
@@ -47,7 +47,7 @@ await mkdir(shell, {recursive: true});
 await build({...common, plugins:[runtimeAudit], build: {outDir: shell, emptyOutDir: false, lib: {entry: resolve(frontend, 'src/runtime.ts'), formats: ['es'], fileName: () => 'runtime.js'}, minify: true, sourcemap: false}});
 await build({...common, plugins:[runtimeAudit], build: {outDir: shell, emptyOutDir: false, lib: {entry: resolve(frontend, 'src/main.ts'), formats: ['es'], fileName: () => 'app.js', cssFileName: 'styles'}, rolldownOptions: {external: ['vue', 'naive-ui', '@game-link/ui', './module-loader.js'], output: {paths: {'vue': './runtime.js', 'naive-ui': './runtime.js','@game-link/ui':'./runtime.js'}}}, minify: true}});
 const projected=[];
-const branches=[],stylePaths=new Set();
+const branches=[],presentationBranches=[],stylePaths=new Set(),presentationAudit=[];
 for(const bundleRoot of bundleRoots)for(const packageName of (await readdir(resolve(root,bundleRoot))).sort()) {
  const source=resolve(root,bundleRoot,packageName),destination=resolve(stageRoot,bundleRoot,packageName);
  const metadata=await lstat(source);
@@ -77,27 +77,70 @@ for(const bundleRoot of bundleRoots)for(const packageName of (await readdir(reso
   const match=/^pages\/dist\/([A-Za-z0-9_-]+)\.js$/.exec(page.entry);
   if(match)entries.set(match[1],page);
  }
+ const bundle = (entry, cssFileName, plugins=[]) =>
+  build({...common, plugins, build:{outDir:resolve(destination,'pages/dist'),emptyOutDir:false,
+   lib:{entry:resolve(source,'pages/src',entry+'.ts'),formats:['es'],fileName:()=>entry+'.js',cssFileName},
+   rolldownOptions:{external:['vue','naive-ui','@game-link/ui'],output:{minify:true,paths:{'vue':'../../../../../runtime.js','naive-ui':'../../../../../runtime.js','@game-link/ui':'../../../../../runtime.js'}}},minify:true}});
  for(const [entry,page] of entries) {
   const styles=page.styles||[],style=styles.find(value=>/^pages\/dist\/[A-Za-z0-9_-]+\.css$/.test(value));
-  await build({...common, build:{outDir:resolve(destination,'pages/dist'),emptyOutDir:false,
-   lib:{entry:resolve(source,'pages/src',entry+'.ts'),formats:['es'],fileName:()=>entry+'.js',cssFileName:style?style.split('/').at(-1).slice(0,-4):'styles'},
-   rolldownOptions:{external:['vue','naive-ui','@game-link/ui'],output:{minify:true,paths:{'vue':'../../../../../runtime.js','naive-ui':'../../../../../runtime.js','@game-link/ui':'../../../../../runtime.js'}}},minify:true}});
+  await bundle(entry, style?style.split('/').at(-1).slice(0,-4):'styles');
+ }
+ const presentations = new Map();
+ const businessEntries = new Set([...entries.keys()].map(entry =>
+  resolve(source, 'pages/src', entry+'.ts').replaceAll('\\','/')));
+ for (const module of manifest.modules) {
+  const name = 'presentation-' + module.module_id;
+  const entry = resolve(source, 'pages/src', name+'.ts');
+  let sourceInfo;
+  try { sourceInfo = await lstat(entry); }
+  catch (error) { if (error.code === 'ENOENT' || error.code === 'ENOTDIR') continue; throw error; }
+  if (!sourceInfo.isFile() || await realpath(entry) !== entry) throw Error('Invalid reviewed presentation source');
+  const js = 'pages/dist/'+name+'.js', css = 'pages/dist/'+name+'.css';
+  if (manifest.modules.some(candidate => (candidate.pages || []).some(page =>
+   page.entry === js || page.styles?.includes(css)))) {
+   throw Error('Presentation resources cannot be business page entries or styles');
+  }
+  const owner = manifest.package_id+'/'+module.module_id;
+  await bundle(name, name, [{name:'module-presentation-inputs', generateBundle() {
+   const files = [...this.getModuleIds()].filter(id => !id.startsWith('\0') &&
+    !this.getModuleInfo(id)?.isExternal).map(id => id.split('?')[0]);
+   if (files.some(id => {
+    const path = relative(source,id).replaceAll('\\','/');
+    return isAbsolute(path) || path === '..' || path.startsWith('../');
+   })) {
+    throw Error('Presentation entry depends on files outside its reviewed package');
+   }
+   if (files.some(id => businessEntries.has(id.replaceAll('\\','/')))) {
+    throw Error('Presentation entry imports a business page entry');
+   }
+   presentationAudit.push({owner, entry: js,
+    inputs: [...new Set(files.map(id => relative(root,id).replaceAll('\\','/')))].sort()});
+  }}]);
+  const files = await readdir(resolve(destination,'pages/dist'));
+  presentations.set(module.module_id, [js, ...(files.includes(name+'.css') ? [css] : [])]);
  }
  const generated=[];
  const generatedNames=new Set();
  for(const [entry,page] of entries){generatedNames.add(entry+'.js');for(const style of page.styles||[])if(style.startsWith('pages/dist/'))generatedNames.add(style.slice('pages/dist/'.length));}
- if(entries.size)for(const file of [...generatedNames].sort()) {
+ const presentationFiles = new Set([...presentations.values()].flat());
+ for (const path of presentationFiles) generatedNames.add(path.slice('pages/dist/'.length));
+ for(const file of [...generatedNames].sort()) {
   const bytes=await readFile(resolve(destination,'pages/dist',file));
   generated.push({path:'pages/dist/'+file,sha256:createHash('sha256').update(bytes).digest('hex')});
  }
- for(const module of manifest.modules)module.resources=await mergeManifestResources(source,module.resources||[],generated);
+ const generatedPaths = new Set(generated.map(resource => resource.path));
+ for(const module of manifest.modules) {
+  const ownPresentation = presentations.get(module.module_id) || [];
+  module.resources = await mergeManifestResources(source, module.resources || [],
+   generated.filter(resource => !presentationFiles.has(resource.path) || ownPresentation.includes(resource.path)));
+ }
  await mkdir(resolve(destination,'pages'),{recursive:true});
  await writeFile(resolve(destination,'pages/resources.json'),JSON.stringify(generated,null,2)+'\n');
  await writeFile(resolve(destination,'yomihime.manifest.json'),(JSON.stringify(manifest,null,2)+'\n').replaceAll('\n',manifestSource.includes('\r\n')?'\r\n':'\n'));
  for(const module of manifest.modules) {
   const owner=manifest.package_id+'/'+module.module_id;
   for(const resource of module.resources) {
-   const generatedResource=resource.path.startsWith('pages/dist/')&&entries.size;
+   const generatedResource=generatedPaths.has(resource.path);
    const bytes=await readFile(resolve(generatedResource?destination:source,resource.path));
    if(createHash('sha256').update(bytes).digest('hex')!==resource.sha256)throw Error('Resource hash mismatch');
    const asset=resolve(shell,'module-assets',owner,resource.path);await mkdir(dirname(asset),{recursive:true});await writeFile(asset,bytes);
@@ -107,10 +150,20 @@ for(const bundleRoot of bundleRoots)for(const packageName of (await readdir(reso
    branches.push('case '+JSON.stringify(entry)+': return import('+JSON.stringify('./'+entry)+');');
    for(const style of page.styles||[])stylePaths.add('module-assets/'+owner+'/'+style);
   }
+  const [presentationEntry, presentationStyle] = presentations.get(module.module_id) || [];
+  if (presentationEntry) {
+   const entry = 'module-assets/'+owner+'/'+presentationEntry;
+   presentationBranches.push('case '+JSON.stringify(entry)+': return import('+JSON.stringify('./'+entry)+');');
+   if (presentationStyle) stylePaths.add('module-assets/'+owner+'/'+presentationStyle);
+  }
  }
  projected.push({package:packageName,resources:generated});
 }
-await writeFile(resolve(shell,'module-loader.js'),"export const sharedRuntimeUrl=new URL('./runtime.js',import.meta.url).href;\nexport async function loadPage(entry){switch(entry){\n"+[...new Set(branches)].sort().join('\n')+"\ndefault:throw Error('Unknown module page');}}\n");
+const loaderFunction = (name, cases, error) =>
+ `export async function ${name}(entry){switch(entry){\n${[...new Set(cases)].sort().join('\n')}\ndefault:throw Error(${JSON.stringify(error)});}}\n`;
+await writeFile(resolve(shell,'module-loader.js'),"export const sharedRuntimeUrl=new URL('./runtime.js',import.meta.url).href;\n"+
+ loaderFunction('loadPage',branches,'Unknown module page')+
+ loaderFunction('loadPresentation',presentationBranches,'Unknown module presentation'));
 const template='<template id="module-style-assets"></template>';
 let index=await readFile(resolve(frontend,'src/index.html'),'utf8');
 if(index.split(template).length!==2)throw Error('Expected one inert module style template');
@@ -133,6 +186,7 @@ for (const name of [...runtimePackages].sort()) {
 await writeFile(resolve(shell,'THIRD_PARTY_NOTICES.txt'),notices.join('\n\n--------------------\n\n'));
 const auditDir=resolve(stageRoot,'.build/frontend'); await mkdir(auditDir,{recursive:true});
 await writeFile(resolve(auditDir,'runtime-packages.json'),JSON.stringify({packages:[...runtimePackages].sort(),facades:[{package:'vue',reason:'public runtime export facade; implementation rendered from @vue packages'}],modules:moduleAudit,licenseFiles},null,2)+'\n');
+await writeFile(resolve(auditDir,'presentation-entries.json'),JSON.stringify(presentationAudit,null,2)+'\n');
 await publishBuild(stageRoot,outputRoot);
 console.log(JSON.stringify({outputRoot,runtimeBytes:(await readFile(resolve(shell,'runtime.js'))).length,projected}));
 } finally {

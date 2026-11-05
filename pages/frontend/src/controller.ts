@@ -55,6 +55,11 @@ export function createShell({bridge, container, window, loadPage, runtimeUrl, ch
     }
     bindings.clear(); for (const [owner, key] of next) bindings.set(owner, key); catalogSeen = true;
   }
+  function canExecuteModule(module: ModuleDescriptor) {
+    // The document's executable projection cannot be renewed by a catalog refresh.
+    return ready && !closed && !projectionRevoked && !revokedOwners.has(module.module_id) &&
+      bindings.get(module.module_id) === assetIdentity(module, boundary);
+  }
   function disposePage() {
     if (!retiring) {
       generation++; navigationVersion++;lastPageNavigationVersion=-1;pendingIdentity=''; identity=''; state.mounted=false;
@@ -73,7 +78,7 @@ export function createShell({bridge, container, window, loadPage, runtimeUrl, ch
     const selection = selected();
     if (!selection || !ready) {disposePage(); if (!state.cleanupPending && (projectionRevoked || revokedOwners.has(state.selected?.owner || ''))) state.message=revokedMessage(); changed(); return;}
     const {module,page} = selection, target = mountIdentity(module,page,boundary);
-    if (projectionRevoked || revokedOwners.has(module.module_id)) {disposePage(); if (!state.cleanupPending) state.message = revokedMessage(); changed(); return;}
+    if (!canExecuteModule(module)) {disposePage(); if (!state.cleanupPending) state.message = revokedMessage(); changed(); return;}
     if (target === identity && mounted) {mounted.update(pageContext(module)); changed(); return;}
     if (target === pendingIdentity) return;
     disposePage(); if (retiring) {changed(); return;}
@@ -96,8 +101,19 @@ export function createShell({bridge, container, window, loadPage, runtimeUrl, ch
         throw error;
       }
       if (!ownScope.isCurrent() || pendingIdentity !== target) return;
+      let logoResourceUrl: string | undefined;
+      if (page.role === 'home' && pageContext(module).available) {
+        // Decoration is optional even if URL creation fails.
+        try { logoResourceUrl = await assets.pageLogo(module, page, ownScope); } catch {}
+        const current = selected();
+        if (!ownScope.isCurrent() || pendingIdentity !== target || !current ||
+            mountIdentity(current.module, current.page, boundary) !== target) return;
+        if (current.page.role !== 'home' || !pageContext(current.module).available) logoResourceUrl = undefined;
+      }
       phase='mount';
-      const instance = code.mount(view, Object.freeze({routeId: page.route_id, context: pageContext(module), services, scope: ownScope,onNavigationStateChange:()=>{if(ownScope.isCurrent()){navigationVersion++;changed();}}}));
+      const instance = code.mount(view, Object.freeze({routeId: page.route_id, context: pageContext(module), services, scope: ownScope,
+        ...(logoResourceUrl === undefined ? {} : {logoResourceUrl}),
+        onNavigationStateChange:()=>{if(ownScope.isCurrent()){navigationVersion++;changed();}}}));
       if (!instance || typeof instance.update !== 'function' || typeof instance.dispose !== 'function') throw Error('invalid_page_instance');
       mounted = instance; identity = target; pendingIdentity = ''; state.mounted = true; changed();
     } catch (error) {if (!closed && !projectionRevoked && !revokedOwners.has(module.module_id)) {
@@ -134,7 +150,7 @@ export function createShell({bridge, container, window, loadPage, runtimeUrl, ch
     contextSeen = true; boundary = next; ready = true; void refresh();
   }
   const hashChanged = () => {pickRoute(); void syncPage(); const main = container.ownerDocument.getElementById('page-root'); main?.focus({preventScroll:true}); window.scrollTo({top:0,left:0,behavior:'instant'});};
-  return {state, selected, refresh,navigationImpact,refuseNavigation(){state.message='无法核对当前模块的离页状态，请重新打开页面。';changed();}, selectModules(){window.location.hash='#/modules';pickRoute();void syncPage();}, selectHome() {window.location.hash='#/'; pickRoute(); void syncPage();}, selectModule(owner:string,section:'home'|'queries'='home'){window.location.hash='#/module/'+encodeURIComponent(owner)+(section==='queries'?'/-/queries':'');pickRoute();void syncPage();}, selectSettings(owner?:string) {const config=state.catalog?.modules?.find(m=>m.module_id===owner)?.pages.find(p=>p.role==='config');window.location.hash=owner?(config?routeHash(owner,config.route_id):'#/module/'+encodeURIComponent(owner)):'#/settings'; pickRoute(); void syncPage();}, select(owner: string, route: string) {window.location.hash = routeHash(owner,route); pickRoute(); void syncPage();},
+  return {state, selected, refresh,canExecuteModule,navigationImpact,refuseNavigation(){state.message='无法核对当前模块的离页状态，请重新打开页面。';changed();}, selectModules(){window.location.hash='#/modules';pickRoute();void syncPage();}, selectHome() {window.location.hash='#/'; pickRoute(); void syncPage();}, selectModule(owner:string,section:'home'|'queries'='home'){window.location.hash='#/module/'+encodeURIComponent(owner)+(section==='queries'?'/-/queries':'');pickRoute();void syncPage();}, selectSettings(owner?:string) {const config=state.catalog?.modules?.find(m=>m.module_id===owner)?.pages.find(p=>p.role==='config');window.location.hash=owner?(config?routeHash(owner,config.route_id):'#/module/'+encodeURIComponent(owner)):'#/settings'; pickRoute(); void syncPage();}, select(owner: string, route: string) {window.location.hash = routeHash(owner,route); pickRoute(); void syncPage();},
     retryCleanup() {if (!state.cleanupPending) return; if (retiring) disposePage(); assets.retryCleanup(); cleanupState(); if (!state.cleanupPending) {state.message=projectionRevoked || revokedOwners.has(state.selected?.owner || '') ? revokedMessage() : '页面清理完成，请手动刷新状态。'; if (!closed) void syncPage();} changed();},
     start() {if (closed) return; window.addEventListener('hashchange',hashChanged); if (!bridge?.ready || !bridge?.onContext || !bridge?.apiGet || !bridge?.apiPost) {state.message = '宿主连接尚未就绪，请重新打开页面。'; changed(); return;} off = bridge.onContext(context => accept(context,true)); deadline(Promise.resolve(bridge.ready())).then(context => accept(context)).catch(() => {if (!ready && !closed) {state.message = '连接宿主失败，请重新打开页面。'; changed();}});},
     dispose() {if (closed) return; closed = true; sequence++; ready = false; off?.(); window.removeEventListener('hashchange',hashChanged); for (const timer of timers) clearTimeout(timer); timers.clear(); disposePage(); assets.invalidateAll(); cleanupState();},

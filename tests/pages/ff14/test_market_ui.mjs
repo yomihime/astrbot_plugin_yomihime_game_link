@@ -33,7 +33,12 @@ check("candidate continuation sends only ticket and ID and keeps keyboard focus 
   const h = await queryHarness("market"); await edit(h, "query", "牛排"); await query(h, marketSample("needsselection"));
   const button = candidates(h)[0]; button.focus(); await button.press("Enter"); await flush();
   assert.deepEqual(JSON.parse(h.bridge.posts.at(-1).parameters.input), {selection: {batch_id: "fixture-batch-1", generation: "fixture-generation-1", item_id: 44091}});
-  assert.equal(h.document.activeElement, h.root.all((n) => n.id === "ff14-market-query")[0]); assert.equal(submitFor(h).disabled, true);
+  assert.equal(h.document.activeElement, h.root.all((n) => n.id === "ff14-market-query")[0]);
+  const submit = submitFor(h);
+  assert.equal(submit.disabled, false);
+  assert.equal(submit.getAttribute("aria-disabled"), "true");
+  assert.equal(submit.getAttribute("aria-busy"), "true");
+  submit.focus(); assert.equal(h.document.activeElement, submit);
   await button.click(); await submitFor(h).click(); await flush(); assert.equal(h.bridge.posts.length, 2);
   h.bridge.posts.at(-1).resolve(marketSample()); await flush(); assert.equal(candidates(h).length, 0); h.app.destroy();
 });

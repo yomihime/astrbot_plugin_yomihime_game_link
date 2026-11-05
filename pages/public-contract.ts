@@ -5,6 +5,32 @@ export type ModulePageRole = 'home' | 'config' | 'aux';
 export interface ModulePageDefinition {readonly routeId: string; readonly title: string; readonly role: ModulePageRole; readonly order?: number; readonly capabilityId?: string | null}
 export interface PageContext {readonly theme: 'light' | 'dark'; readonly locale: string; readonly available: boolean; readonly owner: string; readonly runtimeId: string; readonly epoch: number; readonly boundary: string}
 export interface ResourceScope {readonly signal: AbortSignal; isCurrent(): boolean; onDispose(callback: () => void): () => void}
+
+export type PageColorSlot = 'background' | 'panel' | 'text' | 'muted' | 'border' | 'accent' | 'accentContrast' | 'logo';
+export interface PageAppearance {
+  light?: Partial<Record<PageColorSlot, string>>;
+  dark?: Partial<Record<PageColorSlot, string>>;
+}
+export interface ResolvedPageAppearance {
+  readonly theme: 'light' | 'dark';
+  readonly colors: Readonly<Record<PageColorSlot, string>>;
+  readonly cssVars: Readonly<Record<string, string>>;
+  readonly naiveOverrides: Readonly<Record<string, unknown>>;
+}
+export interface LogoMountOptions {
+  resourceUrl: string;
+  context: Readonly<PageContext>;
+  appearance: ResolvedPageAppearance;
+  scope: ResourceScope;
+}
+export interface MountedLogo {
+  update(context: Readonly<PageContext>, appearance: ResolvedPageAppearance): void;
+  dispose(): void;
+}
+export interface ModulePresentationExports {
+  presentation?: {schemaVersion: 1; appearance?: PageAppearance};
+  mountLogo?: (container: HTMLElement, options: LogoMountOptions) => MountedLogo;
+}
 export interface ConfigField {readonly value: JsonValue; readonly state: 'valid' | 'invalid'; readonly present: boolean; readonly source: 'sqlite' | 'default' | 'legacy'; readonly migration_pending?: boolean}
 export interface ConfigDescriptor {readonly description:string; readonly value_schema:JsonValue|null; readonly default:JsonValue; readonly choices?:readonly {readonly value:JsonValue;readonly label:string}[]}
 export interface ConfigSnapshot {readonly revision: number; readonly fields: Readonly<Record<string, ConfigField>>; readonly descriptors?:Readonly<Record<string,ConfigDescriptor>>}
@@ -39,6 +65,6 @@ export interface ModulePageServices {
 }
 /** Bounded draft/pending summary only; the shell derives the owning module. */
 export interface NavigationImpact {readonly ordinary:boolean; readonly credentials:boolean; readonly pending:boolean; readonly version:number}
-export interface PageOptions {readonly routeId: string; readonly context: Readonly<PageContext>; readonly services: ModulePageServices; readonly scope: ResourceScope; readonly onNavigationStateChange?:()=>void}
+export interface PageOptions {readonly routeId: string; readonly context: Readonly<PageContext>; readonly services: ModulePageServices; readonly scope: ResourceScope; readonly logoResourceUrl?: string; readonly onNavigationStateChange?:()=>void}
 export interface MountedPage {update(context: Readonly<PageContext>): void; dispose(): void; navigationImpact?():Readonly<NavigationImpact>}
 export interface PageModule {mount(container: HTMLElement, options: PageOptions): MountedPage}

@@ -1,6 +1,8 @@
 import {sha256Hex} from './sha256';
 import {createScope} from './lifecycle';
+import {isPageAppearance} from './ui/page-appearance';
 import type {Bridge, ModuleDescriptor, PageDescriptor, PageModule} from './contracts';
+import type {ModulePresentationExports, ResourceScope} from '../../public-contract';
 
 // This identity belongs to the HTML projection, not to a transient page view.
 export function assetIdentity(module: ModuleDescriptor, boundary: string): string {
@@ -8,10 +10,54 @@ export function assetIdentity(module: ModuleDescriptor, boundary: string): strin
     module.resources, module.pages.map(page => [page.route_id, page.entry, page.styles, page.capability_id])]);
 }
 
-export function createModuleAssets(document: Document, loadPage: (entry: string) => Promise<PageModule>, timeoutMs: number, dynamic?:{bridge:Bridge;runtimeUrl:string}) {
+export function presentationPaths(module: ModuleDescriptor) {
+  if (module.state !== 'loaded' || !module.runtime_id ||
+      !/^[a-z][a-z0-9_.-]*\/[a-z][a-z0-9_.-]*$/.test(module.module_id)) return null;
+  const ownerPrefix = `module-assets/${module.module_id}/`;
+  const livePrefix = `${ownerPrefix}pages/p${module.asset_version}/`;
+  const page = /^[0-9a-f]{64}$/.test(module.asset_version)
+    ? module.pages.find(item => item.entry.startsWith(livePrefix))
+    : undefined;
+  if (!page && module.source?.kind !== 'builtin') return null;
+  const prefix = page ? livePrefix : ownerPrefix;
+  const base = `pages/dist/presentation-${module.module_id.split('/')[1]}`;
+  const entry = `${prefix}${base}.js`;
+  const style = `${prefix}${base}.css`;
+  const declared = (path: string) => module.resources.some(item =>
+    item.path === path && /^[0-9a-f]{64}$/.test(item.sha256));
+  if (!declared(entry) || module.pages.some(page => page.entry === entry || page.styles.includes(style))) {
+    return null;
+  }
+  return {entry, style: declared(style) ? style : null, prefix, page};
+}
+
+function presentationExports(value: unknown): ModulePresentationExports {
+  if (!value || typeof value !== 'object' ||
+      Object.keys(value).some(key => key !== 'presentation' && key !== 'mountLogo')) {
+    throw Error('invalid_presentation');
+  }
+  const {presentation, mountLogo} = value as ModulePresentationExports;
+  if ((!presentation && !mountLogo) ||
+      (Object.hasOwn(value, 'mountLogo') && typeof mountLogo !== 'function') ||
+      (Object.hasOwn(value, 'presentation') &&
+        (!presentation || presentation.schemaVersion !== 1 ||
+          Object.keys(presentation).some(key => key !== 'schemaVersion' && key !== 'appearance') ||
+          (Object.hasOwn(presentation, 'appearance') && !isPageAppearance(presentation.appearance))))) {
+    throw Error('invalid_presentation');
+  }
+  return {presentation, mountLogo};
+}
+
+export function createModuleAssets(
+  document: Document,
+  loadPage: (entry: string) => Promise<PageModule>,
+  timeoutMs: number,
+  dynamic?: {bridge: Bridge; runtimeUrl: string},
+  loadPresentation?: (entry: string) => Promise<unknown>,
+) {
   type Payload = Map<string,{bytes:Uint8Array;mime:string}>;
   type Projection = {entry:string;styles:string[];payload:Payload};
-  type Record = {identity:string;revoked: boolean; scope: ReturnType<typeof createScope>; styles: Map<string, Promise<void>>; entries: Map<string, Promise<PageModule>>; projections:Map<string,Promise<Projection>>; images:Map<string,Promise<string>>};
+  type Record = {identity:string;revoked: boolean; scope: ReturnType<typeof createScope>; styles: Map<string, Promise<void>>; entries: Map<string, Promise<PageModule>>; projections:Map<string,Promise<Projection>>; images:Map<string,Promise<string>>; presentation?: Promise<ModulePresentationExports>};
   const owners = new Map<string, Record>();
   async function liveResources(module:ModuleDescriptor,page:PageDescriptor,value:Record):Promise<Projection>{
     if(!dynamic||!module.runtime_id)throw Error('missing_live_projection');
@@ -45,24 +91,55 @@ export function createModuleAssets(document: Document, loadPage: (entry: string)
     let cached=value.projections.get(page.route_id);
     if(!cached){cached=liveResources(module,page,value);value.projections.set(page.route_id,cached);}return cached;
   }
-  async function livePage(module:ModuleDescriptor,page:PageDescriptor,value:Record):Promise<PageModule>{
-    const {entry:entryPath,styles,payload}=await projection(module,page,value);
+  function liveLogo(payload: Payload, path: string) {
+    const item = payload.get(path);
+    if (!item || !['image/svg+xml', 'image/png', 'image/jpeg'].includes(item.mime)) {
+      throw Error('invalid_live_image');
+    }
+    return new Blob([item.bytes as BlobPart], {type: item.mime});
+  }
+  async function liveStyle(owner: string, payload: Payload, path: string, value: Record) {
+    if (value.revoked) throw Error('asset_revoked');
+    const item = payload.get(path);
+    if (!item || item.mime !== 'text/css') throw Error('invalid_live_style');
+    const css = new TextDecoder('utf-8', {fatal: true}).decode(item.bytes);
+    if (/@import\b|url\s*\(/i.test(css)) throw Error('unsupported_live_style_reference');
+    const blob = URL.createObjectURL(new Blob([css], {type: 'text/css'}));
+    await new Promise<void>((resolve, reject) => {
+      const link = document.createElement('link');
+      link.rel = 'stylesheet';
+      link.href = blob;
+      link.dataset.moduleStyle = owner;
+      let done = false;
+      const finish = (error?: Error) => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        link.onload = null;
+        link.onerror = null;
+        error ? reject(error) : resolve();
+      };
+      const timer = setTimeout(() => finish(Error('style_load_timeout')), timeoutMs);
+      link.onload = () => finish();
+      link.onerror = () => finish(Error('style_load_failed'));
+      value.scope.onDispose(() => {
+        finish(Error('asset_revoked'));
+        link.remove();
+        URL.revokeObjectURL(blob);
+      });
+      try { document.head.append(link); } catch { finish(Error('style_load_failed')); }
+    });
+  }
+
+  function liveRuntime(value: Record) {
     if(value.revoked||!dynamic)throw Error('asset_revoked');
     const runtimeUrl=new URL(dynamic.runtimeUrl,document.location.href);
     if(runtimeUrl.origin!==document.location.origin||!['http:','https:'].includes(runtimeUrl.protocol))throw Error('invalid_shared_runtime');
+    return runtimeUrl;
+  }
+
+  async function importLiveEntry(payload: Payload, entryPath: string, value: Record, runtimeUrl: URL) {
     const decoder=new TextDecoder('utf-8',{fatal:true});
-    for(const path of styles){
-      const item=payload.get(path);if(!item||item.mime!=='text/css')throw Error('invalid_live_style');
-      const css=decoder.decode(item.bytes);
-      if(/@import\b|url\s*\(/i.test(css))throw Error('unsupported_live_style_reference');
-      const blob=URL.createObjectURL(new Blob([css],{type:'text/css'}));value.scope.onDispose(()=>URL.revokeObjectURL(blob));
-      await new Promise<void>((resolve,reject)=>{
-        const link=document.createElement('link');link.rel='stylesheet';link.href=blob;link.dataset.moduleStyle=module.module_id;
-        let done=false;const finish=(error?:Error)=>{if(done)return;done=true;clearTimeout(timer);link.onload=null;link.onerror=null;error?reject(error):resolve();};
-        const timer=setTimeout(()=>finish(Error('style_load_timeout')),timeoutMs);link.onload=()=>finish();link.onerror=()=>finish(Error('style_load_failed'));
-        value.scope.onDispose(()=>{finish(Error('asset_revoked'));link.remove();});document.head.append(link);
-      });
-    }
     const entry=payload.get(entryPath);if(!entry||entry.mime!=='text/javascript'||value.revoked)throw Error('invalid_live_entry');
     // Installed page code uses only the shell's one public runtime import.
     let code=decoder.decode(entry.bytes);
@@ -72,6 +149,14 @@ export function createModuleAssets(document: Document, loadPage: (entry: string)
     const blob=URL.createObjectURL(new Blob([code],{type:'text/javascript'}));value.scope.onDispose(()=>URL.revokeObjectURL(blob));
     const mounted=await import(/* @vite-ignore */ blob);
     if(value.revoked)throw Error('asset_revoked');
+    return mounted;
+  }
+
+  async function livePage(module:ModuleDescriptor,page:PageDescriptor,value:Record):Promise<PageModule>{
+    const {entry, styles, payload} = await projection(module, page, value);
+    const runtimeUrl = liveRuntime(value);
+    for (const path of styles) await liveStyle(module.module_id, payload, path, value);
+    const mounted = await importLiveEntry(payload, entry, value, runtimeUrl);
     if(typeof mounted.mount!=='function')throw Error('invalid_page_entry');
     return mounted;
   }
@@ -106,15 +191,75 @@ export function createModuleAssets(document: Document, loadPage: (entry: string)
     value.styles.set(path, pending); return pending;
   }
   return {
+    async pageLogo(module: ModuleDescriptor, page: PageDescriptor, scope: ResourceScope): Promise<string | undefined> {
+      const path = module.display?.logo_resource;
+      if (!scope.isCurrent() || module.state !== 'loaded' || !module.runtime_id ||
+          page.role !== 'home' || !module.pages.includes(page) || !path ||
+          !/\.(?:svg|png|jpg|jpeg)$/.test(path) ||
+          !module.resources.some(item => item.path === path)) return undefined;
+      const prefix = `module-assets/${module.module_id}/`;
+      const livePrefix = `${prefix}pages/p${module.asset_version}/`;
+      const owner = owners.get(module.module_id);
+      if (!owner || owner.revoked || owner.identity !== assetIdentity(module, '')) return undefined;
+
+      if (!page.entry.startsWith(livePrefix)) {
+        if (module.source?.kind === 'builtin' && page.entry.startsWith(prefix) &&
+            path.startsWith(prefix) && !path.startsWith(livePrefix)) return './' + path;
+        return undefined;
+      }
+      if (!path.startsWith(livePrefix)) return undefined;
+      // The page loader has already verified this route's full resource payload.
+      const captured = owner.projections.get(page.route_id);
+      if (!captured) return undefined;
+      const {payload} = await captured;
+      if (!scope.isCurrent() || owner.revoked || owners.get(module.module_id) !== owner) return undefined;
+      const url = URL.createObjectURL(liveLogo(payload, path.slice(livePrefix.length)));
+      scope.onDispose(() => URL.revokeObjectURL(url));
+      return url;
+    },
+    async presentation(module: ModuleDescriptor, isCurrent: () => boolean = () => true): Promise<ModulePresentationExports | null> {
+      const paths = presentationPaths(module);
+      if (!paths) return null;
+      const value = record(module);
+      const live = paths.page ? await projection(module, paths.page, value) : null;
+      if (value.revoked || !isCurrent()) throw Error('asset_revoked');
+      const runtimeUrl = live ? liveRuntime(value) : null;
+      if (!live && !loadPresentation) throw Error('missing_presentation_projection');
+      if (paths.style) {
+        if (live) {
+          let pending = value.styles.get(paths.style);
+          if (!pending) {
+            pending = liveStyle(module.module_id, live.payload, paths.style.slice(paths.prefix.length), value);
+            value.styles.set(paths.style, pending);
+          }
+          await pending;
+        } else {
+          await style(module.module_id, value, paths.style);
+        }
+      }
+      if (value.revoked || !isCurrent()) throw Error('asset_revoked');
+      if (!value.presentation) {
+        value.presentation = (async () => {
+          if (live && runtimeUrl) {
+            const imported = await importLiveEntry(live.payload, paths.entry.slice(paths.prefix.length), value, runtimeUrl);
+            return presentationExports(imported);
+          }
+          return presentationExports(await loadPresentation!(paths.entry));
+        })();
+      }
+      const exports = await value.presentation;
+      if (value.revoked || !isCurrent()) throw Error('asset_revoked');
+      return exports;
+    },
     async image(module:ModuleDescriptor,path:string):Promise<string>{
       const prefix=`module-assets/${module.module_id}/pages/p${module.asset_version}/`;
       if(module.state!=='loaded'||!module.runtime_id||path!==module.display?.logo_resource||!path.startsWith(prefix)||!module.resources.some(item=>item.path===path)||!/\.(?:svg|png|jpg|jpeg)$/.test(path))throw Error('invalid_live_image');
       const page=module.pages.find(item=>item.entry.startsWith(prefix));if(!page)throw Error('missing_live_projection');
       const value=record(module);let cached=value.images.get(path);
       if(!cached){cached=(async()=>{
-        const {payload}=await projection(module,page,value),item=payload.get(path.slice(prefix.length));
-        if(value.revoked||!item||!['image/svg+xml','image/png','image/jpeg'].includes(item.mime))throw Error('invalid_live_image');
-        const blob=URL.createObjectURL(new Blob([item.bytes as BlobPart],{type:item.mime}));
+        const {payload}=await projection(module,page,value);
+        if(value.revoked)throw Error('invalid_live_image');
+        const blob=URL.createObjectURL(liveLogo(payload,path.slice(prefix.length)));
         value.scope.onDispose(()=>URL.revokeObjectURL(blob));return blob;
       })();value.images.set(path,cached);}return cached;
     },

@@ -4,10 +4,11 @@ Module 不需要复制 Core 的页面布局、表单分组、主题配色或组�
 
 ## 公开组件
 
-- `UiProvider`：页面根。传入规范化的 `PageContext.theme`（`light` / `dark`）、`PageContext.locale` 和当前挂载容器 `styleMountTarget`。配置共用组件的主题与语言，并提供 `.ui-page` 根。
+- `PageTemplate` 根据 `content` 声明生成页头、分组、简单字段和操作。它自带 `UiProvider`，接收当前 `context`、`styleMountTarget`、稳定的 `idPrefix`，以及可选的 `state` 和 `appearance`。
+- `UiProvider` 也可以单独使用。传入规范化的 `PageContext.theme`（`light` / `dark`）、`PageContext.locale` 和当前挂载容器 `styleMountTarget`。它给 `.ui-page` 根、Naive UI 组件和默认插槽提供同一份配色。
 - `PageHeader`：`title` 必填，可选 `titleId`、`eyebrow`、`subtitle`；默认 slot 放页头操作。
 - `SettingsLayout`：默认 slot 放主内容，可选 `aside` slot 放说明。
-- `LogoMark`：装饰性矢量徽标。调用方用 CSS mask 指定已验证的本地资源和尺寸；默认静态、不透明。可显式设置 `effect='rebound'` 启用单次 JS 扫光，FF14 在首页和模块主页使用；主题或配置刷新不重播，离开时回收。减少动态效果或浏览器不支持动画时保持静态。组件不读取目录、网络或业务状态。
+- `LogoMark` 是静态装饰徽标。调用方用 CSS mask 指定已验证的本地资源和尺寸。旧 `effect` prop 已弃用，传入它仍显示静态徽标。动态效果由模块维护，目录接入方式见[前端模块合同](frontend-module-contract.md)。
 - `Surface`：语义化内容面板，可选 `title`、`eyebrow`。
 - `SettingsGroup`：`title` 必填，可选 `number`；`fieldset` 使相关表单控件采用 fieldset/legend。
 - `SettingsRow`：表单行布局；标签与控件通过默认 slot 提供。
@@ -18,33 +19,43 @@ Module 不需要复制 Core 的页面布局、表单分组、主题配色或组�
 
 原生表单控件可复用 `ui-control`、`ui-button`（`data-variant="primary"` 或 `quiet`）、`ui-badge`、`ui-segmented` 样式类。为控件提供真实 label、可聚焦按钮和正确的 disabled/ARIA 状态；共享布局不会自动实现业务校验。Core 壳提供公共样式和 token；模块只增加有模块前缀的业务布局，不复制调色板或全局 CSS reset。
 
-## 最小字段视图
+## 模板接入
 
-在已有 `mount(container, options)` 中创建自己的响应式草稿，使用下面的组合即可复用字段、布局与反馈；保留原有业务控制器和服务调用，不把授权交给组件：
+在已有 `mount(container, options)` 中使用响应式草稿和业务控制器：
 
 ```ts
 import {h} from 'vue';
-import {FormField, FormGrid} from '@game-link/ui';
-import type {FormFieldSlot} from '@game-link/ui';
+import {PageTemplate} from '@game-link/ui';
 
-h(FormGrid, {columns: 1}, {
-  default: () => h(FormField, {
-    controlId: 'my-module-query', label: '查询',
-    hint: '只在手动提交后查询。', error: errors.query,
-  }, {
-    default: ({controlAttrs}: FormFieldSlot) => h('input', {
-      ...controlAttrs, class: 'ui-control', value: draft.query,
-      onInput: (event: Event) => editQuery((event.target as HTMLInputElement).value),
-    }),
-  }),
+h(PageTemplate, {
+  context: currentContext, styleMountTarget: container, idPrefix: mountId,
+  content: {
+    title: '状态查询',
+    sections: [{
+      id: 'criteria', title: '查询条件',
+      fields: [{id: 'name', label: '名称', control: 'text', width: 'medium'}],
+    }],
+    actions: [{id: 'query', type: 'submit'}, {id: 'cancelWait'}],
+  },
+  state: {values: {name: draft.name}, errors, pending},
+  onFieldChange: ({id, value}) => editDraft(id, value),
+  onAction: handleAction,
 })
 ```
 
-这里的 `draft`、`errors`、`editQuery` 由模块持有；组件不提供保存、重试或凭据 API。完整可类型检查的 [shared-ui 示例](../examples/modules/shared-ui/pages/src/entry.ts) 展示 `UiProvider`、布局、字段、状态、受限 `status` 调用与 `mount/update/dispose`。示例字段只修改本地标题，不声称保存配置。真实业务字段应沿现有 `PageOptions.services`、revision/CAS 和草稿失效合同提交。
+`idPrefix` 在当前文档所有同时挂载的模板中唯一，并在该实例生命周期内固定。分组和字段使用稳定 ID，字段 ID 在整个模板中唯一。简单控件支持 `text`、`number`、`time`、`select` 和 `checkbox`，选项顺序、值和显示名由调用方提供。复选框发出布尔值，其余发出原始字符串。控制器继续负责解析、校验、草稿、请求、权限和 revision/CAS。
+
+只有声明一个 `type: 'submit'` 的操作才生成主表单。点击、单行输入 Enter 和 `requestSubmit()` 共用一次提交路径。模板内的 `sectionExtra`、`control` 属于主栏，需避免在其中添加独立表单或提交按钮。模板本身应放在外层表单之外。 `aside`、`results`、`footer` 和 `headerActions` 位于主表单之外，独立凭据表单可放在 `aside`。操作默认是普通按钮。
+
+复杂字段声明 `control: 'custom'`，在 `control` 插槽中把 `controlAttrs`、`disabled` 和 `readonly` 应用到实际控件，并用 `onChange` 回传草稿。所有插槽均收到 `presentation`，可读取当前主题、语言和解析后的色板。 `logo` 插槽可渲染已验证资源的 `LogoMark`。在弹出控件中继续使用当前挂载容器作为 `to`，让内容保留在本模板内。
+
+`state.disabled` 表示真正不可用，`state.readonly` 限制字段编辑。 `state.pending` 让常规操作进入保留焦点和 Tab 顺序的忙态，显式声明的 `cancelWait` 可继续使用。控制器接收动作时仍需在等待请求前同步开启原单飞门。 `state.notice` 由控制器选择；已提交但状态未核实用 `pendingUnverified`。 `uiText(key, locale)` 提供通用操作与状态的纯文本默认值。
+
+`appearance.light` 和 `appearance.dark` 可分别覆盖 `background`、`panel`、`text`、`muted`、`border`、`accent`、`accentContrast` 和 `logo`，值须为六位十六进制色码。任一槽或值非法时使用整套 Core 默认色。删掉主题或槽会恢复对应默认值；错误、警告、成功色由 Core 保持。完整例子见 [shared-ui 示例](../examples/modules/shared-ui/pages/src/entry.ts)。
 
 ## 视图生命周期与主题
 
-`mount(container, options)` 创建模块自己的视图实例，根使用 `UiProvider`。将 `options.context` 放入响应式状态；`update(nextContext)` 更新 provider 的 theme/locale，而不是重新挂载整个页面。主题切换不应丢失输入、焦点或待处理请求。只读取规范化的 `PageContext`，不要直接读取 Host bridge、`isDark` 或自行探测宿主主题。
+`mount(container, options)` 创建模块自己的视图实例，根使用 `PageTemplate` 或 `UiProvider`。将 `options.context` 放入响应式状态，`update(nextContext)` 更新现有实例的主题和语言。主题切换保留输入、焦点和待处理请求。主题和语言取自规范化的 `PageContext`。
 
 `dispose()` 只卸载该模块实例，并释放其监听器与请求。通过 `options.scope.onDispose` 注册同一幂等清理函数；不能终止共享 Vue runtime。异步结果提交前检查 `scope.isCurrent()`、当前可用性和 owner/runtimeId/epoch/boundary 绑定。`available:false` 也可能表示普通目录刷新，不能单独将它解释为永久撤权：暂时禁用操作并使旧请求结果失效；同一绑定恢复可用后允许用户发起新请求，不自动重发。owner/runtimeId/epoch/boundary 改变或 scope 失效后不能恢复旧请求；绑定改变后的实例不得因为再次收到旧上下文而复活。
 
@@ -68,7 +79,7 @@ h(FormGrid, {columns: 1}, {
 
 ## 非 FF14 示例与验证
 
-[shared-ui 页面源码](../examples/modules/shared-ui/pages/src/entry.ts) 是独立于 FF14 的源码级消费者：公开导入布局与状态组件，用 `UiProvider` 跟随 context，并通过既有页面服务调用演示 `status` 能力。它没有 manifest、后端工厂或生成资产，不能直接安装，也不代表第二个生产包已通过验收。集成到真实模块时必须声明并受权其实际能力和资源。
+[shared-ui 页面源码](../examples/modules/shared-ui/pages/src/entry.ts) 演示用 `PageTemplate` 声明字段、选项、配色及默认操作，并通过既有页面服务调用演示 `status` 能力。
 
 该源码示例在类型检查和真实 Vite 内存构建中作为独立 entry 编译，JS 仅引用共享 `runtime.js`，不产生第二份 Vue 或公共 CSS。它缺少可安装包所需的 manifest、后端工厂、能力/资源声明与摘要和受信装配，因此不是可直接安装的模块。生产模块通过受审构建投影 `pages/dist` 资源，并继续使用 manifest/hash/loader 校验；示例测试不授予接入权限。
 

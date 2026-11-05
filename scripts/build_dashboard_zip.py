@@ -564,9 +564,30 @@ def _projected_page_assets(
     adapter = import_module(f"{namespace}.adapters.astrbot.bundled")
     payload = {}
     branches = []
+    presentation_branches = []
     styles = set()
     prefix = "pages/00-game-link/"
     builtin_packages = set()
+
+    def project_presentation(module, project_path):
+        # Derive the optional role from the validated local id and its own
+        # resource declarations. The resource capture has verified the bytes.
+        base = f"pages/dist/presentation-{module.module_id}"
+        entry, css = base + ".js", base + ".css"
+        declared = {resource.path for resource in module.resources}
+        if entry not in declared:
+            return
+        if any(page.entry == entry or css in page.styles for page in module.pages):
+            raise ValueError(
+                "presentation resources cannot be business entries or styles"
+            )
+        projected = project_path(entry)
+        presentation_branches.append(
+            f"case {json.dumps(projected)}: return import({json.dumps('./' + projected)});"
+        )
+        if css in declared:
+            styles.add(project_path(css))
+
     for package_root, bundle in _capture_reviewed_bundles(
         adapter, repository_root, bundle_roots
     ):
@@ -585,6 +606,7 @@ def _projected_page_assets(
                     f"case {json.dumps(entry)}: return import({json.dumps('./' + entry)});"
                 )
                 styles.update(f"module-assets/{owner}/{style}" for style in page.styles)
+            project_presentation(module, lambda path: f"module-assets/{owner}/{path}")
     projection_module = import_module(f"{namespace}.extensions.static_page_projection")
     projection, external_resources = projection_module.capture_static_pages(
         external_page_roots
@@ -608,6 +630,10 @@ def _projected_page_assets(
                     projection_module.projected_path(owner, digest, path)
                     for path in page.styles
                 )
+            project_presentation(
+                module,
+                lambda path: projection_module.projected_path(owner, digest, path),
+            )
     if projection.packages:
         payload[projection_module.PROJECTION_FILE] = projection.serialize()
     if external_source_policy_roots:
@@ -680,6 +706,9 @@ def _projected_page_assets(
         "export async function loadPage(entry) {\nswitch (entry) {\n"
         + "\n".join(sorted(set(branches)))
         + "\ndefault: throw new Error('Unknown module page');\n}\n}\n"
+        + "export async function loadPresentation(entry) {\nswitch (entry) {\n"
+        + "\n".join(sorted(set(presentation_branches)))
+        + "\ndefault: throw new Error('Unknown module presentation');\n}\n}\n"
     ).encode()
     index = _read_snapshot(
         repository_root / (prefix + "index.html"), repository_root, "Page index"

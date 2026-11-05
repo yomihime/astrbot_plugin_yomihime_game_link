@@ -1,7 +1,8 @@
 import {createApp, h, shallowRef} from 'vue';
-import {UiProvider, PageHeader, SettingsLayout, Surface, ActionBar, StatusHint, FormGrid, FormField} from '@game-link/ui';
-import type {FormFieldSlot} from '@game-link/ui';
+import {PageTemplate, Surface, type TemplateContent} from '@game-link/ui';
 import type {MountedPage, PageContext, PageOptions} from '../../../../../pages/public-contract';
+
+let instance = 0;
 
 /** Source-only, non-FF14 consumer of the Core public presentation facade. */
 export function mount(container: HTMLElement, options: PageOptions): MountedPage {
@@ -27,27 +28,44 @@ export function mount(container: HTMLElement, options: PageOptions): MountedPage
       if (current(version)) pending.value = false;
     }
   }
-  const app = createApp({setup: () => () => h(UiProvider, {
-    theme: context.value.theme, locale: context.value.locale, styleMountTarget: container,
-  }, {default: () => [
-    h(PageHeader, {title: 'Shared UI example', eyebrow: 'EXAMPLE', subtitle: 'A module-owned view using Core presentation components.'}),
-    h(SettingsLayout, {}, {
-      default: () => h(Surface, {title: heading.value || 'Public status'}, {default: () => [
-        h(FormGrid, {columns: 1}, {default: () => h(FormField, {
-          controlId: 'example-view-heading', label: 'Local heading',
-          hint: 'Presentation only: this value is not saved or sent to a service.',
-          error: heading.value.trim() ? '' : 'Enter a heading.',
-        }, {default: ({controlAttrs}: FormFieldSlot) => h('input', {
-          ...controlAttrs, class: 'ui-control', value: heading.value, maxlength: 80,
-          onInput: (event: Event) => {heading.value = (event.target as HTMLInputElement).value;},
-        })})}),
-        h('p', 'Business requests still use the owner-bound page services.'),
-        h(ActionBar, {}, {default: () => h('button', {type: 'button', class: 'ui-button', 'data-variant': 'primary', disabled: pending.value || !current(sequence), onClick: inspect}, 'Read public status')}),
-        h(StatusHint, {}, {default: () => message.value}),
-      ]}),
-      aside: () => h(Surface, {title: 'Presentation only'}, {default: () => h('p', 'The UI facade grants no management permissions.')}),
-    }),
-  ]})});
+  const content: TemplateContent = {
+    title: 'Shared UI example',
+    eyebrow: 'EXAMPLE',
+    intro: 'A module-owned view using Core presentation components.',
+    sections: [{
+      id: 'presentation', title: 'Public status',
+      fields: [{
+        id: 'heading', label: 'Local heading', control: 'text', maxLength: 80, width: 'medium',
+        hint: 'Presentation only: this value is not saved or sent to a service.',
+      }, {
+        id: 'detail', label: 'View detail', control: 'select',
+        choices: [{value: 'summary', label: 'Summary'}, {value: 'full', label: 'Full detail'}],
+      }],
+    }],
+    actions: [{id: 'query', type: 'submit'}],
+  };
+  const detail = shallowRef('summary');
+  // Unique to this mount, stable across context and draft updates.
+  const idPrefix = 'shared-ui-example-' + ++instance;
+  const app = createApp({setup: () => () => h(PageTemplate, {
+    content, context: context.value, styleMountTarget: container, idPrefix, headingLevel: 1,
+    appearance: {light: {accent: '#305e73', accentContrast: '#ffffff'}},
+    state: {
+      values: {heading: heading.value, detail: detail.value},
+      errors: {heading: heading.value.trim() ? '' : 'Enter a heading.'},
+      pending: pending.value,
+      disabled: !current(sequence),
+      notice: {key: 'custom', text: message.value},
+    },
+    onFieldChange: ({id, value}) => {
+      if (id === 'heading' && typeof value === 'string') heading.value = value;
+      if (id === 'detail' && typeof value === 'string') detail.value = value;
+    },
+    onAction: inspect,
+  }, {
+    aside: () => h(Surface, {title: 'Presentation only'}, {default: () => h('p', 'The UI facade grants no management permissions.')}),
+    results: () => h('p', detail.value === 'full' ? `${heading.value || 'Public status'} · Business requests use the owner-bound page services.` : heading.value || 'Public status'),
+  })});
   app.mount(container);
   function dispose() {
     if (disposed) return;

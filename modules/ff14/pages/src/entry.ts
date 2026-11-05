@@ -1,7 +1,7 @@
 import {createApp, defineComponent, h, withDirectives, ref} from 'vue';
-import {NButton,NInput,NSelect,NTag} from 'naive-ui';
-import {UiProvider,Surface,FormField,FormGrid,ActionBar,StatusHint} from '@game-link/ui';
-import type {FormFieldSlot} from '@game-link/ui';
+import {NButton,NInput,NSelect} from 'naive-ui';
+import {PageTemplate,Surface,FormField,FormGrid} from '@game-link/ui';
+import type {FormFieldSlot,TemplateActionKey} from '@game-link/ui';
 import type {PageOptions, MountedPage} from '../../../../pages/public-contract';
 import {mountSettings} from './settings-page';
 import {createQueryController,fields,queryTimeoutMs} from './query-controller';
@@ -27,40 +27,61 @@ function blocks(result:any) {
   const times=[...(doc?.timestamps || []),...result.timestamps]; if (times.length) nodes.push(h('p',{class:'ff14-hint'},`返回时间：${times.map(resultValue).join('；')}`));
   return nodes;
 }
+const queryLabels: Record<string,string> = {market:'查询市场',items:'查询物品',logs:'查询 Logs',calendar:'查询日历'};
+let nextQuery = 0;
+
 export function mount(container:HTMLElement,options:PageOptions):MountedPage {
   if (options.routeId==='home' || options.routeId==='config') return mountSettings(container,options);
+  const route = options.routeId, idPrefix = `ff14-query-${++nextQuery}`;
   const headStyles = new Set(Array.from(container.ownerDocument.head.querySelectorAll('style')));
   const selectA11y=createSelectA11y(container), expanded=ref<Record<string,boolean>>({});
   const revision=ref(0), controller=createQueryController(options,()=>{revision.value++;},queryTimeoutMs(options.routeId));
   const app=createApp(defineComponent({setup(){return ()=>{
     revision.value; const state=controller.state, pending=state.phase==='loading', result=state.result, context=state.context;
     const candidates=result?.model_facts?.selection;
-    const submit=async(event?:Event)=>{event?.preventDefault(); await controller.submit(); const name=Object.keys(state.errors)[0]; if (name) container.querySelector<HTMLInputElement>(`#ff14-${options.routeId}-${name}`)?.focus();};
+    const focusInput = () => container.querySelector('input')?.focus();
+    async function onAction(action: TemplateActionKey) {
+      if (action === 'cancelWait') {
+        controller.stop();
+        focusInput();
+      } else if (action === 'query') {
+        await controller.submit();
+        const name = Object.keys(state.errors)[0];
+        if (name) container.querySelector<HTMLElement>(`#ff14-${route}-${name}`)?.focus();
+      }
+    }
     const market=result?.model_facts?.market;
-    return h(UiProvider,{theme:context.theme,locale:context.locale,styleMountTarget:container}, {default:()=>h('section',{class:'ff14-page','data-theme':context.theme},[
-      h(Surface,{title:titles[options.routeId]}, {default:()=>[
-        h('p',{class:'ff14-hint'},hints[options.routeId]),
-        h('form',{class:'ff14-form','aria-busy':pending,onSubmit:submit},[h(FormGrid,{}, {default:()=>[
-          ...fields[options.routeId].map(field=>h(FormField,{controlId:`ff14-${options.routeId}-${field.name}`,label:field.label,labelId:`label-${options.routeId}-${field.name}`,errorId:`error-${field.name}`,error:state.errors[field.name],class:field.name==='query'?'ui-field-wide':undefined},{default:({controlAttrs}:FormFieldSlot)=>[
+    return h(PageTemplate, {
+      idPrefix, class: 'ff14-page', context, styleMountTarget: container, onAction,
+      content: {
+        title: titles[route], intro: hints[route], sections: [{id:'criteria', title:'查询条件'}],
+        actions: [
+          {id:'query', type:'submit', label:queryLabels[route], disabled:!context.available},
+          ...(pending ? [{id:'cancelWait', label:'停止展示'} as const] : []),
+        ],
+      },
+      state: {pending, notice: {key:'custom', tone:context.available?'neutral':'warning', text:context.available
+        ? '模块目录已加载；实际查询仍由后端逐请求鉴权，仅手动提交。'
+        : '当前入口状态尚未确认，请刷新状态；仍失败时请重新登录 Dashboard 或重新打开本页。'}},
+    }, {
+      sectionExtra: () => h(FormGrid, {}, {default: () =>
+          fields[route].map(field=>h(FormField,{controlId:`ff14-${route}-${field.name}`,label:field.label,labelId:`label-${route}-${field.name}`,errorId:`error-${field.name}`,error:state.errors[field.name],class:field.name==='query'?'ui-field-wide':undefined},{default:({controlAttrs}:FormFieldSlot)=>[
             field.options?withDirectives(h(NSelect,{value:state.draft[field.name],options:field.options,to:container,
-              menuProps:{id:`menu-${options.routeId}-${field.name}`,role:'listbox','aria-labelledby':`label-${options.routeId}-${field.name}`},
-              nodeProps:(option:any)=>({id:`option-${options.routeId}-${field.name}-${option.value}`,role:'option','aria-selected':state.draft[field.name]===option.value}),
+              menuProps:{id:`menu-${route}-${field.name}`,role:'listbox','aria-labelledby':`label-${route}-${field.name}`},
+              nodeProps:(option:any)=>({id:`option-${route}-${field.name}-${option.value}`,role:'option','aria-selected':state.draft[field.name]===option.value}),
               'onUpdate:show':(show:boolean)=>{expanded.value={...expanded.value,[field.name]:show};},
-              'onUpdate:value':(value:string)=>controller.edit(field.name,value)}),[[selectA11y,{id:`ff14-${options.routeId}-${field.name}`,labelId:`label-${options.routeId}-${field.name}`,menuId:`menu-${options.routeId}-${field.name}`,expanded:Boolean(expanded.value[field.name]),invalid:Boolean(state.errors[field.name]),errorId:`error-${field.name}`}]] )
+              'onUpdate:value':(value:string)=>controller.edit(field.name,value)}),[[selectA11y,{id:`ff14-${route}-${field.name}`,labelId:`label-${route}-${field.name}`,menuId:`menu-${route}-${field.name}`,expanded:Boolean(expanded.value[field.name]),invalid:Boolean(state.errors[field.name]),errorId:`error-${field.name}`}]] )
               :h(NInput,{value:state.draft[field.name],placeholder:field.placeholder,maxlength:field.limit,inputProps:controlAttrs,'onUpdate:value':(value:string)=>controller.edit(field.name,value)}),
-          ]})),
-          h(ActionBar,{}, {default:()=>[h(NButton,{type:'primary',attrType:'submit',disabled:pending||!context.available},()=>({market:'查询市场',items:'查询物品',logs:'查询 Logs',calendar:'查询日历'} as Record<string,string>)[options.routeId]),pending?h(NButton,{onClick:()=>{controller.stop();container.querySelector<HTMLInputElement>('input')?.focus();}},()=> '停止展示'):null]}),
-        ]})]),
-        h(StatusHint,{tone:context.available?'neutral':'warning'},()=>context.available?'模块目录已加载；实际查询仍由后端逐请求鉴权，仅手动提交。':'当前入口状态尚未确认，请刷新状态；仍失败时请重新登录 Dashboard 或重新打开本页。'),
-      ]}),
-      h(Surface,{title:'本次结果',class:'ff14-result','aria-live':'polite','data-result-status':result?.status||state.phase}, {default:()=>[
+          ]}))
+      }),
+      results: () => h(Surface,{title:'本次结果',class:'ff14-result','aria-live':'polite','data-result-status':result?.status||state.phase}, {default:()=>[
         result?h('p',{class:result.status==='error'?'ff14-error':result.status==='success'?'ff14-success':'ff14-warning',role:result.status==='error'?'alert':'status'},result.status==='success'?'查询完成':result.status==='partial_success'?'部分结果 · 保留来源说明':result.status==='needs_selection'?'需要选择物品 · 请确认本次候选':`${result.error?.code==='not_found'?'无匹配结果':result.error?.code==='no_records'?'没有可展示记录':'查询失败'} · ${errors[result.error?.code||'']||'查询未完成，请检查输入与来源后手动重试。'}`):h('p',{role:['error','timeout'].includes(state.phase)?'alert':'status'},state.message),
         pending?h('p',{class:'ff14-hint'},'仅停止展示，本次请求可能仍在后台处理。'):null,
         ...(result?blocks(result):[]),
         market?h('div',{class:'ff14-market-context'},[h('dl',{class:'ff14-fields'},[h('dt','当前解析范围'),h('dd',`${{world:'服务器',dc:'数据中心',region:'区域全服'}[market.scope.kind as string]} / ${market.scope.target??'—'} / ${market.scope.regions.join('、')}（${market.scope.source==='default'?'服务端默认':'显式指定'}）`),h('dt','品质'),h('dd',({all:'全部品质',nq:'NQ',hq:'HQ'} as Record<string,string>)[market.quality]),h('dt','意图'),h('dd',({overview:'概览',min:'最低价',listings:'在售列表'} as Record<string,string>)[market.intent])]),...market.coverage.map((c:any)=>h('p',{class:'ff14-hint'},`来源覆盖：${c.region} / ${c.target??'—'} · ${{available:'已取得记录',empty:'来源返回空记录',failed:'获取失败'}[c.state as string]}；${c.cached===true?'缓存结果':c.cached===false?'本次获取':'缓存状态未知'}；来源获取时间：${c.fetched_at??'未知'}${c.reason?`；原因：${c.reason}`:''}。`)),market.truncated?h('p',{class:'ff14-warning'},'结果已截断；展示范围为本次返回的有限市场记录。'):null]):null,
         candidates?h('div',{class:'ff14-candidates','aria-label':'物品候选'},[h('p',{class:'ff14-hint'},'请选择本次返回的物品候选；修改输入或重新提交后旧候选失效。'),...candidates.candidates.map((c:any)=>h(NButton,{disabled:pending||!context.available,'data-item-id':c.item_id,onClick:()=>{void controller.choose(c.item_id,result);container.querySelector<HTMLInputElement>('input')?.focus();}},()=>`${c.name} · ID ${c.item_id}`)),candidates.truncated?h('p',{class:'ff14-warning'},'候选已截断，请进一步明确名称后手动查询。'):null]):null,
       ]}),
-    ])});
+    });
   };}}));
   app.mount(container); let revoked=false, cleanupComplete=false;
   // vueuc mounts binder / virtual-list CSS directly in head, outside

@@ -1058,11 +1058,19 @@
         },
         {
           "path": "pages/dist/entry.js",
-          "sha256": "286fb3d0a9ae67a252c1939f710c88e3cf3486138c555122c116a3afd232df16"
+          "sha256": "add91325fbed534973bbed46852e1daf295a48eb0cc91c2dfa1a53d399e46b06"
+        },
+        {
+          "path": "pages/dist/presentation-ff14.css",
+          "sha256": "42226b181bed6ada31b1b9de01158f143589518928453f3b0f0016cb47ce34a6"
+        },
+        {
+          "path": "pages/dist/presentation-ff14.js",
+          "sha256": "a5ba06e5af84f239703f52d3d3916447636ff2897c825b96e65589c4aa5f282a"
         },
         {
           "path": "pages/dist/styles.css",
-          "sha256": "82f944172ca062f6e4cf6bde0e3ba4a514bd646b44a6da41cffbad864995d8f8"
+          "sha256": "21b5ffc2337e7346eb933f29c92332e2ce100fc8a9a1afefbdce9bfbdb6dd1fd"
         }
       ],
       "diagnostics": [
