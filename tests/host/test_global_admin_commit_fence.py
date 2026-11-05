@@ -741,19 +741,18 @@ class GlobalAdminCommitFenceTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(cancellations, 3 if repeated_cancel else 2)
                 self.assert_request_resources_released()
 
-    async def test_real_starlette_swallowed_watcher_cancel_stops_and_keeps_fresh_fence(
-        self,
-    ):
+    async def real_starlette_monitor_cancel_scenario(self, *, legacy_swallow=False):
         from starlette.requests import Request
 
         for revoke_at_cleanup in (False, True):
             with self.subTest(revoke_at_cleanup=revoke_at_cleanup):
                 concrete, fake_raw, host = self.request("update")
                 disconnect_event = asyncio.Event()
+                monitor_ready = asyncio.Event()
                 resumed_after_cancel = asyncio.Event()
                 watchers, observations = [], []
                 receive_calls = 0
-                label = "real-anyio-stop-" + str(revoke_at_cleanup)
+                label = "real-anyio-stop-" + str((legacy_swallow, revoke_at_cleanup))
 
                 async def receive():
                     nonlocal receive_calls
@@ -766,6 +765,7 @@ class GlobalAdminCommitFenceTests(unittest.IsolatedAsyncioTestCase):
                         }
                     if not watchers:
                         watchers.append(current)
+                        current.add_done_callback(lambda _: monitor_ready.set())
                     receive_calls += 1
                     if receive_calls == 1:
                         # Real Request.is_disconnected owns its AnyIO scope;
@@ -773,6 +773,7 @@ class GlobalAdminCommitFenceTests(unittest.IsolatedAsyncioTestCase):
                         asyncio.get_running_loop().call_soon(current.cancel)
                     else:
                         resumed_after_cancel.set()
+                        monitor_ready.set()
                     await disconnect_event.wait()
                     return {"type": "http.disconnect"}
 
@@ -792,6 +793,23 @@ class GlobalAdminCommitFenceTests(unittest.IsolatedAsyncioTestCase):
                     },
                     receive=receive,
                 )
+                if legacy_swallow:
+                    original_probe = raw.is_disconnected
+
+                    async def legacy_probe():
+                        # Deliberate old swallowed-cancel model around the real
+                        # Request, separate from the installed AnyIO behavior.
+                        try:
+                            return await original_probe()
+                        except asyncio.CancelledError:
+                            if (
+                                asyncio.current_task().get_name()
+                                != "ygl:admin-disconnect"
+                            ):
+                                raise
+                            return False
+
+                    raw.is_disconnected = legacy_probe
                 raw.state.dashboard_g = N(username=host.subject)
                 concrete._request = raw
 
@@ -799,14 +817,24 @@ class GlobalAdminCommitFenceTests(unittest.IsolatedAsyncioTestCase):
                     return {}
 
                 async def invoke(endpoint, core, data, context):
-                    await asyncio.wait_for(resumed_after_cancel.wait(), 3)
+                    await asyncio.wait_for(monitor_ready.wait(), 3)
                     # The receiver signals inside the cancel scope. Let its
                     # queued cancellation exit/unwind before sampling the task.
                     await asyncio.sleep(0)
                     monitor = watchers[0]
-                    observations.append(
-                        (monitor.done(), monitor.cancelled(), monitor.cancelling())
+                    observation = (
+                        monitor.done(),
+                        monitor.cancelled(),
+                        monitor.cancelling(),
                     )
+                    if resumed_after_cancel.is_set():
+                        self.assertEqual(receive_calls, 2)
+                        self.assertEqual(observation, (False, False, 1))
+                    else:
+                        self.assertFalse(legacy_swallow)
+                        self.assertEqual(receive_calls, 1)
+                        self.assertEqual(observation, (True, True, 1))
+                    observations.append(observation)
 
                     def write(unit):
                         unit.execute("INSERT INTO effects VALUES(?)", (label,))
@@ -820,9 +848,12 @@ class GlobalAdminCommitFenceTests(unittest.IsolatedAsyncioTestCase):
                         write, begin_mode="IMMEDIATE"
                     )
                     if revoke_at_cleanup:
-                        asyncio.get_running_loop().call_soon(
-                            setattr, host, "valid", False
-                        )
+                        if monitor.done():
+                            host.valid = False
+                        else:
+                            asyncio.get_running_loop().call_soon(
+                                setattr, host, "valid", False
+                            )
                     return {"synthetic_effect": True}
 
                 async def call():
@@ -842,12 +873,18 @@ class GlobalAdminCommitFenceTests(unittest.IsolatedAsyncioTestCase):
                         done, _ = await asyncio.wait({handler}, timeout=3)
                         self.assertIn(handler, done)
                         response = await handler
-                        self.assertEqual(observations, [(False, False, 1)])
+                        self.assertEqual(
+                            observations,
+                            [(False, False, 1)]
+                            if resumed_after_cancel.is_set()
+                            else [(True, True, 1)],
+                        )
                         self.assertEqual(
                             response.status_code, 403 if revoke_at_cleanup else 200
                         )
                         self.assertEqual(await self.effects(label), 1)
                         self.assert_request_resources_released()
+
                     finally:
                         # Every assertion/exception path releases the actual
                         # receiver and joins all owned tasks before loop shutdown.
@@ -861,3 +898,9 @@ class GlobalAdminCommitFenceTests(unittest.IsolatedAsyncioTestCase):
                                 pending_task.cancel()
                             await asyncio.gather(*owned, return_exceptions=True)
                         self.assert_request_resources_released()
+
+    async def test_real_starlette_monitor_cancel_stops_and_keeps_fresh_fence(self):
+        await self.real_starlette_monitor_cancel_scenario()
+
+    async def test_legacy_swallowed_watcher_cancel_stops_and_keeps_fresh_fence(self):
+        await self.real_starlette_monitor_cancel_scenario(legacy_swallow=True)

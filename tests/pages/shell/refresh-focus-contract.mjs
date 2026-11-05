@@ -49,7 +49,7 @@ async function scenario(kind){
   }
   if(kind==='failure'){button.click();await flush();assert.equal(gets,initialGets+2,'failed refresh must remain retryable');}
   if(kind==='context'||kind==='invalid'||kind==='dispose'){button.dispatchEvent(new window.MouseEvent('click',{bubbles:true}));await flush();assert.equal(gets,initialGets+1,'revoked/disposed lifecycle must reject further refresh');}
-  assert.equal(posts.filter(p=>['invoke','admin/update','admin/credential-update','admin/module-unload','admin/module-enabled'].includes(p.endpoint)).length,0);
+  assert.equal(posts.filter(p=>['invoke','invoke-images','preview','admin/module-invoke','admin/module-preview','admin/update','admin/credential-update','admin/module-unload','admin/module-enabled'].includes(p.endpoint)).length,0);
  }finally{window.document.getElementById('app')?.__vue_app__?.unmount();dom.window.close();}
 }
 for(const kind of ['success','move','page','failure','context','invalid','dispose'])await scenario(kind);

@@ -175,10 +175,12 @@ class PageCommitFenceTests(unittest.IsolatedAsyncioTestCase):
             return raw, subject[0], dashboard_clock[0] + 30
 
         observations = []
-        if monitor in {"starlette", "starlette-revoke"}:
+        if monitor is not None and monitor.startswith("starlette"):
             from starlette.requests import Request
 
             receive_calls = 0
+            resumed_after_cancel = asyncio.Event()
+            legacy_swallow = "legacy-swallow" in monitor
 
             async def receive():
                 nonlocal receive_calls
@@ -187,10 +189,12 @@ class PageCommitFenceTests(unittest.IsolatedAsyncioTestCase):
                     return {"type": "http.request", "body": b"", "more_body": False}
                 if not watchers:
                     watchers.append(current)
+                    current.add_done_callback(lambda _: entered.set())
                 receive_calls += 1
                 if receive_calls == 1:
                     asyncio.get_running_loop().call_soon(current.cancel)
                 else:
+                    resumed_after_cancel.set()
                     entered.set()
                 await release.wait()
                 return {"type": "http.disconnect"}
@@ -205,6 +209,23 @@ class PageCommitFenceTests(unittest.IsolatedAsyncioTestCase):
                 },
                 receive=receive,
             )
+            if legacy_swallow:
+                original_probe = raw.is_disconnected
+
+                async def legacy_probe():
+                    # Explicit compatibility model for older AnyIO swallowing
+                    # native cancellation; not a claim about the installed version.
+                    try:
+                        return await original_probe()
+                    except asyncio.CancelledError:
+                        if (
+                            asyncio.current_task().get_name()
+                            != "ygl:module-page-disconnect"
+                        ):
+                            raise
+                        return False
+
+                raw.is_disconnected = legacy_probe
             request._request = raw
 
         binding = ModulePageGrant(
@@ -223,7 +244,21 @@ class PageCommitFenceTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.wait_for(entered.wait(), 3)
                 if monitor.startswith("starlette"):
                     await asyncio.sleep(0)
-                    observations.append((watchers[0].done(), watchers[0].cancelling()))
+                    watcher = watchers[0]
+                    observation = (
+                        watcher.done(),
+                        watcher.cancelled(),
+                        watcher.cancelling(),
+                    )
+                    if resumed_after_cancel.is_set():
+                        self.assertEqual(receive_calls, 2)
+                        self.assertEqual(observation, (False, False, 1))
+                    else:
+                        self.assertFalse(legacy_swallow)
+                        self.assertEqual(receive_calls, 1)
+                        self.assertEqual(observation, (True, True, 1))
+                    observations.append(observation)
+                    self.last_starlette_resumed = resumed_after_cancel.is_set()
             if primary_error is not None:
                 raise primary_error
 
@@ -251,8 +286,16 @@ class PageCommitFenceTests(unittest.IsolatedAsyncioTestCase):
                 unit.add_commit_guard(commit_guard)
 
             await self.database.executor.run_transaction(write, begin_mode="IMMEDIATE")
-            if monitor == "starlette-revoke":
-                asyncio.get_running_loop().call_soon(valid.__setitem__, 0, False)
+            if monitor is not None and monitor.startswith("starlette"):
+                if monitor.endswith("-revoke"):
+                    if watchers[0].done():
+                        # Joining an already-cancelled task need not yield.
+                        # Revoke before returning rather than after the response.
+                        valid[0] = False
+                    else:
+                        asyncio.get_running_loop().call_soon(
+                            valid.__setitem__, 0, False
+                        )
             return {"revision": 2}
 
         self.last_source, self.last_watchers = runtime._admin_source, watchers
@@ -313,7 +356,11 @@ class PageCommitFenceTests(unittest.IsolatedAsyncioTestCase):
                 elif change or (monitor is not None and monitor.startswith("revoke")):
                     with self.assertRaises(AdminAuthorizationDenied):
                         await call
-                elif monitor in {"fail-revoke", "starlette-revoke"}:
+                elif monitor == "fail-revoke" or (
+                    monitor is not None
+                    and monitor.startswith("starlette")
+                    and monitor.endswith("-revoke")
+                ):
                     with self.assertRaises(AdminAuthorizationDenied):
                         await call
                 elif monitor == "fail":
@@ -403,11 +450,26 @@ class PageCommitFenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.scenario(None, monitor="fail-revoke"), 1)
         self.assert_request_released()
 
-    async def test_real_starlette_swallowed_monitor_cancel_stops_and_rechecks(self):
+    async def test_real_starlette_monitor_cancel_stops_and_rechecks(self):
         for monitor in ("starlette", "starlette-revoke"):
             with self.subTest(monitor=monitor):
                 self.assertEqual(await self.scenario(None, monitor=monitor), 1)
-                self.assertEqual(self.last_observations, [(False, 1)])
+                self.assertEqual(
+                    self.last_observations,
+                    [(False, False, 1)]
+                    if self.last_starlette_resumed
+                    else [(True, True, 1)],
+                )
+                self.assert_request_released()
+                await self.database.executor.run_transaction(
+                    lambda unit: unit.execute("DELETE FROM effects").rowcount
+                )
+
+    async def test_legacy_swallowed_monitor_cancel_stops_and_rechecks(self):
+        for monitor in ("starlette-legacy-swallow", "starlette-legacy-swallow-revoke"):
+            with self.subTest(monitor=monitor):
+                self.assertEqual(await self.scenario(None, monitor=monitor), 1)
+                self.assertEqual(self.last_observations, [(False, False, 1)])
                 self.assert_request_released()
                 await self.database.executor.run_transaction(
                     lambda unit: unit.execute("DELETE FROM effects").rowcount
