@@ -158,9 +158,10 @@ class _RequestFacts:
     endpoint: str | tuple[str, str, str]
     generation: int
     key: str
-    expiry: int
+    expiry: float | int
     deadline: float
     route: _PublicWebRoute
+    current: object = None
     minted: bool = False
     binding: PublicWebBinding | None = None
 
@@ -275,9 +276,16 @@ class HostPublicWebValidator:
         if type(proof) is not object:
             raise WebPublicRejected("request_rejected")
         facts = self._requests.get(proof)
+        try:
+            request_current = facts is not None and (
+                facts.current is None or facts.current() is True
+            )
+        except Exception:
+            request_current = False
         if (
             self._closed
             or facts is None
+            or not request_current
             or self._core is None
             or self._current(self._core, self._generation) is not True
             or facts.generation != self._generation
@@ -295,8 +303,19 @@ class HostPublicWebValidator:
         expiry: int,
         *,
         started_at: float | None = None,
+        current=None,
     ) -> object:
-        if endpoint not in self._bindings or type(expiry) is not int:
+        if (
+            endpoint not in self._bindings
+            or (
+                type(expiry) is not int
+                and not (
+                    callable(current) and type(expiry) is float and isfinite(expiry)
+                )
+            )
+            or current is not None
+            and not callable(current)
+        ):
             raise WebPublicRejected("request_rejected")
         route = self._routes[endpoint]
         self.require_route_current(endpoint, route)
@@ -314,6 +333,7 @@ class HostPublicWebValidator:
             expiry,
             deadline,
             route,
+            current,
         )
         try:
             self._require(ticket)

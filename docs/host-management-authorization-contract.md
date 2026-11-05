@@ -2,6 +2,12 @@
 
 验证基线为 AstrBot 4.29.1，commit `dffe922773725e9c178392c423676ad65044748c`。版本是测试出处，不是运行时精确版本开关。
 
+## 原生模块页面查询
+
+Dashboard 模块页面通过 `POST admin/module-invoke` 查询、`POST admin/module-preview` 预览图片；两者属于现有 `READ_CONFIG` 管理页面动作。请求仅含 `owner`、`page`、`runtime_id`、`module_epoch`、`page_session`、`capability_id`、`parameters`，参数对象遵守原公共查询预算。真实宿主验证、当前页面会话与服务端声明的页面能力必须同时匹配；调用与最终返回继续验证会话、代次、epoch、路由及取消状态，不提供私有能力或聊天身份。
+
+此链复用 Gateway 的公共安全能力集合、结果投影及图片预算，不依赖可选 `web_public_origin`。外部公共 `/invoke`、`/invoke-images` 仍要求已配置的 origin 及原公共入口授权；留空不会开放公共查询。原生页面查询沿用已有页面会话续签，传输或权限失败不自动重试业务查询。
+
 ## 管理请求
 
 `register_web_api` 注册现行管理路由。v1 入口按官方宿主分发转到普通 Dashboard 入口；管理权限只来自真实请求绑定的宿主 Dashboard JWT 验证器。
