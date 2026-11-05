@@ -65,3 +65,7 @@
 .ui-form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px 20px}.ui-form-grid[data-columns="1"]{grid-template-columns:minmax(0,1fr)}.ui-form-grid>.ui-field-wide,.ui-form-grid>.ui-action-bar{grid-column:1/-1}.ui-form-field{min-width:0}.ui-form-field-stacked{display:grid;gap:7px;align-content:start}.ui-form-field-stacked>label{font-size:14px;font-weight:550}.ui-field-hint,.ui-field-error{font-size:13px;line-height:1.6;margin:0;overflow-wrap:anywhere}.ui-field-hint{color:var(--ui-muted)}.ui-field-error{color:var(--ui-error)}.ui-settings-row>.ui-field-hint,.ui-settings-row>.ui-field-error{grid-column:2/-1}.ui-field-error[hidden]{display:none!important}@media(max-width:719px){.ui-form-grid{grid-template-columns:minmax(0,1fr)}}@media(max-width:599px){.ui-settings-row>.ui-field-hint,.ui-settings-row>.ui-field-error{grid-column:1/-1}}
 
 .ui-form-grid>.ui-action-bar{margin:4px 0 0}
+
+/* Shared module artwork colors, also used by external module pages. */
+:root,.game-shell,.ui-page {--ui-brand-steam:#3478aa;--ui-brand-dota2:#b63d34;--ui-brand-cs2:#b46b1d;--ui-brand-deadlock:#76599d}
+:root[data-theme=dark],.game-shell[data-theme=dark],.ui-page[data-theme=dark] {--ui-brand-steam:#72b8e8;--ui-brand-dota2:#ed776c;--ui-brand-cs2:#f0af61;--ui-brand-deadlock:#b99bdd}
