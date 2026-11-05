@@ -22,22 +22,23 @@ async function moduleHarness({invalid=false,missing=false,twoOwners=false}={}){
  };
  globalThis.__loadFixturePage=()=>Promise.resolve({mount(container,options){const page=module.mount(container,options);return {...page,...(invalid?{navigationImpact(){if(invalid==='shape')return {ordinary:false,credentials:false,pending:false,version:1,owner:'UNTRUSTED OWNER'};throw Error('PRIVATE-MODULE-ERROR');}}:missing?{navigationImpact:undefined}:{}),dispose(){disposed++;page.dispose();}};}});
  await h.go('#/module/ff14%2Fff14/config');await flush();
- const edit=(id,value)=>{const input=h.doc.getElementById(id);assert.ok(input,id);assert.equal(input.disabled,false,id+' must be loaded and editable');input.value=value;input.dispatchEvent(new h.window.Event('input',{bubbles:true}));return input;};
- return {...h,edit,disposed:()=>disposed,writes:()=>writeCalls,releaseWrites(){for(const resolve of pendingWrites.splice(0))resolve();},settings:()=>h.doc.querySelector('.shell-settings'),confirmation:()=>h.doc.querySelector('[data-confirmation=navigation]')};
+ const days=()=>h.doc.querySelector('input[name=ff14_calendar_default_days]');
+ const edit=(id,value)=>{const input=id==='days'?days():h.doc.getElementById(id);assert.ok(input,id);assert.equal(input.disabled,false,id+' must be loaded and editable');input.value=value;input.dispatchEvent(new h.window.Event('input',{bubbles:true}));return input;};
+ return {...h,edit,days,disposed:()=>disposed,writes:()=>writeCalls,releaseWrites(){for(const resolve of pendingWrites.splice(0))resolve();},settings:()=>h.doc.querySelector('.shell-settings'),confirmation:()=>h.doc.querySelector('[data-confirmation=navigation]')};
 }
 test('Module settings click navigation confirms before secret disposal and retains ordinary drafts on return',async()=>{
  const h=await moduleHarness();try{
-  h.edit('ff14-config-ff14_calendar_default_days','8');const secret=h.edit('credential_fflogs_cn-client_secret','SYNTHETIC ONLY');
+  h.edit('days','8');const secret=h.edit('credential_fflogs_cn-client_secret','SYNTHETIC ONLY');
   h.settings().click();await flush();assert.ok(h.confirmation());assert.match(h.confirmation().textContent,/凭据输入/);assert.equal(h.disposed(),0);
   h.doc.querySelector('[data-action=cancel-navigation]').click();await flush();assert.equal(h.window.location.hash,'#/module/ff14%2Fff14/config');assert.equal(h.doc.getElementById(secret.id),secret);assert.equal(secret.value,'SYNTHETIC ONLY');
   h.settings().click();await flush();h.doc.querySelector('[data-action=confirm-navigation]').click();await flush();assert.equal(h.window.location.hash,'#/settings');assert.equal(h.disposed(),1);
-  await h.go('#/module/ff14%2Fff14/config');assert.equal(h.doc.getElementById('ff14-config-ff14_calendar_default_days').value,'8');assert.equal(h.doc.getElementById('credential_fflogs_cn-client_secret').value,'');
+  await h.go('#/module/ff14%2Fff14/config');assert.equal(h.days().value,'8');assert.equal(h.doc.getElementById('credential_fflogs_cn-client_secret').value,'');
  }finally{h.close();}
 });
 test('Module settings hash navigation is guarded and a new edit invalidates an earlier confirmation',async()=>{
  const h=await moduleHarness();try{
-  h.edit('ff14-config-ff14_calendar_default_days','8');await h.go('#/');assert.ok(h.confirmation());assert.equal(h.window.location.hash,'#/module/ff14%2Fff14/config');
-  const late=h.doc.querySelector('[data-action=confirm-navigation]');h.edit('ff14-config-ff14_calendar_default_days','9');await flush();late.click();await flush();assert.equal(h.disposed(),0);assert.equal(h.window.location.hash,'#/module/ff14%2Fff14/config');
+  h.edit('days','8');await h.go('#/');assert.ok(h.confirmation());assert.equal(h.window.location.hash,'#/module/ff14%2Fff14/config');
+  const late=h.doc.querySelector('[data-action=confirm-navigation]');h.edit('days','9');await flush();late.click();await flush();assert.equal(h.disposed(),0);assert.equal(h.window.location.hash,'#/module/ff14%2Fff14/config');
   h.settings().click();await flush();h.doc.querySelector('[data-action=confirm-navigation]').click();await flush();assert.equal(h.disposed(),1);
  }finally{h.close();}
 });
@@ -54,23 +55,25 @@ test('a Module without the optional navigation hook keeps its original clean-pag
 });
 test('pending Module writes require a leave decision and never resend a late ACK',async()=>{
  const h=await moduleHarness();try{
-  h.edit('ff14-config-ff14_calendar_default_days','8');h.doc.querySelector('.ff14-settings form').dispatchEvent(new h.window.Event('submit',{bubbles:true,cancelable:true}));await flush();assert.equal(h.writes(),1);
+  h.edit('days','8');await flush();
+  const form=h.doc.querySelector('.ff14-settings form');assert.equal(form.querySelector('button[type=submit]').disabled,false);
+  form.dispatchEvent(new h.window.Event('submit',{bubbles:true,cancelable:true}));await flush();assert.equal(h.writes(),1);
   h.settings().click();await flush();assert.match(h.confirmation().textContent,/不能撤回已发出的请求/);h.doc.querySelector('[data-action=cancel-navigation]').click();await flush();assert.equal(h.disposed(),0);
   h.settings().click();await flush();h.doc.querySelector('[data-action=confirm-navigation]').click();await flush();assert.equal(h.disposed(),1);h.releaseWrites();await flush();assert.equal(h.writes(),1);assert.equal(h.window.location.hash,'#/settings');
  }finally{h.releaseWrites();h.close();}
 });
 test('cross-owner navigation confirms current owner drafts without inheriting secrets or ordinary values',async()=>{
  const h=await moduleHarness({twoOwners:true});try{
-  h.edit('ff14-config-ff14_calendar_default_days','8');h.edit('credential_fflogs_cn-client_secret','SYNTHETIC ONLY');
+  h.edit('days','8');h.edit('credential_fflogs_cn-client_secret','SYNTHETIC ONLY');
   h.doc.querySelector('.shell-sidebar a[href="#/module/example%2Fdemo"]').click();await flush();assert.ok(h.confirmation());h.doc.querySelector('[data-action=cancel-navigation]').click();await flush();assert.equal(h.disposed(),0);
   h.doc.querySelector('.shell-sidebar a[href="#/module/example%2Fdemo"]').click();await flush();h.doc.querySelector('[data-action=confirm-navigation]').click();await flush();
-  await h.go('#/module/example%2Fdemo/config');assert.equal(h.doc.getElementById('ff14-config-ff14_calendar_default_days').value,'7');assert.equal(h.doc.getElementById('credential_fflogs_cn-client_secret').value,'');
+  await h.go('#/module/example%2Fdemo/config');assert.equal(h.days().value,'7');assert.equal(h.doc.getElementById('credential_fflogs_cn-client_secret').value,'');
  }finally{h.close();}
 });
 test('history forward from a restored dirty Module view uses the same cancelable guard',async()=>{
  const h=await moduleHarness();try{
-  h.edit('ff14-config-ff14_calendar_default_days','8');h.settings().click();await flush();h.doc.querySelector('[data-action=confirm-navigation]').click();await flush();
-  h.window.history.back();await flush();await flush();assert.equal(h.window.location.hash,'#/module/ff14%2Fff14/config');assert.equal(h.doc.getElementById('ff14-config-ff14_calendar_default_days').value,'8');
+  h.edit('days','8');h.settings().click();await flush();h.doc.querySelector('[data-action=confirm-navigation]').click();await flush();
+  h.window.history.back();await flush();await flush();assert.equal(h.window.location.hash,'#/module/ff14%2Fff14/config');assert.equal(h.days().value,'8');
   h.window.history.forward();await flush();await flush();assert.ok(h.confirmation());assert.equal(h.window.location.hash,'#/module/ff14%2Fff14/config');h.doc.querySelector('[data-action=cancel-navigation]').click();await flush();assert.equal(h.window.location.hash,'#/module/ff14%2Fff14/config');
  }finally{h.close();}
 });

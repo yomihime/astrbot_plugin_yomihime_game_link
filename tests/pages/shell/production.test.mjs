@@ -41,7 +41,12 @@ test('production select names its actual focus node and tracks popup keyboard st
 test('production module uses public surfaces and fields without private Naive card overrides',async()=>{
  const scope=createScope(()=>true),page=mount(container,{routeId:'items',context,scope,services:{invoke(){throw Error('unexpected-request');}}});
  try {
-  assert.equal(container.querySelectorAll('.ui-surface').length,2);
+  const primary=container.querySelector('.ui-page-template form');
+  const result=container.querySelector('.ui-page-template .ui-surface.ff14-result');
+  assert.equal(container.querySelectorAll('form').length,1);
+  assert.ok(primary?.querySelector('button[type="submit"][data-action="query"]'));
+  assert.ok(result);
+  assert.equal(primary.contains(result),false);
   assert.ok(container.querySelector('.ui-form-grid .ui-form-field'));
   assert.equal(container.querySelector('.n-card'),null);
   const moduleCss=await readFile(resolve(root,'modules/ff14/pages/dist/styles.css'),'utf8');
@@ -86,6 +91,22 @@ test('production runtime graph and module remain local and share one Vue/UI impl
   const hashLicense=await readFile(resolve(root,'pages/00-game-link/licenses/@noble_hashes.txt'),'utf8');
   assert.match(hashLicense,/@noble\/hashes 2\.0\.1/);assert.match(hashLicense,/MIT/);
   assert.ok(audit.packages.includes('css-render'));assert.ok(audit.packages.includes('lodash-es'));assert.ok(audit.packages.includes('vue'));assert.ok(audit.packages.includes('naive-ui'));
+});
+test('production presentation build contains only the reviewed module display inputs', async () => {
+ const audit=JSON.parse(await readFile(resolve(root,'.build/frontend/presentation-entries.json'),'utf8'));
+ const entry=audit.find(item=>item.owner==='ff14/ff14');
+ assert.equal(entry?.entry,'pages/dist/presentation-ff14.js');
+ assert.deepEqual(entry.inputs.filter(path=>path.startsWith('modules/ff14/')).sort(),[
+  'modules/ff14/pages/src/logo-effect.css',
+  'modules/ff14/pages/src/logo-effect.ts',
+  'modules/ff14/pages/src/presentation-ff14.ts',
+ ]);
+ assert.ok(entry.inputs.every(path=>!/(?:^|\/)(?:entry|query-controller|settings-controller|settings-page)\.[tj]s$/.test(path)));
+ const loader=await readFile(resolve(root,'pages/00-game-link/module-loader.js'),'utf8');
+ const [business,presentation]=loader.split('export async function loadPresentation');
+ const projected='module-assets/ff14/ff14/'+entry.entry;
+ assert.ok(!business.includes(projected));
+ assert.ok(presentation?.includes('case '+JSON.stringify(projected)));
 });
 after(async()=>{dom.window.close();await rm(out,{recursive:true,force:true});});
 

@@ -19,7 +19,7 @@ test('actual source settings UI preserves mask/choices and editable fenced draft
  const context={owner:'ff14/ff14',runtimeId:'source-ui',epoch:1,boundary:'source-ui',available:true,theme:'light',locale:'zh-CN'};
  const page=mountSettings(container,{routeId:'config',context,scope:{isCurrent:()=>true,onDispose:f=>callbacks.push(f)},services:{config:{current:async()=>({revision,fields:{reply_theme:{value:storedTheme,state:'valid',present:storedTheme!==null,source:storedTheme===null?'default':'sqlite'}},descriptors:{reply_theme:{description:'Theme',default:null,value_schema:{},choices:[{value:'host-choice',label:'Host provided label'}]}}}),save:async(r,v)=>{calls.push([r,v]);if(heldWrite)await new Promise(resolve=>releaseWrite=resolve);if(writeError)throw Error(writeError);storedTheme=v.reply_theme;return{revision:++revision};}},credentials:{status:async()=>({revision,fields:{credential_fflogs_cn:{configured:true,decryptable:true,upstream:'unverified'}}}),replace:async(r,f,p)=>{calls.push([r,f,p]);return{revision:++revision};},clear:async()=>{confirmation++;throw Error('operation_cancelled');}}}});
  try{
-  await flush();const theme=container.querySelector('#ff14-config-reply_theme');assert.deepEqual([...theme.options].map(o=>o.textContent),['跟随全局设置','Host provided label']);
+  await flush();const theme=container.querySelector('select[name="reply_theme"]');assert.deepEqual([...theme.options].map(o=>o.textContent),['跟随全局设置','Host provided label']);
   assert.match(container.textContent,/默认值用于后续订阅，已有订阅保留原设置/);
   assert.match(container.textContent,/提醒按调度周期检查，实际送达可能延迟/);
   assert.match(container.textContent,/凭据保存后，上游验证状态仍为待验证/);
@@ -52,7 +52,7 @@ test('ordinary discard follows actual auth classification and recovers without w
  }});
  const button=text=>[...container.querySelectorAll('button')].find(b=>b.textContent.includes(text));
  try{
-  await flush();const days=container.querySelector('#ff14-config-ff14_calendar_default_days');assert.ok(days);assert.equal(days.value,'7');
+  await flush();const days=container.querySelector('input[name="ff14_calendar_default_days"]');assert.ok(days);assert.equal(days.value,'7');
   days.value='17';days.dispatchEvent(new window.Event('input',{bubbles:true}));await flush();assert.equal(button('放弃修改').disabled,false);
   denied=true;button('重新读取状态').click();await flush();assert.match(container.textContent,/管理授权或模块绑定已失效/);assert.equal(days.value,'17');assert.equal(days.disabled,true);
   assert.equal(button('放弃修改').disabled,true);button('放弃修改').click();await flush();assert.equal(days.value,'17');assert.equal(writes,0);
@@ -66,8 +66,8 @@ test('shared settings theme keeps focused draft node and credential regions rema
  const context={owner:'ff14/ff14',runtimeId:'theme-ui',epoch:1,boundary:'theme-ui',available:true,theme:'light',locale:'zh-CN'};
  const page=mountSettings(container,{routeId:'config',context,scope:{isCurrent:()=>true,onDispose(){}},services:{config:{current:async()=>({revision:1,fields:{}}),save:async()=>{writes++;return{revision:2};}},credentials:{status:async()=>({revision:1,fields:{}}),replace:async()=>{writes++;return{revision:2};},clear:async()=>{writes++;return{revision:2};}}}});
  try{
-  await flush();const input=container.querySelector('#ff14-config-ff14_calendar_default_timezone');input.focus();input.value='Asia/Tokyo';input.dispatchEvent(new window.Event('input',{bubbles:true}));input.setSelectionRange(2,5);await flush();
-  page.update({...context,theme:'dark',locale:'en-US'});await flush();assert.equal(container.querySelector('#ff14-config-ff14_calendar_default_timezone'),input);assert.equal(window.document.activeElement,input);assert.equal(input.value,'Asia/Tokyo');assert.equal(input.selectionStart,2);assert.equal(container.querySelector('.ui-page').dataset.theme,'dark');assert.equal(writes,0);
+  await flush();const input=container.querySelector('input[name="ff14_calendar_default_timezone"]');input.focus();input.value='Asia/Tokyo';input.dispatchEvent(new window.Event('input',{bubbles:true}));input.setSelectionRange(2,5);await flush();
+  page.update({...context,theme:'dark',locale:'en-US'});await flush();assert.equal(container.querySelector('input[name="ff14_calendar_default_timezone"]'),input);assert.equal(window.document.activeElement,input);assert.equal(input.value,'Asia/Tokyo');assert.equal(input.selectionStart,2);assert.equal(container.querySelector('.ui-page').dataset.theme,'dark');assert.equal(writes,0);
   const regions=[...container.querySelectorAll('.ui-segmented button')];assert.deepEqual(regions.map(b=>b.getAttribute('aria-pressed')),['true','false']);regions[1].click();await flush();assert.deepEqual(regions.map(b=>b.getAttribute('aria-pressed')),['false','true']);const forms=[...container.querySelectorAll('.ff14-credential')];assert.deepEqual(forms.map(f=>f.hidden),[true,false]);assert.ok([...forms[1].querySelectorAll('input')].every(i=>i.type==='password'));assert.equal(writes,0);
  }finally{page.dispose();container.remove();}
 });

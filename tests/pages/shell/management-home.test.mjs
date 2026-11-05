@@ -30,7 +30,13 @@ test('each public app disables preflight and shell explicitly owns font geometry
  assert.match(await readFile(root+'pages/frontend/src/management-view.ts','utf8'),/import.*UiProvider.*from '@game-link\/ui'/);
  assert.match(await readFile(root+'pages/frontend/src/module-management.ts','utf8'),/import.*UiProvider.*from '@game-link\/ui'/);
  assert.match(await readFile(root+'pages/frontend/src/main.ts','utf8'),/import.*UiProvider.*from '@game-link\/ui'/);
- assert.match(await readFile(root+'modules/ff14/pages/src/entry.ts','utf8'),/import.*UiProvider.*from '@game-link\/ui'/);
+ const ff14=await readFile(root+'modules/ff14/pages/src/entry.ts','utf8');
+ assert.match(ff14,/import.*\bPageTemplate\b.*from '@game-link\/ui'/);
+ assert.match(ff14,/return h\(PageTemplate,/);
+ assert.match(await readFile(root+'pages/public-ui.ts','utf8'),/export \{PageTemplate\} from '.\/frontend\/src\/ui\/page-template'/);
+ const template=await readFile(root+'pages/frontend/src/ui/page-template.ts','utf8');
+ assert.match(template,/import.*\bUiProvider\b.*from '.\/shared-components'/);
+ assert.match(template,/return h\(UiProvider,/);
  assert.match(await readFile(root+'pages/frontend/src/ui/shared-components.ts','utf8'),/preflightStyleDisabled\s*:\s*true/);
  const css=await readFile(root+'pages/frontend/src/shell.css','utf8');assert.match(css,/\.game-shell\s*\{[^}]*font\s*:/);
 });

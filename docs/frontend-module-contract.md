@@ -6,6 +6,16 @@
 
 唯一正式根和 pageName 为 `00-game-link`。壳按 role 展示模块主页、配置、辅助查询；没有 home 时显示简洁摘要，没有 config 时不显示业务配置入口。模块不能注册全局页面或替换壳导航。
 
+获准挂载的 `home` 页面可通过只读可选字段 `PageOptions.logoResourceUrl` 使用同 owner 声明的 Logo。动态资源复用该路由已验证的 payload，Blob URL 在该次挂载的 scope 结束时回收。字段缺失时，模块可使用静态占位。
+
+## 独立目录展示
+
+模块可在自己的 `pages/src/presentation-<local-module-id>.ts` 提供目录展示。受审构建生成同名 `pages/dist/*.js`，有样式输出时再登记同名 CSS。两种资源只登记在精确对应的 owner 下，使用现有 manifest resources 和 SHA-256。正式 ZIP 由已验证资源生成独立的 `loadPresentation`，样式链接在加载前留在惰性模板内。
+
+展示入口可按公开类型导出 `presentation`、`mountLogo` 或两者。`presentation` 使用 schemaVersion 1 和闭合的浅深配色槽。`mountLogo` 收到 Core 已校验的同 owner Logo URL、当前显示上下文和独立 scope。模块自行实现特效并清理动画、监听器与计时器。主题或语言变化调用 `update`，同一显示实例继续使用原节点。离开目录时先使旧 scope 失效，再释放钩子。重新进入可复用同一身份下已校验的资源。关闭页面或身份变化时，Core 在钩子释放后回收资源。清理失败保留原实例供显式重试。
+
+目录只识别当前 owner 明确声明的独立展示入口。旧模块继续用 Core 静态标记。展示入口及其依赖须保持纯展示，目录装载与业务页面挂载分别进行。动态装载沿用现有页面资源读取、完整响应身份及摘要验证，展示入口只使用同一共享 runtime。CSS 继续遵循动态样式的引用限制。钩子参数没有页面服务，目录展示不申请 page-session。
+
 `PageOptions.services` 只包含当前 owner/page 的 invoke、preview、config.current/save/clear 与 credentials.status/replace/clear/authorize。所有写操作携带已读 revision；同页重复写拒绝。clear 凭据由壳统一确认，确认期间切页或失去授权则不提交。config 返回自身字段安全 DTO，credentials 返回 configured、decryptable、upstream:unverified；不返回旧秘密、密文或全局存储管理对象。preview 对当前页面声明的明确公共能力返回有界 PNG，不发送消息或读取默认私人身份。
 
 preview 保留 success、partial_success、needs_selection 的原业务 document。带 card 的成功结果以 `image_state: "ready"` 返回 1～8 张 PNG；无 card 的合法空态、配置说明、选择提示及错误以 `image_state: "none"` 和空 images 返回。客户端不得把无图等同于模块不可用，也不得把损坏或空的 ready 图片降级为成功。文本空态同样经过原公共调用的权限、代际和截止时间检查。

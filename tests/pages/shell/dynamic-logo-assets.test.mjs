@@ -103,13 +103,18 @@ test('mounted source home resolves an external logo, replaces v2, and revokes on
   assert.equal(app.imports,0);assert.equal(app.calls.filter(call=>!['admin/module-page-assets','admin/modules','admin/catalog','admin/read'].includes(call.path)).length,0);
  }finally{app?.close();urls.restore();}
 });
-test('only exact known DLC owners receive the corresponding emblem class',async()=>{
+test('legacy modules use one neutral static emblem across owners',async()=>{
  const urls=blobs();let app;
- try{for(const [owner,expected] of [['steam_dlc/steam','steam'],['steam_dlc/dota2','dota2'],['steam_dlc/cs2','cs2'],['steam_dlc/deadlock','deadlock'],['other/steam',''],['steam_dlc/steam_extra','']]){
+ let color;
+ try{for(const owner of ['steam_dlc/steam','steam_dlc/dota2','steam_dlc/cs2','steam_dlc/deadlock','other/steam','steam_dlc/steam_extra']){
   const f=fixture('a','svg',owner);app=await appHarness(f.data,()=>f.response);
   const logo=app.doc.querySelector('.workspace-emblem-resource');assert.ok(logo,owner);
   const classes=[...logo.classList].filter(name=>/^workspace-emblem-(steam|dota2|cs2|deadlock)$/.test(name));
-  assert.deepEqual(classes,expected?['workspace-emblem-'+expected]:[],owner);
+  assert.deepEqual(classes,[],owner);
+  const logoColor=logo.closest('.workspace-emblem-frame').style.getPropertyValue('--ui-logo');
+  assert.match(logoColor,/^#[0-9a-f]{6}$/i);
+  color??=logoColor;assert.equal(logoColor,color,owner);
+  assert.equal(app.imports,0);
   assert.equal(logo.getAttribute('aria-hidden'),'true');assert.equal(logo.hasAttribute('tabindex'),false);
   app.close();app=null;
  }}finally{app?.close();urls.restore();}

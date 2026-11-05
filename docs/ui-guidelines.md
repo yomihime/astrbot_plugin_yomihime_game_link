@@ -10,7 +10,7 @@
 
 ## 密度与组件
 
-Module 从 `@game-link/ui`（公开入口 `pages/public-ui.ts`）导入 `UiProvider`、`SettingsLayout`、`Surface`、`PageHeader`、`SettingsGroup`、`SettingsRow`、`ActionBar`、`StatusHint`，不得深层导入 `pages/frontend/src/ui/`。这些组件只负责呈现，调用方持有权限、草稿、确认和请求状态。Core 壳发布共用 token 与样式，模块不要复制配色或组件实现。
+Module 从公开入口 `@game-link/ui` 使用 `PageTemplate`，声明页头、字段、选项和操作，再用插槽接入复杂控件或结果。旧模块可继续使用 `UiProvider`、`SettingsLayout`、`Surface`、`PageHeader`、`SettingsGroup`、`SettingsRow`、`ActionBar` 和 `StatusHint`。调用方持有权限、草稿、确认和请求状态。Core 壳发布共用 token 与样式。
 
 |项目|约定|
 |---|---|
@@ -19,9 +19,9 @@ Module 从 `@game-link/ui`（公开入口 `pages/public-ui.ts`）导入 `UiProvi
 |控件|公共输入与操作按钮最小高度 40px、圆角 2px；按内容选短 210px、中 320px 或弹性剩余宽度，不设置所有控件统一长宽；管理 checkbox/radio 为固定 20×20px，不参与 flex 收缩|
 |标签|桌面约 128px；窄屏放控件上方，不用 placeholder 代替|
 |行|标签、适长控件、字段恢复默认，行距 8–12px，无每字段分隔线|
-|颜色|Core 提供 background / panel / text / muted / border / accent / gold / error / warning / success token；浅色为暖纸底、梅紫强调，深色为深紫灰底、柔金强调；与 Naive 浅深主题同步|
+|颜色|模块可按主题覆盖 background / panel / text / muted / border / accent / accentContrast / logo 八个槽；默认浅色为暖纸底、梅紫强调，深色为深紫灰底、柔金强调；CSS 和 Naive UI 共用解析结果，error / warning / success 由 Core 维护|
 
-`UiProvider` 读取规范化 `PageContext.theme` / `locale`，主题更新沿用当前视图，不重挂载或丢失草稿。此主题只影响网页呈现，不代替命令图片的 `reply_theme` 配置。
+`PageTemplate` 将规范化 `PageContext.theme` 和 `locale` 传入自己的 `UiProvider`。主题更新沿用当前视图，保留草稿与焦点。命令图片通过独立的 `reply_theme` 配置选色。
 
 正例：三行日历用短数值、时间、中等时区输入；错误紧跟字段；主要保存按钮紧邻本组。反例：短数值全宽、常驻大成功框、靠缩字或缩点击范围压密度、隐藏冲突、把所有业务入口塞进侧栏。
 
@@ -41,7 +41,7 @@ Module 从 `@game-link/ui`（公开入口 `pages/public-ui.ts`）导入 `UiProvi
 
 ## 模块呈现扩展
 
-模块自己的页面负责业务标签、字段顺序、控件和凭据地区呈现；壳不再通过 `presentation.json` glob 读取模块装饰，也不渲染旧通用业务配置表单。模块只消费 [公开前端合同](../pages/public-contract.ts) 中受限的 owner 绑定服务，字段描述与主题选项来自被授权的安全 DTO；声明本身不授予权限。接入方式以 [前端模块合同](frontend-module-contract.md) 为准，FF14 的具体业务界面见 [模块说明](../modules/ff14/README.md)。Core 全局设置的通用呈现仍由公共层持有。
+模块自己的页面负责业务标签、字段顺序、复杂控件和凭据地区呈现。通用操作与状态可复用 `uiText`，具体语义由控制器选择。Core 提供静态徽标，动态效果由模块通过可信展示入口提供。业务调用继续使用 [公开前端合同](../pages/public-contract.ts) 中受限的 owner 绑定服务，字段描述与主题选项来自被授权的安全 DTO。接入方式见 [前端模块合同](frontend-module-contract.md)，FF14 的业务界面见 [模块说明](../modules/ff14/README.md)。
 
 ## 本地参考与检查
 

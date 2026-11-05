@@ -2,12 +2,12 @@ import {defineComponent, h, type PropType, type SlotsType, type VNodeChild} from
 
 /** Small presentation components. Authorization and form state belong to callers. */
 export const PageHeader = defineComponent({
-  props: {title: {type: String, required: true}, titleId: String, eyebrow: String, subtitle: String},
-  setup(props, {slots}) {return () => h('header', {class: 'ui-page-header'}, [h('div',[props.eyebrow?h('p',{class:'ui-eyebrow'},props.eyebrow):null,h('h1', {id: props.titleId}, props.title),props.subtitle?h('p',{class:'ui-subtitle'},props.subtitle):null]), slots.default?.()]);},
+  props: {title: {type: String, required: true}, titleId: String, eyebrow: String, subtitle: String, headingLevel: {type: Number as PropType<1 | 2>, default: 1}},
+  setup(props, {slots}) {return () => h('header', {class: 'ui-page-header'}, [h('div',[props.eyebrow?h('p',{class:'ui-eyebrow'},props.eyebrow):null,h(props.headingLevel === 2 ? 'h2' : 'h1', {id: props.titleId}, props.title),props.subtitle?h('p',{class:'ui-subtitle'},props.subtitle):null]), slots.default?.()]);},
 });
 export const SettingsGroup = defineComponent({
-  props: {title: {type: String, required: true}, fieldset: Boolean, number: String},
-  setup(props, {slots}) {return () => h(props.fieldset?'fieldset':'section', {class: 'ui-settings-group'}, [props.fieldset?h('legend',{class:'ui-group-legend'},props.title):h('header', {class: 'ui-group-heading'}, [h('h2',[props.number?h('span',{class:'ui-section-number','aria-hidden':'true'},props.number):null,props.title]), slots.heading?.()]), slots.default?.()]);},
+  props: {title: {type: String, required: true}, fieldset: Boolean, number: String, headingLevel: {type: Number as PropType<2 | 3>, default: 2}},
+  setup(props, {slots}) {return () => h(props.fieldset?'fieldset':'section', {class: 'ui-settings-group'}, [props.fieldset?h('legend',{class:'ui-group-legend'},props.title):h('header', {class: 'ui-group-heading'}, [h(props.headingLevel === 3 ? 'h3' : 'h2',[props.number?h('span',{class:'ui-section-number','aria-hidden':'true'},props.number):null,props.title]), slots.heading?.()]), slots.default?.()]);},
 });
 export const SettingsRow = defineComponent({
   setup(_, {slots}) {return () => h('div', {class: 'ui-settings-row'}, slots.default?.());},
