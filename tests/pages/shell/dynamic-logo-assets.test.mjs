@@ -9,8 +9,8 @@ import {catalog,deferred} from './fixtures.mjs';
 const {createModuleAssets}=await sourceModule('pages/frontend/src/module-assets.ts');
 const hash=bytes=>createHash('sha256').update(bytes).digest('hex');
 const flush=async()=>{for(let i=0;i<5;i++)await new Promise(resolve=>setTimeout(resolve,5));};
-function fixture(version='a',extension='svg'){
- const data=catalog('minimal/demo'),module=data.modules[0];module.asset_version=version.repeat(64);
+function fixture(version='a',extension='svg',owner='minimal/demo'){
+ const data=catalog(owner),module=data.modules[0];module.asset_version=version.repeat(64);
  const prefix=`module-assets/${module.module_id}/pages/p${module.asset_version}/`;
  const mime={svg:'image/svg+xml',png:'image/png',jpg:'image/jpeg',jpeg:'image/jpeg'}[extension];
  const content=[['pages/entry.js','text/javascript','throw Error("Logo must never import this page");'],['pages/styles.css','text/css','.business{color:red}'],['assets/logo.'+extension,mime,extension==='svg'?'<svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0h1v1z"/></svg>':'synthetic-image-bytes']];
@@ -18,7 +18,7 @@ function fixture(version='a',extension='svg'){
  module.pages=[{...module.pages[0],entry:prefix+'pages/entry.js',styles:[prefix+'pages/styles.css'],role:'aux'}];
  module.resources=resources.map(item=>({path:prefix+item.path,sha256:item.sha256}));
  module.display={default_name:'Synthetic extension',localized_names:{},short_name:null,logo_resource:prefix+'assets/logo.'+extension};
- module.source={kind:'extension',package_id:'minimal'};
+ module.source={kind:'extension',package_id:owner.split('/')[0]};
  return {data,module,response:{asset_version:module.asset_version,entry:'pages/entry.js',styles:['pages/styles.css'],resources}};
 }
 function blobs(){
@@ -102,6 +102,17 @@ test('mounted source home resolves an external logo, replaces v2, and revokes on
   assert.equal(app.doc.querySelector('.workspace-emblem-resource'),null);assert.ok(urls.revoked.includes(urls.created[1].url));
   assert.equal(app.imports,0);assert.equal(app.calls.filter(call=>!['admin/module-page-assets','admin/modules','admin/catalog','admin/read'].includes(call.path)).length,0);
  }finally{app?.close();urls.restore();}
+});
+test('only exact known DLC owners receive the corresponding emblem class',async()=>{
+ const urls=blobs();let app;
+ try{for(const [owner,expected] of [['steam_dlc/steam','steam'],['steam_dlc/dota2','dota2'],['steam_dlc/cs2','cs2'],['steam_dlc/deadlock','deadlock'],['other/steam',''],['steam_dlc/steam_extra','']]){
+  const f=fixture('a','svg',owner);app=await appHarness(f.data,()=>f.response);
+  const logo=app.doc.querySelector('.workspace-emblem-resource');assert.ok(logo,owner);
+  const classes=[...logo.classList].filter(name=>/^workspace-emblem-(steam|dota2|cs2|deadlock)$/.test(name));
+  assert.deepEqual(classes,expected?['workspace-emblem-'+expected]:[],owner);
+  assert.equal(logo.getAttribute('aria-hidden'),'true');assert.equal(logo.hasAttribute('tabindex'),false);
+  app.close();app=null;
+ }}finally{app?.close();urls.restore();}
 });
 test('mounted home revokes a live logo on pagehide and late v2 never attaches after its owner leaves',async()=>{
  const urls=blobs();let app;
