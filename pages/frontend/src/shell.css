@@ -17,6 +17,18 @@ html{overflow-anchor:none;scrollbar-gutter:stable;overflow-y:auto;background:var
 @media(prefers-reduced-motion:reduce){.game-shell *{transition:none!important;animation:none!important}}
 
 .workspace-emblem-resource{mask-size:contain;mask-position:center;mask-repeat:no-repeat}
+/* Four known DLC identities use static colors; other modules keep the shared rebound. */
+.workspace-emblem-steam{--workspace-emblem-color:#3478aa}
+.workspace-emblem-dota2{--workspace-emblem-color:#b63d34}
+.workspace-emblem-cs2{--workspace-emblem-color:#b46b1d}
+.workspace-emblem-deadlock{--workspace-emblem-color:#76599d}
+[data-theme=dark] .workspace-emblem-steam{--workspace-emblem-color:#72b8e8}
+[data-theme=dark] .workspace-emblem-dota2{--workspace-emblem-color:#ed776c}
+[data-theme=dark] .workspace-emblem-cs2{--workspace-emblem-color:#f0af61}
+[data-theme=dark] .workspace-emblem-deadlock{--workspace-emblem-color:#b99bdd}
+.workspace-emblem-resource:is(.workspace-emblem-steam,.workspace-emblem-dota2,.workspace-emblem-cs2,.workspace-emblem-deadlock){background:var(--workspace-emblem-color)}
+.workspace-emblem-resource:is(.workspace-emblem-steam,.workspace-emblem-dota2,.workspace-emblem-cs2,.workspace-emblem-deadlock)::before{background:var(--workspace-emblem-color);animation:none;clip-path:none}
+.workspace-emblem-resource:is(.workspace-emblem-steam,.workspace-emblem-dota2,.workspace-emblem-cs2,.workspace-emblem-deadlock)::after{animation:none;opacity:0}
 
 .shell-brand-line{display:block;white-space:nowrap}
 

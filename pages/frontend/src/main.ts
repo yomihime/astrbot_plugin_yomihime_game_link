@@ -15,6 +15,13 @@ import {createModuleManagement} from './module-management';
 import {createInlineConfirmation} from './confirmation';
 import {contextBoundary} from './lifecycle';
 import {moduleLabels,moduleGroups} from './catalog';
+// Fixed identities only: extension metadata never supplies CSS or style values.
+const moduleEmblemClasses = new Map([
+  ['steam_dlc/steam','workspace-emblem-steam'],
+  ['steam_dlc/dota2','workspace-emblem-dota2'],
+  ['steam_dlc/cs2','workspace-emblem-cs2'],
+  ['steam_dlc/deadlock','workspace-emblem-deadlock'],
+]);
 declare global {interface Window {AstrBotPluginView: Bridge}}
 const App = defineComponent({setup() {
   const revision = ref(0), root = ref<HTMLElement|null>(null), main = ref<HTMLElement|null>(null), settingsRoot=ref<HTMLElement|null>(null), modulesRoot=ref<HTMLElement|null>(null),maintenanceRoot=ref<HTMLElement|null>(null),maintenanceOpen=ref(false);
@@ -135,7 +142,7 @@ const App = defineComponent({setup() {
               h('div',{class:'workspace-catalog'},[
                 h('div',{class:'workspace-index-heading'},[h('h2',{class:'shell-eyebrow'},'游戏目录'),h('span',{class:'workspace-count'},modules.length+' 个模块')]),
                 ...moduleGroups(modules,state?.locale||'zh-CN').map(group=>h('section',{class:'workspace-package',key:group.key,'aria-label':group.title},[h('h3',{class:'workspace-package-title'},group.title),h('div',{class:'workspace-package-grid'},group.modules.map(module=>h('article',{class:'workspace-module',key:module.module_id},[
-                  h('div',{class:'workspace-module-heading'},[h('div',[h('div',{class:'workspace-module-title'},[h('h2',{'aria-level':4},[link(label(module.module_id),'#/module/'+encodeURIComponent(module.module_id),false,()=>shell?.selectModule(module.module_id),'workspace-status-'+encodeURIComponent(module.module_id))]),workspaceStatus(module.module_id,module.state)]),module.display?.summary?h('p',{class:'workspace-module-summary'},module.display.summary):null,!module.pages.length?h('p',{class:'workspace-module-description'},'暂无可用功能，请在模块管理中核对状态。'):null]),moduleLogo(module)?h(LogoMark,{class:'workspace-emblem workspace-emblem-resource',style:{maskImage:`url("${moduleLogo(module)}")`}}):h('span',{class:'workspace-emblem','aria-hidden':'true'},'✦')]),
+                  h('div',{class:'workspace-module-heading'},[h('div',[h('div',{class:'workspace-module-title'},[h('h2',{'aria-level':4},[link(label(module.module_id),'#/module/'+encodeURIComponent(module.module_id),false,()=>shell?.selectModule(module.module_id),'workspace-status-'+encodeURIComponent(module.module_id))]),workspaceStatus(module.module_id,module.state)]),module.display?.summary?h('p',{class:'workspace-module-summary'},module.display.summary):null,!module.pages.length?h('p',{class:'workspace-module-description'},'暂无可用功能，请在模块管理中核对状态。'):null]),moduleLogo(module)?h(LogoMark,{class:['workspace-emblem','workspace-emblem-resource',moduleEmblemClasses.get(module.module_id)],style:{maskImage:`url("${moduleLogo(module)}")`}}):h('span',{class:'workspace-emblem','aria-hidden':'true'},'✦')]),
                 ])))])),
                 !modules.length?h('p',{class:'shell-empty'},'暂无可用模块。可前往模块管理核对状态。'):null,
               ]),
