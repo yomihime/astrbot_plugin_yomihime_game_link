@@ -123,11 +123,13 @@ test('live copy uses the existing owner/page proof and never poisons the optiona
   }
 });
 
-test('shell deep link localizes only the visible owner, reuses it on home, and revokes it across contexts', async () => {
+test('shell localizes builtin copy in the Host sandbox, reuses it on home, and revokes it across contexts', async () => {
   const dom = new JSDOM('<html data-page-name="00-game-link"><body><div id="app"></div></body></html>', {
     pretendToBeVisual: true, url: 'http://localhost/index.html#/module/ff14%2Fff14/-/queries',
   });
   const {window} = dom, document = window.document;
+  // AstrBot's sandbox keeps the document URL but gives the frame an opaque security origin.
+  Object.defineProperty(window, 'origin', {value: 'null'});
   for (const key of ['window','document','Element','HTMLElement','SVGElement','Node','MutationObserver']) {
     globalThis[key] = key === 'window' ? window : window[key];
   }
@@ -146,7 +148,10 @@ test('shell deep link localizes only the visible owner, reuses it on home, and r
   other.resources.push({path: 'module-assets/example/other/pages/dist/presentation-other.js', sha256: hash(otherCopy)});
   directory.modules.push(other);
   window.fetch = async (url, options) => {
-    fetched.push({url, signal: options.signal});
+    fetched.push({url, signal: options.signal, mode: options.mode, credentials: options.credentials});
+    if (options.mode === 'same-origin' && new URL(url).origin !== window.origin) {
+      throw new TypeError('Request blocked from an opaque origin');
+    }
     return new Response(await (url.includes(owner) ? reply.promise : late.promise));
   };
   window.AstrBotPluginView = {
@@ -159,6 +164,13 @@ test('shell deep link localizes only the visible owner, reuses it on home, and r
   const render = async () => {for (let i = 0; i < 8; i++) await new Promise(resolve => setImmediate(resolve));};
   const emit = value => {for (const listener of listeners) listener(value);};
   const title = () => document.querySelector('.query-links a').textContent;
+  const waitForTitle = async expected => {
+    const deadline = performance.now() + 3000;
+    while (title() !== expected && performance.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    assert.equal(title(), expected);
+  };
   try {
     await sourceApp();
     await render();
@@ -166,8 +178,10 @@ test('shell deep link localizes only the visible owner, reuses it on home, and r
     assert.equal(fetched.length, 1);
     emit({...context, locale: 'ja-JP'});
     reply.resolve(envelope());
-    await render();
-    assert.equal(title(), 'アイテム検索');
+    // The asset digest may finish on a different turn under parallel test load.
+    await waitForTitle('アイテム検索');
+    assert.equal(fetched[0].mode, 'cors');
+    assert.equal(fetched[0].credentials, 'same-origin');
     emit(context);
     await render();
     assert.equal(title(), data['en-US'].titles.items);
