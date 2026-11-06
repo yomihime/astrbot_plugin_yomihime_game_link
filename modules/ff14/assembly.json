@@ -6,7 +6,8 @@
       "ff14.calendar.query": 45
     },
     "collectors": {
-      "ff14.calendar.sync": 45
+      "ff14.calendar.sync": 45,
+      "ff14.news.collect": 90
     }
   },
   "sources": {
@@ -18,7 +19,8 @@
     "fflogs_stats_global": "www.fflogs.com",
     "fflogs_stats_cn": "cn.fflogs.com",
     "ff14_calendar_primary": "calendar.google.com",
-    "ff14_calendar_fallback": "p66-caldav.icloud.com"
+    "ff14_calendar_fallback": "p66-caldav.icloud.com",
+    "ff14_news_official": "cqnews.web.sdo.com"
   },
   "credentials": [
     {

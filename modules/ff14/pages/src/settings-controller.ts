@@ -4,6 +4,9 @@ import {ff14Text} from './i18n';
 export const ordinaryFields = [
   {name:'reply_theme',value:null},
   {name:'ff14_subscriptions_enabled',value:true,choices:[['true','settings.allowSubscriptions'],['false','settings.pauseSubscriptions']]},
+  {name:'ff14_news_admins',value:[] as string[]},
+  {name:'ff14_news_targets',value:[] as string[]},
+  {name:'ff14_news_interval_seconds',value:900,choices:[['900','settings.minutes'],['3600','settings.minutes']]},
   {name:'ff14_default_region',value:'cn',choices:[['cn','region.cn'],['global','region.global']]},
   {name:'ff14_calendar_default_days',value:7},
   {name:'ff14_calendar_default_timezone',value:'Asia/Shanghai'},
@@ -39,7 +42,7 @@ export function createSettingsController(options:PageOptions,onChanged:()=>void)
     state.themeAvailable=Boolean(config.descriptors?.reply_theme);
     state.themeChoices=(config.descriptors?.reply_theme?.choices||[]).flatMap(choice=>typeof choice.value==='string'&&choice.value?[{value:choice.value,label:choice.label}]:[]);
     baseline=Object.fromEntries(ordinaryFields.filter(f=>f.name!=='reply_theme'||state.themeAvailable).map(f=>{
-      const stored=config.fields[f.name];return [f.name,stored?.state==='invalid'?(f.name==='reply_theme'?'!invalid':''):String(stored?.value??f.value??'')];
+      const stored=config.fields[f.name];return [f.name,stored?.state==='invalid'?(f.name==='reply_theme'?'!invalid':''):Array.isArray(f.value)?(Array.isArray(stored?.value)?stored.value:f.value).join(', '):String(stored?.value??f.value??'')];
     }));
     state.draft={...baseline,...patch};acknowledgementPending=false;acknowledgedSubmission=null;state.baselineUnverified=false;syncDrafts();state.ready=true;state.draftEditable=true;
   }
@@ -90,7 +93,9 @@ export function createSettingsController(options:PageOptions,onChanged:()=>void)
     editPair(field:string,name:'client_id'|'client_secret',value:string){if(state.pending||!current(sequence)||!state.pairs[field])return;state.pairs[field][name]=value;changed();},
     discard(){if(state.pending||!current(sequence)||!state.draftEditable)return;state.draft={...baseline};explicitIntent.clear();drafts.delete(key);state.dirty=false;scrub();notify(state.ready?'settings.discarded':'settings.discardedStale');},
     discardPair(field:string){if(state.pending||!current(sequence)||!state.pairs[field])return;scrub(field);notify('settings.credentialDiscarded');},
-    save(){const submitted={...state.draft},values:Record<string,JsonValue>={};for(const field of ordinaryFields){if(field.name==='reply_theme'&&!state.themeAvailable)continue;const raw=submitted[field.name];values[field.name]=field.name==='reply_theme'?(raw===''?null:raw):typeof field.value==='number'?Number(raw):typeof field.value==='boolean'?raw==='true':raw;}
+    save(){if(!state.ready||state.pending||!current(sequence))return Promise.resolve();const submitted={...state.draft},values:Record<string,JsonValue>={};for(const field of ordinaryFields){if(field.name==='reply_theme'&&!state.themeAvailable)continue;const raw=submitted[field.name];values[field.name]=field.name==='reply_theme'?(raw===''?null:raw):Array.isArray(field.value)?raw.split(/[,，\n]/u).map(value=>value.trim()).filter(Boolean):typeof field.value==='number'?Number(raw):typeof field.value==='boolean'?raw==='true':raw;}
+      for(const name of ['ff14_news_admins','ff14_news_targets']){const entries=values[name] as string[];const parts=name==='ff14_news_admins'?2:3;if(entries.length>20||new Set(entries).size!==entries.length||entries.some(entry=>entry.split(':').length!==parts||entry.split(':').some(part=>!/^[^\s:/\\\x00-\x1f\x7f]{1,128}$/u.test(part))||parts===3&&!['FriendMessage','GroupMessage'].includes(entry.split(':')[1]))){notify('settings.invalidNews',true);return Promise.resolve();}}
+      if(![900,3600].includes(Number(values.ff14_news_interval_seconds))){notify('settings.invalidNews',true);return Promise.resolve();}
       if(state.themeAvailable&&submitted.reply_theme!==''&&!state.themeChoices.some(choice=>choice.value===submitted.reply_theme)){notify('settings.selectTheme',true);return Promise.resolve();}
       if(!['true','false'].includes(submitted.ff14_subscriptions_enabled)||!['cn','global'].includes(String(values.ff14_default_region))||!Number.isInteger(values.ff14_calendar_default_days)||Number(values.ff14_calendar_default_days)<1||Number(values.ff14_calendar_default_days)>30||![21600,43200,86400].includes(Number(values.ff14_calendar_sync_interval_seconds))||!/^([01]\d|2[0-3]):[0-5]\d$/.test(String(values.ff14_calendar_default_delivery_time))){notify('settings.checkFields',true);return Promise.resolve();}
       try{new Intl.DateTimeFormat('en',{timeZone:String(values.ff14_calendar_default_timezone)});}catch{notify('settings.invalidTimezone',true);return Promise.resolve();}

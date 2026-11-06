@@ -1992,6 +1992,15 @@ class AstrBotRuntime:
                         self._external_source_policies.timeout_manifests
                     ),
                     trusted_subscription_gates=subscription_gates,
+                    configured_public_subscriptions=(
+                        getattr(
+                            self._assembly.support,
+                            "configured_public_subscriptions",
+                            {},
+                        )
+                        if self._assembly
+                        else {}
+                    ),
                     source_health=self._source_health,
                     commentary_port=AstrBotSubscriptionCommentary(self._context),
                     analysis_port=AstrBotCommandAnalysis(self._context),

@@ -10,7 +10,7 @@
   "settings.calendarSubscriptions": "日历与订阅",
   "settings.subscriptionDefaults": "默认值用于后续订阅，已有订阅保留原设置；提醒按调度周期检查，实际送达可能延迟。",
   "settings.field.reply_theme": "回复图片主题",
-  "settings.field.ff14_subscriptions_enabled": "日历订阅",
+  "settings.field.ff14_subscriptions_enabled": "日历与新闻订阅",
   "settings.field.ff14_default_region": "默认区域",
   "settings.field.ff14_calendar_default_days": "日历默认天数",
   "settings.field.ff14_calendar_default_timezone": "日历默认时区",
@@ -160,5 +160,13 @@
   "catalog.ff14.route.items": "物品查询",
   "catalog.ff14.route.market": "市场行情",
   "catalog.ff14.route.logs": "角色 Logs",
-  "catalog.ff14.route.calendar": "活动日历"
+  "catalog.ff14.route.calendar": "活动日历",
+  "settings.newsSubscriptions": "国服新闻订阅",
+  "settings.field.ff14_news_admins": "新闻管理员",
+  "settings.field.ff14_news_targets": "新闻推送目标",
+  "settings.field.ff14_news_interval_seconds": "新闻同步周期",
+  "settings.hint.ff14_news_admins": "以逗号分隔：平台实例 ID:账户 ID。留空时禁止 addhere。",
+  "settings.hint.ff14_news_targets": "以逗号分隔：平台实例 ID:FriendMessage:账户 ID 或 平台实例 ID:GroupMessage:群 ID。首次完整采集建立基线，删除目标会取消配置订阅。",
+  "settings.invalidNews": "请检查新闻目标、管理员格式及同步周期，每项最多 20 条且不重复。",
+  "settings.minutes": "{count} 分钟"
 }

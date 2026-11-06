@@ -10,7 +10,7 @@
   "settings.calendarSubscriptions": "カレンダーと購読",
   "settings.subscriptionDefaults": "初期値は今後の購読に適用され、既存の購読は現在の設定を保持します。リマインダーは定期的に確認するため、通知が遅れることがあります。",
   "settings.field.reply_theme": "返信画像のテーマ",
-  "settings.field.ff14_subscriptions_enabled": "カレンダーの購読",
+  "settings.field.ff14_subscriptions_enabled": "カレンダーとニュースの購読",
   "settings.field.ff14_default_region": "既定のリージョン",
   "settings.field.ff14_calendar_default_days": "カレンダーの既定日数",
   "settings.field.ff14_calendar_default_timezone": "カレンダーの既定タイムゾーン",
@@ -160,5 +160,13 @@
   "catalog.ff14.route.items": "アイテム検索",
   "catalog.ff14.route.market": "マーケット相場",
   "catalog.ff14.route.logs": "キャラクターの Logs",
-  "catalog.ff14.route.calendar": "イベントカレンダー"
+  "catalog.ff14.route.calendar": "イベントカレンダー",
+  "settings.newsSubscriptions": "中国版ニュース購読",
+  "settings.field.ff14_news_admins": "ニュース管理者",
+  "settings.field.ff14_news_targets": "ニュース配信先",
+  "settings.field.ff14_news_interval_seconds": "ニュース取得間隔",
+  "settings.hint.ff14_news_admins": "カンマ区切り：プラットフォーム実例 ID:アカウント ID。空欄では addhere を無効にします。",
+  "settings.hint.ff14_news_targets": "カンマ区切り：プラットフォーム実例 ID:FriendMessage:アカウント ID または プラットフォーム実例 ID:GroupMessage:グループ ID。初回の完全取得で基準を作成し、配信先の削除で設定購読を解除します。",
+  "settings.invalidNews": "配信先、管理者の形式と取得間隔を確認してください。各リストは重複なしで最大 20 件です。",
+  "settings.minutes": "{count} 分"
 }

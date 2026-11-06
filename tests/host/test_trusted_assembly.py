@@ -144,7 +144,11 @@ class TrustedAssemblyTests(unittest.TestCase):
             {("ff14/ff14", "ff14.calendar.query"): 45},
         )
         self.assertEqual(
-            dict(selected.collector_timeouts), {("ff14/ff14", "ff14.calendar.sync"): 45}
+            dict(selected.collector_timeouts),
+            {
+                ("ff14/ff14", "ff14.calendar.sync"): 45,
+                ("ff14/ff14", "ff14.news.collect"): 90,
+            },
         )
         for values in (selected.capability_timeouts, selected.collector_timeouts):
             with self.assertRaises(TypeError):

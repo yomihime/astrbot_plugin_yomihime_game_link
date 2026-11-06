@@ -91,3 +91,15 @@ contract. Module code performs no filesystem or remote reads for presentation.
 Core owns SVG validation, theme color substitution and rasterization. Explicit
 SDK Asset values can override a registered logo without adding any game logic
 in Core. The original fallback document and full source links are preserved.
+
+## 国服新闻
+
+管理员在业务配置中设置 `ff14_news_admins`（平台实例 ID:账户 ID）、`ff14_news_targets`（平台实例 ID:FriendMessage:账户 ID 或 平台实例 ID:GroupMessage:群 ID）及 `ff14_news_interval_seconds`（900 或 3600 秒）。页面以逗号分隔输入，后端存储为数组。`/ygl ff14 news addhere` 只接受真实命令上下文及已配置的新闻管理员；当前会话由 Core 解析，不接受用户提供任意投递路由。
+
+共享采集固定使用国服官网新闻列表和必要的新文章详情，不抓取任意网页/远程图片。全量受限分页校验后，首次订阅建立基线；同 ID 编辑不再次触发。每轮最多生成三条公开事件，待处理正文保存在订阅状态，随观察与 outbox 事务提交。公开合并身份由 Core 使用模块、完整 ConversationRef、官网 ID 建立，覆盖不同 owner 的重叠订阅；UNKNOWN 保留，不自动重发。卡片与文本经同一次 AstrBot send_message 发送，渲染失败保留文本。
+
+官网类别名称未获核实时使用类别编号；时间仅将官网明确的墙钟字段标为 Asia/Shanghai，不用时间或最大 ID 作游标。空标题、摘要或不可解析时间显示缺失标记。失败、不完整扫描、分页变动、超预算均不推进 evaluator 状态。档案采集上限 1600 条、32 页，单轮来源阶段 80 秒，Core 受信执行预算 90 秒；HTTP 单次 15 秒、来源配额每分钟 30 次、最多两个并行列表请求。固定来源 API 不附带稳定性、服务或抓取授权承诺。
+
+首轮不为旧新闻逐条拉详情。随后只为本轮新发现且缺标题或摘要的 ID 请求详情；详情失败保留原已知 ID 集以便下轮重试。此采集集合按当前官网公开分类筛选，不保证能发现官网在两次成功扫描之间发布后又移除的文章。
+
+完整约束、隔离测试与本地接续边界见[云端交接](../../docs/ff14-news-cloud-handoff.md)。

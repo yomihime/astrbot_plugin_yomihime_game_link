@@ -140,7 +140,10 @@ class FF14CalendarRuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(assembly.manifests[GLOBAL_MODULE_ID], manifest)
         self.assertEqual(
             dict(assembly.collector_timeouts),
-            {(GLOBAL_MODULE_ID, "ff14.calendar.sync"): 45},
+            {
+                (GLOBAL_MODULE_ID, "ff14.calendar.sync"): 45,
+                (GLOBAL_MODULE_ID, "ff14.news.collect"): 90,
+            },
         )
         self.assertNotIn(
             (GLOBAL_MODULE_ID, "ff14.calendar.collect"),
