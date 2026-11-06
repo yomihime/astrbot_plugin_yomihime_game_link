@@ -119,6 +119,7 @@ class AdminOperationsRuntimeTests(unittest.IsolatedAsyncioTestCase):
         context_validator=None,
         trusted_bundled_manifests=None,
         trusted_subscription_gates=None,
+        ordinary_config_resources=None,
     ) -> CoreRuntime:
         extension_root = self.root / "extensions"
         extension_root.mkdir(exist_ok=True)
@@ -140,6 +141,7 @@ class AdminOperationsRuntimeTests(unittest.IsolatedAsyncioTestCase):
             cleanup_timeout=0.5,
             trusted_bundled_manifests=trusted_bundled_manifests,
             trusted_subscription_gates=trusted_subscription_gates,
+            ordinary_config_resources=ordinary_config_resources,
         )
         return self.runtime
 

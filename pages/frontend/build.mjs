@@ -20,6 +20,33 @@ const bundleRoots=args.filter(value=>value.startsWith('--bundle-root=')).map(val
 if(outputOptions.length>1||args.some(value=>!value.startsWith('--out-root=')&&!value.startsWith('--bundle-root=')))throw Error('Unknown or repeated build option');
 if(!bundleRoots.length)bundleRoots.push('modules');
 const safeRelative=value=>typeof value==='string'&&/^[-a-zA-Z0-9_./]+$/.test(value)&&value.split('/').every(part=>part&&part!=='.'&&part!=='..');
+const pageLocales = ['zh-CN','zh-TW','ja-JP','en-US'];
+async function presentationCopy(source, module) {
+ const copy = {}, inputs = [];
+ const prefix = 'catalog.' + module.module_id + '.';
+ for (const locale of pageLocales) {
+  const path = resolve(source,'pages/src/i18n',locale+'.json');
+  let info;
+  try { info = await lstat(path); }
+  catch(error) { if(error.code==='ENOENT'||error.code==='ENOTDIR')continue; throw error; }
+  if (!info.isFile() || info.size > 262144 || await realpath(path) !== path) throw Error('Invalid presentation copy source');
+  const messages = JSON.parse(await readFile(path,'utf8'));
+  if (!Object.hasOwn(messages, prefix+'summary')) continue;
+  const summary = messages[prefix+'summary'];
+  const titles = Object.fromEntries((module.pages || []).map(page =>
+   [page.route_id, messages[prefix+'route.'+page.route_id]]));
+  const plain = (text, limit) => typeof text==='string' && text.trim() &&
+   [...text].length<=limit && !/[\p{Cc}\p{Cf}\p{Cs}\u2028\u2029]/u.test(text);
+  if (!plain(summary,160) || Object.values(titles).some(title=>!plain(title,256))) throw Error('Invalid presentation copy');
+  copy[locale] = {summary, titles};
+  inputs.push(path);
+ }
+ if (!inputs.length) return null;
+ if (inputs.length !== pageLocales.length) throw Error('Incomplete presentation copy');
+ const header = '// ygl-copy-v1 ' + JSON.stringify(copy) + '\n';
+ if (Buffer.byteLength(header) > 16384) throw Error('Presentation copy exceeds byte budget');
+ return {header,inputs};
+}
 if(bundleRoots.some(value=>!safeRelative(value)))throw Error('Invalid reviewed build root');
 const outputRoot=outputOptions.length?resolve(invocationRoot,outputOptions[0].slice('--out-root='.length)):root;
 const stageRoot=await mkdtemp(resolve(tmpdir(),'ygl-frontend-'));
@@ -45,7 +72,14 @@ const runtimeAudit = {name: 'runtime-package-notices', generateBundle(_options, 
 }};
 await mkdir(shell, {recursive: true});
 await build({...common, plugins:[runtimeAudit], build: {outDir: shell, emptyOutDir: false, lib: {entry: resolve(frontend, 'src/runtime.ts'), formats: ['es'], fileName: () => 'runtime.js'}, minify: true, sourcemap: false}});
-await build({...common, plugins:[runtimeAudit], build: {outDir: shell, emptyOutDir: false, lib: {entry: resolve(frontend, 'src/main.ts'), formats: ['es'], fileName: () => 'app.js', cssFileName: 'styles'}, rolldownOptions: {external: ['vue', 'naive-ui', '@game-link/ui', './module-loader.js'], output: {paths: {'vue': './runtime.js', 'naive-ui': './runtime.js','@game-link/ui':'./runtime.js'}}}, minify: true}});
+const shellRuntimeImports = Object.fromEntries(
+  ['vue', 'naive-ui', '@game-link/ui', '@game-link/core-text'].map(id => [id, './runtime.js']));
+const sharedCoreText = {name: 'shared-core-text', enforce: 'pre', resolveId(id, importer) {
+  if (importer && id.startsWith('.') && resolve(dirname(importer), id) === resolve(frontend, 'src/i18n/messages')) {
+    return {id: '@game-link/core-text', external: true};
+  }
+}};
+await build({...common, plugins:[runtimeAudit, sharedCoreText], build: {outDir: shell, emptyOutDir: false, lib: {entry: resolve(frontend, 'src/main.ts'), formats: ['es'], fileName: () => 'app.js', cssFileName: 'styles'}, rolldownOptions: {external: [...Object.keys(shellRuntimeImports), './module-loader.js'], output: {paths: shellRuntimeImports}}, minify: true}});
 const projected=[];
 const branches=[],presentationBranches=[],stylePaths=new Set(),presentationAudit=[];
 for(const bundleRoot of bundleRoots)for(const packageName of (await readdir(resolve(root,bundleRoot))).sort()) {
@@ -101,6 +135,7 @@ for(const bundleRoot of bundleRoots)for(const packageName of (await readdir(reso
    throw Error('Presentation resources cannot be business page entries or styles');
   }
   const owner = manifest.package_id+'/'+module.module_id;
+  const copy = await presentationCopy(source, module);
   await bundle(name, name, [{name:'module-presentation-inputs', generateBundle() {
    const files = [...this.getModuleIds()].filter(id => !id.startsWith('\0') &&
     !this.getModuleInfo(id)?.isExternal).map(id => id.split('?')[0]);
@@ -114,8 +149,12 @@ for(const bundleRoot of bundleRoots)for(const packageName of (await readdir(reso
     throw Error('Presentation entry imports a business page entry');
    }
    presentationAudit.push({owner, entry: js,
-    inputs: [...new Set(files.map(id => relative(root,id).replaceAll('\\','/')))].sort()});
+    inputs: [...new Set([...files,...(copy?.inputs || [])].map(id => relative(root,id).replaceAll('\\','/')))].sort()});
   }}]);
+  if (copy) {
+   const target = resolve(destination, js);
+   await writeFile(target, copy.header + await readFile(target,'utf8'));
+  }
   const files = await readdir(resolve(destination,'pages/dist'));
   presentations.set(module.module_id, [js, ...(files.includes(name+'.css') ? [css] : [])]);
  }

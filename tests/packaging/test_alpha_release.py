@@ -58,7 +58,10 @@ class AlphaReleaseTests(unittest.TestCase):
 
         self.assertEqual(
             set(HOST_METADATA_FILES),
-            {".astrbot-plugin/i18n/zh-CN.json", ".astrbot-plugin/i18n/en-US.json"},
+            {
+                f".astrbot-plugin/i18n/{locale}.json"
+                for locale in ("zh-CN", "en-US", "ja-JP", "zh-TW")
+            },
         )
         for filename in HOST_METADATA_FILES:
             labels = json.loads((ROOT / filename).read_text(encoding="utf-8"))

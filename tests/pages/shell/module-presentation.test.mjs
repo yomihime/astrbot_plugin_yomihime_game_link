@@ -207,8 +207,9 @@ test('home mount receives the declared static Logo without requesting additional
         ready: async () => ({pluginName: 'astrbot_plugin_yomihime_game_link', pageName: '00-game-link'}),
         onContext() {},
         apiGet: async () => data,
-        apiPost: async action => {
+        apiPost: async (action, body) => {
           calls.push(action);
+          if (action === 'admin/read') {assert.deepEqual(body,{scope:'page_locale'});return {};}
           if (action === 'admin/module-page-session') {
             return {page_session: 'fixture-proof', expires_at: Date.now() / 1000 + 30};
           }
@@ -225,7 +226,7 @@ test('home mount receives the declared static Logo without requesting additional
       await flush();
       assert.equal(mounts.length, 1);
       assert.equal(mounts[0].logoResourceUrl, declared ? './' + path : undefined);
-      assert.deepEqual(calls, ['admin/module-page-session']);
+      assert.deepEqual(calls, ['admin/read','admin/module-page-session']);
     } finally {
       shell.dispose();
       dom.window.close();

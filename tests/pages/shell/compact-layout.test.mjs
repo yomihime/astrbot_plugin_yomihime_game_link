@@ -7,9 +7,9 @@ test('home stays module-only and auxiliary links remain inside each module',asyn
  const source=await readFile(new URL('../../../pages/frontend/src/main.ts',import.meta.url),'utf8');
  assert.doesNotMatch(source,/workspace-page-index|workspace-page-number/);
  assert.doesNotMatch(source,/查询偏好、日历与来源凭据|游戏业务由模块独立管理/);
- assert.match(source,/link\('辅助查询','#\/module\/'/);
- assert.match(source,/class:'query-links','aria-label':'辅助查询入口'/);
- assert.match(source,/page.title,`#\/module\//);
+ assert.match(source,/link\(t\('shell\.auxQueries'\),'#\/module\/'/);
+ assert.match(source,/class:'query-links','aria-label':t\('shell\.queryEntries'\)/);
+ assert.match(source,/class:'query-links'.*filter\(page=>page\.role==='aux'\).*#\/module\//);
  assert.match(css,/\.workspace-module h2 a\{[^}]*min-height:40px/);
 });
 test('management surface follows shared theme tokens without shrinking action targets',()=>{
@@ -27,7 +27,7 @@ test('global settings bound control widths, separate maintenance, and preserve v
  const view=await readFile(new URL('../../../pages/frontend/src/management-view.ts',import.meta.url),'utf8');
  assert.match(view,/import.*UiProvider.*from '@game-link\/ui'/);
  assert.match(view,/class:'global-font-panel'/);
- assert.match(view,/card.target==='game_link\/core'\?'放弃全局修改':'放弃本模块修改'/);
+ assert.match(view,/card.target==='game_link\/core'\?t\('settings\.discardGlobal'\):t\('settings\.discardModule'\)/);
  assert.match(css,/\.management-global \.ui-settings-row[^}]*minmax\(0,420px\)/);
  assert.match(css,/\.management-global input\[type=file\]::file-selector-button/);
  assert.match(css,/\.management-global \.master-key-panel>\.ui-status-hint\[data-tone=warning\]\{border-left-color:var\(--ui-warning\)\}/);
@@ -39,18 +39,18 @@ test('home copy avoids per-module boilerplate while preserving unavailable state
  const source=await readFile(new URL('../../../pages/frontend/src/main.ts',import.meta.url),'utf8');
  const home=source.slice(source.indexOf("home?h('section',{class:'workspace-index'"),source.indexOf("h('div',{ref:root,id:'module-container'"));
  assert.doesNotMatch(home,/workspace-kicker|workspace-scope-note|workspace-module-meta|进入模块|查看模块功能与设置|收在一处|MODULE/);
- assert.match(home,/暂无可用功能，请在模块管理中核对状态/);
- assert.match(source,/已加载.*已停用.*不可用/);
+ assert.match(home,/t\('shell\.noFeatures'\)/);
+ assert.match(source,/shell\.loaded.*shell\.disabled.*shell\.unavailable/);
  assert.match(source,/class:'workspace-status-icon'/);
- assert.match(source,/role:'tooltip'\},state==='loaded'\?'已加载'/);
+ assert.match(source,/role:'tooltip'\},state==='loaded'\?t\('shell\.loaded'\)/);
  assert.match(css,/\.workspace-status-icon:hover \.workspace-status-tooltip,\.workspace-module-title:focus-within \.workspace-status-tooltip\{visibility:visible\}/);
  assert.match(home,/class:'workspace-module-title'/);
  assert.match(css,/\.workspace-module \.workspace-emblem\{width:44px;height:44px/);
  const manifest=JSON.parse(await readFile(new URL('../../../modules/ff14/yomihime.manifest.json',import.meta.url),'utf8'));
- const entry=await readFile(new URL('../../../modules/ff14/pages/src/entry.ts',import.meta.url),'utf8');
+ const messages=JSON.parse(await readFile(new URL('../../../modules/ff14/pages/src/i18n/zh-CN.json',import.meta.url),'utf8'));
  for(const [route,title] of Object.entries({items:'物品查询',market:'市场行情',logs:'角色 Logs',calendar:'活动日历'})){
   assert.equal(manifest.modules[0].pages.find(page=>page.route_id===route).title,title);
-  assert.ok(entry.includes(`${route}:'${title}'`));
+  assert.equal(messages[`query.${route}.title`],title);
  }
 });
 

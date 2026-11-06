@@ -3,3 +3,4 @@ export {createApp, defineComponent, h, withDirectives, ref, reactive, shallowRef
 export {NConfigProvider, NButton, NInput, NSelect, NCard, NTag, NAlert, NSpace, darkTheme, zhCN, enUS, dateZhCN, dateEnUS} from 'naive-ui';
 
 export * from '../../public-ui';
+export {coreText} from './i18n/messages';

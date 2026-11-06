@@ -56,6 +56,7 @@ from .configuration.defaults import (
     CORE_DEFAULTS_FIELD,
     CORE_MODULE_ID,
     MODULE_REPLY_THEME,
+    PAGE_LOCALE,
     core_config_target,
     module_configuration_fields,
 )
@@ -832,9 +833,14 @@ class AdminOperationsService(AdminOperations):
         )
         return {"module_id": target.module_id, "revision": config.revision}
 
-    def ordinary_resources(self):
+    def ordinary_resources(self, *, page_locale_only=False):
         if not self._ordinary_config_resources:
             raise AdminAuthorizationDenied
+        if page_locale_only:
+            target = core_config_target(self.config_principal_id)
+            if PAGE_LOCALE.name not in self._ordinary_config_resources.get(target, ()):
+                raise AdminAuthorizationDenied
+            return {target: {PAGE_LOCALE.name}}
         return {
             target: set(fields)
             for target, fields in self._ordinary_config_resources.items()
@@ -861,6 +867,9 @@ class AdminOperationsService(AdminOperations):
             for field in self.ordinary_declarations(target):
                 if any(item.field == field.name for item in snapshot.secret_metadata):
                     raise ValueError("ordinary configuration contains secret metadata")
+                # The dashboard can fall back for an invalid presentation preference.
+                if field == PAGE_LOCALE:
+                    continue
                 if field == MODULE_REPLY_THEME and field.name not in snapshot.values:
                     continue
                 validate_configuration_value(
@@ -921,8 +930,8 @@ class AdminOperationsService(AdminOperations):
         return result
 
     @_tracked_admin_request
-    async def ordinary_snapshot(self, *, authorization):
-        resources = self.ordinary_resources()
+    async def ordinary_snapshot(self, *, authorization, page_locale_only=False):
+        resources = self.ordinary_resources(page_locale_only=page_locale_only)
         grant = await self.authorization.authorize(
             AdminOperation.READ_CONFIG,
             invocation=None,
@@ -931,7 +940,7 @@ class AdminOperationsService(AdminOperations):
         )
         result = {}
         async with self.lifecycle.admission.mutation("admin-ordinary-read"):
-            for target in resources:
+            for target, fields in resources.items():
                 await self.authorization.validate_generation(
                     grant, operation=AdminOperation.READ_CONFIG
                 )
@@ -944,6 +953,8 @@ class AdminOperationsService(AdminOperations):
                 projection = {}
                 for field in self.ordinary_declarations(target):
                     name = field.name
+                    if name not in fields:
+                        continue
                     present = name in snapshot.values
                     value = snapshot.values.get(name, field.default)
                     try:

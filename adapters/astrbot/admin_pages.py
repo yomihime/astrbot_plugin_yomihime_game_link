@@ -267,6 +267,13 @@ class AdminPages:
                 core, source = self.runtime.management_entry(
                     credentials=credentials, modules=modules, master_key=master_key
                 )
+                data = None
+                if endpoint == "read":
+                    data = await asyncio.wait_for(
+                        bounded_body(concrete), timeout=max(0.001, expiry - time())
+                    )
+                    if data and data != {"scope": "page_locale"}:
+                        raise ValueError("invalid configuration read scope")
                 resources = (
                     core.admin_operations.legacy_config_resources()
                     if legacy_copy
@@ -276,6 +283,8 @@ class AdminPages:
                     if credentials
                     else core.admin_operations.module_resources()
                     if modules
+                    else core.admin_operations.ordinary_resources(page_locale_only=True)
+                    if endpoint == "read" and data
                     else core.admin_operations.ordinary_resources()
                 )
                 alive = {"value": True}
@@ -300,12 +309,13 @@ class AdminPages:
                     and dashboard_fence.current(actual),
                 )
                 self.requests[id(context)] = (source, context)
-                data = await asyncio.wait_for(
-                    bounded_font_upload(concrete)
-                    if endpoint == "font-upload"
-                    else bounded_body(concrete),
-                    timeout=max(0.001, expiry - time()),
-                )
+                if data is None:
+                    data = await asyncio.wait_for(
+                        bounded_font_upload(concrete)
+                        if endpoint == "font-upload"
+                        else bounded_body(concrete),
+                        timeout=max(0.001, expiry - time()),
+                    )
                 source.check(
                     context,
                     _OPERATIONS[endpoint],
@@ -599,8 +609,12 @@ class AdminPages:
                 raise ValueError("catalog parameters are not accepted")
             return await ops.ordinary_catalog(authorization=context)
         if endpoint == "read":
+            if data == {"scope": "page_locale"}:
+                return await ops.ordinary_snapshot(
+                    authorization=context, page_locale_only=True
+                )
             if data:
-                raise ValueError("read parameters are not accepted")
+                raise ValueError("invalid configuration read scope")
             return await ops.ordinary_snapshot(authorization=context)
         if endpoint == "update":
             if (

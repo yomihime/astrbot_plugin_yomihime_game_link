@@ -1,5 +1,6 @@
 import {sha256Hex} from './sha256';
 import {createScope} from './lifecycle';
+import {MODULE_COPY_MARKER, parseModuleCopy, type ModuleCopy} from './module-copy';
 import {isPageAppearance} from './ui/page-appearance';
 import type {Bridge, ModuleDescriptor, PageDescriptor, PageModule} from './contracts';
 import type {ModulePresentationExports, ResourceScope} from '../../public-contract';
@@ -59,6 +60,42 @@ export function createModuleAssets(
   type Projection = {entry:string;styles:string[];payload:Payload};
   type Record = {identity:string;revoked: boolean; scope: ReturnType<typeof createScope>; styles: Map<string, Promise<void>>; entries: Map<string, Promise<PageModule>>; projections:Map<string,Promise<Projection>>; images:Map<string,Promise<string>>; presentation?: Promise<ModulePresentationExports>};
   const owners = new Map<string, Record>();
+  async function staticCopyBytes(entry: string, digest: string, value: Record, signal: AbortSignal): Promise<Uint8Array | null> {
+    const window = document.defaultView;
+    if (!window?.fetch || value.revoked || signal.aborted) return null;
+    const url = new URL('./' + entry, document.location.href);
+    if (url.origin !== document.location.origin || !['http:', 'https:'].includes(url.protocol)) return null;
+    const abort = new AbortController();
+    const cancel = () => abort.abort();
+    value.scope.signal.addEventListener('abort', cancel, {once: true});
+    signal.addEventListener('abort', cancel, {once: true});
+    const timer = setTimeout(cancel, timeoutMs);
+    const maxBytes = 4 * 1024 * 1024; // Existing per-resource bound.
+    try {
+      const response = await window.fetch(url.href, {credentials: 'same-origin', mode: 'same-origin', redirect: 'error', signal: abort.signal});
+      if (!response.ok || !response.body || Number(response.headers.get('content-length')) > maxBytes) return null;
+      const chunks: Uint8Array[] = [];
+      let length = 0;
+      const reader = response.body.getReader();
+      while (!abort.signal.aborted) {
+        const part = await reader.read();
+        if (part.done) break;
+        length += part.value.length;
+        if (length > maxBytes) return null;
+        chunks.push(part.value);
+      }
+      if (abort.signal.aborted || value.revoked) return null;
+      const bytes = new Uint8Array(length);
+      let offset = 0;
+      for (const chunk of chunks) {bytes.set(chunk, offset); offset += chunk.length;}
+      return await sha256Hex(bytes) === digest && !abort.signal.aborted && !value.revoked ? bytes : null;
+    } finally {
+      cancel();
+      clearTimeout(timer);
+      value.scope.signal.removeEventListener('abort', cancel);
+      signal.removeEventListener('abort', cancel);
+    }
+  }
   async function liveResources(module:ModuleDescriptor,page:PageDescriptor,value:Record):Promise<Projection>{
     if(!dynamic||!module.runtime_id)throw Error('missing_live_projection');
     const response=await dynamic.bridge.apiPost('admin/module-page-assets',{owner:module.module_id,page:page.route_id,runtime_id:module.runtime_id,module_epoch:module.module_epoch}) as {entry:string;styles:string[];asset_version:string;resources:{path:string;sha256:string;media_type:string;base64:string}[]};
@@ -138,11 +175,15 @@ export function createModuleAssets(
     return runtimeUrl;
   }
 
-  async function importLiveEntry(payload: Payload, entryPath: string, value: Record, runtimeUrl: URL) {
+  async function importLiveEntry(payload: Payload, entryPath: string, value: Record, runtimeUrl: URL, presentationEntry = false) {
     const decoder=new TextDecoder('utf-8',{fatal:true});
     const entry=payload.get(entryPath);if(!entry||entry.mime!=='text/javascript'||value.revoked)throw Error('invalid_live_entry');
     // Installed page code uses only the shell's one public runtime import.
     let code=decoder.decode(entry.bytes);
+    if (presentationEntry && code.startsWith(MODULE_COPY_MARKER)) {
+      const end = code.indexOf('\n');
+      code = end === -1 ? '' : code.slice(end + 1);
+    }
     code=code.replace(/(["'])(?:\.\.?\/)+runtime\.js\1/g,JSON.stringify(runtimeUrl.href));
     const imports=[...code.matchAll(/(?:\bfrom\s*|\bimport\s*\(\s*|\bimport\s*)(["'])([^"']+)\1/g)].map(match=>match[2]);
     if(imports.some(path=>path!==runtimeUrl.href))throw Error('unsupported_live_import');
@@ -191,6 +232,28 @@ export function createModuleAssets(
     value.styles.set(path, pending); return pending;
   }
   return {
+    async moduleCopy(module: ModuleDescriptor, signal: AbortSignal): Promise<ModuleCopy | null> {
+      const paths = presentationPaths(module);
+      if (!paths || signal.aborted) return null;
+      try {
+        const value = record(module);
+        let bytes: Uint8Array | null | undefined;
+        if (paths.page) {
+          // Share any existing verification, but do not seed the business or
+          // logo projection cache with failures from this optional read.
+          const live = await (value.projections.get(paths.page.route_id) ?? liveResources(module, paths.page, value));
+          const item = live.payload.get(paths.entry.slice(paths.prefix.length));
+          if (item?.mime === 'text/javascript') bytes = item.bytes;
+        } else {
+          const resource = module.resources.find(resource => resource.path === paths.entry)!;
+          bytes = await staticCopyBytes(paths.entry, resource.sha256, value, signal);
+        }
+        if (!bytes || signal.aborted || value.revoked || owners.get(module.module_id) !== value) return null;
+        return parseModuleCopy(bytes, new Set(module.pages.map(page => page.route_id)));
+      } catch {
+        return null;
+      }
+    },
     async pageLogo(module: ModuleDescriptor, page: PageDescriptor, scope: ResourceScope): Promise<string | undefined> {
       const path = module.display?.logo_resource;
       if (!scope.isCurrent() || module.state !== 'loaded' || !module.runtime_id ||
@@ -241,7 +304,7 @@ export function createModuleAssets(
       if (!value.presentation) {
         value.presentation = (async () => {
           if (live && runtimeUrl) {
-            const imported = await importLiveEntry(live.payload, paths.entry.slice(paths.prefix.length), value, runtimeUrl);
+            const imported = await importLiveEntry(live.payload, paths.entry.slice(paths.prefix.length), value, runtimeUrl, true);
             return presentationExports(imported);
           }
           return presentationExports(await loadPresentation!(paths.entry));

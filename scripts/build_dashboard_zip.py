@@ -69,6 +69,8 @@ ROOT_FILES = (
 HOST_METADATA_FILES = (
     ".astrbot-plugin/i18n/zh-CN.json",
     ".astrbot-plugin/i18n/en-US.json",
+    ".astrbot-plugin/i18n/ja-JP.json",
+    ".astrbot-plugin/i18n/zh-TW.json",
 )
 OPERATOR_SCRIPT_FILES = (
     "scripts/__init__.py",

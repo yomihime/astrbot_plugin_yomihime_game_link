@@ -355,8 +355,23 @@ class AdminPagesTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.headers["cache-control"], "no-store")
         data = response.json()["data"]
         self.assertEqual(set(data), {"schema_version", "fields"})
-        self.assertEqual(
-            len([field for field in data["fields"] if field["readable"]]), 8
+        self.assertCountEqual(
+            [
+                (field["module_id"], field["name"])
+                for field in data["fields"]
+                if field["readable"]
+            ],
+            [
+                ("game_link/core", "image_theme"),
+                ("game_link/core", "page_locale"),
+                ("ff14/ff14", "ff14_calendar_default_days"),
+                ("ff14/ff14", "ff14_calendar_default_delivery_time"),
+                ("ff14/ff14", "ff14_calendar_default_timezone"),
+                ("ff14/ff14", "ff14_calendar_sync_interval_seconds"),
+                ("ff14/ff14", "ff14_default_region"),
+                ("ff14/ff14", "ff14_subscriptions_enabled"),
+                ("ff14/ff14", "reply_theme"),
+            ],
         )
         self.assertNotIn("PRIVATE-INVALID-LEGACY", response.text)
         self.assertEqual(
@@ -578,6 +593,58 @@ class AdminPagesTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(response.status_code, 400, response.text)
         self.assertEqual(self.pages.requests, {})
         self.assertEqual(self.runtime._admin_source._proofs, {})
+
+    async def test_page_locale_scoped_read_uses_existing_settings_cas(self):
+        scope = {"scope": "page_locale"}
+        owner, field = "game_link/core", "page_locale"
+        initial = {
+            "value": "auto",
+            "state": "valid",
+            "present": False,
+            "source": "default",
+        }
+        self.assertNotEqual(
+            (await self.call("read", scope, headers={})).status_code, 200
+        )
+        for invalid in ({"scope": "image_theme"}, {**scope, "owner": "ff14/ff14"}):
+            self.assertEqual((await self.call("read", invalid)).status_code, 400)
+
+        async def read():
+            response = await self.call("read", scope)
+            self.assertEqual(response.status_code, 200, response.text)
+            result = response.json()["data"]
+            self.assertEqual(set(result), {owner})
+            self.assertEqual(set(result[owner]["fields"]), {field})
+            return result[owner]
+
+        before = await read()
+        self.assertEqual(before["fields"][field], initial)
+        full = (await self.call("read", {})).json()["data"]
+        self.assertEqual(full[owner]["fields"][field], initial)
+        self.assertIn("image_theme", full[owner]["fields"])
+        self.assertIn("ff14/ff14", full)
+        patch = {"module_id": owner, "expected_revision": before["revision"]}
+        invalid = {"field": field, "mode": "replace", "value": "ru-RU"}
+        self.assertEqual(
+            (await self.call("update", {**patch, "updates": [invalid]})).status_code,
+            400,
+        )
+        valid = {**patch, "updates": [{**invalid, "value": "zh-TW"}]}
+        self.assertEqual((await self.call("update", valid)).status_code, 200)
+        self.assertEqual((await self.call("update", valid)).status_code, 409)
+        after = await read()
+        self.assertEqual(after["revision"], before["revision"] + 1)
+        self.assertEqual(
+            after["fields"][field],
+            {**initial, "value": "zh-TW", "present": True, "source": "sqlite"},
+        )
+        clear = {
+            **patch,
+            "expected_revision": after["revision"],
+            "updates": [{"field": field, "mode": "clear"}],
+        }
+        self.assertEqual((await self.call("update", clear)).status_code, 200)
+        self.assertEqual((await read())["fields"][field], initial)
 
     async def test_reviewed_subscription_gate_bool_grant_and_exact_cas_boundaries(self):
         """Real reviewed composition with isolated storage and offline transport."""
