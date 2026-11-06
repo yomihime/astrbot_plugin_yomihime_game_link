@@ -72,7 +72,8 @@ export function createModuleAssets(
     const timer = setTimeout(cancel, timeoutMs);
     const maxBytes = 4 * 1024 * 1024; // Existing per-resource bound.
     try {
-      const response = await window.fetch(url.href, {credentials: 'same-origin', mode: 'same-origin', redirect: 'error', signal: abort.signal});
+      // The Host's sandbox can have an opaque origin despite the matching asset URL.
+      const response = await window.fetch(url.href, {credentials: 'same-origin', mode: 'cors', redirect: 'error', signal: abort.signal});
       if (!response.ok || !response.body || Number(response.headers.get('content-length')) > maxBytes) return null;
       const chunks: Uint8Array[] = [];
       let length = 0;
