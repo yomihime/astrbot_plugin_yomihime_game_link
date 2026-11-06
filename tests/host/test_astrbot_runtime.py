@@ -893,6 +893,8 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
                     "localized_names": {
                         "zh": "最终幻想 XIV",
                         "en": "FINAL FANTASY XIV",
+                        "zh-TW": "最終幻想 XIV",
+                        "ja-JP": "ファイナルファンタジーXIV",
                     },
                     "short_name": "FF14",
                     "summary": "物品查询 · 市场行情 · 角色 Logs · 活动日历",

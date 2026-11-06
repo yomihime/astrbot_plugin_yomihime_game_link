@@ -355,8 +355,23 @@ class AdminPagesTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.headers["cache-control"], "no-store")
         data = response.json()["data"]
         self.assertEqual(set(data), {"schema_version", "fields"})
-        self.assertEqual(
-            len([field for field in data["fields"] if field["readable"]]), 8
+        self.assertCountEqual(
+            [
+                (field["module_id"], field["name"])
+                for field in data["fields"]
+                if field["readable"]
+            ],
+            [
+                ("game_link/core", "image_theme"),
+                ("game_link/core", "page_locale"),
+                ("ff14/ff14", "ff14_calendar_default_days"),
+                ("ff14/ff14", "ff14_calendar_default_delivery_time"),
+                ("ff14/ff14", "ff14_calendar_default_timezone"),
+                ("ff14/ff14", "ff14_calendar_sync_interval_seconds"),
+                ("ff14/ff14", "ff14_default_region"),
+                ("ff14/ff14", "ff14_subscriptions_enabled"),
+                ("ff14/ff14", "reply_theme"),
+            ],
         )
         self.assertNotIn("PRIVATE-INVALID-LEGACY", response.text)
         self.assertEqual(
