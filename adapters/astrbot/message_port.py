@@ -37,7 +37,7 @@ class AstrBotMessagePort:
     async def send(
         self, target: MessageTarget, payload: RenderedMessage
     ) -> MessageReceipt:
-        """Map only Core's current conversation target to AstrBot text output."""
+        """Map a checked durable target to one text and optional public-card chain."""
 
         if not isinstance(target, MessageTarget) or not isinstance(
             payload, RenderedMessage
@@ -49,7 +49,7 @@ class AstrBotMessagePort:
             or conversation.conversation_id != target.conversation_id
             or conversation.adapter_id != conversation.delivery_route
             or payload.resource_ids
-            or payload.png_bytes is not None
+            or (payload.png_bytes is not None and target.authorized)
             or payload.png_pages
             or not _valid_session_component(conversation.delivery_route, platform=True)
             or not _valid_session_component(conversation.conversation_id)
@@ -71,7 +71,10 @@ class AstrBotMessagePort:
             return MessageReceipt(MessageStatus.FAILED)
         try:
             plain = self._plain_factory(payload.text)
-            chain = self._chain_factory((plain,))
+            components = (plain,)
+            if payload.png_bytes is not None:
+                components += (self._image_factory(payload.png_bytes),)
+            chain = self._chain_factory(components)
         except Exception:
             return MessageReceipt(MessageStatus.FAILED)
         try:

@@ -542,6 +542,17 @@
           "invocation_policy": "command_only",
           "effect": "write",
           "privacy_floor": "owner"
+        },
+        {
+          "capability_id": "ff14.news.addhere",
+          "input_schema": {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+          },
+          "invocation_policy": "command_only",
+          "effect": "write",
+          "privacy_floor": "public"
         }
       ],
       "commands": [
@@ -623,6 +634,12 @@
             "expected_revision": "expected_revision"
           },
           "help_text": "取消本人的日历订阅。\n概览：/ygl ff14 calendar cancel <subscription-id> <expected-revision>\n用法：/ygl ff14 calendar cancel <subscription-id> <expected-revision>\n参数：使用 subscriptions 返回的 ID 与 revision。"
+        },
+        {
+          "operation_path": "news addhere",
+          "capability_id": "ff14.news.addhere",
+          "parameter_mapping": {},
+          "help_text": "订阅当前会话的国服新闻。\n用法：/ygl ff14 news addhere\n参数：无需参数。仅配置中的新闻管理员可添加；首次完整采集建立基线，不补发历史新闻。"
         }
       ],
       "tools": [
@@ -790,6 +807,50 @@
           },
           "group": "calendar",
           "description": "日历同步周期"
+        },
+        {
+          "name": "ff14_news_admins",
+          "sensitive": false,
+          "default": [],
+          "description": "新闻管理员（平台实例 ID:账户 ID）；默认无人可添加",
+          "group": "news",
+          "value_schema": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 3,
+              "maxLength": 400
+            }
+          }
+        },
+        {
+          "name": "ff14_news_targets",
+          "sensitive": false,
+          "default": [],
+          "description": "国服新闻目标（平台实例 ID:FriendMessage 或 GroupMessage:会话 ID）",
+          "group": "news",
+          "value_schema": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 3,
+              "maxLength": 400
+            }
+          }
+        },
+        {
+          "name": "ff14_news_interval_seconds",
+          "sensitive": false,
+          "default": 900,
+          "group": "news",
+          "description": "新闻同步周期（秒）；每轮最多补发三篇",
+          "value_schema": {
+            "type": "integer",
+            "enum": [
+              900,
+              3600
+            ]
+          }
         }
       ],
       "sources": [
@@ -846,6 +907,12 @@
           "host": "p66-caldav.icloud.com",
           "timeout_seconds": 15,
           "requests_per_minute": 10
+        },
+        {
+          "source_id": "ff14_news_official",
+          "host": "cqnews.web.sdo.com",
+          "timeout_seconds": 15,
+          "requests_per_minute": 30
         }
       ],
       "schedules": [
@@ -914,6 +981,22 @@
               "region": "global"
             }
           ]
+        },
+        {
+          "collector_id": "ff14.news.collect",
+          "key_version": 1,
+          "source_id": "ff14_news_official",
+          "data_version": 1,
+          "input_schema": {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+          },
+          "shared_scope": "public",
+          "trigger": "periodic",
+          "minimum_interval_seconds": 900,
+          "default_interval_seconds": 900,
+          "interval_config_key": "ff14_news_interval_seconds"
         }
       ],
       "subscriptions": [
@@ -953,6 +1036,29 @@
               "region",
               "timezone",
               "time"
+            ],
+            "additionalProperties": false
+          },
+          "notification_modes": [
+            "instant"
+          ]
+        },
+        {
+          "type_id": "ff14.news.official",
+          "collector_id": "ff14.news.collect",
+          "matcher_id": "ff14.news.official",
+          "filter_schema": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "official_news"
+                ]
+              }
+            },
+            "required": [
+              "kind"
             ],
             "additionalProperties": false
           },
@@ -1058,7 +1164,7 @@
         },
         {
           "path": "pages/dist/entry.js",
-          "sha256": "7e8625bf95581c874580cadd7a86ab14b05bb600618bdc2b401cc2e9293bf2f1"
+          "sha256": "1aba4a063682b19d269410a6ec4deb71c5f95951cc070b460a74d49c6c722f62"
         },
         {
           "path": "pages/dist/presentation-ff14.css",

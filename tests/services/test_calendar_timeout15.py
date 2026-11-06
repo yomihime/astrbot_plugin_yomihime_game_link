@@ -690,7 +690,10 @@ class CalendarRealCoreTimeout15Tests(unittest.IsolatedAsyncioTestCase):
         def create(**kwargs):
             self.assertEqual(
                 dict(kwargs["collector_timeouts"]),
-                {("ff14/ff14", "ff14.calendar.sync"): 45},
+                {
+                    ("ff14/ff14", "ff14.calendar.sync"): 45,
+                    ("ff14/ff14", "ff14.news.collect"): 90,
+                },
             )
             return original(
                 **kwargs,

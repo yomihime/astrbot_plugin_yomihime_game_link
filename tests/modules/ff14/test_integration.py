@@ -175,6 +175,7 @@ class FF14InstalledModuleTests(unittest.IsolatedAsyncioTestCase):
                     "calendar subscriptions",
                     "calendar update",
                     "calendar cancel",
+                    "news addhere",
                 ),
             )
             capabilities = {
@@ -212,6 +213,7 @@ class FF14InstalledModuleTests(unittest.IsolatedAsyncioTestCase):
                     "fflogs_stats_global": "www.fflogs.com",
                     "ff14_calendar_primary": "calendar.google.com",
                     "ff14_calendar_fallback": "p66-caldav.icloud.com",
+                    "ff14_news_official": "cqnews.web.sdo.com",
                 },
             )
             self.assertEqual(
@@ -313,7 +315,7 @@ class FF14InstalledModuleTests(unittest.IsolatedAsyncioTestCase):
                 ),
                 ("command", "llm_tool"),
             )
-            self.assertEqual(len(module_manifest.schedules), 2)
+            self.assertEqual(len(module_manifest.schedules), 3)
             self.assertEqual(
                 module_manifest.schedules[0].collector_id, "ff14.calendar.collect"
             )
@@ -329,7 +331,7 @@ class FF14InstalledModuleTests(unittest.IsolatedAsyncioTestCase):
                 tuple(dict(v) for v in sync.background_parameters),
                 ({"region": "cn"}, {"region": "global"}),
             )
-            self.assertEqual(len(module_manifest.subscriptions), 1)
+            self.assertEqual(len(module_manifest.subscriptions), 2)
             self.assertEqual(
                 module_manifest.subscriptions[0].notification_modes, ("instant",)
             )
@@ -344,6 +346,9 @@ class FF14InstalledModuleTests(unittest.IsolatedAsyncioTestCase):
                     "ff14_calendar_default_days",
                     "ff14_calendar_default_timezone",
                     "ff14_calendar_default_delivery_time",
+                    "ff14_news_admins",
+                    "ff14_news_targets",
+                    "ff14_news_interval_seconds",
                 },
             )
             self.assertTrue(
@@ -384,7 +389,10 @@ class FF14InstalledModuleTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(policy.event_limits["CalendarSync"], 48)
             self.assertEqual(
                 dict(assembly.collector_timeouts),
-                {(GLOBAL_MODULE_ID, "ff14.calendar.sync"): 45},
+                {
+                    (GLOBAL_MODULE_ID, "ff14.calendar.sync"): 45,
+                    (GLOBAL_MODULE_ID, "ff14.news.collect"): 90,
+                },
             )
             runtime = CoreRuntime(
                 database=SQLiteDatabase(root / "core.sqlite3"),

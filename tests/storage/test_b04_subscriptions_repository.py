@@ -4125,6 +4125,61 @@ class B04SubscriptionRepositoryTests(unittest.IsolatedAsyncioTestCase):
             ).register_declared_subscription_gate(target, "subscription_enabled")
             self.assertIsNone(await lifecycle.current_fence("sample/game"))
 
+    async def test_news_public_identity_covers_full_destination_and_merges_overlap(
+        self,
+    ):
+        routes = (
+            ConversationRef("a", ConversationKind.DIRECT, "17", "route-a"),
+            ConversationRef("a", ConversationKind.GROUP, "17", "route-a"),
+            ConversationRef("b", ConversationKind.GROUP, "17", "route-b"),
+            ConversationRef("a", ConversationKind.GROUP, "17", "route-other"),
+        )
+        records = []
+        for index, route in enumerate((*routes, routes[1])):
+            record = replace(
+                self._record(f"news-{index}", owner=f"owner-{index}"), recipient=route
+            )
+            records.append(await self._create(record))
+        observation = self._observation(identity="news-identity-snapshot")
+        cursor = ObservationCursor(
+            observation.observation_id, 1, observation.completeness, ()
+        )
+        changes = []
+        for record in records:
+            event = replace(
+                self._event(record, event_key="ff14:cn:news:7"),
+                display_data=DisplayDocument(
+                    "news", "synthetic", (TextBlock("synthetic summary"),)
+                ),
+                public_contribution=PublicEventContribution(
+                    "news-card", "7", {"id": "7"}
+                ),
+            )
+            changes.append(
+                SubscriptionEvaluationCommit(
+                    record.subscription_id,
+                    1,
+                    None,
+                    EvaluationState(1, {"seen": ["7"]}),
+                    cursor,
+                    (event,),
+                )
+            )
+        lease = await self._lease()
+        self.assertTrue(
+            await self.scheduler.commit_observation_with_evaluations(
+                lease, ObservationEvaluationCommit(observation, tuple(changes))
+            )
+        )
+        due = await self.windows.list_due_routes(
+            now=self.now + timedelta(seconds=31), limit=10
+        )
+        self.assertEqual(len(due), 4)
+        member_counts = sorted(
+            [len((await self.windows.get(route.window_id)).members) for route in due]
+        )
+        self.assertEqual(member_counts, [1, 1, 1, 2])
+
 
 def json_load(value: str):
     from ygl_test_subject.infrastructure.sqlite.repositories_subscriptions import _load

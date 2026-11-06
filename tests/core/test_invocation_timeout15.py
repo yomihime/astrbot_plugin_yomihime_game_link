@@ -61,7 +61,10 @@ class InvocationTimeout15Tests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             dict(captured[0]["collector_timeouts"]),
-            {("ff14/ff14", "ff14.calendar.sync"): 45},
+            {
+                ("ff14/ff14", "ff14.calendar.sync"): 45,
+                ("ff14/ff14", "ff14.news.collect"): 90,
+            },
         )
         self.assertEqual(core.scheduler.quotas.collection_timeout_seconds, 10)
         self.assertEqual(core._budget_policy.command_timeout, 90)

@@ -10,7 +10,7 @@
   "settings.calendarSubscriptions": "Calendar and subscriptions",
   "settings.subscriptionDefaults": "Defaults apply to future subscriptions. Existing subscriptions keep their settings. Reminders are checked on a schedule and may arrive late.",
   "settings.field.reply_theme": "Reply image theme",
-  "settings.field.ff14_subscriptions_enabled": "Calendar subscriptions",
+  "settings.field.ff14_subscriptions_enabled": "Calendar and news subscriptions",
   "settings.field.ff14_default_region": "Default region",
   "settings.field.ff14_calendar_default_days": "Default calendar window",
   "settings.field.ff14_calendar_default_timezone": "Default calendar time zone",
@@ -160,5 +160,13 @@
   "catalog.ff14.route.items": "Item lookup",
   "catalog.ff14.route.market": "Market prices",
   "catalog.ff14.route.logs": "Character Logs",
-  "catalog.ff14.route.calendar": "Event calendar"
+  "catalog.ff14.route.calendar": "Event calendar",
+  "settings.newsSubscriptions": "CN news subscriptions",
+  "settings.field.ff14_news_admins": "News administrators",
+  "settings.field.ff14_news_targets": "News destinations",
+  "settings.field.ff14_news_interval_seconds": "News collection interval",
+  "settings.hint.ff14_news_admins": "Comma separated: platform instance ID:account ID. Empty disables addhere.",
+  "settings.hint.ff14_news_targets": "Comma separated: platform instance ID:FriendMessage:account ID or platform instance ID:GroupMessage:group ID. First complete scan establishes a baseline. Removing a target cancels its configured subscription.",
+  "settings.invalidNews": "Check news destinations, administrator format and interval. Each list accepts up to 20 distinct entries.",
+  "settings.minutes": "{count} minutes"
 }

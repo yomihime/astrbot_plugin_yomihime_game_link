@@ -135,6 +135,7 @@ class DeliveryService:
         retry_at: RetryAt | None = None,
         page_size: int = 100,
         commentary_port=None,
+        public_card_renderer=None,
     ) -> None:
         validate_contract(renderer)
         validate_contract(limits)
@@ -157,6 +158,7 @@ class DeliveryService:
         self._retry_at = retry_at or (lambda _event, _now: None)
         self._page_size = page_size
         self._commentary_port = commentary_port
+        self._public_card_renderer = public_card_renderer
 
     async def recover_startup(
         self,
@@ -617,6 +619,7 @@ class DeliveryService:
                             else DisplayAudience.PUBLIC,
                         )
                     )
+                    public_png = None
                     try:
                         if public_event:
                             document = await self._compose_public_event(
@@ -633,6 +636,19 @@ class DeliveryService:
                                 raise
                             except Exception:
                                 rendered = self._public_text_fallback(document)
+                            if (
+                                self._public_card_renderer is not None
+                                and document.card is not None
+                            ):
+                                try:
+                                    public_png = await self._public_card_renderer(
+                                        candidates[0][2].record.module_id, document
+                                    )
+                                except asyncio.CancelledError:
+                                    raise
+                                except Exception:
+                                    public_png = None
+
                         else:
                             rendered = await self._renderer.render_batch(
                                 batch, self._limits
@@ -957,6 +973,7 @@ class DeliveryService:
                         state,
                         eligible,
                         deadlines_current,
+                        png_bytes=public_png,
                     )
 
                 try:
@@ -1894,9 +1911,11 @@ class DeliveryService:
         state: dict[str, object],
         eligible,
         deadlines_current,
+        *,
+        png_bytes=None,
     ) -> DeliveryResult:
         validate_contract(output)
-        message = RenderedMessage(output.text, output.resource_ids)
+        message = RenderedMessage(output.text, output.resource_ids, png_bytes=png_bytes)
         attempt = envelope.delivery_attempts[-1]
         try:
             child = await self._start_io(

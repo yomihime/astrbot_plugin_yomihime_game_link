@@ -489,6 +489,7 @@ class CoreRuntime:
         trusted_bundled_manifests: Mapping[str, ModuleManifest] | None = None,
         trusted_external_timeout_manifests: Mapping[str, ModuleManifest] | None = None,
         trusted_subscription_gates: Mapping[str, TrustedSubscriptionGate] | None = None,
+        configured_public_subscriptions=None,
         module_host_config_snapshots: Mapping[str, Mapping[str, object]] | None = None,
         public_web_validator: PublicWebProofValidator | None = None,
         public_web_capabilities: frozenset[tuple[str, str]] = frozenset(),
@@ -665,6 +666,11 @@ class CoreRuntime:
             utc_clock=utc_clock,
             subscription_gate_bindings=execution_gate_bindings,
         )
+        from .configured_subscriptions import ConfiguredPublicSubscriptions
+
+        self._configured_public_subscriptions = ConfiguredPublicSubscriptions(
+            self, config_principal_id, configured_public_subscriptions or {}
+        )
         self.config_repository: SQLiteConfigRepository = self.repositories.config
         self.runtime_repository = SQLiteModuleRuntimeRepository(database)
         self.admin_credential_repository = SQLiteAdminCredentialRepository(database)
@@ -814,7 +820,9 @@ class CoreRuntime:
             render_document=self._render_job_document,
         )
         self.module_services.set_jobs(self.jobs)
+        self._subscription_card_renderer = command_card_renderer
         self.delivery = DeliveryService(
+            public_card_renderer=self._render_public_subscription_card,
             commentary_port=commentary_port,
             deliveries=self.b04_repositories.deliveries,
             subscriptions=self.b04_repositories.subscriptions,
@@ -1006,7 +1014,10 @@ class CoreRuntime:
 
     @property
     def pump_failures(self) -> tuple[CoreRuntimeFailure, ...]:
-        return self._pump_failures
+        return self._pump_failures + tuple(
+            CoreRuntimeFailure("configured_subscriptions", module_id, reason)
+            for module_id, reason in self._configured_public_subscriptions.failures
+        )
 
     def public_module_catalog(self) -> dict:
         """Read registered modules through the fixed metadata-only projection."""
@@ -1115,6 +1126,42 @@ class CoreRuntime:
             card = None
         self.require_help_source_current(source)
         return card, settings.core_theme
+
+    async def _render_public_subscription_card(self, module_id, document):
+        """Use the shared local painter for one public aggregate, before send checks."""
+        from dataclasses import replace
+
+        from yomihime_game_link_sdk.display import DisplayAudience, Privacy
+
+        from ..presentation.png_validation import PngValidationLimits, validate_png
+
+        if document.privacy is not Privacy.PUBLIC or document.card is None:
+            return None
+        before = self.registry.snapshot().module(module_id)
+        if (
+            not before.enabled
+            or self._closing
+            or self._subscription_card_renderer is None
+        ):
+            return None
+        settings = await self.theme_settings.current(module_id)
+        logo = await self._command_card_logo(module_id)
+        if document.card.logo is None and logo is not None:
+            document = replace(document, card=replace(document.card, logo=logo))
+        presentation = self._subscription_card_renderer(
+            document,
+            audience=DisplayAudience.PUBLIC,
+            core_theme=settings.core_theme,
+            module_theme=settings.module_theme,
+        )
+        after = self.registry.snapshot().module(module_id)
+        if not after.enabled or after.epoch != before.epoch or self._closing:
+            raise InvalidInvocation()
+        bitmap = presentation.bitmap
+        if bitmap is None:
+            return None
+        validate_png(bitmap, limits=PngValidationLimits())
+        return bitmap.content
 
     async def _render_job_document(self, invocation, document):
         async def current():
@@ -1595,6 +1642,7 @@ class CoreRuntime:
                         if module.enabled
                     }
                 )
+                await self._configured_public_subscriptions.reconcile()
                 await self.scheduler.run_due_page()
                 await self.scheduler.create_digest_windows_page()
                 await self.delivery.dispatch_due_events()

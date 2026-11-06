@@ -371,6 +371,9 @@ class AdminPagesTests(unittest.IsolatedAsyncioTestCase):
                 ("ff14/ff14", "ff14_default_region"),
                 ("ff14/ff14", "ff14_subscriptions_enabled"),
                 ("ff14/ff14", "reply_theme"),
+                ("ff14/ff14", "ff14_news_admins"),
+                ("ff14/ff14", "ff14_news_targets"),
+                ("ff14/ff14", "ff14_news_interval_seconds"),
             ],
         )
         self.assertNotIn("PRIVATE-INVALID-LEGACY", response.text)
@@ -646,6 +649,46 @@ class AdminPagesTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.call("update", clear)).status_code, 200)
         self.assertEqual((await read())["fields"][field], initial)
 
+    async def test_news_config_uses_existing_admin_proof_validator_and_revision(self):
+        async def read():
+            return (await self.call("read", {})).json()["data"]["ff14/ff14"]
+
+        before = await read()
+
+        def body(field, value):
+            return {
+                "module_id": "ff14/ff14",
+                "expected_revision": before["revision"],
+                "updates": [{"field": field, "mode": "replace", "value": value}],
+            }
+
+        for field, value in (
+            ("ff14_news_targets", ["17"]),
+            ("ff14_news_targets", ["test:GroupMessage:../x"]),
+            ("ff14_news_targets", ["test:GroupMessage:17"] * 21),
+            ("ff14_news_admins", ["17"]),
+            ("ff14_news_interval_seconds", 60),
+        ):
+            self.assertEqual(
+                (await self.call("update", body(field, value))).status_code, 400
+            )
+        value = ["test-platform:GroupMessage:17", "other-platform:FriendMessage:17"]
+        self.assertEqual(
+            (
+                await self.call("update", body("ff14_news_targets", value), headers={})
+            ).status_code,
+            401,
+        )
+        self.assertEqual((await read())["revision"], before["revision"])
+        response = await self.call("update", body("ff14_news_targets", value))
+        self.assertEqual(response.status_code, 200, response.text)
+        current = await read()
+        self.assertEqual(current["fields"]["ff14_news_targets"]["value"], value)
+        self.assertEqual(current["revision"], before["revision"] + 1)
+        self.assertEqual(
+            (await self.call("update", body("ff14_news_targets", []))).status_code, 409
+        )
+
     async def test_reviewed_subscription_gate_bool_grant_and_exact_cas_boundaries(self):
         """Real reviewed composition with isolated storage and offline transport."""
         from ygl_test_subject.modules.ff14.config import ORDINARY_FIELDS
@@ -668,6 +711,9 @@ class AdminPagesTests(unittest.IsolatedAsyncioTestCase):
                 "ff14_calendar_default_timezone",
                 "ff14_calendar_default_delivery_time",
                 "ff14_calendar_sync_interval_seconds",
+                "ff14_news_admins",
+                "ff14_news_targets",
+                "ff14_news_interval_seconds",
             },
         )
         field = next(f for f in declarations if f["name"] == gate)

@@ -34,6 +34,7 @@ BUNDLE_SOURCE = ROOT / "modules"
 class BundledExtensionTests(unittest.IsolatedAsyncioTestCase):
     EXPECTED_CAPABILITIES = {
         "status",
+        "ff14.news.addhere",
         "item.lookup",
         "ff14.item.select",
         "ff14.market.query",
@@ -200,9 +201,14 @@ class BundledExtensionTests(unittest.IsolatedAsyncioTestCase):
         handlers = instance.handlers()
         self.assertEqual(set(handlers.capabilities), self.EXPECTED_CAPABILITIES)
         self.assertEqual(
-            set(handlers.collectors), {"ff14.calendar.collect", "ff14.calendar.sync"}
+            set(handlers.collectors),
+            {"ff14.calendar.collect", "ff14.calendar.sync", "ff14.news.collect"},
         )
-        self.assertEqual(set(handlers.evaluators), {"ff14.calendar.daily_summary"})
+        self.assertEqual(
+            set(handlers.evaluators),
+            {"ff14.calendar.daily_summary", "ff14.news.official"},
+        )
+        self.assertEqual(set(handlers.event_composers), {"ff14.news.card"})
         self.assertEqual(set(health.capabilities), self.EXPECTED_CAPABILITIES)
         self.assertNotIn("ff14.logs.output_percentile", health.capabilities)
 

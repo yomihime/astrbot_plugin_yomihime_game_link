@@ -6,6 +6,8 @@ import json
 from dataclasses import dataclass, replace
 from zoneinfo import ZoneInfo
 
+from yomihime_game_link_sdk.subscriptions import SubscriptionRequest
+
 from .config import (
     CALENDAR_CONFIG_FIELDS,
     CALENDAR_VALUE_VALIDATORS,
@@ -14,6 +16,7 @@ from .config import (
     REGION_CONFIG_FIELD,
     FF14ConfigSnapshot,
 )
+from .features.news import ADMINS, TARGETS, TYPE, validate_admins, validate_targets
 
 REQUEST_LIMIT = 4096
 
@@ -102,7 +105,17 @@ class ReviewedSupport:
     metadata: object = None
     ordinary_config_fields = tuple(field.name for field in CALENDAR_CONFIG_FIELDS) + (
         "ff14_subscriptions_enabled",
+        ADMINS,
+        TARGETS,
+        "ff14_news_interval_seconds",
     )
+
+    configured_public_subscriptions = {
+        "ff14/ff14": (
+            TARGETS,
+            SubscriptionRequest(TYPE, {}, {"kind": "official_news"}, "instant"),
+        )
+    }
 
     def with_metadata(self, metadata):
         return replace(self, metadata=metadata)
@@ -112,4 +125,10 @@ class ReviewedSupport:
     query_parameters = staticmethod(query_parameters)
 
 
-SUPPORT = ReviewedSupport(validators=CALENDAR_VALUE_VALIDATORS)
+SUPPORT = ReviewedSupport(
+    validators={
+        **CALENDAR_VALUE_VALIDATORS,
+        ADMINS: validate_admins,
+        TARGETS: validate_targets,
+    }
+)

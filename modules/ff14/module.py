@@ -22,6 +22,7 @@ from .features.calendar_subscriptions import CalendarSubscriptionHandler
 from .features.fflogs import FFLogsCharacterLookup
 from .features.items import ItemLookup
 from .features.market_handler import MarketQueryHandler
+from .features.news import NewsAddHere, NewsCollector, NewsComposer, NewsEvaluator
 from .features.status_cards import build_status_document
 
 CAPABILITY_STATUS = "status"
@@ -36,6 +37,7 @@ CAPABILITY_CALENDAR_SUBSCRIPTION_LIST = "ff14.calendar.subscription.list"
 CAPABILITY_CALENDAR_SUBSCRIPTION_UPDATE = "ff14.calendar.subscription.update"
 CAPABILITY_CALENDAR_SUBSCRIPTION_CANCEL = "ff14.calendar.subscription.cancel"
 CAPABILITY_IDS = (
+    "ff14.news.addhere",
     CAPABILITY_STATUS,
     CAPABILITY_ITEM_LOOKUP,
     CAPABILITY_ITEM_SELECT,
@@ -73,6 +75,7 @@ class FF14Module:
         calendar_snapshots = CalendarSnapshots(services)
         self._handlers = ModuleHandlers(
             capabilities={
+                "ff14.news.addhere": NewsAddHere(services),
                 CAPABILITY_STATUS: _StatusHandler(),
                 CAPABILITY_ITEM_LOOKUP: self._items,
                 CAPABILITY_ITEM_SELECT: self._items,
@@ -96,6 +99,7 @@ class FF14Module:
                 ),
             },
             collectors={
+                "ff14.news.collect": NewsCollector(services),
                 "ff14.calendar.collect": CalendarCollector(
                     services, snapshots=calendar_snapshots
                 ),
@@ -103,7 +107,11 @@ class FF14Module:
                     services, snapshots=calendar_snapshots
                 ),
             },
-            evaluators={"ff14.calendar.daily_summary": CalendarDailySummaryEvaluator()},
+            evaluators={
+                "ff14.calendar.daily_summary": CalendarDailySummaryEvaluator(),
+                "ff14.news.official": NewsEvaluator(),
+            },
+            event_composers={"ff14.news.card": NewsComposer()},
         )
 
     def handlers(self) -> ModuleHandlers:
