@@ -105,34 +105,34 @@ export function validateQueryResult(input) {
 
 export function queryInput(route, draft) {
   const errors = {};
-  const bounded = (key, label, limit) => {
+  const bounded = (key, messageKey, limit) => {
     const value = String(draft[key] ?? "").trim();
-    if (!value || value.length > limit) errors[key] = `请输入${label}，最多${limit}个字符。`;
+    if (!value || value.length > limit) errors[key] = {key: messageKey, limit};
     return value;
   };
   let body;
-  if (route === "items") body = {query: bounded("query", "名称或 ID", 120)};
+  if (route === "items") body = {query: bounded("query", "query.validation.requiredItemName", 120)};
   else if (route === "market") {
-    body = {query: bounded("query", "物品名称或 ID", 120), quality: String(draft.quality ?? "all"), intent: String(draft.intent ?? "overview")};
-    if (!["all", "nq", "hq"].includes(body.quality)) errors.quality = "请选择全部、NQ 或 HQ。";
-    if (!["overview", "min", "listings"].includes(body.intent)) errors.intent = "请选择概览、最低价或在售列表。";
+    body = {query: bounded("query", "query.validation.requiredItem", 120), quality: String(draft.quality ?? "all"), intent: String(draft.intent ?? "overview")};
+    if (!["all", "nq", "hq"].includes(body.quality)) errors.quality = {key: "query.validation.quality"};
+    if (!["overview", "min", "listings"].includes(body.intent)) errors.intent = {key: "query.validation.intent"};
     for (const key of ["server", "dc", "region"]) {
       const value = String(draft[key] ?? "").trim();
-      if (value.length > 100) errors[key] = "范围输入最多100个字符。";
+      if (value.length > 100) errors[key] = {key: "query.validation.scopeLength"};
       if (value) body[key] = value;
     }
-    if (body.region && !["cn", "global"].includes(body.region)) errors.region = "请选择国服或国际服，或留空使用服务端默认范围。";
+    if (body.region && !["cn", "global"].includes(body.region)) errors.region = {key: "query.validation.optionalRegion"};
   }
   else {
     const region = String(draft.region ?? "");
-    if (!["cn", "global"].includes(region)) errors.region = "请选择国服或国际服。";
-    if (route === "logs") body = {region, server: bounded("server", "服务器", 100), character: bounded("character", "角色名", 120)};
+    if (!["cn", "global"].includes(region)) errors.region = {key: "query.validation.region"};
+    if (route === "logs") body = {region, server: bounded("server", "query.validation.requiredWorld", 100), character: bounded("character", "query.validation.requiredCharacter", 120)};
     else if (route === "calendar") {
       const rawDays = String(draft.days ?? "");
       const days = /^[0-9]+$/.test(rawDays) ? Number(rawDays) : NaN;
-      if (!Number.isInteger(days) || days < 1 || days > 30) errors.days = "查询天数须为1至30的整数。";
-      const timezone = bounded("timezone", "IANA 时区", 128);
-      try { new Intl.DateTimeFormat("en-US", {timeZone: timezone}); } catch { errors.timezone = "请输入有效 IANA 时区，例如 Asia/Shanghai。"; }
+      if (!Number.isInteger(days) || days < 1 || days > 30) errors.days = {key: "query.validation.days"};
+      const timezone = bounded("timezone", "query.validation.requiredTimezone", 128);
+      try { new Intl.DateTimeFormat("en-US", {timeZone: timezone}); } catch { errors.timezone = {key: "query.validation.timezone"}; }
       body = {region, days, timezone};
     } else throw new Error("invalid_query_route");
   }

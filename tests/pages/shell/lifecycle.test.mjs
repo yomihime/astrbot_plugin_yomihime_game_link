@@ -6,7 +6,7 @@ import {catalog,success,selection,deferred,flush} from './fixtures.mjs';
 const {createShell}=await sourceModule(root+'pages/frontend/src/controller.ts');
 const {contextBoundary,createScope}=await sourceModule(root+'pages/frontend/src/lifecycle.ts');
 const {validateCatalog}=await sourceModule(root+'pages/frontend/src/catalog.ts');
-const {createQueryController,STOP_MESSAGE}=await sourceModule(root+'modules/ff14/pages/src/query-controller.ts');
+const {createQueryController}=await sourceModule(root+'modules/ff14/pages/src/query-controller.ts');
 const {skipToMain}=await sourceModule(root+'pages/frontend/src/navigation.ts');
 const {createSelectA11y}=await sourceModule(root+'modules/ff14/pages/src/select-a11y.ts');
 test('select ARIA follows only a present pending option and disconnects when its owner unmounts',async()=>{
@@ -25,19 +25,47 @@ test('explicit skip focuses without implicit scroll then reveals the main start'
  skipToMain(null);assert.equal(calls.length,0);skipToMain(main);
  assert.deepEqual(calls,[['focus',{preventScroll:true}],['scroll',{block:'start',inline:'nearest',behavior:'instant'}]]);dom.window.close();
 });
-function harness({data=catalog(),loader,initialContext,readyTask,sessionHandler,expectedPage='00-game-link',assetEvent=()=> 'load',hash='#/module/ff14%2Fff14/items'}={}) {
+function harness({data=catalog(),loader,initialContext,readyTask,sessionHandler,languageHandler=()=>Promise.resolve({}),expectedPage='00-game-link',assetEvent=()=> 'load',hash='#/module/ff14%2Fff14/items'}={}) {
   const dom=new JSDOM('<template id="module-style-assets"></template><div id="container"></div>',{url:'http://localhost/'+hash}),window=dom.window,container=window.document.getElementById('container');
   for(const module of data.modules || []) for(const page of module.pages) for(const path of page.styles) {const link=window.document.createElement('link');link.rel='stylesheet';link.dataset.resource=path;link.setAttribute('href','./'+path+'?fixture-authorized');window.document.getElementById('module-style-assets').content.append(link);}
   const styleRequests=[],imports=[],append=window.document.head.append.bind(window.document.head);
   window.document.head.append=(...nodes)=>{append(...nodes);for(const node of nodes)if(node.matches?.('link[data-module-style]')){styleRequests.push(node);const event=assetEvent(node);if(event)queueMicrotask(()=>node.dispatchEvent(new window.Event(event)));}};
-  const gets=[],posts=[],mounts=[],pageSessions=[]; let callback;
+  const gets=[],posts=[],mounts=[],pageSessions=[],languageReads=[]; let callback;
   window.scrollTo=()=>{};
   const context={pluginName:'astrbot_plugin_yomihime_game_link',pageName:'00-game-link',binding:1,isDark:false,locale:'zh-CN'};
-  const bridge={ready:()=>readyTask?.promise || Promise.resolve(initialContext === undefined ? context : initialContext),onContext(fn){callback=fn;return()=>{callback=null;};},apiGet(path){const p=deferred();gets.push({path,...p});return p.promise;},apiPost(path,body){if(path==='admin/module-page-session'){pageSessions.push({path,body});return sessionHandler?sessionHandler(body):Promise.resolve({page_session:'synthetic-proof',expires_at:Date.now()/1000+30});}if(path==='admin/module-page-session-close'){pageSessions.push({path,body});return Promise.resolve({closed:true});}const p=deferred();posts.push({path,body,...p});return p.promise;}};
+  const bridge={ready:()=>readyTask?.promise || Promise.resolve(initialContext === undefined ? context : initialContext),onContext(fn){callback=fn;return()=>{callback=null;};},apiGet(path){const p=deferred();gets.push({path,...p});return p.promise;},apiPost(path,body){if(path==='admin/read'&&body?.scope==='page_locale'){languageReads.push(body);return languageHandler();}if(path==='admin/module-page-session'){pageSessions.push({path,body});return sessionHandler?sessionHandler(body):Promise.resolve({page_session:'synthetic-proof',expires_at:Date.now()/1000+30});}if(path==='admin/module-page-session-close'){pageSessions.push({path,body});return Promise.resolve({closed:true});}const p=deferred();posts.push({path,body,...p});return p.promise;}};
   const loadPage=loader||(async(entry)=>({mount(view,options){const input=window.document.createElement('input');input.value='draft';view.append(input);const mount={view,input,options,updates:[],disposed:0};mounts.push(mount);return{update(context){mount.updates.push(context);},dispose(){mount.disposed++;view.replaceChildren();}};}}));
   const shell=createShell({bridge,container,window,expectedPage,loadPage:entry=>{imports.push(entry);return loadPage(entry);},changed(){},timeoutMs:100}); shell.start();
-  return {shell,dom,container,gets,posts,mounts,pageSessions,styleRequests,imports,context,emit:c=>callback?.(c),async start(){await flush();gets[0].resolve(data);await flush();},close(){shell.dispose();dom.window.close();}};
+  return {shell,dom,container,gets,posts,mounts,pageSessions,languageReads,styleRequests,imports,context,emit:c=>callback?.(c),async start(){await flush();gets[0].resolve(data);await flush();},close(){shell.dispose();dom.window.close();}};
 }
+const languageSnapshot=(revision,value,state='valid')=>({'game_link/core':{revision,fields:{
+  page_locale:{state,value,present:true,source:'sqlite'},
+}}});
+test('verified language choice and Host context updates preserve an active module and fence stale reads',async()=>{
+  const pending=deferred(),h=harness({languageHandler:()=>pending.promise});
+  try{
+    await h.start();
+    const page=h.mounts[0],scope=page.options.scope;
+    page.input.focus();page.input.setSelectionRange(1,3);
+    h.emit({...h.context,locale:'zh-Hant-HK'});await flush();
+    assert.equal(h.shell.state.locale,'zh-TW');
+    assert.equal(page.updates.at(-1).locale,'zh-TW');
+    h.shell.applyLanguageSnapshot(languageSnapshot(9,'ja-JP'));
+    h.emit({...h.context,locale:'en-GB'});await flush();
+    assert.equal(h.shell.state.locale,'ja-JP');
+    pending.resolve(languageSnapshot(8,'en-US'));await flush();
+    assert.equal(h.shell.state.locale,'ja-JP');
+    h.shell.applyLanguageSnapshot(languageSnapshot(10,'auto'));
+    assert.equal(h.shell.state.locale,'en-US');
+    h.shell.applyLanguageSnapshot(languageSnapshot(11,null,'invalid'));
+    h.emit({...h.context,locale:'ko-KR'});await flush();
+    assert.equal(h.shell.state.locale,'zh-CN');
+    assert.equal(h.dom.window.document.documentElement.lang,'zh-CN');
+    assert.equal(h.mounts.length,1);assert.equal(page.disposed,0);assert.ok(scope.isCurrent());
+    assert.equal(h.dom.window.document.activeElement,page.input);assert.equal(page.input.selectionStart,1);
+    assert.equal(h.posts.length,0);assert.deepEqual(h.languageReads,[{scope:'page_locale'}]);
+  }finally{h.close();}
+});
 for(const outcome of ['resolve','reject'])test(`late ${outcome} of a disposed home bootstrap preserves the same owner's current settings`,async()=>{
  const data=catalog('steam_dlc/cs2'),module=data.modules[0],late=deferred();
  module.pages=module.pages.map((page,index)=>({...page,route_id:index?'settings':'home',role:index?'config':'home',capability_id:index?null:'status'}));
@@ -113,7 +141,7 @@ test('module request and candidate use exact old body contract; edit stops old c
   const h=queryHarness();try {h.controller.edit('query','犎牛牛排');h.controller.edit('server','1043');const p=h.controller.submit();assert.deepEqual(JSON.parse(h.requests[0].body.input),{query:'犎牛牛排',quality:'all',intent:'overview',server:'1043'});h.requests[0].resolve(selection);await p;const original=h.controller.state.result;const candidate=h.controller.choose(44091);assert.deepEqual(JSON.parse(h.requests[1].body.input),{selection:{batch_id:'batch-1',generation:'generation-1',item_id:44091}});h.requests[1].resolve(success);await candidate;h.controller.edit('query','new');h.controller.choose(8,original);assert.equal(h.requests.length,2);}finally{h.scope.dispose();}
 });
 test('theme/context update preserves pending request and results; stop and disposal fence late response',async()=>{
-  const h=queryHarness('items');try {h.controller.edit('query','44091');const p=h.controller.submit();h.controller.update({...h.context,theme:'dark',locale:'en'});assert.equal(h.controller.state.phase,'loading');assert.equal(h.requests.length,1);h.requests[0].resolve(success);await p;assert.equal(h.controller.state.result.status,'partial_success');const p2=h.controller.submit();h.controller.stop();assert.equal(h.controller.state.message,STOP_MESSAGE);h.requests[1].resolve(success);await p2;assert.equal(h.controller.state.result,null);const p3=h.controller.submit();h.scope.dispose();h.requests[2].resolve(success);await p3;assert.equal(h.controller.state.result,null);}finally{h.scope.dispose();}
+  const h=queryHarness('items');try {h.controller.edit('query','44091');const p=h.controller.submit();h.controller.update({...h.context,theme:'dark',locale:'en'});assert.equal(h.controller.state.phase,'loading');assert.equal(h.requests.length,1);h.requests[0].resolve(success);await p;assert.equal(h.controller.state.result.status,'partial_success');const p2=h.controller.submit();h.controller.stop();assert.equal(h.controller.state.message,'Stopped showing results. The request may still be running in the background. It will not retry automatically.');h.requests[1].resolve(success);await p2;assert.equal(h.controller.state.result,null);const p3=h.controller.submit();h.scope.dispose();h.requests[2].resolve(success);await p3;assert.equal(h.controller.state.result,null);}finally{h.scope.dispose();}
 });
 test('query deadline permits manual recovery and no automatic post; invalid input never posts',async()=>{
   const h=queryHarness('items',15);try {h.controller.edit('query','');await h.controller.submit();assert.equal(h.requests.length,0);h.controller.edit('query','44091');const p=h.controller.submit();await new Promise(resolve=>setTimeout(resolve,25));assert.equal(h.controller.state.phase,'timeout');h.requests[0].resolve(success);await p;assert.equal(h.controller.state.result,null);assert.equal(h.requests.length,1);const retry=h.controller.submit();h.requests[1].resolve(success);await retry;assert.equal(h.controller.state.result.status,'partial_success');}finally{h.scope.dispose();}

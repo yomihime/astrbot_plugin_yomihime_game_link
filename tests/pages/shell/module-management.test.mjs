@@ -1,4 +1,4 @@
-import {sourceBundle,sourceRuntimeURL} from './source-build.mjs';
+import {sourceApp,sourceRuntimeURL} from './source-build.mjs';
 // Offline Vue/JSDOM test: a sandboxed Host has no native modal permission.
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
@@ -15,15 +15,7 @@ const runtime=await import(runtimeURL);
 let confirmationSource=stripTypeScriptTypes(await readFile(new URL('pages/frontend/src/confirmation.ts',root),'utf8'),{mode:'strip'}).replace("from 'vue'",'from '+JSON.stringify(runtimeURL)).replace("from 'naive-ui'",'from '+JSON.stringify(runtimeURL));
 const confirmationURL='data:text/javascript;base64,'+Buffer.from(confirmationSource).toString('base64');
 const {createInlineConfirmation}=await import(confirmationURL);
-let source=stripTypeScriptTypes(await readFile(new URL('pages/frontend/src/module-management.ts',root),'utf8'),{mode:'strip'});
-source=source.replace("from 'vue'",'from '+JSON.stringify(runtimeURL)).replace("from 'naive-ui'",'from '+JSON.stringify(runtimeURL)).replace("from './lifecycle'",'from '+JSON.stringify(new URL('pages/frontend/src/lifecycle.ts',root).href)).replace("from './confirmation'",'from '+JSON.stringify(confirmationURL));
-source=source.replace("from '@game-link/ui'",'from '+JSON.stringify(runtimeURL));
-source=source.replace("from './catalog'",'from '+JSON.stringify(new URL('pages/frontend/src/catalog.ts',root).href));
-source=source.replace("from './ui/notice'",'from '+JSON.stringify(new URL('pages/frontend/src/ui/notice.ts',root).href));
-const installationSource=(await sourceBundle('pages/frontend/src/installation-management.ts')).replaceAll('"./runtime.js"',JSON.stringify(runtimeURL)).replaceAll("'./runtime.js'",JSON.stringify(runtimeURL));
-const installationURL='data:text/javascript;base64,'+Buffer.from(installationSource).toString('base64');
-source=source.replace("from './installation-management'",'from '+JSON.stringify(installationURL));
-const {createModuleManagement}=await import('data:text/javascript;base64,'+Buffer.from(source).toString('base64'));
+const {createModuleManagement}=await sourceApp('pages/frontend/src/module-management.ts');
 const {validateCatalog:configurationCatalog,validateSnapshot:configurationSnapshot}=await import('../management/source-management.mjs');
 const configurationFixture=await import('../management/fixtures.mjs');
 const flush=async()=>{for(let i=0;i<20;i++){await Promise.resolve();await runtime.nextTick();}};
@@ -65,8 +57,13 @@ test('refresh revokes the pending confirmation and old click; reopened confirmat
  const f=fixture();try{await load(f);await open(f);const old=confirm(f);assert.ok(old);const refresh=f.view.refresh();await flush();assert.equal(f.container.querySelector('[data-unload-confirm]'),null);old.dispatchEvent(new dom.window.Event('click'));assert.equal(f.calls.length,2);await load(f,status(7,3));await refresh;await open(f);assert.match(f.container.querySelector('[data-unload-confirm]').textContent,/注册版本 7/);confirm(f).click();await flush();assert.deepEqual(pending(f,'admin/module-unload').body,{module_id:'ff14/ff14',expected_registry_revision:7});
  }finally{f.close();}
 });
-test('presentation keeps confirmation and cancel focus; Escape cancels without request',async()=>{
- const f=fixture();try{await load(f);const trigger=button(f,'解除挂载（保留数据）');trigger.focus();await open(f);const node=cancel(f);f.emit({...context,isDark:true,locale:'en-US'});await flush();assert.equal(cancel(f),node);assert.equal(dom.window.document.activeElement,node);f.container.querySelector('[data-unload-confirm]').dispatchEvent(new dom.window.KeyboardEvent('keydown',{key:'Escape',bubbles:true}));await flush();assert.equal(f.container.querySelector('[data-unload-confirm]'),null);assert.equal(dom.window.document.activeElement,trigger);assert.equal(trigger.disabled,false);assert.equal(f.calls.length,1);
+test('presentation translates the open confirmation and keeps cancel focus; Escape cancels without request',async()=>{
+ const f=fixture();try{await load(f);const trigger=button(f,'解除挂载（保留数据）');trigger.focus();await open(f);const node=cancel(f),group=f.container.querySelector('[data-unload-confirm]');
+ f.emit({...context,isDark:true,locale:'en-US'});await flush();
+ assert.equal(group.getAttribute('aria-label'),'Unload this module?');assert.match(group.textContent,/Registry revision 5/);assert.equal(node.textContent,'Cancel');
+ f.view.setLocale('ja-JP');f.view.setHomeVisible(true);f.view.setHomeVisible(true);await flush();
+ assert.equal(group.getAttribute('aria-label'),'このモジュールをアンロードしますか？');assert.equal(cancel(f),node);assert.equal(dom.window.document.activeElement,node);assert.equal(node.textContent,'キャンセル');
+ group.dispatchEvent(new dom.window.KeyboardEvent('keydown',{key:'Escape',bubbles:true}));await flush();assert.equal(f.container.querySelector('[data-unload-confirm]'),null);assert.equal(dom.window.document.activeElement,trigger);assert.equal(trigger.disabled,false);assert.equal(f.calls.length,1);
  }finally{f.close();}
 });
 test('new or invalid context closes confirmation and fences detached old action and late results',async()=>{

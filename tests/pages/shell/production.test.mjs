@@ -79,7 +79,12 @@ test('production independently built module renders unchanged public projection,
 });
 test('production runtime graph and module remain local and share one Vue/UI implementation',async()=>{
   const module=await readFile(resolve(root,'modules/ff14/pages/dist/entry.js'),'utf8'),shell=await readFile(resolve(root,'pages/00-game-link/app.js'),'utf8'),runtimeBytes=await readFile(resolve(root,'pages/00-game-link/runtime.js'),'utf8');
-  assert.match(module,/\.\.\/\.\.\/\.\.\/\.\.\/\.\.\/runtime\.js/);assert.match(shell,/\.\/runtime\.js/);assert.match(shell,/\.\/module-loader\.js/);assert.ok(module.length<30000);assert.ok(runtimeBytes.length>100000);assert.ok(!/https?:\/\/[^\s'"]+\.(?:js|css)/.test(module));
+  const locales = await Promise.all(['zh-CN','zh-TW','ja-JP','en-US'].map(async locale =>
+    JSON.parse(await readFile(resolve(root,'modules/ff14/pages/src/i18n',locale+'.json'),'utf8'))));
+  // Budget the locale data separately. Live relabeling adds about 1.5k characters
+  // to the previous 30k executable budget and still uses one shared runtime.
+  const catalogSize = locales.reduce((size,catalog)=>size+JSON.stringify(catalog).length,0);
+  assert.match(module,/\.\.\/\.\.\/\.\.\/\.\.\/\.\.\/runtime\.js/);assert.match(shell,/\.\/runtime\.js/);assert.match(shell,/\.\/module-loader\.js/);assert.ok(module.length-catalogSize<32000);assert.ok(runtimeBytes.length>100000);assert.ok(!/https?:\/\/[^\s'"]+\.(?:js|css)/.test(module));
   for(const source of [module,shell,runtimeBytes]) {
     assert.doesNotMatch(source,/\bprocess\s*\.\s*env\b/,'production NODE_ENV must be folded');
     assert.doesNotMatch(source,/(?:from|import)\s*[('" ]+node:/,'published chunks must not import Node builtins');
@@ -97,6 +102,10 @@ test('production presentation build contains only the reviewed module display in
  const entry=audit.find(item=>item.owner==='ff14/ff14');
  assert.equal(entry?.entry,'pages/dist/presentation-ff14.js');
  assert.deepEqual(entry.inputs.filter(path=>path.startsWith('modules/ff14/')).sort(),[
+  'modules/ff14/pages/src/i18n/en-US.json',
+  'modules/ff14/pages/src/i18n/ja-JP.json',
+  'modules/ff14/pages/src/i18n/zh-CN.json',
+  'modules/ff14/pages/src/i18n/zh-TW.json',
   'modules/ff14/pages/src/logo-effect.css',
   'modules/ff14/pages/src/logo-effect.ts',
   'modules/ff14/pages/src/presentation-ff14.ts',

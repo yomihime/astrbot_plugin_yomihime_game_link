@@ -1,7 +1,7 @@
 [
   {
     "path": "pages/dist/entry.js",
-    "sha256": "add91325fbed534973bbed46852e1daf295a48eb0cc91c2dfa1a53d399e46b06"
+    "sha256": "7e8625bf95581c874580cadd7a86ab14b05bb600618bdc2b401cc2e9293bf2f1"
   },
   {
     "path": "pages/dist/presentation-ff14.css",
@@ -9,7 +9,7 @@
   },
   {
     "path": "pages/dist/presentation-ff14.js",
-    "sha256": "a5ba06e5af84f239703f52d3d3916447636ff2897c825b96e65589c4aa5f282a"
+    "sha256": "0fbc5f705e791063f7f7bc66b07f5d52420e3dcbc12088f7d9e5cb7cf611b50e"
   },
   {
     "path": "pages/dist/styles.css",

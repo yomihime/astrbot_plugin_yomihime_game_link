@@ -2,9 +2,10 @@ import {createApp, defineComponent, h, ref} from 'vue';
 import {ActionBar, PageTemplate, SettingsRow, StatusHint, Surface, uiText} from '@game-link/ui';
 import type {PageTemplateSlots, TemplateActionKey, TemplateContent} from '@game-link/ui';
 import type {MountedLogo, MountedPage, PageOptions, ResourceScope} from '../../../../pages/public-contract';
-import {homeContent, settingsNote, settingsSectionsFor} from './page-content';
+import {homeContent, settingsSectionsFor} from './page-content';
 import {mountLogo, presentation} from './presentation-ff14';
 import {createSettingsController, credentialFields} from './settings-controller';
+import {ff14Text} from './i18n';
 
 let nextInstance = 0;
 
@@ -37,7 +38,6 @@ export function mountSettings(container: HTMLElement, options: PageOptions): Mou
   const activeRegion = ref<string>(credentialFields[0].name);
   const controller = createSettingsController(options, () => {
     revision.value++;
-    options.onNavigationStateChange?.();
   });
   const logoScope = resourceUrl ? createLogoScope(options.scope) : undefined;
   let logo: MountedLogo | undefined;
@@ -45,6 +45,7 @@ export function mountSettings(container: HTMLElement, options: PageOptions): Mou
   const app = createApp(defineComponent({setup() { return () => {
     revision.value;
     const s = controller.state;
+    const text = (key: string, params?: Readonly<Record<string, string | number>>) => ff14Text(s.context.locale, key, params);
     const ordinaryDisabled = !s.draftEditable || !s.context.available;
     const credentialDisabled = s.pending || !s.ready || !s.context.available;
     const copy = (key: TemplateActionKey) => uiText(key, s.context.locale);
@@ -71,19 +72,19 @@ export function mountSettings(container: HTMLElement, options: PageOptions): Mou
         onVnodeUpdated: () => logo?.update(s.context, appearance),
       }, resourceUrl ? undefined : '✦'),
     } : {
-      aside: () => h(Surface, {title: 'FFLogs 来源凭据', eyebrow: 'SOURCE ACCESS'}, {default: () => [
-        h(StatusHint, {}, () => '国服与国际服独立配置。保存与上游验证相互独立。'),
-        h('div', {class: 'ui-segmented', 'aria-label': '凭据区域'}, credentialFields.map(field =>
-          button(field.label, {'aria-pressed': activeRegion.value === field.name, onClick: () => { activeRegion.value = field.name; }}))),
+      aside: () => h(Surface, {title: text('settings.credentialsTitle'), eyebrow: 'SOURCE ACCESS'}, {default: () => [
+        h(StatusHint, {}, () => text('settings.credentialsScope')),
+        h('div', {class: 'ui-segmented', 'aria-label': text('settings.credentialRegion')}, credentialFields.map(field =>
+          button(text(field.labelKey), {'aria-pressed': activeRegion.value === field.name, onClick: () => { activeRegion.value = field.name; }}))),
         ...credentialFields.map(field => {
           const status = s.credentials?.fields[field.name];
           return h('form', {
             key: field.name, class: 'ff14-credential', hidden: activeRegion.value !== field.name,
-            'aria-label': `${field.label} FFLogs 凭据`,
+            'aria-label': text('settings.credentialForm', {region: text(field.labelKey)}),
             onSubmit: (event: Event) => { event.preventDefault(); void controller.replace(field.name); },
           }, [
-            h('p', {class: 'ui-badge'}, !status ? '状态未读取' : !status.configured ? '未配置' :
-              status.decryptable ? '已配置 · 可解密 · 上游未验证' : '已配置 · 当前不可解密'),
+            h('p', {class: 'ui-badge'}, !status ? text('settings.credentialUnread') : !status.configured ? text('settings.credentialUnset') :
+              status.decryptable ? text('settings.credentialDecryptable') : text('settings.credentialLocked')),
             ...(['client_id', 'client_secret'] as const).map(name => {
               const id = `${field.name}-${name}`;
               return h(SettingsRow, {key: name}, {default: () => [
@@ -102,7 +103,7 @@ export function mountSettings(container: HTMLElement, options: PageOptions): Mou
             ]),
           ]);
         }),
-        h(StatusHint, {}, () => '凭据不回显。加密存储由全局设置统一管理。'),
+        h(StatusHint, {}, () => text('settings.credentialStorage')),
       ]}),
       footer: () => h(ActionBar, {}, () => [
         button(copy('refresh'), {disabled: !s.context.available, 'aria-disabled': s.pending || undefined,
@@ -110,10 +111,10 @@ export function mountSettings(container: HTMLElement, options: PageOptions): Mou
         s.pending ? button(copy('cancelWait'), {onClick: controller.cancel}) : null,
       ]),
     };
-    const content: TemplateContent = isHome ? homeContent : {
-      title: '业务配置',
-      sections: settingsSectionsFor(s.themeAvailable, s.themeChoices, s.draft.reply_theme),
-      notes: [settingsNote],
+    const content: TemplateContent = isHome ? homeContent(s.context.locale) : {
+      title: text('settings.title'),
+      sections: settingsSectionsFor(s.context.locale, s.themeAvailable, s.themeChoices, s.draft.reply_theme),
+      notes: [text('settings.subscriptionDefaults')],
       actions: [
         {id: 'save', type: 'submit', disabled: !s.pending && (!s.ready || !s.dirty)},
         {id: 'discard', disabled: !s.pending && !s.dirty},

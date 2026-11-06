@@ -1,9 +1,11 @@
 import {h, shallowRef, nextTick} from 'vue';
 import {NCard, NButton} from 'naive-ui';
-export type ConfirmationRequest={kind:'navigation'|'module-draft'|'unload'|'maintenance'|'credential-clear'|'key-reset'|'key-restore'|'key-adopt'|'legacy-config'|'extension-install';title:string;message:string;confirmLabel:string;isCurrent():boolean;canRestoreFocus?():boolean;owner?:string;trigger?:HTMLElement|null};
+type ConfirmationText = string | (() => string);
+const resolveText = (text: ConfirmationText): string => typeof text === 'function' ? text() : text;
+export type ConfirmationRequest={kind:'navigation'|'module-draft'|'unload'|'maintenance'|'credential-clear'|'key-reset'|'key-restore'|'key-adopt'|'legacy-config'|'extension-install';title:ConfirmationText;message:ConfirmationText;confirmLabel:ConfirmationText;isCurrent():boolean;canRestoreFocus?():boolean;owner?:string;trigger?:HTMLElement|null};
 type Pending=ConfirmationRequest&{id:number;resolve(value:boolean):void};
 // One owned, non-modal confirmation for the existing shell guards.
-export function createInlineConfirmation(document:Document) {
+export function createInlineConfirmation(document:Document, cancelLabel=()=> '取消') {
   const pending=shallowRef<Pending|null>(null);let serial=0,closed=false,owned:HTMLElement|null=null;
   function settle(choice:Pending,value:boolean,restoreFocus=false) {
     if(pending.value!==choice)return;
@@ -22,10 +24,11 @@ export function createInlineConfirmation(document:Document) {
         void nextTick().then(()=>{if(pending.value===choice&&choice.isCurrent())owned?.querySelector<HTMLElement>('[data-confirm-cancel]')?.focus({preventScroll:true});});});
     },cancel,invalidate(){if(pending.value&&!pending.value.isCurrent())cancel();},dispose(){cancel();closed=true;},
     render(){const choice=pending.value;if(!choice)return null;
-      return h('section',{key:choice.id,role:'group','aria-label':choice.title,'data-unload-confirm':choice.kind==='unload'?choice.owner:undefined,'data-confirmation':choice.kind,ref:(node:unknown)=>{owned=node as HTMLElement|null;},onKeydown:(event:KeyboardEvent)=>{if(event.key==='Escape'){event.preventDefault();settle(choice,false,true);}}},[
-        h(NCard,{title:choice.title},{default:()=>[h('p',choice.message),
-          h(NButton,{'data-action':'confirm-'+choice.kind,onClick:()=>settle(choice,true)},()=>choice.confirmLabel),
-          h(NButton,{'data-action':'cancel-'+choice.kind,'data-confirm-cancel':'',onClick:()=>settle(choice,false,true)},()=> '取消'),
+      const title=resolveText(choice.title);
+      return h('section',{key:choice.id,role:'group','aria-label':title,'data-unload-confirm':choice.kind==='unload'?choice.owner:undefined,'data-confirmation':choice.kind,ref:(node:unknown)=>{owned=node as HTMLElement|null;},onKeydown:(event:KeyboardEvent)=>{if(event.key==='Escape'){event.preventDefault();settle(choice,false,true);}}},[
+        h(NCard,{title},{default:()=>[h('p',resolveText(choice.message)),
+          h(NButton,{'data-action':'confirm-'+choice.kind,onClick:()=>settle(choice,true)},()=>resolveText(choice.confirmLabel)),
+          h(NButton,{'data-action':'cancel-'+choice.kind,'data-confirm-cancel':'',onClick:()=>settle(choice,false,true)},cancelLabel),
         ]}),
       ]);
     },

@@ -1,7 +1,15 @@
 import {defineComponent, h, type PropType, type SlotsType, type VNodeChild} from 'vue';
-import {NConfigProvider, darkTheme, zhCN, enUS, dateZhCN, dateEnUS} from 'naive-ui';
+import {NConfigProvider, darkTheme, zhCN, zhTW, jaJP, enUS, dateZhCN, dateZhTW, dateJaJP, dateEnUS} from 'naive-ui';
 import type {PageAppearance, ResolvedPageAppearance} from '../../../public-contract';
 import {resolvePageAppearance} from './page-appearance';
+import {DEFAULT_UI_LOCALE, normalizeUiLocale} from '../i18n/locale';
+
+const componentLocales = {
+  'zh-CN': {locale: zhCN, dateLocale: dateZhCN},
+  'zh-TW': {locale: zhTW, dateLocale: dateZhTW},
+  'ja-JP': {locale: jaJP, dateLocale: dateJaJP},
+  'en-US': {locale: enUS, dateLocale: dateEnUS},
+};
 
 export interface UiPresentationContext {
   readonly theme: 'light' | 'dark';
@@ -28,12 +36,11 @@ export const UiProvider = defineComponent({
   setup(props, {slots}) {
     return () => {
       const {theme, locale} = props;
-      const english = locale.startsWith('en');
       const appearance = resolvePageAppearance(theme, props.appearance);
       const presentation = Object.freeze({theme, locale, appearance});
       return h(NConfigProvider, {
         theme: theme === 'dark' ? darkTheme : null,
-        locale: english ? enUS : zhCN, dateLocale: english ? dateEnUS : dateZhCN,
+        ...componentLocales[normalizeUiLocale(locale) ?? DEFAULT_UI_LOCALE],
         styleMountTarget: props.styleMountTarget, preflightStyleDisabled: true,
         inlineThemeDisabled: true, themeOverrides: appearance.naiveOverrides,
       }, {

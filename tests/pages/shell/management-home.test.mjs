@@ -18,11 +18,11 @@ test('module display locale fallback, compact name, collision and old IDs stay s
 });
 test('cold default home and fixed global settings never mount a query',async()=>{
  for(const modules of [catalog().modules,[]]){
-  const dom=new JSDOM('<div id="page-root"><div id="container"></div></div>',{url:'http://localhost/#/'});dom.window.scrollTo=()=>{};let loads=0,posts=0;
+  const dom=new JSDOM('<div id="page-root"><div id="container"></div></div>',{url:'http://localhost/#/'});dom.window.scrollTo=()=>{};let loads=0;const posts=[];
   const context={pluginName:'astrbot_plugin_yomihime_game_link',pageName:'00-game-link',session:'one'};
-  const bridge={ready:()=>Promise.resolve(context),onContext:()=>()=>{},apiGet:()=>Promise.resolve({...catalog(),modules}),apiPost:()=>{posts++;return Promise.resolve({});}};
+  const bridge={ready:()=>Promise.resolve(context),onContext:()=>()=>{},apiGet:()=>Promise.resolve({...catalog(),modules}),apiPost:(action,body)=>{posts.push([action,body]);return Promise.resolve({});}};
   const shell=createShell({bridge,container:dom.window.document.getElementById('container'),window:dom.window,loadPage:async()=>{loads++;throw Error();},changed(){}});shell.start();await flush();
-  assert.equal(shell.state.home,true);assert.equal(shell.state.selected,null);assert.equal(loads,0);assert.equal(posts,0);
+  assert.equal(shell.state.home,true);assert.equal(shell.state.selected,null);assert.equal(loads,0);assert.deepEqual(posts,[['admin/read',{scope:'page_locale'}]]);
   shell.selectSettings();await flush();assert.equal(shell.state.settings,true);assert.equal(shell.state.settingsOwner,null);assert.equal(shell.state.home,false);assert.equal(loads,0);shell.dispose();dom.window.close();
  }
 });

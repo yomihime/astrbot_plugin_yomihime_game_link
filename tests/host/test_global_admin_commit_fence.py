@@ -274,6 +274,42 @@ class GlobalAdminCommitFenceTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(coroutine.cr_frame)
         return response, await self.effects(label), host.calls, bool(entered)
 
+    async def test_scoped_locale_read_issues_only_its_field_grant(self):
+        request, _, _ = self.request("read")
+        target = next(iter(self.resources))
+        scoped = {target: {"page_locale"}}
+        broad = {target: {"page_locale", "synthetic"}}
+        operation = AdminOperation.READ_CONFIG
+        self.source.close()
+        self.source = TrustedAdminSource("controlled-global-host", broad, {operation})
+
+        async def body(_request):
+            return {"scope": "page_locale"}
+
+        async def snapshot(*, authorization, page_locale_only):
+            self.assertTrue(page_locale_only)
+            self.source.check(authorization, operation, scoped)
+            with self.assertRaises(AdminAuthorizationDenied):
+                self.source.check(authorization, operation, broad)
+            return {"scoped": True}
+
+        ops = self.core.admin_operations
+        ops.ordinary_resources = lambda *, page_locale_only=False: (
+            scoped if page_locale_only else broad
+        )
+        ops.ordinary_snapshot = snapshot
+        token = self.request_context.set(request)
+        try:
+            with patch(
+                "ygl_test_subject.adapters.astrbot.admin_pages.bounded_body", body
+            ):
+                response = await self.page._handler("read")()
+        finally:
+            self.request_context.reset(token)
+        self.assertEqual(response.status_code, 200, response.payload)
+        self.assertEqual(response.payload["data"], {"scoped": True})
+        self.assertEqual(self.source._proofs, {})
+
     async def test_three_original_global_routes_commit_under_normal_session(self):
         for endpoint in ("master-key-reset", "legacy-config-execute", "update"):
             with self.subTest(endpoint=endpoint):

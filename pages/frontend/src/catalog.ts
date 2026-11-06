@@ -1,4 +1,5 @@
 import type {Catalog, ModuleDescriptor, ModuleDisplay, PageDescriptor} from './contracts';
+import {coreText} from './i18n/messages';
 const record = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === 'object' && !Array.isArray(v);
 const str = (v: unknown, n = 4096): v is string => typeof v === 'string' && v.length > 0 && v.length <= n;
 function moduleAsset(v: unknown): v is string {
@@ -94,7 +95,7 @@ export function moduleGroups<T extends Pick<ModuleDescriptor,'module_id'|'displa
     const orders=new Set(list.map(module=>JSON.stringify(module.source?.module_order||[])));
     const order:string[]=kind==='extension'&&orders.size===1?JSON.parse([...orders][0]):[];
     const rank=(module:T)=>{const index=order.indexOf(module.module_id.split('/')[1]);return index<0?Number.MAX_SAFE_INTEGER:index;};
-    const group=groups.get(key)||{key,title:kind==='builtin'?'内置模块':kind==='extension'?(name||id):id+' · 来源未识别',modules:[]};
+    const group=groups.get(key)||{key,title:kind==='builtin'?coreText(locale,'shell.builtin'):kind==='extension'?(name||id):coreText(locale,'shell.unknownSource',{name:id}),modules:[]};
     group.modules.push(...[...list].sort((a,b)=>rank(a)-rank(b)||byName(a,b)));groups.set(key,group);
   }
   const builtin=groups.get('builtin');if(builtin)builtin.modules.sort(byName);

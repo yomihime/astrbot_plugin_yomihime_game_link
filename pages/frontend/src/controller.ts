@@ -2,29 +2,39 @@ import {createModuleServices} from './module-services';
 import {validateCatalog, readRoute, routeHash} from './catalog';
 import {createScope, contextBoundary, mountIdentity} from './lifecycle';
 import {createModuleAssets, assetIdentity} from './module-assets';
+import {DEFAULT_UI_LOCALE, effectiveUiLocale, type UiLanguage} from './i18n/locale';
+import {coreText, type CoreTextKey} from './i18n/messages';
+import {readPageLanguage} from './i18n/page-language';
 import type {Bridge, Catalog, ModuleDescriptor, PageDescriptor, PageContext, PageModule, MountedPage} from './contracts';
 export function createShell({bridge, container, window, loadPage, runtimeUrl, changed, timeoutMs = 8000, expectedPlugin = 'astrbot_plugin_yomihime_game_link', expectedPage = '00-game-link', confirmClear = async () => false}: {bridge: Bridge; container: HTMLElement; window: Window; loadPage(entry: string): Promise<PageModule>; runtimeUrl?:string; changed(): void; timeoutMs?: number; expectedPlugin?: string; expectedPage?: string; confirmClear?(owner:string,field:string,revision:number,isCurrent:()=>boolean):Promise<boolean>}) {
-  const state = {catalog: null as Catalog | null, busy: false, stale: false, message: '正在连接宿主。', theme: 'light' as 'light'|'dark', locale: 'zh-CN', selected: null as {owner: string; route: string}|null, mounted: false, cleanupPending: false, home: true, modules: false, settings: false, settingsOwner: null as string|null, moduleOwner:null as string|null, moduleSection:null as 'home'|'config'|'queries'|null};
+  let preference: UiLanguage = 'auto', preferenceRevision = -1, hostLocale: unknown;
+  let messageKey: CoreTextKey = 'shell.connecting', withRecovery = false;
+  const show = (key: CoreTextKey, reopen = false) => {messageKey = key; withRecovery = reopen;};
+  const state = {catalog: null as Catalog | null, busy: false, stale: false,
+    get messageKey() {return messageKey;},
+    get message(): string {
+      return coreText(this.locale, messageKey) + (withRecovery
+        ? (this.locale === 'en-US' ? ' ' : '') + coreText(this.locale, 'shell.reopen') : '');
+    },
+    theme: 'light' as 'light'|'dark', locale: DEFAULT_UI_LOCALE, selected: null as {owner: string; route: string}|null, mounted: false, cleanupPending: false, home: true, modules: false, settings: false, settingsOwner: null as string|null, moduleOwner:null as string|null, moduleSection:null as 'home'|'config'|'queries'|null};
   let closed = false, ready = false, sequence = 0, generation = 0, boundary = '', contextSeen = false;
   let off: (() => void) | undefined, mounted: MountedPage | null = null, identity = '', pendingIdentity = '';
   let scope: ReturnType<typeof createScope> | null = null;
   const assets = createModuleAssets(container.ownerDocument, loadPage, timeoutMs, runtimeUrl?{bridge,runtimeUrl}:undefined), bindings = new Map<string, string>(), revokedOwners = new Set<string>();
-  const recoveryMessage = '请关闭此页，并从宿主插件详情重新打开页面。';
-  const reopenMessage = '模块资源已失效。' + recoveryMessage;
-  const ownerFailures = new Map<string,string>();
-  const revokedMessage = () => projectionRevoked ? reopenMessage : ownerFailures.get(state.selected?.owner || '') || reopenMessage;
-  function failureMessage(error:unknown, phase:'load'|'bootstrap'|'mount'):string {
+  const ownerFailures = new Map<string,CoreTextKey>();
+  const revokedMessage = (): CoreTextKey => projectionRevoked ? 'shell.assetsRevoked' : ownerFailures.get(state.selected?.owner || '') || 'shell.assetsRevoked';
+  function failureMessage(error:unknown, phase:'load'|'bootstrap'|'mount'):CoreTextKey {
     // Show only our fixed messages, never a bridge/module exception or URL.
-    if (phase === 'mount') return '模块页面初始化失败。' + recoveryMessage;
+    if (phase === 'mount') return 'shell.mountFailed';
     const row=error as {code?:unknown;error_code?:unknown;message?:unknown;status?:unknown;response?:{status?:unknown}}|null;
     const codes=[row?.code,row?.error_code,row?.message];
-    if ([row?.status,row?.response?.status].some(status=>status===401||status===403) || codes.includes('admin_authorization_denied')) return '宿主授权未通过或会话已失效，请确认宿主登录状态。' + recoveryMessage;
-    if (codes.some(code=>typeof code==='string'&&['asset_revoked','page_revoked','stale_context','revision_conflict'].includes(code))) return reopenMessage;
-    if (codes.includes('invalid_page_entry')) return '模块页面初始化失败。' + recoveryMessage;
-    if (codes.includes('asset_digest_unavailable')) return '模块资源摘要校验无法完成，已阻止加载。' + recoveryMessage;
-    if (codes.some(code=>typeof code==='string'&&['asset_digest_mismatch','invalid_live_projection','invalid_live_resource','incomplete_live_projection','live_resource_budget','invalid_live_style','invalid_live_entry','invalid_shared_runtime','unsupported_live_style_reference','unsupported_live_import'].includes(code))) return '模块资源校验失败，已阻止加载。' + recoveryMessage;
-    if (phase === 'bootstrap') return '模块页面服务暂不可用。' + recoveryMessage;
-    return '模块资源加载失败，请检查连接与浏览器是否允许加载页面资源。' + recoveryMessage;
+    if ([row?.status,row?.response?.status].some(status=>status===401||status===403) || codes.includes('admin_authorization_denied')) return 'shell.authFailed';
+    if (codes.some(code=>typeof code==='string'&&['asset_revoked','page_revoked','stale_context','revision_conflict'].includes(code))) return 'shell.assetsRevoked';
+    if (codes.includes('invalid_page_entry')) return 'shell.mountFailed';
+    if (codes.includes('asset_digest_unavailable')) return 'shell.digestUnavailable';
+    if (codes.some(code=>typeof code==='string'&&['asset_digest_mismatch','invalid_live_projection','invalid_live_resource','incomplete_live_projection','live_resource_budget','invalid_live_style','invalid_live_entry','invalid_shared_runtime','unsupported_live_style_reference','unsupported_live_import'].includes(code))) return 'shell.digestMismatch';
+    if (phase === 'bootstrap') return 'shell.serviceUnavailable';
+    return 'shell.assetsFailed';
   }
   let projectionRevoked = false, catalogSeen = false, activeOwner = '';
   let navigationVersion=0,lastPageNavigationVersion=-1;
@@ -44,7 +54,7 @@ export function createShell({bridge, container, window, loadPage, runtimeUrl, ch
   const deadline = <T>(promise: Promise<T>): Promise<T> => new Promise((resolve,reject) => {const timer = setTimeout(() => {timers.delete(timer); reject(Error('timeout'));}, timeoutMs); timers.add(timer); promise.then(resolve,reject).finally(() => {clearTimeout(timer); timers.delete(timer);});});
   function selected(): {module: ModuleDescriptor; page: PageDescriptor}|null {if (state.settings) return null; const module = state.catalog?.modules?.find(m => m.module_id === state.selected?.owner); const page = module?.pages.find(p => p.route_id === state.selected?.route); return module?.state === 'loaded' && page ? {module,page} : null;}
   function pageContext(module: ModuleDescriptor): Readonly<PageContext> {return Object.freeze({theme: state.theme, locale: state.locale, available: ready && !state.busy && !state.stale && !retiring && !projectionRevoked && !revokedOwners.has(module.module_id), owner: module.module_id, runtimeId: module.runtime_id!, epoch: module.module_epoch, boundary});}
-  function cleanupState() {state.cleanupPending = retiring !== null || assets.cleanupPending; if (state.cleanupPending) state.message='页面清理未完成，请重试页面清理。';}
+  function cleanupState() {state.cleanupPending = retiring !== null || assets.cleanupPending; if (state.cleanupPending) show('shell.cleanupPending');}
   function revokeOwner(owner: string) {revokedOwners.add(owner); if (activeOwner === owner) disposePage(); assets.invalidate(owner); cleanupState();}
   function reconcileAssets(data: Catalog) {
     const next = new Map((data.modules || []).filter(module => module.state === 'loaded').map(module => [module.module_id, assetIdentity(module, boundary)]));
@@ -76,9 +86,9 @@ export function createShell({bridge, container, window, loadPage, runtimeUrl, ch
   async function syncPage() {
     if (retiring) {changed(); return;}
     const selection = selected();
-    if (!selection || !ready) {disposePage(); if (!state.cleanupPending && (projectionRevoked || revokedOwners.has(state.selected?.owner || ''))) state.message=revokedMessage(); changed(); return;}
+    if (!selection || !ready) {disposePage(); if (!state.cleanupPending && (projectionRevoked || revokedOwners.has(state.selected?.owner || ''))) show(revokedMessage(), true); changed(); return;}
     const {module,page} = selection, target = mountIdentity(module,page,boundary);
-    if (!canExecuteModule(module)) {disposePage(); if (!state.cleanupPending) state.message = revokedMessage(); changed(); return;}
+    if (!canExecuteModule(module)) {disposePage(); if (!state.cleanupPending) show(revokedMessage(), true); changed(); return;}
     if (target === identity && mounted) {mounted.update(pageContext(module)); changed(); return;}
     if (target === pendingIdentity) return;
     disposePage(); if (retiring) {changed(); return;}
@@ -119,7 +129,7 @@ export function createShell({bridge, container, window, loadPage, runtimeUrl, ch
     } catch (error) {if (!closed && !projectionRevoked && !revokedOwners.has(module.module_id)) {
       // A first load failure still belongs to this owner after its view leaves.
       ownerFailures.set(module.module_id,failureMessage(error,phase));
-      revokeOwner(module.module_id); if (!state.cleanupPending && state.selected?.owner === module.module_id) state.message = revokedMessage(); changed();
+      revokeOwner(module.module_id); if (!state.cleanupPending && state.selected?.owner === module.module_id) show(revokedMessage(), true); changed();
     }}
   }
   function pickRoute() {
@@ -133,26 +143,50 @@ export function createShell({bridge, container, window, loadPage, runtimeUrl, ch
     state.selected=readRoute(hash);state.moduleOwner=state.selected?.owner||null;
     const page=state.catalog?.modules?.find(m=>m.module_id===state.moduleOwner)?.pages.find(p=>p.route_id===state.selected?.route);
     state.moduleSection=page?.role==='config'?'config':page?.role==='home'?'home':page?'queries':null;
-  }  async function refresh() {
-    if (closed || !ready || state.busy) return;
-    const version = ++sequence; state.busy = true; state.stale = state.catalog !== null; state.message = state.stale ? '正在刷新；当前为上次目录，暂不可提交查询。' : '正在读取模块目录。';
+  }
+  function applyLocale() {
+    const next = effectiveUiLocale(preference, hostLocale);
+    const changedLocale = next !== state.locale;
+    state.locale = next;
+    container.ownerDocument.documentElement.lang = next;
+    container.ownerDocument.title = coreText(next, 'shell.brandShort');
+    return changedLocale;
+  }
+  function applyLanguageSnapshot(payload: unknown) {
+    if (!ready || closed || projectionRevoked) return;
+    const value = readPageLanguage(payload);
+    if (!value || value.revision < preferenceRevision) return;
+    preferenceRevision = value.revision;
+    preference = value.preference;
+    if (!applyLocale()) return;
     const old = selected(); if (old && mounted) mounted.update(pageContext(old.module)); changed();
-    try {const data = validateCatalog(await deadline(bridge.apiGet('catalog', {}))); if (closed || version !== sequence) return; reconcileAssets(data); state.catalog = data; state.busy = false; state.stale = false; if (!state.cleanupPending) state.message = '状态已更新；查询仅在手动提交时执行。'; pickRoute(); await syncPage();}
-    catch {if (closed || version !== sequence) return; state.busy = false; state.stale = state.catalog !== null; state.message = '状态读取失败。保留上次目录，请确认宿主会话后手动重试。'; const old = selected(); if (old && mounted) mounted.update(pageContext(old.module)); changed();}
+  }
+  async function readLanguage() {
+    try {applyLanguageSnapshot(await deadline(bridge.apiPost('admin/read', {scope:'page_locale'})));}
+    catch { /* The current verified preference or Host fallback remains usable. */ }
+  }
+  async function refresh() {
+    if (closed || !ready || state.busy) return;
+    const version = ++sequence; state.busy = true; state.stale = state.catalog !== null; show(state.stale ? 'shell.refreshStale' : 'shell.catalogLoading');
+    void readLanguage();
+    const old = selected(); if (old && mounted) mounted.update(pageContext(old.module)); changed();
+    try {const data = validateCatalog(await deadline(bridge.apiGet('catalog', {}))); if (closed || version !== sequence) return; reconcileAssets(data); state.catalog = data; state.busy = false; state.stale = false; if (!state.cleanupPending) show('shell.catalogReady'); pickRoute(); await syncPage();}
+    catch {if (closed || version !== sequence) return; state.busy = false; state.stale = state.catalog !== null; show('shell.catalogFailed'); const old = selected(); if (old && mounted) mounted.update(pageContext(old.module)); changed();}
   }
   function accept(context: Record<string,unknown>, event = false) {
     if (closed || projectionRevoked || !event && contextSeen) return;
-    state.theme = typeof context?.isDark === 'boolean' ? context.isDark ? 'dark' : 'light' : context?.theme === 'dark' ? 'dark' : 'light'; state.locale = typeof context?.locale === 'string' ? context.locale : 'zh-CN';
-    const revokeProjection = () => {projectionRevoked=true; sequence++; ready=false; state.busy=false; state.stale=state.catalog!==null; disposePage(); assets.invalidateAll(); cleanupState(); if (!state.cleanupPending) state.message=reopenMessage; changed();};
+    const revokeProjection = () => {projectionRevoked=true; sequence++; ready=false; state.busy=false; state.stale=state.catalog!==null; disposePage(); assets.invalidateAll(); cleanupState(); if (!state.cleanupPending) show('shell.assetsRevoked', true); changed();};
     let next: string; try {next = contextBoundary(context); if (!Object.hasOwn(context,'pluginName') || !Object.hasOwn(context,'pageName') || context.pluginName !== expectedPlugin || context.pageName !== expectedPage) throw Error('wrong_page');} catch {contextSeen=true; revokeProjection(); return;}
-    if (contextSeen && ready && next === boundary) {const old = selected(); if (old && mounted) mounted.update(pageContext(old.module)); changed(); return;}
-    if (contextSeen) {revokeProjection(); return;}
+    if (contextSeen && (!ready || next !== boundary)) {revokeProjection(); return;}
+    state.theme = typeof context.isDark === 'boolean' ? context.isDark ? 'dark' : 'light' : context.theme === 'dark' ? 'dark' : 'light';
+    hostLocale = context.locale; applyLocale();
+    if (contextSeen) {const old = selected(); if (old && mounted) mounted.update(pageContext(old.module)); changed(); return;}
     contextSeen = true; boundary = next; ready = true; void refresh();
   }
   const hashChanged = () => {pickRoute(); void syncPage(); const main = container.ownerDocument.getElementById('page-root'); main?.focus({preventScroll:true}); window.scrollTo({top:0,left:0,behavior:'instant'});};
-  return {state, selected, refresh,canExecuteModule,navigationImpact,refuseNavigation(){state.message='无法核对当前模块的离页状态，请重新打开页面。';changed();}, selectModules(){window.location.hash='#/modules';pickRoute();void syncPage();}, selectHome() {window.location.hash='#/'; pickRoute(); void syncPage();}, selectModule(owner:string,section:'home'|'queries'='home'){window.location.hash='#/module/'+encodeURIComponent(owner)+(section==='queries'?'/-/queries':'');pickRoute();void syncPage();}, selectSettings(owner?:string) {const config=state.catalog?.modules?.find(m=>m.module_id===owner)?.pages.find(p=>p.role==='config');window.location.hash=owner?(config?routeHash(owner,config.route_id):'#/module/'+encodeURIComponent(owner)):'#/settings'; pickRoute(); void syncPage();}, select(owner: string, route: string) {window.location.hash = routeHash(owner,route); pickRoute(); void syncPage();},
-    retryCleanup() {if (!state.cleanupPending) return; if (retiring) disposePage(); assets.retryCleanup(); cleanupState(); if (!state.cleanupPending) {state.message=projectionRevoked || revokedOwners.has(state.selected?.owner || '') ? revokedMessage() : '页面清理完成，请手动刷新状态。'; if (!closed) void syncPage();} changed();},
-    start() {if (closed) return; window.addEventListener('hashchange',hashChanged); if (!bridge?.ready || !bridge?.onContext || !bridge?.apiGet || !bridge?.apiPost) {state.message = '宿主连接尚未就绪，请重新打开页面。'; changed(); return;} off = bridge.onContext(context => accept(context,true)); deadline(Promise.resolve(bridge.ready())).then(context => accept(context)).catch(() => {if (!ready && !closed) {state.message = '连接宿主失败，请重新打开页面。'; changed();}});},
+  return {state, selected, refresh,applyLanguageSnapshot,canExecuteModule,navigationImpact,refuseNavigation(){show('shell.navigationBlocked');changed();}, selectModules(){window.location.hash='#/modules';pickRoute();void syncPage();}, selectHome() {window.location.hash='#/'; pickRoute(); void syncPage();}, selectModule(owner:string,section:'home'|'queries'='home'){window.location.hash='#/module/'+encodeURIComponent(owner)+(section==='queries'?'/-/queries':'');pickRoute();void syncPage();}, selectSettings(owner?:string) {const config=state.catalog?.modules?.find(m=>m.module_id===owner)?.pages.find(p=>p.role==='config');window.location.hash=owner?(config?routeHash(owner,config.route_id):'#/module/'+encodeURIComponent(owner)):'#/settings'; pickRoute(); void syncPage();}, select(owner: string, route: string) {window.location.hash = routeHash(owner,route); pickRoute(); void syncPage();},
+    retryCleanup() {if (!state.cleanupPending) return; if (retiring) disposePage(); assets.retryCleanup(); cleanupState(); if (!state.cleanupPending) {if (projectionRevoked || revokedOwners.has(state.selected?.owner || '')) show(revokedMessage(), true); else show('shell.cleanupDone'); if (!closed) void syncPage();} changed();},
+    start() {if (closed) return; window.addEventListener('hashchange',hashChanged); if (!bridge?.ready || !bridge?.onContext || !bridge?.apiGet || !bridge?.apiPost) {show('shell.bridgeMissing'); changed(); return;} off = bridge.onContext(context => accept(context,true)); deadline(Promise.resolve(bridge.ready())).then(context => accept(context)).catch(() => {if (!ready && !closed) {show('shell.bridgeFailed'); changed();}});},
     dispose() {if (closed) return; closed = true; sequence++; ready = false; off?.(); window.removeEventListener('hashchange',hashChanged); for (const timer of timers) clearTimeout(timer); timers.clear(); disposePage(); assets.invalidateAll(); cleanupState();},
   };
 }

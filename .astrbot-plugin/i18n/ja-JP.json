@@ -1,0 +1,24 @@
+{
+  "views": {
+    "00-game-link": {
+      "title": "ゲームリンク"
+    },
+    "management": {
+      "title": "設定とメンテナンス"
+    },
+    "shell": {
+      "title": "モジュールワークスペース"
+    }
+  },
+  "pages": {
+    "00-game-link": {
+      "title": "ゲームリンク"
+    },
+    "management": {
+      "title": "設定とメンテナンス"
+    },
+    "shell": {
+      "title": "モジュールワークスペース"
+    }
+  }
+}

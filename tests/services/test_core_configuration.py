@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import unittest
 from dataclasses import replace
+from time import time
 
 from ygl_test_subject.core.contracts.administration import (
     AdminAuthorizationDenied,
@@ -23,6 +24,7 @@ from ygl_test_subject.modules.ff14.config import (
 from ygl_test_subject.services.configuration.defaults import (
     CORE_CONFIG_FIELDS,
     CORE_MODULE_ID,
+    PAGE_LOCALE,
     core_config_target,
 )
 from ygl_test_subject.services.configuration.operations import (
@@ -45,6 +47,112 @@ class CoreDefaultsRuntimeTests(unittest.IsolatedAsyncioTestCase):
     _start_with_candidate = (
         runtime_fixture.AdminOperationsRuntimeTests._start_with_candidate
     )
+
+    async def test_page_locale_scope_persists_and_invalid_value_is_repairable(self):
+        target = core_config_target("host-config")
+        name = PAGE_LOCALE.name
+        scope = {target: {name}}
+        operations = {AdminOperation.READ_CONFIG, AdminOperation.UPDATE_CONFIG}
+
+        async def start():
+            runtime = self._runtime(
+                ordinary_config_resources={target: {f.name for f in CORE_CONFIG_FIELDS}}
+            )
+            await runtime.start()
+            source = runtime.admin_authorization.register_source(
+                "locale-test", resources=scope, operations=operations
+            )
+            return runtime, source
+
+        async def read_or_update(runtime, source, patch=None):
+            operation = (
+                AdminOperation.READ_CONFIG
+                if patch is None
+                else AdminOperation.UPDATE_CONFIG
+            )
+            request = object()
+            context = source.issue(
+                subject="locale-test",
+                request=request,
+                expiry=time() + 30,
+                operations={operation},
+                resources=scope,
+                live=lambda actual: actual is request,
+            )
+            ops = runtime.admin_operations
+            try:
+                if patch is not None:
+                    return await ops.update_config(
+                        None, CORE_MODULE_ID, patch, authorization=context
+                    )
+                with self.assertRaises(AdminAuthorizationDenied):
+                    await ops.ordinary_snapshot(authorization=context)
+                return await ops.ordinary_snapshot(
+                    authorization=context, page_locale_only=True
+                )
+            finally:
+                source.end(context)
+
+        runtime, source = await start()
+        initial = (await read_or_update(runtime, source))[CORE_MODULE_ID]
+        self.assertEqual(
+            initial["fields"],
+            {
+                name: {
+                    "value": "auto",
+                    "state": "valid",
+                    "present": False,
+                    "source": "default",
+                }
+            },
+        )
+        patch = ConfigPatch(
+            initial["revision"],
+            (ConfigFieldUpdate(name, ConfigUpdateMode.REPLACE, value="ja-JP"),),
+            CORE_CONFIG_FIELDS,
+        )
+        await read_or_update(runtime, source, patch)
+        saved = await read_or_update(runtime, source)
+        self.assertEqual(saved[CORE_MODULE_ID]["fields"][name]["value"], "ja-JP")
+        await runtime.close(timeout=1)
+        runtime, source = await start()
+        self.assertEqual(await read_or_update(runtime, source), saved)
+        await runtime.database.executor.run_transaction(
+            lambda unit: unit.execute(
+                "UPDATE config_entries SET value_json=? WHERE principal_id=? AND module_id=? AND field=?",
+                (
+                    json.dumps("unsupported"),
+                    target.principal_id,
+                    target.module_id,
+                    name,
+                ),
+            ).rowcount
+        )
+        await runtime.close(timeout=1)
+        runtime, source = await start()
+        self.assertTrue(runtime.started)
+        invalid = (await read_or_update(runtime, source))[CORE_MODULE_ID]
+        self.assertEqual(
+            invalid["fields"],
+            {
+                name: {
+                    "value": None,
+                    "state": "invalid",
+                    "present": True,
+                    "source": "sqlite",
+                }
+            },
+        )
+        patch = ConfigPatch(
+            invalid["revision"],
+            (ConfigFieldUpdate(name, ConfigUpdateMode.CLEAR),),
+            CORE_CONFIG_FIELDS,
+        )
+        await read_or_update(runtime, source, patch)
+        self.assertEqual(
+            (await read_or_update(runtime, source))[CORE_MODULE_ID]["fields"],
+            initial["fields"],
+        )
 
     async def _seed_invalid_defaults(self, target, values):
         runtime = self._runtime()
@@ -95,7 +203,7 @@ class CoreDefaultsRuntimeTests(unittest.IsolatedAsyncioTestCase):
             None, CORE_MODULE_ID, authorization=context
         )
         self.assertEqual(summary.revision, 2)
-        self.assertEqual(set(summary.fields), {"image_theme"})
+        self.assertEqual(set(summary.fields), {"image_theme", "page_locale"})
         self.assertNotIn("private-invalid-value", repr(summary))
         patch = ConfigPatch(
             2,
@@ -238,7 +346,9 @@ class CoreDefaultsRuntimeTests(unittest.IsolatedAsyncioTestCase):
         summary = await runtime.admin_facade.config_snapshot(
             None, CORE_MODULE_ID, authorization=context
         )
-        self.assertEqual(summary.fields, {"image_theme": "unset"})
+        self.assertEqual(
+            summary.fields, {"image_theme": "unset", "page_locale": "unset"}
+        )
         self.assertFalse(hasattr(summary, "default_region"))
         self.assertEqual(
             (await runtime.config_repository.current(target)).values,

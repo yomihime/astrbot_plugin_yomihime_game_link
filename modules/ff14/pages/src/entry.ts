@@ -7,27 +7,77 @@ import {mountSettings} from './settings-page';
 import {createQueryController,fields,queryTimeoutMs} from './query-controller';
 import './styles.css';
 import {createSelectA11y} from './select-a11y';
+import {ff14Text} from './i18n';
+
+type Text = (key: string, params?: Readonly<Record<string, string | number>>) => string;
 function resultValue(value:any): string {if (value===null) return '—'; if (value && typeof value==='object' && !Array.isArray(value) && Object.hasOwn(value,'value')) return [String(value.value),value.currency||value.unit||value.timezone].filter(Boolean).join(' '); return value && typeof value==='object'?JSON.stringify(value):String(value);}
-const titles:Record<string,string>={items:'物品查询',market:'市场行情',logs:'角色 Logs',calendar:'活动日历'};
-const hints:Record<string,string>={items:'名称或 ID 查询；缺项与来源说明保留在结果中。',market:'范围可留空，由服务端解析默认区域的全服范围；名称与范围别名也由服务端判定。',logs:'选择对应区域和服务器，输入角色名；来源凭据由管理员维护，不在公开页面填写。',calendar:'仅手动查询选定窗口；来源失败和覆盖限制以本次结果为准。'};
-const errors:Record<string,string>={parameter_error:'参数未被来源接受；范围含糊时使用明确 World ID 或规范数据中心名。',auth_required:'来源凭据不可用，请联系管理员配置相应区域的来源凭据。',auth_expired:'授权已过期，请重新登录 Dashboard。',rate_limited:'查询受到限流，请稍后手动重试。',module_unavailable:'模块或查询期限不可用，请刷新状态后手动重试。',upstream_error:'来源暂时不可用，请稍后手动重试。',not_found:'来源未找到匹配内容，请检查名称或 ID。',no_records:'来源未返回记录；这不表示查询窗口已被完整覆盖。',not_public:'来源内容未公开。'};
-function blocks(result:any) {
+const knownErrors = new Set(['parameter_error', 'auth_required', 'auth_expired', 'rate_limited',
+  'module_unavailable', 'upstream_error', 'not_found', 'no_records', 'not_public']);
+function blocks(result:any, text: Text) {
   const doc=result.document, nodes:any[]=doc?[h('h3',doc.title),h('p',{class:'ff14-hint'},doc.subject)]:[];
   for (const block of doc?.blocks || []) {
     if (block.kind==='text') nodes.push(h('p',{class:'ff14-result-text'},block.text));
     else if (['fields','metrics'].includes(block.kind)) nodes.push(h('dl',{class:'ff14-fields'},Object.entries(block[block.kind]).flatMap(([k,v])=>[h('dt',k),h('dd',resultValue(v))])));
     else if (block.kind==='table') {
-      nodes.push(h('div',{class:'ff14-table-desktop',tabindex:0,'aria-label':'结果表格'},[h('table',[h('thead',[h('tr',block.columns.map((column:string)=>h('th',{scope:'col'},column)))]),h('tbody',block.rows.map((row:any[])=>h('tr',row.map(value=>h('td',resultValue(value))))))])]),h('div',{class:'ff14-table-mobile'},block.rows.map((row:any[])=>h('dl',{class:'ff14-fields'},row.flatMap((value,index)=>[h('dt',block.columns[index]),h('dd',resultValue(value))])))));
-      if (!block.rows.length) nodes.push(h('p',{class:'ff14-warning'},'来源返回的表格内容为空。'));
+      nodes.push(h('div',{class:'ff14-table-desktop',tabindex:0,'aria-label':text('query.result.table')},[h('table',[h('thead',[h('tr',block.columns.map((column:string)=>h('th',{scope:'col'},column)))]),h('tbody',block.rows.map((row:any[])=>h('tr',row.map(value=>h('td',resultValue(value))))))])]),h('div',{class:'ff14-table-mobile'},block.rows.map((row:any[])=>h('dl',{class:'ff14-fields'},row.flatMap((value,index)=>[h('dt',block.columns[index]),h('dd',resultValue(value))])))));
+      if (!block.rows.length) nodes.push(h('p',{class:'ff14-warning'},text('query.result.emptyTable')));
     } else nodes.push(h('ul',block.links.map((link:{label:string;url:string})=>h('li',[h('a',{href:link.url,target:'_blank',rel:'noopener noreferrer'},link.label)]))));
   }
-  if (doc && !doc.blocks.length) nodes.push(h('p',{class:'ff14-warning'},'来源未返回可展示内容。'));
+  if (doc && !doc.blocks.length) nodes.push(h('p',{class:'ff14-warning'},text('query.result.emptyDocument')));
   for (const warning of result.warnings) nodes.push(h('p',{class:'ff14-warning'},warning));
-  const sources=[...(doc?.sources || []),...result.provenance]; if (sources.length) nodes.push(h('p',{class:'ff14-hint'},`来源 / 口径：${sources.join('；')}`));
-  const times=[...(doc?.timestamps || []),...result.timestamps]; if (times.length) nodes.push(h('p',{class:'ff14-hint'},`返回时间：${times.map(resultValue).join('；')}`));
+  const sources=[...(doc?.sources || []),...result.provenance]; if (sources.length) nodes.push(h('p',{class:'ff14-hint'},text('query.result.source', {sources: sources.join(text('list.separator'))})));
+  const times=[...(doc?.timestamps || []),...result.timestamps]; if (times.length) nodes.push(h('p',{class:'ff14-hint'},text('query.result.timestamps', {times: times.map(resultValue).join(text('list.separator'))})));
   return nodes;
 }
-const queryLabels: Record<string,string> = {market:'查询市场',items:'查询物品',logs:'查询 Logs',calendar:'查询日历'};
+function resultStatus(result: NonNullable<ReturnType<typeof createQueryController>['state']['result']>, text: Text): string {
+  switch (result.status) {
+    case 'success': return text('query.result.success');
+    case 'partial_success': return text('query.result.partial');
+    case 'needs_selection': return text('query.result.select');
+    default: {
+      const code = result.error?.code ?? '';
+      const title = code === 'not_found' ? 'noMatch' : code === 'no_records' ? 'noRecords' : 'failed';
+      return `${text(`query.result.${title}`)} · ${text(`query.error.${knownErrors.has(code) ? code : 'fallback'}`)}`;
+    }
+  }
+}
+
+type MarketCoverage = {
+  region: string;
+  target: string | number | null;
+  state: string;
+  cached: boolean | null;
+  fetched_at: string | null;
+  reason: string | null;
+};
+
+function marketContext(market: {
+  scope: {kind: string; target: string | number | null; regions: string[]; source: string};
+  quality: string;
+  intent: string;
+  coverage: MarketCoverage[];
+  truncated: boolean;
+}, text: Text) {
+  const scope = market.scope;
+  return h('div', {class: 'ff14-market-context'}, [
+    h('dl', {class: 'ff14-fields'}, [
+      h('dt', text('market.scope')), h('dd', text('market.scopeValue', {
+        kind: text(`market.scopeKind.${scope.kind}`), target: scope.target ?? '—', regions: scope.regions.join('、'),
+        source: text(`market.scopeSource.${scope.source}`),
+      })),
+      h('dt', text('query.field.quality')), h('dd', text(`query.quality.${market.quality}`)),
+      h('dt', text('market.intent')), h('dd', text(`query.intent.${market.intent}`)),
+    ]),
+    ...market.coverage.map(coverage => h('p', {class: 'ff14-hint'}, text('market.coverage', {
+      region: coverage.region, target: coverage.target ?? '—', status: text(`market.coverageState.${coverage.state}`),
+      cache: text(`market.coverageCache.${coverage.cached === true ? 'cached' : coverage.cached === false ? 'fresh' : 'unknown'}`),
+      time: coverage.fetched_at ?? text('market.unknownTime'),
+      reason: coverage.reason ? text('market.coverageReason', {reason: coverage.reason}) : '',
+    }))),
+    market.truncated ? h('p', {class: 'ff14-warning'}, text('market.truncated')) : null,
+  ]);
+}
+
 let nextQuery = 0;
 
 export function mount(container:HTMLElement,options:PageOptions):MountedPage {
@@ -38,6 +88,7 @@ export function mount(container:HTMLElement,options:PageOptions):MountedPage {
   const revision=ref(0), controller=createQueryController(options,()=>{revision.value++;},queryTimeoutMs(options.routeId));
   const app=createApp(defineComponent({setup(){return ()=>{
     revision.value; const state=controller.state, pending=state.phase==='loading', result=state.result, context=state.context;
+    const text: Text = (key, params) => ff14Text(context.locale, key, params);
     const candidates=result?.model_facts?.selection;
     const focusInput = () => container.querySelector('input')?.focus();
     async function onAction(action: TemplateActionKey) {
@@ -54,32 +105,32 @@ export function mount(container:HTMLElement,options:PageOptions):MountedPage {
     return h(PageTemplate, {
       idPrefix, class: 'ff14-page', context, styleMountTarget: container, onAction,
       content: {
-        title: titles[route], intro: hints[route], sections: [{id:'criteria', title:'查询条件'}],
+        title: text(`query.${route}.title`), intro: text(`query.${route}.hint`), sections: [{id:'criteria', title:text('query.criteria')}],
         actions: [
-          {id:'query', type:'submit', label:queryLabels[route], disabled:!context.available},
-          ...(pending ? [{id:'cancelWait', label:'停止展示'} as const] : []),
+          {id:'query', type:'submit', label:text(`query.${route}.submit`), disabled:!context.available},
+          ...(pending ? [{id:'cancelWait', label:text('query.cancelDisplay')} as const] : []),
         ],
       },
       state: {pending, notice: {key:'custom', tone:context.available?'neutral':'warning', text:context.available
-        ? '模块目录已加载；实际查询仍由后端逐请求鉴权，仅手动提交。'
-        : '当前入口状态尚未确认，请刷新状态；仍失败时请重新登录 Dashboard 或重新打开本页。'}},
+        ? text('query.ready')
+        : text('query.unavailable')}},
     }, {
       sectionExtra: () => h(FormGrid, {}, {default: () =>
-          fields[route].map(field=>h(FormField,{controlId:`ff14-${route}-${field.name}`,label:field.label,labelId:`label-${route}-${field.name}`,errorId:`error-${field.name}`,error:state.errors[field.name],class:field.name==='query'?'ui-field-wide':undefined},{default:({controlAttrs}:FormFieldSlot)=>[
-            field.options?withDirectives(h(NSelect,{value:state.draft[field.name],options:field.options,to:container,
+          fields[route].map(field=>{const error=state.errors[field.name];return h(FormField,{controlId:`ff14-${route}-${field.name}`,label:text(field.labelKey),labelId:`label-${route}-${field.name}`,errorId:`error-${field.name}`,error:error ? text(error.key, error.limit === undefined ? undefined : {limit: error.limit}) : undefined,class:field.name==='query'?'ui-field-wide':undefined},{default:({controlAttrs}:FormFieldSlot)=>[
+            field.options?withDirectives(h(NSelect,{value:state.draft[field.name],options:field.options.map(({value,labelKey})=>({value,label:text(labelKey)})),to:container,
               menuProps:{id:`menu-${route}-${field.name}`,role:'listbox','aria-labelledby':`label-${route}-${field.name}`},
               nodeProps:(option:any)=>({id:`option-${route}-${field.name}-${option.value}`,role:'option','aria-selected':state.draft[field.name]===option.value}),
               'onUpdate:show':(show:boolean)=>{expanded.value={...expanded.value,[field.name]:show};},
               'onUpdate:value':(value:string)=>controller.edit(field.name,value)}),[[selectA11y,{id:`ff14-${route}-${field.name}`,labelId:`label-${route}-${field.name}`,menuId:`menu-${route}-${field.name}`,expanded:Boolean(expanded.value[field.name]),invalid:Boolean(state.errors[field.name]),errorId:`error-${field.name}`}]] )
-              :h(NInput,{value:state.draft[field.name],placeholder:field.placeholder,maxlength:field.limit,inputProps:controlAttrs,'onUpdate:value':(value:string)=>controller.edit(field.name,value)}),
-          ]}))
+              :h(NInput,{value:state.draft[field.name],placeholder:field.placeholderKey ? text(field.placeholderKey) : undefined,maxlength:field.limit,inputProps:controlAttrs,'onUpdate:value':(value:string)=>controller.edit(field.name,value)}),
+          ]});})
       }),
-      results: () => h(Surface,{title:'本次结果',class:'ff14-result','aria-live':'polite','data-result-status':result?.status||state.phase}, {default:()=>[
-        result?h('p',{class:result.status==='error'?'ff14-error':result.status==='success'?'ff14-success':'ff14-warning',role:result.status==='error'?'alert':'status'},result.status==='success'?'查询完成':result.status==='partial_success'?'部分结果 · 保留来源说明':result.status==='needs_selection'?'需要选择物品 · 请确认本次候选':`${result.error?.code==='not_found'?'无匹配结果':result.error?.code==='no_records'?'没有可展示记录':'查询失败'} · ${errors[result.error?.code||'']||'查询未完成，请检查输入与来源后手动重试。'}`):h('p',{role:['error','timeout'].includes(state.phase)?'alert':'status'},state.message),
-        pending?h('p',{class:'ff14-hint'},'仅停止展示，本次请求可能仍在后台处理。'):null,
-        ...(result?blocks(result):[]),
-        market?h('div',{class:'ff14-market-context'},[h('dl',{class:'ff14-fields'},[h('dt','当前解析范围'),h('dd',`${{world:'服务器',dc:'数据中心',region:'区域全服'}[market.scope.kind as string]} / ${market.scope.target??'—'} / ${market.scope.regions.join('、')}（${market.scope.source==='default'?'服务端默认':'显式指定'}）`),h('dt','品质'),h('dd',({all:'全部品质',nq:'NQ',hq:'HQ'} as Record<string,string>)[market.quality]),h('dt','意图'),h('dd',({overview:'概览',min:'最低价',listings:'在售列表'} as Record<string,string>)[market.intent])]),...market.coverage.map((c:any)=>h('p',{class:'ff14-hint'},`来源覆盖：${c.region} / ${c.target??'—'} · ${{available:'已取得记录',empty:'来源返回空记录',failed:'获取失败'}[c.state as string]}；${c.cached===true?'缓存结果':c.cached===false?'本次获取':'缓存状态未知'}；来源获取时间：${c.fetched_at??'未知'}${c.reason?`；原因：${c.reason}`:''}。`)),market.truncated?h('p',{class:'ff14-warning'},'结果已截断；展示范围为本次返回的有限市场记录。'):null]):null,
-        candidates?h('div',{class:'ff14-candidates','aria-label':'物品候选'},[h('p',{class:'ff14-hint'},'请选择本次返回的物品候选；修改输入或重新提交后旧候选失效。'),...candidates.candidates.map((c:any)=>h(NButton,{disabled:pending||!context.available,'data-item-id':c.item_id,onClick:()=>{void controller.choose(c.item_id,result);container.querySelector<HTMLInputElement>('input')?.focus();}},()=>`${c.name} · ID ${c.item_id}`)),candidates.truncated?h('p',{class:'ff14-warning'},'候选已截断，请进一步明确名称后手动查询。'):null]):null,
+      results: () => h(Surface,{title:text('query.result.title'),class:'ff14-result','aria-live':'polite','data-result-status':result?.status||state.phase}, {default:()=>[
+        result?h('p',{class:result.status==='error'?'ff14-error':result.status==='success'?'ff14-success':'ff14-warning',role:result.status==='error'?'alert':'status'},resultStatus(result, text)):h('p',{role:['error','timeout'].includes(state.phase)?'alert':'status'},state.message),
+        pending?h('p',{class:'ff14-hint'},text('query.result.stopNote')):null,
+        ...(result?blocks(result, text):[]),
+        market?marketContext(market, text):null,
+        candidates?h('div',{class:'ff14-candidates','aria-label':text('query.result.candidates')},[h('p',{class:'ff14-hint'},text('query.result.pickCandidate')),...candidates.candidates.map((c:any)=>h(NButton,{disabled:pending||!context.available,'data-item-id':c.item_id,onClick:()=>{void controller.choose(c.item_id,result);container.querySelector<HTMLInputElement>('input')?.focus();}},()=>`${c.name} · ID ${c.item_id}`)),candidates.truncated?h('p',{class:'ff14-warning'},text('query.result.truncatedCandidates')):null]):null,
       ]}),
     });
   };}}));

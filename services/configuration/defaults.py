@@ -24,6 +24,18 @@ IMAGE_THEME = validate_contract(
         value_schema={"type": "string", "enum": _THEME_IDS},
     )
 )
+PAGE_LOCALE = validate_contract(
+    ConfigField(
+        "page_locale",
+        default="auto",
+        description="页面语言",
+        group="page_appearance",
+        value_schema={
+            "type": "string",
+            "enum": ("auto", "zh-CN", "zh-TW", "ja-JP", "en-US"),
+        },
+    )
+)
 MODULE_REPLY_THEME = validate_contract(
     ConfigField(
         "reply_theme",
@@ -33,7 +45,7 @@ MODULE_REPLY_THEME = validate_contract(
         value_schema={"type": "string", "enum": _THEME_IDS},
     )
 )
-CORE_CONFIG_FIELDS = (IMAGE_THEME,)
+CORE_CONFIG_FIELDS = (IMAGE_THEME, PAGE_LOCALE)
 
 
 def module_configuration_fields(
