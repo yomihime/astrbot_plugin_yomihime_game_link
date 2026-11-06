@@ -14,6 +14,7 @@ import uuid
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from html.parser import HTMLParser
+from unicodedata import category
 from zoneinfo import ZoneInfo
 
 from yomihime_game_link_sdk import cards
@@ -116,7 +117,9 @@ def plain(value, limit):
     parser = _Plain()
     parser.feed(value)
     text = " ".join("".join(parser.parts).split())
-    text = "".join(c for c in text if ord(c) >= 32 and ord(c) != 127)
+    # Match Core's card text boundary, including HTML-decoded format controls.
+    # One malformed source string must not stall the shared news outbox.
+    text = "".join(c for c in text if not category(c).startswith("C"))
     return text[:limit]
 
 

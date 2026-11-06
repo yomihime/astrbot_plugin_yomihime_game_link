@@ -73,7 +73,12 @@ class AstrBotMessagePort:
             plain = self._plain_factory(payload.text)
             components = (plain,)
             if payload.png_bytes is not None:
-                components += (self._image_factory(payload.png_bytes),)
+                try:
+                    components += (self._image_factory(payload.png_bytes),)
+                except Exception:
+                    # No dispatch has begun. Retain the complete text instead
+                    # of losing the announcement to an optional image failure.
+                    pass
             chain = self._chain_factory(components)
         except Exception:
             return MessageReceipt(MessageStatus.FAILED)

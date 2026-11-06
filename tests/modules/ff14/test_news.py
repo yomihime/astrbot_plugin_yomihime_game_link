@@ -112,6 +112,25 @@ class NewsEvaluatorTests(unittest.TestCase):
         )
         self.assertEqual(changed.events, ())
 
+    def test_invisible_source_characters_do_not_block_drain_or_reopen(self):
+        baseline = self.evaluate([row(90)])
+        rows = [
+            row(
+                1, Title="New&shy;s\u200b\u200d", Summary="Safe\u0085summary\u2028text"
+            ),
+            row(2),
+            row(90),
+        ]
+        decision = self.evaluate(rows, baseline.state)
+        self.assertEqual(
+            [e.event_key for e in decision.events], ["ff14:cn:news:1", "ff14:cn:news:2"]
+        )
+        document = decision.events[0].display_data
+        self.assertEqual(document.subject, "News")
+        self.assertEqual(document.ordered_blocks[2].text, "Safe summary text")
+        restored = json.loads(json.dumps(dict(decision.state)))
+        self.assertEqual(self.evaluate(rows, restored).events, ())
+
     def test_pinned_unsorted_new_id_and_three_event_limit_drains_after_reopen(self):
         baseline = self.evaluate([row(900), row(800)])
         rows = [
