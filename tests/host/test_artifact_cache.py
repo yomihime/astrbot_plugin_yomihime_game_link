@@ -84,6 +84,36 @@ class CacheTests(unittest.IsolatedAsyncioTestCase):
         self.leases.append(result[0])
         return result[2]
 
+    async def test_default_store_uses_sibling_lease_root_after_reopen(self):
+        parent = self.data / "runtime-leases-v1"
+        first = await self.capture(self.install())
+        lease = self.leases[-1]
+        self.assertEqual(lease.resource_root.parent, parent)
+        self.assertNotIn(parent, self.contents())
+        self.cache.publish("example", first)
+        other = self.new_cache(self.data)
+        self.assertIs(other.store.budget_state, self.cache.store.budget_state)
+        second = await self.capture(self.install(2), other)
+        other_lease = self.leases[-1]
+        self.assertEqual(other_lease.resource_root.parent, parent)
+        self.assertEqual(self.cache.gc(), ())
+        other.publish("example", second)
+        self.assertEqual(lease.release(), "released")
+        self.assertEqual(other_lease.release(), "released")
+        self.assertTrue(parent.is_dir())
+        self.assertEqual(list(parent.iterdir()), [])
+
+    async def test_explicit_store_keeps_its_selected_materialization_parent(self):
+        store = type(self.cache.store)(materialization_parent=self.root / "chosen")
+        data = self.root / "other-data"
+        cache = self.new_cache(data, store=store)
+        self.assertIs(cache.store, store)
+        await self.capture(self.install(), cache)
+        lease = self.leases[-1]
+        self.assertEqual(lease.resource_root.parent, self.root / "chosen")
+        self.assertFalse((data / "runtime-leases-v1").exists())
+        self.assertEqual(lease.release(), "released")
+
     async def test_restart_current_previous_gc_and_explicit_retention(self):
         first = await self.capture(self.install(1))
         self.cache.publish("example", first)

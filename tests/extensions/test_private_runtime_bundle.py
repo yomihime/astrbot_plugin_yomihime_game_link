@@ -134,6 +134,218 @@ class PrivateRuntimeBundleTest(unittest.TestCase):
                 any(name.startswith(core.namespace) for name in sys.modules)
             )
 
+    def test_explicit_parent_preserves_core_and_child_lease_lifetimes(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            core_root, dlc_root = root / "core", root / "dlc"
+            _write(core_root, SDK)
+            _write(dlc_root, DLC)
+            parent = root / "leases"
+            store = RuntimeBundleStore(materialization_parent=parent)
+            core = store.capture(core_root, _release(SDK), kind="core")
+            child = store.capture(dlc_root, _release(DLC), kind="dlc")
+            self.assertEqual(core.resource_root.parent, parent)
+            self.assertEqual(child.resource_root.parent, parent)
+            core.mount_core()
+            child.mount_package(core, "sample", "packages/sample")
+            self.assertEqual(core.release(), "retained_busy")
+            child.retain()
+            self.assertEqual(child.release(), "retained_busy")
+            child.drop()
+            self.assertEqual(child.release(), "released")
+            self.assertEqual(core.release(), "released")
+            self.assertTrue(parent.is_dir())
+            self.assertEqual(list(parent.iterdir()), [])
+            self.assertEqual(store.reserved_bytes("core"), 0)
+            self.assertEqual(store.reserved_bytes("dlc"), 0)
+
+    def test_materialization_parent_link_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            target = root / "target"
+            target.mkdir()
+            alias = root / "alias"
+            alias.symlink_to(target, target_is_directory=True)
+            for parent in (alias, alias / "leases"):
+                with (
+                    self.subTest(parent=parent.name),
+                    self.assertRaisesRegex(
+                        RuntimeBundleError, "materialization_parent_rejected"
+                    ),
+                ):
+                    RuntimeBundleStore(materialization_parent=parent)
+            self.assertEqual(list(target.iterdir()), [])
+
+    def test_materialization_parent_reparse_metadata_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            parent = root / "leases"
+            parent.mkdir()
+            original_lstat = Path.lstat
+
+            def reparse_metadata(path, *args, **kwargs):
+                info = original_lstat(path, *args, **kwargs)
+                if path == parent:
+                    return SimpleNamespace(
+                        st_mode=info.st_mode,
+                        st_file_attributes=getattr(info, "st_file_attributes", 0)
+                        | 0x400,
+                    )
+                return info
+
+            with (
+                patch.object(Path, "lstat", reparse_metadata),
+                self.assertRaisesRegex(
+                    RuntimeBundleError, "materialization_parent_rejected"
+                ),
+            ):
+                RuntimeBundleStore(materialization_parent=parent)
+            self.assertEqual(list(parent.iterdir()), [])
+
+    def test_replaced_parent_is_rejected_before_capture(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            _write(root / "core", SDK)
+            parent = root / "leases"
+            store = RuntimeBundleStore(materialization_parent=parent)
+            parent.rename(root / "original")
+            parent.mkdir()
+            with self.assertRaisesRegex(
+                RuntimeBundleError, "materialization_parent_changed"
+            ):
+                store.capture(root / "core", _release(SDK), kind="core")
+            self.assertEqual(list(parent.iterdir()), [])
+            self.assertEqual(store.reserved_bytes("core"), 0)
+
+    def test_parent_replaced_during_creation_keeps_replacement_untouched(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            _write(root / "core", SDK)
+            parent = root / "leases"
+            store = RuntimeBundleStore(materialization_parent=parent)
+            original_mkdtemp = tempfile.mkdtemp
+            marker = []
+
+            def replace_parent(*args, **kwargs):
+                created = Path(original_mkdtemp(*args, **kwargs))
+                parent.rename(root / "original")
+                parent.mkdir()
+                replacement = parent / created.name
+                replacement.mkdir()
+                marker.append(replacement / "untouched.txt")
+                marker[0].write_bytes(b"replacement belongs to another owner")
+                return str(created)
+
+            with (
+                patch.object(runtime_bundle.tempfile, "mkdtemp", replace_parent),
+                self.assertRaisesRegex(
+                    RuntimeBundleError, "materialization_parent_changed"
+                ),
+            ):
+                store.capture(root / "core", _release(SDK), kind="core")
+            self.assertEqual(
+                marker[0].read_bytes(), b"replacement belongs to another owner"
+            )
+            self.assertEqual(list(marker[0].parent.iterdir()), marker)
+            self.assertEqual(store.reserved_bytes("core"), 0)
+
+    def test_release_refuses_a_replaced_lease_root_and_remains_retryable(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            _write(root / "core", SDK)
+            store = RuntimeBundleStore(materialization_parent=root / "leases")
+            lease = store.capture(root / "core", _release(SDK), kind="core")
+            original = lease.resource_root
+            preserved = original.with_name(original.name + "-original")
+            original.rename(preserved)
+            original.mkdir()
+            marker = original / "untouched.txt"
+            marker.write_bytes(b"replacement")
+            try:
+                with self.assertRaisesRegex(
+                    RuntimeBundleError, "materialization_parent_changed"
+                ):
+                    lease.release()
+                self.assertEqual(marker.read_bytes(), b"replacement")
+                self.assertGreater(store.reserved_bytes("core"), 0)
+            finally:
+                marker.unlink()
+                original.rmdir()
+                preserved.rename(original)
+                self.assertEqual(lease.release(), "released")
+            self.assertEqual(store.reserved_bytes("core"), 0)
+
+    def test_final_materialization_identity_failure_cleans_owned_root(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            _write(root / "core", SDK)
+            parent = root / "leases"
+            store = RuntimeBundleStore(materialization_parent=parent)
+            original_identity = runtime_bundle._materialization_directory_identity
+            root_reads = 0
+
+            def fail_final_identity(path):
+                nonlocal root_reads
+                if path.parent == parent:
+                    root_reads += 1
+                    if root_reads == 2:
+                        raise RuntimeBundleError("injected_final_identity_failure")
+                return original_identity(path)
+
+            with (
+                patch.object(
+                    runtime_bundle,
+                    "_materialization_directory_identity",
+                    fail_final_identity,
+                ),
+                self.assertRaisesRegex(
+                    RuntimeBundleError, "injected_final_identity_failure"
+                ),
+            ):
+                store.capture(root / "core", _release(SDK), kind="core")
+            self.assertEqual(list(parent.iterdir()), [])
+            self.assertEqual(store.reserved_bytes("core"), 0)
+
+    def test_materialization_handoff_performs_no_additional_identity_read(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            _write(root / "core", SDK)
+            parent = root / "leases"
+            store = RuntimeBundleStore(materialization_parent=parent)
+            original_identity = runtime_bundle._materialization_directory_identity
+            original_materialize = runtime_bundle._materialize
+            handed_off = False
+            late_reads = 0
+
+            def materialize(*args, **kwargs):
+                nonlocal handed_off
+                value = original_materialize(*args, **kwargs)
+                handed_off = True
+                return value
+
+            def fail_after_handoff(path):
+                nonlocal late_reads
+                if handed_off:
+                    late_reads += 1
+                    raise RuntimeBundleError("injected_post_materialization_failure")
+                return original_identity(path)
+
+            with (
+                patch.object(runtime_bundle, "_materialize", materialize),
+                patch.object(
+                    runtime_bundle,
+                    "_materialization_directory_identity",
+                    fail_after_handoff,
+                ),
+            ):
+                lease = store.capture(root / "core", _release(SDK), kind="core")
+            self.assertTrue(handed_off)
+            self.assertEqual(late_reads, 0)
+            self.assertEqual(lease.resource_root.parent, parent)
+            self.assertEqual(lease.release(), "released")
+            self.assertEqual(list(parent.iterdir()), [])
+            self.assertEqual(store.reserved_bytes("core"), 0)
+
     def test_generation_types_and_missing_import(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             base = Path(temp)

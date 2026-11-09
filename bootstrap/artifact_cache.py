@@ -161,7 +161,9 @@ class ArtifactCache:
                 file_lock = RuntimeOwnerLock(self.root)
                 try:
                     current, previous, heads = self._load_pins()
-                    owned_store = store or RuntimeBundleStore()
+                    owned_store = store or RuntimeBundleStore(
+                        materialization_parent=data_root / "runtime-leases-v1"
+                    )
                     budget = owned_store.budget_state
                 except BaseException:
                     file_lock.close()
@@ -190,7 +192,10 @@ class ArtifactCache:
                     or heads != state["release_heads"]
                 ):
                     raise RuntimeBundleError("cache_pins_changed")
-                owned_store = store or RuntimeBundleStore(shared_budget=state["budget"])
+                owned_store = store or RuntimeBundleStore(
+                    shared_budget=state["budget"],
+                    materialization_parent=data_root / "runtime-leases-v1",
+                )
             if store is not None and store.budget_state is not state["budget"]:
                 raise RuntimeBundleError("cache_store_conflict")
             self.store = owned_store
