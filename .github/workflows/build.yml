@@ -164,6 +164,9 @@ jobs:
           tests.packaging.test_build_output_safety.BuildOutputSafetyTests.test_failed_archive_capture_preserves_previous_artifact
           tests.packaging.test_build_output_safety.BuildOutputSafetyTests.test_output_parent_junction_is_rejected_without_target_write
           tests.packaging.test_build_output_safety.BuildOutputSafetyTests.test_dashboard_rejects_input_destination_before_truncation
+          tests.packaging.test_build_output_safety.BuildOutputSafetyTests.test_windows_short_name_output_cannot_overwrite_input
+          tests.packaging.test_build_output_safety.BuildOutputSafetyTests.test_windows_short_parent_aliases_cannot_duplicate_missing_outputs
+          tests.packaging.test_build_output_safety.BuildOutputSafetyTests.test_windows_short_names_cannot_duplicate_existing_outputs
           tests.packaging.test_build_output_safety.BuildOutputSafetyTests.test_release_preflights_entire_output_batch
           tests.packaging.test_build_output_safety.BuildOutputSafetyTests.test_checksums_reject_artifact_overlap
 

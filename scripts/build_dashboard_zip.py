@@ -285,6 +285,14 @@ def validate_output_paths(paths, inputs=()) -> tuple[Path, ...]:
                 raise ValueError("Build output parent must be a directory")
             if component == path and not stat.S_ISREG(metadata.st_mode):
                 raise ValueError("Build output must be a regular file")
+    # Resolve only after rejecting every linked output component. Windows 8.3
+    # names can identify the same file or missing descendant through aliases.
+    identities = tuple(path.resolve(strict=False) for path in outputs)
+    if len(identities) != len(set(identities)):
+        raise ValueError("Build outputs must be distinct")
+    protected_identities = {path.resolve(strict=False) for path in protected}
+    if any(path in protected_identities for path in identities):
+        raise ValueError("Build output overlaps an input")
     return outputs
 
 
