@@ -183,10 +183,11 @@ class _MessageReceipts:
 
     def _prune(self):
         now = self._clock()
-        for key, receipt in tuple(self._records.items()):
+        for key, receipt in self._records.copy().items():
             if receipt.event() is None:
                 self._close(receipt, "collected")
-                del self._records[key]
+                if self._records.get(key) is receipt:
+                    del self._records[key]
             elif receipt.expires <= now:
                 self._close(receipt, "expired")
 
