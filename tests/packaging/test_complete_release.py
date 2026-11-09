@@ -4,6 +4,7 @@ import base64
 import hashlib
 import importlib.util
 import json
+import subprocess
 import tempfile
 import unittest
 import zipfile
@@ -45,6 +46,43 @@ class CompleteReleaseTests(unittest.TestCase):
             ).encode(),
             "infrastructure/sqlite/migrations/0000.sql": b"CREATE TABLE sample(id);",
         }
+        self.source_temp = tempfile.TemporaryDirectory(prefix="ygl-release-source-")
+        self.addCleanup(self.source_temp.cleanup)
+        self.source_root = Path(self.source_temp.name)
+        self.builder_sources = {
+            name: f"# synthetic {name}\n".encode()
+            for name in (
+                "build_release.py",
+                "release_envelope.py",
+                "build_dashboard_zip.py",
+            )
+        }
+        for name, content in self.files.items():
+            path = self.source_root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(content)
+        (self.source_root / "scripts").mkdir()
+        for name, content in self.builder_sources.items():
+            (self.source_root / "scripts" / name).write_bytes(content)
+        self.source_git("init", "--quiet")
+        self.source_git("add", ".")
+        self.source_git("commit", "--quiet", "--no-gpg-sign", "-m", "fixture baseline")
+        self.source_commit = self.source_git("rev-parse", "HEAD").strip()
+
+    def source_git(self, *arguments):
+        return subprocess.check_output(
+            [
+                "git",
+                "-C",
+                str(self.source_root),
+                "-c",
+                "user.name=YGL fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                *arguments,
+            ],
+            text=True,
+        )
 
     def unpack(self, payload):
         with zipfile.ZipFile(BytesIO(payload)) as archive:
@@ -64,7 +102,7 @@ class CompleteReleaseTests(unittest.TestCase):
             files["ygl-plugin.json"] = json.dumps(descriptor).encode()
             files["packages/sample/yomihime.manifest.json"] = b"{}"
         return envelope.complete(
-            files, ROOT, role, signing_key=self.key if signed else None
+            files, self.source_root, role, signing_key=self.key if signed else None
         )
 
     def test_core_raw_signature_exact_inventory_and_budget(self):
@@ -148,16 +186,29 @@ class CompleteReleaseTests(unittest.TestCase):
             self.make()
 
     def test_repeat_build_same_key_has_identical_bytes_and_source_receipt(self):
-        one = self.make()
-        self.assertEqual(one, self.make())
-        files = self.unpack(one)
-        receipt = json.loads(files["BUILD.json"])
-        self.assertEqual(
-            receipt["source_files"]["main.py"],
-            hashlib.sha256(self.files["main.py"]).hexdigest(),
-        )
-        self.assertIn("build_release.py", receipt["builder_files"])
-        self.assertTrue(receipt["dirty"])
+        for dirty in (False, True):
+            with self.subTest(dirty=dirty):
+                if dirty:
+                    (self.source_root / "main.py").write_bytes(
+                        self.files["main.py"] + b"# known dirty overlay\n"
+                    )
+                one = self.make()
+                self.assertEqual(one, self.make())
+                files = self.unpack(one)
+                receipt = json.loads(files["BUILD.json"])
+                self.assertEqual(receipt["source_commit"], self.source_commit)
+                self.assertEqual(receipt["dirty"], dirty)
+                self.assertEqual(
+                    receipt["source_files"]["main.py"],
+                    hashlib.sha256(self.files["main.py"]).hexdigest(),
+                )
+                self.assertEqual(
+                    receipt["builder_files"],
+                    {
+                        name: hashlib.sha256(content).hexdigest()
+                        for name, content in self.builder_sources.items()
+                    },
+                )
 
     def test_real_core_payload_has_private_sdk_bootstrap_sql_and_no_external_dlc(self):
         files, _ = dashboard.capture_payload(ROOT)

@@ -1,8 +1,18 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
+import {readFile} from 'node:fs/promises';
 import {sourceModule,root} from '../shell/compile.mjs';
 const {createSettingsController}=await sourceModule(root+'modules/ff14/pages/src/settings-controller.ts');
 const {createQueryController}=await sourceModule(root+'modules/ff14/pages/src/query-controller.ts');
+test('settings fields are explicitly granted by the module config page',async()=>{
+ const {ordinaryFields}=await sourceModule(root+'modules/ff14/pages/src/settings-controller.ts');
+ const manifest=JSON.parse(await readFile(root+'modules/ff14/yomihime.manifest.json','utf8'));
+ const module=manifest.modules.find(module=>module.module_id==='ff14');
+ const page=module.pages.find(page=>page.route_id==='config');
+ assert.deepEqual([...ordinaryFields.map(field=>field.name)].sort(),[...page.config_fields].sort());
+ const sensitive=new Set(module.config_fields.filter(field=>field.sensitive).map(field=>field.name));
+ assert.ok(page.config_fields.every(name=>!sensitive.has(name)));
+});
 const context={owner:'ff14/ff14',runtimeId:'test',epoch:1,boundary:'settings',available:true,theme:'light',locale:'zh-CN'};
 function harness(overrides={},ctx=context){
  const calls=[],callbacks=[];let active=true,revision=4;

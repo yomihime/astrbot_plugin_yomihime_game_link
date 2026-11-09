@@ -943,13 +943,12 @@ class B04RuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-    async def test_i09_send_timeout_becomes_unknown_and_is_never_auto_retried(self):
+    async def _prepare_send_timeout(self, key):
         view = await self._create("alice", minimum=0)
         record = await self.runtime.repositories.subscriptions.current(
             view.subscription_id
         )
         timeout_runtime = build_runtime(self.root, clock=self.clock, send_timeout=0.1)
-        key = "send-timeout-unknown"
         event = await create_subscription_event_fixture(
             timeout_runtime.repositories.deliveries,
             self.bindings,
@@ -975,21 +974,98 @@ class B04RuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 ),
             ),
         )
-        timeout_runtime.message_port.block = True
-        dispatch = asyncio.create_task(
-            timeout_runtime.delivery.dispatch_event(
-                event.event_key,
-                event.event_version,
-                event.subscription_id,
-                event.subscription_revision,
-            )
+        return timeout_runtime, event
+
+    async def test_i09_send_timeout_becomes_unknown_and_is_never_auto_retried(self):
+        timeout_runtime, event = await self._prepare_send_timeout(
+            "send-timeout-unknown"
         )
-        try:
-            await asyncio.wait_for(timeout_runtime.message_port.started.wait(), 2)
-            result = await dispatch
-        finally:
-            timeout_runtime.message_port.release.set()
-            await asyncio.gather(dispatch, return_exceptions=True)
+        port = timeout_runtime.message_port
+        port.block = True
+        delivery = timeout_runtime.delivery
+        admission = delivery._admission
+        original_approve = admission.approve_and_schedule_send
+        original_start = delivery._start_io
+        sender_done = asyncio.Event()
+
+        async def wait_entry_or_terminal(terminal):
+            entered = asyncio.create_task(port.started.wait())
+            try:
+                await asyncio.wait(
+                    {entered, terminal}, return_when=asyncio.FIRST_COMPLETED
+                )
+            finally:
+                entered.cancel()
+                await asyncio.gather(entered, return_exceptions=True)
+
+        async def approve(*args, **kwargs):
+            sender = kwargs["sender"]
+
+            async def observed_sender(*sender_args, **sender_kwargs):
+                try:
+                    return await sender(*sender_args, **sender_kwargs)
+                finally:
+                    sender_done.set()
+
+            permit = await original_approve(
+                *args, **(kwargs | {"sender": observed_sender})
+            )
+            if permit is not None:
+                terminal = asyncio.create_task(sender_done.wait())
+                try:
+                    await wait_entry_or_terminal(terminal)
+                finally:
+                    terminal.cancel()
+                    await asyncio.gather(terminal, return_exceptions=True)
+            return permit
+
+        async def start_io(*args, **kwargs):
+            child = await original_start(*args, **kwargs)
+            if child is not None:
+                await wait_entry_or_terminal(child)
+            return child
+
+        with (
+            patch.object(admission, "approve_and_schedule_send", side_effect=approve),
+            patch.object(delivery, "_start_io", side_effect=start_io),
+        ):
+            dispatch = asyncio.create_task(
+                delivery.dispatch_event(
+                    event.event_key,
+                    event.event_version,
+                    event.subscription_id,
+                    event.subscription_revision,
+                )
+            )
+            try:
+                # This watchdog only bounds the fixture. Both production 0.1s
+                # timers remain real and begin after the actual port entry.
+                async with asyncio.timeout(2):
+                    await wait_entry_or_terminal(dispatch)
+                    self.assertTrue(
+                        port.started.is_set(),
+                        {
+                            "sender_done": sender_done.is_set(),
+                            "dispatch_done": dispatch.done(),
+                            "calls": len(port.calls),
+                        },
+                    )
+                    result = await dispatch
+            except TimeoutError:
+                self.fail(
+                    {
+                        "watchdog": True,
+                        "entered": port.started.is_set(),
+                        "sender_done": sender_done.is_set(),
+                        "dispatch_done": dispatch.done(),
+                        "calls": len(port.calls),
+                    }
+                )
+            finally:
+                port.release.set()
+                if not dispatch.done():
+                    dispatch.cancel()
+                await asyncio.gather(dispatch, return_exceptions=True)
         self.assertEqual(result.state, DeliveryState.UNKNOWN)
         saved = await timeout_runtime.repositories.deliveries.current_event(
             event.event_key,
@@ -1006,6 +1082,46 @@ class B04RuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(await timeout_runtime.delivery.dispatch_due_events(), 0)
         self.assertEqual(len(timeout_runtime.message_port.calls), 1)
+
+    async def test_i09_timeout_before_port_entry_is_cancelled_without_send(self):
+        timeout_runtime, event = await self._prepare_send_timeout("pre-entry-timeout")
+        delivery = timeout_runtime.delivery
+        original_start = delivery._start_io
+
+        async def delayed_start(*args, **kwargs):
+            await asyncio.sleep(delivery._send_timeout * 1.5)
+            return await original_start(*args, **kwargs)
+
+        with patch.object(delivery, "_start_io", side_effect=delayed_start):
+            dispatch = asyncio.create_task(
+                delivery.dispatch_event(
+                    event.event_key,
+                    event.event_version,
+                    event.subscription_id,
+                    event.subscription_revision,
+                )
+            )
+            try:
+                async with asyncio.timeout(2):
+                    result = await dispatch
+            except TimeoutError:
+                self.fail(
+                    {
+                        "watchdog": True,
+                        "entered": timeout_runtime.message_port.started.is_set(),
+                        "dispatch_done": dispatch.done(),
+                        "calls": len(timeout_runtime.message_port.calls),
+                    }
+                )
+            finally:
+                timeout_runtime.message_port.release.set()
+                if not dispatch.done():
+                    dispatch.cancel()
+                await asyncio.gather(dispatch, return_exceptions=True)
+        self.assertEqual(result.state, DeliveryState.CANCELLED)
+        self.assertEqual(result.error_code, "cancelled_before_dispatch")
+        self.assertFalse(timeout_runtime.message_port.started.is_set())
+        self.assertEqual(timeout_runtime.message_port.calls, [])
 
     async def test_i05_complete_partial_and_failed_cursor_semantics(self):
         view = await self._create("alice", minimum=0)
