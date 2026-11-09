@@ -13,15 +13,14 @@ from time import monotonic
 from types import SimpleNamespace
 from urllib.parse import quote
 
-from yomihime_game_link_sdk.display import DisplayDocument, TextBlock
-from yomihime_game_link_sdk.errors import ServiceUnavailable, SourceHttpError
-from yomihime_game_link_sdk.results import (
+from ....yomihime_game_link_sdk.display import DisplayDocument, TextBlock
+from ....yomihime_game_link_sdk.errors import ServiceUnavailable, SourceHttpError
+from ....yomihime_game_link_sdk.results import (
     CapabilityResult,
     ErrorCode,
     FactDocument,
     ResultStatus,
 )
-
 from ..query_resolution import QueryResolutionError
 from .chat_context import chat_owner, language_region, semantic_action
 

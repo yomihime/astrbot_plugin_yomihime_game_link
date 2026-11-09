@@ -12,16 +12,15 @@ from types import MappingProxyType
 from typing import Any, Mapping
 from uuid import uuid4
 
-from yomihime_game_link_sdk.contexts import InvocationView
-from yomihime_game_link_sdk.declarations import ModuleManifest
-from yomihime_game_link_sdk.services import (
+from ..yomihime_game_link_sdk.contexts import InvocationView
+from ..yomihime_game_link_sdk.declarations import ModuleManifest
+from ..yomihime_game_link_sdk.services import (
     CapabilityHealth,
     HealthReport,
     HealthStatus,
     ModuleHandlers,
     ModuleInstance,
 )
-
 from .admission import AdmissionController, AdmissionError
 from .context_issuer import ContextIssuer, InvalidInvocation
 from .contracts.administration import ModuleHealth, ModuleLifecycle, ModuleStatus

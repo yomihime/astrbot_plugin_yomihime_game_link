@@ -1,28 +1,14 @@
 # Game Link module SDK
 
-Import public declarations with `import yomihime_game_link_sdk as ygl`. SDK `0.1.0a24` publishes a distinct canonical release identity for the reviewed aggregate-tool contracts and combines the a16 service contracts and the a19 catalog metadata contract. The a19 branch alone was not a complete superset of a16. Core and extensions pin the exact canonical wheel; version ranges are not a substitute for content identity. The SDK requires Python 3.11 or newer and has no third-party runtime dependencies. Module ABI remains 2.0 and the outer registration bridge remains 1: new declarations are optional trailing fields and existing registration signatures are unchanged. New consumers require a24 and its matching Core implementation.
+Production modules import the injected private facade with `from .._api_v2 import ...`. Core captures its vendored SDK inside each immutable runtime generation; extensions do not import a global canonical pip SDK. Compatibility uses `ygl.control/1`, module contract `2.0`, declared features and data compatibility, rather than exact Core/DLC release pairs. The independent SDK wheel remains optional development tooling (Python >=3.11, no third-party runtime dependencies).
 
 The SDK (including its packaged examples) is licensed under MIT; see `SDK-LICENSE`. The AstrBot plugin implementation remains AGPL-3.0 under `LICENSE`. Third-party notices retain their own terms. The a12 source contract adds the outer-plugin extension bridge without changing module ABI 2.0. Built wheel identity and installation evidence are recorded separately; editing these declarations does not prove a published or installed wheel.
 
 ## Independent AstrBot extension plugins
 
-The outer Star may locate the active Core through the public AstrBot
-`Context.get_registered_star` API and call its public
-`get_game_link_extension_host()`. A ready host implements SDK `ExtensionHost`
-bridge version 1. Check its SDK release and module ABI before registration.
-The outer plugin must delay importing the canonical SDK until Core bootstrap
-has completed; it must not vendor a second copy.
+The thin outer Star locates the active Core through official AstrBot registry APIs and obtains `get_ygl_endpoint_v1()`. The JSON-only `describe`, `connect`, `status`, and `disconnect` operations carry exact current Host-instance authority and opaque leases. No module SDK imports run in the outer shell. Core captures the complete release inventory, negotiates manifest features, mounts the private facade, and owns all module services and immutable pages. Host activation alone grants no source or management permissions.
 
-`register_package(plugin_name=..., plugin_instance=..., package_root=...)`
-accepts a complete package contained in the active plugin's installation.
-The host verifies the exact Star instance from the public registry, safely
-captures all package Python sources and returns an opaque `PackageLease`.
-Use `unregister_package(lease)` on termination. Same-instance registrations
-are idempotent; a stale lease cannot withdraw a replacement. Public plugin
-loaded/unloaded hooks support reconnecting after either plugin reloads.
-There is no polling requirement. Changed source or SDK bytes remain subject
-to `restart_required`. User records and stored enable intents survive detach.
-Sensitive configuration and credential-bearing sources require an approved installation policy bound to the actual Host plugin, package root and reviewed sensitive permissions. Current content hashes prove integrity; they are separate from the durable permission identity. A trusted management plan and revision-checked approval can grant the proposed policy. A package's own policy file never approves itself. Compatible version and page updates retain permissions without rebuilding Core; expanded source, credential injection, authorization, job or migration permissions require a new trusted approval and normal restart. Exact build-selected policies from earlier paired releases may migrate equivalent permissions with an audit record. Core keeps secret storage and injects credentials only into approved host/path/method/field slots; modules do not receive token bytes. Discovery and declarations confer no management authority, lease, storage or page permission. Pages publish only immutable, hash-verified resources captured from a current installation lease and share the shell's runtime. See [trusted source policies](source-policies.md).
+Unsigned DLC requires authorization of the exact artifact digest. Signed DLC requires the explicitly enrolled publisher key/channel plus current package approval. Permission changes require a new revision-checked trusted plan. A declaration or signature never approves its own sensitive permissions. Compatible module/source/page changes switch through the owned lifecycle without a whole-Host restart. External downgrades, including manual ZIP uploads, are rejected; only current-authorized internal last-good fallback is supported.
 
 ## Read-only current-actor dependencies
 
@@ -41,19 +27,15 @@ read proof does not authorize root private output or account management.
 
 ## Install and import
 
-Install the reviewed wheel into your module development environment:
-
-Install the reviewed wheel recorded for the paired Core plugin build, then verify its version and public ABI against that release record. The Core bootstrap pins exact wheel contents and rejects changed contents, foreign package origins, partial preload graphs, and any preloaded retired `yomihime_sdk` graph. Do not infer the combined release version or digest from a branch label.
-
-The plugin release contains the exact content-pinned SDK from that wheel. Its bootstrap rejects changed contents, foreign package origins, partial preload graphs, and any preloaded retired `yomihime_sdk` graph. The retired root `api` and `yomihime_sdk.api` modules have no compatibility redirects. Historical stored-data readers are separate from module import compatibility.
+For optional SDK development tests, build and install the reviewed wheel into an isolated temporary target or virtual environment. Production Core builds do not consume or install that wheel. Production release.json includes the vendored SDK source hashes alongside all source, SQL, schemas and static resources; each private runtime generation has its own exact nominal DTO graph. See [complete release packaging](release-packaging.md).
 
 ## Versions and receiving validation
 
 Package manifests use `contract_version: "2.0"` as the current module ABI selector. Disk manifest schema remains 1 and factory ABI remains 1. Old or unknown module ABI versions are rejected before factory resolution or registration. SDK release, module ABI and output formats are distinct: current display, facts and persisted B04 documents remain at output version 1.8.0. An output version of 2.0 is not admitted.
 
-SDK constructors describe data and freeze supported containers; they do not establish permissions or perform Core receiving validation. Core checks the current canonical types and nested invariants at registration, invocation, service, renderer and storage boundaries. Constructing or copying an InvocationView, OwnerScope or grant reference grants no authority. Only the exact issued invocation with its current lifetime and admission proof can bind services.
+SDK constructors describe data and freeze supported containers; they do not establish permissions or perform Core receiving validation. Core checks the current private generation types and nested invariants at registration, invocation, service, renderer and storage boundaries. Constructing or copying an InvocationView, OwnerScope or grant reference grants no authority. Only the exact issued invocation with its current lifetime and admission proof can bind services.
 
-Core admits exact canonical nominal dataclasses and rejects their subclasses, including nested instances made without constructors. Its internal ancestry-based type classification preserves recursive validation, existing nesting/schema limits and original invocation deadlines; it neither grants a validation bypass nor changes the SDK contract/version. Contract catalogs cannot add virtual ABC or custom metaclass instance checks.
+Core admits exact private nominal dataclasses and rejects their subclasses, including nested instances made without constructors. Its internal ancestry-based type classification preserves recursive validation, existing nesting/schema limits and original invocation deadlines; it neither grants a validation bypass nor changes the SDK contract/version. Contract catalogs cannot add virtual ABC or custom metaclass instance checks.
 
 ## Module model-tool aggregation (a23)
 

@@ -3,8 +3,7 @@
 from contextvars import ContextVar
 from functools import wraps
 
-from yomihime_game_link_sdk import DiagnosticDeclaration
-
+from ....yomihime_game_link_sdk import DiagnosticDeclaration
 from .diagnostic_declarations import array, integer, obj, text
 
 STAGES = "bind sync_start sync_end source_start records_read records_claim records_commit source_skip source_end decode parse".split()

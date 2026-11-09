@@ -7,16 +7,23 @@ import unittest
 from dataclasses import replace
 from types import SimpleNamespace
 
-from modules.ff14.features.fflogs import (
+from ygl_test_subject.modules.ff14.features.fflogs import (
     FFLogsCharacterLookup,
     _assemble_catalog_rankings,
     _bounded_catalog_targets,
     _catalog_query_targets,
     _target_key,
 )
-from modules.ff14.features.fflogs_cards import HISTORY_INCOMPLETE, ranking_period
-from modules.ff14.features.fflogs_catalog import select_character_zones
-from modules.ff14.features.fflogs_models import EncounterRecord, OutputMetadata
+from ygl_test_subject.modules.ff14.features.fflogs_cards import (
+    HISTORY_INCOMPLETE,
+    ranking_period,
+)
+from ygl_test_subject.modules.ff14.features.fflogs_catalog import select_character_zones
+from ygl_test_subject.modules.ff14.features.fflogs_models import (
+    EncounterRecord,
+    OutputMetadata,
+)
+
 from tests.modules.ff14 import test_fflogs as handler_fixture
 from tests.modules.ff14 import test_fflogs_aggregation as fixture
 from tests.modules.ff14 import test_fflogs_cards as card_fixture

@@ -20,9 +20,6 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Protocol
 
-from yomihime_game_link_sdk.contexts import InvocationOrigin, InvocationView
-from yomihime_game_link_sdk.storage import GrantReference, SecretRef
-
 from ..core.context_issuer import ContextIssuer, InvalidInvocation
 from ..core.contracts.services import (
     Grant,
@@ -43,6 +40,8 @@ from ..core.ports import (
     SecretOwner,
     UniqueConstraintViolation,
 )
+from ..yomihime_game_link_sdk.contexts import InvocationOrigin, InvocationView
+from ..yomihime_game_link_sdk.storage import GrantReference, SecretRef
 from .identity import (
     InvocationPrincipalResolver,
     PrincipalResolutionDenied,

@@ -23,6 +23,7 @@ from types import MappingProxyType
 from typing import Any, TypeVar
 from uuid import UUID
 
+from ...services.runtime_effect_gate import current_effect_guard
 from .database import SQLiteDatabase, SQLiteUnitOfWork
 
 T = TypeVar("T")
@@ -43,7 +44,7 @@ class SQLiteExecutorCloseTimeout(SQLiteExecutorError):
 
 
 class _Job:
-    __slots__ = ("kind", "callback", "begin_mode", "loop", "future")
+    __slots__ = ("kind", "callback", "begin_mode", "loop", "future", "operation")
 
     def __init__(
         self,
@@ -52,12 +53,14 @@ class _Job:
         begin_mode: str,
         loop: asyncio.AbstractEventLoop,
         future: asyncio.Future[Any],
+        operation=None,
     ) -> None:
         self.kind = kind
         self.callback = callback
         self.begin_mode = begin_mode
         self.loop = loop
         self.future = future
+        self.operation = operation
 
 
 class SQLiteExecutor:
@@ -69,6 +72,7 @@ class SQLiteExecutor:
         if not isinstance(database, SQLiteDatabase):
             raise TypeError("database must be SQLiteDatabase")
         self.database = database
+        self._effect_guard = None
         self._queue: queue.Queue[_Job] = queue.Queue(maxsize=_CAPACITY)
         self._slots = asyncio.Semaphore(_CAPACITY)
         self._state_lock = threading.Lock()
@@ -80,6 +84,57 @@ class SQLiteExecutor:
         self._initialize_lock = asyncio.Lock()
         self._initialized = False
         self._initialization_version = 0
+
+    def bind_effect_guard(self, guard):
+        """Core integration binds its default guard after migration initialization.
+
+        Invocation guards override this default, so package jobs retain their
+        precise owner identity even when another package replaces its runtime.
+        """
+        if not self._initialized:
+            raise SQLiteExecutorError("initialize before binding runtime guard")
+        if self._effect_guard is not None:
+            raise SQLiteExecutorError("runtime guard is already bound")
+        self._effect_guard = guard
+
+    async def run_internal_transaction(self, callback, *, begin_mode="IMMEDIATE"):
+        """Core-only boot/fence/journal path; never expose through ModuleServices."""
+        if not callable(callback):
+            raise TypeError("transaction callback must be callable")
+        begin_mode = begin_mode.upper()
+        if begin_mode not in {"DEFERRED", "IMMEDIATE", "EXCLUSIVE"}:
+            raise ValueError("invalid begin mode")
+        await self._ensure_initialized()
+        return await self._submit("transaction", callback, begin_mode)
+
+    async def run_delivery_completion(
+        self, callback, *, permit, identity, begin_mode="IMMEDIATE"
+    ):
+        """Exact terminal delivery receipt only; never exported to a module.
+
+        The repository constructs the identity and its fixed terminal CAS. The
+        original started-send ticket remains owned until this worker settles.
+        This deliberately conveys no ambient SQL or subsequent IO authority.
+        """
+        from ...services.delivery_settlement import DeliveryCompletionPermit
+
+        if type(permit) is not DeliveryCompletionPermit or not callable(callback):
+            raise TypeError("exact delivery completion permit required")
+        begin_mode = begin_mode.upper()
+        if begin_mode != "IMMEDIATE":
+            raise ValueError("delivery completion requires IMMEDIATE transaction")
+        permit.assert_exact(identity)
+        await self._ensure_initialized()
+
+        def complete(unit):
+            permit.assert_exact(identity)
+            return callback(unit)
+
+        return await self._submit("transaction", complete, begin_mode)
+
+    def _capture_effect(self):
+        guard = current_effect_guard() or self._effect_guard
+        return guard.capture() if guard is not None else None
 
     @property
     def state(self) -> str:
@@ -138,27 +193,40 @@ class SQLiteExecutor:
         begin_mode = begin_mode.upper()
         if begin_mode not in {"DEFERRED", "IMMEDIATE", "EXCLUSIVE"}:
             raise ValueError("begin_mode must be DEFERRED, IMMEDIATE, or EXCLUSIVE")
-        await self._ensure_initialized()
-        return await self._submit("transaction", callback, begin_mode)
+        operation = self._capture_effect()
+        try:
+            await self._ensure_initialized()
+            return await self._submit("transaction", callback, begin_mode, operation)
+        except BaseException:
+            if operation is not None:
+                operation.finish()
+            raise
 
     async def run_read(self, callback: Callable[[SQLiteUnitOfWork], T]) -> T:
         """Execute one synchronous read callback and return only detached data."""
 
         if not callable(callback):
             raise TypeError("read callback must be callable")
-        await self._ensure_initialized()
-        return await self._submit("read", callback, "DEFERRED")
+        operation = self._capture_effect()
+        try:
+            await self._ensure_initialized()
+            return await self._submit("read", callback, "DEFERRED", operation)
+        except BaseException:
+            if operation is not None:
+                operation.finish()
+            raise
 
     async def _submit(
         self,
         kind: str,
         callback: Callable[[SQLiteUnitOfWork], Any] | None,
         begin_mode: str,
+        operation=None,
     ) -> Any:
         loop, idle = self._bind_loop()
         await self._slots.acquire()
         future: asyncio.Future[Any] = loop.create_future()
-        job = _Job(kind, callback, begin_mode, loop, future)
+        job = _Job(kind, callback, begin_mode, loop, future, operation)
         try:
             with self._state_lock:
                 if self._state != "OPEN":
@@ -226,6 +294,8 @@ class SQLiteExecutor:
             else:
                 self._complete(job, result=result)
             finally:
+                if job.operation is not None:
+                    job.operation.finish()
                 self._queue.task_done()
 
     def _run_job(self, job: _Job) -> Any:
@@ -241,11 +311,15 @@ class SQLiteExecutor:
         if job.kind not in {"read", "transaction"} or job.callback is None:
             raise SQLiteExecutorError("invalid worker job")
 
+        if job.operation is not None:
+            job.operation.mark_executing()
         connection = self.database.connect()
         unit = SQLiteUnitOfWork(connection, begin_mode=job.begin_mode)
         try:
             unit._begin_sync()
             try:
+                if job.operation is not None:
+                    job.operation.check_sql(unit)
                 result = job.callback(unit)
                 if hasattr(result, "__await__"):
                     raise TypeError("SQLite worker callbacks must be synchronous")

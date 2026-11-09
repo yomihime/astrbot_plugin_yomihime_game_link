@@ -15,9 +15,8 @@ from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
 
-from yomihime_game_link_sdk.results import ErrorCode
-from yomihime_game_link_sdk.services import ModuleServices
-
+from ...yomihime_game_link_sdk.results import ErrorCode
+from ...yomihime_game_link_sdk.services import ModuleServices
 from .features.item_resolution import (
     ItemSearch,
     has_control,

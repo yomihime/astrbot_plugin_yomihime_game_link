@@ -11,10 +11,11 @@ from unittest.mock import patch
 from ygl_test_subject.core.invocation_budget import InvocationBudgetPolicy
 from ygl_test_subject.extensions.disk_manifest import parse_manifest
 from ygl_test_subject.infrastructure.sync_diagnostics import SyncDiagnostics
+from ygl_test_subject.modules.ff14.features.calendar_snapshots import _diagnostic
 from ygl_test_subject.services.core_runtime import CoreRuntime
 
-from modules.ff14.features.calendar_snapshots import _diagnostic
 from tests.core import test_invocation as web_fixture
+from tests.fixtures.runtime_cleanup import terminate_and_drain
 from tests.services import test_core_runtime as core_fixture
 from yomihime_game_link_sdk.results import ResultStatus
 
@@ -52,7 +53,7 @@ class InvocationTimeout15Tests(unittest.IsolatedAsyncioTestCase):
         runtime = fixture._runtime(
             _Context(), http_transport_factory=lambda: transport, core_factory=create
         )
-        self.addAsyncCleanup(runtime.terminate)
+        self.addAsyncCleanup(terminate_and_drain, runtime)
         await runtime.initialize()
         core = runtime.core_runtime
         self.assertEqual(

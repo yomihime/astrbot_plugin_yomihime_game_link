@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from yomihime_game_link_sdk import cards
-
+from ....yomihime_game_link_sdk import cards
 from ..models import AcquisitionKind, AcquisitionRoute, ItemRecord
 from ..presentation import ff14_card
 

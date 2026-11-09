@@ -18,3 +18,12 @@ if "ygl_test_subject" not in sys.modules:
     _package = importlib.util.module_from_spec(_spec)
     sys.modules[_spec.name] = _package
     _spec.loader.exec_module(_package)
+
+# Tests use the development SDK as the exact test subject graph. Production never
+# changes canonical names; runtime bundle tests exercise independent private SDKs.
+import importlib  # noqa: E402
+
+_test_sdk = importlib.import_module("yomihime_game_link_sdk")
+for _name, _module in tuple(sys.modules.items()):
+    if _name == "yomihime_game_link_sdk" or _name.startswith("yomihime_game_link_sdk."):
+        sys.modules["ygl_test_subject." + _name] = _module

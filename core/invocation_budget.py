@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from math import isfinite
 from types import MappingProxyType
 
-from yomihime_game_link_sdk.contexts import InvocationOrigin
+from ..yomihime_game_link_sdk.contexts import InvocationOrigin
 
 
 def freeze_execution_timeouts(value, *, targets=None):

@@ -49,6 +49,7 @@ from ygl_test_subject.services.output import (
     LifecycleApprovedSendScheduler,
     OutputService,
     OutputStatus,
+    _OutputFailure,
 )
 from ygl_test_subject.services.owner_authority import OwnerRouteProofAuthority
 
@@ -983,6 +984,105 @@ class OutputServiceTests(unittest.IsolatedAsyncioTestCase):
         unknown = await unknown_service.route(third_view, CommandOutput(self._result()))
         self.assertEqual(unknown.status, OutputStatus.UNKNOWN)
         self.assertEqual(unknown.receipt, unknown_port.receipt)
+
+    async def test_render_preserves_an_existing_controlled_output_failure(self):
+        failure = _OutputFailure("route_changed")
+
+        def project(*args):
+            raise failure
+
+        service = self._service(command_heading_projector=project)
+        with self.assertRaises(_OutputFailure) as caught:
+            await service._render(self._result(), invocation=self._view())
+        self.assertIs(caught.exception, failure)
+        self.assertEqual(self.message_port.calls, [])
+
+    async def test_render_error_rechecks_actual_invocation_before_classification(self):
+        for invalidation in ("issuer", "module", "admission"):
+            with self.subTest(invalidation=invalidation):
+                fixture = OutputServiceTests()
+                await fixture.asyncSetUp()
+                try:
+                    view = fixture._view()
+
+                    class InterruptedRenderer(_Renderer):
+                        async def render(self, document, *, limits, audience):
+                            if invalidation == "issuer":
+                                fixture.issuer.release(view)
+                            elif invalidation == "module":
+                                await fixture._disable()
+                            else:
+                                fixture.admission.close(
+                                    fixture.lifecycle.current_identity("sample/demo"),
+                                    "render-interrupted",
+                                )
+                            raise ValueError("private render details")
+
+                    outcome = await fixture._service(
+                        renderer=InterruptedRenderer()
+                    ).route(view, fixture._result())
+                    self.assertEqual(outcome.status, OutputStatus.FAILED)
+                    self.assertEqual(outcome.error_code, "invocation_unavailable")
+                    self.assertIsNone(outcome.receipt)
+                    self.assertEqual(fixture.message_port.calls, [])
+                finally:
+                    await fixture.asyncTearDown()
+
+    async def test_generated_command_bitmap_sends_while_current(self):
+        from ygl_test_subject.presentation.command_card import CommandPresentation
+
+        from tests.presentation.test_png_validation import png_bitmap
+
+        bitmap = png_bitmap()
+
+        async def send(invocation, result, target, payload, *, image_current):
+            image_current()
+            self.assertEqual(payload.png_bytes, bitmap.content)
+            return await self.message_port.send(target, payload)
+
+        service = self._service(
+            command_card_renderer=lambda *args, **kwargs: CommandPresentation(
+                "rendered card", bitmap
+            ),
+            command_sender=send,
+        )
+        try:
+            outcome = await service.route(self._view(), self._result())
+            self.assertEqual(outcome.status, OutputStatus.SENT)
+            self.assertEqual(len(self.message_port.calls), 1)
+            self.assertEqual(self.message_port.calls[0][1].text, "rendered card")
+        finally:
+            if service._generated_png is not None:
+                self.assertTrue(service._generated_png.close())
+
+    async def test_generated_command_bitmap_fence_is_not_a_render_failure(self):
+        from ygl_test_subject.presentation.command_card import CommandPresentation
+
+        from tests.presentation.test_png_validation import png_bitmap
+
+        bitmap = png_bitmap()
+
+        def render(document, *, audience, **theme):
+            self.admission.close(
+                self.lifecycle.current_identity("sample/demo"), "bitmap-interrupted"
+            )
+            return CommandPresentation("rendered card", bitmap)
+
+        async def forbidden_send(*args, **kwargs):
+            self.fail("a fenced bitmap must not reach the trusted sender")
+
+        service = self._service(
+            command_card_renderer=render, command_sender=forbidden_send
+        )
+        try:
+            outcome = await service.route(self._view(), self._result())
+            self.assertEqual(outcome.status, OutputStatus.FAILED)
+            self.assertEqual(outcome.error_code, "invocation_unavailable")
+            self.assertIsNone(outcome.receipt)
+            self.assertEqual(self.message_port.calls, [])
+        finally:
+            if service._generated_png is not None:
+                self.assertTrue(service._generated_png.close())
 
     async def test_malformed_renderer_output_never_reaches_message_port(self):
         for malformed in (

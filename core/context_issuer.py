@@ -15,19 +15,18 @@ from secrets import token_bytes
 from time import monotonic
 from uuid import uuid4
 
-from yomihime_game_link_sdk.contexts import (
+from ..yomihime_game_link_sdk.contexts import (
     InvocationConversationKind,
     InvocationOrigin,
     InvocationSubscriptionScope,
     InvocationView,
     MessageContext,
 )
-from yomihime_game_link_sdk.errors import (
+from ..yomihime_game_link_sdk.errors import (
     AccessDenied,
     InvalidInvocation,
     ServiceUnavailable,
 )
-
 from .contracts.validation_boundary import validate_contract
 from .policy import public_web_allowed
 from .ports import PublicWebBinding, PublicWebProofValidator

@@ -11,11 +11,14 @@ from datetime import UTC, datetime
 from threading import RLock
 from uuid import uuid4
 
-from yomihime_game_link_sdk.contexts import InvocationOrigin, InvocationView
-from yomihime_game_link_sdk.declarations import CapabilityReference, ModuleManifest
-from yomihime_game_link_sdk.services import CapabilityHealth, HealthReport, HealthStatus
-from yomihime_game_link_sdk.subscriptions import ScheduleTrigger
-
+from ..yomihime_game_link_sdk.contexts import InvocationOrigin, InvocationView
+from ..yomihime_game_link_sdk.declarations import CapabilityReference, ModuleManifest
+from ..yomihime_game_link_sdk.services import (
+    CapabilityHealth,
+    HealthReport,
+    HealthStatus,
+)
+from ..yomihime_game_link_sdk.subscriptions import ScheduleTrigger
 from .context_issuer import ContextIssuer, InvalidInvocation
 from .contracts.validation_boundary import validate_contract
 from .ports import (

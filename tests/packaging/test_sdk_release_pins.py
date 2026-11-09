@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[2]
 CLIS = ("scripts/configure_source_credentials.py", "scripts/admin_credentials.py")
 REVIEWED_RELEASE = "0.1.0a24"
 REVIEWED_WHEEL_SHA256 = (
-    "a0b2f61152e810b3a26febd715487d60f335108dffafba0a41d44db5208fdbb6"
+    "0d741c2d998c63df481ec2fe5670048f04b7170e822616a3d8fe6816527b0324"
 )
 
 
@@ -42,14 +42,9 @@ def _consumer_pins(overrides=None):
     def source(path):
         return overrides.get(path, (ROOT / path).read_text(encoding="utf8"))
 
-    pins = {"main.py": {_literal(source("main.py"), "SDK_VERSION")}}
+    pins = {}
     for path in CLIS:
         pins[path] = {_literal(source(path), "_SDK_VERSION")}
-    wheel_name = _literal(source("scripts/build_release.py"), "wheel_name")
-    match = re.fullmatch(r"yomihime_game_link_sdk-(.+)-py3-none-any\.whl", wheel_name)
-    if match is None:
-        raise AssertionError("release wheel filename is not canonical")
-    pins["scripts/build_release.py"] = {match.group(1)}
     builder = source("scripts/build_dashboard_zip.py")
     member_versions = {
         name.split(".dist-info/", 1)[0].removeprefix("yomihime_game_link_sdk-")
@@ -158,10 +153,19 @@ class SDKReleasePinTests(unittest.TestCase):
                 for name, data in payload.items()
             }
             self.assertEqual(len(actual_manifest), 20)
-            main_manifest = _literal(
-                (ROOT / "main.py").read_text(encoding="utf8"), "SDK_PACKAGE_MANIFEST"
+            main_manifest = {
+                path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+                for path in (ROOT / "yomihime_game_link_sdk").iterdir()
+                if path.suffix == ".py" or path.name == "py.typed"
+            }
+            self.assertEqual(
+                main_manifest,
+                {
+                    name: digest
+                    for name, digest in actual_manifest.items()
+                    if not name.startswith("_examples/")
+                },
             )
-            self.assertEqual(main_manifest, actual_manifest)
             stale_manifest = dict(main_manifest)
             stale_manifest["version.py"] = (
                 "86fb9111d50cc877b69aea1f04c9a619e4a4aa685873ea989bca107cb7d31179"

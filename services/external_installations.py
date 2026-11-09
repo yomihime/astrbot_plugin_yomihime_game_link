@@ -9,11 +9,10 @@ from contextlib import contextmanager
 from pathlib import Path
 from time import time
 
-from yomihime_game_link_sdk.errors import RevisionConflict
-from yomihime_game_link_sdk.host import ExtensionHostError
-
 from ..extensions.disk_manifest import parse_manifest
 from ..extensions.page_resources import _check_path, _read_file, read_page_resources
+from ..yomihime_game_link_sdk.errors import RevisionConflict
+from ..yomihime_game_link_sdk.host import ExtensionHostError
 from .extension_permissions import permission_digest, permission_snapshot
 from .external_source_policies import ExternalSourcePolicies
 

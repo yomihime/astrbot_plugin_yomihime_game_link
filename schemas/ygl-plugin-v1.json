@@ -1,0 +1,91 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ygl.invalid/schemas/ygl-plugin-v1.json",
+  "title": "YGL plugin descriptor v1",
+  "description": "UTF-8 JSON, at most 16384 bytes. Strict parser additionally rejects duplicate keys, nonfinite numbers, unsafe integers, control characters and unsafe paths. plugin_id is supplied by host metadata, not this descriptor.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "role",
+    "package_id",
+    "manifest",
+    "control_protocol"
+  ],
+  "properties": {
+    "schema": {
+      "const": "ygl.plugin/1"
+    },
+    "role": {
+      "enum": [
+        "core",
+        "dlc"
+      ]
+    },
+    "package_id": {
+      "type": "string",
+      "maxLength": 64,
+      "pattern": "^[a-z][a-z0-9_]*(?:[.-][a-z0-9_]+)*$"
+    },
+    "manifest": {
+      "$ref": "#/$defs/path"
+    },
+    "control_protocol": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "major"
+      ],
+      "properties": {
+        "name": {
+          "const": "ygl.control"
+        },
+        "major": {
+          "const": 1
+        }
+      }
+    }
+  },
+  "$defs": {
+    "path": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024,
+      "description": "Relative POSIX path; no empty, dot or dot-dot components, colon, backslash or controls. Runtime also rejects symlinks and file inventory case collisions."
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "role": {
+            "const": "core"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "package_id": {
+            "const": "ygl_core"
+          },
+          "manifest": {
+            "const": "release.json"
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "manifest": {
+            "not": {
+              "enum": [
+                "release.json",
+                "release.sig.json"
+              ]
+            }
+          }
+        }
+      }
+    }
+  ]
+}

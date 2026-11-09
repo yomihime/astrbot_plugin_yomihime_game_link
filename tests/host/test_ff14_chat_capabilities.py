@@ -4,6 +4,8 @@ import json
 import unittest
 from types import SimpleNamespace
 
+from tests.fixtures.runtime_cleanup import terminate_and_drain
+
 from . import test_fflogs_tools as logs_fixture
 from . import test_item_tools as item_fixture
 from . import test_llm_tools as tools_fixture
@@ -187,7 +189,7 @@ class FF14ChatCapabilitiesHostTests(unittest.IsolatedAsyncioTestCase):
             ("ff14_market_select", market_args, "选择物品 44091"),
             ("ff14_logs_character", logs_fixture.TARGET, logs_fixture.MESSAGE),
         )
-        await self.runtime.terminate()
+        await terminate_and_drain(self.runtime)
         self.assertEqual(self.manager.func_list, [])
         self.assertEqual(
             (item_handler._chat.registry.size, market_handler.registry.size), (0, 0)
@@ -254,7 +256,7 @@ class FF14ChatCapabilitiesHostTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(facts["status"], "success")
         self.assertGreater(self.transport.exchanges, 0)
         self.assertEqual(self.provider.trace, [])
-        await self.runtime.terminate()
+        await terminate_and_drain(self.runtime)
         self.assertTrue(self.transport.closed)
         self.assertEqual(self.transport.close_calls, 1)
         self.assertEqual(self.manager.func_list, [])

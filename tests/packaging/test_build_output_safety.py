@@ -31,7 +31,7 @@ class BuildOutputSafetyTests(unittest.TestCase):
             parse, read = original_readers(namespace)
 
             def checked_read(root, manifest):
-                sdk = sys.modules["yomihime_game_link_sdk.declarations"]
+                sdk = sys.modules[namespace + ".yomihime_game_link_sdk.declarations"]
                 self.assertIs(type(manifest), sdk.PackageManifest)
                 self.assertIs(read.__globals__["PackageManifest"], sdk.PackageManifest)
                 self.assertIn(namespace, sys.modules)
@@ -77,7 +77,7 @@ class BuildOutputSafetyTests(unittest.TestCase):
             wheel.write_bytes(b"verified wheel fixture")
             before = wheel.stat()
 
-            def build_zip(source, destination, repository):
+            def build_zip(source, destination, repository, **kwargs):
                 self.assertEqual(source, wheel)
                 destination.write_bytes(b"plugin fixture")
 
@@ -85,19 +85,19 @@ class BuildOutputSafetyTests(unittest.TestCase):
                 patch.object(release, "validate_wheel", return_value={}) as validate,
                 patch.object(release, "build_dashboard_zip", side_effect=build_zip),
                 patch.object(release.shutil, "copyfile") as copy,
+                patch.object(dashboard, "included_files", return_value=[]),
             ):
-                archive, returned_wheel, checksums = release.build_release(
+                archive, checksums = release.build_release(
                     output_dir=out, sdk_wheel=wheel, repository_root=root
                 )
             validate.assert_called_with(wheel)
             copy.assert_not_called()
-            self.assertEqual(returned_wheel, wheel)
             self.assertEqual(wheel.read_bytes(), b"verified wheel fixture")
             self.assertEqual(wheel.stat().st_mtime_ns, before.st_mtime_ns)
             self.assertEqual(wheel.stat().st_ino, before.st_ino)
             expected = "".join(
                 f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}\n"
-                for path in sorted((archive, wheel), key=lambda path: path.name)
+                for path in (archive,)
             )
             self.assertEqual(checksums.read_text(), expected)
 
@@ -157,7 +157,6 @@ class BuildOutputSafetyTests(unittest.TestCase):
                 result = subprocess.run(
                     ["cmd", "/c", "mklink", "/J", str(linked), str(outside)],
                     capture_output=True,
-                    text=True,
                 )
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             else:

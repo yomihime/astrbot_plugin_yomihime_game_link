@@ -7,13 +7,12 @@ declaration fit the small public/read-only surface implemented in B02.
 
 from __future__ import annotations
 
-from yomihime_game_link_sdk.contexts import InvocationOrigin
-from yomihime_game_link_sdk.declarations import (
+from ..yomihime_game_link_sdk.contexts import InvocationOrigin
+from ..yomihime_game_link_sdk.declarations import (
     CapabilityDescriptor,
     CapabilityEffect,
     PrivacyFloor,
 )
-
 from .contracts.validation_boundary import validate_contract
 
 

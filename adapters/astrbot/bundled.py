@@ -97,9 +97,9 @@ def install_bundled_package(
     The package source is statically discovered and captured before any write.
     The fingerprint covers all runtime source plus the manifest and README.
     A fresh version slot is staged outside the Core scan root and published by
-    one same-filesystem rename. Existing slots and the legacy user extension
-    directory are never modified; only a slot matching the current bytes is
-    trusted.
+    a same-filesystem rename, with at most one revalidated Windows Win5 retry.
+    Existing slots and the legacy user extension directory are never modified;
+    only a slot matching the current bytes is trusted.
     """
     if os.name == "nt":
         from ...infrastructure.windows.fs import WindowsScanError, _check_runtime
@@ -144,6 +144,15 @@ def install_bundled_package(
             reason=None if matches else reason,
         )
 
+    parent_identity = None
+    try:
+        if os.name == "nt":
+            parent_identity = _windows_bundle_identity(bundle_root)
+    except (OSError, ValueError):
+        return BundledExtensionInstallation(
+            extension_root, package_dir, False, False, reason="package_write_failed"
+        )
+
     for _ in range(8):
         staging = bundle_root / f".bundle-{fingerprint}-{secrets.token_hex(8)}.stage"
         try:
@@ -178,6 +187,12 @@ def install_bundled_package(
 
     try:
         _validate_path(staging, bundle_root)
+        staged_identity = None
+        if os.name == "nt":
+            staged_identity = _windows_bundle_identity(bundle_root, staging)
+            _require_bundle_parent(staged_identity, parent_identity)
+            if staged_identity.slot_id is None:
+                raise BundledExtensionError("bundle_identity_changed")
         staged_package_dir = staging / package_directory
         staged_package_dir.mkdir()
         _write_package(
@@ -202,20 +217,14 @@ def install_bundled_package(
                 reason=reason or "package_write_failed",
             )
         _validate_path(staging, bundle_root)
-        try:
-            os.rename(staging, extension_root)
-        except FileExistsError:
-            matches, reason = _matches_existing_slot(
-                bundle_root, extension_root, payload
-            )
-            return BundledExtensionInstallation(
-                extension_root=extension_root,
-                package_dir=package_dir,
-                installed=False,
-                trusted=matches,
-                inventory=inventory if matches else None,
-                reason=None if matches else reason,
-            )
+        installed, matches, reason = _publish_staged_bundle(
+            bundle_root,
+            staging,
+            extension_root,
+            payload,
+            parent_identity,
+            staged_identity,
+        )
     except PermissionError:
         return BundledExtensionInstallation(
             extension_root=extension_root,
@@ -233,15 +242,214 @@ def install_bundled_package(
             reason="package_write_failed",
         )
 
-    matches, reason = _matches_existing_slot(bundle_root, extension_root, payload)
     return BundledExtensionInstallation(
         extension_root=extension_root,
         package_dir=package_dir,
-        installed=True,
+        installed=installed,
         trusted=matches,
         inventory=inventory if matches else None,
         reason=None if matches else reason,
     )
+
+
+@dataclass(frozen=True, slots=True)
+class _BundleDirectoryIdentity:
+    volume_guid: str
+    volume_serial: int
+    parent_id: int
+    slot_id: int | None
+
+
+def _windows_bundle_identity(
+    bundle_root: Path, slot: Path | None = None
+) -> _BundleDirectoryIdentity:
+    """Observe one directory/absent child by native FileID; close before returning.
+
+    Absence means two successful enumerations of the pinned, original parent.
+    An inaccessible, ambiguous, linked or changed entry is never absence.
+    """
+    from ...infrastructure.windows import fs
+
+    spec = fs._parse_root(bundle_root)
+    native = fs._Native()
+    guid = fs._volume_name(native, spec.drive_root)
+    handles = []
+    try:
+        volume = fs._open_volume_root(native, guid)
+        handles.append(volume)
+        serial, maximum = fs._volume_serial(native, volume)
+        parent = volume
+        parent_id = fs._file_id(fs._get_info(native, parent))
+        if not parent_id:
+            raise BundledExtensionError("bundle_identity_changed")
+        for component in spec.components:
+            parent, parent_id = fs._lookup_component(
+                native, volume, parent_id, component, serial, maximum
+            )
+            handles.append(parent)
+        slot_id = None
+        if slot is not None:
+            if slot.parent != bundle_root:
+                raise BundledExtensionError("path_escape")
+            # Each lookup gets a fresh directory cursor. The held parent cannot
+            # be renamed/deleted while these non-delete-sharing handles live.
+            observations = []
+            for _ in range(2):
+                cursor = fs._reopen_directory(native, volume, parent_id, serial)
+                handles.append(cursor)
+                entries = fs._enumerate(
+                    native,
+                    cursor,
+                    max_entries=fs.COMPONENT_LOOKUP_LIMIT,
+                    max_component=maximum,
+                    target_name=slot.name,
+                )
+                matches = [
+                    entry
+                    for entry in entries
+                    if entry.name.casefold() == slot.name.casefold()
+                ]
+                if not matches:
+                    observations.append(None)
+                    continue
+                if len(matches) != 1 or matches[0].name != slot.name:
+                    raise BundledExtensionError("bundle_identity_changed")
+                entry = matches[0]
+                if (
+                    entry.attributes & fs.FILE_ATTRIBUTE_REPARSE_POINT
+                    or not entry.attributes & fs.FILE_ATTRIBUTE_DIRECTORY
+                ):
+                    raise BundledExtensionError("bundle_identity_changed")
+                child = fs._open_file_by_id(
+                    native, volume, entry.file_id, directory=True
+                )
+                handles.append(child)
+                fs._verify_opened(native, child, entry.file_id, serial, directory=True)
+                observations.append(entry.file_id)
+            if observations[0] != observations[1]:
+                raise BundledExtensionError("bundle_identity_changed")
+            slot_id = observations[0]
+        fs._verify_opened(native, parent, parent_id, serial, directory=True)
+        if fs._volume_name(native, spec.drive_root).casefold() != guid.casefold():
+            raise BundledExtensionError("bundle_identity_changed")
+        return _BundleDirectoryIdentity(guid.casefold(), serial, parent_id, slot_id)
+    finally:
+        # _Handle.close sets its bool before CloseHandle. Require the actual
+        # calls to succeed, even when unwinding another failure, and attempt all.
+        close_error = None
+        for handle in reversed(handles):
+            try:
+                handle.close()
+            except Exception as exc:
+                if close_error is None:
+                    close_error = exc
+        if close_error is not None:
+            raise BundledExtensionError("bundle_handle_close_failed") from close_error
+
+
+def _require_bundle_parent(
+    observed: _BundleDirectoryIdentity, original: _BundleDirectoryIdentity
+) -> None:
+    if (
+        observed.volume_guid != original.volume_guid
+        or observed.volume_serial != original.volume_serial
+        or observed.parent_id != original.parent_id
+    ):
+        raise BundledExtensionError("bundle_identity_changed")
+
+
+def _check_windows_slot(
+    bundle_root: Path,
+    slot: Path,
+    payload: Mapping[str, object],
+    parent: _BundleDirectoryIdentity,
+    *,
+    expected_id: int | None = None,
+) -> tuple[bool, str | None, bool]:
+    """Return (matches, reason, absent), never converting unknown to absent."""
+    before = _windows_bundle_identity(bundle_root, slot)
+    _require_bundle_parent(before, parent)
+    if before.slot_id is None:
+        if expected_id is not None:
+            raise BundledExtensionError("bundle_identity_changed")
+        return False, None, True
+    if expected_id is not None and before.slot_id != expected_id:
+        raise BundledExtensionError("bundle_identity_changed")
+    matches, reason = _matches_existing_slot(bundle_root, slot, payload)
+    after = _windows_bundle_identity(bundle_root, slot)
+    if before != after:
+        raise BundledExtensionError("bundle_identity_changed")
+    return matches, reason, False
+
+
+def _publish_staged_bundle(
+    bundle_root: Path,
+    staging: Path,
+    extension_root: Path,
+    payload: Mapping[str, object],
+    parent: _BundleDirectoryIdentity | None,
+    staged: _BundleDirectoryIdentity | None,
+) -> tuple[bool, bool, str | None]:
+    """Publish once, with at most one revalidated final Windows Win5 attempt."""
+    if os.name != "nt":
+        try:
+            os.rename(staging, extension_root)
+        except FileExistsError:
+            matches, reason = _matches_existing_slot(
+                bundle_root, extension_root, payload
+            )
+            return False, matches, reason
+        matches, reason = _matches_existing_slot(bundle_root, extension_root, payload)
+        return True, matches, reason
+    if parent is None or staged is None or staged.slot_id is None:
+        raise BundledExtensionError("bundle_identity_changed")
+    _require_bundle_parent(staged, parent)
+    matches, reason, _ = _check_windows_slot(
+        bundle_root, staging, payload, parent, expected_id=staged.slot_id
+    )
+    if not matches:
+        return False, False, reason
+    try:
+        os.rename(staging, extension_root)
+    except (FileExistsError, PermissionError) as first_error:
+        win5 = (
+            isinstance(first_error, PermissionError)
+            and getattr(first_error, "winerror", None) == 5
+        )
+        if not isinstance(first_error, FileExistsError) and not win5:
+            raise
+        matches, reason, absent = _check_windows_slot(
+            bundle_root, extension_root, payload, parent
+        )
+        if not absent:
+            return False, matches, reason
+        if not win5:
+            raise first_error
+        # Keep the original payload, paths and native identities. There is no
+        # loop, sleep, fresh staging or recapture of the source checkout.
+        matches, reason, _ = _check_windows_slot(
+            bundle_root, staging, payload, parent, expected_id=staged.slot_id
+        )
+        if not matches:
+            return False, False, reason
+        try:
+            os.rename(staging, extension_root)
+        except (FileExistsError, PermissionError) as second_error:
+            if not isinstance(second_error, FileExistsError) and not (
+                isinstance(second_error, PermissionError)
+                and getattr(second_error, "winerror", None) == 5
+            ):
+                raise
+            matches, reason, absent = _check_windows_slot(
+                bundle_root, extension_root, payload, parent
+            )
+            if absent:
+                raise
+            return False, matches, reason
+    matches, reason, _ = _check_windows_slot(
+        bundle_root, extension_root, payload, parent, expected_id=staged.slot_id
+    )
+    return True, matches, reason
 
 
 def _bundle_fingerprint(

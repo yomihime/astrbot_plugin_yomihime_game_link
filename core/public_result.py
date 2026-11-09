@@ -2,8 +2,7 @@
 
 from collections.abc import Mapping
 
-from yomihime_game_link_sdk.results import FactDocument
-
+from ..yomihime_game_link_sdk.results import FactDocument
 from .contracts.validation_boundary import validate_contract
 
 
@@ -42,8 +41,8 @@ def preflight_error_facts(result):
     from math import isfinite
     from types import MappingProxyType
 
-    from yomihime_game_link_sdk.display import Privacy
-    from yomihime_game_link_sdk.results import ErrorCode, ErrorDetail
+    from ..yomihime_game_link_sdk.display import Privacy
+    from ..yomihime_game_link_sdk.results import ErrorCode, ErrorDetail
 
     document = result.model_facts
     if document is None:

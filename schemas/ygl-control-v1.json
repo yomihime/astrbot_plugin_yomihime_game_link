@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ygl.invalid/schemas/ygl-control-v1.json",
+  "title": "YGL control request v1",
+  "description": "UTF-8 JSON at most 65536 bytes, depth at most 16. Caller object is only a registry hint and never authentication of Python call origin. Connect is idempotent for exact owner instance, Core epoch, canonical request UUID and normalized request input.",
+  "oneOf": [
+    {"$ref": "#/$defs/describe"}, {"$ref": "#/$defs/connect"},
+    {"$ref": "#/$defs/status"}, {"$ref": "#/$defs/disconnect"}
+  ],
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "uuid": {"type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"},
+    "describe": {"type": "object", "additionalProperties": false, "required": ["protocol", "op"], "properties": {"protocol": {"const": "ygl.control/1"}, "op": {"const": "describe"}}},
+    "connect": {"type": "object", "additionalProperties": false, "required": ["protocol", "op", "request_id", "descriptor_digest"], "properties": {"protocol": {"const": "ygl.control/1"}, "op": {"const": "connect"}, "request_id": {"$ref": "#/$defs/uuid"}, "descriptor_digest": {"$ref": "#/$defs/digest"}}},
+    "status": {"type": "object", "additionalProperties": false, "required": ["protocol", "op"], "anyOf": [{"required": ["operation_id"]}, {"required": ["lease"]}], "properties": {"protocol": {"const": "ygl.control/1"}, "op": {"const": "status"}, "operation_id": {"type": "string", "minLength": 1, "maxLength": 128}, "lease": {"$ref": "#/$defs/digest"}}},
+    "disconnect": {"type": "object", "additionalProperties": false, "required": ["protocol", "op", "lease"], "properties": {"protocol": {"const": "ygl.control/1"}, "op": {"const": "disconnect"}, "lease": {"$ref": "#/$defs/digest"}}}
+  }
+}

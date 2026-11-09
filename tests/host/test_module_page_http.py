@@ -275,6 +275,10 @@ class ModulePageHTTPTests(unittest.IsolatedAsyncioTestCase):
                             "ygl_test_subject.adapters.astrbot.admin_pages.time",
                             lambda: clock[0],
                         ),
+                        patch(
+                            "ygl_test_subject.adapters.astrbot.web_admin.time",
+                            lambda: clock[0],
+                        ),
                         patch.object(
                             self.runtime,
                             "module_page_operation",

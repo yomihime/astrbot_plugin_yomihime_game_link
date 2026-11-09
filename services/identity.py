@@ -11,14 +11,6 @@ from collections.abc import Iterable
 from typing import Final
 from uuid import uuid4
 
-from yomihime_game_link_sdk.contexts import InvocationOrigin, InvocationView
-from yomihime_game_link_sdk.services import (
-    BindingView,
-    IdentityResolver,
-    ResolvedIdentity,
-)
-from yomihime_game_link_sdk.subscriptions import ConversationRef
-
 from ..core.context_issuer import ContextIssuer, InvalidInvocation
 from ..core.contracts.services import (
     Binding,
@@ -40,6 +32,13 @@ from ..core.ports import (
     UniqueConstraintViolation,
 )
 from ..core.ports_jobs import JobRunLease
+from ..yomihime_game_link_sdk.contexts import InvocationOrigin, InvocationView
+from ..yomihime_game_link_sdk.services import (
+    BindingView,
+    IdentityResolver,
+    ResolvedIdentity,
+)
+from ..yomihime_game_link_sdk.subscriptions import ConversationRef
 
 
 class IdentityBindingError(RuntimeError):

@@ -15,27 +15,6 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
-from yomihime_game_link_sdk.contexts import (
-    InvocationConversationKind,
-    InvocationSubscriptionScope,
-)
-from yomihime_game_link_sdk.display import (
-    DisplayAudience,
-    DisplayBatch,
-    DisplayBatchMember,
-    DisplayLimits,
-    DisplayOutput,
-    DisplayRenderer,
-    Privacy,
-    TextBlock,
-)
-from yomihime_game_link_sdk.storage import OwnershipKind
-from yomihime_game_link_sdk.subscriptions import (
-    ComposedPublicEvent,
-    ConversationKind,
-    ConversationRef,
-)
-
 from ..core.admission import AdmissionError
 from ..core.contracts.services import Grant, GrantStatus, TrustedPersistedRouteResolver
 from ..core.contracts.subscriptions import (
@@ -70,6 +49,32 @@ from ..core.ports import (
     SubscriptionStore,
 )
 from ..core.registry import Registry, RegistryError
+from ..yomihime_game_link_sdk.contexts import (
+    InvocationConversationKind,
+    InvocationSubscriptionScope,
+)
+from ..yomihime_game_link_sdk.display import (
+    DisplayAudience,
+    DisplayBatch,
+    DisplayBatchMember,
+    DisplayLimits,
+    DisplayOutput,
+    DisplayRenderer,
+    Privacy,
+    TextBlock,
+)
+from ..yomihime_game_link_sdk.storage import OwnershipKind
+from ..yomihime_game_link_sdk.subscriptions import (
+    ComposedPublicEvent,
+    ConversationKind,
+    ConversationRef,
+)
+from .delivery_settlement import (
+    DeliveryCompletionPermit,
+    digest_completion_identity,
+    event_completion_identity,
+)
+from .runtime_effect_gate import EffectRejected, run_effect
 
 _LOG = logging.getLogger(__name__)
 _ERROR_CODES = frozenset(
@@ -141,6 +146,7 @@ class DeliveryService:
         validate_contract(limits)
         if claim_lease.total_seconds() <= 0 or send_timeout <= 0 or page_size < 1:
             raise ValueError("delivery bounds must be positive")
+        self._effect_guard = None
         self._deliveries = deliveries
         self._subscriptions = subscriptions
         self._grants = grants
@@ -1688,6 +1694,7 @@ class DeliveryService:
         abort,
         target: MessageTarget,
         payload: RenderedMessage,
+        completion_identity,
     ) -> asyncio.Task | None:
         """Hold mutation only through proof and the real MessagePort entry handshake."""
         async with self._admission.mutation("subscription-send-start"):
@@ -1714,9 +1721,23 @@ class DeliveryService:
                         return None
                 except Exception:
                     return None
-                state["entered"] = True
-                entered.set_result(None)
-                return await self._message_port.send(target, payload)
+
+                async def send():
+                    state["completion_permit"] = DeliveryCompletionPermit.capture(
+                        completion_identity, guard=self._effect_guard
+                    )
+                    state["entered"] = True
+                    entered.set_result(None)
+                    receipt = await self._message_port.send(target, payload)
+                    state["io_receipt"] = receipt
+                    return receipt
+
+                try:
+                    return await run_effect(send, guard=self._effect_guard)
+                except EffectRejected:
+                    if not state.get("entered"):
+                        return None
+                    raise
 
             child = asyncio.create_task(io())
             state["io_child"] = child
@@ -1738,6 +1759,25 @@ class DeliveryService:
 
     async def _send_event(
         self,
+        event,
+        target,
+        payload,
+        lease,
+        state,
+        eligible,
+        deadlines_current,
+    ) -> DeliveryResult:
+        try:
+            return await self._send_event_owned(
+                event, target, payload, lease, state, eligible, deadlines_current
+            )
+        finally:
+            permit = state.get("completion_permit")
+            if permit is not None:
+                permit.finish()
+
+    async def _send_event_owned(
+        self,
         event: DeliveryEvent,
         target: MessageTarget,
         payload: RenderedMessage,
@@ -1746,6 +1786,11 @@ class DeliveryService:
         eligible,
         deadlines_current,
     ) -> DeliveryResult:
+        async def finish(*args):
+            return await self._finish_event_receipt(
+                *args, completion_permit=state.get("completion_permit")
+            )
+
         try:
             child = await self._start_io(
                 lease,
@@ -1755,6 +1800,15 @@ class DeliveryService:
                 lambda: _abort_event_send(event, self._deliveries, self._utc_now()),
                 target,
                 payload,
+                event_completion_identity(
+                    event.event_key,
+                    event.event_version,
+                    event.subscription_id,
+                    event.subscription_revision,
+                    event.attempt.attempt_number,
+                    event.attempt.started_at,
+                    event.idempotency_key,
+                ),
             )
             if child is None:
                 return DeliveryResult(
@@ -1768,6 +1822,8 @@ class DeliveryService:
             if isinstance(child, asyncio.Task):
                 child.cancel()
                 receipt = await _wait_protected(child)
+                if receipt is None:
+                    receipt = state.get("io_receipt")
             if not state.get("entered"):
                 await _drain_cleanup(
                     _abort_event_send(event, self._deliveries, self._utc_now())
@@ -1775,25 +1831,23 @@ class DeliveryService:
                 raise
             status, code, message_id = _receipt_fields(receipt, "host_send_cancelled")
             state["result"] = await _drain_cleanup(
-                self._finish_event_receipt(event, status, code, message_id)
+                finish(event, status, code, message_id)
             )
             raise
         except TimeoutError:
             child.cancel()
             receipt = await _wait_protected(child)
+            if receipt is None:
+                receipt = state.get("io_receipt")
             status, code, message_id = _receipt_fields(receipt, "host_send_timeout")
-            return await self._finish_event_receipt(event, status, code, message_id)
+            return await finish(event, status, code, message_id)
         except Exception:
             _LOG.warning("delivery send unresolved code=host_send_unknown")
-            await self._finish_event_receipt(
-                event, MessageStatus.UNKNOWN, "host_send_unknown", None
-            )
+            await finish(event, MessageStatus.UNKNOWN, "host_send_unknown", None)
             return DeliveryResult(DeliveryState.UNKNOWN, "host_send_unknown")
         if not isinstance(receipt, MessageReceipt):
-            return await self._finish_event_receipt(
-                event, MessageStatus.UNKNOWN, "host_send_unknown", None
-            )
-        return await self._finish_event_receipt(
+            return await finish(event, MessageStatus.UNKNOWN, "host_send_unknown", None)
+        return await finish(
             event,
             receipt.status,
             None
@@ -1810,10 +1864,14 @@ class DeliveryService:
         status: MessageStatus,
         code: str | None,
         message_id: str | None,
+        *,
+        completion_permit=None,
     ) -> DeliveryResult:
         return await _wait_protected(
             asyncio.create_task(
-                self._commit_event_receipt(event, status, code, message_id)
+                self._commit_event_receipt(
+                    event, status, code, message_id, completion_permit=completion_permit
+                )
             )
         )
 
@@ -1823,6 +1881,8 @@ class DeliveryService:
         status: MessageStatus,
         code: str | None,
         message_id: str | None,
+        *,
+        completion_permit=None,
     ) -> DeliveryResult:
         state = {
             MessageStatus.ACCEPTED: DeliveryState.SENT,
@@ -1854,6 +1914,11 @@ class DeliveryService:
                 subscription_revision=event.subscription_revision,
                 expected_state=DeliveryState.SENDING,
                 retry_at=retry,
+                **(
+                    {"completion_permit": completion_permit}
+                    if completion_permit is not None
+                    else {}
+                ),
             )
         except Exception:
             _LOG.error("delivery finish failed code=storage_finish_failed")
@@ -1903,6 +1968,36 @@ class DeliveryService:
 
     async def _send_digest(
         self,
+        claim,
+        envelope,
+        target,
+        output,
+        lease,
+        state,
+        eligible,
+        deadlines_current,
+        *,
+        png_bytes=None,
+    ) -> DeliveryResult:
+        try:
+            return await self._send_digest_owned(
+                claim,
+                envelope,
+                target,
+                output,
+                lease,
+                state,
+                eligible,
+                deadlines_current,
+                png_bytes=png_bytes,
+            )
+        finally:
+            permit = state.get("completion_permit")
+            if permit is not None:
+                permit.finish()
+
+    async def _send_digest_owned(
+        self,
         claim: DigestEnvelopeClaim,
         envelope: DigestEnvelope,
         target: MessageTarget,
@@ -1917,6 +2012,12 @@ class DeliveryService:
         validate_contract(output)
         message = RenderedMessage(output.text, output.resource_ids, png_bytes=png_bytes)
         attempt = envelope.delivery_attempts[-1]
+
+        async def finish(*args):
+            return await self._finish_digest_receipt(
+                *args, completion_permit=state.get("completion_permit")
+            )
+
         try:
             child = await self._start_io(
                 lease,
@@ -1928,6 +2029,17 @@ class DeliveryService:
                 ),
                 target,
                 message,
+                digest_completion_identity(
+                    envelope.window_id,
+                    envelope.recipient,
+                    claim.claim_token,
+                    claim.claimed_at,
+                    claim.expires_at,
+                    envelope.revision,
+                    attempt.attempt_number,
+                    attempt.started_at,
+                    attempt.idempotency_key,
+                ),
             )
             if child is None:
                 return DeliveryResult(
@@ -1957,6 +2069,8 @@ class DeliveryService:
             if isinstance(child, asyncio.Task):
                 child.cancel()
                 receipt = await _wait_protected(child)
+                if receipt is None:
+                    receipt = state.get("io_receipt")
             if not state.get("entered"):
                 await _drain_cleanup(
                     self._abort_digest_send(
@@ -1966,7 +2080,7 @@ class DeliveryService:
                 raise
             status, code, message_id = _receipt_fields(receipt, "host_send_cancelled")
             state["result"] = await _drain_cleanup(
-                self._finish_digest_receipt(
+                finish(
                     claim,
                     envelope,
                     attempt,
@@ -1979,8 +2093,10 @@ class DeliveryService:
         except TimeoutError:
             child.cancel()
             receipt = await _wait_protected(child)
+            if receipt is None:
+                receipt = state.get("io_receipt")
             status, code, message_id = _receipt_fields(receipt, "host_send_timeout")
-            return await self._finish_digest_receipt(
+            return await finish(
                 claim,
                 envelope,
                 attempt,
@@ -1990,7 +2106,7 @@ class DeliveryService:
             )
         except Exception:
             _LOG.warning("delivery send unresolved code=host_send_unknown")
-            return await self._finish_digest_receipt(
+            return await finish(
                 claim,
                 envelope,
                 attempt,
@@ -1998,9 +2114,7 @@ class DeliveryService:
                 "host_send_unknown",
                 None,
             )
-        return await self._finish_digest_receipt(
-            claim, envelope, attempt, status, code, message_id
-        )
+        return await finish(claim, envelope, attempt, status, code, message_id)
 
     async def _finish_digest_receipt(
         self,
@@ -2010,11 +2124,19 @@ class DeliveryService:
         status: MessageStatus,
         code: str | None,
         message_id: str | None,
+        *,
+        completion_permit=None,
     ) -> DeliveryResult:
         return await _wait_protected(
             asyncio.create_task(
                 self._commit_digest_receipt(
-                    claim, envelope, prior, status, code, message_id
+                    claim,
+                    envelope,
+                    prior,
+                    status,
+                    code,
+                    message_id,
+                    completion_permit=completion_permit,
                 )
             )
         )
@@ -2027,6 +2149,8 @@ class DeliveryService:
         status: MessageStatus,
         code: str | None,
         message_id: str | None,
+        *,
+        completion_permit=None,
     ) -> DeliveryResult:
         state = {
             MessageStatus.ACCEPTED: DeliveryState.SENT,
@@ -2054,6 +2178,11 @@ class DeliveryService:
                 attempt,
                 expected_revision=envelope.revision,
                 retry_at=retry,
+                **(
+                    {"completion_permit": completion_permit}
+                    if completion_permit is not None
+                    else {}
+                ),
             )
         except Exception:
             _LOG.error("delivery finish failed code=storage_finish_failed")

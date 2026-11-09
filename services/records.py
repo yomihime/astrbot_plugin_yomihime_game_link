@@ -5,16 +5,6 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import cast
 
-from yomihime_game_link_sdk.services import ModuleRecords
-from yomihime_game_link_sdk.storage import (
-    CollectionDescriptor,
-    DeclaredIndexQuery,
-    OwnerScope,
-    RecordCollection,
-    RecordPage,
-    VersionedRecord,
-)
-
 from ..core.contracts.storage import OwnerScope_validate
 from ..core.contracts.validation_boundary import validate_contract
 from ..core.ports import (
@@ -22,6 +12,15 @@ from ..core.ports import (
     ModuleRegistrationLookup,
     ModuleRegistrationSnapshot,
     RecordRepository,
+)
+from ..yomihime_game_link_sdk.services import ModuleRecords
+from ..yomihime_game_link_sdk.storage import (
+    CollectionDescriptor,
+    DeclaredIndexQuery,
+    OwnerScope,
+    RecordCollection,
+    RecordPage,
+    VersionedRecord,
 )
 
 

@@ -8,31 +8,30 @@ from decimal import Decimal
 from types import MappingProxyType
 from typing import Any, Mapping
 
-from yomihime_game_link_sdk.display import CommandsBlock as CommandsBlock
-from yomihime_game_link_sdk.display import DigestMember as DigestMember
-from yomihime_game_link_sdk.display import DisplayAudience as DisplayAudience
-from yomihime_game_link_sdk.display import DisplayBatch as DisplayBatch
-from yomihime_game_link_sdk.display import DisplayBatchMember as DisplayBatchMember
-from yomihime_game_link_sdk.display import DisplayDocument as DisplayDocument
-from yomihime_game_link_sdk.display import DisplayLimits as DisplayLimits
-from yomihime_game_link_sdk.display import DisplayOutput as DisplayOutput
-from yomihime_game_link_sdk.display import DisplayRenderer as DisplayRenderer
-from yomihime_game_link_sdk.display import FieldsBlock as FieldsBlock
-from yomihime_game_link_sdk.display import GridItem as GridItem
-from yomihime_game_link_sdk.display import ImageBlock as ImageBlock
-from yomihime_game_link_sdk.display import ItemGridBlock as ItemGridBlock
-from yomihime_game_link_sdk.display import Link as Link
-from yomihime_game_link_sdk.display import LinksBlock as LinksBlock
-from yomihime_game_link_sdk.display import MetricsBlock as MetricsBlock
-from yomihime_game_link_sdk.display import MoneyValue as MoneyValue
-from yomihime_game_link_sdk.display import NumberValue as NumberValue
-from yomihime_game_link_sdk.display import Privacy as Privacy
-from yomihime_game_link_sdk.display import SeriesBlock as SeriesBlock
-from yomihime_game_link_sdk.display import TableBlock as TableBlock
-from yomihime_game_link_sdk.display import TextBlock as TextBlock
-from yomihime_game_link_sdk.display import TimeValue as TimeValue
-from yomihime_game_link_sdk.display import UnknownBlock as UnknownBlock
-
+from ...yomihime_game_link_sdk.display import CommandsBlock as CommandsBlock
+from ...yomihime_game_link_sdk.display import DigestMember as DigestMember
+from ...yomihime_game_link_sdk.display import DisplayAudience as DisplayAudience
+from ...yomihime_game_link_sdk.display import DisplayBatch as DisplayBatch
+from ...yomihime_game_link_sdk.display import DisplayBatchMember as DisplayBatchMember
+from ...yomihime_game_link_sdk.display import DisplayDocument as DisplayDocument
+from ...yomihime_game_link_sdk.display import DisplayLimits as DisplayLimits
+from ...yomihime_game_link_sdk.display import DisplayOutput as DisplayOutput
+from ...yomihime_game_link_sdk.display import DisplayRenderer as DisplayRenderer
+from ...yomihime_game_link_sdk.display import FieldsBlock as FieldsBlock
+from ...yomihime_game_link_sdk.display import GridItem as GridItem
+from ...yomihime_game_link_sdk.display import ImageBlock as ImageBlock
+from ...yomihime_game_link_sdk.display import ItemGridBlock as ItemGridBlock
+from ...yomihime_game_link_sdk.display import Link as Link
+from ...yomihime_game_link_sdk.display import LinksBlock as LinksBlock
+from ...yomihime_game_link_sdk.display import MetricsBlock as MetricsBlock
+from ...yomihime_game_link_sdk.display import MoneyValue as MoneyValue
+from ...yomihime_game_link_sdk.display import NumberValue as NumberValue
+from ...yomihime_game_link_sdk.display import Privacy as Privacy
+from ...yomihime_game_link_sdk.display import SeriesBlock as SeriesBlock
+from ...yomihime_game_link_sdk.display import TableBlock as TableBlock
+from ...yomihime_game_link_sdk.display import TextBlock as TextBlock
+from ...yomihime_game_link_sdk.display import TimeValue as TimeValue
+from ...yomihime_game_link_sdk.display import UnknownBlock as UnknownBlock
 from .validation_boundary import validate_contract
 from .version import CONTRACT_VERSION as CONTRACT_VERSION
 

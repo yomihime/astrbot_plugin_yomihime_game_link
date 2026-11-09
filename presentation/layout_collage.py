@@ -12,8 +12,7 @@ import math
 from dataclasses import dataclass
 from functools import lru_cache
 
-from yomihime_game_link_sdk.cards import Asset, CollageItem, WeightedCollage
-
+from ..yomihime_game_link_sdk.cards import Asset, CollageItem, WeightedCollage
 from .card_bitmap import BitmapUnavailable
 
 MAX_COLLAGE_ITEMS = 200

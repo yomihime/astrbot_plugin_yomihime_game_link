@@ -7,24 +7,23 @@ from dataclasses import replace
 from hashlib import sha256
 from io import BytesIO
 
-from yomihime_game_link_sdk.cards import (
-    Asset,
-    DenseCollage,
-    ResourceImage,
-    WeightedCollage,
-)
-from yomihime_game_link_sdk.errors import CacheUnavailable, ParameterError
-from yomihime_game_link_sdk.storage import (
-    CacheLookupStatus,
-    CacheQuery,
-    CacheVisibility,
-)
-
 from ..presentation.card_bitmap import RenderedBitmap
 from ..presentation.png_validation import (
     PngValidationError,
     PngValidationLimits,
     validate_png,
+)
+from ..yomihime_game_link_sdk.cards import (
+    Asset,
+    DenseCollage,
+    ResourceImage,
+    WeightedCollage,
+)
+from ..yomihime_game_link_sdk.errors import CacheUnavailable, ParameterError
+from ..yomihime_game_link_sdk.storage import (
+    CacheLookupStatus,
+    CacheQuery,
+    CacheVisibility,
 )
 from .managed_resources import ResourceCapacityError
 from .module_services import _BoundCache, _BoundResources
@@ -542,7 +541,7 @@ async def load_finished_pages(scope, key: str, current):
 
 
 async def store_finished_pages(scope, key: str, bitmaps, current) -> None:
-    from yomihime_game_link_sdk.services import ResourceCacheClass
+    from ..yomihime_game_link_sdk.services import ResourceCacheClass
 
     """Publish a USER manifest only after every page is stored successfully."""
     pages = []

@@ -5,11 +5,11 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 
-from yomihime_game_link_sdk.declarations import ConfigField
-
 from ..core.contracts.services import SecretMaterial
 from ..core.contracts.validation_boundary import validate_contract
 from ..core.ports import validate_module_id
+from ..yomihime_game_link_sdk.declarations import ConfigField
+from .runtime_effect_gate import check_current_effect
 from .source_credentials import _client_field, static_credential_field
 
 
@@ -61,6 +61,7 @@ class ManagedSourceCredentialPolicy:
         }
 
     def material(self, value):
+        check_current_effect()
         if self.kind == "static":
             if type(value) is not dict or set(value) not in (
                 {"token"},

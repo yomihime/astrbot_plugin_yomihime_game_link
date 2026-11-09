@@ -10,20 +10,25 @@ from types import SimpleNamespace
 
 from ygl_test_subject.adapters.astrbot.diagnostics import forward_diagnostic
 from ygl_test_subject.core.contracts.validation_boundary import validate_contract
+from ygl_test_subject.modules.ff14.features.diagnostic_declarations import (
+    COUNTS,
+    DECLARATIONS,
+)
+from ygl_test_subject.modules.ff14.features.fflogs_catalog import (
+    parse_character_metadata,
+)
+from ygl_test_subject.modules.ff14.features.fflogs_evidence import (
+    Evidence,
+    metadata_digest,
+    metadata_payload,
+    project,
+)
 from ygl_test_subject.services.diagnostics import (
     BoundDiagnostics,
     DiagnosticPolicy,
     DiagnosticStore,
 )
 
-from modules.ff14.features.diagnostic_declarations import COUNTS, DECLARATIONS
-from modules.ff14.features.fflogs_catalog import parse_character_metadata
-from modules.ff14.features.fflogs_evidence import (
-    Evidence,
-    metadata_digest,
-    metadata_payload,
-    project,
-)
 from tests.modules.ff14 import (
     test_fflogs as fixture,
 )

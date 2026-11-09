@@ -3,18 +3,23 @@
 from __future__ import annotations
 
 import asyncio
+import math
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
-from pathlib import Path
-
-from yomihime_game_link_sdk.contexts import InvocationOrigin
-from yomihime_game_link_sdk.host import BRIDGE_VERSION, ExtensionHostError
-from yomihime_game_link_sdk.version import MODULE_ABI_VERSION, __version__
+from dataclasses import dataclass, field
+from pathlib import Path, PurePosixPath
 
 from ..core.policy import supports_public_read_only
 from ..extensions.discovery import EXTENSION_ROOT_MAX_PACKAGES, discover_packages
 from ..extensions.loader import CandidateState, ExtensionCandidate
+from ..yomihime_game_link_sdk.contexts import InvocationOrigin
+from ..yomihime_game_link_sdk.host import BRIDGE_VERSION, ExtensionHostError
+from ..yomihime_game_link_sdk.version import MODULE_ABI_VERSION, __version__
 from .extension_runtime import ExtensionCleanupPending
+
+
+def _manifest_business_root(manifest_path):
+    # Manifest inventory paths are POSIX even on a Windows native Host.
+    return PurePosixPath(manifest_path).parent.as_posix()
 
 
 @dataclass(frozen=True, slots=True)
@@ -507,3 +512,1258 @@ class ExternalPackageHost:
             )
             for module in manifest.modules
         )
+
+
+class _GuardedHandler:
+    """Bind every callback and its child tasks to one immutable package lease."""
+
+    def __init__(self, delegate, gate):
+        self._delegate, self._gate = delegate, gate
+
+    def __getattr__(self, name):
+        import inspect
+
+        from .runtime_effect_gate import invocation_guard
+
+        value = getattr(self._delegate, name)
+        if not callable(value):
+            return value
+        if inspect.iscoroutinefunction(value):
+
+            async def invoke(*args, **kwargs):
+                with invocation_guard(self._gate):
+                    self._gate.check()
+                    return await value(*args, **kwargs)
+
+            return invoke
+
+        def invoke(*args, **kwargs):
+            with invocation_guard(self._gate):
+                self._gate.check()
+                return value(*args, **kwargs)
+
+        return invoke
+
+
+class _GuardedInstance:
+    def __init__(self, delegate, gate):
+        from dataclasses import fields, replace
+
+        from ..yomihime_game_link_sdk.services import ModuleHandlers
+
+        handlers = delegate.handlers()
+        if type(handlers) is not ModuleHandlers:
+            raise TypeError("cross_generation_object")
+        self._delegate, self._gate = delegate, gate
+        self._handlers = replace(
+            handlers,
+            **{
+                field.name: {
+                    name: _GuardedHandler(handler, gate)
+                    for name, handler in getattr(handlers, field.name).items()
+                }
+                for field in fields(handlers)
+            },
+        )
+
+    def handlers(self):
+        return self._handlers
+
+    async def start(self):
+        from .runtime_effect_gate import invocation_guard
+
+        with invocation_guard(self._gate):
+            self._gate.check()
+            await self._delegate.start()
+
+    async def stop(self):
+        from .runtime_effect_gate import invocation_guard
+
+        # Cleanup may release owned resources, but a fenced stop gets no
+        # general Core authority for business writes/network/messages.
+        with invocation_guard(self._gate):
+            await self._delegate.stop()
+
+    async def check_health(self):
+        from .runtime_effect_gate import invocation_guard
+
+        with invocation_guard(self._gate):
+            self._gate.check()
+            return await self._delegate.check_health()
+
+
+@dataclass(slots=True)
+class _HotPackage:
+    installation: object
+    bundle: object
+    receipt: object
+    candidate: object
+    gate: object
+    epoch: int
+    cache_key: str
+    policy: object
+    instances: dict
+    lifetimes: dict
+    transition_id: str
+    cleanup_task: object = None
+    policy_current: bool = True
+    published: bool = False
+    envelope: object = None
+    fallback: bool = False
+    installed_version: object = None
+    factory_tasks: list = field(default_factory=list)
+    prepare_cleanup_task: object = None
+
+    @property
+    def _complete(self):
+        return self.published
+
+    @property
+    def active(self):
+        try:
+            self.gate.check()
+            return self.published
+        except Exception:
+            return False
+
+
+class IndependentPackageRuntime:
+    """Core-owned trust, prepare, drain and closed-publication composition."""
+
+    def __init__(self, runtime, generation, cache, *, prepare_timeout=30.0):
+        # One budget for all factories in a package, never per module.
+        if (
+            isinstance(prepare_timeout, bool)
+            or not isinstance(prepare_timeout, (int, float))
+            or not math.isfinite(prepare_timeout)
+            or prepare_timeout <= 0
+        ):
+            raise ValueError("prepare_timeout must be finite and positive")
+        self._prepare_timeout = float(prepare_timeout)
+        self._replacement_tasks = set()
+        self._cancelled_replacements = set()
+        from ..bootstrap.loader import FEATURES
+        from ..infrastructure.sqlite.repositories_extension_policy import (
+            ExtensionPolicyRepository,
+        )
+        from .extension_discovery import ExtensionDiscovery
+        from .extension_transition import ExtensionControlEndpoint
+        from .publisher_trust import PublisherTrust
+
+        self.runtime, self.generation, self.cache = runtime, generation, cache
+        self.core = runtime._core
+        self.discovery = ExtensionDiscovery(runtime._context)
+        self.repository = ExtensionPolicyRepository(
+            self.core.database, before_mutation=self.before_mutation
+        )
+        self.trust = PublisherTrust(self.repository)
+        self.packages, self.operations, self._locks = {}, {}, {}
+        self._closed = False
+        self._reconcile_task = None
+        self._prepared = {}
+        self._retired_prepared = {}
+        self._failed_candidate_cleanup = False
+        self._page_digests = {}
+        self._transition_lock = asyncio.Lock()
+        self.endpoint = ExtensionControlEndpoint(
+            self.discovery,
+            core_epoch=generation.receipt["core_epoch"],
+            activate=self.replace,
+            withdraw=self.withdraw_instance,
+            fence=self.fence_instance,
+            features=FEATURES,
+        )
+
+    def page_manifest_bindings(self):
+        return {
+            key: digest
+            if (package := self.packages.get(key)) is not None and package.active
+            else None
+            for key, digest in self._page_digests.items()
+        }
+
+    def page_projection(self):
+        from types import MappingProxyType
+
+        from ..extensions.static_page_projection import StaticPageProjection
+
+        projection = StaticPageProjection()
+        projection.packages = MappingProxyType(
+            {
+                key: (self._page_digests[key], package.candidate.package.manifest, b"")
+                for key, package in tuple(self.packages.items())
+                if package.active
+            }
+        )
+        return projection
+
+    def public_web_page_bindings(self):
+        bindings = {}
+        for package in tuple(self.packages.values()):
+            if not package.active:
+                continue
+            manifest = package.candidate.package.manifest
+            for module in manifest.modules:
+                owner = manifest.global_module_id(module.module_id)
+                capabilities = {row.capability_id: row for row in module.capabilities}
+                for page in module.pages:
+                    capability = capabilities.get(page.capability_id)
+                    if (
+                        supports_public_read_only(capability)
+                        and InvocationOrigin.WEB_PUBLIC in capability.effective_origins
+                    ):
+                        bindings[(owner, page.route_id, page.capability_id)] = (
+                            _ExternalPublicWebPage(
+                                (owner, page.capability_id), module, package
+                            )
+                        )
+        return bindings
+
+    def page_assets(self, owner, page_id):
+        import base64
+        import hashlib
+
+        package_id, _, local_id = owner.partition("/")
+        package = self.packages.get(package_id)
+        if package is None or not package.active:
+            raise ExtensionHostError("page_unavailable")
+        module = next(
+            (
+                row
+                for row in package.candidate.package.manifest.modules
+                if row.module_id == local_id
+            ),
+            None,
+        )
+        page = (
+            next((row for row in module.pages if row.route_id == page_id), None)
+            if module
+            else None
+        )
+        if page is None:
+            raise ExtensionHostError("page_unavailable")
+        media = {
+            ".js": "text/javascript",
+            ".css": "text/css",
+            ".svg": "image/svg+xml",
+            ".png": "image/png",
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".webp": "image/webp",
+        }
+        resources = []
+        for resource in module.resources:
+            content = package.bundle.read_resource(
+                (
+                    package.candidate.package.package_dir.relative_to(
+                        package.bundle.resource_root
+                    )
+                    / resource.path
+                ).as_posix()
+            )
+            if hashlib.sha256(content).hexdigest() != resource.sha256:
+                raise ExtensionHostError("page_resource_changed")
+            mime = media.get(Path(resource.path).suffix.lower())
+            if mime is None:
+                raise ExtensionHostError("page_resource_type_rejected")
+            resources.append(
+                {
+                    "path": resource.path,
+                    "sha256": resource.sha256,
+                    "media_type": mime,
+                    "base64": base64.b64encode(content).decode("ascii"),
+                }
+            )
+        package.gate.check()
+        return {
+            "entry": page.entry,
+            "styles": list(page.styles),
+            "asset_version": self._page_digests[package_id],
+            "resources": resources,
+        }
+
+    def before_mutation(self, kind, key):
+        for package in tuple(self.packages.values()):
+            receipt = package.receipt
+            if (
+                (kind == "package_grant" and receipt.package_id == key)
+                or (kind == "publisher" and receipt.publisher_key_id == key)
+                or (kind == "artifact_approval" and receipt.artifact_digest == key)
+            ):
+                package.policy_current = False
+                self.fence_instance(package.installation.instance)
+                self.endpoint.retire_instance(package.installation.instance)
+
+    def fence_instance(self, instance):
+        for package in tuple(self.packages.values()):
+            if package.installation.instance is instance:
+                package.gate.close()
+                self.core.jobs.fence_modules(
+                    f"{package.receipt.package_id}/{module.module_id}"
+                    for module in package.candidate.package.manifest.modules
+                )
+                for module in package.candidate.package.manifest.modules:
+                    owner = f"{package.receipt.package_id}/{module.module_id}"
+                    identity = self.core.lifecycle.current_identity(owner)
+                    if identity is not None:
+                        self.core.lifecycle.admission.close(identity, "package_fenced")
+                for module in package.candidate.package.manifest.modules:
+                    self.runtime._source_authorizations.invalidate(
+                        owner_id=f"{package.receipt.package_id}/{module.module_id}"
+                    )
+
+    def guard_for_owner(self, owner):
+        """Resolve the exact currently published package generation for an owner."""
+        for package in tuple(self.packages.values()):
+            if any(
+                owner == f"{package.receipt.package_id}/{module.module_id}"
+                for module in package.candidate.package.manifest.modules
+            ):
+                package.gate.check()
+                return package.gate
+        package_id = owner.partition("/")[0]
+        candidate = self.core.extension_runtime.candidate(package_id)
+        if (
+            candidate is not None
+            and candidate.package is not None
+            and candidate.package.package_dir.is_relative_to(
+                self.generation.bundle.resource_root
+            )
+            and owner in self.core.registry.snapshot().modules
+        ):
+            return self.runtime._hot_gate
+        raise RuntimeError("package_owner_unavailable")
+
+    def _current(self, package):
+        if self._closed or not package.policy_current or not self.runtime.ready:
+            return False
+        metadata = package.installation.metadata
+        if (
+            metadata.activated is not True
+            or metadata.star_cls is not package.installation.instance
+        ):
+            return False
+        # Public registry snapshot is synchronous and never performs SQL/IO.
+        if not any(
+            item is metadata for item in tuple(self.runtime._context.get_all_stars())
+        ):
+            return False
+        return self.packages.get(package.receipt.package_id) is package
+
+    async def _prepare(self, installation, *, cache_key=None):
+        if self._failed_candidate_cleanup:
+            raise ExtensionHostError("cleanup_pending")
+        import hashlib
+        import secrets
+        from uuid import uuid4
+
+        from ..bootstrap.loader import FEATURES
+        from ..core.lifecycle import _ServiceLifetime
+        from ..extensions.discovery import DiscoveredPackage
+        from ..extensions.disk_manifest import parse_manifest
+        from ..extensions.hot_update_protocol import (
+            _load,
+            b05_manifest_bytes,
+            negotiate_manifest,
+            parse_package_manifest,
+            parse_plugin_descriptor,
+        )
+        from ..infrastructure.sqlite.repositories_extension_policy import (
+            assert_execution_policy,
+        )
+        from .extension_permissions import permission_snapshot
+        from .external_source_policies import (
+            ExternalSourcePolicies,
+            parse_package_source_policy,
+        )
+        from .runtime_effect_gate import RuntimeEffectGate, invocation_guard
+
+        checked = {}
+
+        async def validate(raw, signature_bytes, bundle):
+            descriptor_bytes = bundle.read_resource("ygl-plugin.json")
+            descriptor = parse_plugin_descriptor(descriptor_bytes)
+            if (
+                (
+                    cache_key is None
+                    and (
+                        hashlib.sha256(descriptor_bytes).hexdigest()
+                        != installation.descriptor_digest
+                        or descriptor != installation.descriptor
+                    )
+                )
+                or descriptor["role"] != "dlc"
+                or descriptor["package_id"] != installation.package_id
+                or descriptor["package_id"] != bundle.release_doc["package_id"]
+            ):
+                raise ExtensionHostError("artifact_tampered")
+            manifest_path = descriptor["manifest"]
+            envelope = parse_package_manifest(bundle.read_resource(manifest_path))
+            negotiate_manifest(envelope, 0, FEATURES)
+            raw_b05 = b05_manifest_bytes(envelope)
+            manifest = parse_manifest(raw_b05)
+            if (
+                manifest.package_id != descriptor["package_id"]
+                or manifest.package_version != bundle.release_doc["release"]
+            ):
+                raise ExtensionHostError("artifact_tampered")
+            if "source_policy" in envelope:
+                policy, projection = parse_package_source_policy(
+                    bundle.read_resource(envelope["source_policy"]),
+                    b05_manifest_bytes=raw_b05,
+                    source_policy_path=envelope["source_policy"],
+                    required_features=envelope["required_features"],
+                    release_inventory=bundle.release_doc["files"],
+                )
+            else:
+                policy, projection = (
+                    ExternalSourcePolicies(),
+                    permission_snapshot(manifest),
+                )
+            signature = (
+                _load(signature_bytes, 16384, depth=4, nodes=16)
+                if signature_bytes is not None
+                else None
+            )
+            metadata = installation.metadata
+            arguments = dict(
+                host_plugin_id={"author": metadata.author, "name": metadata.name},
+                permission_projection=projection,
+            )
+            if cache_key is None:
+                receipt = await self.trust.evaluate(raw, signature, **arguments)
+            else:
+                if cache_key not in {
+                    self.cache.current.get(installation.package_id),
+                    self.cache.last_good.get(installation.package_id),
+                }:
+                    raise ExtensionHostError("cache_pin_changed")
+                receipt = await self.trust.evaluate_cached(
+                    raw, signature, pinned_digest=cache_key, **arguments
+                )
+            checked.update(
+                envelope=envelope,
+                manifest=manifest,
+                policy=policy,
+                business_root=_manifest_business_root(manifest_path),
+            )
+            return receipt
+
+        fallback = cache_key is not None
+        if fallback:
+            bundle, receipt, cache_key = await self.cache.load(
+                cache_key, kind="dlc", validate=validate
+            )
+        else:
+            bundle, receipt, cache_key = await self.cache.capture(
+                installation.root, kind="dlc", validate=validate
+            )
+        package = None
+        try:
+            if not self.discovery.current(installation):
+                raise ExtensionHostError("stale_instance")
+            old = self.packages.get(receipt.package_id)
+            if old is not None and bundle.files.get(
+                "requirements.txt"
+            ) != old.bundle.files.get("requirements.txt"):
+                raise ExtensionHostError("environment_change_required")
+            bundle.mount_package(
+                self.generation.bundle, receipt.package_id, checked["business_root"]
+            )
+            candidate = ExtensionCandidate(
+                DiscoveredPackage(
+                    receipt.package_id,
+                    bundle.resource_root / checked["business_root"],
+                    checked["manifest"],
+                ),
+                CandidateState.DISABLED,
+                "not_enabled",
+            )
+            persisted_epoch = (
+                await self.core.database.executor.run_internal_transaction(
+                    lambda unit: [
+                        tuple(row)
+                        for row in unit.connection.execute(
+                            "SELECT package_epoch FROM runtime_owners WHERE scope=?",
+                            ("package:" + receipt.package_id,),
+                        ).fetchall()
+                    ]
+                )
+            )
+            epoch = (
+                max(
+                    old.epoch if old else 0,
+                    persisted_epoch[0][0] if persisted_epoch else 0,
+                )
+                + 1
+            )
+            token = secrets.token_hex(32)
+            package = _HotPackage(
+                installation,
+                bundle,
+                receipt,
+                candidate,
+                None,
+                epoch,
+                cache_key,
+                checked["policy"],
+                {},
+                {},
+                str(uuid4()),
+            )
+            gate = RuntimeEffectGate(
+                self.generation.kernel,
+                self.generation.scope,
+                self.generation.receipt["owner_token"],
+                self.generation.receipt["core_epoch"],
+                package_id=receipt.package_id,
+                package_token=token,
+                package_epoch=epoch,
+                grant_revision=receipt.grant_revision,
+                initially_open=False,
+                authority_check=lambda: self._current(package),
+                policy_assert=lambda unit: assert_execution_policy(unit, receipt),
+            )
+            package.gate = gate
+            self._prepared[id(installation.instance)] = package
+            deadline = asyncio.get_running_loop().time() + self._prepare_timeout
+            # Candidate-scoped credential policies are supplied only while
+            # constructing its service objects; existing services keep theirs.
+            services_factory = self.core.module_services
+            original_policies = services_factory._source_credential_policies
+            for module in checked["manifest"].modules:
+                owner = f"{receipt.package_id}/{module.module_id}"
+                lifetime = _ServiceLifetime(
+                    (receipt.package_id, owner, package.transition_id)
+                )
+                services_factory._source_credential_policies = (
+                    tuple(
+                        p
+                        for p in original_policies
+                        if not p.module_id.startswith(receipt.package_id + "/")
+                    )
+                    + package.policy.credential_policies
+                )
+                try:
+                    services = services_factory.for_candidate(
+                        owner, module, service_lifetime=lifetime
+                    )
+                finally:
+                    services_factory._source_credential_policies = original_policies
+                package.lifetimes[owner] = lifetime
+
+                async def create_owned(
+                    entry=module.factory_entry, services=services, owner=owner
+                ):
+                    with invocation_guard(gate):
+                        factory = bundle.resolve(entry)
+                        instance = await factory.create(services)
+                        # No await between return and ownership adoption. Even a
+                        # cancellation-resistant late result belongs to cleanup.
+                        package.instances[owner] = instance
+                        guarded = _GuardedInstance(instance, gate)
+                        package.instances[owner] = guarded
+                        return guarded
+
+                task = asyncio.create_task(create_owned(), name="ygl-package-factory")
+                package.factory_tasks.append(task)
+                try:
+                    done, _ = await asyncio.wait(
+                        (task,),
+                        timeout=max(0, deadline - asyncio.get_running_loop().time()),
+                    )
+                except asyncio.CancelledError:
+                    if not task.done():
+                        task.cancel()
+                    raise
+                if not done:
+                    task.cancel()
+                    self.endpoint.mark_instance_error(
+                        installation.instance, "prepare_timeout"
+                    )
+                    raise ExtensionHostError("prepare_timeout")
+                task.result()
+                if gate.prepare_violation:
+                    from .runtime_effect_gate import EffectRejected
+
+                    raise EffectRejected("prepare_side_effect_forbidden")
+            package.envelope = checked["envelope"]
+            package.fallback = fallback
+            package.installed_version = (
+                None if fallback else bundle.release_doc["release"]
+            )
+            if fallback:
+                try:
+                    from ..extensions.hot_update_protocol import parse_release
+
+                    installed_raw = (installation.root / "release.json").read_bytes()
+                    package.installed_version = parse_release(installed_raw)["release"]
+                except Exception:
+                    pass
+            self._prepared[id(installation.instance)] = package
+            return package
+        except BaseException:
+            if package is not None:
+                violation = package.gate is not None and package.gate.prepare_violation
+                # Keep the candidate slot until *actual* factory/instance
+                # cleanup completes. A shutdown cancel arriving after a
+                # preparation timeout must not unwind the transition lock.
+                while True:
+                    try:
+                        await self._discard_prepared(package)
+                        break
+                    except asyncio.CancelledError:
+                        continue
+                if violation:
+                    from .runtime_effect_gate import EffectRejected
+
+                    raise EffectRejected("prepare_side_effect_forbidden") from None
+            else:
+                bundle.release()
+                self.cache.discard(cache_key)
+            raise
+
+    async def _discard_prepared(self, package):
+        task = package.prepare_cleanup_task
+        if task is None:
+            if package.gate is not None:
+                package.gate.close()
+            task = asyncio.create_task(
+                self._discard_prepared_owned(package), name="ygl-candidate-cleanup"
+            )
+            package.prepare_cleanup_task = task
+            self._retired_prepared[package.transition_id] = task
+        try:
+            await asyncio.shield(task)
+        except BaseException:
+            if task.done() and (task.cancelled() or task.exception() is not None):
+                # A completed-but-failed stop is not quiet. Keep its exact
+                # future, candidate and cache hold; block execution candidates
+                # without retrying a partially failed instance.stop.
+                self._failed_candidate_cleanup = True
+                self.endpoint.mark_instance_error(
+                    package.installation.instance, "cleanup_pending"
+                )
+                raise ExtensionHostError("cleanup_pending") from None
+            raise
+
+    async def _discard_prepared_owned(self, package):
+        from .runtime_effect_gate import invocation_guard
+
+        # These exact tasks may still adopt an instance after cancellation.
+        # Cleanup itself is independently owned and is never cancelled by an
+        # observer or by repeated shutdown.
+        if package.factory_tasks:
+            await asyncio.gather(*package.factory_tasks, return_exceptions=True)
+        for instance in package.instances.values():
+            stop = getattr(instance, "stop", None)
+            if callable(stop):
+                with invocation_guard(package.gate):
+                    await stop()
+        for lifetime in package.lifetimes.values():
+            lifetime.revoke()
+        if package.bundle.release() != "released":
+            raise ExtensionHostError("cleanup_pending")
+        self.cache.discard(package.cache_key)
+        self._prepared.pop(id(package.installation.instance), None)
+        self._retired_prepared.pop(package.transition_id, None)
+
+    def _cancel_replacement(self, task):
+        if not task.done() and task not in self._cancelled_replacements:
+            self._cancelled_replacements.add(task)
+            task.cancel()
+
+    def _replacement_done(self, task):
+        self._replacement_tasks.discard(task)
+        self._cancelled_replacements.discard(task)
+        if not task.cancelled():
+            task.exception()  # Observe detached failures; awaiters still see them.
+
+    async def replace(self, installation):
+        if self._closed:
+            raise ExtensionHostError("core_unavailable")
+        if self._failed_candidate_cleanup:
+            raise ExtensionHostError("cleanup_pending")
+        task = asyncio.create_task(
+            self._replace_owned(installation), name="ygl-package-replacement"
+        )
+        self._replacement_tasks.add(task)
+        task.add_done_callback(self._replacement_done)
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            self._cancel_replacement(task)
+            raise
+
+    async def _replace_owned(self, installation):
+        try:
+            return await self._replace(installation)
+        except BaseException as original:
+            package = self._prepared.get(id(installation.instance))
+            if package is None:
+                raise
+            was_published = self.packages.get(installation.package_id) is package
+            if was_published:
+                self.fence_instance(installation.instance)
+                # Exact owned cleanup is shielded and retained by the package;
+                # recovery cannot begin until its real resources are quiet.
+                await self.withdraw_instance(installation.instance)
+                self._prepared.pop(id(installation.instance), None)
+            else:
+                await self._discard_prepared(package)
+            if (
+                isinstance(original, asyncio.CancelledError)
+                or not was_published
+                or self._closed
+                or not self.discovery.current(installation)
+            ):
+                raise
+            for pin in dict.fromkeys(
+                (
+                    self.cache.current.get(installation.package_id),
+                    self.cache.last_good.get(installation.package_id),
+                )
+            ):
+                if pin is None or pin == package.cache_key:
+                    continue
+                try:
+                    return await self._replace(installation, cache_key=pin)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    failed = self._prepared.get(id(installation.instance))
+                    if failed is not None:
+                        if self.packages.get(installation.package_id) is failed:
+                            self.fence_instance(installation.instance)
+                            await self.withdraw_instance(installation.instance)
+                            self._prepared.pop(id(installation.instance), None)
+                        else:
+                            await self._discard_prepared(failed)
+            raise original
+
+    async def _replace(self, installation, *, cache_key=None):
+        # One 8 MiB execution candidate across all package identities; active
+        # sibling modules keep serving while this transition drains its owner.
+        async with self._transition_lock:
+            if self._failed_candidate_cleanup:
+                raise ExtensionHostError("cleanup_pending")
+            return await self._replace_serial(installation, cache_key=cache_key)
+
+    async def _replace_serial(self, installation, *, cache_key=None):
+        from ..extensions.hot_update_protocol import check_data_compatibility
+        from ..infrastructure.sqlite.runtime_ownership import RuntimeOwnership
+        from .extension_runtime import _CandidatePackage
+
+        lock = self._locks.setdefault(installation.package_id, asyncio.Lock())
+        async with lock:
+            old = self.packages.get(installation.package_id)
+            if (
+                cache_key is None
+                and old is not None
+                and old.installation.instance is installation.instance
+                and old.installation.descriptor_digest == installation.descriptor_digest
+                and old.active
+                and self.discovery.current(installation)
+            ):
+                return self._status(old)
+            try:
+                package = await self._prepare(installation, cache_key=cache_key)
+            except Exception as original:
+                if cache_key is not None:
+                    raise
+                if not self.discovery.current(installation) or self._closed:
+                    raise
+                package = None
+                for pin in dict.fromkeys(
+                    (
+                        self.cache.current.get(installation.package_id),
+                        self.cache.last_good.get(installation.package_id),
+                    )
+                ):
+                    if pin is None:
+                        continue
+                    try:
+                        package = await self._prepare(installation, cache_key=pin)
+                        break
+                    except Exception:
+                        continue
+                if package is None:
+                    raise original
+            active_bytes = sum(
+                current.bundle.total_bytes
+                for key, current in self.packages.items()
+                if key != installation.package_id
+            )
+            if active_bytes + package.bundle.total_bytes > 32 * 1024 * 1024:
+                raise ExtensionHostError("active_package_budget_exceeded")
+            executor = self.core.database.executor
+            scope = "package:" + installation.package_id
+
+            def prepare(unit):
+                prior = unit.connection.execute(
+                    "SELECT * FROM runtime_owners WHERE scope=?", (scope,)
+                ).fetchone()
+                stored = unit.connection.execute(
+                    "SELECT * FROM runtime_data_contracts WHERE package_id=?",
+                    (installation.package_id,),
+                ).fetchone()
+                if stored is not None:
+                    check_data_compatibility(
+                        package.envelope,
+                        stored["schema_version"],
+                        stored["writes_version"],
+                        stored["writes_version"],
+                    )
+                if prior is not None:
+                    package.epoch = max(package.epoch, prior["package_epoch"] + 1)
+                    # gate identity is immutable; construct before prepare using
+                    # persisted epoch instead of mutating it after issuance.
+                    if package.epoch != package.gate.identity.package_epoch:
+                        raise ExtensionHostError("stale_epoch")
+                RuntimeOwnership.prepare(
+                    unit,
+                    package.transition_id,
+                    scope,
+                    package.bundle.digest,
+                    boot_id=self.generation.kernel.boot_id,
+                    from_boot_id=prior["boot_id"] if prior else None,
+                    from_digest=prior["digest"] if prior else None,
+                    from_epoch=prior["package_epoch"] if prior else 0,
+                    to_epoch=package.epoch,
+                )
+                return dict(prior) if prior else None
+
+            prior = await executor.run_internal_transaction(prepare)
+            if old is not None:
+                self.fence_instance(old.installation.instance)
+            if prior is not None:
+                await executor.run_internal_transaction(
+                    lambda unit: RuntimeOwnership.fence(
+                        unit,
+                        scope,
+                        prior["token"],
+                        expected_revision=prior["revision"],
+                        transition_id=package.transition_id,
+                    )
+                )
+                revision = prior["revision"] + 1
+            else:
+                await executor.run_internal_transaction(
+                    lambda unit: RuntimeOwnership.phase(
+                        unit, package.transition_id, "PREPARED", "OLD_FENCED"
+                    )
+                )
+                revision = 0
+            if old is not None:
+                try:
+                    await asyncio.wait_for(self._cleanup_package(old), 0.1)
+                except asyncio.TimeoutError:
+                    await executor.run_internal_transaction(
+                        lambda unit: RuntimeOwnership.phase(
+                            unit,
+                            package.transition_id,
+                            "OLD_FENCED",
+                            "WAITING_CLEANUP",
+                            error_code="cleanup_pending",
+                        )
+                    )
+                    self.endpoint.mark_instance_state(
+                        installation.instance, "cleanup_pending"
+                    )
+                    await self._cleanup_package(old)
+                    await executor.run_internal_transaction(
+                        lambda unit: RuntimeOwnership.resume_waiting(
+                            unit, package.transition_id, "OLD_FENCED"
+                        )
+                    )
+            if not self.discovery.current(installation) or self._closed:
+                await self._discard_prepared(package)
+                raise ExtensionHostError("stale_instance")
+            await executor.run_internal_transaction(
+                lambda unit: RuntimeOwnership.phase(
+                    unit, package.transition_id, "OLD_FENCED", "OLD_QUIET"
+                )
+            )
+
+            def commit(unit):
+                from contextlib import contextmanager
+
+                from ..infrastructure.sqlite.repositories_extension_policy import (
+                    advance_release_head,
+                    assert_execution_policy,
+                )
+                from .runtime_effect_gate import EffectRejected
+
+                def current_owner(*, revalidate=True):
+                    if (
+                        self._closed
+                        or installation.metadata.activated is not True
+                        or installation.metadata.star_cls is not installation.instance
+                        or (revalidate and not self.discovery.current(installation))
+                    ):
+                        raise ExtensionHostError("stale_instance")
+                    record = self.generation.kernel._record(self.generation.scope)
+                    if (
+                        record.fenced
+                        or record.token != self.generation.receipt["owner_token"]
+                    ):
+                        raise EffectRejected()
+
+                @contextmanager
+                def commit_fence():
+                    current_owner()
+                    with self.generation.kernel.lock:
+                        current_owner(revalidate=False)
+                        yield
+
+                current_owner()
+                unit.add_commit_guard(commit_fence)
+                assert_execution_policy(unit, package.receipt)
+                row = unit.connection.execute(
+                    "SELECT * FROM extension_release_heads WHERE package_id=? AND publisher_key_id=? AND channel=?",
+                    (
+                        package.receipt.package_id,
+                        package.receipt.publisher_key_id,
+                        package.receipt.channel,
+                    ),
+                ).fetchone()
+                closed = RuntimeOwnership.commit_closed(
+                    unit,
+                    package.transition_id,
+                    expected_token=prior["token"] if prior else None,
+                    expected_revision=revision,
+                    core_epoch=self.generation.receipt["core_epoch"],
+                    package_epoch=package.epoch,
+                    grant_revision=package.receipt.grant_revision,
+                    boot_id=self.generation.kernel.boot_id,
+                    new_token=package.gate.identity.package_token,
+                    release_commit=(
+                        None
+                        if package.fallback
+                        else lambda u: advance_release_head(
+                            u,
+                            package_id=package.receipt.package_id,
+                            publisher_key_id=package.receipt.publisher_key_id,
+                            channel=package.receipt.channel,
+                            sequence=package.receipt.release_sequence,
+                            artifact_digest=package.receipt.artifact_digest,
+                            expected_sequence=row["release_sequence"] if row else None,
+                            expected_digest=row["artifact_digest"] if row else None,
+                        )
+                    ),
+                )
+                RuntimeOwnership.check_data_contract(
+                    unit,
+                    package.receipt.package_id,
+                    package.envelope["data"]["schema"],
+                    package.envelope["data"]["writes"],
+                    package.envelope["data"]["readable"],
+                )
+                return closed
+
+            closed = await executor.run_internal_transaction(commit)
+            import hashlib
+
+            from ..extensions.hot_update_protocol import b05_manifest_bytes
+
+            self._page_digests[installation.package_id] = hashlib.sha256(
+                b05_manifest_bytes(package.envelope)
+            ).hexdigest()
+            self.packages[installation.package_id] = package
+            try:
+                ext = self.core.extension_runtime
+                ext.attach_host_package(
+                    package.candidate,
+                    live=lambda: self._current(package)
+                    and self.discovery.current(installation),
+                )
+                self._publish_policy(package)
+                self.core.admin_operations.attach_external_package(
+                    package.candidate.package.manifest
+                )
+                handlers = {
+                    module.module_id: package.instances[
+                        f"{installation.package_id}/{module.module_id}"
+                    ].handlers()
+                    for module in package.candidate.package.manifest.modules
+                }
+                base = self.core.registry.snapshot().revision
+                registered = self.core.registry.register_package(
+                    package.candidate.package.manifest, handlers
+                )
+                built = _CandidatePackage(
+                    package.candidate,
+                    package.candidate.package.manifest,
+                    package.transition_id,
+                    package.bundle,
+                    {},
+                    base,
+                    registered.revision,
+                    complete=True,
+                )
+                ext._built[installation.package_id] = built
+                for module in package.candidate.package.manifest.modules:
+                    owner = f"{installation.package_id}/{module.module_id}"
+                    instance = package.instances[owner]
+                    self.core.lifecycle.adopt_candidate(
+                        installation.package_id,
+                        module,
+                        package.transition_id,
+                        instance,
+                        service_lifetime=package.lifetimes[owner],
+                    )
+                    self.core.lifecycle.install_dormant(
+                        installation.package_id,
+                        owner,
+                        package.transition_id,
+                        instance,
+                        instance.handlers(),
+                    )
+                    built.installation_operation_ids[owner] = package.transition_id
+                package.published = True
+                await executor.run_internal_transaction(
+                    lambda unit: RuntimeOwnership.phase(
+                        unit, package.transition_id, "COMMITTED_CLOSED", "PUBLISHED"
+                    )
+                )
+                if not self.discovery.current(installation) or self._closed:
+                    raise ExtensionHostError("stale_instance")
+                await executor.run_internal_transaction(
+                    lambda unit: RuntimeOwnership.open_active(
+                        unit,
+                        package.transition_id,
+                        package.gate.identity.package_token,
+                        closed["revision"],
+                        boot_id=self.generation.kernel.boot_id,
+                    )
+                )
+                package.gate.open()
+                from .runtime_effect_gate import invocation_guard
+
+                with invocation_guard(package.gate):
+                    await self.core._register_declared_subscription_gates(
+                        {
+                            f"{installation.package_id}/{m.module_id}": m
+                            for m in package.candidate.package.manifest.modules
+                        }
+                    )
+                    await ext.restore_host_package(package.candidate)
+                package.gate.check()
+                self.core.jobs.resume_modules(
+                    f"{package.receipt.package_id}/{module.module_id}"
+                    for module in package.candidate.package.manifest.modules
+                )
+                if not package.fallback:
+                    self.cache.publish(installation.package_id, package.cache_key)
+                self._prepared.pop(id(installation.instance), None)
+                self.runtime._external_packages_changed()
+                return self._status(package)
+            except BaseException:
+                self.fence_instance(installation.instance)
+                raise
+
+    def _publish_policy(self, package):
+        from types import MappingProxyType
+
+        prefix = package.receipt.package_id + "/"
+        factory = self.core.module_services
+        factory._source_credential_policies = (
+            tuple(
+                p
+                for p in factory._source_credential_policies
+                if not p.module_id.startswith(prefix)
+            )
+            + package.policy.credential_policies
+        )
+        admin = self.core.admin_operations
+        admin._managed_source_credentials = (
+            tuple(
+                p
+                for p in admin._managed_source_credentials
+                if not p.module_id.startswith(prefix)
+            )
+            + package.policy.managed_credentials
+        )
+        policy = self.runtime._external_source_policies
+        policy.authorizations = MappingProxyType(
+            {
+                **{
+                    owner: rows
+                    for owner, rows in policy.authorizations.items()
+                    if not owner.startswith(prefix)
+                },
+                **package.policy.authorizations,
+            }
+        )
+        self.runtime._source_authorizations._policy = policy
+        from types import MappingProxyType
+
+        from ..core.invocation_budget import InvocationBudgetPolicy
+
+        previous = self.core._budget_policy
+        timeouts = {
+            key: value
+            for key, value in previous.capability_timeouts.items()
+            if not key[0].startswith(prefix)
+        }
+        timeouts.update(package.policy.capability_timeouts)
+        self.core._budget_policy = InvocationBudgetPolicy(
+            previous.command_timeout, MappingProxyType(timeouts)
+        )
+        self.core.gateway._budget_policy = self.core._budget_policy
+
+    async def _cleanup_package(self, package):
+        if package.cleanup_task is None:
+            package.cleanup_task = asyncio.create_task(
+                self._cleanup_loop(package), name="ygl-package-cleanup"
+            )
+        await asyncio.shield(package.cleanup_task)
+
+    async def _cleanup_loop(self, package):
+        while True:
+            try:
+                await self.core.extension_runtime.detach_host_package(
+                    package.candidate, owner_drain=self.core.jobs.drain_modules
+                )
+                break
+            except ExtensionCleanupPending:
+                await asyncio.sleep(0.1)
+        self.core.admin_operations.detach_external_package(
+            package.candidate.package.manifest
+        )
+        prefix = package.receipt.package_id + "/"
+        for owner in tuple(self.runtime._source_authorizations._managers):
+            if owner.startswith(prefix):
+                manager = self.runtime._source_authorizations._managers.pop(owner)
+                await manager.close()
+        if self.packages.get(package.receipt.package_id) is package:
+            self.packages.pop(package.receipt.package_id)
+        self._revoke_policy(package)
+        self.cache.discard(package.cache_key)
+        self.runtime._external_packages_changed()
+
+    def _revoke_policy(self, package):
+        from types import MappingProxyType
+
+        from ..core.invocation_budget import InvocationBudgetPolicy
+
+        prefix = package.receipt.package_id + "/"
+        factory = self.core.module_services
+        factory._source_credential_policies = tuple(
+            p
+            for p in factory._source_credential_policies
+            if not p.module_id.startswith(prefix)
+        )
+        admin = self.core.admin_operations
+        admin._managed_source_credentials = tuple(
+            p
+            for p in admin._managed_source_credentials
+            if not p.module_id.startswith(prefix)
+        )
+        policy = self.runtime._external_source_policies
+        policy.authorizations = MappingProxyType(
+            {
+                owner: rows
+                for owner, rows in policy.authorizations.items()
+                if not owner.startswith(prefix)
+            }
+        )
+        previous = self.core._budget_policy
+        self.core._budget_policy = InvocationBudgetPolicy(
+            previous.command_timeout,
+            {
+                key: value
+                for key, value in previous.capability_timeouts.items()
+                if not key[0].startswith(prefix)
+            },
+        )
+        self.core.gateway._budget_policy = self.core._budget_policy
+
+    async def withdraw_instance(self, instance):
+        self.endpoint.retire_instance(instance, "cleanup_pending")
+        for package in tuple(self.packages.values()):
+            if package.installation.instance is instance:
+                self.fence_instance(instance)
+                await self.core.database.executor.run_internal_transaction(
+                    lambda unit: unit.connection.execute(
+                        "UPDATE runtime_owners SET accepting=0,revision=revision+1 WHERE scope=? AND token=?",
+                        (
+                            "package:" + package.receipt.package_id,
+                            package.gate.identity.package_token,
+                        ),
+                    ).rowcount
+                )
+                await self._cleanup_package(package)
+        self.endpoint.retire_instance(instance)
+
+    def _status(self, package):
+        return {
+            "state": "active",
+            "package_epoch": package.epoch,
+            "runtime_state": "fallback" if package.fallback else "active",
+            "installed_version": package.installed_version,
+            "running_version": package.bundle.release_doc["release"],
+            "grant_revision": package.receipt.grant_revision,
+        }
+
+    def schedule_reconcile(self):
+        if self._closed:
+            return
+        if self._reconcile_task is None or self._reconcile_task.done():
+            self._reconcile_task = asyncio.create_task(
+                self.reconcile(), name="ygl-discovery-reconcile"
+            )
+
+    async def reconcile(self):
+        import hashlib
+        from uuid import UUID
+
+        snapshot = self.discovery.scan()
+        for package in tuple(self.packages.values()):
+            if not any(
+                item.instance is package.installation.instance for item in snapshot
+            ):
+                self.fence_instance(package.installation.instance)
+                await self.withdraw_instance(package.installation.instance)
+        for installation in snapshot:
+            if installation.descriptor["role"] != "dlc":
+                continue
+            request_id = str(
+                UUID(
+                    hashlib.sha256(
+                        (
+                            str(id(installation.instance))
+                            + installation.descriptor_digest
+                        ).encode()
+                    ).hexdigest()[:32]
+                )
+            )
+            await self.endpoint.request(
+                installation.instance,
+                {
+                    "protocol": "ygl.control/1",
+                    "op": "connect",
+                    "request_id": request_id,
+                    "descriptor_digest": installation.descriptor_digest,
+                },
+            )
+
+    def stop_accepting(self):
+        self._closed = True
+        self.endpoint.stop_accepting()
+        for task in tuple(self._replacement_tasks):
+            self._cancel_replacement(task)
+
+    async def close(self):
+        self.stop_accepting()
+        await self.endpoint.close()
+        if self._replacement_tasks:
+            await asyncio.shield(
+                asyncio.gather(*self._replacement_tasks, return_exceptions=True)
+            )
+        for package in tuple(self.packages.values()):
+            await self.withdraw_instance(package.installation.instance)
+        for package in tuple(self._prepared.values()):
+            await self._discard_prepared(package)
+        if self._retired_prepared:
+            await asyncio.shield(asyncio.gather(*self._retired_prepared.values()))

@@ -6,14 +6,20 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from unittest import mock
 
-from modules.ff14.features.calendar import CalendarCollector, CalendarQuery
-from modules.ff14.features.calendar_evaluator import calendar_source_spec
-from modules.ff14.features.calendar_ics import MAX_BYTES
-from modules.ff14.features.calendar_snapshots import (
+from ygl_test_subject.modules.ff14.features.calendar import (
+    CalendarCollector,
+    CalendarQuery,
+)
+from ygl_test_subject.modules.ff14.features.calendar_evaluator import (
+    calendar_source_spec,
+)
+from ygl_test_subject.modules.ff14.features.calendar_ics import MAX_BYTES
+from ygl_test_subject.modules.ff14.features.calendar_snapshots import (
     MANUAL_COOLDOWN_SECONDS,
     CalendarSnapshots,
     source_key,
 )
+
 from tests.modules.ff14.test_calendar import (
     _ConfigView,
     _event,
@@ -219,7 +225,8 @@ class CalendarSnapshotsTests(unittest.IsolatedAsyncioTestCase):
 
         self.http.fetch = slow_primary
         with mock.patch(
-            "modules.ff14.features.calendar_snapshots.SOURCE_TIMEOUT_SECONDS", 0.01
+            "ygl_test_subject.modules.ff14.features.calendar_snapshots.SOURCE_TIMEOUT_SECONDS",
+            0.01,
         ):
             await self.sync()
         self.assertEqual(
@@ -254,7 +261,7 @@ class CalendarSnapshotsTests(unittest.IsolatedAsyncioTestCase):
             return replace(spec, url=spec.url + "?revision=2") if spec else None
 
         with mock.patch(
-            "modules.ff14.features.calendar_snapshots.calendar_source_spec",
+            "ygl_test_subject.modules.ff14.features.calendar_snapshots.calendar_source_spec",
             side_effect=changed,
         ):
             result = await self.query_cn()
@@ -322,13 +329,14 @@ class CalendarRealDiagnosticPortTests(unittest.IsolatedAsyncioTestCase):
         from ygl_test_subject.core.contracts.validation_boundary import (
             validate_contract,
         )
+        from ygl_test_subject.modules.ff14.features.calendar_diagnostics import (
+            DECLARATION,
+        )
         from ygl_test_subject.services.diagnostics import (
             BoundDiagnostics,
             DiagnosticPolicy,
             DiagnosticStore,
         )
-
-        from modules.ff14.features.calendar_diagnostics import DECLARATION
 
         self.setup_services([SourceHttpError("transport_failed"), feed("Fallback")])
 
@@ -366,13 +374,15 @@ class CalendarRealDiagnosticPortTests(unittest.IsolatedAsyncioTestCase):
         from ygl_test_subject.core.contracts.validation_boundary import (
             validate_contract,
         )
+        from ygl_test_subject.modules.ff14.features.calendar_diagnostics import (
+            DECLARATION,
+        )
         from ygl_test_subject.services.diagnostics import (
             BoundDiagnostics,
             DiagnosticPolicy,
             DiagnosticStore,
         )
 
-        from modules.ff14.features.calendar_diagnostics import DECLARATION
         from yomihime_game_link_sdk import InvalidInvocation
 
         for failure in (InvalidInvocation(), asyncio.CancelledError()):

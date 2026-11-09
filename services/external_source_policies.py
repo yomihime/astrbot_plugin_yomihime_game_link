@@ -11,14 +11,13 @@ import json
 from collections.abc import Mapping
 from types import MappingProxyType
 
-from yomihime_game_link_sdk.contexts import InvocationOrigin
-from yomihime_game_link_sdk.declarations import ModuleManifest
-
 from ..core.contracts.storage import freeze_json
 from ..core.invocation_budget import freeze_execution_timeouts
 from ..core.policy import supports_public_read_only
 from ..extensions.disk_manifest import parse_manifest
 from ..extensions.page_resources import _read_file
+from ..yomihime_game_link_sdk.contexts import InvocationOrigin
+from ..yomihime_game_link_sdk.declarations import ModuleManifest
 from .extension_permissions import permission_snapshot, permissions_within
 from .managed_source_credentials import ManagedSourceCredentialPolicy
 from .source_authorizations import AuthorizationFlowPolicy
@@ -264,3 +263,95 @@ class ExternalSourcePolicies:
         return approved is not None and permissions_within(
             permission_snapshot(package.manifest), approved
         )
+
+
+def parse_package_source_policy(
+    payload,
+    *,
+    b05_manifest_bytes,
+    source_policy_path,
+    required_features,
+    release_inventory,
+):
+    """Parse captured, inventory-verified policy; never read the mutable install tree.
+
+    authorizations rows are {owner, flow_id, credential_field, descriptor}.
+    Returned projection includes every normalized policy field.
+    """
+    manifest = parse_manifest(b05_manifest_bytes)
+    if (
+        type(source_policy_path) is not str
+        or not source_policy_path
+        or any(ord(c) < 32 or ord(c) == 127 for c in source_policy_path)
+        or source_policy_path.startswith("/")
+        or "\\" in source_policy_path
+        or any(part in {"", ".", ".."} for part in source_policy_path.split("/"))
+        or "source.policies/1" not in required_features
+    ):
+        raise ValueError("invalid source policy path or missing feature")
+    entries = [row for row in release_inventory if row["path"] == source_policy_path]
+    if (
+        len(entries) != 1
+        or type(payload) is not bytes
+        or len(payload) > 1048576
+        or entries[0]["size"] != len(payload)
+        or entries[0]["sha256"] != hashlib.sha256(payload).hexdigest()
+    ):
+        raise ValueError("source policy not in verified inventory")
+    from ..extensions.hot_update_protocol import _load
+
+    value = _load(payload, 1048576, depth=24, nodes=16000)
+    if (
+        set(value) - {"schema", "credentials", "authorizations", "capability_timeouts"}
+        or not {"schema", "credentials", "authorizations"} <= set(value)
+        or value["schema"] != "ygl.source-policy/1"
+        or type(value["authorizations"]) is not list
+        or len(value["authorizations"]) > 256
+    ):
+        raise ValueError("invalid package source policy")
+    authorizations = {}
+    for row in value["authorizations"]:
+        if type(row) is not dict or set(row) != {
+            "owner",
+            "flow_id",
+            "credential_field",
+            "descriptor",
+        }:
+            raise ValueError("invalid package authorization row")
+        owner, flow = row["owner"], row["flow_id"]
+        if type(owner) is not str or type(flow) is not str:
+            raise ValueError("invalid package authorization identity")
+        rows = authorizations.setdefault(owner, {})
+        if flow in rows:
+            raise ValueError("duplicate package authorization")
+        rows[flow] = {
+            "credential_field": row["credential_field"],
+            "descriptor": row["descriptor"],
+        }
+    package = {
+        "manifest": b05_manifest_bytes.decode("utf-8"),
+        "credentials": value["credentials"],
+        "authorizations": authorizations,
+        "capability_timeouts": value.get("capability_timeouts", {}),
+    }
+    parsed = ExternalSourcePolicies(
+        json.dumps(
+            {"schema_version": 1, "packages": [package]}, allow_nan=False
+        ).encode()
+    )
+    credentials = []
+    for row in value["credentials"]:
+        normalized_row = dict(row)
+        normalized_row["injections"] = sorted(
+            row["injections"],
+            key=lambda rule: json.dumps(rule, sort_keys=True, separators=(",", ":")),
+        )
+        credentials.append(normalized_row)
+    normalized = {
+        "credentials": sorted(
+            credentials, key=lambda row: (row["owner"], row["field"])
+        ),
+        "authorizations": authorizations,
+        "capability_timeouts": value.get("capability_timeouts", {}),
+    }
+    return parsed, permission_snapshot(manifest, normalized)

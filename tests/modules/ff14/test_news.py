@@ -10,8 +10,7 @@ from unittest.mock import AsyncMock
 
 from ygl_test_subject.core.contracts.subscriptions import validate_evaluation_decision
 from ygl_test_subject.core.contracts.validation_boundary import validate_contract
-
-from modules.ff14.features.news import (
+from ygl_test_subject.modules.ff14.features.news import (
     ADMINS,
     COLLECTOR,
     SOURCE,
@@ -25,6 +24,7 @@ from modules.ff14.features.news import (
     validate_admins,
     validate_targets,
 )
+
 from yomihime_game_link_sdk.contexts import InvocationOrigin, InvocationView
 from yomihime_game_link_sdk.services import HttpResponse
 from yomihime_game_link_sdk.storage import OwnerScope

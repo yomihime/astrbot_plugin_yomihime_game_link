@@ -8,12 +8,11 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 
-from yomihime_game_link_sdk.declarations import InvocationPolicy, SourceDeclaration
-from yomihime_game_link_sdk.services import ConfigTarget
-
 from ..core.contracts.validation_boundary import validate_contract
 from ..core.invocation_budget import freeze_execution_timeouts
 from ..extensions.disk_manifest import parse_manifest
+from ..yomihime_game_link_sdk.declarations import InvocationPolicy, SourceDeclaration
+from ..yomihime_game_link_sdk.services import ConfigTarget
 from .configuration.defaults import (
     MODULE_REPLY_THEME,
     module_configuration_fields,

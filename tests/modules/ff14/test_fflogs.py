@@ -9,13 +9,12 @@ from collections import deque
 from typing import Any
 
 from ygl_test_subject.core.contracts.validation_boundary import validate_contract
-
-from modules.ff14.features.fflogs import (
+from ygl_test_subject.modules.ff14.features.fflogs import (
     FFLogsCharacterLookup,
     FFLogsOutputPercentiles,
     parse_statistics_cell,
 )
-from modules.ff14.features.fflogs_catalog import (
+from ygl_test_subject.modules.ff14.features.fflogs_catalog import (
     FFLOGS_CN_SOURCE,
     FFLOGS_GLOBAL_SOURCE,
     MAX_SERVER_PAGES,
@@ -28,7 +27,11 @@ from modules.ff14.features.fflogs_catalog import (
     parse_server_page,
     resolve_output_metadata,
 )
-from modules.ff14.features.fflogs_models import FFLogsPayloadError, RegionRecord
+from ygl_test_subject.modules.ff14.features.fflogs_models import (
+    FFLogsPayloadError,
+    RegionRecord,
+)
+
 from yomihime_game_link_sdk.display import TextBlock
 from yomihime_game_link_sdk.errors import SourceHttpError
 from yomihime_game_link_sdk.results import ErrorCode, ResultStatus
@@ -569,7 +572,9 @@ class FFLogsContractTests(unittest.TestCase):
         self.assertEqual(len(http.requests), MAX_SERVER_PAGES + 1)
 
     def test_character_projection_is_strict_and_public_only(self) -> None:
-        from modules.ff14.features.fflogs_models import parse_public_character
+        from ygl_test_subject.modules.ff14.features.fflogs_models import (
+            parse_public_character,
+        )
 
         parsed = parse_public_character(
             _character()["data"]["characterData"]["character"]

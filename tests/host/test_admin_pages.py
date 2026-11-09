@@ -18,6 +18,7 @@ from ygl_test_subject.adapters.astrbot.web_admin import verified_dashboard_reque
 from ygl_test_subject.core.contracts.administration import AdminAuthorizationDenied
 
 from tests.fixtures.managed_font import OfflineManagedFont
+from tests.fixtures.runtime_cleanup import terminate_and_drain
 from tests.host.astrbot_contract import host_contracts
 from tests.host.test_astrbot_runtime import _IdleTransport, _MessageChain, _Plain
 from tests.host.test_ff14_pages import _Context, _token
@@ -100,7 +101,7 @@ class AdminPagesTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         await self.client.aclose()
         self.pages.close()
-        await self.runtime.terminate()
+        await terminate_and_drain(self.runtime)
         self.modules.stop()
         self.temp.cleanup()
 
@@ -933,3 +934,78 @@ class AdminPagesTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 401)
         self.assertEqual(self.pages.requests, {})
         self.assertEqual(self.runtime._admin_source._proofs, {})
+
+    async def test_hot_update_http_uses_actual_module_grant_and_exact_epoch(self):
+        from ygl_test_subject.core.contracts.administration import AdminOperation
+        from ygl_test_subject.services.admin_authorization import _grant_effect
+
+        calls = []
+        runtime = self.runtime
+
+        class Controller:
+            def _epoch(self):
+                return 71
+
+            async def request(self, action, data, *, grant):
+                effect = _grant_effect(grant)
+                self_outer.assertIs(effect.source, runtime._module_admin_source)
+                self_outer.assertIs(effect.service, runtime._core.admin_authorization)
+                expected = (
+                    AdminOperation.LIST_MODULES
+                    if action in {"status", "inspect"}
+                    else AdminOperation.SET_ENABLED
+                )
+                self_outer.assertIs(grant.operation, expected)
+                await runtime._core.admin_authorization.validate_generation(
+                    grant, operation=expected
+                )
+                for (
+                    owner,
+                    fields,
+                ) in runtime._core.admin_operations.module_resources().items():
+                    effect.check_resource(owner, fields)
+                calls.append((action, dict(data)))
+                if data.get("core_epoch") != 71:
+                    return {"ok": False, "error": {"code": "stale_generation"}}
+                return {"ok": True, "core_epoch": 71, "revision": 2}
+
+        self_outer = self
+        runtime._hot_update_admin = Controller()
+        response = await self.call("module-hot-update-bootstrap", {})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["data"]["core_epoch"], 71)
+        self.assertEqual(calls[-1], ("status", {"core_epoch": 71}))
+        response = await self.call(
+            "module-hot-update-package-approve",
+            {
+                "core_epoch": 70,
+                "package_id": "unknown_package",
+                "plan_id": "a" * 48,
+                "expected_revision": 1,
+            },
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["data"]["error"]["code"], "stale_generation")
+        self.assertEqual(calls[-1][1]["core_epoch"], 70)
+        count = len(calls)
+        self.assertEqual(
+            (
+                await self.call("module-hot-update-bootstrap", {}, headers={})
+            ).status_code,
+            401,
+        )
+        self.assertEqual(
+            (
+                await self.call(
+                    "module-hot-update-retry",
+                    {"core_epoch": 71},
+                    headers={**self.headers, "Origin": "https://other.test"},
+                )
+            ).status_code,
+            403,
+        )
+        self.assertEqual(len(calls), count)
+        response = await self.call("module-hot-update-bootstrap", {"core_epoch": 70})
+        self.assertEqual(response.json()["data"]["error"]["code"], "invalid_request")
+        self.assertEqual(len(calls), count)
+        self.assertEqual(self.pages.requests, {})

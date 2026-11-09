@@ -5,9 +5,9 @@ from datetime import datetime, timezone
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
-from modules.ff14.features import calendar_ics
-from modules.ff14.features.calendar_ics import parse_ics
-from modules.ff14.features.calendar_models import Completeness
+from ygl_test_subject.modules.ff14.features import calendar_ics
+from ygl_test_subject.modules.ff14.features.calendar_ics import parse_ics
+from ygl_test_subject.modules.ff14.features.calendar_models import Completeness
 
 
 def _calendar(*events: str) -> bytes:

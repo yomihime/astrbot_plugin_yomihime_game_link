@@ -10,6 +10,7 @@ from unittest.mock import patch
 from ygl_test_subject.core.contracts.validation_boundary import validate_contract
 from ygl_test_subject.presentation import command_card
 
+from tests.fixtures.runtime_cleanup import terminate_and_drain
 from tests.host import test_astrbot_runtime as runtime_fixture
 from tests.host.test_market_integration import FixtureTransport
 from tests.modules.ff14.test_item_market_cards import item_snapshot, text
@@ -76,7 +77,7 @@ class FF14DeclarativeCommandTests(unittest.IsolatedAsyncioTestCase):
             self.context, http_transport_factory=lambda: self.transport
         )
         await self.runtime.initialize()
-        self.addAsyncCleanup(self.runtime.terminate)
+        self.addAsyncCleanup(terminate_and_drain, self.runtime)
         self.runtime._message_port._image_factory = lambda content: SimpleNamespace(
             png=content
         )

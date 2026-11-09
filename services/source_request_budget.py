@@ -10,7 +10,7 @@ import math
 from datetime import UTC, datetime
 from time import time
 
-from yomihime_game_link_sdk import HttpBudgetStatus, SourceHttpError
+from ..yomihime_game_link_sdk import HttpBudgetStatus, SourceHttpError
 
 
 class SourceRequestBudget:

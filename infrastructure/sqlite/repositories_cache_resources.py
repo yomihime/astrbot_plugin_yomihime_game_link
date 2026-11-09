@@ -11,15 +11,6 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from yomihime_game_link_sdk.storage import (
-    CacheEntry,
-    CacheLookup,
-    CacheLookupStatus,
-    OwnerScope,
-    OwnershipKind,
-    ResourceMetadata,
-)
-
 from ...core.contracts.services import CacheAccessRequest, validate_cache_access_request
 from ...core.contracts.storage import OwnerScope_validate, freeze_json
 from ...core.contracts.validation_boundary import validate_contract
@@ -27,6 +18,14 @@ from ...core.ports import (
     AuthorizationWindowExpired,
     RevisionConflict,
     UniqueConstraintViolation,
+)
+from ...yomihime_game_link_sdk.storage import (
+    CacheEntry,
+    CacheLookup,
+    CacheLookupStatus,
+    OwnerScope,
+    OwnershipKind,
+    ResourceMetadata,
 )
 from .database import SQLiteDatabase, SQLiteUnitOfWork, SQLiteUnitOfWorkFactory
 
@@ -115,7 +114,7 @@ def _scope_from_row(row: sqlite3.Row) -> OwnerScope:
                 raise ValueError("user resource row carries invalid grant data")
             return OwnerScope.user(user_id)
         if kind == "authorized":
-            from yomihime_game_link_sdk.storage import GrantReference
+            from ...yomihime_game_link_sdk.storage import GrantReference
 
             if user_id is None or grant_id is None or grant_revision is None:
                 raise ValueError("authorized resource row is incomplete")

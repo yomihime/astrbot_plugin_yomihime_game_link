@@ -5,10 +5,9 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
-from yomihime_game_link_sdk.contexts import InvocationView
-from yomihime_game_link_sdk.results import CapabilityResult
-
 from ..core.ports import MessageReceipt, MessageTarget
+from ..yomihime_game_link_sdk.contexts import InvocationView
+from ..yomihime_game_link_sdk.results import CapabilityResult
 
 
 @dataclass(frozen=True, slots=True, eq=False)

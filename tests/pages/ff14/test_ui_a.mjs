@@ -1,21 +1,27 @@
 // Formal production Vue harness; old renderer cases are mapped in legacy-retirement.md.
 import assert from 'node:assert/strict';
-import {readFile,mkdir,copyFile} from 'node:fs/promises';
+import {readFile,mkdir,copyFile,mkdtemp,rm} from 'node:fs/promises';
+import {tmpdir} from 'node:os';
 import {resolve} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {JSDOM} from '../../../pages/frontend/node_modules/jsdom/lib/api.js';
 import {sourceModule,root as repositoryRoot} from '../shell/compile.mjs';
 import {queryInput,validateQueryResult} from '../../../modules/ff14/pages/src/query-contract.js';
-const out=resolve(repositoryRoot,'.architecture-refactor/unified-settings/formal-vue-tests-'+process.pid);
-await mkdir(resolve(out,'module-assets/ff14/ff14/pages/dist'),{recursive:true});
-await copyFile(resolve(repositoryRoot,'pages/00-game-link/runtime.js'),resolve(out,'runtime.js'));
-await copyFile(resolve(repositoryRoot,'modules/ff14/pages/dist/entry.js'),resolve(out,'module-assets/ff14/ff14/pages/dist/entry.js'));
 const dom=new JSDOM('<body></body>',{pretendToBeVisual:true,url:'http://localhost/'}),window=dom.window;
 for(const key of ['window','document','HTMLElement','Element','SVGElement','Node','MutationObserver','Event','MouseEvent','KeyboardEvent','InputEvent'])globalThis[key]=key==='window'?window:key==='document'?window.document:window[key];
 globalThis.getComputedStyle=window.getComputedStyle.bind(window);globalThis.requestAnimationFrame=window.requestAnimationFrame.bind(window);globalThis.cancelAnimationFrame=window.cancelAnimationFrame.bind(window);
 window.Element.prototype.scrollTo=function(){};window.matchMedia=()=>({matches:false,addEventListener(){},removeEventListener(){}});
-const runtime=await import(pathToFileURL(resolve(out,'runtime.js')));
-const {mount}=await import(pathToFileURL(resolve(out,'module-assets/ff14/ff14/pages/dist/entry.js')));
+const {runtime,mount}=await (async()=>{
+ const out=await mkdtemp(resolve(tmpdir(),'ygl-formal-vue-tests-'));
+ try{
+  await mkdir(resolve(out,'module-assets/ff14/ff14/pages/dist'),{recursive:true});
+  await copyFile(resolve(repositoryRoot,'pages/00-game-link/runtime.js'),resolve(out,'runtime.js'));
+  await copyFile(resolve(repositoryRoot,'modules/ff14/pages/dist/entry.js'),resolve(out,'module-assets/ff14/ff14/pages/dist/entry.js'));
+  const runtime=await import(pathToFileURL(resolve(out,'runtime.js')));
+  const {mount}=await import(pathToFileURL(resolve(out,'module-assets/ff14/ff14/pages/dist/entry.js')));
+  return {runtime,mount};
+ }finally{await rm(out,{recursive:true,force:true});}
+})();
 const {createScope}=await sourceModule(repositoryRoot+'pages/frontend/src/lifecycle.ts');
 let run=0;
 export async function flush(){for(let i=0;i<35;i++)await Promise.resolve();await runtime.nextTick();}

@@ -17,18 +17,6 @@ from datetime import UTC, datetime, timedelta
 from time import monotonic
 from typing import Callable, TypeVar
 
-from yomihime_game_link_sdk.contexts import InvocationOrigin, InvocationView
-from yomihime_game_link_sdk.errors import CacheUnavailable, ServiceUnavailable
-from yomihime_game_link_sdk.services import CacheAccess
-from yomihime_game_link_sdk.storage import (
-    CacheEntry,
-    CacheLookup,
-    CacheLookupStatus,
-    CacheQuery,
-    CacheVisibility,
-    OwnerScope,
-)
-
 from ..core.context_issuer import ContextIssuer, InvalidInvocation
 from ..core.contracts.services import CacheAccessRequest, JsonObject
 from ..core.contracts.validation_boundary import validate_contract
@@ -42,6 +30,17 @@ from ..core.ports import (
 )
 from ..core.ports_jobs import JobRunLease
 from ..core.public_errors import parameters, public_boundary
+from ..yomihime_game_link_sdk.contexts import InvocationOrigin, InvocationView
+from ..yomihime_game_link_sdk.errors import CacheUnavailable, ServiceUnavailable
+from ..yomihime_game_link_sdk.services import CacheAccess
+from ..yomihime_game_link_sdk.storage import (
+    CacheEntry,
+    CacheLookup,
+    CacheLookupStatus,
+    CacheQuery,
+    CacheVisibility,
+    OwnerScope,
+)
 from .identity import (
     InvocationPrincipalResolver,
     PrincipalResolutionDenied,
@@ -297,7 +296,7 @@ class _CacheAccessCoordinator:
             raise CacheAccessError(
                 "authorised scope requires a grant", code="scope_denied"
             )
-        from yomihime_game_link_sdk.storage import GrantReference
+        from ..yomihime_game_link_sdk.storage import GrantReference
 
         return OwnerScope.authorized(
             principal_id,

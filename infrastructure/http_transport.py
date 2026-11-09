@@ -9,11 +9,15 @@ from urllib.parse import parse_qsl
 import aiohttp
 from yarl import URL
 
-from yomihime_game_link_sdk.declarations import SourceDeclaration
-from yomihime_game_link_sdk.errors import SourceHttpError
-from yomihime_game_link_sdk.services import HttpRequest, HttpResponse
-
 from ..core.contracts.validation_boundary import validate_contract
+from ..services.runtime_effect_gate import (
+    check_current_effect,
+    current_effect_guard,
+    run_effect,
+)
+from ..yomihime_game_link_sdk.declarations import SourceDeclaration
+from ..yomihime_game_link_sdk.errors import SourceHttpError
+from ..yomihime_game_link_sdk.services import HttpRequest, HttpResponse
 from .http import (
     CredentialExchangeRequest,
     TransportRequest,
@@ -168,7 +172,13 @@ class AioHttpTransport:
         except Exception:
             raise SourceHttpError("transport_failed") from None
 
-    async def _send(
+    async def _send(self, *args, **kwargs):
+        return await run_effect(
+            lambda: self._send_unfenced(*args, **kwargs),
+            guard=current_effect_guard() or getattr(self, "_effect_guard", None),
+        )
+
+    async def _send_unfenced(
         self,
         method: str,
         url: URL,
@@ -181,6 +191,7 @@ class AioHttpTransport:
         headers = dict(request_headers)
         headers["Accept-Encoding"] = "identity"
         # An entry count, not proof of headers sent or peer receipt.
+        check_current_effect(getattr(self, "_effect_guard", None))
         diagnostic("network_attempt")
         async with session.request(
             method,

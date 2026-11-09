@@ -2,7 +2,11 @@
 
 import unittest
 
-from modules.ff14.features.fflogs_jobs import JOBS, job_display, job_identity
+from ygl_test_subject.modules.ff14.features.fflogs_jobs import (
+    JOBS,
+    job_display,
+    job_identity,
+)
 
 
 class JobDisplayTests(unittest.TestCase):

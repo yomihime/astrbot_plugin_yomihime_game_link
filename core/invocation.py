@@ -9,14 +9,16 @@ from decimal import Decimal
 from time import monotonic
 from types import MappingProxyType
 
-from yomihime_game_link_sdk.contexts import InvocationOrigin, InvocationView
-from yomihime_game_link_sdk.declarations import (
+from ..infrastructure.sync_diagnostics import SyncDiagnostics
+from ..infrastructure.sync_diagnostics import emit as diagnostic
+from ..yomihime_game_link_sdk.contexts import InvocationOrigin, InvocationView
+from ..yomihime_game_link_sdk.declarations import (
     CommandDescriptor,
     ModuleManifest,
     PrivacyFloor,
     ToolDescriptor,
 )
-from yomihime_game_link_sdk.display import (
+from ..yomihime_game_link_sdk.display import (
     CommandsBlock,
     DisplayDocument,
     FieldsBlock,
@@ -35,22 +37,19 @@ from yomihime_game_link_sdk.display import (
     TimeValue,
     UnknownBlock,
 )
-from yomihime_game_link_sdk.errors import (
+from ..yomihime_game_link_sdk.errors import (
     AccessDenied,
     OperationTimeout,
     ParameterError,
     ServiceUnavailable,
 )
-from yomihime_game_link_sdk.results import (
+from ..yomihime_game_link_sdk.results import (
     CapabilityResult,
     ErrorCode,
     ErrorDetail,
     FactDocument,
     ResultStatus,
 )
-
-from ..infrastructure.sync_diagnostics import SyncDiagnostics
-from ..infrastructure.sync_diagnostics import emit as diagnostic
 from .context_issuer import ContextIssuer, InvalidInvocation
 from .contracts.validation import validate_parameters
 from .contracts.validation_boundary import validate_contract
@@ -925,7 +924,7 @@ class Gateway:
 
     @staticmethod
     def _rebuild_analysis(request):
-        from yomihime_game_link_sdk.results import AnalysisRequest
+        from ..yomihime_game_link_sdk.results import AnalysisRequest
 
         if request is None:
             return None

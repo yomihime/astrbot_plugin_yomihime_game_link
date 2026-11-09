@@ -10,9 +10,8 @@ from enum import StrEnum
 from types import MappingProxyType
 from typing import Literal, Mapping, Protocol, TypedDict
 
-from yomihime_game_link_sdk.contexts import InvocationView as InvocationView
-from yomihime_game_link_sdk.services import ConfigTarget as ConfigTarget
-
+from ...yomihime_game_link_sdk.contexts import InvocationView as InvocationView
+from ...yomihime_game_link_sdk.services import ConfigTarget as ConfigTarget
 from .services import ConfigPatch as ConfigPatch
 from .storage import validate_module_id as validate_module_id
 

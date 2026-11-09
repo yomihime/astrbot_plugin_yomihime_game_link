@@ -10,20 +10,23 @@ from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from modules.ff14.features.fflogs import (
+from ygl_test_subject.modules.ff14.features.fflogs import (
     FFLogsCharacterLookup,
     _assemble_catalog_rankings,
     _bounded_catalog_targets,
     _catalog_query_targets,
     _target_key,
 )
-from modules.ff14.features.fflogs_cards import character_card, percentile_text
-from modules.ff14.features.fflogs_catalog import (
+from ygl_test_subject.modules.ff14.features.fflogs_cards import (
+    character_card,
+    percentile_text,
+)
+from ygl_test_subject.modules.ff14.features.fflogs_catalog import (
     character_metadata_supported,
     parse_character_metadata,
     select_character_zones,
 )
-from modules.ff14.features.fflogs_models import (
+from ygl_test_subject.modules.ff14.features.fflogs_models import (
     CharacterRanking,
     DifficultyRecord,
     EncounterRecord,
@@ -32,6 +35,7 @@ from modules.ff14.features.fflogs_models import (
     RankingSelection,
     ZoneRecord,
 )
+
 from tests.modules.ff14 import test_fflogs as fixture
 from tests.modules.ff14 import test_fflogs_cards as catalog_fixture
 
@@ -392,7 +396,7 @@ class CatalogPolicyTests(unittest.TestCase):
 
 class BatchTests(unittest.IsolatedAsyncioTestCase):
     async def test_first_wave_covers_tiers_before_history_and_shared_deadline(self):
-        from modules.ff14.features import fflogs
+        from ygl_test_subject.modules.ff14.features import fflogs
 
         source = OutputMetadata(
             (
@@ -662,7 +666,7 @@ class BatchTests(unittest.IsolatedAsyncioTestCase):
     async def test_contradictory_actual_savage_size_or_difficulty_excludes_entire_tier(
         self,
     ):
-        from modules.ff14.features.fflogs import _character_result
+        from ygl_test_subject.modules.ff14.features.fflogs import _character_result
 
         source = OutputMetadata((zone(73, "Synthetic tier"),), (), True, (20,))
         for size, difficulty in ((4, 3), (48, 3), (8, 1)):

@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from yomihime_game_link_sdk.cards import Asset, DenseCollage, DenseCollageItem
-
+from ..yomihime_game_link_sdk.cards import Asset, DenseCollage, DenseCollageItem
 from .card_bitmap import BitmapUnavailable
 from .layout_collage import CollagePage, CollageTile
 

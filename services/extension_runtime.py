@@ -16,15 +16,6 @@ from pathlib import Path
 from typing import Protocol
 from uuid import uuid4
 
-from yomihime_game_link_sdk.contexts import InvocationView
-from yomihime_game_link_sdk.declarations import ModuleManifest, PackageManifest
-from yomihime_game_link_sdk.services import (
-    ConfigTarget,
-    ModuleFactory,
-    ModuleHandlers,
-    ModuleInstance,
-)
-
 from ..core.contracts.administration import (
     AdminAuthorizationContext,
     AdminAuthorizationDenied,
@@ -49,6 +40,14 @@ from ..infrastructure.sqlite.repositories_runtime import (
     ModuleRuntimeIntent,
     RuntimeJournalPhase,
     SQLiteModuleRuntimeRepository,
+)
+from ..yomihime_game_link_sdk.contexts import InvocationView
+from ..yomihime_game_link_sdk.declarations import ModuleManifest, PackageManifest
+from ..yomihime_game_link_sdk.services import (
+    ConfigTarget,
+    ModuleFactory,
+    ModuleHandlers,
+    ModuleInstance,
 )
 from .module_services import ModuleServicesFactory
 
@@ -385,12 +384,14 @@ class ExtensionRuntime:
         if fence is not None and fence() is not True:
             raise ExtensionCandidateUnavailable("external package owner is unavailable")
 
-    async def detach_host_package(self, candidate, *, timeout=5.0):
+    async def detach_host_package(self, candidate, *, timeout=5.0, owner_drain=None):
         """Withdraw runtime ownership without changing intents or deleting data.
 
         Pending cleanup retains the exact candidate and its source lease. A later
         call retries it; a replacement is never admitted over an unfinished stop.
         """
+        if owner_drain is not None and not callable(owner_drain):
+            raise TypeError("owner_drain must be a Core callback")
         package_id = candidate.package.package_id
         if self._external_candidates.get(package_id) is not candidate:
             return
@@ -442,6 +443,16 @@ class ExtensionRuntime:
             for owner in owners:
                 if not self._is_registered(owner):
                     continue
+                state = self.lifecycle.state(owner)
+                if (
+                    state.lifecycle is ModuleLifecycle.STOPPED
+                    and state.identity is None
+                    and not state.cleanup_pending
+                ):
+                    # A failed unpublished start can already have drained and
+                    # rolled back its exact instance, leaving only registration.
+                    stops.append((owner, None))
+                    continue
                 op_id = self._host_stop_ids.setdefault(owner, uuid4().hex)
                 identity = self.lifecycle.quiesce(
                     owner, op_id, "external_plugin_unloaded"
@@ -451,18 +462,25 @@ class ExtensionRuntime:
                 )
                 stops.append((owner, op_id))
         for owner, op_id in stops:
-            try:
-                state = await self.lifecycle.stop_candidate(
-                    owner, op_id, self._remaining(deadline)
-                )
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                raise ExtensionCleanupPending(
-                    "external package stop remains pending"
-                ) from exc
-            if state.cleanup_pending:
-                raise ExtensionCleanupPending("external package stop remains pending")
+            if op_id is not None:
+                try:
+                    state = await self.lifecycle.stop_candidate(
+                        owner, op_id, self._remaining(deadline)
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    raise ExtensionCleanupPending(
+                        "external package stop remains pending"
+                    ) from exc
+                if state.cleanup_pending:
+                    raise ExtensionCleanupPending(
+                        "external package stop remains pending"
+                    )
+            # Core-owned work can outlive its canceled Lifecycle supervisor.
+            # Stop may signal that work; drain it before resources are released.
+            if owner_drain is not None:
+                await owner_drain((owner,))
             async with self.admission.mutation(f"external-detach:{owner}"):
                 await self.prepare_detach(owner)
                 self.lifecycle.detach_stopped(owner)

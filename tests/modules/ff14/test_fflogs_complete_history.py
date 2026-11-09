@@ -14,18 +14,18 @@ from unittest.mock import patch
 from PIL import Image
 from ygl_test_subject.core.contracts.validation_boundary import validate_contract
 from ygl_test_subject.core.invocation import Gateway
-from ygl_test_subject.presentation.command_card import CommandCardRenderer
-
-from modules.ff14.features.fflogs import (
+from ygl_test_subject.modules.ff14.features.fflogs import (
     FFLogsCharacterLookup,
     _bounded_catalog_targets,
     _catalog_query_targets,
     _character_result,
     _target_key,
 )
-from modules.ff14.features.fflogs_catalog import select_character_zones
-from modules.ff14.features.fflogs_evidence import project
-from modules.ff14.features.fflogs_models import EncounterRecord
+from ygl_test_subject.modules.ff14.features.fflogs_catalog import select_character_zones
+from ygl_test_subject.modules.ff14.features.fflogs_evidence import project
+from ygl_test_subject.modules.ff14.features.fflogs_models import EncounterRecord
+from ygl_test_subject.presentation.command_card import CommandCardRenderer
+
 from tests.integration import test_bound_public_contracts as bound_fixture
 from tests.modules.ff14 import test_fflogs as public_fixture
 from tests.modules.ff14 import test_fflogs_explicit_history as explicit_fixture
@@ -256,7 +256,8 @@ class CompleteHistoryTests(unittest.IsolatedAsyncioTestCase):
 
         self.scope.http.fetch = slow
         with patch(
-            "modules.ff14.features.fflogs.monotonic", side_effect=lambda: clock[0]
+            "ygl_test_subject.modules.ff14.features.fflogs.monotonic",
+            side_effect=lambda: clock[0],
         ):
             result = await self.collect(deadline=80)
         self.assertGreater(clock[0], 15)
@@ -371,7 +372,8 @@ class CompleteHistoryTests(unittest.IsolatedAsyncioTestCase):
             origin=InvocationOrigin.COMMAND, deadline=started + 90
         )
         with patch(
-            "modules.ff14.features.fflogs.monotonic", side_effect=lambda: clock[0]
+            "ygl_test_subject.modules.ff14.features.fflogs.monotonic",
+            side_effect=lambda: clock[0],
         ):
             result = await handler.invoke(
                 context,

@@ -936,71 +936,140 @@ sys.exit(not r.wasSuccessful())
         self.assertEqual(reports[0]["origins"], reports[1]["origins"])
         self.trace.append({"V05_source_counterfactual_not_installed": reports})
 
-    async def test_counterfactual_release_stays_denied_by_production_strict_bootstrap(
+    async def test_private_sdk_release_domain_preserves_signed_integrity_and_isolation(
         self,
     ):
-        import os
-        import shutil
-        import subprocess
-        import sys
-
-        from tests.host.test_b05_sdk_bootstrap import BOOTSTRAP_CASE, SDKBootstrapTests
-
-        explicit_wheel = os.environ.get("YGL_TEST_SDK_WHEEL")
-        self.assertTrue(
-            explicit_wheel,
-            "current a12 strict control requires an explicit actual wheel",
-        )
-        wheel = Path(explicit_wheel)
-        self.assertTrue(wheel.is_file())
-        self.assertEqual(wheel.name, "yomihime_game_link_sdk-0.1.0a24-py3-none-any.whl")
+        import base64
         import hashlib
+        import importlib
+        from unittest.mock import patch
 
-        self.assertEqual(
-            hashlib.sha256(wheel.read_bytes()).hexdigest(),
-            "a0b2f61152e810b3a26febd715487d60f335108dffafba0a41d44db5208fdbb6",
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+        from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+        from ygl_test_subject.bootstrap.loader import validate_core_release
+        from ygl_test_subject.extensions.runtime_bundle import (
+            RuntimeBundleError,
+            RuntimeBundleStore,
         )
-        SDKBootstrapTests.setUpClass()
-        try:
-            fixture = SDKBootstrapTests(
-                "test_cold_and_identical_preload_work_under_arbitrary_plugin_names"
+
+        from tests.extensions.test_private_runtime_bundle import SDK, _release, _write
+
+        key = Ed25519PrivateKey.generate()
+        public = key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+        key_id = hashlib.sha256(public).hexdigest()
+        files = {
+            **SDK,
+            "main.py": b"# synthetic native shell",
+            "ygl-plugin.json": json.dumps(
+                {
+                    "schema": "ygl.plugin/1",
+                    "role": "core",
+                    "package_id": "ygl_core",
+                    "manifest": "release.json",
+                    "control_protocol": {"name": "ygl.control", "major": 1},
+                }
+            ).encode(),
+            "release-key.json": json.dumps(
+                {
+                    "algorithm": "ed25519",
+                    "key_id": key_id,
+                    "public_key_base64": base64.b64encode(public).decode(),
+                }
+            ).encode(),
+        }
+
+        def sign(raw):
+            return json.dumps(
+                {
+                    "algorithm": "ed25519",
+                    "key_id": key_id,
+                    "signature_base64": base64.b64encode(key.sign(raw)).decode(),
+                }
+            ).encode()
+
+        with tempfile.TemporaryDirectory(prefix="private-version-domain-") as work:
+            selected = Path(work)
+            _write(selected, files)
+            release = _release(files, package_id="ygl_core")
+            raw = json.dumps(release).encode()
+            signature = sign(raw)
+            store = RuntimeBundleStore()
+            active = store.capture(selected, release, kind="core")
+            self.addCleanup(active.release)
+            self.assertEqual(
+                validate_core_release(raw, signature, active)["role"], "core"
             )
-            plugin = fixture._plugin("actual-a12-strict-control")
-            fixture._run_bootstrap(plugin, "cold")
-            # Official validated Host projection, never an SDK installation.
-            with tempfile.TemporaryDirectory(prefix="strict-counter-") as work:
-                selected = Path(work)
-                shutil.copytree(
-                    ROOT / "yomihime_game_link_sdk",
-                    selected / "yomihime_game_link_sdk",
-                    ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+            canonical_version = importlib.import_module(
+                "yomihime_game_link_sdk.version"
+            )
+            original_release = canonical_version.__version__
+            # A preloaded global graph, even with foreign descriptive release/ABI
+            # markers, neither binds nor substitutes for the captured private SDK.
+            with (
+                patch.object(ygl, "__version__", "99.0.0"),
+                patch.object(ygl, "MODULE_ABI_VERSION", "9.0"),
+                patch.object(canonical_version, "__version__", "99.0.0"),
+                patch.object(canonical_version, "MODULE_ABI_VERSION", "9.0"),
+            ):
+                active.mount_core()
+                current = importlib.import_module(
+                    active.namespace + ".yomihime_game_link_sdk"
                 )
-                marker = selected / "yomihime_game_link_sdk/version.py"
-                original = marker.read_bytes()
-                changed = original.replace(b"0.1.0a24", b"0.1.0a25")
-                self.assertNotEqual(changed, original)
-                marker.write_bytes(changed)
-                fixture._run_bootstrap(plugin, "different", selected)
-            # Isolate the package release guard from origin/hash rejection:
-            # Current canonical preloads, same validated plugin origin, only
-            # the descriptive loaded package release marker becomes a25.
-            probe = BOOTSTRAP_CASE.replace(
-                '__version__ = "9.9.9"', '__version__ = "0.1.0a25"'
+                self.assertEqual(current.__version__, original_release)
+                self.assertEqual(current.MODULE_ABI_VERSION, "2.0")
+                self.assertIsNot(current.ConfigSnapshot, ygl.ConfigSnapshot)
+                self.assertEqual(ygl.__version__, "99.0.0")
+                self.assertEqual(
+                    validate_core_release(raw, signature, active)["role"], "core"
+                )
+            self.assertEqual(ygl.__version__, original_release)
+
+            marker = "yomihime_game_link_sdk/version.py"
+            changed = dict(files)
+            changed[marker] = files[marker].replace(
+                original_release.encode(), b"0.1.0a25"
             )
-            self.assertNotEqual(probe, BOOTSTRAP_CASE)
-            rejected = subprocess.run(
-                [sys.executable, "-I", "-B", "-c", probe, str(plugin), "unsupported"],
-                cwd=ROOT,
-                capture_output=True,
-                text=True,
-                encoding="utf8",
-                timeout=30,
+            self.assertNotEqual(changed[marker], files[marker])
+            _write(selected, changed)
+            # An SDK release-string edit is still a payload edit: the prior
+            # inventory cannot capture it, and the active graph stays immutable.
+            with self.assertRaises(RuntimeBundleError):
+                store.capture(selected, release, kind="core")
+            self.assertEqual(active.read_resource(marker), files[marker])
+            self.assertEqual(current.__version__, original_release)
+            with self.assertRaises(RuntimeBundleError):
+                validate_core_release(raw + b" ", signature, active)
+
+            candidate_release = _release(changed, package_id="ygl_core")
+            candidate_release["release"] = "1.0.1"
+            candidate_raw = json.dumps(candidate_release).encode()
+            candidate = store.capture(selected, candidate_release, kind="core")
+            self.addCleanup(candidate.release)
+            with self.assertRaises(RuntimeBundleError):
+                validate_core_release(candidate_raw, signature, candidate)
+            # A newly authenticated private payload may carry a different
+            # descriptive SDK release without changing the module ABI domain.
+            self.assertEqual(
+                validate_core_release(candidate_raw, sign(candidate_raw), candidate)[
+                    "role"
+                ],
+                "core",
             )
-            self.assertEqual(rejected.returncode, 0, rejected.stderr)
-        finally:
-            SDKBootstrapTests.tearDownClass()
+            candidate.mount_core()
+            newer = importlib.import_module(
+                candidate.namespace + ".yomihime_game_link_sdk"
+            )
+            self.assertEqual(newer.__version__, "0.1.0a25")
+            self.assertEqual(newer.MODULE_ABI_VERSION, current.MODULE_ABI_VERSION)
+            self.assertIsNot(newer.ConfigSnapshot, current.ConfigSnapshot)
+            self.assertIsNot(newer.ConfigSnapshot, ygl.ConfigSnapshot)
+            self.assertEqual(current.__version__, original_release)
+            self.assertEqual(active.read_resource(marker), files[marker])
+            self.assertEqual(
+                validate_core_release(raw, signature, active)["role"], "core"
+            )
         self.trace.append(
-            "V07_explicit_actual_a7_validated_Host_projection_current_positive_a11_source_and_release_marker_strict_denial_no_install"
+            "V07_private_SDK_release_descriptive_canonical_preload_ignored_payload_and_raw_signature_tamper_rejected_signed_new_graph_isolated"
         )
 
     async def test_parsed_module_owned_tool_all_output_statuses(self):

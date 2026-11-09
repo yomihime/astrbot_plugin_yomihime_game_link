@@ -11,10 +11,9 @@ from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 
-from yomihime_game_link_sdk.services import ConfigTarget
-
 from ...core.contracts.validation_boundary import validate_contract
 from ...core.ports import ModuleRegistrationLookup
+from ...yomihime_game_link_sdk.services import ConfigTarget
 from ..files import SafeFileStore
 from ..secret_store import SQLiteSecretStore
 from .database import SQLiteDatabase

@@ -644,8 +644,13 @@ class ReleaseBuildTests(unittest.TestCase):
             sdk_build_root = work_root / "sdk-build"
             sdk_build_root.mkdir()
             sdk_wheel = build_sdk_wheel(sdk_build_root, ROOT)
-            archive_path, _, _ = build_release(
+            from cryptography.hazmat.primitives.asymmetric.ed25519 import (
+                Ed25519PrivateKey,
+            )
+
+            archive_path, _ = build_release(
                 sdk_wheel=sdk_wheel,
+                signing_key=Ed25519PrivateKey.generate(),
                 output_dir=work_root / "artifacts",
                 repository_root=ROOT,
             )

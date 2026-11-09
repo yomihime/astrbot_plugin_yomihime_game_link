@@ -1,6 +1,6 @@
 """FF14-owned diagnostic field whitelist, not runtime authority."""
 
-from yomihime_game_link_sdk import DiagnosticDeclaration
+from ....yomihime_game_link_sdk import DiagnosticDeclaration
 
 
 def text(limit=160, nullable=False, values=None):

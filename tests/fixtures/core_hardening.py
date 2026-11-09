@@ -2,7 +2,8 @@
 
 The child probe is deliberately isolated: it adds the freshly installed SDK
 site before importing the repository Core, then extracts the example only from
-that installed package. Test doubles below the Core boundary model only the
+that installed package. A test-only binding shares that exact installed graph
+under the isolated Core namespace; production uses its captured private graph. Test doubles below the Core boundary model only the
 host's renderer, message port, validator, codec, and clock.
 """
 
@@ -104,6 +105,22 @@ def _isolated_probe_main() -> None:
     plugin = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = plugin
     spec.loader.exec_module(plugin)
+    # Development wheel examples retain absolute SDK imports. Bind every exact
+    # installed concrete SDK module under this private TEST namespace before
+    # any Core receiver imports; production private capture remains unchanged.
+    helper_spec = importlib.util.spec_from_file_location(
+        "_ygl_hardening_installed_sdk_fixture",
+        repository_root / "tests/fixtures/b05_runtime.py",
+    )
+    helper = importlib.util.module_from_spec(helper_spec)
+    sys.modules[helper_spec.name] = helper
+    helper_spec.loader.exec_module(helper)
+    private_sdk_names = helper.bind_installed_sdk_test_graph(spec.name, site_root)
+    if (
+        not private_sdk_names
+        or sys.modules[spec.name + ".yomihime_game_link_sdk"] is not sdk
+    ):
+        raise AssertionError("installed SDK was not bound into the private test graph")
 
     from ygl_core_hardening_subject.core.contracts import contexts as core_contexts
     from ygl_core_hardening_subject.core.contracts import services as core_services

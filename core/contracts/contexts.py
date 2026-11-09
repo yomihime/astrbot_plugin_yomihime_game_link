@@ -9,15 +9,15 @@ from __future__ import annotations
 import math
 import re
 
-from yomihime_game_link_sdk.contexts import (
+from ...yomihime_game_link_sdk.contexts import (
     InvocationConversationKind as InvocationConversationKind,
 )
-from yomihime_game_link_sdk.contexts import InvocationOrigin as InvocationOrigin
-from yomihime_game_link_sdk.contexts import (
+from ...yomihime_game_link_sdk.contexts import InvocationOrigin as InvocationOrigin
+from ...yomihime_game_link_sdk.contexts import (
     InvocationSubscriptionScope as InvocationSubscriptionScope,
 )
-from yomihime_game_link_sdk.contexts import InvocationView as InvocationView
-from yomihime_game_link_sdk.contexts import MessageContext as MessageContext
+from ...yomihime_game_link_sdk.contexts import InvocationView as InvocationView
+from ...yomihime_game_link_sdk.contexts import MessageContext as MessageContext
 
 _IDENTIFIER = re.compile("[a-z][a-z0-9_]*(?:[.-][a-z0-9_]+)*\\Z")
 _GLOBAL_MODULE_ID = re.compile(

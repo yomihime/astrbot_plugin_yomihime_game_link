@@ -12,12 +12,18 @@ from types import SimpleNamespace
 
 from ygl_test_subject.services.core_runtime import CoreRuntime
 
+from tests.fixtures.runtime_cleanup import terminate_and_drain
 from tests.host import test_astrbot_runtime as fixture
 from tests.modules.ff14.test_news import page, row
 from yomihime_game_link_sdk.services import HttpResponse
 
 
 class ManualPumpCore(CoreRuntime):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        # Exact manual ticks need deterministic due times in this fixture.
+        self.scheduler.random_source = lambda: 0.5
+
     async def _pump_loop(self):
         # Test owns explicit ticks; all production scheduler services remain real.
         await asyncio.Future()
@@ -61,7 +67,7 @@ class FF14NewsRuntimeTests(unittest.IsolatedAsyncioTestCase):
             http_transport_factory=lambda: self.transport,
         )
         await self.runtime.initialize()
-        self.addAsyncCleanup(self.runtime.terminate)
+        self.addAsyncCleanup(terminate_and_drain, self.runtime)
         self.assertTrue(self.runtime.ready)
         self.core = self.runtime.core_runtime
         self.runtime._message_port._image_factory = lambda content: SimpleNamespace(
@@ -200,7 +206,7 @@ class FF14NewsRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.now += timedelta(seconds=900)
         await self.tick()
         self.assertEqual(len(self.context.calls), 1)
-        await self.runtime.terminate()
+        await terminate_and_drain(self.runtime)
 
         def core_factory(**kwargs):
             return ManualPumpCore(**kwargs, utc_clock=lambda: self.now)
@@ -211,7 +217,7 @@ class FF14NewsRuntimeTests(unittest.IsolatedAsyncioTestCase):
             http_transport_factory=lambda: self.transport,
         )
         await self.runtime.initialize()
-        self.addAsyncCleanup(self.runtime.terminate)
+        self.addAsyncCleanup(terminate_and_drain, self.runtime)
         self.core = self.runtime.core_runtime
         await self.core._configured_public_subscriptions.reconcile()
         self.assertFalse(self.core._configured_public_subscriptions.failures)

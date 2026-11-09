@@ -15,18 +15,18 @@ from ygl_test_subject.core.public_result import (
     preflight_error_facts,
     public_fact_strings,
 )
-
-from modules.ff14.features.fflogs import (
+from ygl_test_subject.modules.ff14.features.fflogs import (
     FFLogsCharacterLookup,
     _character_inputs,
     _error,
 )
-from modules.ff14.features.fflogs_chat import message_parameters
-from modules.ff14.features.fflogs_evidence import RequestMetrics
-from modules.ff14.features.fflogs_scope_contract import (
+from ygl_test_subject.modules.ff14.features.fflogs_chat import message_parameters
+from ygl_test_subject.modules.ff14.features.fflogs_evidence import RequestMetrics
+from ygl_test_subject.modules.ff14.features.fflogs_scope_contract import (
     SHAPE_QUERY,
     InvocationObservation,
 )
+
 from tests.modules.ff14 import test_fflogs as f
 from yomihime_game_link_sdk.contexts import InvocationOrigin
 from yomihime_game_link_sdk.errors import SourceHttpError
@@ -970,7 +970,7 @@ class ObservationTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(handler.close)
         timeout = asyncio.timeout
         with patch(
-            "modules.ff14.features.fflogs.asyncio.timeout",
+            "ygl_test_subject.modules.ff14.features.fflogs.asyncio.timeout",
             side_effect=lambda _: timeout(0.05),
         ):
             result = await handler.invoke(WEB, TARGET)

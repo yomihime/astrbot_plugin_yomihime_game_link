@@ -3,13 +3,12 @@
 from collections.abc import Mapping
 from math import isfinite
 
-from yomihime_game_link_sdk.declarations import (
+from ...yomihime_game_link_sdk.declarations import (
     CapabilityDescriptor as CapabilityDescriptor,
 )
-from yomihime_game_link_sdk.errors import ParameterError as ParameterError
-from yomihime_game_link_sdk.storage import JsonObject as JsonObject
-from yomihime_game_link_sdk.storage import JsonValue as JsonValue
-
+from ...yomihime_game_link_sdk.errors import ParameterError as ParameterError
+from ...yomihime_game_link_sdk.storage import JsonObject as JsonObject
+from ...yomihime_game_link_sdk.storage import JsonValue as JsonValue
 from .storage import freeze_json as freeze_json
 
 

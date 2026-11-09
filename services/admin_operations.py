@@ -10,15 +10,6 @@ from functools import wraps
 from math import isfinite
 from types import MappingProxyType
 
-from yomihime_game_link_sdk.contexts import InvocationView
-from yomihime_game_link_sdk.declarations import (
-    ConfigUpdateMode,
-    ModuleManifest,
-    PackageManifest,
-)
-from yomihime_game_link_sdk.services import ConfigSnapshot, ConfigTarget
-from yomihime_game_link_sdk.storage import SecretMetadataState
-
 from ..core.contracts.administration import (
     AdminAuthorizationContext,
     AdminAuthorizationDenied,
@@ -50,6 +41,14 @@ from ..infrastructure.managed_key_manager import ManagedKeyConflict, ManagedKeyM
 from ..infrastructure.secret_store import SQLiteSecretStore
 from ..infrastructure.sqlite.database import SQLiteDatabase
 from ..infrastructure.sqlite.repositories_config import SQLiteConfigRepository
+from ..yomihime_game_link_sdk.contexts import InvocationView
+from ..yomihime_game_link_sdk.declarations import (
+    ConfigUpdateMode,
+    ModuleManifest,
+    PackageManifest,
+)
+from ..yomihime_game_link_sdk.services import ConfigSnapshot, ConfigTarget
+from ..yomihime_game_link_sdk.storage import SecretMetadataState
 from .admin_authorization import AdminAuthorizationService
 from .configuration.defaults import (
     CORE_CONFIG_FIELDS,

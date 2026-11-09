@@ -11,31 +11,31 @@ from threading import RLock
 from time import monotonic
 from weakref import WeakSet
 
-from yomihime_game_link_sdk.contexts import InvocationOrigin
-from yomihime_game_link_sdk.display import DisplayDocument
-from yomihime_game_link_sdk.errors import (
-    AccessDenied,
-    CacheUnavailable,
-    ParameterError,
-    ServiceUnavailable,
-    SourceHttpError,
-)
-from yomihime_game_link_sdk.jobs import JobRequest, JobResultPage
-from yomihime_game_link_sdk.services import ResourceCacheClass
-from yomihime_game_link_sdk.storage import CacheVisibility, OwnerScope
-
 from ..core.contracts.validation import _validate
 from ..core.contracts.validation_boundary import validate_contract
 from ..core.ports_jobs import JobError, JobRunProof, declaration_digest
 from ..core.public_errors import public_boundary
-from ..core.task_scope import ScopeDeadlineExceeded, TaskScope
+from ..core.task_scope import ScopeDeadlineExceeded, ScopeStopTimeout, TaskScope
 from ..infrastructure.sqlite.repositories_jobs import (
     SQLiteJobRepository,
     json_object,
     object_value,
     view,
 )
+from ..yomihime_game_link_sdk.contexts import InvocationOrigin
+from ..yomihime_game_link_sdk.display import DisplayDocument
+from ..yomihime_game_link_sdk.errors import (
+    AccessDenied,
+    CacheUnavailable,
+    ParameterError,
+    ServiceUnavailable,
+    SourceHttpError,
+)
+from ..yomihime_game_link_sdk.jobs import JobRequest, JobResultPage
+from ..yomihime_game_link_sdk.services import ResourceCacheClass
+from ..yomihime_game_link_sdk.storage import CacheVisibility, OwnerScope
 from .identity import TrustedIngressPrincipalProvisioner
+from .runtime_effect_gate import check_current_effect, run_effect
 
 
 def _now():
@@ -66,6 +66,7 @@ class _Check:
         self.service, self.check, self.lease = service, check, lease
 
     def __call__(self):
+        check_current_effect()
         if self.service._closed:
             raise JobError("job_service_closed")
         self.check()
@@ -215,10 +216,17 @@ class JobsService:
         self._tasks, self._runs = {}, {}
         self._settlements = set()
         self._settling = {}
+        self._task_modules = {}
+        self._claims = {}
+        self._settlement_modules = {}
+        self._draining_modules = set()
+        self._module_drains = {}
         self._driver = None
         issuer.register_job_source(self._source)
 
     def _module(self, module_id):
+        if module_id in self._draining_modules:
+            raise JobError("job_module_unavailable")
         try:
             module = self.registry.snapshot().module(module_id)
             self.lifecycle.guard(module_id, epoch=module.epoch)
@@ -406,6 +414,10 @@ class JobsService:
                     active["revoked"] = True
                     if active["scope"] is not None:
                         active["scope"].cancel()
+                    execution = active.get("execution")
+                    if execution is not None and not active["cancel_requested"]:
+                        active["cancel_requested"] = True
+                        execution.cancel()
                 task = self._tasks.get(job_id)
                 if task is not None:
                     task.cancel()
@@ -471,22 +483,33 @@ class JobsService:
     def _busy_jobs(self):
         # A cancelled supervisor can finish before its resistant handler.
         # Retain that run, and an unstarted claim's settlement, as worker slots.
-        return self._tasks.keys() | self._runs.keys() | self._settling.keys()
+        return (
+            self._tasks.keys()
+            | self._runs.keys()
+            | self._settling.keys()
+            | self._claims.keys()
+        )
 
     async def _drive(self):
         while not self._closed:
             await self._wake.wait()
             self._wake.clear()
             await self.repository.expire(_now())
-            # At most len(busy) leading rows can be waiting retries. Looking
-            # through max_running rows leaves every free slot a fair candidate.
-            for candidate in await self.repository.queued(self.max_running):
+            if self._draining_modules:
+                candidates = await self.repository.queued(
+                    self.max_running, exclude_modules=tuple(self._draining_modules)
+                )
+            else:
+                candidates = await self.repository.queued(self.max_running)
+            for candidate in candidates:
                 busy = self._busy_jobs()
                 if self._closed or len(busy) >= self.max_running:
                     break
-                if candidate["job_id"] in busy:
+                if (
+                    candidate["job_id"] in busy
+                    or candidate["module_id"] in self._draining_modules
+                ):
                     continue
-                row = None
                 try:
                     descriptor = self._descriptor(
                         candidate["module_id"], candidate["handler_id"]
@@ -497,21 +520,16 @@ class JobsService:
                     ):
                         raise JobError("job_declaration_changed")
                     module = self._module(candidate["module_id"])
-                    check = _Check(
-                        self,
-                        lambda: self.lifecycle.guard(
-                            module.module_id, epoch=module.epoch
-                        ),
+                    task = asyncio.create_task(
+                        self._claim_and_start(candidate, descriptor, module),
+                        name="ygl:job-claim",
                     )
-                    row = await self.repository.claim(candidate, _now(), check)
-                    if row is None:
-                        continue
-                    work = self.lifecycle.scope(module.module_id).create_task(
-                        self._run(row, descriptor), name="job:" + row["job_id"]
-                    )
-                    self._tasks[row["job_id"]] = work
-                    work.add_done_callback(
-                        lambda task, record=row: self._done(record, task)
+                    record = {"module_id": candidate["module_id"], "task": task}
+                    self._claims[candidate["job_id"]] = record
+                    task.add_done_callback(
+                        lambda work, row=candidate, owned=record: self._claim_done(
+                            row, owned, work
+                        )
                     )
                 except asyncio.CancelledError:
                     raise
@@ -521,52 +539,240 @@ class JobsService:
                         if isinstance(error, JobError)
                         else "job_admission_failed"
                     )
-                    if row is not None:
-                        await self.repository.finish(
-                            row["job_id"], row["run_token"], "failed", {}, code, _now()
-                        )
-                    else:
+                    if candidate["module_id"] not in self._draining_modules:
                         await self.repository.reject_queued(
                             candidate["job_id"], code, _now()
                         )
 
+    def _claim_done(self, row, record, task):
+        if self._claims.get(row["job_id"]) is record:
+            self._claims.pop(row["job_id"])
+        if not task.cancelled():
+            task.exception()
+        self._wake.set()
+
+    async def _claim_and_start(self, candidate, descriptor, module):
+        row = None
+        try:
+            check = _Check(
+                self,
+                lambda: (
+                    self._module(module.module_id),
+                    self.lifecycle.guard(module.module_id, epoch=module.epoch),
+                ),
+            )
+            row = await self.repository.claim(candidate, _now(), check)
+            if row is None:
+                return
+            # The claim can commit just before a fence while its continuation
+            # is delayed. Never adopt that row into a successor lifecycle scope.
+            check()
+            work = self.lifecycle.scope(module.module_id).create_task(
+                self._run(row, descriptor), name="job:" + row["job_id"]
+            )
+            self._tasks[row["job_id"]] = work
+            self._task_modules[row["job_id"]] = row["module_id"]
+            work.add_done_callback(lambda task, record=row: self._done(record, task))
+        except asyncio.CancelledError:
+            if row is not None:
+                await asyncio.shield(
+                    self._queue_terminal(row, "interrupted", {}, "job_interrupted")
+                )
+            raise
+        except Exception as error:
+            if row is not None:
+                await asyncio.shield(
+                    self._queue_terminal(row, "interrupted", {}, "job_interrupted")
+                )
+            elif (
+                candidate["module_id"] not in self._draining_modules
+                and not self._closed
+            ):
+                code = (
+                    error.code
+                    if isinstance(error, JobError)
+                    else "job_admission_failed"
+                )
+                await self.repository.reject_queued(candidate["job_id"], code, _now())
+
+    def _queue_terminal(self, row, status, summary, error, *, check=None, active=None):
+        task = asyncio.create_task(
+            self.repository.finish(
+                row["job_id"],
+                row["run_token"],
+                status,
+                summary,
+                error,
+                _now(),
+                check=check,
+            ),
+            name="ygl:job-terminal",
+        )
+        self._settlements.add(task)
+        self._settling[row["job_id"]] = task
+        self._settlement_modules[task] = row["module_id"]
+        if active is not None:
+            active["settlements"].add(task)
+
+        def settled(work):
+            self._settlements.discard(work)
+            self._settlement_modules.pop(work, None)
+            if self._settling.get(row["job_id"]) is work:
+                self._settling.pop(row["job_id"], None)
+            if not work.cancelled():
+                work.exception()
+            self._wake.set()
+
+        task.add_done_callback(settled)
+        return task
+
+    def fence_modules(self, module_ids):
+        """Core composition only: fence exact owners synchronously, before SQL."""
+        owners = frozenset(module_ids)
+        with self._fence_lock:
+            self._draining_modules.update(owners)
+            for active in self._runs.values():
+                if active["module_id"] not in owners:
+                    continue
+                active["revoked"] = True
+                if active["scope"] is not None:
+                    active["scope"].cancel()
+                execution = active.get("execution")
+                if execution is not None and not active["cancel_requested"]:
+                    active["cancel_requested"] = True
+                    execution.cancel()
+            for job_id, task in self._tasks.items():
+                if self._task_modules.get(job_id) in owners and not task.cancelling():
+                    task.cancel()
+        self._wake.set()
+
+    async def drain_modules(self, module_ids):
+        """Await only these owners' actual callbacks and terminal SQL, shielded."""
+        owners = frozenset(module_ids)
+        self.fence_modules(owners)
+        task = self._module_drains.get(owners)
+        if task is None:
+            task = asyncio.create_task(
+                self._drain_modules_owned(owners), name="ygl:jobs-owner-drain"
+            )
+            self._module_drains[owners] = task
+        await asyncio.shield(task)
+
+    async def _drain_modules_owned(self, owners):
+        current = asyncio.current_task()
+        while True:
+            # Flush supervisor callbacks which can create unstarted settlements.
+            await asyncio.sleep(0)
+            tasks = {
+                task
+                for job_id, task in self._tasks.items()
+                if self._task_modules.get(job_id) in owners
+            }
+            tasks.update(
+                task
+                for task, owner in self._settlement_modules.items()
+                if owner in owners
+            )
+            tasks.update(
+                record["task"]
+                for record in self._claims.values()
+                if record["module_id"] in owners
+            )
+            active = [run for run in self._runs.values() if run["module_id"] in owners]
+            for run in active:
+                cleanup = run.get("cleanup")
+                if cleanup is not None:
+                    tasks.add(cleanup)
+                elif run.get("execution") is not None:
+                    tasks.add(run["execution"])
+            tasks.discard(current)
+            if not tasks and not active:
+                await self._recover_modules(owners)
+                return
+            pending = {task for task in tasks if not task.done()}
+            if pending:
+                await asyncio.shield(asyncio.gather(*pending, return_exceptions=True))
+
+    async def _recover_modules(self, owners):
+        # Terminal callbacks can finish with a worker error. Physical quiet is
+        # necessary but not sufficient: repair these exact owners durably before
+        # publication, using the still-current Core's ordinary guarded SQL path.
+        service = self
+
+        class OwnerFence:
+            def __call__(self):
+                if not owners <= service._draining_modules:
+                    raise JobError("job_owner_changed")
+
+            @contextmanager
+            def fence(self):
+                with service._fence_lock:
+                    self()
+                    yield
+
+        check = OwnerFence()
+        while True:
+            gate = getattr(self, "_shutdown_gate", None)
+            if gate is not None:
+                with gate.kernel.lock:
+                    record = gate.kernel._record(gate.scope)
+                    if record.token == gate.identity.core_token and record.fenced:
+                        # The original fixed whole-Core repair runs only after
+                        # all physical jobs drain; no package successor can open.
+                        return
+            try:
+                await self.repository.recover_modules(_now(), owners, check=check)
+                return
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # Keep the original owner drain task and code/resource leases.
+                # A database failure never becomes package OLD_QUIET.
+                await asyncio.sleep(0.05)
+
+    def resume_modules(self, module_ids):
+        """Core calls only after replacement ACTIVE and exact gate validation."""
+        owners = frozenset(module_ids)
+        with self._fence_lock:
+            if any(
+                not task.done()
+                for key, task in self._module_drains.items()
+                if key & owners
+            ):
+                raise JobError("job_cleanup_pending")
+            self._draining_modules.difference_update(owners)
+            for key in tuple(self._module_drains):
+                if key <= owners:
+                    self._module_drains.pop(key)
+        self._wake.set()
+
     def _done(self, row, task):
         job_id = row["job_id"]
         owned = self._tasks.get(job_id) is task
-        if owned:
+        if owned and job_id not in self._runs:
             self._tasks.pop(job_id)
+            self._task_modules.pop(job_id, None)
         if not task.cancelled():
             task.exception()
         if owned and not row.get("_entered"):
-            cleanup = asyncio.create_task(
-                self.repository.finish(
-                    job_id,
-                    row["run_token"],
-                    "interrupted",
-                    {},
-                    "job_interrupted",
-                    _now(),
-                ),
-                name="ygl:job-unstarted",
-            )
-            self._settlements.add(cleanup)
-            self._settling[job_id] = cleanup
-
-            def settled(work):
-                self._settlements.discard(work)
-                if self._settling.get(job_id) is work:
-                    self._settling.pop(job_id)
-                if not work.cancelled():
-                    work.exception()
-                self._wake.set()
-
-            cleanup.add_done_callback(settled)
+            self._queue_terminal(row, "interrupted", {}, "job_interrupted")
         self._wake.set()
 
     async def _run(self, row, descriptor):
         row["_entered"] = True
         invocation, lease = None, None
-        active = {"token": row["run_token"], "revoked": False, "scope": None}
+        active = {
+            "token": row["run_token"],
+            "module_id": row["module_id"],
+            "supervisor": self._tasks.get(row["job_id"]),
+            "revoked": False,
+            "scope": None,
+            "execution": None,
+            "work": None,
+            "cancel_requested": False,
+            "cleanup": None,
+            "settlements": set(),
+        }
         self._runs[row["job_id"]] = active
         deadline = monotonic() + descriptor.timeout_seconds
 
@@ -606,32 +812,43 @@ class JobsService:
             )
             active["scope"] = scope
             control = _Control(self, row, invocation, check)
-            summary = await scope.await_result(
-                module.handlers.jobs[row["handler_id"]].run(
+
+            async def execute_handler():
+                active["execution"] = asyncio.current_task()
+                if active["revoked"] or row["module_id"] in self._draining_modules:
+                    raise JobError("job_run_revoked")
+                return await module.handlers.jobs[row["handler_id"]].run(
                     invocation, object_value(row["parameters_json"]), control
                 )
+
+            work = asyncio.create_task(
+                scope.await_result(run_effect(execute_handler)),
+                name="ygl:job-owned-work",
             )
+            active["work"] = work
+            work.add_done_callback(
+                lambda task: None if task.cancelled() else task.exception()
+            )
+            summary = await asyncio.shield(work)
             check()
-            await self.repository.finish(
-                row["job_id"],
-                row["run_token"],
-                "succeeded",
-                summary,
-                None,
-                _now(),
-                check=check,
+            await asyncio.shield(
+                self._queue_terminal(
+                    row, "succeeded", summary, None, check=check, active=active
+                )
             )
         except asyncio.CancelledError:
-            await self.repository.finish(
-                row["job_id"],
-                row["run_token"],
-                "interrupted",
-                {},
-                "job_interrupted",
-                _now(),
+            await asyncio.shield(
+                self._queue_terminal(
+                    row, "interrupted", {}, "job_interrupted", active=active
+                )
             )
             raise
         except Exception as error:
+            if isinstance(error, (ScopeDeadlineExceeded, ScopeStopTimeout)):
+                execution = active.get("execution")
+                if execution is not None and not active["cancel_requested"]:
+                    active["cancel_requested"] = True
+                    execution.cancel()
             code = (
                 error.code
                 if isinstance(error, JobError)
@@ -641,29 +858,52 @@ class JobsService:
                 if isinstance(error, (CacheUnavailable, SourceHttpError))
                 else "job_execution_failed"
             )
-            await self.repository.finish(
-                row["job_id"], row["run_token"], "failed", {}, code, _now()
+            await asyncio.shield(
+                self._queue_terminal(row, "failed", {}, code, active=active)
             )
         finally:
             active["revoked"] = True
+            cleanup = asyncio.create_task(
+                self._retire_run(row, active, invocation), name="ygl:job-run-cleanup"
+            )
+            active["cleanup"] = cleanup
+            cleanup.add_done_callback(
+                lambda task: None if task.cancelled() else task.exception()
+            )
+            # Cancellation hands cleanup to the retained owner immediately;
+            # Lifecycle must be free to run instance.stop, which can signal a
+            # resistant handler. Package drain still waits this exact task.
+            if not asyncio.current_task().cancelling():
+                await asyncio.shield(cleanup)
+
+    async def _retire_run(self, row, active, invocation):
+        # This owned task is never canceled with the module's supervisor. Its
+        # scope retains resistant actual handlers through repeated stop waits.
+        try:
+            if active["scope"] is not None:
+                await active["scope"].stop()
+            if active["work"] is not None:
+                await asyncio.gather(active["work"], return_exceptions=True)
+            if active["settlements"]:
+                await asyncio.gather(*active["settlements"], return_exceptions=True)
+        finally:
             try:
-                if active["scope"] is not None:
-                    await active["scope"].stop()
+                if invocation is not None and self.resources is not None:
+                    await self.resources.release_invocation_pins(
+                        invocation.invocation_id
+                    )
             finally:
-                try:
-                    if invocation is not None and self.resources is not None:
-                        await self.resources.release_invocation_pins(
-                            invocation.invocation_id
-                        )
-                finally:
-                    if invocation is not None:
-                        try:
-                            self.issuer.release(invocation)
-                        except Exception:
-                            pass
-                    if self._runs.get(row["job_id"]) is active:
-                        self._runs.pop(row["job_id"])
-                    self._wake.set()
+                if invocation is not None:
+                    try:
+                        self.issuer.release(invocation)
+                    except Exception:
+                        pass
+                if self._runs.get(row["job_id"]) is active:
+                    self._runs.pop(row["job_id"])
+                if self._tasks.get(row["job_id"]) is active["supervisor"]:
+                    self._tasks.pop(row["job_id"], None)
+                    self._task_modules.pop(row["job_id"], None)
+                self._wake.set()
 
     def stop_accepting(self):
         """Revoke execution/commit authority without waiting for physical work."""
@@ -675,6 +915,10 @@ class JobsService:
                 active["revoked"] = True
                 if active["scope"] is not None:
                     active["scope"].cancel()
+                execution = active.get("execution")
+                if execution is not None and not active["cancel_requested"]:
+                    active["cancel_requested"] = True
+                    execution.cancel()
             if self._driver is not None:
                 self._driver.cancel()
             for task in self._tasks.values():
@@ -701,7 +945,13 @@ class JobsService:
             await asyncio.wait(
                 tuple(self._settlements), timeout=TaskScope.DEFAULT_CLEANUP_TIMEOUT
             )
-        await self.repository.recover(_now())
+        shutdown_gate = getattr(self, "_shutdown_gate", None)
+        if shutdown_gate is not None:
+            if self._busy_jobs() or self._settlements:
+                return False
+            await self.repository.recover_after_quiet(_now(), core_gate=shutdown_gate)
+        else:
+            await self.repository.recover(_now())
         self._close_recovered = True
         if not self._busy_jobs() and not self._settlements:
             self.issuer.unregister_job_source(self._source)

@@ -12,7 +12,8 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
 
-from yomihime_game_link_sdk.display import (
+from ..core.contracts.validation_boundary import validate_contract
+from ..yomihime_game_link_sdk.display import (
     CommandsBlock,
     DisplayDocument,
     FieldsBlock,
@@ -29,8 +30,6 @@ from yomihime_game_link_sdk.display import (
     TimeValue,
     UnknownBlock,
 )
-
-from ..core.contracts.validation_boundary import validate_contract
 
 _TRUNCATION_NOTICE = "[内容已截断]"
 

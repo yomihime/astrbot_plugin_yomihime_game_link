@@ -4,9 +4,8 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from yomihime_game_link_sdk import cards
-from yomihime_game_link_sdk.results import ErrorCode
-
+from ....yomihime_game_link_sdk import cards
+from ....yomihime_game_link_sdk.results import ErrorCode
 from ..presentation import ff14_card
 from ..query_resolution import MarketQuery
 from .market_models import Listing, Quote, ScopeOutcome

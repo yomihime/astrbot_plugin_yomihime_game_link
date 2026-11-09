@@ -7,7 +7,7 @@ raw exception handler, so neither cause nor context retains dependency data.
 from functools import wraps
 from inspect import iscoroutinefunction
 
-from yomihime_game_link_sdk.errors import (
+from ..yomihime_game_link_sdk.errors import (
     AccessDenied,
     CacheUnavailable,
     InvalidInvocation,
@@ -18,7 +18,6 @@ from yomihime_game_link_sdk.errors import (
     SourceHttpError,
     UniqueConstraintViolation,
 )
-
 from .task_scope import ScopeClosedError, ScopeDeadlineExceeded, ScopeStaleError
 
 

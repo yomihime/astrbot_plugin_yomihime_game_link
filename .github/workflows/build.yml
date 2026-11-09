@@ -244,15 +244,15 @@ jobs:
           tests.packaging.test_release_build
           tests.packaging.test_runtime_dependencies
 
-      - name: Build plugin and SDK artifacts
+      - name: Build complete test-signed Core candidate
         env:
           RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || inputs.tag }}
         shell: bash
         run: |
           if [[ -z "$RELEASE_TAG" ]]; then
-            python scripts/build_release.py
+            python scripts/build_release.py --test-signing
           else
-            python scripts/build_release.py --tag "$RELEASE_TAG"
+            python scripts/build_release.py --test-signing --tag "$RELEASE_TAG"
           fi
 
       - name: Upload build artifacts
@@ -261,7 +261,6 @@ jobs:
           name: release-artifacts-${{ github.run_id }}
           path: |
             dist/*.zip
-            dist/*.whl
             dist/SHA256SUMS
           if-no-files-found: error
           retention-days: 30

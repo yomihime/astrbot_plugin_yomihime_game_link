@@ -15,26 +15,26 @@ from typing import (
     Protocol,
 )
 
-from yomihime_game_link_sdk.contexts import (
+from ..yomihime_game_link_sdk.contexts import (
     InvocationConversationKind,
     InvocationSubscriptionScope,
     InvocationView,
 )
-from yomihime_game_link_sdk.display import DigestMember
-from yomihime_game_link_sdk.errors import (
+from ..yomihime_game_link_sdk.display import DigestMember
+from ..yomihime_game_link_sdk.errors import (
     RevisionConflict as RevisionConflict,
 )
-from yomihime_game_link_sdk.errors import (
+from ..yomihime_game_link_sdk.errors import (
     UniqueConstraintViolation as UniqueConstraintViolation,
 )
-from yomihime_game_link_sdk.services import (
+from ..yomihime_game_link_sdk.services import (
     CallerCapability,
     ConfigSnapshot,
     ConfigTarget,
     HealthReport,
     ResolvedIdentity,
 )
-from yomihime_game_link_sdk.storage import (
+from ..yomihime_game_link_sdk.storage import (
     CacheEntry,
     CacheLookup,
     CollectionDescriptor,
@@ -49,14 +49,13 @@ from yomihime_game_link_sdk.storage import (
     SecretRef,
     VersionedRecord,
 )
-from yomihime_game_link_sdk.storage import JsonValue as JsonValue
-from yomihime_game_link_sdk.subscriptions import (
+from ..yomihime_game_link_sdk.storage import JsonValue as JsonValue
+from ..yomihime_game_link_sdk.subscriptions import (
     CollectionKey,
     ConversationKind,
     ConversationRef,
     Observation,
 )
-
 from .contracts.administration import (
     AdminAuthorizationContext,
     AdminAuthorizationGrant,

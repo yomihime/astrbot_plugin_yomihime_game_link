@@ -8,9 +8,8 @@ from dataclasses import dataclass, replace
 from threading import RLock
 from types import MappingProxyType
 
-from yomihime_game_link_sdk.declarations import ModuleManifest, PackageManifest
-from yomihime_game_link_sdk.services import ModuleHandlers
-
+from ..yomihime_game_link_sdk.declarations import ModuleManifest, PackageManifest
+from ..yomihime_game_link_sdk.services import ModuleHandlers
 from .contracts.validation_boundary import validate_contract
 
 

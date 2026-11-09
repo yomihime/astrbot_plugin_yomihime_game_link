@@ -9,7 +9,6 @@ import json
 import sys
 import tempfile
 import unittest
-import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
@@ -150,15 +149,9 @@ class ExternalSourcePolicyProjectionTests(unittest.TestCase):
         assets = self.assets()
         self.assertFalse(any(name.endswith(".py") for name in assets))
         self.assertNotIn(sentinel, b"".join(assets.values()))
-        output = self.build(self.root / "closed.zip")
-        with zipfile.ZipFile(output) as archive:
-            self.assertIn(POLICY_FILE, archive.namelist())
-            self.assertFalse(
-                any("credential-material" in name for name in archive.namelist())
-            )
-            self.assertNotIn(
-                sentinel, b"".join(archive.read(name) for name in archive.namelist())
-            )
+        with self.assertRaisesRegex(ValueError, "do not compose external"):
+            self.build(self.root / "closed.zip")
+        self.assertFalse((self.root / "closed.zip").exists())
 
     def test_source_policy_requires_explicit_corresponding_external_page_package(self):
         with self.assertRaisesRegex(ValueError, "paired page manifest"):
@@ -175,13 +168,13 @@ class ExternalSourcePolicyProjectionTests(unittest.TestCase):
         self.policy["credentials"][0]["owner"] = "another/demo"
         self.policy_path.write_text(json.dumps(self.policy), encoding="utf-8")
         with self.assertRaises(ValueError):
-            self.build(output)
+            self.assets()
         self.assertEqual(output.read_bytes(), b"previous artifact")
         self.policy_path.write_bytes(
             b'{"schema_version":1,"credentials":[],"authorizations":{},"token":"not-allowed"}'
         )
         with self.assertRaises(ValueError):
-            self.build(output)
+            self.assets()
         self.assertEqual(output.read_bytes(), b"previous artifact")
 
     def test_manifest_and_policy_mutation_during_capture_reject_without_publication(
@@ -216,76 +209,37 @@ class ExternalSourcePolicyProjectionTests(unittest.TestCase):
                             ValueError, "changed (?:during capture|before publication)"
                         ),
                     ):
-                        self.build(output)
+                        self.assets()
                     self.assertTrue(mutated)
                     self.assertEqual(output.read_bytes(), b"previous artifact")
                 finally:
                     target.write_bytes(original)
 
-    def test_selected_input_mutation_after_capture_preserves_previous_output(
-        self,
-    ):
+    def test_external_inputs_are_rejected_before_any_source_is_read(self):
         output = self.root / "previous.zip"
-        original_write = dashboard._write_entry
-        for target in (
-            self.policy_path,
-            self.package / "yomihime.manifest.json",
-            self.package / "pages/entry.js",
+        output.write_bytes(b"previous artifact")
+        with (
+            patch.object(dashboard, "_read_snapshot") as read,
+            self.assertRaisesRegex(ValueError, "do not compose external"),
         ):
-            with self.subTest(target=target.name):
-                original = target.read_bytes()
-                output.write_bytes(b"previous artifact")
-                mutated = False
+            self.build(output)
+        read.assert_not_called()
+        self.assertEqual(output.read_bytes(), b"previous artifact")
 
-                def mutate_after_runtime_entry(archive, name, data):
-                    nonlocal mutated
-                    original_write(archive, name, data)
-                    if name == "runtime.py" and not mutated:
-                        target.write_bytes(original + b"\n")
-                        mutated = True
-
-                try:
-                    with (
-                        patch.object(
-                            dashboard,
-                            "_write_entry",
-                            side_effect=mutate_after_runtime_entry,
-                        ),
-                        self.assertRaises(ValueError),
-                    ):
-                        self.build(output)
-                    self.assertTrue(mutated)
-                    self.assertEqual(output.read_bytes(), b"previous artifact")
-                finally:
-                    target.write_bytes(original)
-
-    def test_release_forwards_explicit_selection_and_archives_no_external_python(self):
+    def test_release_rejects_external_composition_instead_of_requiring_a_pair(self):
         output = self.root / "release"
         with (
             patch.object(release, "validate_wheel", return_value={}),
-            patch.object(dashboard, "validate_wheel", return_value={}),
-            patch.object(
-                dashboard, "included_files", return_value=[self.runtime_source]
-            ),
+            self.assertRaisesRegex(ValueError, "do not compose external"),
         ):
-            archive, wheel, sums = release.build_release(
+            release.build_release(
                 output_dir=output,
                 sdk_wheel=self.wheel,
                 repository_root=self.root,
                 external_page_roots=(self.package,),
                 external_source_policy_roots=(self.package,),
             )
-        with zipfile.ZipFile(archive) as result:
-            selected = ExternalSourcePolicies(result.read(POLICY_FILE))
-            self.assertEqual(
-                selected.manifests["minimal"], hashlib.sha256(self.raw).hexdigest()
-            )
-            self.assertNotIn("module.py", result.namelist())
-        self.assertEqual(wheel.read_bytes(), self.wheel.read_bytes())
-        for artifact in (archive, wheel):
-            self.assertIn(
-                hashlib.sha256(artifact.read_bytes()).hexdigest(), sums.read_text()
-            )
+        self.assertFalse(output.exists())
 
     def test_release_missing_page_pair_preserves_entire_existing_output_batch(self):
         output = self.root / "release"
@@ -303,7 +257,7 @@ class ExternalSourcePolicyProjectionTests(unittest.TestCase):
             patch.object(
                 dashboard, "included_files", return_value=[self.runtime_source]
             ),
-            self.assertRaisesRegex(ValueError, "paired page manifest"),
+            self.assertRaisesRegex(ValueError, "do not compose external"),
         ):
             release.build_release(
                 output_dir=output,
@@ -314,27 +268,15 @@ class ExternalSourcePolicyProjectionTests(unittest.TestCase):
         for path, data in old.items():
             self.assertEqual(path.read_bytes(), data)
 
-    def test_release_cli_accepts_explicit_source_and_page_package_flags(self):
-        expected = (self.root / "core.zip", self.wheel, self.root / "SHA256SUMS")
+    def test_release_cli_refuses_retired_external_composition_flags(self):
         with (
             patch.object(
                 sys,
                 "argv",
-                [
-                    "build_release.py",
-                    "--sdk-wheel",
-                    str(self.wheel),
-                    "--external-page-package",
-                    str(self.package),
-                    "--external-source-policy-package",
-                    str(self.package),
-                ],
+                ["build_release.py", "--external-page-package", str(self.package)],
             ),
-            patch.object(release, "build_release", return_value=expected) as build,
-            contextlib.redirect_stdout(io.StringIO()),
+            contextlib.redirect_stderr(io.StringIO()),
+            self.assertRaises(SystemExit) as raised,
         ):
             release.main()
-        self.assertEqual(build.call_args.kwargs["external_page_roots"], [self.package])
-        self.assertEqual(
-            build.call_args.kwargs["external_source_policy_roots"], [self.package]
-        )
+        self.assertEqual(raised.exception.code, 2)

@@ -162,7 +162,7 @@ class CancellationBarrierHandler(Handler):
             self.live -= 1
 
 
-def registry(handler, *, timeout=30, active=2, credential=False):
+def registry(handler, *, timeout=30, active=2, credential=False, sibling_jobs=False):
     caps = fixtures._Handler()
     alpha = replace(
         fixtures._manifest("alpha"),
@@ -192,7 +192,15 @@ def registry(handler, *, timeout=30, active=2, credential=False):
                 "sample",
                 "1.0.0",
                 MODULE_ABI_VERSION,
-                (alpha, fixtures._manifest("beta")),
+                (
+                    alpha,
+                    replace(
+                        fixtures._manifest("beta"),
+                        jobs=(JobDescriptor("wall", SCHEMA, timeout, active),)
+                        if sibling_jobs
+                        else (),
+                    ),
+                ),
                 "tests",
                 "MIT",
                 "isolated job consumer",
@@ -205,7 +213,9 @@ def registry(handler, *, timeout=30, active=2, credential=False):
                 {},
                 jobs={"wall": handler},
             ),
-            "beta": ModuleHandlers({"read": caps}, {}, {}),
+            "beta": ModuleHandlers(
+                {"read": caps}, {}, {}, jobs={"wall": handler} if sibling_jobs else {}
+            ),
         },
     )
     return result
@@ -294,13 +304,18 @@ class DurableJobsTests(unittest.IsolatedAsyncioTestCase):
         )
         return invocation, bound
 
-    async def reset_runtime(self, *, credential=False, timeout=30):
+    async def reset_runtime(self, *, credential=False, timeout=30, sibling_jobs=False):
         await self.jobs.close()
         await self.runtime.services.close_credentials()
         await self.runtime.database.executor.close(timeout=2)
         self.runtime = await fixtures.build_runtime(
             Path(self.temp.name) / "replacement",
-            registry=registry(self.handler, credential=credential, timeout=timeout),
+            registry=registry(
+                self.handler,
+                credential=credential,
+                timeout=timeout,
+                sibling_jobs=sibling_jobs,
+            ),
         )
         self.jobs = self.make_service()
         self.runtime.services.set_jobs(self.jobs)
@@ -544,6 +559,259 @@ class DurableJobsTests(unittest.IsolatedAsyncioTestCase):
         self.handler.release.set()
         self.assertTrue(await self.jobs.close())
         self.assertFalse(self.jobs._busy_jobs())
+
+    async def test_repeated_module_stop_keeps_actual_job_and_owner_drain_owned(self):
+        self.handler = CancellationBarrierHandler()
+        await self.reset_runtime()
+        ops = await self.web()
+        job = await ops.submit(JobRequest("wall", {"count": 1}))
+        await self.jobs.start()
+        await asyncio.wait_for(self.handler.entered.wait(), 2)
+        nested = self.jobs._runs[job.job_id]["scope"]
+        nested._cleanup_timeout = 0.01
+        module_scope = self.runtime.lifecycle.scope("sample/alpha")
+        module_scope._cleanup_timeout = 0.01
+        identity = self.runtime.lifecycle.quiesce(
+            "sample/alpha", "job-stop", "package_update"
+        )
+        self.runtime.lifecycle.publish_committed_intent(
+            "sample/alpha",
+            "job-stop",
+            identity,
+            False,
+            self.runtime.registry.snapshot().revision,
+        )
+        waiter = None
+        try:
+            for _ in range(6):
+                try:
+                    await self.runtime.lifecycle.stop_candidate(
+                        "sample/alpha", "job-stop", 0.02
+                    )
+                except Exception:
+                    pass
+                await asyncio.sleep(0.01)
+            self.assertEqual(self.handler.live, 1)
+            self.assertIn(job.job_id, self.jobs._runs)
+            waiter = asyncio.create_task(self.jobs.drain_modules(("sample/alpha",)))
+            await asyncio.sleep(0.02)
+            self.assertFalse(waiter.done())
+            cleanup = self.jobs._runs[job.job_id]["cleanup"]
+            self.assertFalse(cleanup.done())
+            self.handler.release.set()
+            await asyncio.wait_for(waiter, 2)
+            self.assertTrue(cleanup.done())
+            self.assertEqual(self.handler.live, 0)
+            self.assertNotIn(job.job_id, self.jobs._busy_jobs())
+        finally:
+            self.handler.release.set()
+            if waiter is not None:
+                await asyncio.gather(waiter, return_exceptions=True)
+
+    async def test_owner_drain_requires_durable_terminal_repair_after_worker_failure(
+        self,
+    ):
+        import sqlite3
+
+        ops = await self.web()
+        executor = self.runtime.database.executor
+        actual = executor.run_transaction
+        terminal_failed, recovery_failed, repaired = (
+            asyncio.Event(),
+            asyncio.Event(),
+            asyncio.Event(),
+        )
+
+        async def failing_transaction(callback, **kwargs):
+            name = callback.__qualname__
+            terminal = "SQLiteJobRepository.finish." in name
+            recovery = "SQLiteJobRepository.recover_modules." in name
+            if terminal or (recovery and not repaired.is_set()):
+                (terminal_failed if terminal else recovery_failed).set()
+
+                def fail(unit):
+                    raise sqlite3.OperationalError("injected terminal worker failure")
+
+                return await actual(fail, **kwargs)
+            return await actual(callback, **kwargs)
+
+        executor.run_transaction = failing_transaction
+        waiter = None
+        try:
+            job = await ops.submit(JobRequest("wall", {"count": 1}))
+            await self.jobs.start()
+            await asyncio.wait_for(terminal_failed.wait(), 2)
+            self.jobs.fence_modules(("sample/alpha",))
+            waiter = asyncio.create_task(self.jobs.drain_modules(("sample/alpha",)))
+            await asyncio.wait_for(recovery_failed.wait(), 2)
+            await asyncio.sleep(0.02)
+            self.assertFalse(waiter.done())
+            row = await self.jobs.repository.get(
+                ops._caller.owner_id, "sample/alpha", job.job_id
+            )
+            self.assertEqual(row["status"], "running")
+            self.assertIsNotNone(row["run_token"])
+            owned = self.jobs._module_drains[frozenset(("sample/alpha",))]
+            repaired.set()
+            await asyncio.wait_for(waiter, 2)
+            self.assertIs(self.jobs._module_drains[frozenset(("sample/alpha",))], owned)
+            row = await self.jobs.repository.get(
+                ops._caller.owner_id, "sample/alpha", job.job_id
+            )
+            self.assertEqual(row["status"], "interrupted")
+            self.assertIsNone(row["run_token"])
+        finally:
+            repaired.set()
+            executor.run_transaction = actual
+            if waiter is not None:
+                await asyncio.gather(waiter, return_exceptions=True)
+
+    async def test_fenced_owner_queue_cannot_starve_sibling_dispatch(self):
+        async def pure_handler(invocation, parameters, control):
+            self.handler.invocations.append(invocation)
+            return {"count": parameters["count"]}
+
+        self.handler.run = pure_handler
+        await self.reset_runtime(sibling_jobs=True)
+        owner = await self.web(module="sample/alpha")
+        first = await owner.submit(JobRequest("wall", {"count": 1}))
+        second = await owner.submit(JobRequest("wall", {"count": 2}))
+        sibling = await self.web(module="sample/beta")
+        other = await sibling.submit(JobRequest("wall", {"count": 3}))
+        self.assertEqual(self.jobs.max_running, 2)
+        self.jobs.fence_modules(("sample/alpha",))
+        await self.jobs.start()
+        self.assertIs(
+            (await self.terminal(sibling, other.job_id)).status, JobStatus.SUCCEEDED
+        )
+        for job in (first, second):
+            row = await self.jobs.repository.get(
+                owner._caller.owner_id, "sample/alpha", job.job_id
+            )
+            self.assertEqual(row["status"], "queued")
+        self.jobs.resume_modules(("sample/alpha",))
+        self.assertIs(
+            (await self.terminal(owner, first.job_id)).status, JobStatus.SUCCEEDED
+        )
+        self.assertIs(
+            (await self.terminal(owner, second.job_id)).status, JobStatus.SUCCEEDED
+        )
+
+    async def test_fence_before_claim_commit_keeps_original_row_queued(self):
+        ops = await self.web()
+        job = await ops.submit(JobRequest("wall", {"count": 1}))
+        original = self.jobs.repository.claim
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def hold_before_commit(*args, **kwargs):
+            entered.set()
+            await release.wait()
+            return await original(*args, **kwargs)
+
+        self.jobs.repository.claim = hold_before_commit
+        waiter = None
+        try:
+            await self.jobs.start()
+            await asyncio.wait_for(entered.wait(), 2)
+            self.jobs.fence_modules(("sample/alpha",))
+            waiter = asyncio.create_task(self.jobs.drain_modules(("sample/alpha",)))
+            await asyncio.sleep(0.02)
+            self.assertFalse(waiter.done())
+            release.set()
+            await asyncio.wait_for(waiter, 2)
+            row = await self.jobs.repository.get(
+                ops._caller.owner_id, "sample/alpha", job.job_id
+            )
+            self.assertEqual(row["status"], "queued")
+            self.assertIsNone(row["run_token"])
+            self.assertEqual(self.handler.invocations, [])
+        finally:
+            release.set()
+            self.jobs.repository.claim = original
+            if waiter is not None:
+                await asyncio.gather(waiter, return_exceptions=True)
+
+    async def test_owner_drain_retains_committed_claim_before_supervisor_registration(
+        self,
+    ):
+        ops = await self.web()
+        job = await ops.submit(JobRequest("wall", {"count": 1}))
+        original = self.jobs.repository.claim
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def hold_claim(*args, **kwargs):
+            row = await original(*args, **kwargs)
+            if row is not None:
+                entered.set()
+                await release.wait()
+            return row
+
+        self.jobs.repository.claim = hold_claim
+        waiter = None
+        try:
+            await self.jobs.start()
+            await asyncio.wait_for(entered.wait(), 2)
+            self.jobs.fence_modules(("sample/alpha",))
+            waiter = asyncio.create_task(self.jobs.drain_modules(("sample/alpha",)))
+            await asyncio.sleep(0.02)
+            self.assertFalse(waiter.done())
+            self.assertEqual(self.handler.invocations, [])
+            release.set()
+            await asyncio.wait_for(waiter, 2)
+            row = await self.jobs.repository.get(
+                ops._caller.owner_id, "sample/alpha", job.job_id
+            )
+            self.assertEqual(row["status"], "interrupted")
+            self.assertIsNone(row["run_token"])
+            self.assertEqual(self.handler.invocations, [])
+        finally:
+            release.set()
+            self.jobs.repository.claim = original
+            if waiter is not None:
+                await asyncio.gather(waiter, return_exceptions=True)
+
+    async def test_owner_drain_waits_unstarted_claim_terminal_settlement(self):
+        ops = await self.web()
+        job = await ops.submit(JobRequest("wall", {"count": 1}))
+        scope = self.runtime.lifecycle.scope("sample/alpha")
+        create_task, finish = scope.create_task, self.jobs.repository.finish
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        def cancel_entry(work, *, name):
+            task = create_task(work, name=name)
+            task.cancel()
+            return task
+
+        async def hold_finish(*args, **kwargs):
+            if args[0] == job.job_id:
+                entered.set()
+                await release.wait()
+            return await finish(*args, **kwargs)
+
+        scope.create_task = cancel_entry
+        self.jobs.repository.finish = hold_finish
+        waiter = None
+        try:
+            await self.jobs.start()
+            await asyncio.wait_for(entered.wait(), 2)
+            waiter = asyncio.create_task(self.jobs.drain_modules(("sample/alpha",)))
+            await asyncio.sleep(0.02)
+            self.assertFalse(waiter.done())
+            self.assertIn(job.job_id, self.jobs._settling)
+            release.set()
+            await asyncio.wait_for(waiter, 2)
+            row = await self.jobs.repository.get(
+                ops._caller.owner_id, "sample/alpha", job.job_id
+            )
+            self.assertEqual(row["status"], "interrupted")
+            self.assertIsNone(row["run_token"])
+            self.assertNotIn(job.job_id, self.jobs._busy_jobs())
+        finally:
+            release.set()
+            scope.create_task = create_task
+            self.jobs.repository.finish = finish
+            if waiter is not None:
+                await asyncio.gather(waiter, return_exceptions=True)
 
     async def test_close_retains_cancel_resistant_run_until_real_cleanup_drains(self):
         self.handler = CancellationBarrierHandler()

@@ -5,10 +5,9 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 
-from yomihime_game_link_sdk.declarations import ConfigField
-from yomihime_game_link_sdk.services import ConfigTarget
-
 from ...core.contracts.validation_boundary import validate_contract
+from ...yomihime_game_link_sdk.declarations import ConfigField
+from ...yomihime_game_link_sdk.services import ConfigTarget
 from .defaults import presentation_choices
 
 MAX_FIELDS = 128

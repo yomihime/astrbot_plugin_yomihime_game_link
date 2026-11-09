@@ -4,8 +4,7 @@ from __future__ import annotations
 
 import shlex
 
-from yomihime_game_link_sdk.results import ErrorCode
-
+from ....yomihime_game_link_sdk.results import ErrorCode
 from ..query_resolution import GLOBAL_REGIONS, QueryResolutionError
 
 LOGS_USAGE = "用法：/ygl ff14 logs <服务器> <角色名>；含空格的名称请用双引号。"

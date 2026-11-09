@@ -2415,7 +2415,47 @@ class CoreRuntimeTests(unittest.IsolatedAsyncioTestCase):
             )
         finally:
             handler.release.set()
-            self.assertTrue(await runtime.close(timeout=1))
+            close_deadline = asyncio.get_running_loop().time() + 1
+            async with asyncio.timeout_at(close_deadline):
+                jobs_owner = runtime.jobs
+                cleanup = runtime._jobs_cleanup_task
+                if cleanup is not None:
+                    # Observe this retained cleanup, never replace/cancel it.
+                    jobs_closed = await asyncio.shield(cleanup)
+                    self.assertIs(runtime._jobs_cleanup_task, cleanup)
+                    if jobs_closed is False:
+                        # Consume only this proven normal False, once.
+                        with self.assertRaises(CoreRuntimeCleanupPending) as closed:
+                            await runtime.close(
+                                timeout=close_deadline
+                                - asyncio.get_running_loop().time()
+                            )
+                        self.assertEqual(closed.exception.component, "durable_jobs")
+                        self.assertIsNone(closed.exception.__cause__)
+                        self.assertIsNone(runtime._jobs_cleanup_task)
+                    else:
+                        self.assertIs(jobs_closed, True)
+                # A cancelled supervisor is not the physical-work owner.
+                active = jobs_owner._runs.get(job.job_id)
+                if active is not None:
+                    supervisor = active["supervisor"]
+                    if supervisor is not None:
+                        await asyncio.wait({supervisor})
+                    retirement = active["cleanup"]
+                    self.assertIsNotNone(retirement)
+                    await asyncio.shield(retirement)
+                    self.assertIsNot(jobs_owner._runs.get(job.job_id), active)
+                for settlement in tuple(jobs_owner._settlements):
+                    await asyncio.shield(settlement)
+                self.assertIs(runtime.jobs, jobs_owner)
+                self.assertFalse(jobs_owner._busy_jobs())
+                self.assertFalse(jobs_owner._settlements)
+                self.assertTrue(
+                    await runtime.close(
+                        timeout=close_deadline - asyncio.get_running_loop().time()
+                    )
+                )
+                self.assertTrue(runtime.closed)
         self.assertTrue(handler.late_rejected)
         self.assertFalse(runtime.jobs._busy_jobs())
         self.assertEqual(runtime._command_message_port.calls, [])

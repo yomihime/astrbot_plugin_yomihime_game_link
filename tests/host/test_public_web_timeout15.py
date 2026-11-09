@@ -18,6 +18,7 @@ from ygl_test_subject.adapters.astrbot.web_public import (
 )
 from ygl_test_subject.services.core_runtime import CoreRuntime
 
+from tests.fixtures.runtime_cleanup import terminate_and_drain
 from tests.host import test_astrbot_runtime as host_fixture
 from tests.host.test_ff14_pages import _host_contracts, _request, _token
 
@@ -53,7 +54,7 @@ class PublicWebTimeout15Tests(unittest.IsolatedAsyncioTestCase):
             core_factory=create,
         )
         # Registered before initialize so failed setup is owned too.
-        self.addAsyncCleanup(self.runtime.terminate)
+        self.addAsyncCleanup(terminate_and_drain, self.runtime)
         await self.runtime.initialize()
         await fixture._assert_initial_public_calendar_sync(self.runtime, self.transport)
         self.runtime._web_validator._clock = lambda: self.mono[0]

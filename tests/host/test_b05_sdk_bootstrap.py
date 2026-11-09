@@ -1,20 +1,24 @@
-"""Local identity/bootstrap checks for the pinned Dashboard SDK bundle."""
+"""Private Core release capture plus optional development-wheel boundaries."""
 
 from __future__ import annotations
 
 import ast
 import hashlib
+import importlib
 import os
 import shutil
 import stat
-import subprocess
-import sys
 import tempfile
 import unittest
 import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
+
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from ygl_test_subject.bootstrap.loader import validate_core_release
+from ygl_test_subject.extensions.hot_update_protocol import parse_release
+from ygl_test_subject.extensions.runtime_bundle import RuntimeBundleStore
 
 import scripts.build_dashboard_zip as zip_builder
 from scripts.build_dashboard_zip import (
@@ -53,165 +57,6 @@ def _write_operator_script_fixtures(root: Path) -> None:
         path.write_bytes(b"operator script fixture")
 
 
-BOOTSTRAP_CASE = r"""
-import importlib
-import importlib.util
-import sys
-import types
-import asyncio
-from pathlib import Path
-from types import SimpleNamespace
-
-plugin_root = Path(sys.argv[1]).resolve()
-mode = sys.argv[2]
-astrbot = types.ModuleType("astrbot")
-api = types.ModuleType("astrbot.api")
-event = types.ModuleType("astrbot.api.event")
-star = types.ModuleType("astrbot.api.star")
-class Event:
-    def __init__(self):
-        self.llm_flags = []
-    def should_call_llm(self, value):
-        self.llm_flags.append(value)
-    def plain_result(self, text):
-        return text
-lifecycle_events = []
-class Star:
-    async def initialize(self): lifecycle_events.append("super_initialize")
-    async def terminate(self): lifecycle_events.append("super_terminate")
-class Filter:
-    @staticmethod
-    def command(*args, **kwargs):
-        return lambda fn: fn
-    @staticmethod
-    def on_llm_request(*args, **kwargs):
-        return lambda fn: fn
-def register(*args, **kwargs):
-    return lambda cls: cls
-event.AstrMessageEvent = Event
-event.filter = Filter()
-star.Star = Star
-star.register = register
-for name, module in {
-    "astrbot": astrbot,
-    "astrbot.api": api,
-    "astrbot.api.event": event,
-    "astrbot.api.star": star,
-}.items():
-    sys.modules[name] = module
-
-if mode in {"same", "partial", "unsupported", "mixed", "abi", "old-release"}:
-    sys.path.insert(0, str(plugin_root))
-    import yomihime_game_link_sdk
-    sys.path.pop(0)
-    if mode == "partial":
-        del sys.modules["yomihime_game_link_sdk.results"]
-    elif mode == "unsupported":
-        yomihime_game_link_sdk.__version__ = "9.9.9"
-    elif mode == "old-release":
-        yomihime_game_link_sdk.__version__ = "0.1.0a10"
-    elif mode == "abi":
-        sys.modules["yomihime_game_link_sdk.version"].MODULE_ABI_VERSION = "9.0"
-    elif mode == "mixed":
-        other = Path(sys.argv[3]).resolve()
-        name = "yomihime_game_link_sdk.results"
-        spec = importlib.util.spec_from_file_location(
-            name, other / "yomihime_game_link_sdk/results.py"
-        )
-        mixed_module = importlib.util.module_from_spec(spec)
-        sys.modules[name] = mixed_module
-        spec.loader.exec_module(mixed_module)
-elif mode == "different":
-    other = Path(sys.argv[3]).resolve()
-    sys.path.insert(0, str(other))
-    import yomihime_game_link_sdk
-    sys.path.pop(0)
-
-if mode == "retired":
-    sys.modules["yomihime_sdk.api.contexts"] = types.ModuleType("yomihime_sdk.api.contexts")
-
-before = list(sys.path)
-spec = importlib.util.spec_from_file_location("ygl_bootstrap_subject", plugin_root / "main.py")
-module = importlib.util.module_from_spec(spec)
-sys.modules[spec.name] = module
-try:
-    spec.loader.exec_module(module)
-except module.SDKBootstrapError as error:
-    assert mode in {"different", "partial", "unsupported", "mixed", "root-escape", "abi", "retired", "hash", "old-release"}, mode
-    if mode == "old-release":
-        message = str(error)
-        assert "Fully stop this same AstrBot Host process" in message, message
-        assert "while it is stopped, install the trusted new plugin code" in message, message
-        assert "cold-start the Host" in message, message
-        assert "Disabling or hot-reloading" in message, message
-        assert "rolled back" in message and "old files alone will not upgrade" in message, message
-        assert sys.modules["yomihime_game_link_sdk"].__version__ == "0.1.0a10"
-else:
-    assert mode in {"cold", "same", "root-check", "entry-text", "entry-none", "lifecycle"}, mode
-    if mode == "root-check":
-        try:
-            module._require_contained(Path(sys.argv[3]).resolve(), plugin_root, "test SDK root")
-        except module.SDKBootstrapError:
-            pass
-        else:
-            raise AssertionError("out-of-root SDK package was accepted")
-    assert module.bootstrap_sdk(plugin_root) is sys.modules["yomihime_game_link_sdk"]
-    sdk_root = Path(sys.modules["yomihime_game_link_sdk"].__file__).resolve().parent
-    assert sdk_root == plugin_root / "yomihime_game_link_sdk"
-    if mode == "lifecycle":
-        class Pages:
-            def register(self): lifecycle_events.append("register")
-            def close(self): lifecycle_events.append("page_close")
-        class AdminPages:
-            def register(self): lifecycle_events.append("admin_register")
-            def close(self): lifecycle_events.append("admin_page_close")
-        class LifecycleRuntime:
-            def __init__(self, fail_start=False, fail_close=False):
-                self.fail_start, self.fail_close = fail_start, fail_close
-            async def initialize(self):
-                lifecycle_events.append("runtime_initialize")
-                if self.fail_start: raise RuntimeError("start failure")
-            async def terminate(self):
-                lifecycle_events.append("runtime_terminate")
-                if self.fail_close: raise RuntimeError("close failure")
-        async def exercise():
-            for fail_start, fail_close in ((False, False), (True, False), (False, True)):
-                lifecycle_events.clear()
-                subject = object.__new__(module.YomihimeGameLink)
-                subject._pages = Pages()
-                subject._admin_pages = AdminPages()
-                subject._runtime = LifecycleRuntime(fail_start, fail_close)
-                try: await subject.initialize()
-                except RuntimeError:
-                    assert fail_start
-                if fail_start:
-                    assert lifecycle_events == ["super_initialize", "register", "admin_register", "runtime_initialize", "page_close", "admin_page_close"]
-                    continue
-                assert lifecycle_events == ["super_initialize", "register", "admin_register", "runtime_initialize"]
-                try: await subject.terminate()
-                except RuntimeError:
-                    assert fail_close
-                assert lifecycle_events[-4:] == ["page_close", "admin_page_close", "runtime_terminate", "super_terminate"]
-        asyncio.run(exercise())
-    if mode in {"entry-text", "entry-none"}:
-        result = "help text" if mode == "entry-text" else None
-        class Runtime:
-            async def handle_event(self, event):
-                return result
-        event_instance = Event()
-        subject = SimpleNamespace(_runtime=Runtime())
-        async def collect():
-            return [
-                item async for item in module.YomihimeGameLink.game_link(
-                    subject, event_instance
-                )
-            ]
-        assert asyncio.run(collect()) == ([] if result is None else [result])
-        assert event_instance.llm_flags == [True]
-assert sys.path == before, (before, sys.path)
-"""
-
-
 class SDKBootstrapTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -229,109 +74,15 @@ class SDKBootstrapTests(unittest.TestCase):
     def tearDownClass(cls) -> None:
         cls.temp.cleanup()
 
-    def _plugin(self, name: str) -> Path:
-        root = self.temp_root / name
-        root.mkdir()
-        shutil.copy2(ROOT / "main.py", root / "main.py")
-        for name, data in validate_wheel(self.wheel).items():
-            target = root / name
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(data)
-        return root
-
-    def _run_bootstrap(self, root: Path, mode: str, other: Path | None = None) -> None:
-        command = [sys.executable, "-c", BOOTSTRAP_CASE, str(root), mode]
-        if other is not None:
-            command.append(str(other))
-        result = subprocess.run(command, cwd=ROOT, capture_output=True, text=True)
-        if result.returncode:
-            raise AssertionError(result.stderr)
-
-    def test_s2a_current_message_projection_matches_actual_wheel(self) -> None:
-        tree = ast.parse((ROOT / "main.py").read_text(encoding="utf-8"))
-        manifest = next(
-            ast.literal_eval(node.value)
-            for node in tree.body
-            if isinstance(node, ast.Assign)
-            and any(
-                isinstance(target, ast.Name) and target.id == "SDK_PACKAGE_MANIFEST"
-                for target in node.targets
-            )
-        )
-        package = validate_wheel(self.wheel)
-        self.assertEqual(len(manifest), 20)
-        self.assertEqual(
-            set(package), {"yomihime_game_link_sdk/" + name for name in manifest}
-        )
-        for relative, expected in manifest.items():
-            with self.subTest(member=relative):
-                payload = package["yomihime_game_link_sdk/" + relative]
-                self.assertEqual(hashlib.sha256(payload).hexdigest(), expected)
-                source = (
-                    ROOT / "examples" / relative.removeprefix("_examples/")
-                    if relative.startswith("_examples/")
-                    else ROOT / "yomihime_game_link_sdk" / relative
-                )
-                self.assertEqual(payload, source.read_bytes())
-        self.assertIn(
-            b"class MessageContext", package["yomihime_game_link_sdk/contexts.py"]
-        )
-        self.assertIn(
-            b"class MessageAccess", package["yomihime_game_link_sdk/services.py"]
-        )
-
-    def test_page_registration_and_cleanup_surround_runtime_lifecycle(self) -> None:
-        self._run_bootstrap(self._plugin("page-lifecycle"), "lifecycle")
-
-    def test_old_in_memory_sdk_error_gives_safe_cold_upgrade_steps(self) -> None:
-        self._run_bootstrap(self._plugin("old-release"), "old-release")
-
-    def test_cold_and_identical_preload_work_under_arbitrary_plugin_names(self) -> None:
-        self._run_bootstrap(self._plugin("plugin-one"), "cold")
-        self._run_bootstrap(self._plugin("another_arbitrary_plugin"), "cold")
-        self._run_bootstrap(self._plugin("same-preload"), "same")
-
-    def test_matched_command_disables_default_llm_and_preserves_text_yield(
-        self,
-    ) -> None:
-        self._run_bootstrap(self._plugin("entry-text"), "entry-text")
-        self._run_bootstrap(self._plugin("entry-none"), "entry-none")
-
-    def test_different_partial_mixed_and_unsupported_preloads_fail_closed(self) -> None:
-        target = self._plugin("target-plugin")
-        foreign = self._plugin("foreign-plugin")
-        changed = foreign / "yomihime_game_link_sdk/results.py"
-        changed.write_text(
-            changed.read_text(encoding="utf-8") + "\n# same version, different build\n",
-            encoding="utf-8",
-        )
-        self._run_bootstrap(target, "different", foreign)
-        self._run_bootstrap(self._plugin("partial-plugin"), "partial")
-        self._run_bootstrap(self._plugin("unsupported-plugin"), "unsupported")
-        self._run_bootstrap(self._plugin("mixed-plugin"), "mixed", foreign)
-        self._run_bootstrap(self._plugin("abi-plugin"), "abi")
-        self._run_bootstrap(self._plugin("retired-plugin"), "retired")
-        tampered = self._plugin("hash-plugin")
-        changed = tampered / "yomihime_game_link_sdk" / "services.py"
-        changed.write_bytes(changed.read_bytes() + b"\n# altered content\n")
-        self._run_bootstrap(tampered, "hash")
-
-    def test_sdk_package_root_cannot_escape_the_plugin_root(self) -> None:
-        target = self._plugin("sdk-root-target")
-        foreign = self._plugin("sdk-root-foreign")
-        sdk_tree = target / "yomihime_game_link_sdk"
-        shutil.rmtree(sdk_tree)
-        try:
-            os.symlink(
-                foreign / "yomihime_game_link_sdk", sdk_tree, target_is_directory=True
-            )
-        except OSError:
-            shutil.copytree(foreign / "yomihime_game_link_sdk", sdk_tree)
-            self._run_bootstrap(
-                target, "root-check", foreign / "yomihime_game_link_sdk"
-            )
-        else:
-            self._run_bootstrap(target, "root-escape")
+    def test_thin_entry_has_no_eager_business_or_canonical_sdk_import(self):
+        tree = ast.parse((ROOT / "main.py").read_text())
+        imports = [
+            node for node in tree.body if isinstance(node, (ast.Import, ast.ImportFrom))
+        ]
+        names = [getattr(node, "module", "") or "" for node in imports]
+        self.assertIn("bootstrap.loader", names)
+        self.assertFalse(any("yomihime_game_link_sdk" in name for name in names))
+        self.assertFalse(any("adapters.astrbot.runtime" in name for name in names))
 
     def test_zip_builder_rejects_runtime_escape_and_file_links(self) -> None:
         repository = self.temp_root / "synthetic-plugin-root"
@@ -432,7 +183,7 @@ class SDKBootstrapTests(unittest.TestCase):
         repository = self.temp_root / "snapshot-plugin-root"
         repository.mkdir()
         for name in ROOT_FILES:
-            (repository / name).write_text("fixture", encoding="utf-8")
+            (repository / name).write_bytes((ROOT / name).read_bytes())
         for name in RUNTIME_DIRS:
             (repository / name).mkdir()
         _write_operator_script_fixtures(repository)
@@ -456,6 +207,7 @@ class SDKBootstrapTests(unittest.TestCase):
         original = b"trusted snapshot bytes\n"
         runtime_file.write_bytes(original)
         archive_path = self.temp_root / "snapshot.zip"
+        archive_path.write_bytes(b"previous validated archive")
         read_snapshot = zip_builder._read_snapshot
         replaced = False
 
@@ -469,18 +221,44 @@ class SDKBootstrapTests(unittest.TestCase):
                 replaced = True
             return snapshot
 
-        with mock.patch.object(
-            zip_builder, "_read_snapshot", side_effect=read_then_modify
+        with (
+            mock.patch.object(
+                zip_builder, "_read_snapshot", side_effect=read_then_modify
+            ),
+            # This synthetic tree is intentionally not a Git checkout. Source
+            # provenance has separate real-checkout tests; byte capture is real.
+            mock.patch(
+                "scripts.release_envelope.subprocess.check_output",
+                side_effect=["synthetic-source", ""],
+            ),
+            self.assertRaisesRegex(
+                ValueError, "Core source changed before publication"
+            ),
         ):
-            zip_builder.build(self.wheel, archive_path, repository_root=repository)
-        with zipfile.ZipFile(archive_path) as archive:
-            self.assertEqual(archive.read("core/snapshot.py"), original)
+            zip_builder.build(
+                archive_path=archive_path,
+                repository_root=repository,
+                signing_key=Ed25519PrivateKey.generate(),
+            )
+        self.assertTrue(replaced)
+        self.assertEqual(archive_path.read_bytes(), b"previous validated archive")
         self.assertEqual(runtime_file.read_bytes(), b"changed after snapshot\n")
 
     def test_zip_contains_pinned_sdk_and_root_documents(self) -> None:
-        package = validate_wheel(self.wheel)
+        package = {
+            "yomihime_game_link_sdk/" + path.name: path.read_bytes()
+            for path in (ROOT / "yomihime_game_link_sdk").iterdir()
+            if path.suffix == ".py" or path.name == "py.typed"
+        }
         archive_path = self.temp_root / "assembled.zip"
-        build(self.wheel, archive_path)
+        # Runtime payload is the closed vendored graph, not the optional wheel.
+        with mock.patch.object(
+            zip_builder,
+            "validate_wheel",
+            side_effect=AssertionError("production ZIP requested an optional wheel"),
+        ):
+            build(archive_path=archive_path, signing_key=Ed25519PrivateKey.generate())
+        projected = zip_builder.projected_page_assets(ROOT)
         with zipfile.ZipFile(archive_path) as schema_archive:
             for config_asset in (
                 "_conf_schema.json",
@@ -490,7 +268,7 @@ class SDKBootstrapTests(unittest.TestCase):
             ):
                 self.assertEqual(
                     schema_archive.read(config_asset),
-                    (ROOT / config_asset).read_bytes(),
+                    projected.get(config_asset, (ROOT / config_asset).read_bytes()),
                 )
         document_bytes = {
             name: (ROOT / name).read_bytes() for name in ("README.md", "CHANGELOG.md")
@@ -513,7 +291,29 @@ class SDKBootstrapTests(unittest.TestCase):
             document = extracted / name
             self.assertEqual(document.read_bytes(), data, name)
             self.assertEqual(document.read_text(encoding="utf-8"), document_text[name])
-        self._run_bootstrap(extracted, "cold")
+        with zipfile.ZipFile(archive_path) as archive:
+            raw = archive.read("release.json")
+            release = parse_release(raw)
+            self.assertEqual(
+                {row["path"] for row in release["files"]},
+                set(archive.namelist()) - {"release.json", "release.sig.json"},
+            )
+            bundle = RuntimeBundleStore().capture(extracted, release, kind="core")
+            self.addCleanup(bundle.release)
+            self.assertEqual(
+                validate_core_release(raw, archive.read("release.sig.json"), bundle)[
+                    "role"
+                ],
+                "core",
+            )
+        bundle.mount_core()
+        private = importlib.import_module(bundle.namespace + ".yomihime_game_link_sdk")
+        canonical = importlib.import_module("yomihime_game_link_sdk")
+        self.assertIsNot(private.ConfigSnapshot, canonical.ConfigSnapshot)
+        self.assertEqual(
+            bundle.read_resource("yomihime_game_link_sdk/services.py"),
+            package["yomihime_game_link_sdk/services.py"],
+        )
 
         incomplete_repository = self.temp_root / "missing-readme-plugin-root"
         incomplete_repository.mkdir()
@@ -525,9 +325,9 @@ class SDKBootstrapTests(unittest.TestCase):
         incomplete_archive = self.temp_root / "missing-readme.zip"
         with self.assertRaises(FileNotFoundError):
             build(
-                self.wheel,
-                incomplete_archive,
+                archive_path=incomplete_archive,
                 repository_root=incomplete_repository,
+                signing_key=Ed25519PrivateKey.generate(),
             )
         self.assertFalse(incomplete_archive.exists())
 

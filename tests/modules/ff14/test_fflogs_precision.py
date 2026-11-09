@@ -6,22 +6,26 @@ import json
 import unittest
 from decimal import ROUND_UP, Decimal, getcontext, localcontext
 
-from modules.ff14.features.fflogs import (
+from ygl_test_subject.modules.ff14.features.fflogs import (
     _assemble_catalog_rankings,
     _catalog_query_targets,
     _target_key,
 )
-from modules.ff14.features.fflogs_cards import percentile, percentile_text
-from modules.ff14.features.fflogs_catalog import (
+from ygl_test_subject.modules.ff14.features.fflogs_cards import (
+    percentile,
+    percentile_text,
+)
+from ygl_test_subject.modules.ff14.features.fflogs_catalog import (
     parse_graphql_envelope,
     select_character_zones,
 )
-from modules.ff14.features.fflogs_models import (
+from ygl_test_subject.modules.ff14.features.fflogs_models import (
     EncounterRecord,
     FFLogsPayloadError,
     OutputMetadata,
     parse_rankings,
 )
+
 from tests.modules.ff14 import test_fflogs_aggregation as fixture
 
 
