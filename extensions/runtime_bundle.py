@@ -55,6 +55,7 @@ class RuntimeBundleStore:
         core_capacity: int = 2 * CORE_MAX_BYTES,
         dlc_capacity: int = 40 * 1024 * 1024,
         shared_budget=None,
+        materialization_parent=None,
     ) -> None:
         if type(core_capacity) is not int or core_capacity < CORE_MAX_BYTES:
             raise ValueError("invalid Core capacity")
@@ -87,6 +88,23 @@ class RuntimeBundleStore:
         self._capacities = shared_budget["capacities"]
         self._used = shared_budget["used"]
         self._lock = shared_budget["lock"]
+        self._materialization_parent = None
+        self._materialization_parent_identity = None
+        if materialization_parent is not None:
+            (
+                self._materialization_parent,
+                self._materialization_parent_identity,
+            ) = _prepare_materialization_parent(materialization_parent)
+
+    def _require_materialization_parent(self):
+        parent = self._materialization_parent
+        if parent is not None:
+            if (
+                _materialization_directory_identity(parent)
+                != self._materialization_parent_identity
+            ):
+                raise RuntimeBundleError("materialization_parent_changed")
+        return parent
 
     def reserved_bytes(self, kind: str) -> int:
         with self._lock:
@@ -163,7 +181,13 @@ class RuntimeBundleLease:
         self.files = MappingProxyType(dict(files))
         self.total_bytes = sum(map(len, files.values()))
         self.digest = release["payload_digest"]
-        self._root = _materialize(files, self.digest)
+        parent = store._require_materialization_parent()
+        self._root, self._materialization_identity = _materialize(
+            files,
+            self.digest,
+            parent=parent,
+            parent_identity=store._materialization_parent_identity,
+        )
         self.resource_root = self._root
         self._namespace: str | None = None
         self._finder: SnapshotFinder | None = None
@@ -346,6 +370,12 @@ class RuntimeBundleLease:
             if self._busy or self._children:
                 return "retained_busy"
             try:
+                if self._store._require_materialization_parent() is not None:
+                    if (
+                        _materialization_directory_identity(self._root)
+                        != self._materialization_identity
+                    ):
+                        raise RuntimeBundleError("materialization_parent_changed")
                 _remove_materialized(self._root)
             except OSError as exc:
                 # Keep the import and accounting lease until cleanup succeeds.
@@ -618,9 +648,58 @@ def _capture_windows_tree(
         raise RuntimeBundleError("bundle_unavailable") from exc
 
 
-def _materialize(files: Mapping[str, bytes], digest: str) -> Path:
-    root = Path(tempfile.mkdtemp(prefix=f"ygl-{digest[:12]}-"))
+def _materialization_directory_identity(path: Path) -> tuple[int, int]:
+    identity = None
     try:
+        for component in (path, *path.parents):
+            info = component.lstat()
+            if (
+                stat.S_ISLNK(info.st_mode)
+                or getattr(info, "st_file_attributes", 0) & 0x400
+                or not stat.S_ISDIR(info.st_mode)
+            ):
+                raise RuntimeBundleError("materialization_parent_rejected")
+            if component == path:
+                identity = (info.st_dev, info.st_ino)
+    except OSError:
+        raise RuntimeBundleError("materialization_parent_unavailable") from None
+    if identity is None or not all(identity):
+        raise RuntimeBundleError("materialization_identity_unavailable")
+    return identity
+
+
+def _prepare_materialization_parent(value) -> tuple[Path, tuple[int, int]]:
+    path = Path(value)
+    if ".." in path.parts:
+        raise RuntimeBundleError("materialization_parent_rejected")
+    path = path.absolute()
+    parent_identity = _materialization_directory_identity(path.parent)
+    try:
+        path.mkdir(mode=0o700)
+    except FileExistsError:
+        pass
+    if _materialization_directory_identity(path.parent) != parent_identity:
+        raise RuntimeBundleError("materialization_parent_changed")
+    return path, _materialization_directory_identity(path)
+
+
+def _materialize(
+    files: Mapping[str, bytes],
+    digest: str,
+    *,
+    parent: Path | None = None,
+    parent_identity: tuple[int, int] | None = None,
+) -> tuple[Path, tuple[int, int] | None]:
+    if parent is not None:
+        if _materialization_directory_identity(parent) != parent_identity:
+            raise RuntimeBundleError("materialization_parent_changed")
+    root = Path(tempfile.mkdtemp(prefix=f"ygl-{digest[:12]}-", dir=parent))
+    root_identity = None
+    try:
+        if parent is not None:
+            root_identity = _materialization_directory_identity(root)
+            if _materialization_directory_identity(parent) != parent_identity:
+                raise RuntimeBundleError("materialization_parent_changed")
         for name, data in files.items():
             target = root / name
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -629,8 +708,22 @@ def _materialize(files: Mapping[str, bytes], digest: str) -> Path:
             target.chmod(0o444)
         for directory, _, _ in os.walk(root, topdown=False):
             Path(directory).chmod(0o555)
-        return root
+        if parent is not None:
+            if (
+                _materialization_directory_identity(parent) != parent_identity
+                or _materialization_directory_identity(root) != root_identity
+            ):
+                raise RuntimeBundleError("materialization_parent_changed")
+        return root, root_identity
     except BaseException:
+        if parent is not None:
+            # A replaced path is no longer this lease's cleanup authority.
+            if (
+                root_identity is None
+                or _materialization_directory_identity(parent) != parent_identity
+                or _materialization_directory_identity(root) != root_identity
+            ):
+                raise
         _remove_materialized(root)
         raise
 
