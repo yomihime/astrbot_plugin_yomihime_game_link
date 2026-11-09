@@ -11,15 +11,6 @@ from time import monotonic
 from typing import Callable, TypeVar
 from uuid import uuid4
 
-from yomihime_game_link_sdk.contexts import InvocationView
-from yomihime_game_link_sdk.services import (
-    ResourceAccess,
-    ResourceCacheClass,
-    ResourceCacheStats,
-    ResourceReference,
-)
-from yomihime_game_link_sdk.storage import CacheVisibility, OwnerScope, ResourceMetadata
-
 from ..core.context_issuer import ContextIssuer, InvalidInvocation
 from ..core.contracts.validation_boundary import validate_contract
 from ..core.ports import (
@@ -32,6 +23,18 @@ from ..core.ports import (
     ScheduledLease,
 )
 from ..core.ports_jobs import JobRunLease
+from ..yomihime_game_link_sdk.contexts import InvocationView
+from ..yomihime_game_link_sdk.services import (
+    ResourceAccess,
+    ResourceCacheClass,
+    ResourceCacheStats,
+    ResourceReference,
+)
+from ..yomihime_game_link_sdk.storage import (
+    CacheVisibility,
+    OwnerScope,
+    ResourceMetadata,
+)
 from .identity import (
     InvocationPrincipalResolver,
     PrincipalResolutionDenied,
@@ -360,7 +363,7 @@ class _ResourceAccessCoordinator:
             raise ResourceAccessError(
                 "authorised scope requires a grant", code="scope_denied"
             )
-        from yomihime_game_link_sdk.storage import GrantReference
+        from ..yomihime_game_link_sdk.storage import GrantReference
 
         return OwnerScope.authorized(
             principal_id,

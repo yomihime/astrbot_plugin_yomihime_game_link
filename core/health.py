@@ -12,14 +12,13 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
-from yomihime_game_link_sdk.declarations import CapabilityReference, ModuleManifest
-from yomihime_game_link_sdk.services import (
+from ..yomihime_game_link_sdk.declarations import CapabilityReference, ModuleManifest
+from ..yomihime_game_link_sdk.services import (
     CapabilityHealth,
     ConfigSnapshot,
     HealthStatus,
 )
-from yomihime_game_link_sdk.storage import SecretMetadataState
-
+from ..yomihime_game_link_sdk.storage import SecretMetadataState
 from .contracts.administration import ModuleLifecycle
 from .contracts.validation_boundary import validate_contract
 from .lifecycle import LifecycleController

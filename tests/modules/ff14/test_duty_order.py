@@ -8,13 +8,14 @@ from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from modules.ff14.features.duty_order import (
+from ygl_test_subject.modules.ff14.features.duty_order import (
     DutyOrder,
     DutyOrderCatalog,
     apply_duty_order,
     parse_page,
 )
-from modules.ff14.features.fflogs_models import CharacterRankingGroup
+from ygl_test_subject.modules.ff14.features.fflogs_models import CharacterRankingGroup
+
 from tests.modules.ff14 import test_fflogs_aggregation as fixture
 from yomihime_game_link_sdk.errors import (
     OperationTimeout,
@@ -131,7 +132,10 @@ class DutyOrderTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch.object(http, "fetch", pages),
-            patch("modules.ff14.features.duty_order.monotonic", return_value=100),
+            patch(
+                "ygl_test_subject.modules.ff14.features.duty_order.monotonic",
+                return_value=100,
+            ),
         ):
             result = await client.load(http)
         self.assertTrue(result.complete)
@@ -141,25 +145,36 @@ class DutyOrderTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(reference())
         http = Http()
         with patch(
-            "modules.ff14.features.duty_order.monotonic", return_value=100 + 86399
+            "ygl_test_subject.modules.ff14.features.duty_order.monotonic",
+            return_value=100 + 86399,
         ):
             self.assertEqual(await client.load(http), result)
         self.assertEqual(http.requests, [])
         with patch(
-            "modules.ff14.features.duty_order.monotonic", return_value=100 + 86400
+            "ygl_test_subject.modules.ff14.features.duty_order.monotonic",
+            return_value=100 + 86400,
         ):
             self.assertTrue((await client.load(http)).complete)
         self.assertEqual(len(http.requests), 1)
 
     async def test_failure_ttl_and_cancellation_are_bounded(self):
         client, http = DutyOrderCatalog(), Http(ValueError("synthetic"))
-        with patch("modules.ff14.features.duty_order.monotonic", return_value=100):
+        with patch(
+            "ygl_test_subject.modules.ff14.features.duty_order.monotonic",
+            return_value=100,
+        ):
             self.assertFalse((await client.load(http)).complete)
         self.assertEqual(client._cached[0], 160)
-        with patch("modules.ff14.features.duty_order.monotonic", return_value=159):
+        with patch(
+            "ygl_test_subject.modules.ff14.features.duty_order.monotonic",
+            return_value=159,
+        ):
             await client.load(http)
         self.assertEqual(len(http.requests), 1)
-        with patch("modules.ff14.features.duty_order.monotonic", return_value=160):
+        with patch(
+            "ygl_test_subject.modules.ff14.features.duty_order.monotonic",
+            return_value=160,
+        ):
             await client.load(http)
         self.assertEqual(len(http.requests), 2)
         client.close()

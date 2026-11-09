@@ -9,15 +9,15 @@ from decimal import Decimal
 from types import SimpleNamespace
 
 from ygl_test_subject.core.contracts.validation_boundary import validate_contract
-
-from modules.ff14.features.fflogs_catalog import parse_graphql_envelope
-from modules.ff14.features.fflogs_chat import character_facts
-from modules.ff14.features.fflogs_evidence import (
+from ygl_test_subject.modules.ff14.features.fflogs_catalog import parse_graphql_envelope
+from ygl_test_subject.modules.ff14.features.fflogs_chat import character_facts
+from ygl_test_subject.modules.ff14.features.fflogs_evidence import (
     MAX_CHUNKS,
     Evidence,
     project,
 )
-from modules.ff14.features.fflogs_models import parse_public_character
+from ygl_test_subject.modules.ff14.features.fflogs_models import parse_public_character
+
 from tests.modules.ff14 import test_fflogs as fixture
 from yomihime_game_link_sdk.results import FactDocument
 

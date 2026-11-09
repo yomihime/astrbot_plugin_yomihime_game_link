@@ -9,42 +9,47 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Mapping
 
-from yomihime_game_link_sdk.contexts import InvocationOrigin as InvocationOrigin
-from yomihime_game_link_sdk.declarations import (
+from ...yomihime_game_link_sdk.contexts import InvocationOrigin as InvocationOrigin
+from ...yomihime_game_link_sdk.declarations import (
     CapabilityDescriptor as CapabilityDescriptor,
 )
-from yomihime_game_link_sdk.declarations import CapabilityEffect as CapabilityEffect
-from yomihime_game_link_sdk.declarations import (
+from ...yomihime_game_link_sdk.declarations import CapabilityEffect as CapabilityEffect
+from ...yomihime_game_link_sdk.declarations import (
     CapabilityReference as CapabilityReference,
 )
-from yomihime_game_link_sdk.declarations import CommandDescriptor as CommandDescriptor
-from yomihime_game_link_sdk.declarations import ConfigField as ConfigField
-from yomihime_game_link_sdk.declarations import ConfigUpdateMode as ConfigUpdateMode
-from yomihime_game_link_sdk.declarations import (
+from ...yomihime_game_link_sdk.declarations import (
+    CommandDescriptor as CommandDescriptor,
+)
+from ...yomihime_game_link_sdk.declarations import ConfigField as ConfigField
+from ...yomihime_game_link_sdk.declarations import ConfigUpdateMode as ConfigUpdateMode
+from ...yomihime_game_link_sdk.declarations import (
     DiagnosticDeclaration as DiagnosticDeclaration,
 )
-from yomihime_game_link_sdk.declarations import InvocationPolicy as InvocationPolicy
-from yomihime_game_link_sdk.declarations import ModuleCategory as ModuleCategory
-from yomihime_game_link_sdk.declarations import ModuleDisplay as ModuleDisplay
-from yomihime_game_link_sdk.declarations import ModuleManifest as ModuleManifest
-from yomihime_game_link_sdk.declarations import PackageManifest as PackageManifest
-from yomihime_game_link_sdk.declarations import PageDescriptor as PageDescriptor
-from yomihime_game_link_sdk.declarations import PageResource as PageResource
-from yomihime_game_link_sdk.declarations import PrivacyFloor as PrivacyFloor
-from yomihime_game_link_sdk.declarations import SourceDeclaration as SourceDeclaration
-from yomihime_game_link_sdk.declarations import ToolDescriptor as ToolDescriptor
-from yomihime_game_link_sdk.jobs import JobDescriptor
-from yomihime_game_link_sdk.storage import CollectionDescriptor as CollectionDescriptor
-from yomihime_game_link_sdk.storage import JsonValue as JsonValue
-from yomihime_game_link_sdk.subscriptions import (
+from ...yomihime_game_link_sdk.declarations import InvocationPolicy as InvocationPolicy
+from ...yomihime_game_link_sdk.declarations import ModuleCategory as ModuleCategory
+from ...yomihime_game_link_sdk.declarations import ModuleDisplay as ModuleDisplay
+from ...yomihime_game_link_sdk.declarations import ModuleManifest as ModuleManifest
+from ...yomihime_game_link_sdk.declarations import PackageManifest as PackageManifest
+from ...yomihime_game_link_sdk.declarations import PageDescriptor as PageDescriptor
+from ...yomihime_game_link_sdk.declarations import PageResource as PageResource
+from ...yomihime_game_link_sdk.declarations import PrivacyFloor as PrivacyFloor
+from ...yomihime_game_link_sdk.declarations import (
+    SourceDeclaration as SourceDeclaration,
+)
+from ...yomihime_game_link_sdk.declarations import ToolDescriptor as ToolDescriptor
+from ...yomihime_game_link_sdk.jobs import JobDescriptor
+from ...yomihime_game_link_sdk.storage import (
+    CollectionDescriptor as CollectionDescriptor,
+)
+from ...yomihime_game_link_sdk.storage import JsonValue as JsonValue
+from ...yomihime_game_link_sdk.subscriptions import (
     ScheduleDescriptor as ScheduleDescriptor,
 )
-from yomihime_game_link_sdk.subscriptions import ScheduleTrigger as ScheduleTrigger
-from yomihime_game_link_sdk.subscriptions import (
+from ...yomihime_game_link_sdk.subscriptions import ScheduleTrigger as ScheduleTrigger
+from ...yomihime_game_link_sdk.subscriptions import (
     SubscriptionDescriptor as SubscriptionDescriptor,
 )
-from yomihime_game_link_sdk.version import MODULE_ABI_VERSION
-
+from ...yomihime_game_link_sdk.version import MODULE_ABI_VERSION
 from .schema import freeze_input_schema as freeze_input_schema
 from .validation_boundary import validate_contract
 from .version import COMPATIBLE_CONTRACT_VERSIONS as COMPATIBLE_CONTRACT_VERSIONS

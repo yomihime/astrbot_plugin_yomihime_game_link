@@ -1,0 +1,259 @@
+"""Deterministic closed release envelopes; no network or runtime imports."""
+
+from __future__ import annotations
+
+import ast
+import base64
+import hashlib
+import json
+import re
+import stat
+import subprocess
+import zipfile
+from io import BytesIO
+from pathlib import Path, PurePosixPath
+
+MAX_ZIP_BYTES = 16_000_000
+
+
+def encode(value):
+    return (
+        json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
+    ).encode()
+
+
+def metadata(files):
+    result = {}
+    for key in ("name", "author", "version"):
+        matches = re.findall(
+            r"(?m)^" + key + r":\s*([^\r\n]+)", files["metadata.yaml"].decode()
+        )
+        if len(matches) != 1:
+            raise ValueError("metadata requires one " + key)
+        result[key] = matches[0].strip().strip("\"'")
+    result["version"] = result["version"].removeprefix("v")
+    if not re.fullmatch(
+        r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)", result["version"]
+    ):
+        raise ValueError("release requires numeric MAJOR.MINOR.PATCH")
+    return result
+
+
+def validate_files(files, role):
+    maximum, per_file, count = (
+        (128 * 1024 * 1024, 8 * 1024 * 1024, 4096)
+        if role == "core"
+        else (8 * 1024 * 1024, 1024 * 1024, 256)
+    )
+    if not files or len(files) > count or sum(map(len, files.values())) > maximum:
+        raise ValueError("expanded release payload exceeds budget")
+    folded = {}
+    for name, data in files.items():
+        parts = name.split("/")
+        if set(part.casefold() for part in parts) & {
+            ".git",
+            ".agent-workspace",
+            "tests",
+            "node_modules",
+            "venv",
+            ".venv",
+            "__pycache__",
+        } or Path(name).suffix.casefold() in {".pem", ".key", ".p12", ".pyc"}:
+            raise ValueError("private/development material in release")
+        if (
+            not name
+            or name.startswith("/")
+            or "\\" in name
+            or ":" in name
+            or any(p in ("", ".", "..") for p in parts)
+            or any(ord(c) < 32 or 127 <= ord(c) <= 159 for c in name)
+        ):
+            raise ValueError("unsafe archive path")
+        if len(data) > per_file or len(name.encode()) > 1024 or len(parts) > 24:
+            raise ValueError("release file exceeds budget")
+        if name.casefold() in {"release.json", "release.sig.json"}:
+            raise ValueError("recursive release inventory")
+        for index in range(1, len(parts) + 1):
+            prefix = "/".join(parts[:index])
+            previous = folded.setdefault(prefix.casefold(), prefix)
+            if previous != prefix:
+                raise ValueError("case-colliding archive paths")
+        if any(str(p) in files for p in PurePosixPath(name).parents if str(p) != "."):
+            raise ValueError("file/directory collision")
+
+
+def complete(files, root, role, *, signing_key=None, channel="preview", sequence=1):
+    files = dict(files)
+    descriptor = json.loads(files["ygl-plugin.json"])
+    if descriptor["role"] != role:
+        raise ValueError("plugin role differs from release")
+    info = metadata(files)
+    if role == "core" and signing_key is None:
+        raise ValueError("Core requires an Ed25519 signing key; no unsigned Core build")
+    if (
+        channel not in ("stable", "preview")
+        or type(sequence) is not int
+        or sequence < 0
+    ):
+        raise ValueError("invalid release channel/sequence")
+    source_files = {
+        name: hashlib.sha256(data).hexdigest() for name, data in sorted(files.items())
+    }
+    tree = ast.parse(files["main.py"])
+    constants = {
+        node.targets[0].id: node.value.value
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        and len(node.targets) == 1
+        and isinstance(node.targets[0], ast.Name)
+        and isinstance(node.value, ast.Constant)
+    }
+    registrations = []
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "register"
+        ):
+
+            def literal(arg):
+                return (
+                    constants.get(arg.id)
+                    if isinstance(arg, ast.Name)
+                    else ast.literal_eval(arg)
+                )
+
+            registrations.append(
+                tuple(literal(node.args[index]) for index in (0, 1, 3))
+            )
+    if registrations != [(info["name"], info["author"], info["version"])]:
+        raise ValueError("register author/name/version differs from metadata")
+    if signing_key is not None:
+        from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+
+        public = signing_key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+        key_id = hashlib.sha256(public).hexdigest()
+        if role == "core":
+            files["release-key.json"] = encode(
+                {
+                    "algorithm": "ed25519",
+                    "key_id": key_id,
+                    "public_key_base64": base64.b64encode(public).decode(),
+                }
+            )
+    builders = {
+        p.name: hashlib.sha256(p.read_bytes()).hexdigest()
+        for p in sorted((root / "scripts").glob("*release*.py"))
+    }
+    dashboard = root / "scripts/build_dashboard_zip.py"
+    if dashboard.exists():
+        builders[dashboard.name] = hashlib.sha256(dashboard.read_bytes()).hexdigest()
+    revision = subprocess.check_output(
+        ["git", "-C", str(root), "rev-parse", "HEAD"], text=True
+    ).strip()
+    dirty = bool(
+        subprocess.check_output(
+            [
+                "git",
+                "-C",
+                str(root),
+                "status",
+                "--porcelain",
+                "--untracked-files=normal",
+            ],
+            text=True,
+        ).strip()
+    )
+    files["BUILD.json"] = encode(
+        {
+            "source_commit": revision,
+            "dirty": dirty,
+            "source_files": source_files,
+            "builder_files": builders,
+            "source_digest": hashlib.sha256(encode(source_files)).hexdigest(),
+            "development_candidate": channel == "preview",
+        }
+    )
+    validate_files(files, role)
+    rows = [
+        {"path": name, "size": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+        for name, data in sorted(files.items())
+    ]
+    digest = hashlib.sha256()
+    for row in rows:
+        digest.update(
+            row["path"].encode()
+            + b"\0"
+            + str(row["size"]).encode()
+            + b"\0"
+            + row["sha256"].encode()
+            + b"\n"
+        )
+    raw = encode(
+        {
+            "schema": "ygl.release/1",
+            "plugin_id": {"author": info["author"], "name": info["name"]},
+            "package_id": descriptor["package_id"],
+            "release": info["version"],
+            "channel": channel,
+            "release_sequence": sequence,
+            "payload_digest": digest.hexdigest(),
+            "files": rows,
+        }
+    )
+    if len(raw) > 2 * 1024 * 1024:
+        raise ValueError("release manifest exceeds budget")
+    files["release.json"] = raw
+    if signing_key is not None:
+        files["release.sig.json"] = encode(
+            {
+                "algorithm": "ed25519",
+                "key_id": key_id,
+                "signature_base64": base64.b64encode(signing_key.sign(raw)).decode(),
+            }
+        )
+    stream = BytesIO()
+    with zipfile.ZipFile(
+        stream, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9
+    ) as archive:
+        for name, data in sorted(files.items()):
+            entry = zipfile.ZipInfo(name, (1980, 1, 1, 0, 0, 0))
+            entry.compress_type = zipfile.ZIP_DEFLATED
+            entry.external_attr = (stat.S_IFREG | 0o644) << 16
+            archive.writestr(entry, data)
+    payload = stream.getvalue()
+    if len(payload) >= MAX_ZIP_BYTES:
+        raise ValueError("ZIP must be smaller than 16000000 bytes")
+    with zipfile.ZipFile(BytesIO(payload)) as archive:
+        if archive.testzip() is not None or archive.namelist() != sorted(files):
+            raise ValueError("archive content audit failed")
+        for name, data in files.items():
+            if archive.read(name) != data:
+                raise ValueError("archive bytes differ")
+    return payload
+
+
+def signing_key(path=None, *, test=False):
+    if path is None and not test:
+        return None
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    if path is not None and test:
+        raise ValueError("choose supplied key or ephemeral test signing")
+    if test:
+        return Ed25519PrivateKey.generate()
+    if path is None:
+        return None
+    from cryptography.hazmat.primitives.serialization import load_pem_private_key
+
+    path = Path(path).absolute()
+    for component in (path, *path.parents):
+        info = component.lstat()
+        if stat.S_ISLNK(info.st_mode) or (
+            stat.S_ISREG(info.st_mode) and info.st_nlink > 1
+        ):
+            raise ValueError("signing key traverses a link")
+    key = load_pem_private_key(path.read_bytes(), password=None)
+    if not isinstance(key, Ed25519PrivateKey):
+        raise ValueError("Ed25519 signing key required")
+    return key

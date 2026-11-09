@@ -5,16 +5,15 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from yomihime_game_link_sdk import (
+from ...core.contracts.schema import freeze_input_schema
+from ...core.contracts.validation_boundary import validate_contract
+from ...yomihime_game_link_sdk import (
     ConfigField,
     ConfigSnapshot,
     ConfigTarget,
     RevisionConflict,
     ServiceUnavailable,
 )
-
-from ...core.contracts.schema import freeze_input_schema
-from ...core.contracts.validation_boundary import validate_contract
 from .operations import validate_configuration_value
 
 

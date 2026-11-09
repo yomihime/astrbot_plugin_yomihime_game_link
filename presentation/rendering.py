@@ -15,7 +15,9 @@ from decimal import Decimal
 from functools import wraps
 from typing import Any, Protocol
 
-from yomihime_game_link_sdk.display import (
+from ..core.contracts.validation_boundary import validate_contract
+from ..core.contracts.version import CONTRACT_VERSION
+from ..yomihime_game_link_sdk.display import (
     CommandsBlock,
     DisplayAudience,
     DisplayBatch,
@@ -38,9 +40,6 @@ from yomihime_game_link_sdk.display import (
     TimeValue,
     UnknownBlock,
 )
-
-from ..core.contracts.validation_boundary import validate_contract
-from ..core.contracts.version import CONTRACT_VERSION
 
 _TRUNCATION_NOTICE = "[内容已截断]"
 _TRUNCATION_FALLBACK = "[截断]"

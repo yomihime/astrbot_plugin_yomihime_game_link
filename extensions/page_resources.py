@@ -8,14 +8,13 @@ import stat
 from pathlib import Path
 from types import MappingProxyType
 
-from yomihime_game_link_sdk.declarations import PackageManifest
-
 from ..core.contracts.manifests import (
     EXTENSION_MANIFEST_FILENAME,
     EXTENSION_MANIFEST_MAX_BYTES,
     validate_page_resource_path,
 )
 from ..core.contracts.validation_boundary import validate_contract
+from ..yomihime_game_link_sdk.declarations import PackageManifest
 from .disk_manifest import parse_manifest
 from .source_snapshot import (
     MAX_PACKAGE_SOURCE_BYTES,

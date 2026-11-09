@@ -4,17 +4,20 @@ import unittest
 from dataclasses import replace
 
 from ygl_test_subject.core.contracts.cards import validate_card
-
-from modules.ff14.features.fflogs_cards import character_card, record_version
-from modules.ff14.features.fflogs_catalog import (
+from ygl_test_subject.modules.ff14.features.fflogs_cards import (
+    character_card,
+    record_version,
+)
+from ygl_test_subject.modules.ff14.features.fflogs_catalog import (
     ultimate_catalog_order,
     ultimate_group_key,
 )
-from modules.ff14.features.fflogs_models import (
+from ygl_test_subject.modules.ff14.features.fflogs_models import (
     CharacterRankingGroup,
     EncounterRecord,
     RankingOrigin,
 )
+
 from tests.modules.ff14 import test_fflogs_aggregation as fixture
 from yomihime_game_link_sdk import cards
 
@@ -170,7 +173,9 @@ class LogsTablePolishTests(unittest.TestCase):
         self.assertGreater(measure_document(compact).height, 500)
 
     def test_winner_period_and_budget_do_not_reorder_catalog_identities(self):
-        from modules.ff14.features.fflogs import _assemble_catalog_rankings
+        from ygl_test_subject.modules.ff14.features.fflogs import (
+            _assemble_catalog_rankings,
+        )
 
         source = fixture.catalog()
         targets = fixture.targets(source)
@@ -204,9 +209,9 @@ class LogsTablePolishTests(unittest.TestCase):
         )
 
     def test_full_duty_names_headers_and_jobs_remain_single_line(self):
+        from ygl_test_subject.modules.ff14.features.fflogs_jobs import JOBS
         from ygl_test_subject.presentation.layout_renderer import measure_document
 
-        from modules.ff14.features.fflogs_jobs import JOBS
         from tests.modules.ff14.test_duty_order import NAMES
 
         for language in ("zh", "ja"):

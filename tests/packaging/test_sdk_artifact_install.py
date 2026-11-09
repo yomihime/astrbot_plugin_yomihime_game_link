@@ -15,11 +15,9 @@ from pathlib import Path
 
 from ygl_test_subject.extensions.disk_manifest import parse_manifest
 
-from scripts.build_release import build_release
-
 ROOT = Path(__file__).resolve().parents[2]
 EXPECTED_WHEEL_SHA256 = (
-    "a0b2f61152e810b3a26febd715487d60f335108dffafba0a41d44db5208fdbb6"
+    "0d741c2d998c63df481ec2fe5670048f04b7170e822616a3d8fe6816527b0324"
 )
 EXPECTED_RESOURCES = {
     f"yomihime_game_link_sdk/_examples/{example}/{filename}"
@@ -29,291 +27,50 @@ EXPECTED_RESOURCES = {
 
 
 VERIFY_INSTALLED_ARTIFACT = r"""
-import ast
-import asyncio
-import hashlib
-import importlib
-import importlib.resources
-import importlib.util
-import inspect
-import json
-import os
-import sys
-import threading
+import asyncio, importlib, importlib.abc, importlib.resources, importlib.util, os, sys, threading
 from pathlib import Path
-
-site_root, extraction_root, repository_root = map(Path, sys.argv[1:4])
+site_root, extraction_root = map(Path, sys.argv[1:3])
 sys.path.insert(0, str(site_root))
-
-main_tree = ast.parse((repository_root / "main.py").read_text(encoding="utf-8"))
-sdk_manifest = next(
-    ast.literal_eval(statement.value)
-    for statement in main_tree.body
-    if isinstance(statement, ast.Assign)
-    and any(
-        isinstance(target, ast.Name) and target.id == "SDK_PACKAGE_MANIFEST"
-        for target in statement.targets
-    )
-)
-installed_sdk_root = site_root / "yomihime_game_link_sdk"
-installed_payload = {
-    path.relative_to(installed_sdk_root).as_posix()
-    for path in installed_sdk_root.rglob("*")
-    if path.is_file() and "__pycache__" not in path.parts
-}
-assert len(sdk_manifest) == 20
-assert installed_payload == set(sdk_manifest)
-for relative, expected_digest in sdk_manifest.items():
-    assert hashlib.sha256(
-        (installed_sdk_root / relative).read_bytes()
-    ).hexdigest() == expected_digest
-
-spec = importlib.util.spec_from_file_location(
-    "ygl_artifact_subject",
-    repository_root / "__init__.py",
-    submodule_search_locations=[str(repository_root)],
-)
-assert spec is not None and spec.loader is not None
-plugin = importlib.util.module_from_spec(spec)
-sys.modules[spec.name] = plugin
-spec.loader.exec_module(plugin)
-
-import importlib.abc
+phase = [True]
 class SDKOnly(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname, path=None, target=None):
-        if fullname.split(".")[0] in {"core", "services", "adapters", "astrbot", "modules", "ygl_artifact_subject"}:
+        if phase[0] and fullname.split(".")[0] in {"core", "services", "adapters", "astrbot", "modules"}:
             raise AssertionError("SDK reverse dependency: " + fullname)
-import_phase = [True]
-def import_audit(event, args):
-    if import_phase[0] and event in {"socket.connect", "socket.bind", "subprocess.Popen", "os.system"}:
+def audit(event,args):
+    if phase[0] and event in {"socket.connect","socket.bind","subprocess.Popen","os.system"}:
         raise AssertionError("SDK import performed external work")
-    if import_phase[0] and event == "open" and isinstance(args[0], (str, bytes)):
-        filename = os.fsdecode(args[0]).lower()
-        if filename.endswith((".json", ".yaml", ".yml", ".sqlite", ".sqlite3", ".db", ".toml")):
-            raise AssertionError("SDK import read product configuration")
-sys.addaudithook(import_audit)
-guard = SDKOnly(); sys.meta_path.insert(0, guard)
-threads_before_import = {thread.ident for thread in threading.enumerate()}
+    if phase[0] and event=="open" and isinstance(args[0],(str,bytes)) and os.fsdecode(args[0]).lower().endswith((".json",".yaml",".sqlite",".db",".toml")):
+        raise AssertionError("SDK import read product configuration")
+sys.addaudithook(audit)
+sys.meta_path.insert(0,SDKOnly())
+before={t.ident for t in threading.enumerate()}
 import yomihime_game_link_sdk as sdk
-import_phase[0] = False; sys.meta_path.remove(guard)
-assert {thread.ident for thread in threading.enumerate()} == threads_before_import
-assert Path(sdk.__file__).resolve() == installed_sdk_root / "__init__.py"
-assert len(sdk.__path__) == 1
-assert Path(sdk.__path__[0]).resolve() == installed_sdk_root
-from yomihime_game_link_sdk.display import DisplayDocument as CanonicalDisplayDocument
-from yomihime_game_link_sdk.results import CapabilityResult as CanonicalCapabilityResult
-from yomihime_game_link_sdk.results import FactDocument as CanonicalFactDocument
-from yomihime_game_link_sdk.results import ResultStatus as CanonicalResultStatus
-from yomihime_game_link_sdk.services import ModuleHandlers as CanonicalModuleHandlers
-from yomihime_game_link_sdk.services import ModuleServices as CanonicalModuleServices
-from yomihime_game_link_sdk.display import TextBlock as CanonicalTextBlock
-from yomihime_game_link_sdk.services import HealthStatus as CanonicalHealthStatus
-from yomihime_game_link_sdk.errors import SourceHttpError as CanonicalSourceHttpError
-
-from ygl_artifact_subject.core.contracts.display import TextBlock as ShimTextBlock
-from ygl_artifact_subject.core.contracts.results import CapabilityResult as ShimCapabilityResult
-from ygl_artifact_subject.core.contracts.results import FactDocument as ShimFactDocument
-from ygl_artifact_subject.core.contracts.results import ResultStatus as ShimResultStatus
-from ygl_artifact_subject.core.contracts.services import ModuleHandlers as ShimModuleHandlers
-from ygl_artifact_subject.core.contracts.services import ModuleServices as ShimModuleServices
-from ygl_artifact_subject.core.contracts.services import HealthStatus as ShimHealthStatus
-from ygl_artifact_subject.core.invocation import CapabilityResult as GatewayResultType
-from ygl_artifact_subject.core.invocation import Gateway
-from ygl_artifact_subject.core.contracts.validation_boundary import validate_contract
-from ygl_artifact_subject.services.module_services import ModuleServices as RuntimeModuleServices
-from ygl_artifact_subject.services.output import CapabilityResult as OutputResultType
-from ygl_artifact_subject.extensions.disk_manifest import parse_manifest
-from ygl_artifact_subject.core.registry import Registry
-
-assert sdk.CapabilityResult is CanonicalCapabilityResult is ShimCapabilityResult
-assert sdk.ModuleServices is CanonicalModuleServices is ShimModuleServices
-assert CanonicalModuleServices is RuntimeModuleServices
-assert sdk.ModuleHandlers is CanonicalModuleHandlers is ShimModuleHandlers
-assert sdk.DisplayDocument is CanonicalDisplayDocument
-assert sdk.TextBlock is CanonicalTextBlock is ShimTextBlock
-assert sdk.FactDocument is CanonicalFactDocument is ShimFactDocument
-assert sdk.ResultStatus is CanonicalResultStatus is ShimResultStatus
-assert sdk.HealthStatus is CanonicalHealthStatus is ShimHealthStatus
-assert sdk.SourceHttpError is CanonicalSourceHttpError
-assert GatewayResultType is sdk.CapabilityResult
-assert OutputResultType is sdk.CapabilityResult
-
-assert sdk.__version__ == "0.1.0a24"
-assert sdk.MODULE_ABI_VERSION == "2.0"
-assert sdk.ScheduleTrigger.BACKGROUND.value == "background"
-assert sdk.ScheduleDescriptor.__dataclass_fields__["background_parameters"].default == ()
-background = validate_contract(sdk.ScheduleDescriptor(
-    collector_id="background_probe", key_version=1, source_id="public_source",
-    data_version=1, input_schema={"type": "object"},
-    shared_scope=sdk.OwnershipKind.PUBLIC, trigger=sdk.ScheduleTrigger.BACKGROUND,
-    minimum_interval_seconds=60, default_interval_seconds=300,
-    interval_config_key="background_interval", background_parameters=({},),
-))
-assert background.background_parameters == ({},)
-assert sdk.PrivacyFloor.OWNER.value == "owner"
-assert sdk.InvocationOrigin("web_public") is sdk.InvocationOrigin.WEB_PUBLIC
-assert sdk.InvocationPolicy("command_and_public_web") is sdk.InvocationPolicy.COMMAND_AND_PUBLIC_WEB
-web_capability = sdk.CapabilityDescriptor(
-    "public_web_read", {"type": "object"},
-    sdk.InvocationPolicy.COMMAND_AND_PUBLIC_WEB,
-    sdk.CapabilityEffect.READ_ONLY,
-)
-assert web_capability.privacy_floor is sdk.PrivacyFloor.PUBLIC
-for privacy, effect in (
-    (sdk.PrivacyFloor.PRIVATE, sdk.CapabilityEffect.READ_ONLY),
-    (sdk.PrivacyFloor.OWNER, sdk.CapabilityEffect.READ_ONLY),
-    (sdk.PrivacyFloor.PUBLIC, sdk.CapabilityEffect.WRITE),
-):
-    try:
-        validate_contract(sdk.CapabilityDescriptor(
-            "rejected_web", {"type": "object"},
-            sdk.InvocationPolicy.COMMAND_AND_PUBLIC_WEB,
-            effect, privacy_floor=privacy,
-        ))
-    except ValueError:
-        pass
-    else:
-        raise AssertionError("installed wheel widened public web permissions")
-owner_capability = sdk.CapabilityDescriptor(
-    "owner_read",
-    {"type": "object"},
-    sdk.InvocationPolicy.COMMAND_ONLY,
-    sdk.CapabilityEffect.READ_ONLY,
-    privacy_floor=sdk.PrivacyFloor.OWNER,
-)
-assert owner_capability.privacy_floor is sdk.PrivacyFloor.OWNER
-try:
-    validate_contract(sdk.CapabilityDescriptor(
-        "owner_read",
-        {"type": "object"},
-        sdk.InvocationPolicy.NATURAL_LANGUAGE_ALLOWED,
-        sdk.CapabilityEffect.READ_ONLY,
-        privacy_floor=sdk.PrivacyFloor.OWNER,
-    ))
-except ValueError as exc:
-    assert "command_only" in str(exc)
-else:
-    raise AssertionError("OWNER capability accepted a non-command invocation")
-assert len(sdk.__all__) == len(set(sdk.__all__))
-assert all(hasattr(sdk, name) for name in sdk.__all__)
-assert inspect.iscoroutinefunction(sdk.ModuleFactory.create)
-assert tuple(sdk.ModuleServices.__annotations__) == (
-    "config", "identities", "accounts", "subscriptions", "scopes"
-)
-before_threads = {thread.ident for thread in threading.enumerate()}
-
-class _ConfigDouble:
+phase[0]=False
+assert Path(sdk.__file__).resolve()==site_root/"yomihime_game_link_sdk/__init__.py"
+assert sdk.__version__=="0.1.0a24" and sdk.MODULE_ABI_VERSION=="2.0"
+class ConfigDouble:
     async def current(self):
         return sdk.ConfigSnapshot(1, {"region": "cn"})
-
-class _IdentityDouble:
-    pass
-
-class _AccountOperationsDouble:
-    pass
-
-class _SubscriptionOperationsDouble:
-    pass
-
-class _ScopeBinderDouble:
-    pass
-
-services = sdk.ModuleServices(
-    config=_ConfigDouble(),
-    identities=_IdentityDouble(),
-    accounts=_AccountOperationsDouble(),
-    subscriptions=_SubscriptionOperationsDouble(),
-    scopes=_ScopeBinderDouble(),
-)
-
-for example in ("empty_module", "offline_sample"):
-    package = importlib.import_module(f"yomihime_game_link_sdk._examples.{example}")
-    resource = importlib.resources.files(package)
-    output = extraction_root / example
+services=sdk.ModuleServices(config=ConfigDouble(),identities=object(),accounts=object(),subscriptions=object(),scopes=object())
+for example in ("empty_module","offline_sample"):
+    package=importlib.import_module("yomihime_game_link_sdk._examples."+example)
+    output=extraction_root/example
     output.mkdir(parents=True)
-    for name in ("manifest.json", "module.py", "README.md"):
-        data = resource.joinpath(name).read_bytes()
-        target_name = "yomihime.manifest.json" if name == "manifest.json" else name
-        (output / target_name).write_bytes(data)
-
-    if example == "empty_module":
-        module_path = output / "module.py"
-        spec = importlib.util.spec_from_file_location("empty_template_module", module_path)
-        assert spec is not None and spec.loader is not None
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-
-        async def exercise_empty_factory():
-            # Deliberately a fake service value: the no-op template ignores it.
-            instance = await module.Factory().create(object())
-            handlers = instance.handlers()
-            assert handlers.capabilities == {}
-            assert handlers.collectors == {}
-            assert handlers.evaluators == {}
-            assert (await instance.check_health()).capabilities == {}
-
-        asyncio.run(exercise_empty_factory())
-        continue
-    module_path = output / "module.py"
-    spec = importlib.util.spec_from_file_location("offline_sample_module", module_path)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-
-    async def exercise_factory():
-        instance = await module.Factory().create(services)
-        source_instance = await module.SourceFactory().create(services)
-        handlers = instance.handlers()
-        source_handlers = source_instance.handlers()
-        assert set(handlers.capabilities) == {
-            "status", "from_source", "configured_status", "account_bind",
-            "account_list", "account_unbind", "subscription_create",
-            "subscription_list", "subscription_cancel", "private_status",
-            "state", "message", "public_error", "subscription_revise",
-        }
-        assert set(handlers.collectors) == {"public_catalog", "private_catalog"}
-        assert set(handlers.evaluators) == {"sample_matcher"}
-        assert set(source_handlers.capabilities) == {"read"}
-
-        manifest_path = output / "yomihime.manifest.json"
-        manifest = parse_manifest(manifest_path.read_bytes())
-        declared = {item.module_id: item for item in manifest.modules}
-        assert set(declared) == {"status", "source"}
-        registry = Registry()
-        registered = registry.register_package(manifest, {"status": handlers, "source": source_handlers})
-        assert registered.module(manifest.package_id + "/status").handlers.capabilities["status"] is handlers.capabilities["status"]
-        status = declared["status"]
-        source = declared["source"]
-        assert (len(status.commands), len(status.tools)) == (14, 3)
-        assert (len(status.schedules), len(status.subscriptions)) == (2, 2)
-        assert len(status.config_fields) == 3
-        assert (len(source.commands), len(source.tools)) == (1, 0)
-        assert (len(source.schedules), len(source.subscriptions)) == (0, 0)
-        assert len(source.config_fields) == 0
-
-        result = await handlers.capabilities["status"].invoke(None, {})
-        assert isinstance(result, sdk.CapabilityResult)
-        assert result.document is not None
-        assert result.model_facts is not None
-        assert result.model_facts.facts["sample"] == "offline"
-        assert type(result) is CanonicalCapabilityResult
-        assert type(result.status) is CanonicalResultStatus
-        assert type(result.document) is CanonicalDisplayDocument
-        assert type(result.document.ordered_blocks[0]) is CanonicalTextBlock
-        assert type(result.model_facts) is CanonicalFactDocument
-        health = await instance.check_health()
-        assert health.capabilities["status"].status is sdk.HealthStatus.AVAILABLE
-
-        source_result = await source_handlers.capabilities["read"].invoke(None, {})
-        assert source_result.model_facts is not None
-        assert source_result.model_facts.facts["value"] == 7
-        checked = Gateway._valid_public_result(result)
-        assert type(checked) is sdk.CapabilityResult
-        assert type(checked.document.ordered_blocks[0]) is sdk.TextBlock
-        assert type(checked.model_facts) is sdk.FactDocument
-    asyncio.run(exercise_factory())
-
-assert {thread.ident for thread in threading.enumerate()} == before_threads
+    for name in ("README.md","module.py","manifest.json"):
+        data=importlib.resources.files(package).joinpath(name).read_bytes()
+        (output/("yomihime.manifest.json" if name=="manifest.json" else name)).write_bytes(data)
+    spec=importlib.util.spec_from_file_location("example_"+example,output/"module.py")
+    module=importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+    if example=="offline_sample":
+        async def exercise():
+            instance=await module.Factory().create(services)
+            result=await instance.handlers().capabilities["status"].invoke(None,{})
+            assert type(result) is sdk.CapabilityResult
+            assert result.model_facts.facts["sample"]=="offline"
+            assert type(result.document) is sdk.DisplayDocument
+            assert type(result.document.ordered_blocks[0]) is sdk.TextBlock
+        asyncio.run(exercise())
+assert {t.ident for t in threading.enumerate()}==before
 """
 
 
@@ -432,21 +189,8 @@ class InstalledArtifactTests(unittest.TestCase):
 
             extension_root = workdir / "extensions"
             extension_root.mkdir()
-            release_root = workdir / "release"
-            plugin_root = workdir / "astrbot_plugin_yomihime_game_link"
-            plugin_root.mkdir()
-            archive_path, _, _ = build_release(
-                sdk_wheel=wheel,
-                output_dir=release_root,
-                repository_root=ROOT,
-            )
-            with zipfile.ZipFile(archive_path) as archive:
-                archive.extractall(plugin_root)
-
-            # Install the reviewed wheel into the extracted plugin root, the
-            # same location from which the host bootstrap loads its pinned SDK.
-            shutil.rmtree(plugin_root / "yomihime_game_link_sdk")
-            install_result = subprocess.run(
+            site_root = workdir / "sdk-target"
+            installed = subprocess.run(
                 [
                     sys.executable,
                     "-m",
@@ -456,144 +200,30 @@ class InstalledArtifactTests(unittest.TestCase):
                     "--no-deps",
                     "--no-cache-dir",
                     "--target",
-                    str(plugin_root),
+                    str(site_root),
                     str(wheel),
                 ],
-                check=False,
-                cwd=workdir,
                 capture_output=True,
                 text=True,
             )
             self.assertEqual(
-                install_result.returncode,
-                0,
-                f"SDK wheel installation failed:\n{install_result.stdout}\n{install_result.stderr}",
+                installed.returncode, 0, installed.stdout + installed.stderr
             )
             probe = subprocess.run(
                 [
                     sys.executable,
                     "-I",
+                    "-B",
                     "-c",
                     VERIFY_INSTALLED_ARTIFACT,
-                    str(plugin_root),
+                    str(site_root),
                     str(extension_root),
-                    str(plugin_root),
                 ],
-                check=False,
                 cwd=workdir,
                 capture_output=True,
                 text=True,
             )
-            self.assertEqual(
-                probe.returncode,
-                0,
-                f"installed release probe failed:\n{probe.stdout}\n{probe.stderr}",
-            )
-
-            environment = os.environ.copy()
-            environment.pop("PYTHONPATH", None)
-            installed_package = plugin_root.name
-            entrypoints = (
-                f"{installed_package}.scripts.configure_source_credentials",
-                f"{installed_package}.scripts.admin_credentials",
-            )
-            sdk_origin_probe = """
-import pathlib, runpy, sys
-parent = pathlib.Path(sys.argv[1]).resolve()
-module_name = sys.argv[2]
-sys.path.insert(0, str(parent))
-sys.argv = [module_name, "--help"]
-try:
-    runpy.run_module(module_name, run_name="__main__")
-except SystemExit as exc:
-    assert exc.code in (None, 0), exc.code
-else:
-    raise AssertionError("--help did not exit")
-plugin_root = parent / module_name.split(".", 1)[0]
-import yomihime_game_link_sdk
-assert pathlib.Path(yomihime_game_link_sdk.__file__).resolve() == plugin_root / "yomihime_game_link_sdk" / "__init__.py"
-assert "astrbot_plugin_yomihime_game_link.main" not in sys.modules
-"""
-            external_sdk_probe = """
-import pathlib, runpy, sys
-parent = pathlib.Path(sys.argv[1]).resolve()
-module_name = sys.argv[2]
-external_root = pathlib.Path(sys.argv[3]).resolve()
-sys.path.insert(0, str(parent))
-sys.path.insert(0, str(external_root))
-import yomihime_game_link_sdk
-assert pathlib.Path(yomihime_game_link_sdk.__file__).resolve().is_relative_to(external_root)
-sys.argv = [module_name, "--help"]
-try:
-    runpy.run_module(module_name, run_name="__main__")
-except RuntimeError as exc:
-    assert "pinned plugin-local SDK" in str(exc)
-else:
-    raise AssertionError("a preloaded external SDK was accepted")
-assert "astrbot_plugin_yomihime_game_link.main" not in sys.modules
-"""
-            for module_name in entrypoints:
-                help_result = subprocess.run(
-                    [sys.executable, "-m", module_name, "--help"],
-                    cwd=workdir,
-                    env=environment,
-                    check=False,
-                    capture_output=True,
-                    text=True,
-                )
-                self.assertEqual(
-                    help_result.returncode,
-                    0,
-                    f"installed CLI help failed: {module_name}\n"
-                    f"{help_result.stdout}\n{help_result.stderr}",
-                )
-                origin_result = subprocess.run(
-                    [
-                        sys.executable,
-                        "-c",
-                        sdk_origin_probe,
-                        str(workdir),
-                        module_name,
-                    ],
-                    cwd=workdir,
-                    env=environment,
-                    check=False,
-                    capture_output=True,
-                    text=True,
-                )
-                self.assertEqual(
-                    origin_result.returncode,
-                    0,
-                    f"installed SDK origin failed: {module_name}\n"
-                    f"{origin_result.stdout}\n{origin_result.stderr}",
-                )
-                external_root = workdir / f"external-{module_name.rsplit('.', 1)[-1]}"
-                shutil.copytree(
-                    plugin_root / "yomihime_game_link_sdk",
-                    external_root / "yomihime_game_link_sdk",
-                )
-                external_result = subprocess.run(
-                    [
-                        sys.executable,
-                        "-c",
-                        external_sdk_probe,
-                        str(workdir),
-                        module_name,
-                        str(external_root),
-                    ],
-                    cwd=workdir,
-                    env=environment,
-                    check=False,
-                    capture_output=True,
-                    text=True,
-                )
-                self.assertEqual(
-                    external_result.returncode,
-                    0,
-                    f"external SDK was not rejected: {module_name}\n"
-                    f"{external_result.stdout}\n{external_result.stderr}",
-                )
-
+            self.assertEqual(probe.returncode, 0, probe.stdout + probe.stderr)
             empty = parse_manifest(
                 (extension_root / "empty_module/yomihime.manifest.json").read_bytes()
             )

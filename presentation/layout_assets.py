@@ -20,8 +20,7 @@ from io import BytesIO
 from typing import Literal
 from unicodedata import category
 
-from yomihime_game_link_sdk.cards import Asset as Asset
-
+from ..yomihime_game_link_sdk.cards import Asset as Asset
 from .card_bitmap import BitmapUnavailable
 
 MAX_ASSET_BYTES = 1_048_576

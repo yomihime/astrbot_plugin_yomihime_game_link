@@ -5,7 +5,7 @@ import unittest
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 
-from modules.ff14.config import (
+from ygl_test_subject.modules.ff14.config import (
     CALENDAR_CONFIG_FIELDS,
     DAYS,
     DELIVERY_TIME,
@@ -93,4 +93,9 @@ class FF14ConfigTests(unittest.TestCase):
         self.assertEqual(
             declared["value_schema"], {"type": "integer", "enum": [21600, 43200, 86400]}
         )
-        self.assertEqual(dict(field.value_schema), declared["value_schema"])
+        # Declarations can be raw lists or receiver-frozen tuples; their exact
+        # JSON contract (integer type and ordered enum values) is identical.
+        self.assertEqual(
+            json.loads(json.dumps(dict(field.value_schema))), declared["value_schema"]
+        )
+        self.assertTrue(all(type(value) is int for value in field.value_schema["enum"]))

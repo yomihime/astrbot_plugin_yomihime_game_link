@@ -11,8 +11,6 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from typing import Protocol
 
-from yomihime_game_link_sdk.declarations import CapabilityDescriptor, CommandDescriptor
-
 from ...core.contracts.validation import validate_parameters
 from ...core.contracts.validation_boundary import validate_contract
 from ...core.help_catalog import HelpCatalog
@@ -24,6 +22,10 @@ from ...core.registry import (
 from ...presentation.command_card import HelpCardSource, HelpModule
 from ...presentation.command_text import FULL_BRAND, command_title, render_total_help
 from ...presentation.text import TextPresenter
+from ...yomihime_game_link_sdk.declarations import (
+    CapabilityDescriptor,
+    CommandDescriptor,
+)
 
 _ROUTE = re.compile(r"[a-z][a-z0-9_]*(?:[.-][a-z0-9_]+)*\Z")
 _USAGE = "用法：/ygl help 查看模块；/ygl <模块路由> help 查看能力；/ygl <模块路由> <命令路径> help 查看参数。参数以空格分隔；双引号用于包含空格；不支持转义或 shell 语法。"

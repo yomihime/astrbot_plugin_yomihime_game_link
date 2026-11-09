@@ -10,16 +10,6 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from time import monotonic
 
-from yomihime_game_link_sdk.declarations import ConfigField, SourceDeclaration
-from yomihime_game_link_sdk.errors import SourceHttpError
-from yomihime_game_link_sdk.services import (
-    ConfigSnapshot,
-    ConfigTarget,
-    HttpRequest,
-    HttpResponse,
-)
-from yomihime_game_link_sdk.storage import SecretMetadataState, SecretRef
-
 from ..core.contracts.validation_boundary import validate_contract
 from ..core.ports import ConfigRepository, SecretOwner, SecretStore, validate_module_id
 from ..infrastructure.http import (
@@ -27,6 +17,16 @@ from ..infrastructure.http import (
     CredentialLease,
     _create_credential_exchange_request,
 )
+from ..yomihime_game_link_sdk.declarations import ConfigField, SourceDeclaration
+from ..yomihime_game_link_sdk.errors import SourceHttpError
+from ..yomihime_game_link_sdk.services import (
+    ConfigSnapshot,
+    ConfigTarget,
+    HttpRequest,
+    HttpResponse,
+)
+from ..yomihime_game_link_sdk.storage import SecretMetadataState, SecretRef
+from .runtime_effect_gate import check_current_effect, run_effect
 
 _CLIENT_TOKEN = re.compile(r"[A-Za-z0-9._~+/=-]{1,4096}\Z")
 _TOKEN_EXCHANGE_TIMEOUT_SECONDS = 5.0
@@ -558,6 +558,7 @@ class SourceCredentialService:
             state.generation += 1
 
     def _ensure_active(self) -> None:
+        check_current_effect()
         if self._closed:
             raise SourceHttpError("credentials_unavailable") from None
 
@@ -704,7 +705,7 @@ class SourceCredentialService:
                         timeout,
                     )
                 )
-                response = await exchange_method(exchange)
+                response = await run_effect(lambda: exchange_method(exchange))
         except asyncio.CancelledError:
             raise
         except asyncio.TimeoutError:

@@ -16,9 +16,9 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
-from yomihime_game_link_sdk.errors import ParameterError
-from yomihime_game_link_sdk.services import ResourceCacheClass, ResourceCacheStats
-from yomihime_game_link_sdk.storage import OwnerScope, OwnershipKind, ResourceMetadata
+from ..yomihime_game_link_sdk.errors import ParameterError
+from ..yomihime_game_link_sdk.services import ResourceCacheClass, ResourceCacheStats
+from ..yomihime_game_link_sdk.storage import OwnerScope, OwnershipKind, ResourceMetadata
 
 
 @dataclass(frozen=True, slots=True)

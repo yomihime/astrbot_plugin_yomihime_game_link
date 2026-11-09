@@ -1,8 +1,7 @@
-"""Build a Dashboard ZIP containing only the independently pinned SDK wheel."""
+"""Capture an independent Core payload with its private vendored SDK."""
 
 from __future__ import annotations
 
-import argparse
 import hashlib
 import html
 import json
@@ -20,7 +19,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 ARCHIVE = ROOT / "dist" / "astrbot_plugin_yomihime_game_link-local.zip"
 EXPECTED_WHEEL_SHA256 = (
-    "a0b2f61152e810b3a26febd715487d60f335108dffafba0a41d44db5208fdbb6"
+    "0d741c2d998c63df481ec2fe5670048f04b7170e822616a3d8fe6816527b0324"
 )
 EXPECTED_WHEEL_ENTRIES = {
     "yomihime_game_link_sdk/jobs.py",
@@ -65,6 +64,7 @@ ROOT_FILES = (
     "README.md",
     "CHANGELOG.md",
     "requirements.txt",
+    "ygl-plugin.json",
 )
 HOST_METADATA_FILES = (
     ".astrbot-plugin/i18n/zh-CN.json",
@@ -169,6 +169,8 @@ FF14_BUNDLE_REQUIRED_FILES = set(REVIEWED_BUNDLE_SOURCES[("modules", "ff14")]) |
     "README.md",
 }
 RUNTIME_DIRS = (
+    "bootstrap",
+    "yomihime_game_link_sdk",
     "adapters",
     "core",
     "extensions",
@@ -176,7 +178,7 @@ RUNTIME_DIRS = (
     "infrastructure",
     "presentation",
 )
-ALLOWED_SUFFIXES = {".py", ".sql"}
+ALLOWED_SUFFIXES = {".py", ".sql", ".typed"}
 # Exact reviewed binary/legal inputs. Never broaden the runtime suffix set or
 # recursively admit presentation/assets (including Python files placed there).
 FONT_ASSETS = {
@@ -201,13 +203,33 @@ EXCLUDED_RUNTIME_DIRS = {
     "instance",
     "local-data",
     "local_data",
+    ".agent-workspace",
+    ".git",
+    "node_modules",
+    "tests",
+    ".venv",
+    "venv",
 }
 
 
 def validate_public_paths(paths) -> None:
     for path in paths:
         normalized = str(path).replace("\\", "/").casefold()
-        if ".local-dev" in normalized.split("/") or normalized == "agents.md":
+        if (
+            any(
+                part
+                in {
+                    ".local-dev",
+                    ".agent-workspace",
+                    ".git",
+                    "node_modules",
+                    ".venv",
+                    "venv",
+                }
+                for part in normalized.split("/")
+            )
+            or normalized == "agents.md"
+        ):
             raise ValueError(f"Local development material is not public input: {path}")
 
 
@@ -263,6 +285,14 @@ def validate_output_paths(paths, inputs=()) -> tuple[Path, ...]:
                 raise ValueError("Build output parent must be a directory")
             if component == path and not stat.S_ISREG(metadata.st_mode):
                 raise ValueError("Build output must be a regular file")
+    # Resolve only after rejecting every linked output component. Windows 8.3
+    # names can identify the same file or missing descendant through aliases.
+    identities = tuple(path.resolve(strict=False) for path in outputs)
+    if len(identities) != len(set(identities)):
+        raise ValueError("Build outputs must be distinct")
+    protected_identities = {path.resolve(strict=False) for path in protected}
+    if any(path in protected_identities for path in identities):
+        raise ValueError("Build output overlaps an input")
     return outputs
 
 
@@ -801,103 +831,59 @@ def included_files(root: Path = ROOT) -> list[Path]:
     )
 
 
+def capture_payload(repository_root=ROOT):
+    repository_root = Path(repository_root).resolve(strict=True)
+    files = included_files(repository_root)
+    result = {
+        path.relative_to(repository_root).as_posix(): (
+            _font_asset_snapshot(path, repository_root)
+            if path.relative_to(repository_root).as_posix() in FONT_ASSETS
+            else _read_snapshot(path, repository_root, "Runtime source")
+        )
+        for path in files
+    }
+    # Builtin pages are closed Core assets. External packages are admitted and
+    # dynamically projected by runtime, independently of a Core release build.
+    result.update(projected_page_assets(repository_root))
+    return result, files
+
+
 def build(
-    sdk_wheel: Path,
-    archive_path: Path = ARCHIVE,
-    repository_root: Path = ROOT,
+    sdk_wheel=None,
+    archive_path=ARCHIVE,
+    repository_root=ROOT,
     *,
+    signing_key=None,
+    channel="preview",
+    sequence=1,
     external_page_roots=(),
     external_source_policy_roots=(),
-) -> Path:
-    package = validate_wheel(sdk_wheel)
-    repository_root = Path(repository_root).resolve(strict=True)
-    if any(
-        Path(archive_path).absolute().is_relative_to(Path(root).absolute())
-        for root in (*external_page_roots, *external_source_policy_roots)
-    ):
-        raise ValueError("Build output overlaps an external page input")
-    files = included_files(repository_root)
-    policy_inputs = {
-        Path(root).resolve(strict=True): _read_snapshot(
-            Path(root).resolve(strict=True) / "yomihime.source-policy.json",
-            Path(root).resolve(strict=True),
-            "External source policy",
-            max_bytes=262144,
-        )
-        for root in external_source_policy_roots
-    }
-    page_assets = projected_page_assets(
-        repository_root,
-        external_page_roots=external_page_roots,
-        **(
-            {"external_source_policy_roots": external_source_policy_roots}
-            if external_source_policy_roots
-            else {}
-        ),
+):
+    if external_page_roots or external_source_policy_roots:
+        raise ValueError("Core release builds do not compose external packages")
+    if sdk_wheel is not None:
+        validate_wheel(sdk_wheel)  # Optional developer wheel verification only.
+    files, inputs = capture_payload(repository_root)
+    validate_output_paths(
+        (archive_path,), (*inputs, *((sdk_wheel,) if sdk_wheel else ()))
     )
-    inputs = (*files, sdk_wheel, *external_page_roots, *external_source_policy_roots)
-    validate_output_paths((archive_path,), inputs)
-    output = BytesIO()
-    with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        for path in files:
-            name = path.relative_to(repository_root).as_posix()
-            content = (
-                _font_asset_snapshot(path, repository_root)
-                if name in FONT_ASSETS
-                else _read_snapshot(path, repository_root, "Runtime source")
-            )
-            if name in page_assets:
-                content = page_assets[name]
-            _write_entry(archive, name, content)
-        for name, data in package.items():
-            _write_entry(archive, name, data)
-        for name, data in page_assets.items():
-            if name not in {
-                path.relative_to(repository_root).as_posix() for path in files
-            }:
-                _write_entry(archive, name, data)
-
-    with zipfile.ZipFile(BytesIO(output.getvalue())) as result:
-        names = result.namelist()
-        expected_names = (
-            {path.relative_to(repository_root).as_posix() for path in files}
-            | set(package)
-            | set(page_assets)
-        )
-        if len(names) != len(set(names)) or set(names) != expected_names:
-            raise RuntimeError("Generated ZIP entry manifest is not exact")
-        for name, data in package.items():
-            if result.read(name) != data:
-                raise RuntimeError(f"SDK bytes differ from the pinned wheel: {name}")
-        for name, data in page_assets.items():
-            if result.read(name) != data:
-                raise RuntimeError(f"Module asset differs from verified bundle: {name}")
-        if result.testzip() is not None:
-            raise RuntimeError("The generated ZIP failed its integrity check")
-    if external_source_policy_roots:
-        # A selected secret-use policy and its page projection form one pair.
-        # Recheck the explicit external inputs at the publication boundary;
-        # a changed capture must leave an existing artifact untouched.
-        for policy_root, captured in policy_inputs.items():
-            if (
-                _read_snapshot(
-                    policy_root / "yomihime.source-policy.json",
-                    policy_root,
-                    "External source policy",
-                    max_bytes=262144,
-                )
-                != captured
-            ):
-                raise ValueError("external source policy changed before publication")
-        current_assets = projected_page_assets(
-            repository_root,
-            external_page_roots=external_page_roots,
-            external_source_policy_roots=external_source_policy_roots,
-        )
-        if current_assets != page_assets:
-            raise ValueError("external paired inputs changed before publication")
-    publish_artifacts({archive_path: output.getvalue()}, inputs)
-    return archive_path
+    if __package__:
+        from .release_envelope import complete
+    else:
+        from release_envelope import complete
+    payload = complete(
+        files,
+        Path(repository_root),
+        "core",
+        signing_key=signing_key,
+        channel=channel,
+        sequence=sequence,
+    )
+    current, _ = capture_payload(repository_root)
+    if current != files:
+        raise ValueError("Core source changed before publication")
+    publish_artifacts({Path(archive_path): payload}, inputs)
+    return Path(archive_path)
 
 
 def _write_entry(archive: zipfile.ZipFile, name: str, data: bytes) -> None:
@@ -909,24 +895,23 @@ def _write_entry(archive: zipfile.ZipFile, name: str, data: bytes) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--sdk-wheel",
-        required=True,
-        type=Path,
-        help="Path to the offline K-reviewed wheel; its digest is checked against the built-in pin.",
-    )
-    parser.add_argument(
-        "--external-page-package",
-        action="append",
-        type=Path,
-        default=[],
-        help="Explicit reviewed package root; capture only hash-declared static pages, never Python.",
-    )
+    from argparse import ArgumentParser
+
+    if __package__:
+        from .release_envelope import signing_key
+    else:
+        from release_envelope import signing_key
+    parser = ArgumentParser(description=__doc__)
+    parser.add_argument("--output", type=Path, default=ARCHIVE)
+    parser.add_argument("--signing-key", type=Path)
+    parser.add_argument("--test-signing", action="store_true")
     args = parser.parse_args()
-    archive = build(args.sdk_wheel, external_page_roots=args.external_page_package)
-    print(f"Created {archive}")
-    print(f"Included {len(included_files()) + len(PACKAGE_ENTRY_NAMES)} files")
+    print(
+        build(
+            archive_path=args.output,
+            signing_key=signing_key(args.signing_key, test=args.test_signing),
+        )
+    )
 
 
 if __name__ == "__main__":

@@ -12,34 +12,37 @@ from html.parser import HTMLParser
 from time import monotonic, time
 from urllib.parse import quote
 
-from yomihime_game_link_sdk.contexts import InvocationOrigin, InvocationView
-from yomihime_game_link_sdk.display import (
+from ....yomihime_game_link_sdk.contexts import InvocationOrigin, InvocationView
+from ....yomihime_game_link_sdk.display import (
     DisplayDocument,
     Link,
     LinksBlock,
     Privacy,
     TextBlock,
 )
-from yomihime_game_link_sdk.errors import (
+from ....yomihime_game_link_sdk.errors import (
     CacheUnavailable,
     ParameterError,
     ServiceUnavailable,
     SourceHttpError,
 )
-from yomihime_game_link_sdk.results import (
+from ....yomihime_game_link_sdk.results import (
     CapabilityResult,
     ErrorCode,
     ErrorDetail,
     ResultStatus,
 )
-from yomihime_game_link_sdk.services import ConfigSnapshot, HttpRequest, ModuleServices
-from yomihime_game_link_sdk.storage import (
+from ....yomihime_game_link_sdk.services import (
+    ConfigSnapshot,
+    HttpRequest,
+    ModuleServices,
+)
+from ....yomihime_game_link_sdk.storage import (
     CacheLookupStatus,
     CacheQuery,
     JsonObject,
     SecretMetadataState,
 )
-
 from .fflogs_cards import (
     CATALOG_LIMITATION,
     DETAIL_LIMITATION,
@@ -897,7 +900,7 @@ class FFLogsCharacterLookup:
                     "timeframe" in advanced_filters
                     and advanced_filters["timeframe"] not in contract.timeframe_values
                 ):
-                    from yomihime_game_link_sdk.results import FactDocument
+                    from ....yomihime_game_link_sdk.results import FactDocument
 
                     return replace(
                         _error(
@@ -1222,7 +1225,7 @@ class FFLogsCharacterLookup:
             )
             return tool_result(result, {"fflogs": facts})
         if advanced_filters and result.error is None:
-            from yomihime_game_link_sdk.results import FactDocument
+            from ....yomihime_game_link_sdk.results import FactDocument
 
             return replace(
                 result,
@@ -1236,7 +1239,7 @@ class FFLogsCharacterLookup:
             and result.error.code is ErrorCode.NO_RECORDS
             and not scoped["total_rows"]
         ):
-            from yomihime_game_link_sdk.results import FactDocument
+            from ....yomihime_game_link_sdk.results import FactDocument
 
             return replace(
                 result,

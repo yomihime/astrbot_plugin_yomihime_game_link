@@ -6,9 +6,6 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
-from yomihime_game_link_sdk.services import ResolvedIdentity
-from yomihime_game_link_sdk.subscriptions import ConversationKind, ConversationRef
-
 from ...core.contracts.services import (
     Binding,
     BindingDefaultSnapshot,
@@ -21,6 +18,8 @@ from ...core.ports import (
     RevisionConflict,
     UniqueConstraintViolation,
 )
+from ...yomihime_game_link_sdk.services import ResolvedIdentity
+from ...yomihime_game_link_sdk.subscriptions import ConversationKind, ConversationRef
 from .database import SQLiteDatabase, SQLiteUnitOfWork, SQLiteUnitOfWorkFactory
 
 

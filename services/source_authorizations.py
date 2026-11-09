@@ -22,7 +22,8 @@ from types import MappingProxyType
 from typing import Any
 from urllib.parse import parse_qsl, urlsplit
 
-from yomihime_game_link_sdk.services import HttpRequest, HttpResponse
+from ..yomihime_game_link_sdk.services import HttpRequest, HttpResponse
+from .runtime_effect_gate import check_current_effect, run_effect
 
 _MAX_ACTIVE_SESSIONS = 128
 _MAX_TERMINAL_SESSIONS = 128
@@ -368,6 +369,7 @@ class SourceAuthorizations:
         self._closed = False
 
     def _check_open(self):
+        check_current_effect()
         if self._closed:
             raise AuthorizationError("authorization_closed")
 
@@ -426,7 +428,7 @@ class SourceAuthorizations:
 
     async def _fetch(self, request):
         try:
-            response = await self._request(request)
+            response = await run_effect(lambda: self._request(request))
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -551,8 +553,10 @@ class SourceAuthorizations:
                     session.slots.clear()
                     session.qr_url = None
                     try:
-                        await self._credential_update(
-                            binding, MappingProxyType(captures)
+                        await run_effect(
+                            lambda: self._credential_update(
+                                binding, MappingProxyType(captures)
+                            )
                         )
                     except asyncio.CancelledError:
                         raise
@@ -622,7 +626,9 @@ class SourceAuthorizations:
                 session.clear("revoked")
                 self._archive(session)
         try:
-            await self._credential_update(binding, MappingProxyType({}))
+            await run_effect(
+                lambda: self._credential_update(binding, MappingProxyType({}))
+            )
         except asyncio.CancelledError:
             raise
         except Exception:

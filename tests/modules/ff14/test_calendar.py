@@ -7,13 +7,8 @@ from datetime import UTC, datetime
 from unittest import mock
 
 from ygl_test_subject.core.contracts.validation_boundary import validate_contract
-from ygl_test_subject.presentation.rendering import (
-    GenericDisplayRenderer,
-    RenderingBounds,
-)
-
-from modules.ff14.config import FF14ConfigSnapshot
-from modules.ff14.features.calendar import (
+from ygl_test_subject.modules.ff14.config import FF14ConfigSnapshot
+from ygl_test_subject.modules.ff14.features.calendar import (
     COLLECTOR_ID,
     DATA_VERSION,
     FALLBACK_SOURCE_ID,
@@ -24,14 +19,21 @@ from modules.ff14.features.calendar import (
     CalendarSourceReader,
     normalize_region,
 )
-from modules.ff14.features.calendar_evaluator import (
+from ygl_test_subject.modules.ff14.features.calendar_evaluator import (
     DEFAULT_LOCAL_TIME,
     DEFAULT_TIMEZONE,
     FILTER_KIND,
     SUMMARY_TYPE_ID,
     calendar_source_spec,
 )
-from modules.ff14.features.calendar_subscriptions import CalendarSubscriptionHandler
+from ygl_test_subject.modules.ff14.features.calendar_subscriptions import (
+    CalendarSubscriptionHandler,
+)
+from ygl_test_subject.presentation.rendering import (
+    GenericDisplayRenderer,
+    RenderingBounds,
+)
+
 from tests.modules.ff14.calendar_fakes import MemoryRecords
 from yomihime_game_link_sdk.contexts import InvocationOrigin, InvocationView
 from yomihime_game_link_sdk.display import (
@@ -281,7 +283,7 @@ class CalendarCollectorAndQueryTests(unittest.IsolatedAsyncioTestCase):
             "Services", (), {"config": _ConfigView(), "scopes": _Scopes(http)}
         )()
         with mock.patch(
-            "modules.ff14.features.calendar_snapshots.calendar_source_spec",
+            "ygl_test_subject.modules.ff14.features.calendar_snapshots.calendar_source_spec",
             side_effect=lambda region, source: None
             if source == SCHEDULE_SOURCE_ID
             else calendar_source_spec(region, source),

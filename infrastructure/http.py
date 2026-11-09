@@ -23,12 +23,16 @@ from types import MappingProxyType
 from typing import Protocol
 from urllib.parse import parse_qsl, quote_plus, urlencode, urljoin, urlsplit
 
-from yomihime_game_link_sdk.declarations import SourceDeclaration
-from yomihime_game_link_sdk.errors import SourceHttpError
-from yomihime_game_link_sdk.services import HttpRequest, HttpResponse, SourceHttp
-
 from ..core.contracts.validation_boundary import validate_contract
 from ..core.public_errors import public_boundary
+from ..services.runtime_effect_gate import (
+    check_current_effect,
+    current_effect_guard,
+    run_effect,
+)
+from ..yomihime_game_link_sdk.declarations import SourceDeclaration
+from ..yomihime_game_link_sdk.errors import SourceHttpError
+from ..yomihime_game_link_sdk.services import HttpRequest, HttpResponse, SourceHttp
 from .sync_diagnostics import emit as diagnostic
 
 
@@ -582,7 +586,7 @@ class SourceHttpService(SourceHttp):
         return limit
 
     async def budget(self, source_id):
-        from yomihime_game_link_sdk import HttpBudgetStatus
+        from ..yomihime_game_link_sdk import HttpBudgetStatus
 
         if type(source_id) is not str or source_id not in self._sources:
             raise SourceHttpError("source_not_declared")
@@ -866,6 +870,7 @@ class SourceHttpService(SourceHttp):
     ) -> HttpResponse:
         validate_contract(declaration)
         validate_contract(checked)
+        check_current_effect()
         headers = dict(checked.headers)
         body = checked.body
         remaining = deadline - asyncio.get_running_loop().time()
@@ -978,10 +983,19 @@ class SourceHttpService(SourceHttp):
             method = getattr(self._transport, "fetch", None)
         if not callable(method):
             method = self._transport
-        value = method(request)
-        if inspect.isawaitable(value):
-            return await value
-        raise SourceHttpError("invalid_response") from None
+
+        async def invoke():
+            check_current_effect()
+            value = method(request)
+            if inspect.isawaitable(value):
+                return await value
+            raise SourceHttpError("invalid_response") from None
+
+        return await run_effect(
+            invoke,
+            guard=current_effect_guard()
+            or getattr(self._transport, "_effect_guard", None),
+        )
 
     async def _reserve_quota(self, source: _SourceState, deadline: float) -> None:
         now = float(self._clock())

@@ -69,6 +69,7 @@ class CoreRuntimeIntegrationTests(unittest.TestCase):
             "core",
             "services",
             "infrastructure",
+            "modules",
             "extensions",
             "presentation",
             "adapters",

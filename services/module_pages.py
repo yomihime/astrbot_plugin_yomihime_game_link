@@ -7,12 +7,11 @@ import math
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from yomihime_game_link_sdk import ConfigTarget, ConfigUpdateMode
-from yomihime_game_link_sdk.storage import SecretMetadataState
-
 from ..core.contracts.administration import AdminAuthorizationDenied, AdminOperation
 from ..core.contracts.services import ConfigFieldUpdate, ConfigPatch
 from ..core.ports import SecretOwner
+from ..yomihime_game_link_sdk import ConfigTarget, ConfigUpdateMode
+from ..yomihime_game_link_sdk.storage import SecretMetadataState
 from .configuration.defaults import MODULE_REPLY_THEME, module_configuration_fields
 from .configuration.legacy_copy import effective_configuration
 from .configuration.operations import validate_configuration_value

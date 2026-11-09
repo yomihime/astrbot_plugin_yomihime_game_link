@@ -10,9 +10,8 @@ from collections import OrderedDict
 from collections.abc import Mapping
 from dataclasses import replace
 
-from yomihime_game_link_sdk.display import TextBlock
-
 from ..core.public_result import public_fact_strings
+from ..yomihime_game_link_sdk.display import TextBlock
 
 
 def _plain(value):

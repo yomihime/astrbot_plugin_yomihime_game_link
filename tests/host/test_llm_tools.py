@@ -16,6 +16,7 @@ from ygl_test_subject.infrastructure.sqlite.executor import SQLiteExecutorClosed
 from ygl_test_subject.modules.ff14.query_resolution import TrustedOwner
 from ygl_test_subject.services.core_runtime import CoreRuntimeCleanupPending
 
+from tests.fixtures.runtime_cleanup import terminate_and_drain
 from yomihime_game_link_sdk.contexts import InvocationOrigin
 from yomihime_game_link_sdk.display import Privacy
 from yomihime_game_link_sdk.results import (
@@ -163,7 +164,7 @@ class LLMToolTests(unittest.IsolatedAsyncioTestCase):
         self.runtime = self._runtime(
             self.context, http_transport_factory=lambda: self.transport
         )
-        self.addAsyncCleanup(self.runtime.terminate)
+        self.addAsyncCleanup(terminate_and_drain, self.runtime)
         await self.runtime.initialize()
         await fixture.AstrBotRuntimeTests._assert_initial_public_calendar_sync(
             self, self.runtime, self.transport
@@ -176,6 +177,10 @@ class LLMToolTests(unittest.IsolatedAsyncioTestCase):
         self.host.tool_exec.llm_tools = self.manager
         self.host.provider_register.llm_tools = self.manager
         self.provider = ControlledProvider(self.runtime._tool_publisher)
+
+    async def stop_quiet(self):
+        """Join actual quiet, not only the bounded Host observer."""
+        await terminate_and_drain(self.runtime)
 
     def wrapper(
         self,
@@ -917,7 +922,10 @@ class LLMToolTests(unittest.IsolatedAsyncioTestCase):
 
         async def star_process(event):
             async for value in namespace["game_link"](
-                SimpleNamespace(_runtime=self.runtime), event
+                SimpleNamespace(
+                    _runtime=self.runtime, _stopping=False, _state="active"
+                ),
+                event,
             ):
                 yield value
 
@@ -3038,7 +3046,10 @@ class LLMToolTests(unittest.IsolatedAsyncioTestCase):
         try:
             with self.assertRaises(CoreRuntimeCleanupPending) as pending:
                 await self.runtime.terminate()
-            self.assertEqual(pending.exception.component, "tool_publication")
+            self.assertEqual(pending.exception.component, "retained_orchestration")
+            retained_cleanup = self.runtime._retained_cleanup
+            self.assertFalse(retained_cleanup.done())
+            self.assertFalse(retained_cleanup.cancelled())
             with self.assertRaises(PermissionError):
                 await self.call_captured_parent(captured, wrapper)
             self.assertIs(self.runtime._tool_publisher, publisher)
@@ -3049,7 +3060,7 @@ class LLMToolTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(self.transport.close_calls, 1)
         finally:
             publisher.cleanup = real_cleanup
-        await self.runtime.terminate()
+        await self.stop_quiet()
         self.assertEqual(self.manager.func_list, [replacement])
         self.assertIsNone(self.runtime.core_runtime)
         self.assertEqual(self.transport.close_calls, 1)
@@ -3093,16 +3104,89 @@ class LLMToolTests(unittest.IsolatedAsyncioTestCase):
         self.transport.callback = callback
         pending = asyncio.create_task(self.call())
         await asyncio.wait_for(started.wait(), 5)
-        stopping = asyncio.create_task(self.runtime.terminate())
+        stopping = asyncio.create_task(self.stop_quiet())
         await asyncio.sleep(0)
         release.set()
         with self.assertRaises((PermissionError, asyncio.CancelledError)):
             await pending
         await stopping
 
+    async def test_same_runtime_two_lifetimes_own_distinct_actual_cleanup(self):
+        await self.start()
+        first_core, first_transport = (
+            self.runtime.core_runtime,
+            self.runtime._http_transport,
+        )
+        await self.stop_quiet()
+        first_cleanup = self.runtime._retained_cleanup
+        self.assertTrue(first_cleanup.done())
+        self.assertTrue(first_core.closed)
+        self.assertTrue(first_transport.closed)
+        self.assertEqual(self.manager.func_list, [])
+        await self.stop_quiet()
+        self.assertIs(self.runtime._retained_cleanup, first_cleanup)
+        self.assertFalse(self.runtime._closing)
+        self.runtime._http_transport_factory = FixtureTransport
+        await self.runtime.initialize()
+        second_core, second_transport = (
+            self.runtime.core_runtime,
+            self.runtime._http_transport,
+        )
+        self.assertIsNot(second_core, first_core)
+        self.assertIsNot(second_transport, first_transport)
+        self.assertTrue(self.runtime.ready)
+        self.assertEqual(len(self.manager.func_list), 1)
+        await self.stop_quiet()
+        self.assertIsNot(self.runtime._retained_cleanup, first_cleanup)
+        self.assertTrue(second_core.closed)
+        self.assertTrue(second_transport.closed)
+        self.assertIsNone(self.runtime._http_transport)
+        self.assertEqual(self.manager.func_list, [])
+
+    async def test_resistant_actual_cleanup_keeps_exact_task_and_blocks_reinitialize(
+        self,
+    ):
+        await self.start()
+        core = self.runtime.core_runtime
+        original = self.runtime._managed_font.close
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def delayed_close():
+            entered.set()
+            await release.wait()
+            await original()
+
+        self.runtime._managed_font.close = delayed_close
+        waiter = asyncio.create_task(self.runtime.terminate())
+        retained = None
+        try:
+            await asyncio.wait_for(entered.wait(), 5)
+            retained = self.runtime._retained_cleanup
+            waiter.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await waiter
+            self.assertFalse(retained.done())
+            self.assertFalse(retained.cancelled())
+            with self.assertRaises(CoreRuntimeCleanupPending):
+                await self.runtime.initialize()
+            self.assertIs(self.runtime.core_runtime, core)
+            self.assertIs(self.runtime._retained_cleanup, retained)
+            self.assertFalse(core.closed)
+            self.assertFalse(core._accepting)
+            self.assertFalse(self.transport.closed)
+        finally:
+            release.set()
+            self.runtime._managed_font.close = original
+            await asyncio.gather(waiter, return_exceptions=True)
+        await self.stop_quiet()
+        self.assertIs(self.runtime._retained_cleanup, retained)
+        self.assertTrue(core.closed)
+        self.assertTrue(self.transport.closed)
+        self.assertEqual(self.manager.func_list, [])
+
     async def test_collision_and_partial_publication_failure_close_real_runtime(self):
         await self.start()
-        await self.runtime.terminate()
+        await self.stop_quiet()
         other = self.host.FunctionTool(
             name="ff14_market_query",
             description="other plugin",
@@ -3166,7 +3250,7 @@ class LLMToolTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_initialization_pending_cleanup_retains_owner_and_retries(self):
         await self.start()
-        await self.runtime.terminate()
+        await self.stop_quiet()
         original = self.context.add_llm_tools
         retained = {}
 
@@ -3214,7 +3298,7 @@ class LLMToolTests(unittest.IsolatedAsyncioTestCase):
             name="ff14_market_query", description="other", parameters={"type": "object"}
         )
         self.manager.func_list.insert(0, other)
-        await self.runtime.terminate()
+        await self.stop_quiet()
         self.assertEqual(self.manager.func_list, [other])
         self.assertIsNone(self.runtime.core_runtime)
         self.assertEqual(self.transport.close_calls, close_calls + 1)
@@ -3233,20 +3317,29 @@ class LLMToolTests(unittest.IsolatedAsyncioTestCase):
             return False
 
         core.close = pending_core
-        with self.assertRaises(CoreRuntimeCleanupPending) as failure:
-            await self.runtime.terminate()
-        self.assertEqual(
-            failure.exception.component, "tool_publication,core_runtime_close"
-        )
-        self.assertIs(self.runtime.core_runtime, core)
-        self.assertIs(self.runtime._tool_publisher, publisher)
-        self.assertFalse(core.closed)
-        self.assertFalse(core._accepting)
-        self.assertIs(self.runtime._http_transport, self.transport)
-        self.assertFalse(self.transport.closed)
-        self.assertEqual(self.transport.close_calls, 0)
-        publisher.cleanup, core.close = cleanup, close
-        await self.runtime.terminate()
+        retained = None
+        try:
+            with self.assertRaises(CoreRuntimeCleanupPending) as failure:
+                await self.runtime.terminate()
+            self.assertEqual(failure.exception.component, "retained_orchestration")
+            retained = self.runtime._retained_cleanup
+            self.assertFalse(retained.done())
+            self.assertFalse(retained.cancelled())
+            self.assertIs(self.runtime.core_runtime, core)
+            self.assertIs(self.runtime._tool_publisher, publisher)
+            self.assertFalse(core.closed)
+            self.assertFalse(core._accepting)
+            self.assertIs(self.runtime._http_transport, self.transport)
+            self.assertFalse(self.transport.closed)
+            self.assertEqual(self.transport.close_calls, 0)
+            with self.assertRaises(CoreRuntimeCleanupPending):
+                await self.runtime.initialize()
+            self.assertIs(self.runtime.core_runtime, core)
+            self.assertIs(self.runtime._retained_cleanup, retained)
+        finally:
+            publisher.cleanup, core.close = cleanup, close
+        await self.stop_quiet()
+        self.assertIs(self.runtime._retained_cleanup, retained)
         await self.assert_core_closed(core, module)
         self.assertEqual(self.manager.func_list, [])
         self.assertTrue(self.transport.closed)
@@ -3268,19 +3361,27 @@ class LLMToolTests(unittest.IsolatedAsyncioTestCase):
             raise RuntimeError("pending transport")
 
         self.transport.close = pending_transport
-        with self.assertRaises(CoreRuntimeCleanupPending) as failure:
-            await self.runtime.terminate()
-        self.assertEqual(
-            failure.exception.component, "tool_publication,http_transport_close"
-        )
-        self.assertIsNone(self.runtime.core_runtime)
-        await self.assert_core_closed(core, module)
-        self.assertIs(self.runtime._tool_publisher, publisher)
-        self.assertIs(self.runtime._http_transport, self.transport)
-        self.assertFalse(self.transport.closed)
-        self.assertEqual(self.transport.close_calls, 0)
-        publisher.cleanup, self.transport.close = cleanup, close
-        await self.runtime.terminate()
+        retained = None
+        try:
+            with self.assertRaises(CoreRuntimeCleanupPending) as failure:
+                await self.runtime.terminate()
+            self.assertEqual(failure.exception.component, "retained_orchestration")
+            retained = self.runtime._retained_cleanup
+            self.assertFalse(retained.done())
+            self.assertFalse(retained.cancelled())
+            self.assertIsNone(self.runtime.core_runtime)
+            await self.assert_core_closed(core, module)
+            self.assertIs(self.runtime._tool_publisher, publisher)
+            self.assertIs(self.runtime._http_transport, self.transport)
+            self.assertFalse(self.transport.closed)
+            self.assertEqual(self.transport.close_calls, 0)
+            with self.assertRaises(CoreRuntimeCleanupPending):
+                await self.runtime.initialize()
+            self.assertIs(self.runtime._retained_cleanup, retained)
+        finally:
+            publisher.cleanup, self.transport.close = cleanup, close
+        await self.stop_quiet()
+        self.assertIs(self.runtime._retained_cleanup, retained)
         self.assertIsNone(self.runtime._tool_publisher)
         self.assertIsNone(self.runtime._http_transport)
         self.assertEqual(self.manager.func_list, [])

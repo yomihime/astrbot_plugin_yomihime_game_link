@@ -8,8 +8,11 @@ from types import ModuleType, SimpleNamespace
 from unittest.mock import patch
 
 from ygl_test_subject.adapters.astrbot.diagnostics import forward_diagnostic
+from ygl_test_subject.modules.ff14.features.fflogs_evidence import (
+    Evidence,
+    RequestMetrics,
+)
 
-from modules.ff14.features.fflogs_evidence import Evidence, RequestMetrics
 from tests.host import test_fflogs_diagnostics as bridge_fixture
 
 

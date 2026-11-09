@@ -5,9 +5,8 @@ from __future__ import annotations
 import random
 from dataclasses import replace
 
-from yomihime_game_link_sdk.declarations import CapabilityDescriptor, ModuleManifest
-from yomihime_game_link_sdk.display import DisplayDocument, TextBlock
-
+from ..yomihime_game_link_sdk.declarations import CapabilityDescriptor, ModuleManifest
+from ..yomihime_game_link_sdk.display import DisplayDocument, TextBlock
 from .text import TextPresenter
 
 FULL_BRAND = "如月怜的游戏连结"

@@ -30,6 +30,7 @@ from ygl_test_subject.infrastructure.windows.private_storage import (
     identity_private_base,
 )
 
+from tests.fixtures.runtime_cleanup import terminate_and_drain
 from tests.host import test_admin_pages as admin_fixture
 from tests.host.astrbot_contract import host_contracts
 from tests.host.test_external_packages import SOURCE, _Font
@@ -222,7 +223,7 @@ class ModuleSourceAuthorizationTests(unittest.IsolatedAsyncioTestCase):
             http_transport_factory=lambda: self.transport,
             config={"web_public_origin": "https://ui.test"},
         )
-        self.addAsyncCleanup(self.runtime.terminate)
+        self.addAsyncCleanup(terminate_and_drain, self.runtime)
         await self.runtime.initialize()
         await self.runtime.extension_host.register_package(
             plugin_name=metadata.name,

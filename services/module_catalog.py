@@ -6,9 +6,6 @@ import hashlib
 import json
 from collections.abc import Mapping
 
-from yomihime_game_link_sdk.contexts import InvocationOrigin
-from yomihime_game_link_sdk.declarations import CapabilityEffect, PrivacyFloor
-
 from ..core.contracts.administration import ModuleLifecycle
 from ..core.contracts.manifests import (
     EXTENSION_MANIFEST_MAX_BYTES,
@@ -20,6 +17,8 @@ from ..core.contracts.manifests import (
 from ..core.lifecycle import LifecycleState
 from ..core.ports import RunIdentity
 from ..core.registry import RegistrySnapshot
+from ..yomihime_game_link_sdk.contexts import InvocationOrigin
+from ..yomihime_game_link_sdk.declarations import CapabilityEffect, PrivacyFloor
 
 
 class ModuleCatalogUnavailable(RuntimeError):

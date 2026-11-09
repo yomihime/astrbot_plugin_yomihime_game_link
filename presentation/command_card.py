@@ -8,9 +8,11 @@ text, or an explicit size hint when the complete text exceeds the send budget.
 from collections.abc import Mapping
 from dataclasses import dataclass, fields, is_dataclass, replace
 
-from yomihime_game_link_sdk import cards
-from yomihime_game_link_sdk.declarations import ModuleManifest
-from yomihime_game_link_sdk.display import (
+from ..core.contracts.validation_boundary import validate_contract
+from ..core.contracts.version import CONTRACT_VERSION
+from ..yomihime_game_link_sdk import cards
+from ..yomihime_game_link_sdk.declarations import ModuleManifest
+from ..yomihime_game_link_sdk.display import (
     DisplayAudience,
     DisplayDocument,
     ImageBlock,
@@ -18,9 +20,6 @@ from yomihime_game_link_sdk.display import (
     Privacy,
     TableBlock,
 )
-
-from ..core.contracts.validation_boundary import validate_contract
-from ..core.contracts.version import CONTRACT_VERSION
 from .bundled_font import BundledFontProvider
 from .card_bitmap import (
     BitmapUnavailable,

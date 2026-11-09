@@ -5,14 +5,6 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from uuid import uuid4
 
-from yomihime_game_link_sdk.contexts import InvocationOrigin, InvocationView
-from yomihime_game_link_sdk.services import (
-    AccountOperations,
-    BindingView,
-    ResolvedIdentity,
-)
-from yomihime_game_link_sdk.storage import GrantReference
-
 from ..core.context_issuer import ContextIssuer
 from ..core.contracts.services import Binding, BindingDefaultSnapshot
 from ..core.contracts.validation_boundary import validate_contract
@@ -26,6 +18,13 @@ from ..core.ports import (
     RevisionConflict,
     UniqueConstraintViolation,
 )
+from ..yomihime_game_link_sdk.contexts import InvocationOrigin, InvocationView
+from ..yomihime_game_link_sdk.services import (
+    AccountOperations,
+    BindingView,
+    ResolvedIdentity,
+)
+from ..yomihime_game_link_sdk.storage import GrantReference
 from .identity import (
     IdentityBindingConflict,
     IdentityBindingError,

@@ -17,8 +17,10 @@ from ygl_test_subject.infrastructure.http import SourceHttpService
 from ygl_test_subject.infrastructure.http_transport import AioHttpTransport
 from ygl_test_subject.infrastructure.sqlite.database import SQLiteUnitOfWork
 from ygl_test_subject.infrastructure.sync_diagnostics import SyncDiagnostics
+from ygl_test_subject.modules.ff14.features.calendar_snapshots import (
+    SOURCE_TIMEOUT_SECONDS,
+)
 
-from modules.ff14.features.calendar_snapshots import SOURCE_TIMEOUT_SECONDS
 from tests.integration import test_ff14_runtime as integration_fixture
 from tests.modules.ff14 import test_calendar_snapshots as snapshots_fixture
 from tests.services import test_background_scheduler as background_fixture

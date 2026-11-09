@@ -60,10 +60,11 @@ import subprocess
 host_commit = subprocess.check_output(
     ["git", "-C", str(host_source), "rev-parse", "HEAD"], text=True
 ).strip()
-if host_commit != "dffe922773725e9c178392c423676ad65044748c":
-    parser.error(
-        "Expected official v4.29.1 commit dffe922773725e9c178392c423676ad65044748c"
-    )
+if host_commit not in {
+    "dffe922773725e9c178392c423676ad65044748c",
+    "61335414433db721b3f7ecc93f90deafe0a59d78",
+}:
+    parser.error("Expected allowlisted official v4.29.1 or v4.29.4 commit")
 if subprocess.check_output(
     ["git", "-C", str(host_source), "status", "--porcelain", "--untracked-files=no"],
     text=True,
@@ -242,17 +243,16 @@ async def main():
             == "Settings and Maintenance"
         )
         result["native_view_localization"] = True
+        await asyncio.wait_for(star.star_cls._start_task, timeout=30)
         runtime = star.star_cls._runtime
         assert runtime.ready, "runtime not ready"
         assert runtime.core_runtime.registry.is_active("ff14/ff14"), "FF14 inactive"
         result["core_ready"] = runtime.ready
         result["ff14_active"] = True
-        mainmod = sys.modules[type(star.star_cls).__module__]
-        sdk = importlib.import_module("yomihime_game_link_sdk")
-        assert sdk.__version__ == mainmod.SDK_VERSION
-        Path(sdk.__file__).resolve().relative_to(
-            Path(mainmod.__file__).resolve().parent
-        )
+        namespace = star.star_cls._generation.bundle.namespace
+        sdk = importlib.import_module(namespace + ".yomihime_game_link_sdk")
+        assert "yomihime_game_link_sdk" not in sys.modules
+        assert type(runtime).__module__.startswith(namespace + ".")
         result["sdk_version"] = sdk.__version__
         result["sdk_local"] = True
         dashboard = AstrBotDashboard(host, db_helper, asyncio.Event())

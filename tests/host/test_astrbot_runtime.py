@@ -57,6 +57,7 @@ from ygl_test_subject.services.core_runtime import (
 )
 
 from tests.fixtures.managed_font import OfflineManagedFont
+from tests.fixtures.runtime_cleanup import terminate_and_drain
 from yomihime_game_link_sdk.declarations import (
     CapabilityDescriptor,
     CapabilityEffect,
@@ -500,7 +501,7 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertEqual(counts, (0, 0))
             finally:
-                await runtime.terminate()
+                await terminate_and_drain(runtime)
 
     async def test_public_web_same_bearer_budget_and_terminate_revoke_before_lock(self):
         from tests.host.test_ff14_pages import _host_contracts, _request, _token
@@ -580,7 +581,7 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.gather(*tasks, return_exceptions=True)
             for state in states:
                 runtime.finish_public_web(state)
-            await runtime.terminate()
+            await terminate_and_drain(runtime)
 
     async def test_trusted_gate_binding_comes_from_one_scan_and_initializes_installed_sha(
         self,
@@ -632,7 +633,7 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 ).supported
             )
         finally:
-            await runtime.terminate()
+            await terminate_and_drain(runtime)
 
     async def test_untrusted_bundle_never_initializes_gate_bootstrap(self):
         runtime = self._runtime(_Context(), http_transport_factory=_IdleTransport)
@@ -666,7 +667,7 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 finally:
                     connection.close()
             finally:
-                await runtime.terminate()
+                await terminate_and_drain(runtime)
 
     async def test_invalid_current_configuration_reports_safe_field_without_overwrite(
         self,
@@ -689,7 +690,7 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("插件设置页", text)
             self.assertIn("尚未启动", text)
             self.assertNotIn("private-invalid-zone", text)
-            await runtime.terminate()
+            await terminate_and_drain(runtime)
         self.assertEqual(context.calls, [])
 
     async def test_catalog_help_does_not_read_legacy_region_or_dispatch(
@@ -751,7 +752,7 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("server_hint=", details)
             self.assertEqual(context.calls, [])
         finally:
-            await runtime.terminate()
+            await terminate_and_drain(runtime)
 
     async def test_fresh_composition_needs_no_legacy_prepared_input(self):
         runtime = self._runtime(_Context(), http_transport_factory=_IdleTransport)
@@ -760,7 +761,7 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(runtime.core_runtime.configuration_blocked)
         self.assertTrue(runtime.core_runtime.started)
         self.assertIsNotNone(runtime.core_runtime._pump_task)
-        await runtime.terminate()
+        await terminate_and_drain(runtime)
 
     async def test_old_initialize_cannot_publish_after_terminate_starts(self):
         entered, release = asyncio.Event(), asyncio.Event()
@@ -843,7 +844,7 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(settings["state"], "retired")
         finally:
-            await runtime.terminate()
+            await terminate_and_drain(runtime)
 
     async def test_catalog_real_ff14_is_metadata_only_and_never_invokes(self):
         context = _Context()
@@ -973,7 +974,7 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaisesRegex(RuntimeError, "generation changed"):
                     runtime.public_module_catalog()
         finally:
-            await runtime.terminate()
+            await terminate_and_drain(runtime)
         self.assertEqual(
             runtime.public_module_catalog()["runtime"], {"state": "not_ready"}
         )
@@ -991,7 +992,7 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 "modules": None,
             },
         )
-        await runtime.terminate()
+        await terminate_and_drain(runtime)
 
     async def test_invalid_config_retired_locator_keeps_formal_management_recovery(
         self,
@@ -1005,7 +1006,7 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(runtime.core_runtime.configuration_blocked)
             self.assertFalse(runtime.core_runtime.started)
         finally:
-            await runtime.terminate()
+            await terminate_and_drain(runtime)
 
     async def test_retired_locator_does_not_borrow_registry_or_declaration_authority(
         self,
@@ -1057,11 +1058,11 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("FF14", chain.chain[0].text)
         self.assertIn("FFLogs", chain.chain[0].text)
 
-        await runtime.terminate()
+        await terminate_and_drain(runtime)
         self.assertTrue(core.closed)
         self.assertTrue(transport.closed)
         self.assertFalse(runtime.ready)
-        await runtime.terminate()
+        await terminate_and_drain(runtime)
 
     async def test_content_addressed_bundle_upgrade_preserves_enabled_intent(self):
         runtime = self._runtime(_Context())
@@ -1070,7 +1071,7 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(first_core)
         self.assertTrue(first_core.registry.snapshot().module("ff14/ff14").enabled)
         first_extension_root = first_core.extension_root
-        await runtime.terminate()
+        await terminate_and_drain(runtime)
         self.assertTrue(first_core.closed)
 
         readme = self.plugin_root / "modules" / "ff14" / "README.md"
@@ -1086,7 +1087,7 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(persisted)
         self.assertTrue(persisted.desired_enabled)
         self.assertIsNone(runtime._isolated_extension_dir)
-        await runtime.terminate()
+        await terminate_and_drain(runtime)
 
     async def test_content_addressed_bundle_upgrade_preserves_disabled_intent(self):
         runtime = self._runtime(_Context())
@@ -1095,7 +1096,7 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(first_core)
         first_extension_root = first_core.extension_root
         self.assertTrue(first_core.registry.snapshot().module("ff14/ff14").enabled)
-        await runtime.terminate()
+        await terminate_and_drain(runtime)
 
         layout = resolve_private_storage(self.data_dir)
         self.assertEqual(layout.database_path, first_core.database.path)
@@ -1143,7 +1144,7 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(persisted)
         self.assertFalse(persisted.desired_enabled)
         self.assertEqual(persisted.intent_revision, 2)
-        await runtime.terminate()
+        await terminate_and_drain(runtime)
 
     async def test_modified_existing_bundle_cannot_restore_enabled_intent(self):
         runtime = self._runtime(_Context())
@@ -1152,7 +1153,7 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(first_core)
         self.assertTrue(first_core.registry.snapshot().module("ff14/ff14").enabled)
         package_dir = first_core.extension_root / "ff14"
-        await runtime.terminate()
+        await terminate_and_drain(runtime)
 
         manifest_path = package_dir / "yomihime.manifest.json"
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -1183,7 +1184,7 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("清单与发行包不一致", diagnostic)
             self.assertIn("重载插件", diagnostic)
             self.assertNotIn(str(self.data_dir), diagnostic)
-        await runtime.terminate()
+        await terminate_and_drain(runtime)
 
     async def test_bundle_failure_reasons_have_safe_distinct_recovery_actions(self):
         cases = (
@@ -1217,7 +1218,7 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
                     self.assertNotIn("unknown-private-path-and-secret", reply)
                     self.assertEqual(context.calls, [])
                 finally:
-                    await runtime.terminate()
+                    await terminate_and_drain(runtime)
 
     async def test_unsupported_bundle_environment_is_visible_on_startup_and_help(self):
         runtime = self._runtime(_Context(), http_transport_factory=_IdleTransport)
@@ -1235,7 +1236,7 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(runtime.core_runtime)
         event = self._event(message="/ygl help")
         self.assertEqual(await runtime.handle_event(event), str(raised.exception))
-        await runtime.terminate()
+        await terminate_and_drain(runtime)
 
     async def test_other_message_and_changed_event_facts_are_rejected(self):
         context = _Context()
@@ -1264,7 +1265,7 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         self.assertEqual(context.calls, [])
-        await runtime.terminate()
+        await terminate_and_drain(runtime)
 
     async def test_trusted_commands_provision_one_adapter_scoped_principal(self):
         runtime = self._runtime(_Context())
@@ -1306,7 +1307,7 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
             ).fetchone()[0]
         )
         self.assertEqual(row_count, 2)
-        await runtime.terminate()
+        await terminate_and_drain(runtime)
 
     async def test_group_owner_command_returns_fixed_private_chat_hint(self):
         context = _Context()
@@ -1385,7 +1386,7 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(context.calls, [])
         self.assertNotIn("user-17", response)
         self.assertNotIn("revision", response.lower())
-        await runtime.terminate()
+        await terminate_and_drain(runtime)
 
     async def test_send_value_error_after_call_begins_is_unknown(self):
         context = _Context(error=ValueError("platform send failed"))
@@ -1445,12 +1446,12 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(runtime._http_transport, transport)
         self.assertFalse(transport.closed)
 
-        await runtime.terminate()
+        await terminate_and_drain(runtime)
         self.assertTrue(transport.closed)
         self.assertEqual(transport.close_calls, 1)
         self.assertIsNone(runtime._http_transport)
 
-        await runtime.terminate()
+        await terminate_and_drain(runtime)
         self.assertEqual(transport.close_calls, 1)
 
     async def test_proxy_source_is_only_the_trusted_host_config(self):
@@ -1471,7 +1472,7 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(action.operation_path, "item")
             self.assertEqual(dict(action.parameters), {"query": "44091"})
         finally:
-            await runtime.terminate()
+            await terminate_and_drain(runtime)
 
     async def _assert_initial_public_calendar_sync(
         self, runtime, transport, *, expect_cached=False
@@ -1594,7 +1595,7 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
         context = _Context()
         transport = _ItemReplyTransport()
         runtime = self._runtime(context, http_transport_factory=lambda: transport)
-        self.addAsyncCleanup(runtime.terminate)
+        self.addAsyncCleanup(terminate_and_drain, runtime)
         await runtime.initialize()
         await self._assert_initial_public_calendar_sync(runtime, transport)
         try:
@@ -1634,13 +1635,13 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 ],
             )
         finally:
-            await runtime.terminate()
+            await terminate_and_drain(runtime)
 
     async def test_item_command_uses_core_sources_and_public_output(self):
         context = _Context()
         transport = _ItemReplyTransport()
         runtime = self._runtime(context, http_transport_factory=lambda: transport)
-        self.addAsyncCleanup(runtime.terminate)
+        self.addAsyncCleanup(terminate_and_drain, runtime)
         await runtime.initialize()
         await self._assert_initial_public_calendar_sync(runtime, transport)
         core = runtime.core_runtime
@@ -1678,7 +1679,7 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
             .text.startswith("游戏连结 · 最终幻想 XIV · item\n")
         )
         self.assertIn("FF14 物品 100", context.calls[0][1].chain[0].text)
-        await runtime.terminate()
+        await terminate_and_drain(runtime)
         self.assertTrue(transport.closed)
 
     async def test_unavailable_required_source_only_degrades_item_capability(self):
@@ -1693,7 +1694,7 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
         item_health, _ = core.health_resolver.current("ff14/ff14", "item.lookup")
         self.assertIs(status_health.status, HealthStatus.AVAILABLE)
         self.assertIs(item_health.status, HealthStatus.UNAVAILABLE)
-        await runtime.terminate()
+        await terminate_and_drain(runtime)
 
     async def test_missing_required_source_is_capability_level_unknown(self):
         self._rewrite_source("xivapi_items", remove=True)
@@ -1706,7 +1707,7 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
         item_health, _ = core.health_resolver.current("ff14/ff14", "item.lookup")
         self.assertIs(status_health.status, HealthStatus.AVAILABLE)
         self.assertIs(item_health.status, HealthStatus.UNKNOWN)
-        await runtime.terminate()
+        await terminate_and_drain(runtime)
 
     async def test_wrong_optional_source_host_does_not_block_item_lookup(self):
         self._rewrite_source("garland_items", host="unapproved.example")
@@ -1719,7 +1720,7 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
         item_health, _ = core.health_resolver.current("ff14/ff14", "item.lookup")
         self.assertIs(status_health.status, HealthStatus.AVAILABLE)
         self.assertIs(item_health.status, HealthStatus.AVAILABLE)
-        await runtime.terminate()
+        await terminate_and_drain(runtime)
 
     async def test_wrong_required_source_host_blocks_only_item_lookup(self):
         self._rewrite_source("xivapi_items", host="unapproved.example")
@@ -1732,7 +1733,7 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
         item_health, _ = core.health_resolver.current("ff14/ff14", "item.lookup")
         self.assertIs(status_health.status, HealthStatus.AVAILABLE)
         self.assertIs(item_health.status, HealthStatus.UNAVAILABLE)
-        await runtime.terminate()
+        await terminate_and_drain(runtime)
 
     async def test_trusted_manifest_binds_exact_independent_fflogs_policies(self):
         runtime = self._runtime(_Context())
@@ -1761,7 +1762,7 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
         core = runtime.core_runtime
         self.assertIsNotNone(core)
         self.assertEqual(core.module_services._source_credential_policies, policies)
-        await runtime.terminate()
+        await terminate_and_drain(runtime)
 
     async def test_partial_fflogs_sensitive_field_declaration_fails_closed(self):
         self._rewrite_config_field("credential_fflogs_cn", required=True)
@@ -1772,13 +1773,13 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNone(runtime.core_runtime)
         self.assertFalse(runtime.ready)
-        await runtime.terminate()
+        await terminate_and_drain(runtime)
 
     async def test_missing_fflogs_secret_never_falls_back_to_anonymous_http(self):
         context = _Context()
         transport = _ItemReplyTransport()
         runtime = self._runtime(context, http_transport_factory=lambda: transport)
-        self.addAsyncCleanup(runtime.terminate)
+        self.addAsyncCleanup(terminate_and_drain, runtime)
         await runtime.initialize()
         await self._assert_initial_public_calendar_sync(runtime, transport)
 
@@ -1791,7 +1792,7 @@ class AstrBotRuntimeTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(len(context.calls), 1)
         self.assertNotIn("credential", context.calls[0][1].chain[0].text.lower())
-        await runtime.terminate()
+        await terminate_and_drain(runtime)
 
 
 if __name__ == "__main__":

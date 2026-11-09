@@ -12,14 +12,14 @@ from time import monotonic, time
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from modules.ff14.features.fflogs import (
+from ygl_test_subject.modules.ff14.features.fflogs import (
     FFLogsCharacterLookup,
     _bounded_catalog_targets,
     _catalog_query_targets,
     _target_key,
 )
-from modules.ff14.features.fflogs_catalog import select_character_zones
-from modules.ff14.features.fflogs_history_cache import (
+from ygl_test_subject.modules.ff14.features.fflogs_catalog import select_character_zones
+from ygl_test_subject.modules.ff14.features.fflogs_history_cache import (
     HISTORY_CACHE_TTL,
     cache_pack_key,
     cache_packs,
@@ -30,12 +30,13 @@ from modules.ff14.features.fflogs_history_cache import (
     snapshot_key,
     snapshot_payload,
 )
-from modules.ff14.features.fflogs_models import (
+from ygl_test_subject.modules.ff14.features.fflogs_models import (
     EncounterRecord,
     FFLogsPayloadError,
     OutputMetadata,
     PartitionRecord,
 )
+
 from tests.modules.ff14 import test_fflogs_aggregation as fixture
 from tests.services import test_cache_resources as managed_cache_fixture
 from yomihime_game_link_sdk.errors import ServiceUnavailable
@@ -300,7 +301,8 @@ class ExplicitHistoryTests(unittest.IsolatedAsyncioTestCase):
             CacheLookupStatus.MISS,
         )
         with patch(
-            "modules.ff14.features.fflogs_history_cache.time", return_value=time() + 901
+            "ygl_test_subject.modules.ff14.features.fflogs_history_cache.time",
+            return_value=time() + 901,
         ):
             before = len(self.calls)
             result = await self.run_history()
@@ -432,7 +434,7 @@ class ExplicitHistoryTests(unittest.IsolatedAsyncioTestCase):
         self.scope.cache.put = failing_put
         result = await self.run_history()
         self.assertTrue(result.catalog_complete)
-        from modules.ff14.features.fflogs import HISTORY_INCOMPLETE
+        from ygl_test_subject.modules.ff14.features.fflogs import HISTORY_INCOMPLETE
 
         self.assertNotIn(HISTORY_INCOMPLETE, result.catalog_warnings)
         self.assertTrue(any(row.query_state == "record" for row in result.rankings))
@@ -547,7 +549,10 @@ class ExplicitHistoryTests(unittest.IsolatedAsyncioTestCase):
                 cancelled.set()
 
         self.scope.cache.lookup = hanging_lookup
-        with patch("modules.ff14.features.fflogs.asyncio.timeout", controlled_timeout):
+        with patch(
+            "ygl_test_subject.modules.ff14.features.fflogs.asyncio.timeout",
+            controlled_timeout,
+        ):
             result = await self.run_history()
         self.assertTrue(entered.is_set())
         self.assertTrue(cancelled.is_set())
@@ -576,7 +581,10 @@ class ExplicitHistoryTests(unittest.IsolatedAsyncioTestCase):
 
         self.scope.cache.lookup = immediate_miss
         self.scope.cache.put = stalled_put
-        with patch("modules.ff14.features.fflogs.asyncio.timeout", controlled_timeout):
+        with patch(
+            "ygl_test_subject.modules.ff14.features.fflogs.asyncio.timeout",
+            controlled_timeout,
+        ):
             result = await self.run_history()
         self.assertEqual(attempts, [10])
         self.assertEqual(len(self.requested(self.calls)), 111)
@@ -606,7 +614,10 @@ class ExplicitHistoryTests(unittest.IsolatedAsyncioTestCase):
 
         self.scope.cache.lookup = immediate_miss
         self.scope.cache.put = stalled_put
-        with patch("modules.ff14.features.fflogs.asyncio.timeout", controlled_timeout):
+        with patch(
+            "ygl_test_subject.modules.ff14.features.fflogs.asyncio.timeout",
+            controlled_timeout,
+        ):
             result = await self.run_history()
         self.assertEqual(attempts, [1])
         self.assertEqual(len(self.requested(self.calls)), 6)
@@ -619,7 +630,7 @@ class ExplicitHistoryTests(unittest.IsolatedAsyncioTestCase):
                 for row in group.rankings
             )
         )
-        from modules.ff14.features.fflogs import HISTORY_INCOMPLETE
+        from ygl_test_subject.modules.ff14.features.fflogs import HISTORY_INCOMPLETE
 
         self.assertNotIn(HISTORY_INCOMPLETE, result.catalog_warnings)
         self.assertTrue(any("保存" in warning for warning in result.catalog_warnings))

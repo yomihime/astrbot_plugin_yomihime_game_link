@@ -20,6 +20,7 @@ from ygl_test_subject.services.configuration.defaults import (
 )
 from ygl_test_subject.services.core_runtime import CoreRuntime
 
+from tests.fixtures.runtime_cleanup import terminate_and_drain
 from tests.host import test_astrbot_runtime as fixture
 from tests.host.test_market_integration import FixtureTransport
 from yomihime_game_link_sdk.declarations import ConfigUpdateMode
@@ -98,7 +99,7 @@ class DeclarativeCommandPipelineTests(unittest.IsolatedAsyncioTestCase):
                     runtime.core_runtime.output._generated_png._entries, {}
                 )
         finally:
-            await runtime.terminate()
+            await terminate_and_drain(runtime)
 
     async def test_declarative_failure_uses_complete_text_once(self):
         context = fixture._Context()
@@ -126,7 +127,7 @@ class DeclarativeCommandPipelineTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("A test item.", text)
                 self.assertEqual(len(context.calls), 2)
         finally:
-            await runtime.terminate()
+            await terminate_and_drain(runtime)
 
     async def test_stale_help_or_changed_event_never_sends(self):
         context = fixture._Context()
@@ -152,7 +153,7 @@ class DeclarativeCommandPipelineTests(unittest.IsolatedAsyncioTestCase):
                 await runtime.send_help(event, help_text)
             self.assertEqual(context.calls, [])
         finally:
-            await runtime.terminate()
+            await terminate_and_drain(runtime)
 
     async def test_authorized_theme_write_is_read_on_next_help_and_module_card(self):
         class Admin:
@@ -272,4 +273,4 @@ class DeclarativeCommandPipelineTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(captured[-1].theme, "deep_indigo")
             self.assertEqual(len(context.calls), 5)
         finally:
-            await runtime.terminate()
+            await terminate_and_drain(runtime)

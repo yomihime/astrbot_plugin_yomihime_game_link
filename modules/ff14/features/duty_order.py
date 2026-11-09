@@ -12,13 +12,12 @@ from collections import Counter
 from dataclasses import dataclass, replace
 from time import monotonic
 
-from yomihime_game_link_sdk.errors import (
+from ....yomihime_game_link_sdk.errors import (
     OperationTimeout,
     ServiceUnavailable,
     SourceHttpError,
 )
-from yomihime_game_link_sdk.services import HttpRequest
-
+from ....yomihime_game_link_sdk.services import HttpRequest
 from .fflogs_catalog import normalized_encounter_name
 
 SOURCE = "xivapi_items"

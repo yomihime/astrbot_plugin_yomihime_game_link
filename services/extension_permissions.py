@@ -23,8 +23,14 @@ def plain(value):
     return value
 
 
-def permission_snapshot(manifest):
-    """Only approved authority. Version, UI and ordinary config are content."""
+def permission_snapshot(manifest, source_policy=None):
+    """Only approved authority; compatibility is validated before this projection.
+
+    Page role/order select UI placement, not page grants; access and field scopes
+    remain authority. Capability output_version is a separate compatibility check.
+    Signed source_policy is intentionally conservative: its complete normalized
+    credential/authorization policy (including descriptive text) is approved.
+    """
     result = {}
     for module in manifest.modules:
         budget_fields = {
@@ -35,11 +41,44 @@ def permission_snapshot(manifest):
         result[module.module_id] = {
             "sources": {item.source_id: plain(item) for item in module.sources},
             "sensitive_fields": {
-                item.name: plain(item)
+                item.name: {
+                    key: value
+                    for key, value in plain(item).items()
+                    if key != "description"
+                }
                 for item in module.config_fields
                 if item.sensitive
             },
             "jobs": {item.job_id: plain(item) for item in module.jobs},
+            "subscriptions": {
+                item.type_id: plain(item) for item in module.subscriptions
+            },
+            "schedules": {item.collector_id: plain(item) for item in module.schedules},
+            "collections": {item.name: plain(item) for item in module.collections},
+            "pages": {
+                item.route_id: {
+                    key: value
+                    for key, value in plain(item).items()
+                    if key not in {"title", "entry", "styles", "order", "role"}
+                }
+                for item in module.pages
+            },
+            "commands": {
+                item.operation_path: {
+                    key: value
+                    for key, value in plain(item).items()
+                    if key != "help_text"
+                }
+                for item in module.commands
+            },
+            "tools": {
+                item.name: {
+                    key: value
+                    for key, value in plain(item).items()
+                    if key != "description"
+                }
+                for item in module.tools
+            },
             "budget_fields": {
                 item.name: {
                     "default": plain(item.default),
@@ -49,12 +88,17 @@ def permission_snapshot(manifest):
                 for item in module.config_fields
                 if item.name in budget_fields
             },
-            "write_capabilities": {
-                item.capability_id: plain(item)
+            "capabilities": {
+                item.capability_id: {
+                    key: value
+                    for key, value in plain(item).items()
+                    if key != "output_version"
+                }
                 for item in module.capabilities
-                if item.effect.value != "read_only"
             },
         }
+    if source_policy is not None:
+        result["$source_policy"] = {"policy": {"normalized": plain(source_policy)}}
     return result
 
 
@@ -83,3 +127,24 @@ def permission_digest(snapshot):
             allow_nan=False,
         ).encode()
     ).hexdigest()
+
+
+def permission_delta(candidate, approved):
+    """Stable authority differences, independent of display and release metadata."""
+
+    def flatten(snapshot):
+        return {
+            f"{owner}/{kind}/{name}": value
+            for owner, kinds in snapshot.items()
+            for kind, entries in kinds.items()
+            for name, value in entries.items()
+        }
+
+    new, old = flatten(candidate), flatten(approved)
+    return {
+        "added": sorted(new.keys() - old.keys()),
+        "removed": sorted(old.keys() - new.keys()),
+        "changed": sorted(
+            key for key in new.keys() & old.keys() if new[key] != old[key]
+        ),
+    }

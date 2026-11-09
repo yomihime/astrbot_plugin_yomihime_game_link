@@ -20,7 +20,7 @@ from io import BytesIO
 from types import MappingProxyType
 from unicodedata import category
 
-from yomihime_game_link_sdk.cards import (
+from ..yomihime_game_link_sdk.cards import (
     Asset,
     Cell,
     CollageItem,
@@ -29,8 +29,7 @@ from yomihime_game_link_sdk.cards import (
     TaggedText,
     WeightedCollage,
 )
-from yomihime_game_link_sdk.storage import CacheVisibility
-
+from ..yomihime_game_link_sdk.storage import CacheVisibility
 from .bundled_font import BundledFontProvider
 from .card_bitmap import BitmapBounds, BitmapUnavailable, FontProvider, RenderedBitmap
 from .layout_document import (

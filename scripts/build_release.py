@@ -1,4 +1,4 @@
-"""Build the plugin ZIP and independently installable, pinned SDK wheel."""
+"""Build a complete Core release; optional SDK wheel tooling is development-only."""
 
 from __future__ import annotations
 
@@ -65,6 +65,7 @@ def plugin_metadata(repository_root: Path = ROOT) -> tuple[str, str]:
     plugin_version = _metadata_value(metadata_path, "version")
     if not PLUGIN_NAME_PATTERN.fullmatch(plugin_name):
         raise ValueError(f"Unsupported plugin name in metadata.yaml: {plugin_name!r}")
+    plugin_version = "v" + plugin_version.removeprefix("v")
     if not TAG_PATTERN.fullmatch(plugin_version):
         raise ValueError(
             f"metadata.yaml version must be a vMAJOR.MINOR.PATCH tag: {plugin_version!r}"
@@ -165,147 +166,90 @@ def write_checksums(artifacts: tuple[Path, ...], destination: Path) -> Path:
 
 
 def build_release(
-    tag: str | None = None,
-    output_dir: Path | None = None,
-    sdk_wheel: Path | None = None,
-    repository_root: Path = ROOT,
+    tag=None,
+    output_dir=None,
+    sdk_wheel=None,
+    repository_root=ROOT,
     *,
+    signing_key=None,
+    channel="preview",
+    sequence=1,
     external_page_roots=(),
     external_source_policy_roots=(),
-) -> tuple[Path, Path, Path]:
-    """Build the validated plugin ZIP, pinned SDK wheel, and SHA256SUMS."""
+):
+    """Build one complete signed Core ZIP and SHA256SUMS; no DLC checkout needed."""
     repository_root = Path(repository_root).resolve(strict=True)
-    plugin_name, metadata_version = plugin_metadata(repository_root)
+    name, metadata_version = plugin_metadata(repository_root)
     if tag is not None:
         validate_tag(tag, metadata_version)
-    if sdk_wheel is None:
-        validate_build_environment()
-
     output_dir = (
         Path(output_dir) if output_dir is not None else repository_root / "dist"
     )
-    zip_name = f"{plugin_name}-{metadata_version}.zip"
-    wheel_name = "yomihime_game_link_sdk-0.1.0a24-py3-none-any.whl"
-    output_artifacts = (output_dir / zip_name, output_dir / wheel_name)
-    sums_path = output_dir / "SHA256SUMS"
-    protected = (repository_root / "metadata.yaml",)
-    retain_wheel = False
+    archive = output_dir / f"{name}-{metadata_version}.zip"
+    checksums = output_dir / "SHA256SUMS"
+    # Preflight the entire batch before capturing or writing anything.
+    from_inputs = tuple(repository_root.rglob("metadata.yaml"))
     if sdk_wheel is not None:
-        protected += (Path(sdk_wheel),)
-        try:
-            retain_wheel = os.path.samefile(sdk_wheel, output_artifacts[1])
-        except FileNotFoundError:
-            pass
-        if retain_wheel:
-            # Same-file reuse is a no-op, never an exemption from source or
-            # destination link/reparse/hardlink and independently pinned checks.
-            validate_wheel(Path(sdk_wheel))
-            validate_output_paths((output_artifacts[1],))
-    destinations = (
-        (output_artifacts[0], sums_path)
-        if retain_wheel
-        else (*output_artifacts, sums_path)
-    )
-    if any(
-        Path(output).absolute().is_relative_to(Path(root).absolute())
-        for output in destinations
-        for root in external_page_roots
-    ):
-        raise ValueError("Release output overlaps an external page input")
-    validate_output_paths(destinations, protected)
-
-    with tempfile.TemporaryDirectory(prefix="yomihime-release-build-") as temporary:
-        work_root = Path(temporary)
-        source_wheel = (
-            build_sdk_wheel(work_root, repository_root)
-            if sdk_wheel is None
-            else Path(sdk_wheel)
+        validate_wheel(Path(sdk_wheel))
+        from_inputs += (Path(sdk_wheel),)
+    validate_output_paths((archive, checksums), from_inputs)
+    with tempfile.TemporaryDirectory(prefix="ygl-complete-release-") as temporary:
+        staged = Path(temporary) / archive.name
+        build_dashboard_zip(
+            sdk_wheel,
+            staged,
+            repository_root,
+            signing_key=signing_key,
+            channel=channel,
+            sequence=sequence,
+            external_page_roots=external_page_roots,
+            external_source_policy_roots=external_source_policy_roots,
         )
-        if source_wheel.name != wheel_name:
-            raise RuntimeError(f"Unexpected SDK wheel filename: {source_wheel.name}")
-        validate_wheel(source_wheel)
-        staged_wheel = source_wheel if retain_wheel else work_root / wheel_name
-        if not retain_wheel:
-            shutil.copyfile(source_wheel, staged_wheel)
-        staged_zip = work_root / zip_name
-        if external_page_roots or external_source_policy_roots:
-            build_dashboard_zip(
-                staged_wheel,
-                staged_zip,
-                repository_root,
-                external_page_roots=external_page_roots,
-                **(
-                    {"external_source_policy_roots": external_source_policy_roots}
-                    if external_source_policy_roots
-                    else {}
-                ),
-            )
+        payload = staged.read_bytes()
+        sums = f"{hashlib.sha256(payload).hexdigest()}  {archive.name}\n".encode(
+            "ascii"
+        )
+        # Protect every captured source path, including generated static assets.
+        if __package__:
+            from .build_dashboard_zip import included_files
         else:
-            build_dashboard_zip(staged_wheel, staged_zip, repository_root)
-
-        staged_artifacts = (staged_zip, staged_wheel)
-        payloads = {
-            destination: source.read_bytes()
-            for source, destination in zip(
-                staged_artifacts, output_artifacts, strict=True
-            )
-        }
-        checksums = "".join(
-            f"{hashlib.sha256(data).hexdigest()}  {destination.name}\n"
-            for destination, data in sorted(
-                payloads.items(), key=lambda item: item[0].name
-            )
-        ).encode("ascii")
-        if retain_wheel:
-            del payloads[output_artifacts[1]]
-        payloads[sums_path] = checksums
-        publish_artifacts(payloads, protected)
-    return output_artifacts[0], output_artifacts[1], sums_path
+            from build_dashboard_zip import included_files
+        publish_artifacts(
+            {archive: payload, checksums: sums},
+            (*from_inputs, *included_files(repository_root)),
+        )
+    return archive, checksums
 
 
-def main() -> None:
+def main():
+    if __package__:
+        from .release_envelope import signing_key
+    else:
+        from release_envelope import signing_key
     parser = argparse.ArgumentParser(
-        description="Build the plugin ZIP, pinned SDK wheel, and SHA256SUMS."
+        description="Build a complete independently installable signed Core ZIP."
     )
+    parser.add_argument("--tag")
+    parser.add_argument("--output-dir", type=Path)
+    parser.add_argument("--signing-key", type=Path)
     parser.add_argument(
-        "--tag",
-        help="Optional vMAJOR.MINOR.PATCH tag; must equal metadata.yaml version.",
+        "--test-signing",
+        action="store_true",
+        help="Ephemeral development key; not publisher enrollment or production signing.",
     )
-    parser.add_argument(
-        "--output-dir",
-        type=Path,
-        help="Artifact directory (defaults to the repository dist/ directory).",
-    )
-    parser.add_argument(
-        "--sdk-wheel",
-        type=Path,
-        help="Reuse an existing SDK wheel after checking its pinned hash and contents.",
-    )
-    parser.add_argument(
-        "--external-page-package",
-        action="append",
-        type=Path,
-        default=[],
-        help="Explicit reviewed external package root for fixed-pair static pages only.",
-    )
-    parser.add_argument(
-        "--external-source-policy-package",
-        action="append",
-        type=Path,
-        default=[],
-        help="Explicit reviewed external credential/authorization policy root; requires exact paired page manifest.",
-    )
+    parser.add_argument("--channel", choices=("preview", "stable"), default="preview")
+    parser.add_argument("--sequence", type=int, default=1)
     args = parser.parse_args()
-    archive, wheel, checksums = build_release(
+    if args.test_signing and args.channel != "preview":
+        parser.error("test signing is preview-only")
+    for path in build_release(
         args.tag,
         args.output_dir,
-        sdk_wheel=args.sdk_wheel,
-        external_page_roots=args.external_page_package,
-        external_source_policy_roots=args.external_source_policy_package,
-    )
-    print(f"Created {archive}")
-    print(f"Created {wheel}")
-    print(f"Created {checksums}")
+        signing_key=signing_key(args.signing_key, test=args.test_signing),
+        channel=args.channel,
+        sequence=args.sequence,
+    ):
+        print(f"Created {path}")
 
 
 if __name__ == "__main__":

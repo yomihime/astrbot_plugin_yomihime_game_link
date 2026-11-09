@@ -9,8 +9,7 @@ from dataclasses import dataclass, replace
 from decimal import Decimal
 from typing import Any
 
-from yomihime_game_link_sdk.services import HttpRequest, SourceHttp
-
+from ....yomihime_game_link_sdk.services import HttpRequest, SourceHttp
 from .fflogs_models import (
     DifficultyRecord,
     EncounterRecord,

@@ -19,7 +19,7 @@ from ygl_test_subject.extensions.discovery import discover_packages
 from ygl_test_subject.extensions.factory_resolver import FilesystemFactorySource
 from ygl_test_subject.extensions.loader import CandidateState, ExtensionCandidate
 
-from scripts.build_release import build_release, build_sdk_wheel
+from scripts.build_release import build_release
 from yomihime_game_link_sdk.services import (
     ConfigSnapshot,
     HealthStatus,
@@ -294,13 +294,16 @@ class BundledExtensionTests(unittest.IsolatedAsyncioTestCase):
             data_root = work_root / "astrbot-data"
             plugin_root.mkdir()
             data_root.mkdir()
-            sdk_build_root = work_root / "sdk-build"
-            sdk_build_root.mkdir()
-            sdk_wheel = build_sdk_wheel(sdk_build_root, ROOT)
-            archive_path, _, _ = build_release(
-                sdk_wheel=sdk_wheel,
+            from cryptography.hazmat.primitives.asymmetric.ed25519 import (
+                Ed25519PrivateKey,
+            )
+
+            # A complete Core release is signed and captures its own private SDK;
+            # the optional developer wheel is not an installation prerequisite.
+            archive_path, _ = build_release(
                 output_dir=artifact_dir,
                 repository_root=ROOT,
+                signing_key=Ed25519PrivateKey.generate(),
             )
             with ZipFile(archive_path) as archive:
                 archive.extractall(plugin_root)
@@ -500,6 +503,374 @@ class BundledExtensionTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(BundledExtensionError):
             install_bundled_package(self.plugin_root, self.data_root)
         self.assertEqual(tuple(outside.iterdir()), ())
+
+
+class BundledPublishRecoveryTests(unittest.TestCase):
+    """Deterministic control-flow checks; synthetic IDs are not NTFS proof."""
+
+    def setUp(self):
+        from types import SimpleNamespace
+
+        from ygl_test_subject.adapters.astrbot import bundled
+
+        self.subject = bundled
+        platform = patch.object(
+            bundled, "os", SimpleNamespace(name="nt", rename=unittest.mock.Mock())
+        )
+        platform.start()
+        self.addCleanup(platform.stop)
+        self.root = Path("C:/controlled/bundled_extensions")
+        self.stage = self.root / ".original.stage"
+        self.target = self.root / "fingerprint"
+        identity = bundled._BundleDirectoryIdentity
+        self.parent = identity("volume", 71, 99, None)
+        self.staged = identity("volume", 71, 99, 123)
+        self.payload = {"original": object()}
+
+    @staticmethod
+    def denied(winerror=5):
+        error = PermissionError("injected final rename refusal")
+        if winerror is not None:
+            error.winerror = winerror
+        return error
+
+    def publish(self):
+        return self.subject._publish_staged_bundle(
+            self.root,
+            self.stage,
+            self.target,
+            self.payload,
+            self.parent,
+            self.staged,
+        )
+
+    def test_win5_absent_revalidated_stage_then_single_extra_rename(self):
+        with (
+            patch.object(
+                self.subject,
+                "_check_windows_slot",
+                side_effect=[
+                    (True, None, False),
+                    (False, None, True),
+                    (True, None, False),
+                    (True, None, False),
+                ],
+            ) as check,
+            patch.object(
+                self.subject.os, "rename", side_effect=[self.denied(), None]
+            ) as rename,
+        ):
+            self.assertEqual(self.publish(), (True, True, None))
+        self.assertEqual(rename.call_count, 2)
+        for call in rename.call_args_list:
+            self.assertEqual(call.args, (self.stage, self.target))
+        self.assertEqual(check.call_count, 4)
+        self.assertIs(check.call_args_list[2].args[2], self.payload)
+        self.assertEqual(check.call_args_list[3].kwargs, {"expected_id": 123})
+
+    def test_win5_or_fileexists_reuses_valid_competitor_without_retry(self):
+        for error in (self.denied(), FileExistsError()):
+            with (
+                self.subTest(error=type(error).__name__),
+                patch.object(
+                    self.subject,
+                    "_check_windows_slot",
+                    side_effect=[
+                        (True, None, False),
+                        (True, None, False),
+                    ],
+                ),
+                patch.object(self.subject.os, "rename", side_effect=error) as rename,
+            ):
+                self.assertEqual(self.publish(), (False, True, None))
+                self.assertEqual(rename.call_count, 1)
+
+    def test_competitor_mismatch_is_untrusted_without_retry(self):
+        with (
+            patch.object(
+                self.subject,
+                "_check_windows_slot",
+                side_effect=[
+                    (True, None, False),
+                    (False, "existing_readme_mismatch", False),
+                ],
+            ),
+            patch.object(
+                self.subject.os, "rename", side_effect=self.denied()
+            ) as rename,
+        ):
+            self.assertEqual(self.publish(), (False, False, "existing_readme_mismatch"))
+            self.assertEqual(rename.call_count, 1)
+
+    def test_fileexists_absent_does_not_publish_again(self):
+        with (
+            patch.object(
+                self.subject,
+                "_check_windows_slot",
+                side_effect=[
+                    (True, None, False),
+                    (False, None, True),
+                ],
+            ),
+            patch.object(
+                self.subject.os, "rename", side_effect=FileExistsError()
+            ) as rename,
+        ):
+            with self.assertRaises(FileExistsError):
+                self.publish()
+            self.assertEqual(rename.call_count, 1)
+
+    def test_other_final_permission_errors_do_not_observe_or_retry(self):
+        for winerror in (None, 32, 1314):
+            with (
+                self.subTest(winerror=winerror),
+                patch.object(
+                    self.subject,
+                    "_check_windows_slot",
+                    return_value=(True, None, False),
+                ) as check,
+                patch.object(
+                    self.subject.os, "rename", side_effect=self.denied(winerror)
+                ) as rename,
+            ):
+                with self.assertRaises(PermissionError):
+                    self.publish()
+                self.assertEqual(rename.call_count, 1)
+                self.assertEqual(check.call_count, 1)
+
+    def test_permanent_denial_never_attempts_third_publish(self):
+        with (
+            patch.object(
+                self.subject,
+                "_check_windows_slot",
+                side_effect=[
+                    (True, None, False),
+                    (False, None, True),
+                    (True, None, False),
+                    (False, None, True),
+                ],
+            ),
+            patch.object(
+                self.subject.os, "rename", side_effect=[self.denied(), self.denied()]
+            ) as rename,
+        ):
+            with self.assertRaises(PermissionError):
+                self.publish()
+            self.assertEqual(rename.call_count, 2)
+
+    def test_excluded_second_permission_error_does_not_observe_or_reuse_target(self):
+        for winerror in (None, 32, 1314):
+            second_error = self.denied(winerror)
+            with (
+                self.subTest(winerror=winerror),
+                patch.object(
+                    self.subject,
+                    "_check_windows_slot",
+                    side_effect=[
+                        (True, None, False),
+                        (False, None, True),
+                        (True, None, False),
+                        (True, None, False),
+                    ],
+                ) as check,
+                patch.object(
+                    self.subject.os, "rename", side_effect=[self.denied(), second_error]
+                ) as rename,
+            ):
+                with self.assertRaises(PermissionError) as raised:
+                    self.publish()
+                self.assertIs(raised.exception, second_error)
+                self.assertEqual(rename.call_count, 2)
+                # The fourth check would validate a competing target. An
+                # excluded second error must propagate before that observation.
+                self.assertEqual(check.call_count, 3)
+
+    def test_second_competitor_is_reused_with_no_third_publish(self):
+        for error in (FileExistsError(), self.denied()):
+            with (
+                self.subTest(error=type(error).__name__),
+                patch.object(
+                    self.subject,
+                    "_check_windows_slot",
+                    side_effect=[
+                        (True, None, False),
+                        (False, None, True),
+                        (True, None, False),
+                        (True, None, False),
+                    ],
+                ),
+                patch.object(
+                    self.subject.os, "rename", side_effect=[self.denied(), error]
+                ) as rename,
+            ):
+                self.assertEqual(self.publish(), (False, True, None))
+                self.assertEqual(rename.call_count, 2)
+
+    def test_stage_tamper_before_retry_prevents_second_rename(self):
+        with (
+            patch.object(
+                self.subject,
+                "_check_windows_slot",
+                side_effect=[
+                    (True, None, False),
+                    (False, None, True),
+                    (False, "existing_bundle_slot_mismatch", False),
+                ],
+            ),
+            patch.object(
+                self.subject.os, "rename", side_effect=self.denied()
+            ) as rename,
+        ):
+            self.assertEqual(
+                self.publish(), (False, False, "existing_bundle_slot_mismatch")
+            )
+            self.assertEqual(rename.call_count, 1)
+
+    def test_identity_or_close_unknown_prevents_second_rename(self):
+        for reason in ("bundle_identity_changed", "bundle_handle_close_failed"):
+            with (
+                self.subTest(reason=reason),
+                patch.object(
+                    self.subject,
+                    "_check_windows_slot",
+                    side_effect=[
+                        (True, None, False),
+                        (False, None, True),
+                        self.subject.BundledExtensionError(reason),
+                    ],
+                ),
+                patch.object(
+                    self.subject.os, "rename", side_effect=self.denied()
+                ) as rename,
+            ):
+                with self.assertRaises(BundledExtensionError):
+                    self.publish()
+                self.assertEqual(rename.call_count, 1)
+
+    def test_success_target_must_retain_staging_native_id(self):
+        different = self.subject._BundleDirectoryIdentity("volume", 71, 99, 456)
+        with (
+            patch.object(
+                self.subject, "_windows_bundle_identity", return_value=different
+            ),
+            patch.object(self.subject, "_matches_existing_slot") as matches,
+        ):
+            with self.assertRaises(BundledExtensionError):
+                self.subject._check_windows_slot(
+                    self.root, self.target, self.payload, self.parent, expected_id=123
+                )
+            matches.assert_not_called()
+
+    def test_competitor_may_have_different_stable_native_id(self):
+        competitor = self.subject._BundleDirectoryIdentity("volume", 71, 99, 456)
+        with (
+            patch.object(
+                self.subject, "_windows_bundle_identity", return_value=competitor
+            ),
+            patch.object(
+                self.subject, "_matches_existing_slot", return_value=(True, None)
+            ) as matches,
+        ):
+            self.assertEqual(
+                self.subject._check_windows_slot(
+                    self.root, self.target, self.payload, self.parent
+                ),
+                (True, None, False),
+            )
+            matches.assert_called_once_with(self.root, self.target, self.payload)
+
+    def test_parent_and_slot_substitution_are_not_trusted(self):
+        identity = self.subject._BundleDirectoryIdentity
+        before = identity("volume", 71, 99, 456)
+        for changed in (
+            identity("other", 71, 99, 456),
+            identity("volume", 72, 99, 456),
+            identity("volume", 71, 98, 456),
+            identity("volume", 71, 99, 457),
+            self.parent,
+        ):
+            with (
+                self.subTest(changed=changed),
+                patch.object(
+                    self.subject,
+                    "_windows_bundle_identity",
+                    side_effect=[before, changed],
+                ),
+                patch.object(
+                    self.subject, "_matches_existing_slot", return_value=(True, None)
+                ),
+            ):
+                with self.assertRaises(BundledExtensionError):
+                    self.subject._check_windows_slot(
+                        self.root, self.target, self.payload, self.parent
+                    )
+
+    def test_parent_substitution_is_not_absence(self):
+        changed = self.subject._BundleDirectoryIdentity("volume", 71, 98, None)
+        with patch.object(
+            self.subject, "_windows_bundle_identity", return_value=changed
+        ):
+            with self.assertRaises(BundledExtensionError):
+                self.subject._check_windows_slot(
+                    self.root, self.target, self.payload, self.parent
+                )
+
+    def test_non_windows_permission_denied_is_not_retried(self):
+        # Patch only the subject's os binding; pathlib and other modules retain
+        # the real OS, and no synthetic ID masquerades as native qualification.
+        from types import SimpleNamespace
+
+        rename = unittest.mock.Mock(side_effect=self.denied())
+        with (
+            patch.object(
+                self.subject, "os", SimpleNamespace(name="posix", rename=rename)
+            ),
+            patch.object(self.subject, "_windows_bundle_identity") as native,
+        ):
+            with self.assertRaises(PermissionError):
+                self.publish()
+            rename.assert_called_once_with(self.stage, self.target)
+            native.assert_not_called()
+
+    def test_native_close_failure_rejects_receipt_and_closes_other_handles(self):
+        from types import SimpleNamespace
+
+        from ygl_test_subject.infrastructure.windows import fs
+
+        native = SimpleNamespace(
+            CloseHandle=unittest.mock.Mock(side_effect=lambda handle: handle.value != 4)
+        )
+        handles = [fs._Handle(native, value) for value in range(1, 6)]
+        with (
+            patch.object(fs, "_Native", return_value=native),
+            patch.object(
+                fs,
+                "_parse_root",
+                return_value=SimpleNamespace(
+                    drive_root="C:/", components=("controlled", "bundled_extensions")
+                ),
+            ),
+            patch.object(fs, "_volume_name", return_value="volume"),
+            patch.object(fs, "_open_volume_root", return_value=handles[0]),
+            patch.object(fs, "_volume_serial", return_value=(71, 255)),
+            patch.object(fs, "_get_info"),
+            patch.object(fs, "_file_id", return_value=1),
+            patch.object(
+                fs, "_lookup_component", side_effect=[(handles[1], 2), (handles[2], 99)]
+            ),
+            patch.object(fs, "_reopen_directory", side_effect=handles[3:]),
+            patch.object(fs, "_enumerate", return_value=[]),
+            patch.object(fs, "_verify_opened"),
+        ):
+            with self.assertRaisesRegex(
+                BundledExtensionError, "bundle_handle_close_failed"
+            ):
+                self.subject._windows_bundle_identity(self.root, self.target)
+        self.assertEqual(native.CloseHandle.call_count, 5)
+        self.assertEqual(
+            [call.args[0].value for call in native.CloseHandle.call_args_list],
+            [5, 4, 3, 2, 1],
+        )
 
 
 if __name__ == "__main__":

@@ -5,11 +5,10 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass
 
-from yomihime_game_link_sdk.declarations import ConfigField
-from yomihime_game_link_sdk.services import ConfigSnapshot, ConfigTarget
-
 from ...core.contracts.validation_boundary import validate_contract
 from ...presentation.layout_renderer import list_themes
+from ...yomihime_game_link_sdk.declarations import ConfigField
+from ...yomihime_game_link_sdk.services import ConfigSnapshot, ConfigTarget
 from .operations import validate_configuration_value
 
 CORE_MODULE_ID = "game_link/core"

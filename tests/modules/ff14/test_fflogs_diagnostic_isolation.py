@@ -7,7 +7,8 @@ from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from modules.ff14.features import fflogs, fflogs_evidence
+from ygl_test_subject.modules.ff14.features import fflogs, fflogs_evidence
+
 from tests.modules.ff14 import test_fflogs_aggregation as fixture
 from yomihime_game_link_sdk.errors import (
     InvalidInvocation,

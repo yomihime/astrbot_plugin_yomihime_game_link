@@ -15,6 +15,7 @@ from ygl_test_subject.extensions.factory_resolver import FilesystemFactorySource
 from ygl_test_subject.services.core_runtime import CoreRuntime
 
 from tests.fixtures.managed_font import OfflineManagedFont
+from tests.fixtures.private_storage import fixture_private_storage
 from tests.fixtures.settings_module import write_settings_module
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -90,7 +91,8 @@ def _core_with_neutral_module(**kwargs):
 async def export_catalog() -> dict:
     private_root = os.environ.get("YGL_MANAGED_KEY_TEST_ROOT")
     with tempfile.TemporaryDirectory(
-        prefix="ygl-catalog-contract-", dir=private_root
+        prefix="ygl-catalog-contract-",
+        dir=private_root or (ROOT if os.name == "nt" else None),
     ) as temporary:
         directory = Path(temporary)
         plugin_root = directory / "plugin"
@@ -111,7 +113,8 @@ async def export_catalog() -> dict:
             core_factory=_core_with_neutral_module,
         )
         try:
-            await runtime.initialize()
+            with fixture_private_storage(directory, data_dir):
+                await runtime.initialize()
             catalog = runtime.public_module_catalog()
             assert runtime.ready, (runtime.bundle_failure_reason, catalog)
             assert {module["module_id"] for module in catalog["modules"]} == {

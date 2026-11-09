@@ -10,18 +10,17 @@ from decimal import Decimal
 from math import isfinite
 from time import monotonic
 
-from yomihime_game_link_sdk.contexts import InvocationOrigin, InvocationView
-from yomihime_game_link_sdk.display import DisplayDocument, Privacy, TextBlock
-from yomihime_game_link_sdk.errors import ServiceUnavailable, SourceHttpError
-from yomihime_game_link_sdk.results import (
+from ....yomihime_game_link_sdk.contexts import InvocationOrigin, InvocationView
+from ....yomihime_game_link_sdk.display import DisplayDocument, Privacy, TextBlock
+from ....yomihime_game_link_sdk.errors import ServiceUnavailable, SourceHttpError
+from ....yomihime_game_link_sdk.results import (
     CapabilityResult,
     ErrorCode,
     ErrorDetail,
     FactDocument,
     ResultStatus,
 )
-from yomihime_game_link_sdk.services import ModuleServices
-
+from ....yomihime_game_link_sdk.services import ModuleServices
 from ..query_resolution import (
     CandidateBatch,
     CandidateRegistry,

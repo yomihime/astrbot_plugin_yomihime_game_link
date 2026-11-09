@@ -9,8 +9,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from time import monotonic
 
-from yomihime_game_link_sdk.services import HttpRequest
-
+from ....yomihime_game_link_sdk.services import HttpRequest
 from .fflogs_catalog import GRAPHQL_PATH, parse_graphql_envelope
 from .fflogs_models import FFLogsPayloadError
 
@@ -80,7 +79,7 @@ class InvocationObservation:
                 except asyncio.CancelledError:
                     raise
                 except Exception as error:
-                    from yomihime_game_link_sdk.errors import SourceHttpError
+                    from ....yomihime_game_link_sdk.errors import SourceHttpError
 
                     if isinstance(error, SourceHttpError):
                         known = {
@@ -343,7 +342,7 @@ class InvocationObservation:
             return result
         from dataclasses import replace
 
-        from yomihime_game_link_sdk.results import FactDocument
+        from ....yomihime_game_link_sdk.results import FactDocument
 
         def count(operation_names):
             rows = [self.metrics.operations.get(name, {}) for name in operation_names]

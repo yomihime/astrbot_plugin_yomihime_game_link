@@ -14,8 +14,8 @@ import re
 from dataclasses import fields
 from unicodedata import category
 
-from yomihime_game_link_sdk import cards
-from yomihime_game_link_sdk.storage import CacheVisibility
+from ...yomihime_game_link_sdk import cards
+from ...yomihime_game_link_sdk.storage import CacheVisibility
 
 _TYPES = {
     name: getattr(cards, name)

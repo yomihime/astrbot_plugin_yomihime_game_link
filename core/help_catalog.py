@@ -4,11 +4,10 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from yomihime_game_link_sdk import cards
-from yomihime_game_link_sdk.declarations import PrivacyFloor
-from yomihime_game_link_sdk.display import CommandsBlock, DisplayDocument, TextBlock
-from yomihime_game_link_sdk.services import CapabilityHealth
-
+from ..yomihime_game_link_sdk import cards
+from ..yomihime_game_link_sdk.declarations import PrivacyFloor
+from ..yomihime_game_link_sdk.display import CommandsBlock, DisplayDocument, TextBlock
+from ..yomihime_game_link_sdk.services import CapabilityHealth
 from .contracts.validation_boundary import validate_contract
 from .registry import RegisteredModule, RegistryError, RegistrySnapshot
 

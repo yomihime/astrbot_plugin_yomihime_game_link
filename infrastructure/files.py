@@ -7,11 +7,11 @@ import os
 import stat
 from pathlib import Path
 
-from yomihime_game_link_sdk.storage import OwnerScope, ResourceMetadata
-
 from ..core.contracts.storage import OwnerScope_validate
 from ..core.contracts.validation_boundary import validate_contract
 from ..core.ports import FileStage
+from ..services.runtime_effect_gate import check_current_effect
+from ..yomihime_game_link_sdk.storage import OwnerScope, ResourceMetadata
 
 
 def _bounded(value: str, field: str) -> str:
@@ -92,6 +92,7 @@ class LocalSafeFileStore:
         scope = OwnerScope_validate(scope)
         asset_id = self.content_id(content, scope)
         path = self._temp(operation_id, asset_id)
+        check_current_effect(getattr(self, "_effect_guard", None))
         path.parent.mkdir(parents=True, exist_ok=True)
         if path.exists():
             if path.read_bytes() != content:
@@ -135,6 +136,7 @@ class LocalSafeFileStore:
         if not source.is_file():
             raise FileNotFoundError("staged resource is unavailable")
         target = self._final(stage.asset_id, stage.scope)
+        check_current_effect(getattr(self, "_effect_guard", None))
         target.parent.mkdir(parents=True, exist_ok=True)
         if target.exists():
             if target.read_bytes() != source.read_bytes():
@@ -147,6 +149,7 @@ class LocalSafeFileStore:
             self._pending(stage.asset_id, stage.scope).write_text(
                 "index pending", encoding="utf-8"
             )
+            check_current_effect(getattr(self, "_effect_guard", None))
             os.replace(source, target)
         return metadata
 
@@ -177,13 +180,16 @@ class LocalSafeFileStore:
         if self.content_id(content, stage.scope) != stage.asset_id:
             raise ValueError("staged resource identity is invalid")
         target = self._final(stage.asset_id, stage.scope)
+        check_current_effect(getattr(self, "_effect_guard", None))
         target.parent.mkdir(parents=True, exist_ok=True)
         self._pending(stage.asset_id, stage.scope).write_text(
             "index pending", encoding="utf-8"
         )
+        check_current_effect(getattr(self, "_effect_guard", None))
         os.replace(source, target)
 
     async def remove_managed(self, asset_id: str, scope: OwnerScope) -> None:
+        check_current_effect(getattr(self, "_effect_guard", None))
         """Unlink exact indexed resource paths; never enumerate directories."""
         for path in (
             self._final(asset_id, scope),

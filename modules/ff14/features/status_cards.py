@@ -1,8 +1,7 @@
 """Static registered capabilities, not a live health or credential check."""
 
-from yomihime_game_link_sdk import cards
-from yomihime_game_link_sdk.display import DisplayDocument, Privacy, TextBlock
-
+from ....yomihime_game_link_sdk import cards
+from ....yomihime_game_link_sdk.display import DisplayDocument, Privacy, TextBlock
 from ..presentation import ff14_card
 
 # Mirrors the manifest's declared collector default, guarded by a contract test.

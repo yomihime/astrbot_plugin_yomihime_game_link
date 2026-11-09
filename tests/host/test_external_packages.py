@@ -28,6 +28,7 @@ from ygl_test_subject.infrastructure.windows.private_storage import (
 )
 from ygl_test_subject.services.extension_runtime import ExtensionCleanupPending
 
+from tests.fixtures.runtime_cleanup import terminate_and_drain
 from tests.host.test_ff14_pages import _host_contracts, _request
 from yomihime_game_link_sdk.host import ExtensionHostError
 from yomihime_game_link_sdk.services import HealthStatus
@@ -141,7 +142,7 @@ class ExternalPackageTests(unittest.IsolatedAsyncioTestCase):
             bundled_selection=None,
             config={"web_public_origin": "https://ui.test"},
         )
-        self.addAsyncCleanup(self.runtime.terminate)
+        self.addAsyncCleanup(terminate_and_drain, self.runtime)
         self.key_patch = patch(
             "ygl_test_subject.adapters.astrbot.runtime.EnvironmentKeyProvider.get_key",
             return_value=bytes(range(32)),
@@ -640,7 +641,7 @@ class ExternalPackageTests(unittest.IsolatedAsyncioTestCase):
             bundled_selection=DEFAULT_BUNDLE_SELECTION,
             config={"web_public_origin": "https://ui.test"},
         )
-        self.addAsyncCleanup(runtime.terminate)
+        self.addAsyncCleanup(terminate_and_drain, runtime)
         await runtime.initialize()
         self.runtime, self.core, self.host = (
             runtime,
@@ -882,7 +883,7 @@ class ExternalPackageTests(unittest.IsolatedAsyncioTestCase):
             http_transport_factory=_Transport,
             bundled_selection=DEFAULT_BUNDLE_SELECTION,
         )
-        self.addAsyncCleanup(runtime.terminate)
+        self.addAsyncCleanup(terminate_and_drain, runtime)
         await runtime.initialize()
         self.runtime, self.core = runtime, runtime.core_runtime
         self.host = runtime.extension_host

@@ -20,42 +20,6 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Callable, Mapping
 
-from yomihime_game_link_sdk.display import (
-    CommandsBlock,
-    DigestMember,
-    DisplayDocument,
-    FieldsBlock,
-    GridItem,
-    ImageBlock,
-    ItemGridBlock,
-    Link,
-    LinksBlock,
-    MetricsBlock,
-    MoneyValue,
-    NumberValue,
-    Privacy,
-    SeriesBlock,
-    TableBlock,
-    TextBlock,
-    TimeValue,
-    UnknownBlock,
-)
-from yomihime_game_link_sdk.storage import GrantReference, OwnerScope, OwnershipKind
-from yomihime_game_link_sdk.subscriptions import (
-    CollectionKey,
-    CommentaryRequest,
-    ConversationKind,
-    ConversationRef,
-    DigestScheduleProfile,
-    DstFoldPolicy,
-    DstGapPolicy,
-    EvaluationState,
-    NormalizedInput,
-    Observation,
-    ObservationCompleteness,
-    PublicEventContribution,
-)
-
 from ...core.contracts.subscriptions import (
     ActiveDigestSchedule,
     DeliveryAttempt,
@@ -98,6 +62,41 @@ from ...core.ports import (
     SubscriptionFence,
     SubscriptionGateBinding,
     UniqueConstraintViolation,
+)
+from ...yomihime_game_link_sdk.display import (
+    CommandsBlock,
+    DigestMember,
+    DisplayDocument,
+    FieldsBlock,
+    GridItem,
+    ImageBlock,
+    ItemGridBlock,
+    Link,
+    LinksBlock,
+    MetricsBlock,
+    MoneyValue,
+    NumberValue,
+    Privacy,
+    SeriesBlock,
+    TableBlock,
+    TextBlock,
+    TimeValue,
+    UnknownBlock,
+)
+from ...yomihime_game_link_sdk.storage import GrantReference, OwnerScope, OwnershipKind
+from ...yomihime_game_link_sdk.subscriptions import (
+    CollectionKey,
+    CommentaryRequest,
+    ConversationKind,
+    ConversationRef,
+    DigestScheduleProfile,
+    DstFoldPolicy,
+    DstGapPolicy,
+    EvaluationState,
+    NormalizedInput,
+    Observation,
+    ObservationCompleteness,
+    PublicEventContribution,
 )
 from .database import SQLiteDatabase, SQLiteUnitOfWork
 
@@ -188,9 +187,8 @@ _ENUMS = {
 
 
 def _encode(value: Any) -> Any:
-    from yomihime_game_link_sdk.cards import Document as CardDocument
-
     from ...core.contracts.cards import encode_card
+    from ...yomihime_game_link_sdk.cards import Document as CardDocument
 
     if type(value) is CardDocument:
         return {"$type": "cards.Document.v1", "fields": encode_card(value)}
@@ -2846,6 +2844,7 @@ class SQLiteDigestWindowRepository(_Repository):
         *,
         expected_revision: int,
         retry_at: datetime | None = None,
+        completion_permit=None,
     ) -> DigestEnvelope | None:
         if retry_at is not None:
             retry_at = _utc_instant(retry_at, "retry_at")
@@ -2938,6 +2937,23 @@ class SQLiteDigestWindowRepository(_Repository):
                     )
             return updated
 
+        if completion_permit is not None:
+            from ...services.delivery_settlement import digest_completion_identity
+
+            identity = digest_completion_identity(
+                claim.envelope.window_id,
+                claim.envelope.recipient,
+                claim.claim_token,
+                claim.claimed_at,
+                claim.expires_at,
+                expected_revision,
+                attempt.attempt_number,
+                attempt.started_at,
+                attempt.idempotency_key,
+            )
+            return await self.database.executor.run_delivery_completion(
+                _run, permit=completion_permit, identity=identity
+            )
         return await self.database.executor.run_transaction(
             _run, begin_mode="IMMEDIATE"
         )
@@ -3235,6 +3251,7 @@ class SQLiteDeliveryRepository(_Repository):
         subscription_revision: int,
         expected_state: DeliveryState,
         retry_at: datetime | None = None,
+        completion_permit=None,
     ) -> DeliveryEvent:
         if retry_at is not None:
             retry_at = _utc_instant(retry_at, "retry_at")
@@ -3355,6 +3372,27 @@ class SQLiteDeliveryRepository(_Repository):
                 )
             return updated
 
+        if completion_permit is not None:
+            from ...services.delivery_settlement import event_completion_identity
+
+            if expected_state is not DeliveryState.SENDING or attempt.state not in (
+                DeliveryState.SENT,
+                DeliveryState.FAILED,
+                DeliveryState.UNKNOWN,
+            ):
+                raise ValueError("completion permit permits terminal SENDING only")
+            identity = event_completion_identity(
+                event_key,
+                event_version,
+                subscription_id,
+                subscription_revision,
+                attempt.attempt_number,
+                attempt.started_at,
+                attempt.idempotency_key,
+            )
+            return await self.database.executor.run_delivery_completion(
+                _run, permit=completion_permit, identity=identity
+            )
         return await self.database.executor.run_transaction(
             _run, begin_mode="IMMEDIATE"
         )

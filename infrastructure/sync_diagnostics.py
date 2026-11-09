@@ -9,7 +9,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from time import monotonic
 
-from yomihime_game_link_sdk.errors import AccessDenied, OperationTimeout
+from ..yomihime_game_link_sdk.errors import AccessDenied, OperationTimeout
 
 MAX_ATTEMPTS = 8
 MAX_EVENTS = 48

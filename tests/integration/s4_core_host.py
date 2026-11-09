@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import ast
 import asyncio
 import hashlib
 import importlib
@@ -21,42 +20,29 @@ mode = sys.argv[2] if len(sys.argv) > 2 else "minimal"
 sys.path.insert(0, str(deployment))
 sys.path.insert(0, str(plugin_root))
 
-# Execute the original entry's guard definitions, without its AstrBot entry.
-tree = ast.parse((plugin_root / "main.py").read_text(encoding="utf-8"))
-guard_nodes = []
-for node in tree.body:
-    if (
-        isinstance(node, ast.ImportFrom)
-        and node.module
-        and node.module.startswith("astrbot")
-    ):
-        break
-    if isinstance(node, ast.Assign) and any(
-        isinstance(t, ast.Name) and t.id == "SDK" for t in node.targets
-    ):
-        break
-    guard_nodes.append(node)
-guard = {"__file__": str(plugin_root / "main.py"), "__name__": "s4_original_guard"}
-exec(
-    compile(
-        ast.Module(body=guard_nodes, type_ignores=[]),
-        str(plugin_root / "main.py"),
-        "exec",
-    ),
-    guard,
+# The parent installed the strictly validated wheel into this isolated target.
+# Match tests/__init__.py's real SDK graph aliasing; this source-level Core
+# assembly does not claim to exercise a private runtime-generation mount.
+sdk_root = plugin_root / "yomihime_game_link_sdk"
+assert not any(
+    name == "yomihime_game_link_sdk" or name.startswith("yomihime_game_link_sdk.")
+    for name in sys.modules
 )
-sdk = guard["bootstrap_sdk"](plugin_root)
-assert (
-    Path(sdk.__file__).resolve() == plugin_root / "yomihime_game_link_sdk/__init__.py"
-)
-for name in guard["SDK_MODULES"]:
-    assert (
-        Path(sys.modules[name].__spec__.origin)
-        .resolve()
-        .is_relative_to(plugin_root / "yomihime_game_link_sdk")
-    )
+sdk = importlib.import_module("yomihime_game_link_sdk")
+assert Path(sdk.__file__).resolve() == sdk_root / "__init__.py"
+for path in sorted(sdk_root.glob("*.py")):
+    if path.stem != "__init__":
+        importlib.import_module("yomihime_game_link_sdk." + path.stem)
+plugin = importlib.import_module("plugin")
+for name, module in tuple(sys.modules.items()):
+    if name == "yomihime_game_link_sdk" or name.startswith("yomihime_game_link_sdk."):
+        assert Path(module.__spec__.origin).resolve().is_relative_to(sdk_root)
+        alias = "plugin." + name
+        assert alias not in sys.modules
+        sys.modules[alias] = module
+plugin.yomihime_game_link_sdk = sdk
 
-# Keep Core imports after the exact main bootstrap and its origin checks.
+# Keep actual Core imports after the isolated wheel origin/type-identity checks.
 _core_runtime = importlib.import_module("plugin.services.core_runtime")
 CoreRuntime = _core_runtime.CoreRuntime
 HostIngress = _core_runtime.HostIngress
@@ -357,6 +343,75 @@ def compose(data, host, transport, *, gate=True):
     )
 
 
+def assert_sample_evaluation(state):
+    assert type(state) is sdk.EvaluationState, state
+    assert type(state.revision) is int and state.revision > 0, state
+    assert state.value == {"value": 7}, state
+    assert type(state.value["value"]) is int, state
+
+
+async def sample_subscription_checkpoint(runtime, expected, association):
+    checkpoint = await runtime.b04_repositories.scheduler.current_checkpoint(
+        expected.subscription_id, association.collection_key
+    )
+    assert checkpoint is not None
+    record = checkpoint.snapshot.subscription
+    assert record.status.value == "active"
+    # The real management-view projection checks every stable dataclass field,
+    # including any later fields, against the exact successful revise receipt.
+    stored_view = runtime.subscription_operations._view(record)
+    assert type(stored_view) is type(expected) is sdk.SubscriptionView
+    assert stored_view == expected, (stored_view, expected)
+    assert_sample_evaluation(checkpoint.snapshot.state)
+    return checkpoint
+
+
+async def complete_sample_subscription_evaluation(runtime, expected, association):
+    scheduler = runtime.scheduler
+    key_token = importlib.import_module(type(scheduler).__module__)._key_token(
+        association.collection_key
+    )
+    # Use the existing collection budget for this fixture completion condition;
+    # no Core deadline or five-second pump configuration is changed.
+    async with asyncio.timeout(scheduler.quotas.collection_timeout_seconds):
+        while True:
+            await scheduler.run_due_page()
+            # A pump-owned unexpired lease is omitted from list_due_jobs. Join
+            # its exact owned Task as well, rather than treating an empty page
+            # as proof that the current subscription revision was evaluated.
+            async with scheduler._active_lock:
+                active = scheduler._active.get(key_token)
+            if active is not None:
+                await asyncio.shield(active)
+            checkpoint = await runtime.b04_repositories.scheduler.current_checkpoint(
+                expected.subscription_id, association.collection_key
+            )
+            if checkpoint is not None and checkpoint.snapshot.state is not None:
+                return await sample_subscription_checkpoint(
+                    runtime, expected, association
+                )
+            # A pre-revise task may finish with its commit rejected by revision
+            # CAS, including between the page read and active-map read. Its
+            # release retains due_at. Revisit real due work under the same
+            # existing deadline; never fabricate state or accept its absence.
+
+
+def assert_sample_subscription_listing(views, expected, before, after):
+    assert type(views) is tuple and len(views) == 1, views
+    (view,) = views
+    assert type(view) is type(expected) is sdk.SubscriptionView
+    assert replace(view, evaluation_state=expected.evaluation_state) == expected, (
+        view,
+        expected,
+    )
+    assert_sample_evaluation(view.evaluation_state)
+    assert (
+        before.snapshot.state.revision
+        <= view.evaluation_state.revision
+        <= after.snapshot.state.revision
+    ), (before.snapshot.state, view.evaluation_state, after.snapshot.state)
+
+
 async def expanded(runtime, host):
     instance = sample_instance(runtime)
     assert instance.start_count == 1 and instance.stop_count == 0
@@ -514,17 +569,23 @@ async def expanded(runtime, host):
     ).result.status is sdk.ResultStatus.SUCCESS
     a2 = handlers["subscription_revise"].last_view
     assert a2.revision == 2
+    assert a2.evaluation_state is None
     a2_link = await runtime.b04_repositories.jobs.current_for_subscription(
         a.subscription_id
     )
     assert a2_link is not None
+    await complete_sample_subscription_evaluation(runtime, a2, a2_link)
     assert (
         await command(runtime, host, "subscription revise", revised)
     ).result.status is sdk.ResultStatus.ERROR
+    before = await sample_subscription_checkpoint(runtime, a2, a2_link)
     assert (
         await command(runtime, host, "subscription list", {})
     ).result.status is sdk.ResultStatus.SUCCESS
-    assert handlers["subscription_list"].last_views == (a2,)
+    after = await sample_subscription_checkpoint(runtime, a2, a2_link)
+    assert_sample_subscription_listing(
+        handlers["subscription_list"].last_views, a2, before, after
+    )
     assert (
         await runtime.b04_repositories.jobs.current_for_subscription(a.subscription_id)
         == a2_link
@@ -541,10 +602,14 @@ async def expanded(runtime, host):
             {"subscription_id": a.subscription_id, "expected_revision": 1},
         )
     ).result.status is sdk.ResultStatus.ERROR
+    before = await sample_subscription_checkpoint(runtime, a2, a2_link)
     assert (
         await command(runtime, host, "subscription list", {})
     ).result.status is sdk.ResultStatus.SUCCESS
-    assert handlers["subscription_list"].last_views == (a2,)
+    after = await sample_subscription_checkpoint(runtime, a2, a2_link)
+    assert_sample_subscription_listing(
+        handlers["subscription_list"].last_views, a2, before, after
+    )
     assert (
         await runtime.b04_repositories.jobs.current_for_subscription(a.subscription_id)
         == a2_link

@@ -10,27 +10,13 @@ import weakref
 from collections.abc import Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from functools import partial
+from functools import partial, wraps
 from pathlib import Path
 from secrets import token_urlsafe
 from threading import RLock
 from time import monotonic, time
 from types import MappingProxyType
 from typing import Callable
-
-from yomihime_game_link_sdk.contexts import InvocationOrigin
-from yomihime_game_link_sdk.declarations import PrivacyFloor
-from yomihime_game_link_sdk.display import DisplayLimits
-from yomihime_game_link_sdk.errors import (
-    AccessDenied,
-    InvalidInvocation,
-    OperationTimeout,
-    ParameterError,
-    ServiceUnavailable,
-)
-from yomihime_game_link_sdk.results import ResultStatus
-from yomihime_game_link_sdk.services import CapabilityHealth, ConfigTarget, HealthStatus
-from yomihime_game_link_sdk.subscriptions import ConversationKind, ConversationRef
 
 from ...core.contracts.administration import (
     AdminAuthorizationDenied,
@@ -78,6 +64,23 @@ from ...services.managed_font import ManagedFont
 from ...services.source_authorizations import AuthorizationBinding
 from ...services.source_credentials import SourceCredentialPolicy
 from ...services.trusted_assembly import assemble_reviewed
+from ...yomihime_game_link_sdk.contexts import InvocationOrigin
+from ...yomihime_game_link_sdk.declarations import PrivacyFloor
+from ...yomihime_game_link_sdk.display import DisplayLimits
+from ...yomihime_game_link_sdk.errors import (
+    AccessDenied,
+    InvalidInvocation,
+    OperationTimeout,
+    ParameterError,
+    ServiceUnavailable,
+)
+from ...yomihime_game_link_sdk.results import ResultStatus
+from ...yomihime_game_link_sdk.services import (
+    CapabilityHealth,
+    ConfigTarget,
+    HealthStatus,
+)
+from ...yomihime_game_link_sdk.subscriptions import ConversationKind, ConversationRef
 from .analysis import AstrBotCommandAnalysis
 from .bundled import (
     DEFAULT_BUNDLE_SELECTION,
@@ -180,10 +183,11 @@ class _MessageReceipts:
 
     def _prune(self):
         now = self._clock()
-        for key, receipt in tuple(self._records.items()):
+        for key, receipt in self._records.copy().items():
             if receipt.event() is None:
                 self._close(receipt, "collected")
-                del self._records[key]
+                if self._records.get(key) is receipt:
+                    del self._records[key]
             elif receipt.expires <= now:
                 self._close(receipt, "expired")
 
@@ -529,6 +533,22 @@ class _AstrBotMessageIngress:
         return adapter, sender, conversation, kind
 
 
+def _owned_core_invocation(method):
+    @wraps(method)
+    async def invoke(self, *args, **kwargs):
+        from contextlib import nullcontext
+
+        from ...services.runtime_effect_gate import invocation_guard
+
+        gate = getattr(self, "_hot_gate", None)
+        with invocation_guard(gate) if gate is not None else nullcontext():
+            if gate is not None:
+                gate.check()
+            return await method(self, *args, **kwargs)
+
+    return invoke
+
+
 class AstrBotRuntime:
     """Own a single Core runtime, its module pump and the AstrBot output port."""
 
@@ -632,7 +652,11 @@ class AstrBotRuntime:
         self._refresh_external_public_web_bindings()
         if getattr(core, "jobs", None) is not None:
             core.jobs.notify_changed()
-        for source in (self._admin_source, self._module_admin_source):
+        for source in (
+            self._admin_source,
+            self._module_admin_source,
+            self._credential_admin_source,
+        ):
             if source is not None:
                 core.admin_authorization.unregister_source(source)
         self._admin_source = core.admin_authorization.register_source(
@@ -661,6 +685,16 @@ class AstrBotRuntime:
                     AdminOperation.UNLOAD_MODULE,
                 },
             )
+        credential_resources = core.admin_operations.credential_resources()
+        self._credential_admin_source = (
+            core.admin_authorization.register_source(
+                "astrbot-dashboard-source-credentials",
+                resources=credential_resources,
+                operations={AdminOperation.READ_CONFIG, AdminOperation.UPDATE_CONFIG},
+            )
+            if credential_resources
+            else None
+        )
         if self._tool_publisher is not None:
             self._tool_publisher.publish()
 
@@ -679,11 +713,15 @@ class AstrBotRuntime:
         )
 
     def _external_page_bindings(self):
-        host = getattr(self, "_extension_host", None)
+        host = getattr(self, "_independent_packages", None) or getattr(
+            self, "_extension_host", None
+        )
         return host.page_manifest_bindings() if host is not None else {}
 
     def _external_projection(self):
-        host = getattr(self, "_extension_host", None)
+        host = getattr(self, "_independent_packages", None) or getattr(
+            self, "_extension_host", None
+        )
         return host.page_projection() if host is not None else StaticPageProjection()
 
     def _refresh_external_public_web_bindings(self):
@@ -693,7 +731,7 @@ class AstrBotRuntime:
         if validator is None or core is None:
             return
         try:
-            host = self._extension_host
+            host = getattr(self, "_independent_packages", None) or self._extension_host
             bindings = {}
             if host is not None:
                 manifests = host.page_manifest_bindings()
@@ -808,9 +846,53 @@ class AstrBotRuntime:
             raise AdminAuthorizationDenied
         return self._core, source
 
+    @_owned_core_invocation
     async def installation_operation(self, action, data, context):
         core, source = self.management_entry(modules=True)
         resources = core.admin_operations.module_resources()
+        controller = getattr(self, "_hot_update_admin", None)
+        if action == "bootstrap":
+            if data != {}:
+                return {"ok": False, "error": {"code": "invalid_request"}}
+            if controller is None:
+                return {"ok": False, "error": {"code": "hot_update_unavailable"}}
+            source.check(context, AdminOperation.LIST_MODULES, resources)
+            # Only this authenticated read learns the epoch. Mutations retain
+            # the exact browser epoch and are checked by the controller.
+            grant = await core.admin_authorization.authorize(
+                AdminOperation.LIST_MODULES,
+                invocation=None,
+                context=context,
+                resources=resources,
+            )
+            return await controller.request(
+                "status", {"core_epoch": controller._epoch()}, grant=grant
+            )
+        if controller is not None and action in {
+            "status",
+            "inspect",
+            "retry",
+            "package-approve",
+            "package-revoke",
+            "artifact-approve",
+            "artifact-revoke",
+            "publisher-enroll",
+            "publisher-revoke",
+        }:
+            operation = (
+                AdminOperation.LIST_MODULES
+                if action in {"status", "inspect"}
+                else AdminOperation.SET_ENABLED
+            )
+            if not self.management_current(core, source):
+                raise AdminAuthorizationDenied
+            source.check(context, operation, resources)
+            grant = await core.admin_authorization.authorize(
+                operation, invocation=None, context=context, resources=resources
+            )
+            return await controller.request(action, data, grant=grant)
+        if action not in {"module-install-plan", "module-install-approve"}:
+            return {"ok": False, "error": {"code": "hot_update_unavailable"}}
         operation = (
             AdminOperation.LIST_MODULES
             if action == "module-install-plan"
@@ -857,9 +939,8 @@ class AstrBotRuntime:
     ):
         import base64
 
-        from yomihime_game_link_sdk.jobs import JobRequest
-
         from ...services.extension_permissions import plain
+        from ...yomihime_game_link_sdk.jobs import JobRequest
 
         identity = {"owner", "page", "runtime_id", "module_epoch", "page_session"}
 
@@ -1059,6 +1140,7 @@ class AstrBotRuntime:
         finally:
             validator.revoke(ticket)
 
+    @_owned_core_invocation
     async def module_page_operation(self, action, data, *, request):
         """Bind a real Dashboard session to a current, selected module page.
 
@@ -1067,9 +1149,8 @@ class AstrBotRuntime:
         body owner/page are selectors intersected with current trusted policy.
         No asset token, client pageName, Referer, or API key grants authority.
         """
-        from yomihime_game_link_sdk import ConfigTarget
-
         from ...services.module_pages import ModulePageGrant, module_page_operation
+        from ...yomihime_game_link_sdk import ConfigTarget
         from .admin_pages import _DashboardRequestFence
         from .web_admin import verified_dashboard_request
 
@@ -1207,7 +1288,7 @@ class AstrBotRuntime:
         if data.get("runtime_id") != binding.runtime_id:
             raise AdminAuthorizationDenied
         if action == "module-page-assets":
-            host = self._extension_host
+            host = getattr(self, "_independent_packages", None) or self._extension_host
             if host is None:
                 raise AdminAuthorizationDenied
             result = host.page_assets(binding.owner, binding.page)
@@ -1519,7 +1600,16 @@ class AstrBotRuntime:
             data["expected_revision"],
         )
 
+        manager = getattr(self, "_independent_packages", None)
+        effect_guard = (
+            manager.guard_for_owner(binding.owner)
+            if manager is not None and not binding.owner.startswith("ygl_core/")
+            else getattr(self, "_hot_gate", None)
+        )
+
         async def guard():
+            if effect_guard is not None:
+                effect_guard.check()
             if not current(raw):
                 raise AdminAuthorizationDenied
             source.check(
@@ -1569,16 +1659,26 @@ class AstrBotRuntime:
         cached = core.module_services._http_by_module.get(binding.owner)
         if cached is None:
             raise AdminAuthorizationDenied
-        return await self._source_authorizations.execute(
-            binding=material_binding,
-            flow_id=data["flow_id"],
-            step=data["step"],
-            session_id=data["session_id"],
-            guard=guard,
-            commit=commit,
-            http=cached[1],
-        )
+        from contextlib import nullcontext
 
+        from ...services.runtime_effect_gate import invocation_guard
+
+        with (
+            invocation_guard(effect_guard)
+            if effect_guard is not None
+            else nullcontext()
+        ):
+            return await self._source_authorizations.execute(
+                binding=material_binding,
+                flow_id=data["flow_id"],
+                step=data["step"],
+                session_id=data["session_id"],
+                guard=guard,
+                commit=commit,
+                http=cached[1],
+            )
+
+    @_owned_core_invocation
     async def recover_management(
         self, core, revisions, *, authorization
     ) -> ManagementRecoveryProjection:
@@ -1666,6 +1766,7 @@ class AstrBotRuntime:
             raise WebPublicRejected("entry_unavailable")
         return validator.remaining(ticket)
 
+    @_owned_core_invocation
     async def invoke_public_web(
         self,
         request_state,
@@ -1810,10 +1911,27 @@ class AstrBotRuntime:
 
     async def initialize(self) -> None:
         """Install the exact bundled module, then start the one CoreRuntime."""
+        retained = getattr(self, "_retained_cleanup", None)
+        if retained is not None and not retained.done():
+            raise CoreRuntimeCleanupPending("retained_orchestration")
         generation = self._generation
         async with self._lock:
             if generation != self._generation:
                 return
+            current_cleanup = getattr(self, "_retained_cleanup", None)
+            if current_cleanup is not None:
+                if not current_cleanup.done():
+                    raise CoreRuntimeCleanupPending("retained_orchestration")
+                # Done is not sufficient: preserve failed/canceled cleanup.
+                current_cleanup.result()
+                if (
+                    self._core is not None
+                    or self._http_transport is not None
+                    or self._tool_publisher is not None
+                    or self._closing
+                ):
+                    raise CoreRuntimeCleanupPending("retained_orchestration")
+                self._retained_cleanup = None
             if self._closing:
                 await self._close_owned_runtime()
                 self._closing = False
@@ -2118,9 +2236,36 @@ class AstrBotRuntime:
             self._web_validator = validator
             self._managed_font.start()
             try:
-                await core.start()
+                await self.activate_core_owner(core)
+                from contextlib import nullcontext
+
+                from ...services.runtime_effect_gate import invocation_guard
+
+                gate = getattr(self, "_hot_gate", None)
+                with invocation_guard(gate) if gate is not None else nullcontext():
+                    await core.start()
             except BaseException as exc:
                 self._ready = False
+                hot = getattr(self, "_hot_generation", None)
+                if hot is not None:
+                    self.sync_fence()
+                    from ...infrastructure.sqlite.runtime_ownership import (
+                        RuntimeOwnership,
+                    )
+
+                    transition_id = getattr(self, "_hot_transition_id", None)
+                    if transition_id is not None:
+                        await core.database.executor.run_internal_transaction(
+                            lambda unit: RuntimeOwnership.phase(
+                                unit,
+                                transition_id,
+                                "ACTIVE",
+                                "FAILED",
+                                error_code="core_start_failed",
+                            )
+                        )
+                    hot.sync_fence()
+                    raise
                 if isinstance(exc, ConfigurationValueError):
                     self._config_error = exc.field
                 self._bridge = None
@@ -2183,6 +2328,36 @@ class AstrBotRuntime:
                     registration_timeout=core._handler_timeout,
                 )
             await self._publish_tools_or_close(core)
+            hot = getattr(self, "_hot_generation", None)
+            if hot is not None:
+                from ...bootstrap.loader import ArtifactCache
+                from ...services.external_packages import IndependentPackageRuntime
+
+                cache = getattr(hot, "cache", None) or ArtifactCache(self._data_dir)
+                hot.cache = cache
+                self._independent_packages = IndependentPackageRuntime(self, hot, cache)
+                from ...services.hot_update_admin import HotUpdateAdmin
+
+                self._hot_update_admin = HotUpdateAdmin(
+                    self._independent_packages,
+                    core.admin_authorization,
+                    management_source=lambda: self._module_admin_source,
+                )
+                self._control_endpoint = self._independent_packages.endpoint
+                self.schedule_extension_reconcile()
+                self._extension_tick = asyncio.create_task(
+                    self._extension_reconcile_loop(), name="ygl-discovery-tick"
+                )
+
+    def schedule_extension_reconcile(self):
+        manager = getattr(self, "_independent_packages", None)
+        if manager is not None:
+            manager.schedule_reconcile()
+
+    async def _extension_reconcile_loop(self):
+        while not self._closing:
+            await asyncio.sleep(60)
+            self.schedule_extension_reconcile()
 
     async def _publish_tools_or_close(self, core) -> None:
         if not callable(getattr(self._context, "add_llm_tools", None)):
@@ -2205,12 +2380,9 @@ class AstrBotRuntime:
             self._closing = False
             raise
 
-    async def terminate(self) -> None:
-        """Stop ingress and close the owned pump/modules/database once."""
+    def sync_fence(self):
+        """Irreversibly stop every Host ingress and sink before any await."""
         self._page_sessions.close()
-        manager = getattr(self, "_source_authorizations", None)
-        if manager is not None:
-            await manager.close()
         if self._extension_host is not None:
             self._extension_host.stop_accepting()
         self._generation += 1
@@ -2234,9 +2406,178 @@ class AstrBotRuntime:
         self._closing = True
         self._ready = False
         self._bridge = None
-        async with self._lock:
-            await self._close_owned_runtime()
+        hot_gate = getattr(self, "_hot_gate", None)
+        if hot_gate is not None:
+            hot_gate.close()
+        control = getattr(self, "_independent_packages", None)
+        if control is not None:
+            control.stop_accepting()
+        tick = getattr(self, "_extension_tick", None)
+        if tick is not None:
+            tick.cancel()
+
+    async def terminate(self) -> None:
+        self.sync_fence()
+        try:
+            await asyncio.wait_for(self.cleanup_until_quiet(), 0.5)
+        except asyncio.TimeoutError:
+            raise CoreRuntimeCleanupPending("retained_orchestration") from None
+
+    async def cleanup_until_quiet(self):
+        # One overall task survives per-resource bounded close attempts. A
+        # timeout does not replace or cancel the original orchestration task.
+        task = getattr(self, "_retained_cleanup", None)
+        if task is None:
+            task = asyncio.create_task(self._cleanup_owned(), name="ygl-core-cleanup")
+            self._retained_cleanup = task
+        await asyncio.shield(task)
+        if (
+            task is getattr(self, "_retained_cleanup", None)
+            and self._core is None
+            and self._http_transport is None
+            and self._tool_publisher is None
+        ):
+            # A repeated observer of this same successful quiet lifetime must
+            # not leave it closing, or change a newer lifetime's state.
             self._closing = False
+
+    async def _cleanup_owned(self):
+        manager = getattr(self, "_source_authorizations", None)
+        if manager is not None:
+            await manager.close()
+        control = getattr(self, "_independent_packages", None)
+        if control is not None:
+            await control.close()
+        tick = getattr(self, "_extension_tick", None)
+        if tick is not None:
+            await asyncio.gather(tick, return_exceptions=True)
+        async with self._lock:
+            while True:
+                try:
+                    await self._close_owned_runtime()
+                    self._closing = False
+                    return
+                except CoreRuntimeCleanupPending:
+                    # Core retains each actual per-resource task. Retry its
+                    # observation, never infer quiet from waiter completion.
+                    await asyncio.sleep(0.1)
+
+    async def activate_core_owner(self, core):
+        generation = getattr(self, "_hot_generation", None)
+        if generation is None:
+            return
+        from uuid import uuid4
+
+        from ...infrastructure.sqlite.runtime_ownership import RuntimeOwnership
+        from ...services.runtime_effect_gate import EffectRejected, RuntimeEffectGate
+
+        executor = core.database.executor
+        await executor.initialize()
+        self._hot_database = core.database
+        receipt = generation.receipt
+        token, epoch = receipt["owner_token"], receipt["core_epoch"]
+        transition_id = str(uuid4())
+        self._hot_transition_id = transition_id
+        self._hot_gate = RuntimeEffectGate(
+            generation.kernel, generation.scope, token, epoch, initially_open=False
+        )
+
+        def require_owner():
+            record = generation.kernel._record(generation.scope)
+            if (
+                self._closing
+                or record.fenced
+                or record.token != token
+                or record.epoch != epoch
+            ):
+                raise EffectRejected()
+
+        def owned_control(callback):
+            def run(unit):
+                @contextmanager
+                def commit_fence():
+                    with generation.kernel.lock:
+                        require_owner()
+                        yield
+
+                require_owner()
+                unit.add_commit_guard(commit_fence)
+                return callback(unit)
+
+            return run
+
+        def closed_owner(unit):
+            RuntimeOwnership.fence_previous_boot(unit, generation.kernel.boot_id)
+            old = unit.connection.execute(
+                "SELECT * FROM runtime_owners WHERE scope='core'"
+            ).fetchone()
+            RuntimeOwnership.prepare(
+                unit,
+                transition_id,
+                "core",
+                generation.bundle.digest,
+                boot_id=generation.kernel.boot_id,
+                from_boot_id=old["boot_id"] if old else None,
+                from_digest=old["digest"] if old else None,
+                from_epoch=old["core_epoch"] if old else 0,
+                to_epoch=epoch,
+            )
+            if old is not None and old["accepting"]:
+                raise RuntimeError("previous durable Core owner is not fenced")
+            RuntimeOwnership.phase(unit, transition_id, "PREPARED", "OLD_FENCED")
+            RuntimeOwnership.phase(unit, transition_id, "OLD_FENCED", "OLD_QUIET")
+            return RuntimeOwnership.commit_closed(
+                unit,
+                transition_id,
+                expected_token=old["token"] if old else None,
+                expected_revision=old["revision"] if old else 0,
+                core_epoch=epoch,
+                boot_id=generation.kernel.boot_id,
+                new_token=token,
+            )
+
+        closed = await executor.run_internal_transaction(owned_control(closed_owner))
+        # self._core already publishes the Core service object with ready=False.
+        await executor.run_internal_transaction(
+            owned_control(
+                lambda unit: RuntimeOwnership.phase(
+                    unit, transition_id, "COMMITTED_CLOSED", "PUBLISHED"
+                )
+            )
+        )
+        await executor.run_internal_transaction(
+            owned_control(
+                lambda unit: RuntimeOwnership.open_active(
+                    unit,
+                    transition_id,
+                    token,
+                    closed["revision"],
+                    boot_id=generation.kernel.boot_id,
+                )
+            )
+        )
+        self._hot_gate.open()
+        executor.bind_effect_guard(self._hot_gate)
+        core.delivery._effect_guard = self._hot_gate
+        core.jobs._shutdown_gate = self._hot_gate
+        core.file_store._effect_guard = self._hot_gate
+        core.secret_store._effect_guard = self._hot_gate
+        self._http_transport._effect_guard = self._hot_gate
+        generation.state = "initializing"
+
+    async def fence_durable_owner(self):
+        generation = getattr(self, "_hot_generation", None)
+        database = getattr(self, "_hot_database", None)
+        if generation is None or database is None:
+            return
+        token = generation.receipt["owner_token"]
+        # An exact-token control fence cannot affect the next Core owner.
+        await database.executor.run_internal_transaction(
+            lambda unit: unit.connection.execute(
+                "UPDATE runtime_owners SET accepting=0,revision=revision+1 WHERE scope='core' AND token=?",
+                (token,),
+            ).rowcount
+        )
 
     async def _close_owned_runtime(self) -> None:
         if self._extension_host is not None:
@@ -2477,6 +2818,7 @@ class AstrBotRuntime:
             + _BUNDLE_FAILURE_DIAGNOSTICS[reason]
         )
 
+    @_owned_core_invocation
     async def handle_event(self, event: object) -> str | None:
         """Return host help/errors, or dispatch once through the Core output port."""
         if self._config_error is not None:
@@ -2529,6 +2871,7 @@ class AstrBotRuntime:
             return None
         return None
 
+    @_owned_core_invocation
     async def send_help(self, event, text):
         """Send public help with at most three live PNG/base64 reservations.
 
@@ -2626,6 +2969,7 @@ class AstrBotRuntime:
         )
         return capability is not None and capability.privacy_floor is PrivacyFloor.OWNER
 
+    @_owned_core_invocation
     async def scope_model_tools(self, event, request):
         if not self._ready or self._closing or self._tool_publisher is None:
             return
@@ -2635,6 +2979,7 @@ class AstrBotRuntime:
             return
         await self._tool_publisher.scope_request(event, request)
 
+    @_owned_core_invocation
     async def invoke_tool(
         self,
         module_id,

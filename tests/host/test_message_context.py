@@ -10,6 +10,7 @@ import asyncio
 import dataclasses
 import gc
 import json
+import sys
 import tempfile
 import unittest
 from datetime import timedelta
@@ -186,6 +187,108 @@ class _OfflineHost:
             return SimpleNamespace(result=result, output=routed)
         finally:
             self.runtime.issuer.release(view)
+
+
+class MessageReceiptGCTests(unittest.TestCase):
+    class Event:
+        def __init__(self, *, cyclic=False):
+            if cyclic:
+                self.cycle = self
+
+        def get_message_str(self):
+            return "synthetic receipt lifecycle"
+
+    def setUp(self):
+        enabled = gc.isenabled()
+        gc.disable()
+        self.addCleanup(gc.enable if enabled else gc.disable)
+
+    def _collect_during_prune(self, receipts, live, *, replacement=None):
+        """Run actual weakref callbacks after the original snapshot is retained."""
+        fired = False
+
+        def trace(frame, event, _arg):
+            nonlocal fired
+            if frame.f_code is not _MessageReceipts._prune.__code__:
+                return None
+            if event == "line" and "receipt" in frame.f_locals and not fired:
+                fired = True
+                gc.collect()
+                if replacement is not None:
+                    key, receipt = replacement
+                    # Model an event id reused after the real collection callback.
+                    receipts._records[key] = receipt
+            return trace
+
+        previous = sys.gettrace()
+        try:
+            sys.settrace(trace)
+            result = receipts.live(live)
+        finally:
+            sys.settrace(previous)
+        self.assertTrue(fired)
+        return result
+
+    def test_collected_cycle_during_prune_preserves_live_receipt(self):
+        receipts = _MessageReceipts()
+        alive = self.Event()
+        live = receipts.capture(alive, ("synthetic",))
+        cyclic = self.Event(cyclic=True)
+        key = id(cyclic)
+        collected = receipts.capture(cyclic, ("synthetic",))
+        del cyclic
+
+        self.assertTrue(self._collect_during_prune(receipts, live))
+        self.assertIsNone(collected.event())
+        self.assertTrue(collected.closed)
+        self.assertIsNone(collected.text)
+        self.assertNotIn(key, receipts._records)
+        self.assertIs(receipts._records[id(alive)], live)
+        self.assertFalse(live.closed)
+
+    def test_collected_snapshot_does_not_remove_replacement_receipt(self):
+        receipts = _MessageReceipts()
+        alive = self.Event()
+        live = receipts.capture(alive, ("synthetic",))
+        cyclic = self.Event(cyclic=True)
+        key = id(cyclic)
+        collected = receipts.capture(cyclic, ("synthetic",))
+        replacement_event = self.Event()
+        replacement = receipts.capture(replacement_event, ("synthetic",))
+        del cyclic
+
+        self.assertTrue(
+            self._collect_during_prune(receipts, live, replacement=(key, replacement))
+        )
+        self.assertIsNone(collected.event())
+        self.assertTrue(collected.closed)
+        self.assertIs(receipts._records[key], replacement)
+        self.assertIs(replacement.event(), replacement_event)
+        self.assertFalse(replacement.closed)
+        self.assertIsNotNone(replacement.text)
+
+    def test_gc_during_prune_keeps_expired_tombstone_closed(self):
+        receipts = _MessageReceipts()
+        now = [0.0]
+        receipts._clock = lambda: now[0]
+        alive = self.Event()
+        expired = receipts.capture(alive, ("synthetic",))
+        cyclic = self.Event(cyclic=True)
+        collected = receipts.capture(cyclic, ("synthetic",))
+        del cyclic
+        now[0] = 300.0
+
+        with self.assertRaises(ygl.OperationTimeout):
+            self._collect_during_prune(receipts, expired)
+        self.assertIsNone(collected.event())
+        self.assertIs(receipts._records[id(alive)], expired)
+        self.assertTrue(expired.closed)
+        self.assertIsNone(expired.text)
+        self.assertIsNone(expired.facts)
+        self.assertIsNone(expired.correlation)
+        self.assertEqual(expired.expires, 300.0)
+        with self.assertRaises(ygl.OperationTimeout):
+            receipts.capture(alive, ("synthetic",))
 
 
 class ControlledMessageTests(unittest.IsolatedAsyncioTestCase):

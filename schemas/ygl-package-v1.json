@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ygl.invalid/schemas/ygl-package-v1.json",
+  "title": "YGL package manifest envelope v1",
+  "description": "UTF-8 JSON at most 1048576 bytes. B05 declarations are the existing schema_version/package_id/package_version/contract_version/author/license/source/modules plus optional display_name/module_order. The host-independent parser validates this outer envelope; the Core must separately run existing B05 parse_manifest over b05_manifest_bytes before granting permissions or running modules. No arbitrary permission fields are allowed. V1 never runs DLC data migrations; schema and writes must match accepted values and readable must include current stored format.",
+  "type": "object", "additionalProperties": false,
+  "required": ["schema_version", "package_id", "package_version", "contract_version", "author", "license", "source", "modules", "release", "module_contract", "required_features", "optional_features", "data"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "package_id": {"type": "string", "maxLength": 64, "pattern": "^[a-z][a-z0-9_]*(?:[.-][a-z0-9_]+)*$"},
+    "package_version": {"$ref": "#/$defs/version"},
+    "contract_version": {"const": "2.0"},
+    "author": {"type": "string", "minLength": 1, "maxLength": 2048},
+    "license": {"type": "string", "minLength": 1, "maxLength": 2048},
+    "source": {"type": "string", "minLength": 1, "maxLength": 2048},
+    "modules": {"type": "array", "minItems": 1, "maxItems": 256, "description": "Every module and permission-bearing nested declaration must pass existing B05 parse_manifest; this envelope does not authorize opaque module fields."},
+    "display_name": {"type": ["string", "null"]},
+    "module_order": {"type": ["array", "null"]},
+    "release": {"$ref": "#/$defs/version", "description": "Must equal package_version."},
+    "module_contract": {"type": "object", "additionalProperties": false, "required": ["major", "minimum_minor"], "properties": {"major": {"const": 2}, "minimum_minor": {"type": "integer", "minimum": 0, "maximum": 65535}}},
+    "required_features": {"$ref": "#/$defs/features"},
+    "optional_features": {"$ref": "#/$defs/features"},
+    "data": {"type": "object", "additionalProperties": false, "required": ["schema", "readable", "writes"], "properties": {"schema": {"type": "integer", "minimum": 1, "maximum": 9007199254740991}, "readable": {"type": "array", "minItems": 1, "maxItems": 256, "uniqueItems": true, "items": {"type": "integer", "minimum": 1, "maximum": 9007199254740991}}, "writes": {"type": "integer", "minimum": 1, "maximum": 9007199254740991}}},
+    "metadata": {"type": "object", "maxProperties": 64, "additionalProperties": {"type": ["string", "integer", "boolean", "null"]}, "description": "Non-authorizing scalar display metadata only."},
+    "source_policy": {"type": "string", "minLength": 1, "maxLength": 1024, "description": "Relative POSIX path to a signed inventory member. Requires source.policies/1 in required_features. File contents are validated separately; this field grants no permissions by itself."}
+  },
+  "$defs": {
+    "version": {"type": "string", "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"},
+    "feature": {"type": "string", "pattern": "^[a-z][a-z0-9._-]{0,63}/[1-9][0-9]{0,5}$"},
+    "features": {"type": "array", "maxItems": 256, "uniqueItems": true, "items": {"$ref": "#/$defs/feature"}}
+  }
+}

@@ -6,11 +6,10 @@ from collections.abc import Mapping
 from contextlib import contextmanager
 from uuid import uuid4
 
-from yomihime_game_link_sdk.jobs import JobStatus, JobView
-
 from ...core.contracts.storage import freeze_json
 from ...core.ports import RevisionConflict
 from ...core.ports_jobs import JobError
+from ...yomihime_game_link_sdk.jobs import JobStatus, JobView
 
 
 @contextmanager
@@ -80,6 +79,68 @@ class SQLiteJobRepository:
             )
 
         await self.database.executor.run_transaction(write, begin_mode="IMMEDIATE")
+
+    async def recover_modules(self, now, module_ids, *, check):
+        """Fixed repair for physically quiet Core-fenced owners; normal SQL guard."""
+        owners = tuple(sorted(set(module_ids)))
+        if (
+            not owners
+            or len(owners) > 4096
+            or any(
+                type(owner) is not str or not 1 <= len(owner) <= 256 for owner in owners
+            )
+        ):
+            raise JobError("invalid_job_owner_filter")
+
+        def write(unit):
+            check()
+            unit.execute(
+                "UPDATE durable_jobs SET status='interrupted',revision=revision+1,"
+                "run_token=NULL,error_code='owner_interrupted',updated_at=? "
+                "WHERE status='running' AND module_id IN ("
+                + ",".join("?" for _ in owners)
+                + ")",
+                (now, *owners),
+            )
+            unit.add_commit_guard(lambda: _fence(check))
+
+        await self.database.executor.run_transaction(write, begin_mode="IMMEDIATE")
+
+    async def recover_after_quiet(self, now, *, core_gate):
+        """Fixed shutdown journal repair after this Core's actual jobs drain.
+
+        No callback or SQL is supplied by a caller. This path cannot run before
+        the exact Core kernel owner is fenced or after a successor owns scope.
+        """
+        from ...services.runtime_effect_gate import EffectRejected, RuntimeEffectGate
+
+        if (
+            type(core_gate) is not RuntimeEffectGate
+            or core_gate.identity.package_id is not None
+        ):
+            raise TypeError("Core shutdown ownership required")
+
+        def check():
+            with core_gate.kernel.lock:
+                record = core_gate.kernel._record(core_gate.scope)
+                if (
+                    not record.fenced
+                    or record.token != core_gate.identity.core_token
+                    or record.epoch != core_gate.identity.core_epoch
+                ):
+                    raise EffectRejected()
+
+        check()
+
+        def write(unit):
+            check()
+            unit.execute(
+                "UPDATE durable_jobs SET status='interrupted',revision=revision+1,"
+                "run_token=NULL,error_code='process_interrupted',updated_at=? WHERE status='running'",
+                (now,),
+            )
+
+        await self.database.executor.run_internal_transaction(write)
 
     @staticmethod
     def owned(unit, owner, module, job_id):
@@ -176,13 +237,25 @@ class SQLiteJobRepository:
             write, begin_mode="IMMEDIATE"
         )
 
-    async def queued(self, limit):
+    async def queued(self, limit, *, exclude_modules=()):
+        excluded = tuple(sorted(set(exclude_modules)))
+        if len(excluded) > 4096 or any(
+            type(owner) is not str or not 1 <= len(owner) <= 256 for owner in excluded
+        ):
+            raise JobError("invalid_job_owner_filter")
+        predicate = (
+            (" AND module_id NOT IN (" + ",".join("?" for _ in excluded) + ")")
+            if excluded
+            else ""
+        )
         return await self.database.executor.run_read(
             lambda unit: tuple(
                 dict(row)
                 for row in unit.execute(
-                    "SELECT * FROM durable_jobs WHERE status='queued' ORDER BY created_at,job_id LIMIT ?",
-                    (limit,),
+                    "SELECT * FROM durable_jobs WHERE status='queued'"
+                    + predicate
+                    + " ORDER BY created_at,job_id LIMIT ?",
+                    (*excluded, limit),
                 ).fetchall()
             )
         )

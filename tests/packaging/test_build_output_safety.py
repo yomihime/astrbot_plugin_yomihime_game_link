@@ -15,6 +15,32 @@ from scripts import build_release as release
 
 
 class BuildOutputSafetyTests(unittest.TestCase):
+    def _windows_short_path(self, path):
+        if os.name != "nt":
+            self.skipTest("Real Windows 8.3 aliases are required for this scenario")
+        import ctypes
+        from ctypes import wintypes
+
+        native = ctypes.WinDLL("kernel32", use_last_error=True)
+        native.GetShortPathNameW.argtypes = [
+            wintypes.LPCWSTR,
+            wintypes.LPWSTR,
+            wintypes.DWORD,
+        ]
+        native.GetShortPathNameW.restype = wintypes.DWORD
+        size = native.GetShortPathNameW(str(path), None, 0)
+        if not size:
+            self.skipTest("GetShortPathNameW is unavailable for this temporary path")
+        buffer = ctypes.create_unicode_buffer(size)
+        written = native.GetShortPathNameW(str(path), buffer, size)
+        self.assertGreater(written, 0)
+        self.assertLess(written, size)
+        alias = Path(buffer.value)
+        if alias == path:
+            self.skipTest("The temporary volume has no distinct Windows 8.3 alias")
+        self.assertTrue(path.samefile(alias))
+        return alias
+
     def test_real_ff14_projection_executes_readers_and_cleans_imports(self):
         before_path = list(sys.path)
         before_modules = {
@@ -31,7 +57,7 @@ class BuildOutputSafetyTests(unittest.TestCase):
             parse, read = original_readers(namespace)
 
             def checked_read(root, manifest):
-                sdk = sys.modules["yomihime_game_link_sdk.declarations"]
+                sdk = sys.modules[namespace + ".yomihime_game_link_sdk.declarations"]
                 self.assertIs(type(manifest), sdk.PackageManifest)
                 self.assertIs(read.__globals__["PackageManifest"], sdk.PackageManifest)
                 self.assertIn(namespace, sys.modules)
@@ -77,7 +103,7 @@ class BuildOutputSafetyTests(unittest.TestCase):
             wheel.write_bytes(b"verified wheel fixture")
             before = wheel.stat()
 
-            def build_zip(source, destination, repository):
+            def build_zip(source, destination, repository, **kwargs):
                 self.assertEqual(source, wheel)
                 destination.write_bytes(b"plugin fixture")
 
@@ -85,19 +111,19 @@ class BuildOutputSafetyTests(unittest.TestCase):
                 patch.object(release, "validate_wheel", return_value={}) as validate,
                 patch.object(release, "build_dashboard_zip", side_effect=build_zip),
                 patch.object(release.shutil, "copyfile") as copy,
+                patch.object(dashboard, "included_files", return_value=[]),
             ):
-                archive, returned_wheel, checksums = release.build_release(
+                archive, checksums = release.build_release(
                     output_dir=out, sdk_wheel=wheel, repository_root=root
                 )
             validate.assert_called_with(wheel)
             copy.assert_not_called()
-            self.assertEqual(returned_wheel, wheel)
             self.assertEqual(wheel.read_bytes(), b"verified wheel fixture")
             self.assertEqual(wheel.stat().st_mtime_ns, before.st_mtime_ns)
             self.assertEqual(wheel.stat().st_ino, before.st_ino)
             expected = "".join(
                 f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}\n"
-                for path in sorted((archive, wheel), key=lambda path: path.name)
+                for path in (archive,)
             )
             self.assertEqual(checksums.read_text(), expected)
 
@@ -157,7 +183,6 @@ class BuildOutputSafetyTests(unittest.TestCase):
                 result = subprocess.run(
                     ["cmd", "/c", "mklink", "/J", str(linked), str(outside)],
                     capture_output=True,
-                    text=True,
                 )
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             else:
@@ -168,7 +193,8 @@ class BuildOutputSafetyTests(unittest.TestCase):
 
     def test_dashboard_rejects_input_destination_before_truncation(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            # Match the canonical paths returned by real included_files.
+            root = Path(temporary).resolve(strict=True)
             source = root / "runtime.py"
             source.write_bytes(b"preserve source")
             with (
@@ -179,6 +205,47 @@ class BuildOutputSafetyTests(unittest.TestCase):
             ):
                 dashboard.build(root / "sdk.whl", source, root)
             self.assertEqual(source.read_bytes(), b"preserve source")
+
+    def test_windows_short_name_output_cannot_overwrite_input(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve(strict=True)
+            source = root / "protected SDK input.bin"
+            source.write_bytes(b"preserve source")
+            alias = self._windows_short_path(source)
+            self.assertEqual(source.stat().st_nlink, 1)
+            for destination, protected in ((alias, source), (source, alias)):
+                with (
+                    self.subTest(destination=destination, protected=protected),
+                    self.assertRaisesRegex(ValueError, "input"),
+                ):
+                    dashboard.publish_artifacts(
+                        {destination: b"replacement"}, (protected,)
+                    )
+            self.assertEqual(source.read_bytes(), b"preserve source")
+            self.assertEqual(list(root.iterdir()), [source])
+
+    def test_windows_short_parent_aliases_cannot_duplicate_missing_outputs(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve(strict=True)
+            alias = self._windows_short_path(root)
+            output = root / "missing parent" / "candidate.zip"
+            alias_output = alias / "missing parent" / "candidate.zip"
+            with self.assertRaisesRegex(ValueError, "distinct"):
+                dashboard.publish_artifacts({output: b"first", alias_output: b"second"})
+            self.assertFalse(output.parent.exists())
+            self.assertEqual(list(root.iterdir()), [])
+
+    def test_windows_short_names_cannot_duplicate_existing_outputs(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve(strict=True)
+            output = root / "existing candidate artifact.zip"
+            output.write_bytes(b"preserve previous artifact")
+            alias = self._windows_short_path(output)
+            self.assertEqual(output.stat().st_nlink, 1)
+            with self.assertRaisesRegex(ValueError, "distinct"):
+                dashboard.publish_artifacts({output: b"first", alias: b"second"})
+            self.assertEqual(output.read_bytes(), b"preserve previous artifact")
+            self.assertEqual(list(root.iterdir()), [output])
 
     def test_release_preflights_entire_output_batch(self):
         with tempfile.TemporaryDirectory() as temporary:

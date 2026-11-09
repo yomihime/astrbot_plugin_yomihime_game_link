@@ -820,21 +820,67 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
                     self.deliveries, self.bindings, self._event(key=key)
                 )
                 tasks = []
+                cancelled = loop.create_future()
+                cancellation_deadline = None
+                completed_at = None
 
                 def factory(event_loop, work, context=None):
+                    nonlocal cancellation_deadline
                     task = asyncio.Task(work, loop=event_loop, context=context)
                     if work.cr_code.co_name == name:
                         tasks.append(task)
                         task.cancel()
+                        if cancellation_deadline is None:
+                            cancellation_deadline = loop.time() + 2
+                            cancelled.set_result(None)
                     return task
 
+                async def dispatch():
+                    nonlocal completed_at
+                    try:
+                        return await self.service.dispatch_event(key, 1, "sub-1", 1)
+                    finally:
+                        completed_at = loop.time()
+
+                dispatch_task = None
                 loop.set_task_factory(factory)
                 try:
+                    dispatch_task = asyncio.create_task(dispatch())
+                    await asyncio.wait(
+                        (cancelled, dispatch_task),
+                        timeout=10,
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if not cancelled.done():
+                        if dispatch_task.done():
+                            # Surface an early dispatch exception before diagnosing
+                            # a normal return that never created the owned task.
+                            dispatch_task.result()
+                            self.fail(
+                                f"dispatch completed before cancelling owned {name}"
+                            )
+                        self.fail(f"setup timed out before cancelling owned {name}")
+                    remaining = cancellation_deadline - loop.time()
+                    if not dispatch_task.done() and remaining <= 0:
+                        raise TimeoutError(f"owned {name} drain exceeded 2 seconds")
                     result = await asyncio.wait_for(
-                        self.service.dispatch_event(key, 1, "sub-1", 1), 2
+                        asyncio.shield(dispatch_task), max(0, remaining)
+                    )
+                    # A delayed waiter must not accept completion after the fixed
+                    # deadline, even when dispatch is already done on resumption.
+                    self.assertLessEqual(
+                        completed_at,
+                        cancellation_deadline,
+                        f"owned {name} drain exceeded 2 seconds",
                     )
                 finally:
                     loop.set_task_factory(original_factory)
+                    if not cancelled.done():
+                        cancelled.cancel()
+                    if dispatch_task is not None:
+                        if not dispatch_task.done():
+                            dispatch_task.cancel()
+                        await asyncio.gather(dispatch_task, return_exceptions=True)
                 saved = await self.deliveries.current_event(
                     key, 1, subscription_id="sub-1", subscription_revision=1
                 )

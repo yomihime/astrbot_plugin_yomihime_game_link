@@ -25,7 +25,7 @@ class AlphaReleaseTests(unittest.TestCase):
         ]
         metadata = (ROOT / "metadata.yaml").read_text(encoding="utf-8")
         self.assertEqual(
-            versions, [re.search(r"^version:\s*v(.+)$", metadata, re.M)[1]]
+            versions, [re.search(r"^version:\s*v?(.+)$", metadata, re.M)[1]]
         )
         self.assertIn('astrbot_version: ">=4.29.1"', metadata)
 

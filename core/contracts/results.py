@@ -7,16 +7,15 @@ from math import isfinite
 from types import MappingProxyType
 from typing import Mapping
 
-from yomihime_game_link_sdk.display import DisplayDocument as DisplayDocument
-from yomihime_game_link_sdk.display import Privacy as Privacy
-from yomihime_game_link_sdk.display import TimeValue as TimeValue
-from yomihime_game_link_sdk.results import AnalysisRequest as AnalysisRequest
-from yomihime_game_link_sdk.results import CapabilityResult as CapabilityResult
-from yomihime_game_link_sdk.results import ErrorCode as ErrorCode
-from yomihime_game_link_sdk.results import ErrorDetail as ErrorDetail
-from yomihime_game_link_sdk.results import FactDocument as FactDocument
-from yomihime_game_link_sdk.results import ResultStatus as ResultStatus
-
+from ...yomihime_game_link_sdk.display import DisplayDocument as DisplayDocument
+from ...yomihime_game_link_sdk.display import Privacy as Privacy
+from ...yomihime_game_link_sdk.display import TimeValue as TimeValue
+from ...yomihime_game_link_sdk.results import AnalysisRequest as AnalysisRequest
+from ...yomihime_game_link_sdk.results import CapabilityResult as CapabilityResult
+from ...yomihime_game_link_sdk.results import ErrorCode as ErrorCode
+from ...yomihime_game_link_sdk.results import ErrorDetail as ErrorDetail
+from ...yomihime_game_link_sdk.results import FactDocument as FactDocument
+from ...yomihime_game_link_sdk.results import ResultStatus as ResultStatus
 from .display import _text as _text
 from .display import _valid_value as _valid_value
 from .validation_boundary import validate_contract

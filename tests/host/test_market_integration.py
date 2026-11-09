@@ -20,6 +20,7 @@ from ygl_test_subject.core.contracts.administration import AdminAuthorizationDen
 from ygl_test_subject.core.contracts.validation_boundary import validate_contract
 from ygl_test_subject.modules.ff14.assembly import query_parameters
 
+from tests.fixtures.runtime_cleanup import terminate_and_drain
 from tests.host import test_astrbot_runtime as runtime_fixture
 from tests.host import test_ff14_pages as page_fixture
 from tests.host.astrbot_contract import host_contracts
@@ -123,7 +124,7 @@ class MarketHostIntegrationTests(unittest.IsolatedAsyncioTestCase):
             config={"web_public_origin": "https://ui.test"},
         )
         await self.runtime.initialize()
-        self.addAsyncCleanup(self.runtime.terminate)
+        self.addAsyncCleanup(terminate_and_drain, self.runtime)
         await runtime_fixture.AstrBotRuntimeTests._assert_initial_public_calendar_sync(
             self, self.runtime, self.transport, expect_cached=expect_calendar_cached
         )

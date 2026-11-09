@@ -12,14 +12,13 @@ from unittest.mock import patch
 from ygl_test_subject.core.contracts.cards import validate_card
 from ygl_test_subject.core.contracts.validation_boundary import validate_contract
 from ygl_test_subject.core.public_result import public_fact_strings
-
-from modules.ff14.features.fflogs import (
+from ygl_test_subject.modules.ff14.features.fflogs import (
     CATALOG_DIAGNOSTIC_BYTES,
     FFLogsCharacterLookup,
     _bounded_catalog_targets,
     _catalog_diagnostic,
 )
-from modules.ff14.features.fflogs_cards import (
+from ygl_test_subject.modules.ff14.features.fflogs_cards import (
     CATALOG_LIMITATION,
     amount,
     character_card,
@@ -27,7 +26,7 @@ from modules.ff14.features.fflogs_cards import (
     percentile,
     selection_title,
 )
-from modules.ff14.features.fflogs_catalog import (
+from ygl_test_subject.modules.ff14.features.fflogs_catalog import (
     CHARACTER_METADATA_QUERY,
     OUTPUT_METADATA_QUERY,
     parse_character_metadata,
@@ -35,12 +34,13 @@ from modules.ff14.features.fflogs_catalog import (
     parse_output_metadata,
     select_character_zones,
 )
-from modules.ff14.features.fflogs_chat import character_facts
-from modules.ff14.features.fflogs_models import (
+from ygl_test_subject.modules.ff14.features.fflogs_chat import character_facts
+from ygl_test_subject.modules.ff14.features.fflogs_models import (
     CharacterRankingGroup,
     FFLogsPayloadError,
     parse_public_character,
 )
+
 from yomihime_game_link_sdk import cards
 from yomihime_game_link_sdk.results import ErrorCode, FactDocument, ResultStatus
 
@@ -229,7 +229,7 @@ def catalog_rankings(
 
 class FFLogsCardTests(unittest.TestCase):
     def test_plain_percentile_and_card_share_exact_truncation_and_sentinels(self):
-        from modules.ff14.features.fflogs_cards import percentile_text
+        from ygl_test_subject.modules.ff14.features.fflogs_cards import percentile_text
 
         for value, text in (
             (Decimal("99.9762"), "99.9%"),
@@ -1064,7 +1064,7 @@ class FFLogsOfflineCatalogReferenceTests(unittest.IsolatedAsyncioTestCase):
                     with (
                         patch.object(handler, "_catalog_rankings", rankings),
                         patch(
-                            "modules.ff14.features.fflogs.asyncio.timeout",
+                            "ygl_test_subject.modules.ff14.features.fflogs.asyncio.timeout",
                             controlled_timeout,
                         ),
                     ):
@@ -1441,7 +1441,10 @@ class FFLogsOfflineCatalogReferenceTests(unittest.IsolatedAsyncioTestCase):
             return await original(request)
 
         http.fetch = fetch
-        with patch("modules.ff14.features.fflogs.METADATA_DEADLINE_SECONDS", 0.01):
+        with patch(
+            "ygl_test_subject.modules.ff14.features.fflogs.METADATA_DEADLINE_SECONDS",
+            0.01,
+        ):
             result = await offline_catalog_reference(
                 FFLogsCharacterLookup(fixture._services(http)), None, TARGET
             )

@@ -6,11 +6,12 @@ import json
 import unittest
 from time import monotonic
 
-from modules.ff14.features.fflogs import FFLogsCharacterLookup
-from modules.ff14.features.fflogs_catalog import (
+from ygl_test_subject.modules.ff14.features.fflogs import FFLogsCharacterLookup
+from ygl_test_subject.modules.ff14.features.fflogs_catalog import (
     FFLOGS_CN_SOURCE,
     parse_character_metadata,
 )
+
 from tests.modules.ff14 import test_fflogs as fixture
 from tests.modules.ff14 import test_fflogs_cards as card_fixture
 from yomihime_game_link_sdk.results import ResultStatus

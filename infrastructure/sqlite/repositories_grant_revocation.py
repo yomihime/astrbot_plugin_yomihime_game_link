@@ -7,9 +7,6 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
-from yomihime_game_link_sdk.storage import GrantReference, OwnershipKind
-from yomihime_game_link_sdk.subscriptions import CollectionKey
-
 from ...core.contracts.services import Grant
 from ...core.contracts.subscriptions import (
     DeliveryAttempt,
@@ -23,6 +20,8 @@ from ...core.contracts.subscriptions import (
 )
 from ...core.contracts.validation_boundary import validate_contract
 from ...core.ports import RevisionConflict
+from ...yomihime_game_link_sdk.storage import GrantReference, OwnershipKind
+from ...yomihime_game_link_sdk.subscriptions import CollectionKey
 from .database import SQLiteDatabase, SQLiteUnitOfWork
 from .repositories_auth import SQLiteGrantStore
 from .repositories_subscriptions import (

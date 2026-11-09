@@ -7,17 +7,17 @@ from datetime import UTC, date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 from ygl_test_subject.core.contracts.validation_boundary import validate_contract
-from ygl_test_subject.presentation.rendering import (
-    GenericDisplayRenderer,
-    RenderingBounds,
-)
-
-from modules.ff14.features.calendar_evaluator import (
+from ygl_test_subject.modules.ff14.features.calendar_evaluator import (
     CalendarDailySummaryEvaluator,
     build_calendar_document,
     filter_occurrences,
     load_timezone,
 )
+from ygl_test_subject.presentation.rendering import (
+    GenericDisplayRenderer,
+    RenderingBounds,
+)
+
 from yomihime_game_link_sdk.display import DisplayLimits, Privacy, TableBlock
 from yomihime_game_link_sdk.storage import OwnerScope
 from yomihime_game_link_sdk.subscriptions import (

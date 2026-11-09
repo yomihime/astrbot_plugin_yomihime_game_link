@@ -164,6 +164,9 @@ jobs:
           tests.packaging.test_build_output_safety.BuildOutputSafetyTests.test_failed_archive_capture_preserves_previous_artifact
           tests.packaging.test_build_output_safety.BuildOutputSafetyTests.test_output_parent_junction_is_rejected_without_target_write
           tests.packaging.test_build_output_safety.BuildOutputSafetyTests.test_dashboard_rejects_input_destination_before_truncation
+          tests.packaging.test_build_output_safety.BuildOutputSafetyTests.test_windows_short_name_output_cannot_overwrite_input
+          tests.packaging.test_build_output_safety.BuildOutputSafetyTests.test_windows_short_parent_aliases_cannot_duplicate_missing_outputs
+          tests.packaging.test_build_output_safety.BuildOutputSafetyTests.test_windows_short_names_cannot_duplicate_existing_outputs
           tests.packaging.test_build_output_safety.BuildOutputSafetyTests.test_release_preflights_entire_output_batch
           tests.packaging.test_build_output_safety.BuildOutputSafetyTests.test_checksums_reject_artifact_overlap
 
@@ -244,15 +247,15 @@ jobs:
           tests.packaging.test_release_build
           tests.packaging.test_runtime_dependencies
 
-      - name: Build plugin and SDK artifacts
+      - name: Build complete test-signed Core candidate
         env:
           RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || inputs.tag }}
         shell: bash
         run: |
           if [[ -z "$RELEASE_TAG" ]]; then
-            python scripts/build_release.py
+            python scripts/build_release.py --test-signing
           else
-            python scripts/build_release.py --tag "$RELEASE_TAG"
+            python scripts/build_release.py --test-signing --tag "$RELEASE_TAG"
           fi
 
       - name: Upload build artifacts
@@ -261,7 +264,6 @@ jobs:
           name: release-artifacts-${{ github.run_id }}
           path: |
             dist/*.zip
-            dist/*.whl
             dist/SHA256SUMS
           if-no-files-found: error
           retention-days: 30

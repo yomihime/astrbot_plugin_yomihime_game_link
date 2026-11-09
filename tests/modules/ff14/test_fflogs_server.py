@@ -4,12 +4,16 @@ from __future__ import annotations
 
 import unittest
 
-from modules.ff14.features.fflogs_server import command_parameters, realm_from_catalog
-from modules.ff14.query_resolution import (
+from ygl_test_subject.modules.ff14.features.fflogs_server import (
+    command_parameters,
+    realm_from_catalog,
+)
+from ygl_test_subject.modules.ff14.query_resolution import (
     CatalogEntry,
     QueryResolutionError,
     ScopeCatalog,
 )
+
 from yomihime_game_link_sdk.results import ErrorCode
 
 

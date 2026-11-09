@@ -13,10 +13,10 @@ import secrets
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
+from ..services.runtime_effect_gate import check_current_effect
+
 if TYPE_CHECKING:
     from .managed_key_manager import ManagedKeyManager
-
-from yomihime_game_link_sdk.storage import SecretRef
 
 from ..core.contracts.storage import (
     ClaimedSecretReceipt,
@@ -32,6 +32,7 @@ from ..core.ports import (
     SecretOwner,
     SecretTransition,
 )
+from ..yomihime_game_link_sdk.storage import SecretRef
 from .sqlite.database import SQLiteDatabase, SQLiteUnitOfWork
 from .sqlite.repositories_auth import _database, _ref
 
@@ -197,6 +198,7 @@ class SQLiteSecretStore:
         return self.root / f"{token}.blob"
 
     def _write_payload(self, token: str, value: bytes) -> None:
+        check_current_effect(getattr(self, "_effect_guard", None))
         if self.key_manager is not None:
             try:
                 self.key_manager.assert_storage_writable()
@@ -225,6 +227,7 @@ class SQLiteSecretStore:
                 os.fsync(handle.fileno())
             if self.key_manager is not None:
                 self.key_manager.assert_storage_writable()
+            check_current_effect(getattr(self, "_effect_guard", None))
             os.replace(temporary, path)
         except (OSError, ValueError):
             try:
@@ -653,6 +656,7 @@ class SQLiteSecretStore:
             if state is None:
                 return True
             try:
+                check_current_effect(getattr(self, "_effect_guard", None))
                 self._path(authoritative.token).unlink(missing_ok=True)
             except OSError:
                 unit.execute(

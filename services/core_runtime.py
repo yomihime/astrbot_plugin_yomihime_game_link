@@ -17,25 +17,6 @@ from types import MappingProxyType
 from typing import Protocol
 from uuid import uuid4
 
-from yomihime_game_link_sdk.contexts import (
-    InvocationOrigin,
-    InvocationView,
-    MessageContext,
-)
-from yomihime_game_link_sdk.declarations import (
-    CapabilityEffect,
-    CommandDescriptor,
-    ModuleManifest,
-    PrivacyFloor,
-    ToolDescriptor,
-)
-from yomihime_game_link_sdk.display import DisplayLimits, DisplayRenderer, Privacy
-from yomihime_game_link_sdk.errors import AccessDenied, InvalidInvocation
-from yomihime_game_link_sdk.results import CapabilityResult, ResultStatus
-from yomihime_game_link_sdk.services import CapabilityHealth, ConfigTarget
-from yomihime_game_link_sdk.storage import GrantReference
-from yomihime_game_link_sdk.subscriptions import ConversationKind, ConversationRef
-
 from ..core.admission import CapabilityUnavailable
 from ..core.context_issuer import ContextIssuer
 from ..core.contracts.administration import (
@@ -74,6 +55,24 @@ from ..infrastructure.sqlite.repositories_config import SQLiteConfigRepository
 from ..infrastructure.sqlite.repositories_output import SQLiteRootOutputRepository
 from ..infrastructure.sqlite.repositories_runtime import SQLiteModuleRuntimeRepository
 from ..infrastructure.sync_diagnostics import SyncDiagnostics
+from ..yomihime_game_link_sdk.contexts import (
+    InvocationOrigin,
+    InvocationView,
+    MessageContext,
+)
+from ..yomihime_game_link_sdk.declarations import (
+    CapabilityEffect,
+    CommandDescriptor,
+    ModuleManifest,
+    PrivacyFloor,
+    ToolDescriptor,
+)
+from ..yomihime_game_link_sdk.display import DisplayLimits, DisplayRenderer, Privacy
+from ..yomihime_game_link_sdk.errors import AccessDenied, InvalidInvocation
+from ..yomihime_game_link_sdk.results import CapabilityResult, ResultStatus
+from ..yomihime_game_link_sdk.services import CapabilityHealth, ConfigTarget
+from ..yomihime_game_link_sdk.storage import GrantReference
+from ..yomihime_game_link_sdk.subscriptions import ConversationKind, ConversationRef
 from .admin_authorization import AdminAuthorizationService, ContextValidator
 from .admin_facade import AdminFacade
 from .admin_operations import (
@@ -1131,9 +1130,8 @@ class CoreRuntime:
         """Use the shared local painter for one public aggregate, before send checks."""
         from dataclasses import replace
 
-        from yomihime_game_link_sdk.display import DisplayAudience, Privacy
-
         from ..presentation.png_validation import PngValidationLimits, validate_png
+        from ..yomihime_game_link_sdk.display import DisplayAudience, Privacy
 
         if document.privacy is not Privacy.PUBLIC or document.card is None:
             return None
@@ -1176,9 +1174,8 @@ class CoreRuntime:
 
     async def _command_card_logo(self, module_id):
         """Bind only the current manifest's declared, hash-verified static logo."""
-        from yomihime_game_link_sdk.cards import Asset
-
         from ..extensions.page_resources import capture_page_resources
+        from ..yomihime_game_link_sdk.cards import Asset
 
         module = self.registry.snapshot().module(module_id)
         display = module.manifest.display

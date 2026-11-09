@@ -20,13 +20,13 @@ from ygl_test_subject.infrastructure.sync_diagnostics import (
     SyncDiagnostics,
     emit,
 )
+from ygl_test_subject.modules.ff14.features.calendar_diagnostics import DECLARATION
 from ygl_test_subject.services.diagnostics import (
     BoundDiagnostics,
     DiagnosticPolicy,
     DiagnosticStore,
 )
 
-from modules.ff14.features.calendar_diagnostics import DECLARATION
 from tests.core import test_invocation as web_fixture
 from tests.modules.ff14 import test_calendar_snapshots as calendar_fixture
 from tests.modules.ff14.test_calendar import _ics
@@ -101,7 +101,8 @@ class CalendarDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
 
         fixture.http.fetch = blocked
         with patch(
-            "modules.ff14.features.calendar_snapshots.SOURCE_TIMEOUT_SECONDS", 0.005
+            "ygl_test_subject.modules.ff14.features.calendar_snapshots.SOURCE_TIMEOUT_SECONDS",
+            0.005,
         ):
             await fixture.sync()
         self.assertEqual(self.codes().count("source_deadline"), 2)

@@ -14,33 +14,6 @@ from enum import Enum, StrEnum
 from typing import Any, Protocol, TypeAlias
 from uuid import uuid4
 
-from yomihime_game_link_sdk.cards import DenseCollage, WeightedCollage
-from yomihime_game_link_sdk.contexts import (
-    InvocationOrigin,
-    InvocationSubscriptionScope,
-    InvocationView,
-)
-from yomihime_game_link_sdk.declarations import (
-    CapabilityDescriptor,
-    ModuleManifest,
-    PrivacyFloor,
-)
-from yomihime_game_link_sdk.display import (
-    DisplayAudience,
-    DisplayDocument,
-    DisplayLimits,
-    DisplayRenderer,
-    Privacy,
-)
-from yomihime_game_link_sdk.results import (
-    CapabilityResult,
-    ErrorCode,
-    FactDocument,
-    ResultStatus,
-)
-from yomihime_game_link_sdk.storage import OwnershipKind
-from yomihime_game_link_sdk.subscriptions import ConversationKind, ConversationRef
-
 from ..core.admission import AdmissionError
 from ..core.context_issuer import ContextIssuer
 from ..core.contracts.services import (
@@ -78,6 +51,32 @@ from ..core.ports import (
     SubscriptionStore,
 )
 from ..core.registry import Registry
+from ..yomihime_game_link_sdk.cards import DenseCollage, WeightedCollage
+from ..yomihime_game_link_sdk.contexts import (
+    InvocationOrigin,
+    InvocationSubscriptionScope,
+    InvocationView,
+)
+from ..yomihime_game_link_sdk.declarations import (
+    CapabilityDescriptor,
+    ModuleManifest,
+    PrivacyFloor,
+)
+from ..yomihime_game_link_sdk.display import (
+    DisplayAudience,
+    DisplayDocument,
+    DisplayLimits,
+    DisplayRenderer,
+    Privacy,
+)
+from ..yomihime_game_link_sdk.results import (
+    CapabilityResult,
+    ErrorCode,
+    FactDocument,
+    ResultStatus,
+)
+from ..yomihime_game_link_sdk.storage import OwnershipKind
+from ..yomihime_game_link_sdk.subscriptions import ConversationKind, ConversationRef
 from .analysis import CommandAnalysisService
 from .identity import (
     InvocationPrincipalResolver,
@@ -378,11 +377,10 @@ class OutputService:
         This path has no message target, send claim, personal finished cache,
         or reusable grant pixels. Gateway retains ownership of the invocation.
         """
-        from yomihime_game_link_sdk.cards import ResourceImage
-        from yomihime_game_link_sdk.storage import CacheVisibility
-
         from ..presentation.command_card import CommandCardRenderer, CommandPresentation
         from ..presentation.png_validation import PngValidationLimits, validate_png
+        from ..yomihime_game_link_sdk.cards import ResourceImage
+        from ..yomihime_game_link_sdk.storage import CacheVisibility
         from .collage_cache import (
             collage_snapshots_current,
             inspect_collage_resources,
@@ -583,7 +581,7 @@ class OutputService:
                     and capability.privacy_floor is not PrivacyFloor.OWNER
                 )
                 collage = self._is_collage(result)
-                from yomihime_game_link_sdk.display import ImageBlock
+                from ..yomihime_game_link_sdk.display import ImageBlock
 
                 owned_image = (
                     result.privacy is Privacy.PRIVATE
@@ -1210,11 +1208,10 @@ class OutputService:
         """Explicit one-image private reply through the existing prepared sender."""
         import struct
 
-        from yomihime_game_link_sdk.storage import CacheVisibility
-
         from ..presentation.card_bitmap import RenderedBitmap
         from ..presentation.command_card import CommandCardRenderer, CommandPresentation
         from ..presentation.png_validation import PngValidationLimits, validate_png
+        from ..yomihime_game_link_sdk.storage import CacheVisibility
         from .generated_png import GeneratedPngCoordinator, GeneratedPngLimits
 
         async def current():
@@ -1254,7 +1251,7 @@ class OutputService:
         )
         await current()
         renderer = self._command_card_renderer or CommandCardRenderer()
-        from yomihime_game_link_sdk.display import ImageBlock, TextBlock
+        from ..yomihime_game_link_sdk.display import ImageBlock, TextBlock
 
         text_blocks = tuple(
             item for item in document.ordered_blocks if type(item) is not ImageBlock
@@ -1332,9 +1329,8 @@ class OutputService:
                 document = replace(document, title=heading[0], subject=heading[1])
                 validate_contract(document)
             if image is not None and self._command_card_renderer is not None:
-                from yomihime_game_link_sdk.display import ImageBlock
-
                 from ..presentation.command_card import CommandPresentation
+                from ..yomihime_game_link_sdk.display import ImageBlock
                 from .generated_png import GeneratedPngCoordinator, GeneratedPngError
 
                 owned_images = tuple(
@@ -1418,9 +1414,18 @@ class OutputService:
                 document, limits=self._limits, audience=audience
             )
             validate_contract(output)
+        except _OutputFailure:
+            raise
         except Exception:
+            if invocation is not None:
+                try:
+                    self._issuer.require(invocation)
+                    self._require_current_module(invocation)
+                    self._admission.check(self._root_lease(invocation))
+                except Exception:
+                    raise _OutputFailure("invocation_unavailable") from None
             raise _OutputFailure("display_render_failed") from None
-        from yomihime_game_link_sdk.display import DisplayOutput
+        from ..yomihime_game_link_sdk.display import DisplayOutput
 
         if type(output) is not DisplayOutput:
             raise _OutputFailure("display_render_failed")

@@ -6,8 +6,7 @@ import json
 from dataclasses import dataclass, replace
 from zoneinfo import ZoneInfo
 
-from yomihime_game_link_sdk.subscriptions import SubscriptionRequest
-
+from ...yomihime_game_link_sdk.subscriptions import SubscriptionRequest
 from .config import (
     CALENDAR_CONFIG_FIELDS,
     CALENDAR_VALUE_VALIDATORS,

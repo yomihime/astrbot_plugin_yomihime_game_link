@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from yomihime_game_link_sdk.contexts import InvocationView
-
 from ..core.contracts.administration import (
     AdminAuthorizationContext,
     AdminAuthorizationDenied,
@@ -20,6 +18,7 @@ from ..core.contracts.administration import (
 from ..core.contracts.services import ConfigPatch
 from ..core.contracts.validation_boundary import validate_contract
 from ..core.ports import AdminAuthorizationPort
+from ..yomihime_game_link_sdk.contexts import InvocationView
 
 
 @dataclass(frozen=True, slots=True)

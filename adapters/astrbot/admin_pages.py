@@ -9,10 +9,6 @@ import secrets
 from math import isfinite
 from time import time
 
-from yomihime_game_link_sdk.declarations import ConfigUpdateMode
-from yomihime_game_link_sdk.errors import AccessDenied, InvalidInvocation
-from yomihime_game_link_sdk.services import ConfigTarget
-
 from ...core.contracts.administration import (
     AdminAuthorizationDenied,
     AdminOperation,
@@ -24,6 +20,9 @@ from ...core.ports import RevisionConflict
 from ...infrastructure.managed_key_manager import ManagedKeyConflict
 from ...infrastructure.private_storage import PrivateStorageError
 from ...infrastructure.secret_store import SecretStoreUnavailable
+from ...yomihime_game_link_sdk.declarations import ConfigUpdateMode
+from ...yomihime_game_link_sdk.errors import AccessDenied, InvalidInvocation
+from ...yomihime_game_link_sdk.services import ConfigTarget
 from .runtime import PLUGIN_NAME
 from .web_admin import bounded_body, bounded_font_upload, verified_dashboard_request
 
@@ -70,6 +69,16 @@ _OPERATIONS = {
     "module-job-cancel": AdminOperation.READ_CONFIG,
     "module-job-retry": AdminOperation.READ_CONFIG,
     "module-job-resource": AdminOperation.READ_CONFIG,
+    "module-hot-update-bootstrap": AdminOperation.LIST_MODULES,
+    "module-hot-update-status": AdminOperation.LIST_MODULES,
+    "module-hot-update-inspect": AdminOperation.LIST_MODULES,
+    "module-hot-update-retry": AdminOperation.SET_ENABLED,
+    "module-hot-update-package-approve": AdminOperation.SET_ENABLED,
+    "module-hot-update-artifact-approve": AdminOperation.SET_ENABLED,
+    "module-hot-update-package-revoke": AdminOperation.SET_ENABLED,
+    "module-hot-update-artifact-revoke": AdminOperation.SET_ENABLED,
+    "module-hot-update-publisher-enroll": AdminOperation.SET_ENABLED,
+    "module-hot-update-publisher-revoke": AdminOperation.SET_ENABLED,
     "module-install-plan": AdminOperation.LIST_MODULES,
     "module-install-approve": AdminOperation.SET_ENABLED,
 }
@@ -450,6 +459,10 @@ class AdminPages:
         return handler
 
     async def _invoke(self, endpoint, core, data, context):
+        if endpoint.startswith("module-hot-update-"):
+            return await self.runtime.installation_operation(
+                endpoint.removeprefix("module-hot-update-"), data, context
+            )
         if endpoint in {"module-install-plan", "module-install-approve"}:
             return await self.runtime.installation_operation(endpoint, data, context)
         ops = core.admin_operations

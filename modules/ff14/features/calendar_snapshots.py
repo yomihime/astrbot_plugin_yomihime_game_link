@@ -12,14 +12,13 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, time, timedelta
 from typing import Callable
 
-from yomihime_game_link_sdk.errors import (
+from ....yomihime_game_link_sdk.errors import (
     RevisionConflict,
     SourceHttpError,
     UniqueConstraintViolation,
 )
-from yomihime_game_link_sdk.services import HttpRequest, ModuleServices
-from yomihime_game_link_sdk.subscriptions import ObservationCompleteness
-
+from ....yomihime_game_link_sdk.services import HttpRequest, ModuleServices
+from ....yomihime_game_link_sdk.subscriptions import ObservationCompleteness
 from .calendar_diagnostics import current_bound, diagnosed
 from .calendar_diagnostics import diagnostic as _diagnostic
 from .calendar_evaluator import CalendarSourceSpec, calendar_source_spec

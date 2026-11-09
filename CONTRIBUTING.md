@@ -57,33 +57,16 @@ npm run typecheck --prefix pages/frontend
 npm run build --prefix pages/frontend
 python scripts/prepare_test_font.py
 python scripts/verify_frontend_build.py
-python scripts/build_release.py
+python scripts/build_release.py --test-signing
 ```
 
-前端 build 会从模块源码生成 `modules/*/pages/dist/` 与 `pages/resources.json`，更新 manifest 中对应资源摘要，再生成唯一正式页面根 `pages/00-game-link` 及构建检查清单。它先在临时 staging 树完整生成，完成目标目录的链接检查后逐文件原子替换。正式发行资产按受审 manifest 投影模块入口、样式和资源。缺少 Vite 等依赖时先执行 `npm ci`；缺少待校验的 frontend 生成物时运行前端 build。`verify_frontend_build.py` 要求正式构建产物已存在，不会代替 build。隔离构建可用 `node pages/frontend/build.mjs --out-root=<absolute-task-directory>`，不作为正式发行资产。字体脚本仅下载经 SHA-256 和长度校验的官方固定测试资源；运行时字体仍由独立管理服务获取。发行 ZIP 注入经过内容摘要校验的 SDK a11 wheel 中的运行时成员字节，不把 `.whl` 文件本身放入插件 ZIP，也不依赖尚未发布的远端下载地址。`--sdk-wheel` 可复用校验通过的现有 wheel，包括 `dist/` 中与目标内容完全相同的 wheel；复用时按摘要及文件系统链接边界验证，再直接从 wheel 打包运行时成员。
+生成 `dist/astrbot_plugin_yomihime_game_link-v0.2.0.zip` 与 `dist/SHA256SUMS`。Core ZIP 必须包含原始清单 Ed25519 签名、被清单覆盖的公钥、私有 SDK 和完整静态页面；不得使用无签名 Core 绕过路径。`--test-signing` 仅为 preview 在进程内产生临时测试密钥。正式 `--signing-key` 接受外部受保护 Ed25519 PEM；生产密钥保管和登记是未来发布配置，本轮不创建或发布生产密钥。
 
-
-从仓库根目录运行：
-
-```powershell
-python scripts/build_release.py
-```
-
-脚本要求 Python 3.13 和固定版本的 setuptools、wheel。它从临时 SDK 源码副本构建并验证固定的 SDK wheel，然后生成：
-
-- `dist/astrbot_plugin_yomihime_game_link-v0.1.2.zip`：上传到 AstrBot WebUI 的插件包；
-- `dist/yomihime_game_link_sdk-0.1.0a19-py3-none-any.whl`：独立 SDK 工件，不是插件 ZIP；
-- `dist/SHA256SUMS`：上述工件的摘要。
-
-可用 `--tag v0.1.2` 校验 tag 必须与 `metadata.yaml` 中的版本相同。该参数只做版本校验，不创建 tag。发布工件的下载和安装步骤见[README](https://github.com/yomihime/astrbot_plugin_yomihime_game_link/blob/master/README.md)。
-
-不要直接把未经构建的仓库快照安装到 AstrBot：SDK 运行文件由已验证的 wheel 注入插件 ZIP。SDK 契约与工件细节见[模块 SDK 说明](https://github.com/yomihime/astrbot_plugin_yomihime_game_link/blob/master/docs/module-sdk.md)。
+`--tag v0.2.0` 仅验证 metadata 版本，不创建 tag。Core 与 DLC 独立构建和发布；每 ZIP 严格小于 16,000,000 字节。源码归档不含生成签名和闭合清单，不可安装。市场 download_url 必须指向不可变完整 ZIP asset；无市场条目通过 AstrBot 原生 ZIP 上传。详见[完整发布包](docs/release-packaging.md)。
 
 ### SDK 发行版本或 ABI 变化
 
-只有 SDK 发行版本或模块 ABI 变化时才需要以下冷升级流程；SDK 版本/ABI 未变的普通插件更新继续使用 README 所述的 AstrBot WebUI 上传。Host 可能在检查模块是否禁用前已导入 SDK，导致上传自动回滚；禁用模块并重启旧文件仍会加载旧 SDK graph。
-
-已验证的升级方式是：完全停止同一 AstrBot Host 并确认进程退出；停机时仅按该 Host 部署方式安装受信候选插件代码，不改动配置、数据库、密钥或其他用户数据；再冷启动，并核对实际加载的插件版本、SDK 发行版本及运行时内容。如果上传发生回滚，保留旧插件文件时单纯重启不会完成升级。不要据此推广任意 ZIP 覆盖或卸载重装流程为通用支持；若具体部署没有明确的停机替换步骤，先确认该部署支持的离线安装方式。
+生产模块使用每代私有 SDK facade，通过模块契约与 features 协商兼容性，不依赖全局 pip SDK 发行号。新协议内兼容更新通过生命周期排空切换，不要求整个 Host 重启。共享或原生依赖变更需要单独环境维护；旧 pre-coordinator alpha 的首次迁移不承诺热切换。外部降级（含普通手动上传）拒绝，仅支持当前授权下内部 last-good 回退，无公开跳过版本校验。
 
 ## 验证
 
@@ -108,7 +91,7 @@ node tests/pages/ff14/test_item_display.mjs
 全量测试需要明确指定刚构建并验证的 SDK wheel：
 
 ```powershell
-$env:YGL_TEST_SDK_WHEEL = (Resolve-Path dist/yomihime_game_link_sdk-0.1.0a19-py3-none-any.whl).Path
+$env:YGL_TEST_SDK_WHEEL = (Resolve-Path dist/yomihime_game_link_sdk-0.1.0a24-py3-none-any.whl).Path
 python -m unittest discover -s tests -t . -v
 python scripts/check_doc_links.py
 ```
@@ -120,7 +103,7 @@ python -m unittest -v tests.storage.test_windows_ci_boundaries tests.integration
 node --test tests/packaging/build-output.test.mjs
 ```
 
-Linux 对应 `export YGL_TEST_SDK_WHEEL="$PWD/dist/yomihime_game_link_sdk-0.1.0a19-py3-none-any.whl"`。真实宿主 ZIP 冒烟测试使用独立完整宿主环境，步骤见[真实宿主验证](docs/real-host-smoke.md)。
+Linux 对应 `export YGL_TEST_SDK_WHEEL="$PWD/dist/yomihime_game_link_sdk-0.1.0a24-py3-none-any.whl"`。真实宿主 ZIP 冒烟测试使用独立完整宿主环境，步骤见[真实宿主验证](docs/real-host-smoke.md)。
 
 Ubuntu job 运行全量 unittest 与 Ruff。每次验证应报告实际 passed/failed/skipped 汇总；局部测试通过不等于全量通过。
 

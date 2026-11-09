@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from yomihime_game_link_sdk import cards
+from ...yomihime_game_link_sdk import cards
 
 
 def ff14_card(

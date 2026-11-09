@@ -6,13 +6,14 @@ from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from modules.ff14.features.fflogs import _assemble_catalog_rankings
-from modules.ff14.features.fflogs_cards import (
+from ygl_test_subject.modules.ff14.features.fflogs import _assemble_catalog_rankings
+from ygl_test_subject.modules.ff14.features.fflogs_cards import (
     character_card,
     partition_version,
     record_version,
 )
-from modules.ff14.features.fflogs_models import PartitionRecord
+from ygl_test_subject.modules.ff14.features.fflogs_models import PartitionRecord
+
 from tests.modules.ff14 import test_fflogs_aggregation as fixture
 from tests.modules.ff14 import test_fflogs_explicit_history as cache_fixture
 
@@ -253,7 +254,7 @@ class PartitionCacheTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
         with patch(
-            "modules.ff14.features.fflogs_history_cache.POLICY",
+            "ygl_test_subject.modules.ff14.features.fflogs_history_cache.POLICY",
             "explicit-standard-history-pack-v2",
         ):
             await self.run_history()

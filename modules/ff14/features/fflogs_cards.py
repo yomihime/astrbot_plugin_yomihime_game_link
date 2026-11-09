@@ -10,8 +10,7 @@ import unicodedata
 from dataclasses import replace
 from decimal import ROUND_DOWN, ROUND_HALF_UP, Decimal, InvalidOperation, localcontext
 
-from yomihime_game_link_sdk import cards
-
+from ....yomihime_game_link_sdk import cards
 from ..presentation import ff14_card
 from .fflogs_catalog import partition_version
 from .fflogs_jobs import JobLanguage, job_display

@@ -178,6 +178,42 @@ class ModulePageHTTPTests(unittest.IsolatedAsyncioTestCase):
             snapshot["fields"]["ff14_calendar_default_days"]["value"],
         )
 
+    async def test_news_fields_read_save_and_reject_ungranted_config(self):
+        proof = await self.session()
+        binding = self.binding | {"page_session": proof}
+        before = await self.call("module-config-current", binding)
+        self.assertEqual(before.status_code, 200, before.text)
+        snapshot = before.json()["data"]
+        values = {
+            "ff14_news_admins": ["test-platform-1:user-17"],
+            "ff14_news_targets": ["test-platform-1:GroupMessage:news-group"],
+            "ff14_news_interval_seconds": 3600,
+        }
+        self.assertTrue(values.keys() <= snapshot["fields"].keys())
+        saved = await self.call(
+            "module-config-save",
+            binding | {"expected_revision": snapshot["revision"], "values": values},
+        )
+        self.assertEqual(saved.status_code, 200, saved.text)
+        revision = saved.json()["data"]["revision"]
+        after = await self.call("module-config-current", binding)
+        self.assertEqual(after.status_code, 200, after.text)
+        self.assertEqual(after.json()["data"]["revision"], revision)
+        for name, value in values.items():
+            self.assertEqual(after.json()["data"]["fields"][name]["value"], value)
+        stale = await self.call(
+            "module-config-save",
+            binding | {"expected_revision": snapshot["revision"], "values": values},
+        )
+        self.assertEqual(stale.status_code, 409, stale.text)
+        for name in ("ungranted_field", "credential_fflogs_cn"):
+            denied = await self.call(
+                "module-config-save",
+                binding
+                | {"expected_revision": revision, "values": {name: "synthetic"}},
+            )
+            self.assertEqual(denied.status_code, 403, denied.text)
+
     async def test_outer_module_result_rechecks_host_authority_for_every_action(self):
         # Actual Host JWT/ASGI dispatch; the operation is inert to isolate the
         # outer HTTP result fence without minting sessions or repeating writes.
@@ -273,6 +309,10 @@ class ModulePageHTTPTests(unittest.IsolatedAsyncioTestCase):
                     with (
                         patch(
                             "ygl_test_subject.adapters.astrbot.admin_pages.time",
+                            lambda: clock[0],
+                        ),
+                        patch(
+                            "ygl_test_subject.adapters.astrbot.web_admin.time",
                             lambda: clock[0],
                         ),
                         patch.object(

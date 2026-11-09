@@ -7,8 +7,19 @@ import math
 from collections.abc import Mapping
 from typing import Any
 
-from yomihime_game_link_sdk.contexts import InvocationOrigin
-from yomihime_game_link_sdk.declarations import (
+from ..core.contracts.manifests import (
+    EXTENSION_DESCRIPTOR_FIELDS,
+    EXTENSION_MANIFEST_ABI,
+    EXTENSION_MANIFEST_MAX_BYTES,
+    EXTENSION_MANIFEST_MAX_STRING_LENGTH,
+    EXTENSION_MANIFEST_SCHEMA_VERSION,
+    EXTENSION_PACKAGE_FIELDS,
+    EXTENSION_PACKAGE_OPTIONAL_FIELDS,
+)
+from ..core.contracts.validation_boundary import validate_contract
+from ..core.contracts.version import CONTRACT_VERSION
+from ..yomihime_game_link_sdk.contexts import InvocationOrigin
+from ..yomihime_game_link_sdk.declarations import (
     CapabilityDescriptor,
     CapabilityEffect,
     CapabilityReference,
@@ -26,30 +37,18 @@ from yomihime_game_link_sdk.declarations import (
     SourceDeclaration,
     ToolDescriptor,
 )
-from yomihime_game_link_sdk.jobs import JobDescriptor
-from yomihime_game_link_sdk.storage import (
+from ..yomihime_game_link_sdk.jobs import JobDescriptor
+from ..yomihime_game_link_sdk.storage import (
     CollectionDescriptor,
     CollectionIndex,
     OwnershipKind,
 )
-from yomihime_game_link_sdk.subscriptions import (
+from ..yomihime_game_link_sdk.subscriptions import (
     ScheduleDescriptor,
     ScheduleTrigger,
     SubscriptionDescriptor,
 )
-from yomihime_game_link_sdk.version import MODULE_ABI_VERSION
-
-from ..core.contracts.manifests import (
-    EXTENSION_DESCRIPTOR_FIELDS,
-    EXTENSION_MANIFEST_ABI,
-    EXTENSION_MANIFEST_MAX_BYTES,
-    EXTENSION_MANIFEST_MAX_STRING_LENGTH,
-    EXTENSION_MANIFEST_SCHEMA_VERSION,
-    EXTENSION_PACKAGE_FIELDS,
-    EXTENSION_PACKAGE_OPTIONAL_FIELDS,
-)
-from ..core.contracts.validation_boundary import validate_contract
-from ..core.contracts.version import CONTRACT_VERSION
+from ..yomihime_game_link_sdk.version import MODULE_ABI_VERSION
 
 
 class ManifestError(ValueError):

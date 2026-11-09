@@ -13,8 +13,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from yomihime_game_link_sdk.storage import SecretRef
-
 from ...core.contracts.services import (
     Grant,
     GrantStatus,
@@ -24,6 +22,7 @@ from ...core.contracts.services import (
 from ...core.contracts.storage import validate_module_id
 from ...core.contracts.validation_boundary import validate_contract
 from ...core.ports import RevisionConflict, UniqueConstraintViolation
+from ...yomihime_game_link_sdk.storage import SecretRef
 from .database import SQLiteDatabase
 
 

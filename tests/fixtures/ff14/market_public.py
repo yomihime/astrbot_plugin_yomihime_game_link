@@ -5,15 +5,17 @@ import json
 
 from ygl_test_subject.core.contracts.validation_boundary import validate_contract
 
+from tests.fixtures.private_storage import fixture_private_storage
 from tests.host.test_market_integration import MarketHostIntegrationTests
 from yomihime_game_link_sdk.services import HttpResponse
 
 
 async def market_public_samples() -> dict:
     fixture = MarketHostIntegrationTests()
-    fixture.setUp()
     try:
-        await fixture.start()
+        fixture.setUp()
+        with fixture_private_storage(fixture.root, fixture.data_dir):
+            await fixture.start()
         samples = {}
         parameters = dict(
             query="44091", server="90001", quality="hq", intent="listings"
@@ -54,9 +56,14 @@ async def market_public_samples() -> dict:
         samples["partial"] = await fixture.public(dict(query="44091", region="global"))
         return samples
     finally:
-        if hasattr(fixture, "runtime"):
-            await fixture.runtime.terminate()
-        fixture.tearDown()
+        try:
+            if hasattr(fixture, "runtime"):
+                await fixture.runtime.terminate()
+            fixture.tearDown()
+        finally:
+            # This standalone exporter does not run unittest's cleanup stack.
+            if hasattr(fixture, "temporary"):
+                fixture.temporary.cleanup()
 
 
 if __name__ == "__main__":

@@ -6,14 +6,13 @@ import json
 import re
 from collections.abc import Mapping
 
-from yomihime_game_link_sdk.jobs import (
+from ...yomihime_game_link_sdk.jobs import (
     JobDescriptor,
     JobRequest,
     JobResultPage,
     JobStatus,
     JobView,
 )
-
 from .schema import freeze_input_schema
 from .storage import freeze_json
 

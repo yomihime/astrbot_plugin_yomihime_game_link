@@ -12,7 +12,7 @@ from pathlib import Path
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 EXPECTED_WHEEL_SHA256 = (
-    "a0b2f61152e810b3a26febd715487d60f335108dffafba0a41d44db5208fdbb6"
+    "0d741c2d998c63df481ec2fe5670048f04b7170e822616a3d8fe6816527b0324"
 )
 
 
@@ -76,6 +76,47 @@ def build_and_install_pinned_sdk(work_root: Path) -> InstalledSdk:
     return InstalledSdk(wheel_path=wheel, site_root=site_root, sha256=digest)
 
 
+def bind_installed_sdk_test_graph(
+    plugin_namespace: str, site_root: Path
+) -> tuple[str, ...]:
+    """Bind a verified development wheel only inside an isolated TEST namespace.
+
+    Production captures its vendored private graph and never calls this helper.
+    The offline wheel examples use absolute SDK imports, so this development
+    fixture aliases the exact installed concrete module objects for relative
+    Core imports. It never changes canonical modules or imports example factories.
+    """
+    import importlib
+
+    installed_root = Path(site_root).resolve(strict=True) / "yomihime_game_link_sdk"
+    sdk = importlib.import_module("yomihime_game_link_sdk")
+    if Path(sdk.__file__).resolve() != installed_root / "__init__.py":
+        raise AssertionError("development SDK must originate in the installed target")
+    if plugin_namespace not in sys.modules or not plugin_namespace.startswith("ygl_"):
+        raise AssertionError("an explicit isolated test package is required")
+    concrete = {"yomihime_game_link_sdk": sdk}
+    for source in sorted(installed_root.glob("*.py")):
+        if source.name == "__init__.py":
+            continue
+        name = "yomihime_game_link_sdk." + source.stem
+        module = importlib.import_module(name)
+        if Path(module.__file__).resolve() != source.resolve():
+            raise AssertionError("SDK concrete module escaped the installed target")
+        concrete[name] = module
+    aliases = []
+    for name, module in concrete.items():
+        private_name = plugin_namespace + "." + name
+        previous = sys.modules.get(private_name)
+        if previous is not None and previous is not module:
+            raise AssertionError("test private SDK graph was imported before binding")
+        sys.modules[private_name] = module
+        aliases.append(private_name)
+    setattr(sys.modules[plugin_namespace], "yomihime_game_link_sdk", sdk)
+    if any("._examples." in name and name.endswith(".module") for name in sys.modules):
+        raise AssertionError("development binding eagerly imported an example factory")
+    return tuple(aliases)
+
+
 STATIC_SCAN_PROBE = r"""
 import importlib.metadata
 import importlib.util
@@ -99,6 +140,13 @@ sys.modules[spec.name] = plugin
 spec.loader.exec_module(plugin)
 
 import yomihime_game_link_sdk
+# Load the standalone test helper without importing the parent tests package.
+helper_spec = importlib.util.spec_from_file_location("_ygl_static_installed_sdk_fixture", repository_root / "tests/fixtures/b05_runtime.py")
+helper = importlib.util.module_from_spec(helper_spec)
+sys.modules[helper_spec.name] = helper
+helper_spec.loader.exec_module(helper)
+private_sdk_names = helper.bind_installed_sdk_test_graph(spec.name, site_root)
+assert private_sdk_names and sys.modules[spec.name + ".yomihime_game_link_sdk"] is yomihime_game_link_sdk
 from ygl_r_preflight_subject.extensions.discovery import DiscoveryRootError
 from ygl_r_preflight_subject.extensions.loader import CandidateState, ExtensionLoader
 from ygl_r_preflight_subject.core.registry import Registry
@@ -234,5 +282,6 @@ __all__ = [
     "EXPECTED_WHEEL_SHA256",
     "InstalledSdk",
     "build_and_install_pinned_sdk",
+    "bind_installed_sdk_test_graph",
     "run_installed_artifact_static_scan",
 ]

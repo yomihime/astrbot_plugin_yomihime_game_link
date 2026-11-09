@@ -106,10 +106,14 @@ def validate_contract(value):
                 # ERROR JSON must be bounded and detached before recursive
                 # visits inspect any caller-controlled facts mapping.
                 if (
-                    kind.__module__ == "yomihime_game_link_sdk.results"
+                    kind.__module__
+                    in {
+                        __package__.split(".")[0] + ".yomihime_game_link_sdk.results",
+                        "yomihime_game_link_sdk.results",
+                    }
                     and kind.__name__ == "CapabilityResult"
                 ):
-                    from yomihime_game_link_sdk.results import ResultStatus
+                    from ...yomihime_game_link_sdk.results import ResultStatus
 
                     status = item.status
                     if (
@@ -121,7 +125,12 @@ def validate_contract(value):
 
                         preflight_error_facts(item)
                 if (
-                    kind.__module__ == "yomihime_game_link_sdk.subscriptions"
+                    kind.__module__
+                    in {
+                        __package__.split(".")[0]
+                        + ".yomihime_game_link_sdk.subscriptions",
+                        "yomihime_game_link_sdk.subscriptions",
+                    }
                     and kind.__name__ == "ScheduleDescriptor"
                 ):
                     from .subscriptions import preflight_schedule_parameters
@@ -130,10 +139,10 @@ def validate_contract(value):
                 check = checks.get(kind)
                 # HTTP headers have a dedicated safe normalization boundary;
                 # run it before visiting a caller-controlled Mapping.
-                if (
-                    kind.__module__ == "yomihime_game_link_sdk.services"
-                    and kind.__name__ in {"HttpRequest", "HttpResponse"}
-                ):
+                if kind.__module__ in {
+                    __package__.split(".")[0] + ".yomihime_game_link_sdk.services",
+                    "yomihime_game_link_sdk.services",
+                } and kind.__name__ in {"HttpRequest", "HttpResponse"}:
                     check(item)
                     check = None
                 for field in fields(kind):
