@@ -10,7 +10,7 @@
   "settings.calendarSubscriptions": "行事曆與訂閱",
   "settings.subscriptionDefaults": "預設值適用於後續訂閱，現有訂閱保留原設定。提醒會依排程週期檢查，實際送達可能延遲。",
   "settings.field.reply_theme": "回覆圖片主題",
-  "settings.field.ff14_subscriptions_enabled": "行事曆訂閱",
+  "settings.field.ff14_subscriptions_enabled": "行事曆與新聞訂閱",
   "settings.field.ff14_default_region": "預設區域",
   "settings.field.ff14_calendar_default_days": "行事曆預設天數",
   "settings.field.ff14_calendar_default_timezone": "行事曆預設時區",
@@ -160,5 +160,13 @@
   "catalog.ff14.route.items": "道具查詢",
   "catalog.ff14.route.market": "市場行情",
   "catalog.ff14.route.logs": "角色 Logs",
-  "catalog.ff14.route.calendar": "活動行事曆"
+  "catalog.ff14.route.calendar": "活動行事曆",
+  "settings.newsSubscriptions": "國服新聞訂閱",
+  "settings.field.ff14_news_admins": "新聞管理員",
+  "settings.field.ff14_news_targets": "新聞推送目標",
+  "settings.field.ff14_news_interval_seconds": "新聞同步週期",
+  "settings.hint.ff14_news_admins": "以逗號分隔：平台實例 ID:帳戶 ID。留空時禁止 addhere。",
+  "settings.hint.ff14_news_targets": "以逗號分隔：平台實例 ID:FriendMessage:帳戶 ID 或 平台實例 ID:GroupMessage:群組 ID。首次完整擷取建立基準，刪除目標會取消設定訂閱。",
+  "settings.invalidNews": "請檢查新聞目標、管理員格式及同步週期，每項最多 20 筆且不重複。",
+  "settings.minutes": "{count} 分鐘"
 }

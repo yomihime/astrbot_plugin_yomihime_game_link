@@ -10,10 +10,16 @@ CALENDAR_DEFAULT_INTERVAL_SECONDS = 900
 
 
 def build_status_document() -> DisplayDocument:
-    capabilities = ("物品查询", "市场查询", "FFLogs 公开角色战绩", "活动日历")
+    capabilities = (
+        "物品查询",
+        "市场查询",
+        "FFLogs 公开角色战绩",
+        "活动日历",
+        "国服新闻订阅",
+    )
     requirements = (
         ("FFLogs 战绩", "国服、国际服分别配置凭据"),
-        ("物品 / 市场 / 日历", "无需 FFLogs 凭据"),
+        ("物品 / 市场 / 日历 / 新闻", "无需 FFLogs 凭据"),
     )
     minutes = CALENDAR_DEFAULT_INTERVAL_SECONDS // 60
     caveat = "以上为模块已接入能力说明，未执行实时健康或凭据检查"

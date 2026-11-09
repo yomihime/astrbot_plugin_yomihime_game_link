@@ -13,6 +13,7 @@ export function homeContent(locale: string): TemplateContent {
 
 const settingsSections = [
   {id: 'query-reply', titleKey: 'settings.queryReply', names: ['ff14_default_region', 'reply_theme']},
+  {id: 'news-subscriptions', titleKey: 'settings.newsSubscriptions', names: ['ff14_news_admins','ff14_news_targets','ff14_news_interval_seconds']},
   {id: 'calendar-subscriptions', titleKey: 'settings.calendarSubscriptions', names: [
     'ff14_calendar_default_days', 'ff14_calendar_default_timezone', 'ff14_calendar_default_delivery_time',
     'ff14_calendar_sync_interval_seconds', 'ff14_subscriptions_enabled',
@@ -32,9 +33,10 @@ export function settingsSectionsFor(locale: string, themeAvailable: boolean, the
       }
       return [field.name, {...base, control: 'select', choices}];
     }
+    if (field.name === 'ff14_news_admins' || field.name === 'ff14_news_targets') return [field.name, {...base, control: 'text', maxLength: 8000, hint: ff14Text(locale, `settings.hint.${field.name}`)}];
     if ('choices' in field) {
       return [field.name, {...base, control: 'select', choices: field.choices.map(([value, labelKey]) => ({
-        value, label: ff14Text(locale, labelKey, labelKey === 'settings.hours' ? {count: Number(value) / 3600} : undefined),
+        value, label: ff14Text(locale, labelKey, labelKey === 'settings.hours' ? {count: Number(value) / 3600} : labelKey === 'settings.minutes' ? {count: Number(value) / 60} : undefined),
       }))}];
     }
     if (field.name === 'ff14_calendar_default_days') return [field.name, {...base, control: 'number', min: 1, max: 30}];

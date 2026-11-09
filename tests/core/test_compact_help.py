@@ -58,14 +58,14 @@ class CompactHelpTests(unittest.TestCase):
         self.catalog = HelpCatalog(active_query=lambda module: True)
         self.bridge = AstrBotCommandBridge(self.registry, catalog=self.catalog)
 
-    def test_five_boxes_have_declared_usage_then_summary_and_no_policy(self):
+    def test_six_boxes_have_declared_usage_then_summary_and_no_policy(self):
         response = self.bridge.parse(Event("/ygl ff14 help"))
         card = build_help_card(response.source)
         boxes = [b for b in card.blocks if isinstance(b, cards.Section)]
-        self.assertEqual(len(boxes), 5)
+        self.assertEqual(len(boxes), 6)
         self.assertEqual(
             [b.blocks[0].content.spans[0].text.split()[2] for b in boxes],
-            ["market", "item", "logs", "calendar", "status"],
+            ["market", "item", "logs", "calendar", "status", "news"],
         )
         for box in boxes:
             usage, summary = box.blocks[0].content.spans

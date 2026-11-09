@@ -57,3 +57,15 @@ test('navigation summary is bounded, value-free and changes with ordinary, secre
  let resolve;h.services.config.save=()=>new Promise(done=>resolve=done);const write=h.controller.save();assert.equal(h.controller.navigationImpact().pending,true);h.controller.cancel();resolve({revision:5});await write;
  assert.equal(h.controller.navigationImpact().pending,false);assert.equal(h.controller.navigationImpact().credentials,false);h.dispose();
 });
+
+test('news lists round-trip as arrays and reject invalid routes before mutation',async()=>{
+ const h=harness();await h.controller.load();
+ h.controller.edit('ff14_news_admins','platform-a:17, platform-b:17');
+ h.controller.edit('ff14_news_targets','platform-a:GroupMessage:42, platform-b:FriendMessage:42');
+ h.controller.edit('ff14_news_interval_seconds','3600');await h.controller.save();
+ assert.deepEqual(h.calls[0][2].ff14_news_admins,['platform-a:17','platform-b:17']);
+ assert.deepEqual(h.calls[0][2].ff14_news_targets,['platform-a:GroupMessage:42','platform-b:FriendMessage:42']);
+ assert.equal(h.calls[0][2].ff14_news_interval_seconds,3600);
+ h.controller.edit('ff14_news_targets','platform-a:GroupMessage:../private');await h.controller.save();
+ assert.equal(h.calls.length,1);assert.equal(h.controller.state.error,true);h.dispose();
+});
