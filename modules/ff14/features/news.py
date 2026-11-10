@@ -1,7 +1,8 @@
 """Official CN news: bounded complete snapshots and durable three-event drains.
 
 The endpoint is a public website JSON source, not a promised developer API.
-External HTML is reduced to literal text; images and OutLink are never fetched.
+External HTML is reduced to literal excerpts; OutLink is never followed.
+An optional display marker asks Core to capture the fixed official mobile page.
 """
 
 from __future__ import annotations
@@ -17,13 +18,13 @@ from html.parser import HTMLParser
 from unicodedata import category
 from zoneinfo import ZoneInfo
 
-from ....yomihime_game_link_sdk import cards
 from ....yomihime_game_link_sdk.contexts import InvocationOrigin
 from ....yomihime_game_link_sdk.display import (
     DisplayDocument,
     Link,
     LinksBlock,
     TextBlock,
+    UnknownBlock,
 )
 from ....yomihime_game_link_sdk.errors import SourceHttpError
 from ....yomihime_game_link_sdk.results import (
@@ -44,7 +45,6 @@ from ....yomihime_game_link_sdk.subscriptions import (
     PublicEventContribution,
     SubscriptionRequest,
 )
-from ..presentation import ff14_card
 
 SOURCE = "ff14_news_official"
 COLLECTOR = "ff14.news.collect"
@@ -93,8 +93,9 @@ def validate_targets(value):
 
 
 class _Plain(HTMLParser):
-    def __init__(self):
+    def __init__(self, paragraph_separator=" "):
         super().__init__(convert_charrefs=True)
+        self.paragraph_separator = paragraph_separator
         self.parts = []
         self.hidden = 0
 
@@ -102,13 +103,15 @@ class _Plain(HTMLParser):
         if tag in ("script", "style", "iframe", "object"):
             self.hidden += 1
         elif tag in ("p", "br", "div", "li") and not self.hidden:
-            self.parts.append(" ")
+            self.parts.append(self.paragraph_separator)
 
     def handle_endtag(self, tag):
         if tag in ("script", "style", "iframe", "object"):
             self.hidden = max(0, self.hidden - 1)
         elif not self.hidden:
-            self.parts.append(" ")
+            self.parts.append(
+                self.paragraph_separator if tag in ("p", "div", "li") else " "
+            )
 
     def handle_data(self, data):
         if not self.hidden:
@@ -125,6 +128,48 @@ def plain(value, limit):
     # One malformed source string must not stall the shared news outbox.
     text = "".join(c for c in text if not category(c).startswith("C"))
     return text[:limit]
+
+
+def body_excerpt(content, title, limit=200):
+    """Take bounded literal body sentences, never invent a model-written summary.
+
+    The list's Summary commonly repeats the title, so it is not a fallback.
+    Keep facts in source order, omit standalone salutations/title/footer, and
+    signal truncation rather than silently presenting a partial sentence as full.
+    """
+    if type(content) is not str or len(content) > 100_000:
+        raise ValueError("news_text_invalid")
+    parser = _Plain(paragraph_separator="\n")
+    parser.feed(content)
+    text = "".join(parser.parts)
+    text = "".join(c for c in text if c.isspace() or not category(c).startswith("C"))
+    title_key = "".join(c for c in title if c.isalnum())
+    selected = []
+    for piece in re.split(r"(?<=[。！？!?])\s*|(?<=\.)\s+|\n+", text):
+        piece = " ".join(piece.split())
+        key = "".join(c for c in piece if c.isalnum())
+        if not key or key == title_key or (len(key) >= 8 and key in title_key):
+            continue
+        if re.fullmatch(
+            r"(?:亲爱的|尊敬的)?(?:各位)?冒险者(?:们)?[：:，,！!。 ]*", piece
+        ):
+            continue
+        if re.fullmatch(
+            r"(?:《最终幻想14》|最终幻想14)?(?:中国|国服)?(?:运营|项目)团队[。 ]*",
+            piece,
+        ):
+            continue
+        if re.fullmatch(r"\d{4}[年/.-]\d{1,2}[月/.-]\d{1,2}日?", piece):
+            continue
+        remaining = limit - len(" ".join(selected)) - bool(selected)
+        if len(piece) > remaining:
+            if not selected:
+                selected.append(piece[: limit - 1].rstrip() + "…")
+            break
+        selected.append(piece)
+        if len(selected) == 3:
+            break
+    return " ".join(selected) or "暂时无法生成简述，请查看原文。"
 
 
 def article(row):
@@ -150,33 +195,31 @@ def article(row):
         )
     except (ValueError, TypeError):
         published = "官网未提供可识别时间"
-    summary = plain(row.get("Summary") or row.get("Content") or "", 200)
+    summary = body_excerpt(row.get("Content") or "", title)
     return {
         "id": news_id,
         "title": title,
         "category": category,
         "published": published,
-        "summary": summary or "官网未提供摘要。",
+        "summary": summary,
     }
 
 
 def news_document(item):
-    url = "https://ff.web.sdo.com/web8/index.html#/newstab/newscont/" + item["id"]
-    lines = (
-        f"类别：官网类别 {item['category']}",
-        f"时间：{item['published']}",
-        item["summary"],
-    )
+    news_id = item["id"]
+    if type(news_id) is not str or not _ID.fullmatch(news_id):
+        raise ValueError("news_id_invalid")
+    url = "https://ff.web.sdo.com/web8/indexm.html#/newstab/newscont/" + news_id
     return DisplayDocument(
-        title="FF14 国服新闻",
-        subject=item["title"],
-        ordered_blocks=tuple(TextBlock(line) for line in lines)
-        + (LinksBlock((Link("官方原文", url),)),),
-        sources=("最终幻想14 国服官网",),
-        card=ff14_card(
-            item["title"],
-            category="国服新闻",
-            blocks=tuple(cards.Text(line) for line in lines) + (cards.Text(url),),
+        title=item["title"],
+        subject=item["summary"],
+        ordered_blocks=(
+            LinksBlock((Link("官方原文", url),)),
+            UnknownBlock(
+                kind="official_mobile_screenshot_v1",
+                required=False,
+                fallback_text="网页截图暂不可用，请查看原文。",
+            ),
         ),
     )
 
@@ -185,6 +228,10 @@ class NewsCollector:
     def __init__(self, services, *, clock=lambda: datetime.now(UTC)):
         self.services = services
         self.clock = clock
+        # Runtime-only progress across failed detail rounds. Keep normalized
+        # public facts, never full HTML, cookies or bytes. This is not a cursor:
+        # only a complete observation can advance durable known/seen state.
+        self._detail_cache = {}
 
     def normalize(self, parameters):
         if not isinstance(parameters, Mapping) or parameters:
@@ -281,6 +328,14 @@ class NewsCollector:
         return page
 
     async def _read(self, http, *, known_ids=None):
+        if known_ids is None:
+            self._detail_cache.clear()
+        else:
+            self._detail_cache = {
+                key: value
+                for key, value in self._detail_cache.items()
+                if key[0] not in known_ids
+            }
         first = await self._page(http, 0)
         rows = list(first["Data"])
         # Match Core's per-source concurrency bound. TaskGroup drains/cancels
@@ -307,16 +362,20 @@ class NewsCollector:
         result = []
         for row in rows:
             # Baseline needs IDs, not hundreds of historical detail requests.
-            # Later snapshots fetch a detail only for a newly discovered ID
-            # lacking a list summary. A failed detail keeps the prior known set.
-            if (
-                (not row.get("Summary") or not row.get("Title"))
-                and known_ids is not None
-                and str(row.get("Id")) not in known_ids
-            ):
+            # Every newly discovered ID needs its actual body: list summaries
+            # often repeat titles. A failed detail keeps the prior known set.
+            if known_ids is not None and str(row.get("Id")) not in known_ids:
                 news_id = str(row.get("Id"))
                 if not _ID.fullmatch(news_id):
                     raise ValueError("news_id_invalid")
+                fingerprint = hashlib.sha256(
+                    json.dumps(row, sort_keys=True, allow_nan=False).encode("utf-8")
+                ).hexdigest()
+                cache_key = (news_id, fingerprint)
+                cached = self._detail_cache.get(cache_key)
+                if cached is not None:
+                    result.append(dict(cached))
+                    continue
                 detail = await self._json(
                     http, "/api/news/newsDetail", (("gameCode", "ff"), ("id", news_id))
                 )
@@ -325,8 +384,13 @@ class NewsCollector:
                     or str(detail["Data"].get("Id")) != news_id
                 ):
                     raise ValueError("news_detail_invalid")
-                row = detail["Data"]
-            result.append(article(row))
+                normalized = article(detail["Data"])
+                self._detail_cache[cache_key] = dict(normalized)
+                while len(self._detail_cache) > MAX_ARTICLES:
+                    del self._detail_cache[next(iter(self._detail_cache))]
+                result.append(normalized)
+            else:
+                result.append(article(row))
         return result
 
 

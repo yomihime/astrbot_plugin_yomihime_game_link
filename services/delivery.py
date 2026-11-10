@@ -642,10 +642,7 @@ class DeliveryService:
                                 raise
                             except Exception:
                                 rendered = self._public_text_fallback(document)
-                            if (
-                                self._public_card_renderer is not None
-                                and document.card is not None
-                            ):
+                            if self._public_card_renderer is not None:
                                 try:
                                     public_png = await self._public_card_renderer(
                                         candidates[0][2].record.module_id, document
@@ -654,6 +651,25 @@ class DeliveryService:
                                     raise
                                 except Exception:
                                     public_png = None
+                            if public_png is not None:
+                                from ..presentation.official_webpage import (
+                                    requested_url,
+                                    without_screenshot_notice,
+                                )
+
+                                if requested_url(document) is not None:
+                                    try:
+                                        rendered = await self._renderer.render(
+                                            without_screenshot_notice(document),
+                                            limits=self._limits,
+                                            audience=DisplayAudience.PUBLIC,
+                                        )
+                                    except asyncio.CancelledError:
+                                        raise
+                                    except Exception:
+                                        rendered = self._public_text_fallback(
+                                            document, screenshot_available=True
+                                        )
 
                         else:
                             rendered = await self._renderer.render_batch(
@@ -1023,8 +1039,18 @@ class DeliveryService:
         return DeliveryResult(DeliveryState.CANCELLED, "subscription_revision_changed")
 
     @staticmethod
-    def _public_text_fallback(document):
-        """Keep a valid settlement event when an optional renderer fails."""
+    def _public_text_fallback(document, *, screenshot_available=False):
+        """Keep a valid public event when an optional renderer fails."""
+        from ..presentation.official_webpage import requested_url
+
+        url = requested_url(document)
+        if url is not None:
+            text = f"{document.title}\n{document.subject}\n官方原文: {url}"
+            if not screenshot_available:
+                text += "\n网页截图暂不可用，请查看原文。"
+            if len(text) > 8192:
+                raise ValueError("public event text fallback exceeds bounds")
+            return validate_contract(DisplayOutput(text))
         blocks = [
             block.text for block in document.ordered_blocks if type(block) is TextBlock
         ]

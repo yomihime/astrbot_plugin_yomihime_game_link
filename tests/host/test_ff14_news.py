@@ -9,6 +9,7 @@ import json
 import unittest
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 from ygl_test_subject.services.core_runtime import CoreRuntime
 
@@ -39,8 +40,19 @@ class NewsTransport(fixture._ItemReplyTransport):
         if request.source_id != "ff14_news_official":
             return await super().request(request)
         self.requests.append(request)
+        payload = page(self.rows)
+        if request.path == "/api/news/newsDetail":
+            news_id = dict(request.query)["id"]
+            payload = {
+                "Code": "0",
+                "Data": next(
+                    dict(r, Content="<p>维护已结束，可以登录游戏。</p>")
+                    for r in self.rows
+                    if str(r["Id"]) == news_id
+                ),
+            }
         return HttpResponse(
-            503 if self.fail_page else 200, {}, json.dumps(page(self.rows)).encode()
+            503 if self.fail_page else 200, {}, json.dumps(payload).encode()
         )
 
 
@@ -70,6 +82,17 @@ class FF14NewsRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.addAsyncCleanup(terminate_and_drain, self.runtime)
         self.assertTrue(self.runtime.ready)
         self.core = self.runtime.core_runtime
+        # Browser acquisition is a separate integration boundary; never open
+        # a browser or use the live official site from this offline Host test.
+        from io import BytesIO
+
+        from PIL import Image
+
+        png = BytesIO()
+        Image.new("RGB", (485, 100), "white").save(png, format="PNG")
+        self.core._official_webpage_renderer = SimpleNamespace(
+            render=AsyncMock(return_value=png.getvalue())
+        )
         self.runtime._message_port._image_factory = lambda content: SimpleNamespace(
             png=content
         )
@@ -131,7 +154,9 @@ class FF14NewsRuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(session, "test-platform-1:GroupMessage:group-42")
             self.assertEqual(len(chain.chain), 2)
             self.assertIn("Synthetic news", chain.chain[0].text)
-            self.assertIn("官网类别 8325", chain.chain[0].text)
+            self.assertIn("维护已结束", chain.chain[0].text)
+            self.assertNotIn("网页截图暂不可用", chain.chain[0].text)
+            self.assertNotIn("官网类别", chain.chain[0].text)
             self.assertIn("https://ff.web.sdo.com/", chain.chain[0].text)
             self.assertTrue(chain.chain[1].png.startswith(b"\x89PNG\r\n\x1a\n"))
         self.now += timedelta(seconds=900)
@@ -149,6 +174,41 @@ class FF14NewsRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.now += timedelta(seconds=900)
         await self.tick()
         self.assertEqual(len(self.context.calls) - before, 5)
+
+    async def test_screenshot_failure_keeps_one_text_message_without_replay(self):
+        await self.start(targets=["test-platform-1:GroupMessage:group-42"])
+        await self.tick()
+        self.core._official_webpage_renderer.render.side_effect = RuntimeError(
+            "unavailable"
+        )
+        self.transport.rows += [row(7)]
+        self.now += timedelta(seconds=900)
+        await self.tick()
+        self.assertEqual(len(self.context.calls), 1)
+        chain = self.context.calls[0][1].chain
+        self.assertEqual(len(chain), 1)
+        self.assertIn("网页截图暂不可用", chain[0].text)
+        self.assertIn("indexm.html#/newstab/newscont/7", chain[0].text)
+        self.now += timedelta(seconds=900)
+        await self.tick()
+        self.assertEqual(len(self.context.calls), 1)
+
+    async def test_text_renderer_failure_preserves_title_summary_link_and_image(self):
+        await self.start(targets=["test-platform-1:GroupMessage:group-42"])
+        await self.tick()
+        self.core.delivery._renderer = SimpleNamespace(
+            render=AsyncMock(side_effect=RuntimeError("render unavailable"))
+        )
+        self.transport.rows += [row(7)]
+        self.now += timedelta(seconds=900)
+        await self.tick()
+        self.assertEqual(len(self.context.calls), 1)
+        chain = self.context.calls[0][1].chain
+        self.assertEqual(len(chain), 2)
+        self.assertIn("Synthetic news 7", chain[0].text)
+        self.assertIn("维护已结束", chain[0].text)
+        self.assertIn("indexm.html#/newstab/newscont/7", chain[0].text)
+        self.assertNotIn("网页截图暂不可用", chain[0].text)
 
     async def test_unknown_keeps_uncertainty_and_does_not_resend(self):
         await self.start(targets=["test-platform-1:GroupMessage:group-42"])
@@ -219,6 +279,17 @@ class FF14NewsRuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.runtime.initialize()
         self.addAsyncCleanup(terminate_and_drain, self.runtime)
         self.core = self.runtime.core_runtime
+        # Browser acquisition is a separate integration boundary; never open
+        # a browser or use the live official site from this offline Host test.
+        from io import BytesIO
+
+        from PIL import Image
+
+        png = BytesIO()
+        Image.new("RGB", (485, 100), "white").save(png, format="PNG")
+        self.core._official_webpage_renderer = SimpleNamespace(
+            render=AsyncMock(return_value=png.getvalue())
+        )
         await self.core._configured_public_subscriptions.reconcile()
         self.assertFalse(self.core._configured_public_subscriptions.failures)
         self.transport.rows[-1] = row(7, Title="Edited after reopen")

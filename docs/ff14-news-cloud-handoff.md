@@ -1,5 +1,7 @@
 # FF14 国服新闻：云端开发至本地验证交接
 
+> 本文保留 2026-11-06 首轮交接记录，不代表当前呈现方式。新闻现已改为正文简述与官网移动版截图；最新实现、依赖和待验收边界见[移动版新闻截图](ff14-news-mobile-screenshot.md)。
+
 ## 当前交付
 
 - 仓库：`yomihime/astrbot_plugin_yomihime_game_link`。

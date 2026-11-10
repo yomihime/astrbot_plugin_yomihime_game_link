@@ -1137,12 +1137,29 @@ class CoreRuntime:
         """Use the shared local painter for one public aggregate, before send checks."""
         from dataclasses import replace
 
+        from ..presentation.official_webpage import (
+            OfficialWebpageRenderer,
+            requested_url,
+        )
         from ..presentation.png_validation import PngValidationLimits, validate_png
         from ..yomihime_game_link_sdk.display import DisplayAudience, Privacy
 
-        if document.privacy is not Privacy.PUBLIC or document.card is None:
+        if document.privacy is not Privacy.PUBLIC:
             return None
         before = self.registry.snapshot().module(module_id)
+        if requested_url(document) is not None:
+            if not before.enabled or self._closing:
+                return None
+            renderer = getattr(self, "_official_webpage_renderer", None)
+            if renderer is None:
+                renderer = self._official_webpage_renderer = OfficialWebpageRenderer()
+            content = await renderer.render(document)
+            after = self.registry.snapshot().module(module_id)
+            if not after.enabled or after.epoch != before.epoch or self._closing:
+                raise InvalidInvocation()
+            return content
+        if document.card is None:
+            return None
         if (
             not before.enabled
             or self._closing
