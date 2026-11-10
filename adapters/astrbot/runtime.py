@@ -2729,8 +2729,12 @@ class AstrBotRuntime:
         unavailable = validate_contract(
             CapabilityHealth(HealthStatus.UNAVAILABLE, "source_unavailable")
         )
-        if self._extension_host is not None and self._extension_host.source_ready(
-            module_id, source_id
+        if (
+            self._independent_packages is not None
+            and self._independent_packages.source_ready(module_id, source_id)
+        ) or (
+            self._extension_host is not None
+            and self._extension_host.source_ready(module_id, source_id)
         ):
             transport = self._http_transport
             if (
