@@ -17,6 +17,7 @@ from ygl_test_subject.modules.ff14.features.news import (
 )
 from ygl_test_subject.presentation.official_webpage import (
     OfficialWebpageRenderer,
+    _detail_json,
     installed_browsers,
     normalize_png,
     public_addresses,
@@ -50,6 +51,35 @@ def source_row():
 
 
 class ScreenshotPolicyTests(unittest.TestCase):
+    def test_jsonp_keeps_module_article_identity_and_rejects_extra_script(self):
+        raw = json.dumps({"Code": "0", "Data": source_row()}).encode()
+        url = "https://cqnews.web.sdo.com/api/news/newsDetail?id=395410"
+        self.assertEqual(_detail_json(raw, url), raw)
+        wrapped = b"_jsonp_fixture(" + raw + b");"
+        extracted = _detail_json(wrapped, url + "&callback=_jsonp_fixture")
+        self.assertEqual(extracted, raw)
+        self.assertTrue(
+            NewsCollector.validate_screenshot_detail(
+                extracted, "395410", article(source_row())["version"]
+            )
+        )
+        for query, content in (
+            ("&callback=", wrapped),
+            ("&callback=x&callback=_jsonp_fixture", wrapped),
+            ("&callback=window.fn", wrapped),
+            ("&callback=other", wrapped),
+            ("&callback=_jsonp_fixture", wrapped + b"alert(1);"),
+            ("&callback=_jsonp_fixture", b"alert(1);" + wrapped),
+        ):
+            with self.subTest(query=query), self.assertRaises(ValueError):
+                _detail_json(content, url + query)
+        # A nested second call is not one JSON value inside the callback.
+        with self.assertRaises(ValueError):
+            _detail_json(
+                b"_jsonp_fixture(" + raw + b");alert(1);_jsonp_fixture(" + raw + b");",
+                url + "&callback=_jsonp_fixture",
+            )
+
     def test_module_detail_validation_keeps_id_and_revision(self):
         validate = NewsCollector.validate_screenshot_detail
         row = source_row()
@@ -266,7 +296,14 @@ class ScreenshotRenderTests(unittest.IsolatedAsyncioTestCase):
 
 class BrowserBoundaryTests(unittest.IsolatedAsyncioTestCase):
     async def capture(
-        self, *, height=500, title="公告标题", error=None, changed=False, wrong_id=False
+        self,
+        *,
+        height=500,
+        title="公告标题",
+        error=None,
+        changed=False,
+        wrong_id=False,
+        jsonp=False,
     ):
         async def screenshot(**kwargs):
             if error:
@@ -305,11 +342,15 @@ class BrowserBoundaryTests(unittest.IsolatedAsyncioTestCase):
                 request=SimpleNamespace(
                     method="GET",
                     resource_type="xhr",
-                    url="https://cqnews.web.sdo.com/api/news/newsDetail?id=395410",
+                    url=(
+                        "https://cqnews.web.sdo.com/api/news/newsDetail?id=395410"
+                        + ("&callback=_jsonp_fixture" if jsonp else "")
+                    ),
                 ),
                 fulfill=AsyncMock(),
                 abort=AsyncMock(),
             )
+            page.detail_route = route
             await handlers[0](route)
 
         page.goto.side_effect = goto
@@ -320,7 +361,8 @@ class BrowserBoundaryTests(unittest.IsolatedAsyncioTestCase):
                 row["Content"] = "<p>新的正文</p>"
             if wrong_id:
                 row["Id"] = 123
-            yield json.dumps({"Code": "0", "Data": row}).encode()
+            content = json.dumps({"Code": "0", "Data": row}).encode()
+            yield b"_jsonp_fixture(" + content + b");" if jsonp else content
 
         @asynccontextmanager
         async def get(*args, **kwargs):
@@ -364,6 +406,18 @@ class BrowserBoundaryTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 browser.close.assert_awaited_once()
         return result, page, launch
+
+    async def test_official_jsonp_is_validated_then_fulfilled_unchanged(self):
+        result, page, _ = await self.capture(jsonp=True)
+        self.assertTrue(result[0].startswith(b"\x89PNG"))
+        page.detail_route.abort.assert_not_awaited()
+        self.assertTrue(
+            page.detail_route.fulfill.await_args.kwargs["body"].startswith(
+                b"_jsonp_fixture("
+            )
+        )
+        with self.assertRaisesRegex(ValueError, "official_page_incomplete"):
+            await self.capture(jsonp=True, changed=True)
 
     async def test_capture_requests_desktop_actual_page_and_supports_image_only_body(
         self,

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import json
 import math
 import os
 import re
@@ -19,7 +20,7 @@ from dataclasses import replace
 from io import BytesIO
 from pathlib import Path
 from time import monotonic
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 from ..yomihime_game_link_sdk.display import LinksBlock, Privacy, UnknownBlock
 from .card_bitmap import RenderedBitmap
@@ -174,6 +175,41 @@ def public_addresses(records):
     ):
         raise ValueError("official_page_address_denied")
     return records
+
+
+def _detail_json(content, resource_url):
+    """Unwrap an exact requested JSONP callback, without evaluating JavaScript.
+
+    The official desktop client uses JSONP. The extracted JSON still has to
+    pass the module's article identity/version validator before the original
+    response can be fulfilled to that client.
+    """
+    query = parse_qs(
+        urlsplit(resource_url).query,
+        keep_blank_values=True,
+        strict_parsing=True,
+        max_num_fields=16,
+    )
+    callbacks = query.get("callback")
+    if callbacks is None:
+        return content
+    if len(callbacks) != 1 or not re.fullmatch(
+        r"[A-Za-z_$][A-Za-z0-9_$]{0,127}", callbacks[0]
+    ):
+        raise ValueError("official_page_jsonp_invalid")
+    match = re.fullmatch(
+        rb"\s*" + re.escape(callbacks[0].encode("ascii")) + rb"\s*\((.*)\)\s*;?\s*",
+        content,
+        flags=re.DOTALL,
+    )
+    if match is None:
+        raise ValueError("official_page_jsonp_invalid")
+    payload = match[1]
+    # A greedy closing-parenthesis match must not hide trailing JavaScript
+    # inside the candidate body. Require one complete JSON value here; the
+    # module separately validates its article schema, identity and version.
+    json.loads(payload)
+    return payload
 
 
 def normalize_png(content):
@@ -350,7 +386,9 @@ class OfficialWebpageRenderer:
                                     == "/api/news/newsDetail"
                                 ):
                                     if not validate_detail(
-                                        content, url.rsplit("/", 1)[-1], version
+                                        _detail_json(content, resource_url),
+                                        url.rsplit("/", 1)[-1],
+                                        version,
                                     ):
                                         raise ValueError(
                                             "official_page_article_changed"
