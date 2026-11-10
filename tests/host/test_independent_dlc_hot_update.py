@@ -9,8 +9,199 @@ from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
 
+from ygl_test_subject.adapters.astrbot.runtime import AstrBotRuntime
+from ygl_test_subject.bootstrap.coordinator import get_coordinator
 from ygl_test_subject.services.extension_discovery import ExtensionDiscovery
 from ygl_test_subject.services.extension_transition import ExtensionControlEndpoint
+from ygl_test_subject.services.external_packages import (
+    IndependentPackageRuntime,
+    _HotPackage,
+)
+from ygl_test_subject.services.runtime_effect_gate import RuntimeEffectGate
+from ygl_test_subject.services.source_credentials import (
+    CredentialInjection,
+    SourceCredentialPolicy,
+)
+
+from yomihime_game_link_sdk.declarations import SourceDeclaration
+from yomihime_game_link_sdk.services import HealthStatus
+
+
+class IndependentSourceHealthTest(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.kernel = get_coordinator()
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.scope = (self.temp.name, object())
+        result = await self.kernel.acquire_core(self.scope, object(), 0, "a" * 64)
+        self.token = result["owner_token"]
+        self.addAsyncCleanup(self.close_scope)
+        self.granted = True
+        self.gate = RuntimeEffectGate(
+            self.kernel,
+            self.scope,
+            self.token,
+            1,
+            package_id="unknown_dlc",
+            package_token="b" * 64,
+            package_epoch=1,
+            authority_check=lambda: self.granted,
+            policy_assert=lambda unit: None,
+        )
+        self.policy = SourceCredentialPolicy(
+            "unknown_dlc/demo",
+            "managed",
+            "credential_api_key",
+            "api.example.test",
+            ("/data",),
+            kind="static",
+            injections=(CredentialInjection("/data", "GET", "header", "X-Key"),),
+        )
+        self.module = SimpleNamespace(
+            module_id="demo",
+            sources=(
+                SourceDeclaration("public", "public.example.test"),
+                SourceDeclaration("managed", "api.example.test"),
+            ),
+        )
+        self.package = _HotPackage(
+            installation=None,
+            bundle=None,
+            receipt=None,
+            candidate=SimpleNamespace(
+                package=SimpleNamespace(
+                    manifest=SimpleNamespace(modules=(self.module,))
+                )
+            ),
+            gate=self.gate,
+            epoch=1,
+            cache_key="test",
+            policy=SimpleNamespace(credential_policies=(self.policy,)),
+            instances={},
+            lifetimes={},
+            transition_id="test",
+            published=True,
+        )
+        self.runtime = AstrBotRuntime.__new__(AstrBotRuntime)
+        self.runtime._extension_host = None
+        self.runtime._trusted_bundle = False
+        self.runtime._assembly = None
+        self.runtime._http_transport = SimpleNamespace(closed=False)
+        self.runtime._transport_closed = False
+        self.packages = IndependentPackageRuntime.__new__(IndependentPackageRuntime)
+        self.packages._closed = False
+        self.packages.packages = {"unknown_dlc": self.package}
+        self.packages.core = SimpleNamespace(
+            module_services=SimpleNamespace(_source_credential_policies=(self.policy,))
+        )
+        self.runtime._independent_packages = self.packages
+
+    async def close_scope(self):
+        self.gate.close()
+
+        async def done():
+            return True
+
+        self.kernel.sync_fence(
+            self.scope,
+            self.token,
+            done,
+            done,
+            lambda token, owner: dict(
+                owner_token=token,
+                tracked_inflight=0,
+                cleanup_complete=True,
+                durable_fence=True,
+                resources_closed=True,
+            ),
+        )
+        await self.kernel.await_quiet(self.scope, self.token)
+        self.assertTrue(self.kernel.release_scope(self.scope, self.token))
+
+    async def health(self, source="public", owner="unknown_dlc/demo"):
+        return (await self.runtime._source_health(owner, source)).status
+
+    async def test_public_and_managed_sources_need_no_secret_for_wiring_health(self):
+        # No secret store is supplied. Actual credential errors belong to HTTP.
+        self.assertIs(await self.health(), HealthStatus.AVAILABLE)
+        self.assertIs(await self.health("managed"), HealthStatus.AVAILABLE)
+
+    async def test_missing_or_mismatched_credential_policy_fails_closed(self):
+        factory = self.packages.core.module_services
+        factory._source_credential_policies = ()
+        self.assertIs(await self.health("managed"), HealthStatus.UNAVAILABLE)
+        self.assertIs(await self.health(), HealthStatus.AVAILABLE)
+        factory._source_credential_policies = (self.policy,)
+        self.module.sources = (SourceDeclaration("managed", "wrong.example.test"),)
+        self.assertIs(await self.health("managed"), HealthStatus.UNAVAILABLE)
+
+    async def test_unknown_package_module_source_and_direct_alias_fail_closed(self):
+        for owner, source in (
+            ("missing/demo", "public"),
+            ("unknown_dlc/missing", "public"),
+            ("unknown_dlc/demo", "missing"),
+        ):
+            with self.subTest(owner=owner, source=source):
+                self.assertIs(
+                    await self.health(source, owner), HealthStatus.UNAVAILABLE
+                )
+        self.module.sources = (SourceDeclaration("public", "api.example.test", "key"),)
+        self.assertIs(await self.health(), HealthStatus.UNAVAILABLE)
+
+    async def test_grant_revocation_and_closed_gate_fail_closed(self):
+        self.granted = False
+        self.assertIs(await self.health(), HealthStatus.UNAVAILABLE)
+        self.granted = True
+        self.assertIs(await self.health(), HealthStatus.AVAILABLE)
+        self.gate.close()
+        self.assertIs(await self.health(), HealthStatus.UNAVAILABLE)
+
+    async def test_unpublished_closed_runtime_and_transport_fail_closed(self):
+        self.package.published = False
+        self.assertIs(await self.health(), HealthStatus.UNAVAILABLE)
+        self.package.published = True
+        self.packages._closed = True
+        self.assertIs(await self.health(), HealthStatus.UNAVAILABLE)
+        self.packages._closed = False
+        self.runtime._http_transport.closed = True
+        self.assertIs(await self.health(), HealthStatus.UNAVAILABLE)
+        self.runtime._http_transport.closed = False
+        self.runtime._transport_closed = True
+        self.assertIs(await self.health(), HealthStatus.UNAVAILABLE)
+
+    async def test_legacy_source_readiness_still_uses_owned_transport(self):
+        del self.runtime._independent_packages
+        self.runtime._extension_host = SimpleNamespace(source_ready=lambda *_: True)
+        self.assertIs(await self.health(), HealthStatus.AVAILABLE)
+        self.runtime._http_transport = None
+        self.assertIs(await self.health(), HealthStatus.UNAVAILABLE)
+
+    async def test_non_hot_bundled_source_readiness_without_independent_runtime(self):
+        self.runtime = AstrBotRuntime(
+            SimpleNamespace(),
+            plugin_root=Path(self.temp.name),
+            data_dir=Path(self.temp.name) / "data",
+            font_manager_factory=lambda root: SimpleNamespace(provider=lambda: None),
+        )
+        self.assertFalse(hasattr(self.runtime, "_independent_packages"))
+        self.runtime._http_transport = SimpleNamespace(closed=False)
+        self.runtime._trusted_bundle = True
+        self.runtime._assembly = SimpleNamespace(
+            module_id="bundled/demo",
+            source_hosts={"public": "public.example.test"},
+            credential_policies=(),
+        )
+        self.runtime._source_credential_policies = ()
+        module = SimpleNamespace(manifest=self.module)
+        self.runtime._core = SimpleNamespace(
+            registry=SimpleNamespace(
+                snapshot=lambda: SimpleNamespace(module=lambda owner: module)
+            )
+        )
+        self.assertIs(await self.health(owner="bundled/demo"), HealthStatus.AVAILABLE)
+        self.assertIs(
+            await self.health("missing", "bundled/demo"), HealthStatus.UNAVAILABLE
+        )
 
 
 class LogicalArtifactPathsTest(unittest.TestCase):

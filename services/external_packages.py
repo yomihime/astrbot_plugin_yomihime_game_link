@@ -674,6 +674,41 @@ class IndependentPackageRuntime:
             features=FEATURES,
         )
 
+    def source_ready(self, module_id, source_id):
+        """Check current package wiring without reading secrets or probing HTTP."""
+        package_id, _, local_id = module_id.partition("/")
+        package = self.packages.get(package_id)
+        if self._closed or package is None or not package.active:
+            return False
+        module = next(
+            (
+                row
+                for row in package.candidate.package.manifest.modules
+                if row.module_id == local_id
+            ),
+            None,
+        )
+        source = (
+            next((row for row in module.sources if row.source_id == source_id), None)
+            if module is not None
+            else None
+        )
+        if source is None or source.credential_ref is not None:
+            return False
+        expected = tuple(
+            policy
+            for policy in package.policy.credential_policies
+            if policy.module_id == module_id and policy.source_id == source_id
+        )
+        published = tuple(
+            policy
+            for policy in self.core.module_services._source_credential_policies
+            if policy.module_id == module_id and policy.source_id == source_id
+        )
+        return expected == published and all(
+            policy.resource_host == source.host for policy in expected
+        )
+
     def page_manifest_bindings(self):
         return {
             key: digest
