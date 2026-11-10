@@ -651,7 +651,7 @@ class DeliveryService:
                                     raise
                                 except Exception:
                                     public_png = None
-                            if public_png is not None:
+                            if public_png:
                                 from ..presentation.official_webpage import (
                                     requested_url,
                                     without_screenshot_notice,
@@ -1045,7 +1045,16 @@ class DeliveryService:
 
         url = requested_url(document)
         if url is not None:
-            text = f"{document.title}\n{document.subject}\n官方原文: {url}"
+            parts = [document.title]
+            if document.subject:
+                parts.append(document.subject)
+            parts.extend(
+                block.text
+                for block in document.ordered_blocks
+                if type(block) is TextBlock
+            )
+            parts.append(f"官方原文: {url}")
+            text = "\n".join(parts)
             if not screenshot_available:
                 text += "\n网页截图暂不可用，请查看原文。"
             if len(text) > 8192:
@@ -2036,7 +2045,12 @@ class DeliveryService:
         png_bytes=None,
     ) -> DeliveryResult:
         validate_contract(output)
-        message = RenderedMessage(output.text, output.resource_ids, png_bytes=png_bytes)
+        message = RenderedMessage(
+            output.text,
+            output.resource_ids,
+            png_bytes=None if type(png_bytes) is tuple else png_bytes,
+            png_pages=png_bytes if type(png_bytes) is tuple else (),
+        )
         attempt = envelope.delivery_attempts[-1]
 
         async def finish(*args):

@@ -89,9 +89,9 @@ class FF14NewsRuntimeTests(unittest.IsolatedAsyncioTestCase):
         from PIL import Image
 
         png = BytesIO()
-        Image.new("RGB", (485, 100), "white").save(png, format="PNG")
+        Image.new("RGB", (1200, 100), "white").save(png, format="PNG")
         self.core._official_webpage_renderer = SimpleNamespace(
-            render=AsyncMock(return_value=png.getvalue())
+            render=AsyncMock(return_value=(png.getvalue(), png.getvalue()))
         )
         self.runtime._message_port._image_factory = lambda content: SimpleNamespace(
             png=content
@@ -152,7 +152,7 @@ class FF14NewsRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(messages), 3)
         for session, chain in messages:
             self.assertEqual(session, "test-platform-1:GroupMessage:group-42")
-            self.assertEqual(len(chain.chain), 2)
+            self.assertEqual(len(chain.chain), 3)
             self.assertIn("Synthetic news", chain.chain[0].text)
             self.assertIn("维护已结束", chain.chain[0].text)
             self.assertNotIn("网页截图暂不可用", chain.chain[0].text)
@@ -173,7 +173,11 @@ class FF14NewsRuntimeTests(unittest.IsolatedAsyncioTestCase):
         ]
         self.now += timedelta(seconds=900)
         await self.tick()
-        self.assertEqual(len(self.context.calls) - before, 5)
+        self.assertEqual(len(self.context.calls) - before, 6)
+        self.assertIn("标题更新", self.context.calls[-1][1].chain[0].text)
+        self.now += timedelta(seconds=900)
+        await self.tick()
+        self.assertEqual(len(self.context.calls) - before, 6)
 
     async def test_screenshot_failure_keeps_one_text_message_without_replay(self):
         await self.start(targets=["test-platform-1:GroupMessage:group-42"])
@@ -188,7 +192,7 @@ class FF14NewsRuntimeTests(unittest.IsolatedAsyncioTestCase):
         chain = self.context.calls[0][1].chain
         self.assertEqual(len(chain), 1)
         self.assertIn("网页截图暂不可用", chain[0].text)
-        self.assertIn("indexm.html#/newstab/newscont/7", chain[0].text)
+        self.assertIn("index.html#/newstab/newscont/7", chain[0].text)
         self.now += timedelta(seconds=900)
         await self.tick()
         self.assertEqual(len(self.context.calls), 1)
@@ -204,10 +208,10 @@ class FF14NewsRuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.tick()
         self.assertEqual(len(self.context.calls), 1)
         chain = self.context.calls[0][1].chain
-        self.assertEqual(len(chain), 2)
+        self.assertEqual(len(chain), 3)
         self.assertIn("Synthetic news 7", chain[0].text)
         self.assertIn("维护已结束", chain[0].text)
-        self.assertIn("indexm.html#/newstab/newscont/7", chain[0].text)
+        self.assertIn("index.html#/newstab/newscont/7", chain[0].text)
         self.assertNotIn("网页截图暂不可用", chain[0].text)
 
     async def test_unknown_keeps_uncertainty_and_does_not_resend(self):
@@ -259,7 +263,7 @@ class FF14NewsRuntimeTests(unittest.IsolatedAsyncioTestCase):
             len(await self.sql("SELECT subscription_id FROM b04_subscription_jobs")), 1
         )
 
-    async def test_reopen_keeps_baseline_and_does_not_replay_same_official_id(self):
+    async def test_reopen_keeps_versions_and_sends_only_new_content(self):
         await self.start(targets=["test-platform-1:GroupMessage:group-42"])
         await self.tick()
         self.transport.rows += [row(7)]
@@ -286,16 +290,23 @@ class FF14NewsRuntimeTests(unittest.IsolatedAsyncioTestCase):
         from PIL import Image
 
         png = BytesIO()
-        Image.new("RGB", (485, 100), "white").save(png, format="PNG")
+        Image.new("RGB", (1200, 100), "white").save(png, format="PNG")
         self.core._official_webpage_renderer = SimpleNamespace(
-            render=AsyncMock(return_value=png.getvalue())
+            render=AsyncMock(return_value=(png.getvalue(), png.getvalue()))
         )
         await self.core._configured_public_subscriptions.reconcile()
         self.assertFalse(self.core._configured_public_subscriptions.failures)
-        self.transport.rows[-1] = row(7, Title="Edited after reopen")
         self.now += timedelta(seconds=900)
         await self.tick()
         self.assertEqual(len(self.context.calls), 1)
+        self.transport.rows[-1] = row(7, Title="Edited after reopen")
+        self.now += timedelta(seconds=900)
+        await self.tick()
+        self.assertEqual(len(self.context.calls), 2)
+        self.assertIn("标题更新", self.context.calls[-1][1].chain[0].text)
+        self.now += timedelta(seconds=900)
+        await self.tick()
+        self.assertEqual(len(self.context.calls), 2)
 
     async def test_changed_live_manifest_cannot_inherit_configuration_authority(self):
         from dataclasses import replace

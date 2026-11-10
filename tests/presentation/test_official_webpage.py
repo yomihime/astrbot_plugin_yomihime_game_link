@@ -1,6 +1,7 @@
 """Offline screenshot boundaries; no browser, network or real subscriptions."""
 
 import asyncio
+import json
 import unittest
 from contextlib import asynccontextmanager
 from dataclasses import replace
@@ -9,7 +10,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from PIL import Image
-from ygl_test_subject.modules.ff14.features.news import news_document
+from ygl_test_subject.modules.ff14.features.news import article, news_document
 from ygl_test_subject.presentation.official_webpage import (
     OfficialWebpageRenderer,
     normalize_png,
@@ -26,13 +27,21 @@ from ygl_test_subject.services.core_runtime import CoreRuntime
 
 from yomihime_game_link_sdk.display import DisplayLimits, Link, LinksBlock, Privacy
 
-URL = "https://ff.web.sdo.com/web8/indexm.html#/newstab/newscont/395410"
+URL = "https://ff.web.sdo.com/web8/index.html#/newstab/newscont/395410"
 
 
 def document():
-    return news_document(
-        {"id": "395410", "title": "公告标题", "summary": "维护已结束。"}
-    )
+    return news_document(article(source_row()))
+
+
+def source_row():
+    return {
+        "Id": 395410,
+        "Title": "公告标题",
+        "CategoryCode": "8325",
+        "PublishDate": "2026/11/10 12:00:00",
+        "Content": "<p>维护已结束。</p>",
+    }
 
 
 class ScreenshotPolicyTests(unittest.TestCase):
@@ -42,8 +51,8 @@ class ScreenshotPolicyTests(unittest.TestCase):
         self.assertIsNone(requested_url(without_screenshot_notice(doc)))
         self.assertIsNone(requested_url(replace(doc, privacy=Privacy.PRIVATE)))
         for url in (
-            "http://ff.web.sdo.com/web8/indexm.html#/newstab/newscont/1",
-            "https://ff.web.sdo.com.evil.test/web8/indexm.html#/newstab/newscont/1",
+            "http://ff.web.sdo.com/web8/index.html#/newstab/newscont/1",
+            "https://ff.web.sdo.com.evil.test/web8/index.html#/newstab/newscont/1",
             "https://127.0.0.1/",
             URL + "?redirect=http://localhost/",
             URL + "/../1",
@@ -93,8 +102,8 @@ class ScreenshotPolicyTests(unittest.TestCase):
             Image.new("RGB", (width, height), "white").save(out, format="PNG")
             return out.getvalue()
 
-        self.assertTrue(normalize_png(png(485, 100)).startswith(b"\x89PNG"))
-        for data in (b"bad", png(486, 100), png(485, 8193)):
+        self.assertTrue(normalize_png(png(1200, 100)).startswith(b"\x89PNG"))
+        for data in (b"bad", png(1441, 100), png(1200, 5001)):
             with self.assertRaises(Exception):
                 normalize_png(data)
 
@@ -110,7 +119,9 @@ class ScreenshotRenderTests(unittest.IsolatedAsyncioTestCase):
         success = await renderer.render(
             without_screenshot_notice(doc), limits=DisplayLimits(1, 1048576)
         )
-        self.assertEqual(success.text, "公告标题\n维护已结束。\n官方原文: " + URL)
+        self.assertIn("公告标题", success.text)
+        self.assertIn("维护已结束。", success.text)
+        self.assertIn("官方原文: " + URL, success.text)
 
     async def test_same_public_article_reuses_bounded_pixels_across_recipients(self):
         renderer = OfficialWebpageRenderer()
@@ -165,11 +176,21 @@ class ScreenshotRenderTests(unittest.IsolatedAsyncioTestCase):
 
 
 class BrowserBoundaryTests(unittest.IsolatedAsyncioTestCase):
-    async def capture(self, *, height=500, title="公告标题", error=None):
-        png = BytesIO()
-        Image.new("RGB", (485, 712), "white").save(png, format="PNG")
+    async def capture(self, *, height=500, title="公告标题", error=None, changed=False):
+        async def screenshot(**kwargs):
+            if error:
+                raise error
+            clip = kwargs["clip"]
+            png = BytesIO()
+            Image.new("RGB", (clip["width"], clip["height"]), "white").save(
+                png, format="PNG"
+            )
+            return png.getvalue()
+
         body = SimpleNamespace(
-            bounding_box=AsyncMock(return_value={"y": 200, "height": height}),
+            bounding_box=AsyncMock(
+                return_value={"x": 120, "y": 200, "width": 1200, "height": height}
+            ),
             evaluate=AsyncMock(),
         )
         heading = SimpleNamespace(inner_text=AsyncMock(return_value=title))
@@ -177,12 +198,47 @@ class BrowserBoundaryTests(unittest.IsolatedAsyncioTestCase):
             url=URL,
             goto=AsyncMock(),
             wait_for_function=AsyncMock(),
-            locator=lambda selector: body if selector == "#newsCon" else heading,
+            locator=lambda selector: body
+            if selector in (".newcontbox", ".newsCont")
+            else heading,
             evaluate=AsyncMock(return_value=True),
-            screenshot=AsyncMock(return_value=png.getvalue(), side_effect=error),
+            screenshot=AsyncMock(side_effect=screenshot),
         )
+        handlers = []
+
+        async def register(_pattern, handler):
+            handlers.append(handler)
+
+        async def goto(*args, **kwargs):
+            route = SimpleNamespace(
+                request=SimpleNamespace(
+                    method="GET",
+                    resource_type="xhr",
+                    url="https://cqnews.web.sdo.com/api/news/newsDetail?id=395410",
+                ),
+                fulfill=AsyncMock(),
+                abort=AsyncMock(),
+            )
+            await handlers[0](route)
+
+        page.goto.side_effect = goto
+
+        async def chunks(_size):
+            row = source_row()
+            if changed:
+                row["Content"] = "<p>新的正文</p>"
+            yield json.dumps({"Code": "0", "Data": row}).encode()
+
+        @asynccontextmanager
+        async def get(*args, **kwargs):
+            yield SimpleNamespace(
+                status=200,
+                headers={"Content-Type": "application/json"},
+                content=SimpleNamespace(iter_chunked=chunks),
+            )
+
         context = SimpleNamespace(
-            route=AsyncMock(),
+            route=AsyncMock(side_effect=register),
             route_web_socket=AsyncMock(),
             new_page=AsyncMock(return_value=page),
         )
@@ -197,34 +253,56 @@ class BrowserBoundaryTests(unittest.IsolatedAsyncioTestCase):
 
         # Test the real capture orchestration without installing/starting browsers.
         fake_api = SimpleNamespace(async_playwright=playwright)
-        with patch.dict("sys.modules", {"playwright.async_api": fake_api}):
+        with (
+            patch.dict("sys.modules", {"playwright.async_api": fake_api}),
+            patch("aiohttp.ClientSession.get", get),
+        ):
             try:
-                result = await OfficialWebpageRenderer()._capture(URL, "公告标题")
+                result = await OfficialWebpageRenderer()._capture(
+                    URL, "公告标题", article(source_row())["version"]
+                )
             finally:
                 browser.close.assert_awaited_once()
         return result, page, launch
 
-    async def test_capture_requests_mobile_actual_page_and_supports_image_only_body(
+    async def test_capture_requests_desktop_actual_page_and_supports_image_only_body(
         self,
     ):
         result, page, launch = await self.capture()
-        self.assertTrue(result.startswith(b"\x89PNG"))
+        self.assertTrue(result[0].startswith(b"\x89PNG"))
         page.goto.assert_awaited_once_with(
             URL, wait_until="domcontentloaded", timeout=20000
         )
         readiness = page.wait_for_function.await_args_list[0].args[0]
         self.assertIn("body.querySelector('img')", readiness)
         page.screenshot.assert_awaited_once()
-        self.assertEqual(page.screenshot.await_args.kwargs["clip"]["height"], 712)
+        self.assertEqual(page.screenshot.await_args.kwargs["clip"]["height"], 500)
         self.assertTrue(launch.await_args.kwargs["chromium_sandbox"])
         self.assertIn("--disable-quic", launch.await_args.kwargs["args"])
 
     async def test_oversize_article_does_not_silently_crop(self):
         with self.assertRaisesRegex(ValueError, "image_budget"):
-            await self.capture(height=9000)
+            await self.capture(height=49000)
 
     async def test_changed_title_and_capture_failure_close_browser(self):
         with self.assertRaisesRegex(ValueError, "article_changed"):
             await self.capture(title="不同文章")
         with self.assertRaises(RuntimeError):
             await self.capture(error=RuntimeError("screenshot failed"))
+
+    async def test_long_article_is_contiguous_ordered_pages_not_truncated(self):
+        result, page, _ = await self.capture(height=12000)
+        self.assertEqual(len(result), 3)
+        clips = [call.kwargs["clip"] for call in page.screenshot.await_args_list]
+        self.assertEqual(
+            [(c["y"], c["height"]) for c in clips],
+            [(200, 5000), (5200, 5000), (10200, 2000)],
+        )
+
+    async def test_changed_body_is_not_paired_with_older_summary(self):
+        with self.assertRaisesRegex(ValueError, "incomplete"):
+            await self.capture(changed=True)
+
+    async def test_excessive_page_count_falls_back_as_a_whole(self):
+        with self.assertRaisesRegex(ValueError, "image_budget"):
+            await self.capture(height=45000)

@@ -48,8 +48,10 @@ class AstrBotMessagePort:
             or conversation.conversation_id != target.conversation_id
             or conversation.adapter_id != conversation.delivery_route
             or payload.resource_ids
-            or (payload.png_bytes is not None and target.authorized)
-            or payload.png_pages
+            or (
+                (payload.png_bytes is not None or payload.png_pages)
+                and target.authorized
+            )
             or not _valid_session_component(conversation.delivery_route, platform=True)
             or not _valid_session_component(conversation.conversation_id)
         ):
@@ -71,7 +73,20 @@ class AstrBotMessagePort:
         try:
             plain = self._plain_factory(payload.text)
             components = (plain,)
-            if payload.png_bytes is not None:
+            if payload.png_pages:
+                try:
+                    # Construct every page before dispatch, never send a partial set.
+                    images = tuple(
+                        self._image_factory(page) for page in payload.png_pages
+                    )
+                    components += images
+                except Exception:
+                    components = (
+                        self._plain_factory(
+                            payload.text + "\n网页截图暂不可用，请查看原文。"
+                        ),
+                    )
+            elif payload.png_bytes is not None:
                 try:
                     components += (self._image_factory(payload.png_bytes),)
                 except Exception:

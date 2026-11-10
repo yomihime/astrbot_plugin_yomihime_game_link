@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import json
 import math
 import re
 import socket
@@ -22,20 +23,33 @@ from ..yomihime_game_link_sdk.display import LinksBlock, Privacy, UnknownBlock
 from .card_bitmap import RenderedBitmap
 from .png_validation import PngValidationLimits, validate_png
 
-MARKER = "official_mobile_screenshot_v1"
+MARKER = "official_desktop_screenshot_v1"
+MARKER_PATTERN = re.compile(MARKER + r":([0-9a-f]{64})\Z")
 ARTICLE = re.compile(
-    r"https://ff\.web\.sdo\.com/web8/indexm\.html#/newstab/newscont/[1-9][0-9]{0,11}\Z"
+    r"https://ff\.web\.sdo\.com/web8/index\.html#/newstab/newscont/[1-9][0-9]{0,11}\Z"
 )
-WIDTH = 485
-MAX_HEIGHT = 8192
+WIDTH = 1440
+MAX_WIDTH = 1440
+MAX_HEIGHT = 48000
+PAGE_HEIGHT = 5000
+MAX_PAGES = 8
 MAX_RESPONSE = 4 * 1024 * 1024
 MAX_TOTAL = 24 * 1024 * 1024
 MAX_REQUESTS = 100
 TIMEOUT = 35
 USER_AGENT = (
-    "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) "
-    "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1"
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
 )
+
+
+def requested_version(document):
+    for block in document.ordered_blocks:
+        if type(block) is UnknownBlock:
+            match = MARKER_PATTERN.fullmatch(block.kind)
+            if match:
+                return match[1]
+    return None
 
 
 def requested_url(document):
@@ -45,7 +59,7 @@ def requested_url(document):
     markers = [
         b
         for b in document.ordered_blocks
-        if type(b) is UnknownBlock and b.kind == MARKER
+        if type(b) is UnknownBlock and MARKER_PATTERN.fullmatch(b.kind)
     ]
     if len(markers) != 1 or markers[0].required:
         return None
@@ -66,7 +80,7 @@ def without_screenshot_notice(document):
         ordered_blocks=tuple(
             b
             for b in document.ordered_blocks
-            if not (type(b) is UnknownBlock and b.kind == MARKER)
+            if not (type(b) is UnknownBlock and MARKER_PATTERN.fullmatch(b.kind))
         ),
     )
 
@@ -115,8 +129,8 @@ def normalize_png(content):
     with Image.open(BytesIO(content)) as source:
         if (
             source.format != "PNG"
-            or source.width != WIDTH
-            or not 1 <= source.height <= MAX_HEIGHT
+            or not 1 <= source.width <= MAX_WIDTH
+            or not 1 <= source.height <= PAGE_HEIGHT
         ):
             raise ValueError("official_page_image_budget")
         # Strip browser metadata before Core's stricter PNG validation.
@@ -142,18 +156,20 @@ class OfficialWebpageRenderer:
         # Includes queueing, DNS, assets and browser startup in the same budget.
         async with asyncio.timeout(TIMEOUT):
             async with self._slot:
-                key = (url, document.title)
+                key = (url, document.title, requested_version(document))
                 cached = self._cache.get(key)
                 if cached is not None and monotonic() - cached[0] < 120:
                     return cached[1]
-                content = await self._capture(url, document.title)
+                content = await self._capture(
+                    url, document.title, requested_version(document)
+                )
                 self._cache[key] = (monotonic(), content)
                 self._cache.move_to_end(key)
                 while len(self._cache) > 4:
                     self._cache.popitem(last=False)
                 return content
 
-    async def _capture(self, url, title):
+    async def _capture(self, url, title, version):
         import aiohttp
         from playwright.async_api import async_playwright
 
@@ -196,24 +212,35 @@ class OfficialWebpageRenderer:
                     context = await browser.new_context(
                         viewport={"width": WIDTH, "height": 900},
                         device_scale_factor=1,
-                        is_mobile=True,
-                        has_touch=True,
+                        is_mobile=False,
+                        has_touch=False,
                         user_agent=USER_AGENT,
                         service_workers="block",
                         accept_downloads=False,
                     )
                     total = requests = 0
+                    verified_version = False
                     failed = False
 
                     async def route_request(route):
-                        nonlocal total, requests, failed
+                        nonlocal total, requests, failed, verified_version
                         request = route.request
+                        resource_url = request.url
+                        # Official legacy article images use HTTP URLs. Upgrade
+                        # only reviewed image hosts to TLS; never permit HTTP I/O.
+                        parsed = urlsplit(resource_url)
+                        if parsed.scheme == "http" and parsed.hostname in (
+                            "fu2.sdo.com",
+                            "fu5.web.sdo.com",
+                            "ffstatic.web.sdo.com",
+                        ):
+                            resource_url = "https:" + resource_url[5:]
                         requests += 1
-                        if request.method != "GET" or not resource_allowed(request.url):
-                            # Images not available through the reviewed HTTPS
-                            # profile must not be silently presented as complete.
-                            if request.resource_type == "image":
-                                failed = True
+                        if request.method != "GET" or not resource_allowed(
+                            resource_url
+                        ):
+                            # Required body images are verified below. Unrelated
+                            # tracking/chrome requests need not poison the article.
                             await route.abort()
                             return
                         if requests > MAX_REQUESTS:
@@ -222,7 +249,7 @@ class OfficialWebpageRenderer:
                             return
                         try:
                             async with session.get(
-                                request.url,
+                                resource_url,
                                 allow_redirects=False,
                                 headers={"User-Agent": USER_AGENT, "Referer": url},
                             ) as response:
@@ -238,9 +265,28 @@ class OfficialWebpageRenderer:
                                             "official_page_resource_budget"
                                         )
                                     chunks.append(chunk)
+                                content = b"".join(chunks)
+                                if (
+                                    urlsplit(resource_url).hostname
+                                    == "cqnews.web.sdo.com"
+                                    and urlsplit(resource_url).path
+                                    == "/api/news/newsDetail"
+                                ):
+                                    from ..modules.ff14.features.news import article
+
+                                    value = json.loads(content)
+                                    data = value.get("Data")
+                                    if (
+                                        not isinstance(data, dict)
+                                        or article(data)["version"] != version
+                                    ):
+                                        raise ValueError(
+                                            "official_page_article_changed"
+                                        )
+                                    verified_version = True
                                 await route.fulfill(
                                     status=200,
-                                    body=b"".join(chunks),
+                                    body=content,
                                     headers={
                                         "content-type": response.headers.get(
                                             "Content-Type", "application/octet-stream"
@@ -261,7 +307,7 @@ class OfficialWebpageRenderer:
                     await page.goto(url, wait_until="domcontentloaded", timeout=20000)
                     await page.wait_for_function(
                         """() => {
-                            const body = document.querySelector('#newsCon');
+                            const body = document.querySelector('.newcontbox');
                             return body && (body.innerText.trim() || body.querySelector('img'))
                               && document.querySelector('.newstitle .tit')?.innerText.trim();
                         }""",
@@ -271,40 +317,79 @@ class OfficialWebpageRenderer:
                     if "".join(actual_title.split()) != "".join(title.split()):
                         raise ValueError("official_page_article_changed")
                     # Trigger lazy images by scrolling through the bounded article.
-                    for _ in range(10):
-                        box = await page.locator("#newsCon").bounding_box()
+                    for _ in range(60):
+                        box = await page.locator(".newcontbox").bounding_box()
                         if not box or box["height"] > MAX_HEIGHT:
                             raise ValueError("official_page_image_budget")
-                        await page.locator("#newsCon").evaluate(
+                        await page.locator(".newcontbox").evaluate(
                             "el => el.querySelectorAll('img').forEach(i => i.loading = 'eager')"
                         )
                         await page.evaluate("window.scrollBy(0, 800)")
                         if await page.evaluate(
-                            "window.scrollY + innerHeight >= document.querySelector('#newsCon').getBoundingClientRect().bottom + scrollY"
+                            "window.scrollY + innerHeight >= document.querySelector('.newcontbox').getBoundingClientRect().bottom + scrollY"
                         ):
                             break
                     await page.wait_for_function(
-                        """() => [...document.querySelectorAll('#newsCon img')]
+                        """() => [...document.querySelectorAll('.newcontbox img')]
                         .every(i => i.complete && i.naturalWidth > 0)""",
                         timeout=7000,
                     )
                     await page.evaluate("document.fonts.ready")
                     await page.evaluate("window.scrollTo(0, 0)")
-                    box = await page.locator("#newsCon").bounding_box()
-                    if not box or failed or page.url != url:
+                    box = await page.locator(".newcontbox").bounding_box()
+                    if not box or failed or not verified_version or page.url != url:
                         raise ValueError("official_page_incomplete")
-                    height = math.ceil(box["y"] + box["height"] + 12)
-                    if not 1 <= height <= MAX_HEIGHT:
-                        raise ValueError("official_page_image_budget")
-                    # Capture the real top/header/title/date/body, excluding footer.
-                    content = await page.screenshot(
-                        type="png",
-                        full_page=True,
-                        clip={"x": 0, "y": 0, "width": WIDTH, "height": height},
-                        animations="disabled",
-                        timeout=5000,
+                    container = await page.locator(".newsCont").bounding_box()
+                    if not container:
+                        raise ValueError("official_page_incomplete")
+                    x = max(0, math.floor(container["x"]))
+                    y = max(0, math.floor(container["y"]))
+                    width = math.ceil(container["width"])
+                    height = math.ceil(
+                        max(
+                            container["y"] + container["height"],
+                            box["y"] + box["height"],
+                        )
+                        - y
                     )
-                    return normalize_png(content)
+                    if not (1 <= width <= MAX_WIDTH and 1 <= height <= MAX_HEIGHT):
+                        raise ValueError("official_page_image_budget")
+                    # Desktop article in its native layout, not a reconstructed
+                    # card. Split only when needed, preserving every vertical row.
+                    pages = []
+
+                    async def capture_part(top, part_height):
+                        if len(pages) >= MAX_PAGES:
+                            raise ValueError("official_page_image_budget")
+                        content = await page.screenshot(
+                            type="png",
+                            full_page=True,
+                            clip={
+                                "x": x,
+                                "y": top,
+                                "width": width,
+                                "height": part_height,
+                            },
+                            animations="disabled",
+                            timeout=5000,
+                        )
+                        try:
+                            png = normalize_png(content)
+                        except Exception:
+                            if part_height <= 256:
+                                raise ValueError("official_page_image_budget") from None
+                            first = part_height // 2
+                            await capture_part(top, first)
+                            await capture_part(top + first, part_height - first)
+                        else:
+                            pages.append(png)
+
+                    for offset in range(0, height, PAGE_HEIGHT):
+                        await capture_part(
+                            y + offset, min(PAGE_HEIGHT, height - offset)
+                        )
+                    return tuple(pages)
+
                 finally:
                     await browser.close()
         finally:

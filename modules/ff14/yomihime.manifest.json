@@ -912,7 +912,7 @@
           "source_id": "ff14_news_official",
           "host": "cqnews.web.sdo.com",
           "timeout_seconds": 15,
-          "requests_per_minute": 30
+          "requests_per_minute": 60
         }
       ],
       "schedules": [
