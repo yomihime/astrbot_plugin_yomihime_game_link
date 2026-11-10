@@ -59,6 +59,9 @@ MAX_PAGES = 32
 MAX_ARTICLES = 1600
 MAX_REMEMBERED = 5000
 MAX_RESPONSE_BYTES = 2_000_000
+MAX_BODY_CHARS = (
+    500_000  # Full official major-version patch notes include large HTML tables.
+)
 DETAIL_BUDGET = 12
 HEAD_REFRESH = 4
 BODY_SNAPSHOT_CHARS = 1024
@@ -144,7 +147,7 @@ def body_excerpt(content, title, limit=200):
     Keep facts in source order, omit standalone salutations/title/footer, and
     signal truncation rather than silently presenting a partial sentence as full.
     """
-    if type(content) is not str or len(content) > 100_000:
+    if type(content) is not str or len(content) > MAX_BODY_CHARS:
         raise ValueError("news_text_invalid")
     parser = _Plain(paragraph_separator="\n")
     parser.feed(content)
@@ -238,7 +241,7 @@ def content_facts(content):
     Dates/views/list order/HTML styling never enter that version. Resource URLs
     are compared as data only and never fetched here.
     """
-    if type(content) is not str or len(content) > 100_000:
+    if type(content) is not str or len(content) > MAX_BODY_CHARS:
         raise ValueError("news_text_invalid")
     parser = _Content()
     parser.feed(content)

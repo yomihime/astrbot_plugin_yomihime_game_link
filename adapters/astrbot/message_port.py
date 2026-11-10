@@ -129,6 +129,7 @@ class AstrBotMessagePort:
             route = target.conversation
             if (
                 route is None
+                or payload.image_profile != "card"
                 or payload.resource_ids
                 or payload.png_pages
                 or (payload.png_bytes is not None and target.authorized)
@@ -189,6 +190,7 @@ class AstrBotMessagePort:
         if (
             type(target) is not MessageTarget
             or type(payload) is not RenderedMessage
+            or payload.image_profile != "card"
             or payload.resource_ids
             or not payload.png_pages
             or not callable(image_current)

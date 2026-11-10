@@ -6,6 +6,7 @@ import unittest
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from io import BytesIO
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -153,7 +154,8 @@ class ScreenshotPolicyTests(unittest.TestCase):
             return out.getvalue()
 
         self.assertTrue(normalize_png(png(1200, 100)).startswith(b"\x89PNG"))
-        for data in (b"bad", png(1441, 100), png(1200, 5001)):
+        self.assertTrue(normalize_png(png(1200, 5950)).startswith(b"\x89PNG"))
+        for data in (b"bad", png(1441, 100), png(1, 43201)):
             with self.assertRaises(Exception):
                 normalize_png(data)
 
@@ -322,6 +324,15 @@ class BrowserBoundaryTests(unittest.IsolatedAsyncioTestCase):
             evaluate=AsyncMock(),
         )
         heading = SimpleNamespace(inner_text=AsyncMock(return_value=title))
+
+        async def evaluate(script, *args):
+            if "protectedSpans" in script:
+                return {
+                    "boundaries": [[v, 1] for v in range(100, height, 100)],
+                    "protected": [],
+                }
+            return True
+
         page = SimpleNamespace(
             url=URL,
             goto=AsyncMock(),
@@ -329,7 +340,7 @@ class BrowserBoundaryTests(unittest.IsolatedAsyncioTestCase):
             locator=lambda selector: (
                 body if selector in (".newcontbox", ".newsCont") else heading
             ),
-            evaluate=AsyncMock(return_value=True),
+            evaluate=AsyncMock(side_effect=evaluate),
             screenshot=AsyncMock(side_effect=screenshot),
         )
         handlers = []
@@ -440,7 +451,7 @@ class BrowserBoundaryTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_oversize_article_does_not_silently_crop(self):
         with self.assertRaisesRegex(ValueError, "image_budget"):
-            await self.capture(height=49000)
+            await self.capture(height=240001)
 
     async def test_changed_title_and_capture_failure_close_browser(self):
         with self.assertRaisesRegex(ValueError, "article_changed"):
@@ -454,11 +465,11 @@ class BrowserBoundaryTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_long_article_is_contiguous_ordered_pages_not_truncated(self):
         result, page, _ = await self.capture(height=12000)
-        self.assertEqual(len(result), 3)
+        self.assertEqual(len(result), 1)
         clips = [call.kwargs["clip"] for call in page.screenshot.await_args_list]
         self.assertEqual(
             [(c["y"], c["height"]) for c in clips],
-            [(200, 5000), (5200, 5000), (10200, 2000)],
+            [(200, 4096), (4296, 4096), (8392, 3808)],
         )
 
     async def test_changed_body_is_not_paired_with_older_summary(self):
@@ -470,8 +481,11 @@ class BrowserBoundaryTests(unittest.IsolatedAsyncioTestCase):
             await self.capture(wrong_id=True)
 
     async def test_excessive_page_count_falls_back_as_a_whole(self):
-        with self.assertRaisesRegex(ValueError, "image_budget"):
-            await self.capture(height=45000)
+        with (
+            patch("ygl_test_subject.presentation.official_webpage.MAX_PAGES", 2),
+            self.assertRaisesRegex(ValueError, "budget"),
+        ):
+            await self.capture(height=100000)
 
 
 class ExistingBrowserDiscoveryTests(unittest.TestCase):
@@ -489,11 +503,13 @@ class ExistingBrowserDiscoveryTests(unittest.TestCase):
         self.assertFalse(any("untrusted" in p or "ms-playwright" in p for p in paths))
 
     def test_windows_only_exact_edge_chrome_install_executables(self):
+        program_files = Path("program-files").absolute()
+        local_apps = Path("local-apps").absolute()
         with (
             patch("sys.platform", "win32"),
             patch.dict(
                 "os.environ",
-                {"PROGRAMFILES": "C:/program-files", "LOCALAPPDATA": "C:/local-apps"},
+                {"PROGRAMFILES": str(program_files), "LOCALAPPDATA": str(local_apps)},
                 clear=True,
             ),
             patch("pathlib.Path.is_file", return_value=True),
@@ -504,16 +520,8 @@ class ExistingBrowserDiscoveryTests(unittest.TestCase):
         self.assertEqual(
             paths[:2],
             (
-                str(
-                    __import__("pathlib").Path(
-                        "C:/program-files/Microsoft/Edge/Application/msedge.exe"
-                    )
-                ),
-                str(
-                    __import__("pathlib").Path(
-                        "C:/program-files/Google/Chrome/Application/chrome.exe"
-                    )
-                ),
+                str(program_files / "Microsoft/Edge/Application/msedge.exe"),
+                str(program_files / "Google/Chrome/Application/chrome.exe"),
             ),
         )
         self.assertTrue(all(p.endswith(("msedge.exe", "chrome.exe")) for p in paths))

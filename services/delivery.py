@@ -2051,11 +2051,23 @@ class DeliveryService:
         png_bytes=None,
     ) -> DeliveryResult:
         validate_contract(output)
+        from ..presentation.official_webpage import CapturedPages
+
+        text = output.text
+        image_profile = "card"
+        if type(png_bytes) is CapturedPages:
+            image_profile = "webpage"
+            if png_bytes.notice:
+                text += "\n" + png_bytes.notice
+            # The internal Host payload keeps immutable byte tuples. Browser
+            # pages may be PNG or JPEG; ordinary card PNG policy is unchanged.
+            png_bytes = tuple(png_bytes)
         message = RenderedMessage(
-            output.text,
+            text,
             output.resource_ids,
             png_bytes=None if type(png_bytes) is tuple else png_bytes,
             png_pages=png_bytes if type(png_bytes) is tuple else (),
+            image_profile=image_profile,
         )
         attempt = envelope.delivery_attempts[-1]
 

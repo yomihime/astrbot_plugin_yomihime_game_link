@@ -17,14 +17,20 @@ import socket
 import sys
 from collections import OrderedDict
 from dataclasses import replace
-from io import BytesIO
 from pathlib import Path
 from time import monotonic
 from urllib.parse import parse_qs, urlsplit
 
 from ..yomihime_game_link_sdk.display import LinksBlock, Privacy, UnknownBlock
-from .card_bitmap import RenderedBitmap
-from .png_validation import PngValidationLimits, validate_png
+from .webpage_images import (
+    MAX_OUTPUT_BYTES,
+    MAX_PAGE_HEIGHT,
+    MAX_PIXELS,
+    ImageBudgetError,
+    capture_region,
+    encode_page,
+)
+from .webpage_pagination import CutBoundary, ProtectedSpan, plan_pages
 
 MARKER = "official_desktop_screenshot_v1"
 MARKER_PATTERN = re.compile(MARKER + r":([0-9a-f]{64})\Z")
@@ -33,13 +39,12 @@ ARTICLE = re.compile(
 )
 WIDTH = 1440
 MAX_WIDTH = 1440
-MAX_HEIGHT = 48000
-PAGE_HEIGHT = 5000
+MAX_HEIGHT = 240000
 MAX_PAGES = 8
 MAX_RESPONSE = 4 * 1024 * 1024
 MAX_TOTAL = 24 * 1024 * 1024
-MAX_REQUESTS = 100
-TIMEOUT = 35
+MAX_REQUESTS = 200
+TIMEOUT = 120
 USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
@@ -213,24 +218,60 @@ def _detail_json(content, resource_url):
 
 
 def normalize_png(content):
-    from PIL import Image
+    """Compatibility name for the private browser encoder (PNG or JPEG)."""
+    return encode_page(content).content
 
-    if not isinstance(content, bytes) or len(content) > MAX_RESPONSE:
-        raise ValueError("official_page_image_budget")
-    with Image.open(BytesIO(content)) as source:
-        if (
-            source.format != "PNG"
-            or not 1 <= source.width <= MAX_WIDTH
-            or not 1 <= source.height <= PAGE_HEIGHT
-        ):
-            raise ValueError("official_page_image_budget")
-        # Strip browser metadata before Core's stricter PNG validation.
-        image = source.convert("RGB")
-        output = BytesIO()
-        image.save(output, format="PNG", optimize=True)
-        bitmap = RenderedBitmap(output.getvalue(), image.width, image.height)
-    validate_png(bitmap, limits=PngValidationLimits())
-    return bitmap.content
+
+class CapturedPages(tuple):
+    """Private image pages plus a non-secret explanation of the actual layout."""
+
+    def __new__(cls, pages, metadata, notice=""):
+        instance = super().__new__(cls, pages)
+        instance.metadata = metadata
+        instance.notice = notice
+        return instance
+
+
+# Geometry only from the independently launched, allowlisted public page. Text
+# line rectangles and images are protected; no CSS/layout/content is rewritten.
+CONTENT_BOUNDARIES = r"""({y, height}) => {
+    const root = document.querySelector('.newsCont');
+    const boundaries = new Map();
+    const protectedSpans = [];
+    const add = (v, priority=0) => {
+        v = Math.round(v - y);
+        if (v > 0 && v < height)
+            boundaries.set(v, Math.max(priority, boundaries.get(v) || 0));
+    };
+    const protect = rect => {
+        if (!rect.width || !rect.height) return;
+        const a = Math.max(0, Math.floor(rect.top + scrollY - y));
+        const b = Math.min(height, Math.ceil(rect.bottom + scrollY - y));
+        if (b > a) protectedSpans.push([a,b]);
+    };
+    for (const el of root.querySelectorAll('img,svg,canvas,video,iframe'))
+        protect(el.getBoundingClientRect());
+    for (const el of root.querySelectorAll('h1,h2,h3,h4,h5,h6,p,li,tr,section,div')) {
+        const r = el.getBoundingClientRect();
+        if (!r.width || !r.height) continue;
+        const priority = /^H[1-6]$/.test(el.tagName) ? 2 : 1;
+        add(r.top + scrollY, priority); add(r.bottom + scrollY);
+    }
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    let node, count = 0;
+    while (node = walker.nextNode()) {
+        if (++count > 30000) throw Error('official_page_layout_budget');
+        if (!node.textContent.trim()) continue;
+        const range = document.createRange(); range.selectNodeContents(node);
+        for (const r of range.getClientRects()) {
+            protect(r); add(Math.floor(r.top + scrollY));
+            add(Math.ceil(r.bottom + scrollY));
+        }
+    }
+    if (boundaries.size > 30000 || protectedSpans.length > 30000)
+        throw Error('official_page_layout_budget');
+    return {boundaries: [...boundaries], protected: protectedSpans};
+}"""
 
 
 class OfficialWebpageRenderer:
@@ -262,7 +303,16 @@ class OfficialWebpageRenderer:
                 )
                 self._cache[key] = (monotonic(), content)
                 self._cache.move_to_end(key)
-                while len(self._cache) > 4:
+                while (
+                    len(self._cache) > 4
+                    or sum(
+                        sum(map(len, value[1]))
+                        if isinstance(value[1], tuple)
+                        else len(value[1])
+                        for value in self._cache.values()
+                    )
+                    > 32 * 1024 * 1024
+                ):
                     self._cache.popitem(last=False)
                 return content
 
@@ -427,7 +477,7 @@ class OfficialWebpageRenderer:
                     if "".join(actual_title.split()) != "".join(title.split()):
                         raise ValueError("official_page_article_changed")
                     # Trigger lazy images by scrolling through the bounded article.
-                    for _ in range(60):
+                    for _ in range(math.ceil(MAX_HEIGHT / 800) + 1):
                         box = await page.locator(".newcontbox").bounding_box()
                         if not box or box["height"] > MAX_HEIGHT:
                             raise ValueError("official_page_image_budget")
@@ -464,41 +514,79 @@ class OfficialWebpageRenderer:
                     )
                     if not (1 <= width <= MAX_WIDTH and 1 <= height <= MAX_HEIGHT):
                         raise ValueError("official_page_image_budget")
-                    # Desktop article in its native layout, not a reconstructed
-                    # card. Split only when needed, preserving every vertical row.
-                    pages = []
-
-                    async def capture_part(top, part_height):
-                        if len(pages) >= MAX_PAGES:
-                            raise ValueError("official_page_image_budget")
-                        content = await page.screenshot(
-                            type="png",
-                            full_page=True,
-                            clip={
-                                "x": x,
-                                "y": top,
-                                "width": width,
-                                "height": part_height,
-                            },
-                            animations="disabled",
-                            timeout=5000,
+                    geometry = await page.evaluate(
+                        CONTENT_BOUNDARIES, {"y": y, "height": height}
+                    )
+                    boundaries = tuple(CutBoundary(*v) for v in geometry["boundaries"])
+                    protected = tuple(ProtectedSpan(*v) for v in geometry["protected"])
+                    page_limit = min(MAX_PAGE_HEIGHT, MAX_PIXELS // width)
+                    encoded_split = False
+                    while True:
+                        plan = plan_pages(
+                            width,
+                            height,
+                            boundaries=boundaries,
+                            protected=protected,
+                            max_page_height=page_limit,
+                            max_pages=MAX_PAGES,
                         )
+                        pages, details = [], []
                         try:
-                            png = normalize_png(content)
-                        except Exception:
-                            if part_height <= 256:
-                                raise ValueError("official_page_image_budget") from None
-                            first = part_height // 2
-                            await capture_part(top, first)
-                            await capture_part(top + first, part_height - first)
-                        else:
-                            pages.append(png)
-
-                    for offset in range(0, height, PAGE_HEIGHT):
-                        await capture_part(
-                            y + offset, min(PAGE_HEIGHT, height - offset)
+                            for part in plan.pages:
+                                encoded = await capture_region(
+                                    page,
+                                    x=x,
+                                    y=y + part.offset,
+                                    width=width,
+                                    height=part.height,
+                                )
+                                pages.append(encoded.content)
+                                details.append(
+                                    {
+                                        "offset": part.offset,
+                                        "width": width,
+                                        "height": part.height,
+                                        "bytes": len(encoded.content),
+                                        "format": encoded.format,
+                                        "quality": encoded.quality,
+                                        "png_bytes": encoded.png_bytes,
+                                    }
+                                )
+                        except ImageBudgetError as exc:
+                            if str(exc) != "official_page_encoded_budget":
+                                raise
+                            # Replan the complete article at safe boundaries, not
+                            # a recursive mid-image crop. No partial output escapes.
+                            page_limit = min(page_limit - 1, part.height * 9 // 10)
+                            encoded_split = True
+                            continue
+                        if sum(map(len, pages)) > MAX_OUTPUT_BYTES:
+                            raise ImageBudgetError("official_page_total_output_budget")
+                        reason = "encoded_budget" if encoded_split else plan.reason
+                        notice = ""
+                        if "budget" in reason:
+                            notice = (
+                                f"截图因本地图片大小或解码内存预算分为{len(pages)}张，"
+                                "已沿内容边界保留全文；这不是QQ平台上限。"
+                            )
+                        return CapturedPages(
+                            pages,
+                            {
+                                "width": width,
+                                "height": height,
+                                "reason": reason,
+                                "pages": details,
+                                "protected_regions": len(protected),
+                                "cuts": list(plan.cut_positions),
+                                "cuts_cross_content": any(
+                                    span.y0 < cut < span.y1
+                                    for cut in plan.cut_positions
+                                    for span in protected
+                                ),
+                                "capture_tile_height": 4096,
+                            },
+                            notice,
                         )
-                    return tuple(pages)
 
                 finally:
                     await browser.close()

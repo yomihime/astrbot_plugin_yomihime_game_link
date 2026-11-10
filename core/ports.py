@@ -576,14 +576,25 @@ class MessageTarget:
 
 @dataclass(frozen=True, slots=True)
 class RenderedMessage:
-    """Internal payload; PNG bytes never enter the public SDK or Tool facts."""
+    """Internal payload; image bytes never enter the public SDK or Tool facts.
+
+    The historical ``png_pages`` name also carries trusted browser JPEG pages;
+    it does not change ordinary card encoding or grant resource authority.
+    """
 
     text: str
     resource_ids: tuple[str, ...] = ()
     png_bytes: bytes | None = None
     png_pages: tuple[bytes, ...] = ()
+    image_profile: str = "card"
 
     def __post_init__(self) -> None:
+        if self.image_profile not in ("card", "webpage"):
+            raise ValueError("invalid internal image profile")
+        if self.image_profile == "webpage" and (
+            not self.png_pages or self.png_bytes is not None or self.resource_ids
+        ):
+            raise ValueError("webpage profile requires only complete public pages")
         if not isinstance(self.text, str) or not self.text.strip():
             raise ValueError("rendered text must be non-empty text")
         if self.png_bytes is not None and (
@@ -598,10 +609,14 @@ class RenderedMessage:
                 or self.png_bytes is not None
                 or self.resource_ids
                 or any(
-                    type(page) is not bytes or not 1 <= len(page) <= 4_194_304
+                    type(page) is not bytes
+                    or not 1
+                    <= len(page)
+                    <= (4_900_000 if self.image_profile == "webpage" else 4_194_304)
                     for page in self.png_pages
                 )
-                or sum(map(len, self.png_pages)) > 16_777_216
+                or sum(map(len, self.png_pages))
+                > (24_000_000 if self.image_profile == "webpage" else 16_777_216)
             ):
                 raise ValueError("collage pages exceed their local byte budget")
         elif type(self.png_pages) is not tuple:
