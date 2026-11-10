@@ -16,7 +16,7 @@ from .bootstrap.loader import ArtifactCache, CoreGeneration, validate_core_relea
     "astrbot_plugin_yomihime_game_link",
     "yomihime",
     "如月怜的游戏连结：聚合游戏角色、战绩与资讯。",
-    "0.2.5",
+    "0.2.6",
 )
 class YomihimeGameLink(Star):
     """Hold no canonical SDK, business objects or mutable resource imports."""

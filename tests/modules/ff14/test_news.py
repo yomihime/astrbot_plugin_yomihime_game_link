@@ -16,6 +16,7 @@ from ygl_test_subject.modules.ff14.features.news import (
     COLLECTOR,
     DETAIL_BUDGET,
     MAX_ARTICLES,
+    MAX_BODY_CHARS,
     MAX_PAGES,
     SOURCE,
     NewsAddHere,
@@ -254,7 +255,7 @@ class NewsEvaluatorTests(unittest.TestCase):
             "事实一。",
         )
         with self.assertRaises(ValueError):
-            body_excerpt("x" * 100_001, title)
+            body_excerpt("x" * (MAX_BODY_CHARS + 1), title)
 
     def test_missing_body_does_not_reuse_title_summary_or_invent_facts(self):
         for content in (

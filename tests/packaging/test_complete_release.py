@@ -1,5 +1,6 @@
 """Complete independent ZIPs must satisfy the production admission contracts."""
 
+import ast
 import base64
 import hashlib
 import importlib.util
@@ -258,12 +259,21 @@ class CompleteReleaseTests(unittest.TestCase):
         info = envelope.metadata(
             {"metadata.yaml": (ROOT / "metadata.yaml").read_bytes()}
         )
+        registrations = [
+            node
+            for node in ast.walk(ast.parse((ROOT / "main.py").read_text("utf-8")))
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "register"
+        ]
+        self.assertEqual(len(registrations), 1)
+        self.assertRegex(info["version"], r"^\d+\.\d+\.\d+$")
         self.assertEqual(
             info,
             {
                 "name": "astrbot_plugin_yomihime_game_link",
                 "author": "yomihime",
-                "version": "0.2.4",
+                "version": ast.literal_eval(registrations[0].args[3]),
             },
         )
 
