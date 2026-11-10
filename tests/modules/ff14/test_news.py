@@ -936,7 +936,7 @@ class NewsCollectorTests(unittest.IsolatedAsyncioTestCase):
             (
                 Path(__file__).resolve().parents[3]
                 / "modules/ff14/yomihime.manifest.json"
-            ).read_text()
+            ).read_text(encoding="utf-8")
         )
 
         def source_policy(value):

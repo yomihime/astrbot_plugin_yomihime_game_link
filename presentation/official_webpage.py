@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
-import json
 import math
 import os
 import re
@@ -205,19 +204,25 @@ class OfficialWebpageRenderer:
         self._slot = asyncio.Semaphore(1)
         self._cache = OrderedDict()
 
-    async def render(self, document):
+    async def render(self, document, *, validate_detail=None, cache_scope=None):
         url = requested_url(document)
-        if url is None:
+        if url is None or not callable(validate_detail):
             return None
         # Includes queueing, DNS, assets and browser startup in the same budget.
         async with asyncio.timeout(TIMEOUT):
             async with self._slot:
-                key = (url, document.title, requested_version(document))
+                key = (
+                    url,
+                    document.title,
+                    requested_version(document),
+                    validate_detail,
+                    cache_scope,
+                )
                 cached = self._cache.get(key)
                 if cached is not None and monotonic() - cached[0] < 120:
                     return cached[1]
                 content = await self._capture(
-                    url, document.title, requested_version(document)
+                    url, document.title, requested_version(document), validate_detail
                 )
                 self._cache[key] = (monotonic(), content)
                 self._cache.move_to_end(key)
@@ -225,7 +230,7 @@ class OfficialWebpageRenderer:
                     self._cache.popitem(last=False)
                 return content
 
-    async def _capture(self, url, title, version):
+    async def _capture(self, url, title, version, validate_detail):
         executables = installed_browsers()
         if not executables:
             raise RuntimeError("existing_browser_unavailable")
@@ -344,15 +349,8 @@ class OfficialWebpageRenderer:
                                     and urlsplit(resource_url).path
                                     == "/api/news/newsDetail"
                                 ):
-                                    from ..modules.ff14.features.news import article
-
-                                    value = json.loads(content)
-                                    data = value.get("Data")
-                                    if (
-                                        str(value.get("Code")) != "0"
-                                        or not isinstance(data, dict)
-                                        or str(data.get("Id")) != url.rsplit("/", 1)[-1]
-                                        or article(data)["version"] != version
+                                    if not validate_detail(
+                                        content, url.rsplit("/", 1)[-1], version
                                     ):
                                         raise ValueError(
                                             "official_page_article_changed"

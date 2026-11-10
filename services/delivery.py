@@ -1585,7 +1585,7 @@ class DeliveryService:
             subscription_revision=event.subscription_revision,
             expected_state=state,
             retry_at=self._retry_at(event, completed_at)
-            if attempt.state is DeliveryState.FAILED
+            if attempt.state is DeliveryState.FAILED and attempt_number < 3
             else None,
         )
 
@@ -1938,7 +1938,9 @@ class DeliveryService:
             message_id,
         )
         retry = (
-            self._retry_at(event, completed) if state is DeliveryState.FAILED else None
+            self._retry_at(event, completed)
+            if state is DeliveryState.FAILED and attempt.attempt_number < 3
+            else None
         )
         try:
             await self._deliveries.record_attempt(
@@ -1990,7 +1992,11 @@ class DeliveryService:
             completed_at,
             code,
         )
-        retry = self._retry_at_for_digest(envelope, completed_at)
+        retry = (
+            self._retry_at_for_digest(envelope, completed_at)
+            if attempt_number < 3
+            else None
+        )
         finished = await self._windows.complete_envelope_send(
             claim,
             attempt,
@@ -2209,7 +2215,7 @@ class DeliveryService:
         )
         retry = (
             self._retry_at_for_digest(envelope, completed)
-            if state is DeliveryState.FAILED
+            if state is DeliveryState.FAILED and attempt.attempt_number < 3
             else None
         )
         try:

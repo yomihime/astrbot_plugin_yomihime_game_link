@@ -10,7 +10,11 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from PIL import Image
-from ygl_test_subject.modules.ff14.features.news import article, news_document
+from ygl_test_subject.modules.ff14.features.news import (
+    NewsCollector,
+    article,
+    news_document,
+)
 from ygl_test_subject.presentation.official_webpage import (
     OfficialWebpageRenderer,
     installed_browsers,
@@ -46,6 +50,21 @@ def source_row():
 
 
 class ScreenshotPolicyTests(unittest.TestCase):
+    def test_module_detail_validation_keeps_id_and_revision(self):
+        validate = NewsCollector.validate_screenshot_detail
+        row = source_row()
+        version = article(row)["version"]
+
+        def encoded(item):
+            return json.dumps({"Code": "0", "Data": item}).encode()
+
+        self.assertTrue(validate(encoded(row), "395410", version))
+        self.assertFalse(validate(encoded(row), "395411", version))
+        self.assertFalse(
+            validate(encoded({**row, "Content": "changed"}), "395410", version)
+        )
+        self.assertFalse(validate(b"{}", "395410", version))
+
     def test_explicit_marker_and_single_allowlisted_link_required(self):
         doc = document()
         self.assertEqual(requested_url(doc), URL)
@@ -127,15 +146,62 @@ class ScreenshotRenderTests(unittest.IsolatedAsyncioTestCase):
     async def test_same_public_article_reuses_bounded_pixels_across_recipients(self):
         renderer = OfficialWebpageRenderer()
         renderer._capture = AsyncMock(return_value=b"synthetic pixels")
-        self.assertEqual(await renderer.render(document()), b"synthetic pixels")
-        self.assertEqual(await renderer.render(document()), b"synthetic pixels")
+        self.assertEqual(
+            await renderer.render(
+                document(), validate_detail=NewsCollector.validate_screenshot_detail
+            ),
+            b"synthetic pixels",
+        )
+        self.assertEqual(
+            await renderer.render(
+                document(), validate_detail=NewsCollector.validate_screenshot_detail
+            ),
+            b"synthetic pixels",
+        )
         self.assertEqual(renderer._capture.await_count, 1)
 
     async def test_cancel_is_not_swallowed(self):
         renderer = OfficialWebpageRenderer()
         renderer._capture = AsyncMock(side_effect=asyncio.CancelledError())
         with self.assertRaises(asyncio.CancelledError):
-            await renderer.render(document())
+            await renderer.render(
+                document(), validate_detail=NewsCollector.validate_screenshot_detail
+            )
+
+    async def test_cache_never_crosses_validator_or_module_epoch(self):
+        renderer = OfficialWebpageRenderer()
+        renderer._capture = AsyncMock(side_effect=(b"first", b"second", b"third"))
+        validator = NewsCollector.validate_screenshot_detail
+
+        def other_validator(*_):
+            return True
+
+        doc = document()
+        self.assertEqual(
+            await renderer.render(
+                doc, validate_detail=validator, cache_scope=("ff14/ff14", 1)
+            ),
+            b"first",
+        )
+        self.assertEqual(
+            await renderer.render(
+                doc, validate_detail=validator, cache_scope=("ff14/ff14", 1)
+            ),
+            b"first",
+        )
+        self.assertEqual(
+            await renderer.render(
+                doc, validate_detail=other_validator, cache_scope=("ff14/ff14", 1)
+            ),
+            b"second",
+        )
+        self.assertEqual(
+            await renderer.render(
+                doc, validate_detail=validator, cache_scope=("ff14/ff14", 2)
+            ),
+            b"third",
+        )
+        self.assertEqual(renderer._capture.await_count, 3)
 
     async def test_unrequested_document_never_starts_browser(self):
         renderer = OfficialWebpageRenderer()
@@ -144,18 +210,29 @@ class ScreenshotRenderTests(unittest.IsolatedAsyncioTestCase):
         renderer._capture.assert_not_called()
 
     async def test_runtime_rechecks_epoch_after_screenshot(self):
-        state = SimpleNamespace(enabled=True, epoch=1)
+        state = SimpleNamespace(
+            enabled=True,
+            epoch=1,
+            handlers=SimpleNamespace(
+                collectors={
+                    "news": SimpleNamespace(
+                        validate_screenshot_detail=NewsCollector.validate_screenshot_detail
+                    )
+                }
+            ),
+        )
         registry = SimpleNamespace(
             snapshot=lambda: SimpleNamespace(module=lambda _: state)
         )
 
-        async def capture(_):
+        async def capture(_, **_kwargs):
             state.epoch = 2
             return b"png"
 
         runtime = SimpleNamespace(
             registry=registry,
             _closing=False,
+            _trusted_bundled_manifests={"ff14/ff14": object()},
             _official_webpage_renderer=SimpleNamespace(render=capture),
         )
         # Snapshot module instances are immutable in production; use distinct
@@ -166,11 +243,22 @@ class ScreenshotRenderTests(unittest.IsolatedAsyncioTestCase):
             nonlocal count
             count += 1
             return SimpleNamespace(
-                module=lambda _: SimpleNamespace(enabled=True, epoch=count)
+                module=lambda _: SimpleNamespace(
+                    enabled=True,
+                    epoch=count,
+                    handlers=state.handlers,
+                    manifest=object(),
+                )
             )
 
         registry.snapshot = snapshot
-        with self.assertRaises(Exception):
+        with (
+            patch(
+                "ygl_test_subject.services.core_runtime._matches_trusted_bundled_manifest",
+                return_value=True,
+            ),
+            self.assertRaises(Exception),
+        ):
             await CoreRuntime._render_public_subscription_card(
                 runtime, "ff14/ff14", document()
             )
@@ -201,9 +289,9 @@ class BrowserBoundaryTests(unittest.IsolatedAsyncioTestCase):
             url=URL,
             goto=AsyncMock(),
             wait_for_function=AsyncMock(),
-            locator=lambda selector: body
-            if selector in (".newcontbox", ".newsCont")
-            else heading,
+            locator=lambda selector: (
+                body if selector in (".newcontbox", ".newsCont") else heading
+            ),
             evaluate=AsyncMock(return_value=True),
             screenshot=AsyncMock(side_effect=screenshot),
         )
@@ -268,7 +356,10 @@ class BrowserBoundaryTests(unittest.IsolatedAsyncioTestCase):
         ):
             try:
                 result = await OfficialWebpageRenderer()._capture(
-                    URL, "公告标题", article(source_row())["version"]
+                    URL,
+                    "公告标题",
+                    article(source_row())["version"],
+                    NewsCollector.validate_screenshot_detail,
                 )
             finally:
                 browser.close.assert_awaited_once()
@@ -339,7 +430,7 @@ class ExistingBrowserDiscoveryTests(unittest.TestCase):
             patch.dict("os.environ", {"PATH": "/untrusted"}),
         ):
             paths = installed_browsers()
-        self.assertEqual(paths[0], "/usr/bin/chromium")
+        self.assertEqual(paths[0].replace("\\", "/"), "/usr/bin/chromium")
         self.assertEqual(len(paths), 3)
         self.assertFalse(any("untrusted" in p or "ms-playwright" in p for p in paths))
 
@@ -348,7 +439,7 @@ class ExistingBrowserDiscoveryTests(unittest.TestCase):
             patch("sys.platform", "win32"),
             patch.dict(
                 "os.environ",
-                {"PROGRAMFILES": "/program-files", "LOCALAPPDATA": "/local-apps"},
+                {"PROGRAMFILES": "C:/program-files", "LOCALAPPDATA": "C:/local-apps"},
                 clear=True,
             ),
             patch("pathlib.Path.is_file", return_value=True),
@@ -359,8 +450,16 @@ class ExistingBrowserDiscoveryTests(unittest.TestCase):
         self.assertEqual(
             paths[:2],
             (
-                "/program-files/Microsoft/Edge/Application/msedge.exe",
-                "/program-files/Google/Chrome/Application/chrome.exe",
+                str(
+                    __import__("pathlib").Path(
+                        "C:/program-files/Microsoft/Edge/Application/msedge.exe"
+                    )
+                ),
+                str(
+                    __import__("pathlib").Path(
+                        "C:/program-files/Google/Chrome/Application/chrome.exe"
+                    )
+                ),
             ),
         )
         self.assertTrue(all(p.endswith(("msedge.exe", "chrome.exe")) for p in paths))
@@ -369,14 +468,20 @@ class ExistingBrowserDiscoveryTests(unittest.TestCase):
     def test_snap_launcher_path_is_not_resolved_to_snap_dispatcher(self):
         with (
             patch("sys.platform", "linux"),
-            patch("pathlib.Path.is_file", lambda p: str(p) == "/snap/bin/chromium"),
+            patch(
+                "pathlib.Path.is_file",
+                lambda p: str(p).replace("\\", "/") == "/snap/bin/chromium",
+            ),
             patch("os.access", return_value=True),
             patch(
                 "pathlib.Path.resolve",
                 side_effect=AssertionError("must preserve launcher path"),
             ),
         ):
-            self.assertEqual(installed_browsers(), ("/snap/bin/chromium",))
+            self.assertEqual(
+                tuple(p.replace("\\", "/") for p in installed_browsers()),
+                ("/snap/bin/chromium",),
+            )
 
     def test_missing_or_non_executable_installation_is_unsupported(self):
         for is_file, executable in ((False, True), (True, False)):
@@ -399,7 +504,9 @@ class MissingBrowserFallbackTests(unittest.IsolatedAsyncioTestCase):
             patch.dict("sys.modules", {"playwright.async_api": fake}),
         ):
             with self.assertRaisesRegex(RuntimeError, "existing_browser_unavailable"):
-                await OfficialWebpageRenderer().render(document())
+                await OfficialWebpageRenderer().render(
+                    document(), validate_detail=NewsCollector.validate_screenshot_detail
+                )
         start.assert_not_called()
 
     async def test_absent_optional_controller_does_not_install_anything(self):
@@ -411,7 +518,9 @@ class MissingBrowserFallbackTests(unittest.IsolatedAsyncioTestCase):
             patch.dict("sys.modules", {"playwright.async_api": None}),
         ):
             with self.assertRaises(ModuleNotFoundError):
-                await OfficialWebpageRenderer().render(document())
+                await OfficialWebpageRenderer().render(
+                    document(), validate_detail=NewsCollector.validate_screenshot_detail
+                )
 
     async def test_incompatible_installed_browsers_never_launch_default_download(self):
         launch = AsyncMock(side_effect=RuntimeError("incompatible browser"))
@@ -431,7 +540,9 @@ class MissingBrowserFallbackTests(unittest.IsolatedAsyncioTestCase):
             ),
         ):
             with self.assertRaisesRegex(RuntimeError, "existing_browser_unavailable"):
-                await OfficialWebpageRenderer().render(document())
+                await OfficialWebpageRenderer().render(
+                    document(), validate_detail=NewsCollector.validate_screenshot_detail
+                )
         self.assertEqual(
             [call.kwargs["executable_path"] for call in launch.await_args_list],
             ["/usr/bin/chromium", "/usr/bin/google-chrome"],

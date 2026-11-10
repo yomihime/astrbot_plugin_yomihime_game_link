@@ -844,6 +844,7 @@ class CoreRuntime:
             now=utc_clock,
             claim_lease=claim_lease,
             send_timeout=send_timeout,
+            retry_at=lambda _event, completed: completed + timedelta(minutes=5),
         )
 
         async def background_config_for(module):
@@ -1148,12 +1149,34 @@ class CoreRuntime:
             return None
         before = self.registry.snapshot().module(module_id)
         if requested_url(document) is not None:
-            if not before.enabled or self._closing:
+            if (
+                module_id != "ff14/ff14"
+                or not before.enabled
+                or self._closing
+                or self._trusted_bundled_manifests.get(module_id) is None
+                or not _matches_trusted_bundled_manifest(
+                    before.manifest,
+                    self._trusted_bundled_manifests[module_id],
+                )
+            ):
+                return None
+            validators = tuple(
+                callback
+                for collector in before.handlers.collectors.values()
+                if callable(
+                    callback := getattr(collector, "validate_screenshot_detail", None)
+                )
+            )
+            if len(validators) != 1:
                 return None
             renderer = getattr(self, "_official_webpage_renderer", None)
             if renderer is None:
                 renderer = self._official_webpage_renderer = OfficialWebpageRenderer()
-            content = await renderer.render(document)
+            content = await renderer.render(
+                document,
+                validate_detail=validators[0],
+                cache_scope=(module_id, before.epoch),
+            )
             after = self.registry.snapshot().module(module_id)
             if not after.enabled or after.epoch != before.epoch or self._closing:
                 raise InvalidInvocation()

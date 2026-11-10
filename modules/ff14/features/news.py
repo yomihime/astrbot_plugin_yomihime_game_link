@@ -377,6 +377,22 @@ def news_document(item):
 
 
 class NewsCollector:
+    @staticmethod
+    def validate_screenshot_detail(content: bytes, news_id: str, version: str) -> bool:
+        """Check the official detail response against the collected revision."""
+        try:
+            value = json.loads(content)
+            if not isinstance(value, dict) or str(value.get("Code")) != "0":
+                return False
+            data = value.get("Data")
+            return (
+                isinstance(data, dict)
+                and str(data.get("Id")) == news_id
+                and article(data)["version"] == version
+            )
+        except (TypeError, ValueError, UnicodeDecodeError):
+            return False
+
     def __init__(self, services, *, clock=lambda: datetime.now(UTC)):
         self.services = services
         self.clock = clock
