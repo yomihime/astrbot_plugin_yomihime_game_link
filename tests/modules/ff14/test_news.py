@@ -104,6 +104,14 @@ def page(rows, *, pages=1, total=None):
 class NewsEvaluatorTests(unittest.TestCase):
     def evaluate(self, rows, state=None):
         obs = observation(rows)
+        items = []
+        for item in obs.payload["articles"]:
+            old = (state or {}).get("latest", {}).get(item["id"], {})
+            revision = old.get("revision", 1) + bool(
+                old and old.get("version") != item["version"]
+            )
+            items.append({**item, "revision": revision})
+        obs = replace(obs, payload={"articles": items})
         decision = NewsEvaluator().evaluate(
             VIEW, obs, None if state is None else EvaluationState(1, state)
         )
@@ -134,7 +142,7 @@ class NewsEvaluatorTests(unittest.TestCase):
         decision = self.evaluate(rows, baseline.state)
         self.assertEqual(
             [e.event_key.rsplit(":", 1)[0] for e in decision.events],
-            ["ff14:cn:news:1", "ff14:cn:news:2"],
+            ["ff14:cn:news:1:r1", "ff14:cn:news:2:r1"],
         )
         document = decision.events[0].display_data
         self.assertEqual(document.title, "News")
@@ -311,7 +319,9 @@ class NewsEvaluatorTests(unittest.TestCase):
         )
         self.assertEqual(self.evaluate([edited], reopened).events, ())
         reverted = self.evaluate([first], reopened)
-        self.assertEqual(reverted.events, ())
+        self.assertEqual(len(reverted.events), 1)
+        self.assertIn(":r3:", reverted.events[0].event_key)
+        self.assertEqual(self.evaluate([first], reverted.state).events, ())
         third = self.evaluate([row(7, Content="奖励为300金币。")], reverted.state)
         self.assertEqual(len(third.events), 1)
         self.assertNotEqual(third.events[0].event_key, event.event_key)
@@ -373,7 +383,7 @@ class NewsEvaluatorTests(unittest.TestCase):
         self.assertEqual(len(result.events), 1)
         self.assertEqual(result.events[0].event_key, "ff14:cn:news:7")
         self.assertEqual(len(result.events[0].display_data.ordered_blocks), 2)
-        self.assertEqual(result.state["schema"], 2)
+        self.assertEqual(result.state["schema"], 3)
         self.assertEqual(self.evaluate([row(7)], result.state).events, ())
         changed = self.evaluate([row(7, Content="New body.")], result.state)
         self.assertEqual(len(changed.events), 1)
@@ -405,9 +415,29 @@ class NewsEvaluatorTests(unittest.TestCase):
         baseline = self.evaluate([row(7)])
         with patch("ygl_test_subject.modules.ff14.features.news.MAX_REMEMBERED", 1):
             with self.assertRaisesRegex(ValueError, "news_backlog_limit"):
-                self.evaluate([row(7, Content="A new version.")], baseline.state)
-        self.assertEqual(len(baseline.state["versions"]["7"]), 1)
+                self.evaluate([row(7), row(8)], baseline.state)
+        self.assertEqual(baseline.state["last_revisions"]["7"], 1)
         self.assertEqual(self.evaluate([row(7)], baseline.state).events, ())
+
+    def test_schema_two_migration_preserves_pending_and_detects_actual_edit(self):
+        before = article(row(7, Content="A"))
+        state = {
+            "schema": 2,
+            "seen": ["7"],
+            "latest": {"7": before},
+            "versions": {"7": [before["version"]]},
+            "pending": [before],
+        }
+        same = self.evaluate([row(7, Content="A")], state)
+        self.assertEqual(len(same.events), 1)
+        self.assertEqual(
+            same.events[0].event_key, "ff14:cn:news:7:" + before["version"]
+        )
+        self.assertEqual(self.evaluate([row(7, Content="A")], same.state).events, ())
+        state["pending"] = []
+        changed = self.evaluate([row(7, Content="B")], state)
+        self.assertEqual(len(changed.events), 1)
+        self.assertIn(":r2:", changed.events[0].event_key)
 
     def test_configuration_validation_full_identity_and_bounds(self):
         validate_admins(["platform-a:17", "platform-b:17"])
@@ -730,6 +760,81 @@ class NewsCollectorTests(unittest.IsolatedAsyncioTestCase):
             state, previous = decision.state, current
         self.assertTrue(set(str(i) for i in range(1, 21)).issubset(state["seen"]))
         self.assertTrue(set(str(i) for i in range(1, 21)).issubset(fetched))
+
+    async def test_shared_revision_survives_failure_restart_removal_and_revert(self):
+        listing = [row(7)]
+        body = row(7, Content="A")
+        fail = False
+
+        async def fetch(request):
+            if request.path.endswith("newsList"):
+                value = page(listing)
+            elif fail:
+                return HttpResponse(429, {}, b"limited")
+            else:
+                value = {"Code": "0", "Data": body}
+            return HttpResponse(200, {}, json.dumps(value).encode())
+
+        services = SimpleNamespace(
+            scopes=SimpleNamespace(
+                bind=AsyncMock(
+                    return_value=SimpleNamespace(http=SimpleNamespace(fetch=fetch))
+                )
+            )
+        )
+
+        async def poll(previous):
+            # Recreate process-local collector each round; all counters are durable.
+            return await NewsCollector(services, clock=lambda: NOW).collect(
+                CollectionView(KEY, invocation=INVOCATION),
+                NormalizedInput({}),
+                previous,
+            )
+
+        baseline = await poll(None)
+        state = NewsEvaluator().evaluate(VIEW, baseline, None).state
+        a = await poll(baseline)
+        state = NewsEvaluator().evaluate(VIEW, a, EvaluationState(1, state)).state
+        self.assertEqual(a.payload["revisions"]["7"]["revision"], 1)
+        body = row(7, Content="B")
+        fail = True
+        failed = await poll(a)
+        self.assertEqual(failed.payload["revisions"], a.payload["revisions"])
+        fail = False
+        b = await poll(failed)
+        decision = NewsEvaluator().evaluate(VIEW, b, EvaluationState(1, state))
+        self.assertEqual(b.payload["revisions"]["7"]["revision"], 2)
+        self.assertEqual(len(decision.events), 1)
+        other = NewsEvaluator().evaluate(
+            replace(VIEW, subscription_id="other"), b, EvaluationState(1, state)
+        )
+        self.assertEqual(other.events[0].event_key, decision.events[0].event_key)
+        repeated = await poll(b)
+        self.assertEqual(
+            NewsEvaluator()
+            .evaluate(VIEW, repeated, EvaluationState(1, decision.state))
+            .events,
+            (),
+        )
+        listing = []
+        absent = await poll(repeated)
+        empty = NewsEvaluator().evaluate(
+            VIEW, absent, EvaluationState(1, decision.state)
+        )
+        self.assertEqual(absent.payload["revisions"]["7"]["revision"], 2)
+        listing = [row(7)]
+        body = row(7, Content="A")
+        returned = await poll(absent)
+        reverted = NewsEvaluator().evaluate(
+            VIEW, returned, EvaluationState(1, empty.state)
+        )
+        self.assertEqual(returned.payload["revisions"]["7"]["revision"], 3)
+        self.assertEqual(len(reverted.events), 1)
+        self.assertIn(":r3:", reverted.events[0].event_key)
+        self.assertEqual(
+            returned.payload["revisions"]["7"]["version"],
+            a.payload["revisions"]["7"]["version"],
+        )
 
     async def test_rotation_detects_unchanged_list_body_edit_after_restart_and_failed_detail(
         self,

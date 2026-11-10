@@ -307,6 +307,14 @@ class FF14NewsRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.now += timedelta(seconds=900)
         await self.tick()
         self.assertEqual(len(self.context.calls), 2)
+        self.transport.rows[-1] = row(7)
+        self.now += timedelta(seconds=900)
+        await self.tick()
+        self.assertEqual(len(self.context.calls), 3)
+        self.assertIn("标题更新", self.context.calls[-1][1].chain[0].text)
+        self.now += timedelta(seconds=900)
+        await self.tick()
+        self.assertEqual(len(self.context.calls), 3)
 
     async def test_changed_live_manifest_cannot_inherit_configuration_authority(self):
         from dataclasses import replace

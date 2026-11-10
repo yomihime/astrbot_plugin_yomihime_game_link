@@ -434,6 +434,7 @@ class NewsCollector:
                     "refresh_cursor",
                     "poll_round",
                     "pending_new_ids",
+                    "revisions",
                 )
                 if key in prior
             }
@@ -525,6 +526,14 @@ class NewsCollector:
             for key, value in prior.get("details", {}).items()
             if key in by_id
         }
+        # Shared, durable revision counters, not per-recipient counters. Retain
+        # compact entries even when an ID leaves the current archive window.
+        revisions = {
+            key: dict(value) for key, value in prior.get("revisions", {}).items()
+        }
+        for key, value in prior.get("details", {}).items():
+            if value.get("version") and key not in revisions:
+                revisions[key] = {"version": value["version"], "revision": 1}
         round_number = int(prior.get("poll_round", 0))
         cursor = str(prior.get("refresh_cursor", ""))
         pending_new_ids = [
@@ -580,7 +589,17 @@ class NewsCollector:
                     self._detail_cache[cache_key] = dict(cached)
                     while len(self._detail_cache) > MAX_ARTICLES:
                         del self._detail_cache[next(iter(self._detail_cache))]
-                details[news_id] = dict(cached)
+                old_revision = revisions.get(news_id)
+                revision = (old_revision["revision"] if old_revision else 0) + (
+                    old_revision is None or old_revision["version"] != cached["version"]
+                )
+                revisions[news_id] = {
+                    "version": cached["version"],
+                    "revision": revision,
+                }
+                details[news_id] = {**cached, "revision": revision}
+                if len(revisions) > MAX_REMEMBERED:
+                    raise ValueError("news_backlog_limit")
             pending_new_ids = [key for key in pending_new_ids if key not in selected]
             if selected_rotation:
                 cursor = selected_rotation[-1]
@@ -597,6 +616,7 @@ class NewsCollector:
         self._detail_cache.clear()
         return {
             "articles": result,
+            "revisions": revisions,
             "known_ids": list(by_id),
             "details": details,
             "refresh_cursor": cursor,
@@ -621,9 +641,9 @@ class NewsEvaluator:
             state = {
                 "seen": [row["id"] for row in rows],
                 "pending": [],
-                "schema": 2,
+                "schema": 3,
                 "latest": {},
-                "versions": {},
+                "last_revisions": {},
             }
         seen = set(state["seen"])
         current_ids = {row["id"] for row in rows}
@@ -632,14 +652,15 @@ class NewsEvaluator:
             for key, value in state.get("latest", {}).items()
             if key in current_ids
         }
-        versions = {
-            key: list(value) for key, value in state.get("versions", {}).items()
-        }
+        last_revisions = dict(state.get("last_revisions", {}))
         pending = [dict(item) for item in state["pending"]]
-        if state.get("schema") != 2:
-            # Legacy pending IDs keep their already committed event identity.
+        if state.get("schema") != 3:
+            # Pending deliveries retain their original committed event identity.
             for item in pending:
-                item["legacy_event"] = True
+                if state.get("schema") != 2:
+                    item["legacy_event"] = True
+                else:
+                    item["legacy_hash_event"] = True
         for row in rows:
             item = dict(row)
             news_id, version = item["id"], item.get("version")
@@ -650,9 +671,23 @@ class NewsEvaluator:
             ):
                 continue
             old = latest.get(news_id)
-            hashes = versions.setdefault(news_id, [])
+            revision = item.get("revision", 1)
+            if type(revision) is not int or revision < 1:
+                raise ValueError("news_revision_invalid")
+            item["revision"] = revision
+            previous_revision = last_revisions.get(news_id)
             is_new = news_id not in seen
-            if is_new or (hashes and version not in hashes):
+            migrated_change = (
+                state.get("schema") == 2
+                and old is not None
+                and old.get("version") is not None
+                and old.get("version") != version
+            )
+            if (
+                is_new
+                or migrated_change
+                or (previous_revision is not None and revision > previous_revision)
+            ):
                 event_item = {
                     key: value
                     for key, value in item.items()
@@ -667,12 +702,14 @@ class NewsEvaluator:
                 pending.append(event_item)
             # A known legacy/baseline ID with no body is learned silently.
             seen.add(news_id)
-            if version not in hashes:
-                hashes.append(version)
-            latest[news_id] = item
+            # Migrated IDs adopt the shared collector revision; only an actual
+            # hash change emits. Stale observations cannot roll back the baseline.
+            if previous_revision is None or revision >= previous_revision:
+                last_revisions[news_id] = revision
+                latest[news_id] = item
         if (
             len(seen) > MAX_REMEMBERED
-            or sum(map(len, versions.values())) > MAX_REMEMBERED
+            or len(last_revisions) > MAX_REMEMBERED
             or len(pending) > MAX_ARTICLES
         ):
             raise ValueError("news_backlog_limit")
@@ -681,6 +718,8 @@ class NewsEvaluator:
         for item in selected:
             key = "ff14:cn:news:" + item["id"]
             if not item.get("legacy_event"):
+                if not item.get("legacy_hash_event"):
+                    key += ":r" + str(item["revision"])
                 key += ":" + item["version"]
             digest = _digest(item)[:16]
             events.append(
@@ -693,10 +732,10 @@ class NewsEvaluator:
             )
         return EvaluationDecision(
             {
-                "schema": 2,
+                "schema": 3,
                 "seen": sorted(seen),
                 "latest": latest,
-                "versions": versions,
+                "last_revisions": last_revisions,
                 "pending": pending,
             },
             False,
@@ -709,7 +748,16 @@ class NewsComposer:
         if not contributions or any(c.composer_id != COMPOSER for c in contributions):
             raise ValueError("news_contribution_invalid")
         if (
-            len({(c.payload["id"], c.payload.get("version")) for c in contributions})
+            len(
+                {
+                    (
+                        c.payload["id"],
+                        c.payload.get("revision"),
+                        c.payload.get("version"),
+                    )
+                    for c in contributions
+                }
+            )
             != 1
         ):
             raise ValueError("news_contribution_conflict")
