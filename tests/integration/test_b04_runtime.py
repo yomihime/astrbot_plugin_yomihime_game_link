@@ -1744,7 +1744,11 @@ class B04RuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
         owner = await self.runtime.repositories.subscriptions.current(
             owner_view.subscription_id
         )
-        failing_runtime = build_runtime(self.root, clock=self.clock, renderer=renderer)
+        # Use the production send deadline while testing asset fallback.
+        # Dedicated timeout tests keep their explicit deadlines.
+        failing_runtime = build_runtime(
+            self.root, clock=self.clock, renderer=renderer, send_timeout=30.0
+        )
         event_key = "renderer-fallback"
         event = await create_subscription_event_fixture(
             failing_runtime.repositories.deliveries,
@@ -1793,7 +1797,7 @@ class B04RuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
             event.subscription_id,
             event.subscription_revision,
         )
-        self.assertEqual(result.state, DeliveryState.SENT)
+        self.assertEqual(result.state, DeliveryState.SENT, result.error_code)
         self.assertEqual(len(failing_runtime.message_port.calls), 1)
         payload = failing_runtime.message_port.calls[0][1]
         self.assertIn("optional image", payload.text)

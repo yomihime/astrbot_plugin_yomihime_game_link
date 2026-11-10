@@ -679,6 +679,7 @@ class ReleaseBuildTests(unittest.TestCase):
                 self.assertEqual(imported.returncode, 0, imported.stderr)
                 names = set(archive.namelist())
                 self.assertIn("requirements.txt", names)
+                self.assertIn("requirements-news-screenshot.txt", names)
                 for name in FONT_ASSETS:
                     self.assertEqual(archive.read(name), (ROOT / name).read_bytes())
                 self.assertEqual(

@@ -642,10 +642,7 @@ class DeliveryService:
                                 raise
                             except Exception:
                                 rendered = self._public_text_fallback(document)
-                            if (
-                                self._public_card_renderer is not None
-                                and document.card is not None
-                            ):
+                            if self._public_card_renderer is not None:
                                 try:
                                     public_png = await self._public_card_renderer(
                                         candidates[0][2].record.module_id, document
@@ -654,6 +651,25 @@ class DeliveryService:
                                     raise
                                 except Exception:
                                     public_png = None
+                            if public_png:
+                                from ..presentation.official_webpage import (
+                                    requested_url,
+                                    without_screenshot_notice,
+                                )
+
+                                if requested_url(document) is not None:
+                                    try:
+                                        rendered = await self._renderer.render(
+                                            without_screenshot_notice(document),
+                                            limits=self._limits,
+                                            audience=DisplayAudience.PUBLIC,
+                                        )
+                                    except asyncio.CancelledError:
+                                        raise
+                                    except Exception:
+                                        rendered = self._public_text_fallback(
+                                            document, screenshot_available=True
+                                        )
 
                         else:
                             rendered = await self._renderer.render_batch(
@@ -1023,8 +1039,27 @@ class DeliveryService:
         return DeliveryResult(DeliveryState.CANCELLED, "subscription_revision_changed")
 
     @staticmethod
-    def _public_text_fallback(document):
-        """Keep a valid settlement event when an optional renderer fails."""
+    def _public_text_fallback(document, *, screenshot_available=False):
+        """Keep a valid public event when an optional renderer fails."""
+        from ..presentation.official_webpage import requested_url
+
+        url = requested_url(document)
+        if url is not None:
+            parts = [document.title]
+            if document.subject:
+                parts.append(document.subject)
+            parts.extend(
+                block.text
+                for block in document.ordered_blocks
+                if type(block) is TextBlock
+            )
+            parts.append(f"官方原文: {url}")
+            text = "\n".join(parts)
+            if not screenshot_available:
+                text += "\n网页截图暂不可用，请查看原文。"
+            if len(text) > 8192:
+                raise ValueError("public event text fallback exceeds bounds")
+            return validate_contract(DisplayOutput(text))
         blocks = [
             block.text for block in document.ordered_blocks if type(block) is TextBlock
         ]
@@ -1550,7 +1585,7 @@ class DeliveryService:
             subscription_revision=event.subscription_revision,
             expected_state=state,
             retry_at=self._retry_at(event, completed_at)
-            if attempt.state is DeliveryState.FAILED
+            if attempt.state is DeliveryState.FAILED and attempt_number < 3
             else None,
         )
 
@@ -1903,7 +1938,9 @@ class DeliveryService:
             message_id,
         )
         retry = (
-            self._retry_at(event, completed) if state is DeliveryState.FAILED else None
+            self._retry_at(event, completed)
+            if state is DeliveryState.FAILED and attempt.attempt_number < 3
+            else None
         )
         try:
             await self._deliveries.record_attempt(
@@ -1955,7 +1992,11 @@ class DeliveryService:
             completed_at,
             code,
         )
-        retry = self._retry_at_for_digest(envelope, completed_at)
+        retry = (
+            self._retry_at_for_digest(envelope, completed_at)
+            if attempt_number < 3
+            else None
+        )
         finished = await self._windows.complete_envelope_send(
             claim,
             attempt,
@@ -2010,7 +2051,24 @@ class DeliveryService:
         png_bytes=None,
     ) -> DeliveryResult:
         validate_contract(output)
-        message = RenderedMessage(output.text, output.resource_ids, png_bytes=png_bytes)
+        from ..presentation.official_webpage import CapturedPages
+
+        text = output.text
+        image_profile = "card"
+        if type(png_bytes) is CapturedPages:
+            image_profile = "webpage"
+            if png_bytes.notice:
+                text += "\n" + png_bytes.notice
+            # The internal Host payload keeps immutable byte tuples. Browser
+            # pages may be PNG or JPEG; ordinary card PNG policy is unchanged.
+            png_bytes = tuple(png_bytes)
+        message = RenderedMessage(
+            text,
+            output.resource_ids,
+            png_bytes=None if type(png_bytes) is tuple else png_bytes,
+            png_pages=png_bytes if type(png_bytes) is tuple else (),
+            image_profile=image_profile,
+        )
         attempt = envelope.delivery_attempts[-1]
 
         async def finish(*args):
@@ -2169,7 +2227,7 @@ class DeliveryService:
         )
         retry = (
             self._retry_at_for_digest(envelope, completed)
-            if state is DeliveryState.FAILED
+            if state is DeliveryState.FAILED and attempt.attempt_number < 3
             else None
         )
         try:

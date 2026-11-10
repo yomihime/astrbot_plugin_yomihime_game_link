@@ -1,7 +1,8 @@
 """Official CN news: bounded complete snapshots and durable three-event drains.
 
 The endpoint is a public website JSON source, not a promised developer API.
-External HTML is reduced to literal text; images and OutLink are never fetched.
+External HTML is reduced to literal excerpts; OutLink is never followed.
+An optional display marker asks Core to capture the fixed official desktop page.
 """
 
 from __future__ import annotations
@@ -13,17 +14,19 @@ import re
 import uuid
 from collections.abc import Mapping
 from datetime import UTC, datetime
+from difflib import SequenceMatcher
 from html.parser import HTMLParser
 from unicodedata import category
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from zoneinfo import ZoneInfo
 
-from ....yomihime_game_link_sdk import cards
 from ....yomihime_game_link_sdk.contexts import InvocationOrigin
 from ....yomihime_game_link_sdk.display import (
     DisplayDocument,
     Link,
     LinksBlock,
     TextBlock,
+    UnknownBlock,
 )
 from ....yomihime_game_link_sdk.errors import SourceHttpError
 from ....yomihime_game_link_sdk.results import (
@@ -44,7 +47,6 @@ from ....yomihime_game_link_sdk.subscriptions import (
     PublicEventContribution,
     SubscriptionRequest,
 )
-from ..presentation import ff14_card
 
 SOURCE = "ff14_news_official"
 COLLECTOR = "ff14.news.collect"
@@ -57,6 +59,14 @@ MAX_PAGES = 32
 MAX_ARTICLES = 1600
 MAX_REMEMBERED = 5000
 MAX_RESPONSE_BYTES = 2_000_000
+MAX_BODY_CHARS = (
+    500_000  # Full official major-version patch notes include large HTML tables.
+)
+DETAIL_BUDGET = 12
+HEAD_REFRESH = 4
+BODY_SNAPSHOT_CHARS = 1024
+CATEGORY_NAMES = {"8325": "公告"}
+_HASH = re.compile(r"[0-9a-f]{64}\Z")
 _ID = re.compile(r"[1-9][0-9]{0,11}\Z")
 _COMPONENT = re.compile(r"[^\s:/\\\x00-\x1f\x7f]{1,128}\Z")
 
@@ -93,8 +103,9 @@ def validate_targets(value):
 
 
 class _Plain(HTMLParser):
-    def __init__(self):
+    def __init__(self, paragraph_separator=" "):
         super().__init__(convert_charrefs=True)
+        self.paragraph_separator = paragraph_separator
         self.parts = []
         self.hidden = 0
 
@@ -102,13 +113,15 @@ class _Plain(HTMLParser):
         if tag in ("script", "style", "iframe", "object"):
             self.hidden += 1
         elif tag in ("p", "br", "div", "li") and not self.hidden:
-            self.parts.append(" ")
+            self.parts.append(self.paragraph_separator)
 
     def handle_endtag(self, tag):
         if tag in ("script", "style", "iframe", "object"):
             self.hidden = max(0, self.hidden - 1)
         elif not self.hidden:
-            self.parts.append(" ")
+            self.parts.append(
+                self.paragraph_separator if tag in ("p", "div", "li") else " "
+            )
 
     def handle_data(self, data):
         if not self.hidden:
@@ -125,6 +138,165 @@ def plain(value, limit):
     # One malformed source string must not stall the shared news outbox.
     text = "".join(c for c in text if not category(c).startswith("C"))
     return text[:limit]
+
+
+def body_excerpt(content, title, limit=200):
+    """Take bounded literal body sentences, never invent a model-written summary.
+
+    The list's Summary commonly repeats the title, so it is not a fallback.
+    Keep facts in source order, omit standalone salutations/title/footer, and
+    signal truncation rather than silently presenting a partial sentence as full.
+    """
+    if type(content) is not str or len(content) > MAX_BODY_CHARS:
+        raise ValueError("news_text_invalid")
+    parser = _Plain(paragraph_separator="\n")
+    parser.feed(content)
+    text = "".join(parser.parts)
+    text = "".join(c for c in text if c.isspace() or not category(c).startswith("C"))
+    title_key = "".join(c for c in title if c.isalnum())
+    selected = []
+    for piece in re.split(r"(?<=[。！？!?])\s*|(?<=\.)\s+|\n+", text):
+        piece = " ".join(piece.split())
+        key = "".join(c for c in piece if c.isalnum())
+        if not key or key == title_key or (len(key) >= 8 and key in title_key):
+            continue
+        if re.fullmatch(
+            r"(?:亲爱的|尊敬的)?(?:各位)?冒险者(?:们)?[：:，,！!。 ]*", piece
+        ):
+            continue
+        if re.fullmatch(
+            r"(?:《最终幻想14》|最终幻想14)?(?:中国|国服)?(?:运营|项目)团队[。 ]*",
+            piece,
+        ):
+            continue
+        if re.fullmatch(r"\d{4}[年/.-]\d{1,2}[月/.-]\d{1,2}日?", piece):
+            continue
+        remaining = limit - len(" ".join(selected)) - bool(selected)
+        if len(piece) > remaining:
+            if not selected:
+                selected.append(piece[: limit - 1].rstrip() + "…")
+            break
+        selected.append(piece)
+        if len(selected) == 3:
+            break
+    return " ".join(selected) or "暂时无法生成简述，请查看原文。"
+
+
+class _Content(_Plain):
+    """Semantic article body only; not page chrome, scripts or style changes."""
+
+    def __init__(self):
+        super().__init__(paragraph_separator="\n")
+        self.resources = []
+
+    def handle_starttag(self, tag, attrs):
+        super().handle_starttag(tag, attrs)
+        if self.hidden:
+            return
+        field = "href" if tag == "a" else "src"
+        if tag not in ("a", "img", "video", "audio", "source"):
+            return
+        value = dict(attrs).get(field)
+        if not value:
+            return
+        parts = urlsplit(value)
+        if parts.scheme not in ("", "https", "http"):
+            return
+        query = [
+            (k, v)
+            for k, v in parse_qsl(parts.query, keep_blank_values=True)
+            if k.lower() not in ("_", "t", "timestamp", "cache", "spm")
+            and not k.lower().startswith("utm_")
+        ]
+        value = urlunsplit(
+            (
+                parts.scheme.lower(),
+                parts.netloc.lower(),
+                parts.path,
+                urlencode(sorted(query)),
+                parts.fragment,
+            )
+        )
+        self.resources.append((tag, value))
+
+    def handle_endtag(self, tag):
+        if tag in ("script", "style", "iframe", "object"):
+            self.hidden = max(0, self.hidden - 1)
+        elif not self.hidden and tag in ("p", "div", "li"):
+            self.parts.append("\n")
+
+
+def _digest(value):
+    return hashlib.sha256(
+        json.dumps(
+            value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def content_facts(content):
+    """Return bounded snapshot plus hashes of the *complete* semantic body.
+
+    Consumers checking a live screenshot must use article(detail)["version"].
+    Dates/views/list order/HTML styling never enter that version. Resource URLs
+    are compared as data only and never fetched here.
+    """
+    if type(content) is not str or len(content) > MAX_BODY_CHARS:
+        raise ValueError("news_text_invalid")
+    parser = _Content()
+    parser.feed(content)
+    text = "".join(parser.parts)
+    text = "".join(c for c in text if c.isspace() or not category(c).startswith("C"))
+    text = "\n".join(
+        " ".join(line.split()) for line in text.splitlines() if line.strip()
+    )
+    return {
+        "body_hash": _digest([" ".join(text.split()), parser.resources]),
+        "resources_hash": _digest(parser.resources),
+        "body_snapshot": text[:BODY_SNAPSHOT_CHARS],
+        "body_truncated": len(text) > BODY_SNAPSHOT_CHARS,
+    }
+
+
+def change_excerpt(old, new):
+    """Describe only observed literal differences, with explicit bounded fallback."""
+    changes = []
+    if old["title"] != new["title"]:
+        changes.append("标题更新：" + new["title"][:80])
+    if old["category"] != new["category"]:
+        changes.append(
+            "分类调整为："
+            + CATEGORY_NAMES.get(new["category"], "官网分类 " + new["category"])
+        )
+    if old.get("body_hash") != new.get("body_hash"):
+        body_change_start = len(changes)
+
+        def split(text):
+            return [
+                p.strip() for p in re.split(r"(?<=[。！？!?])|\n+", text) if p.strip()
+            ]
+
+        before, after = (
+            split(old.get("body_snapshot", "")),
+            split(new.get("body_snapshot", "")),
+        )
+        for operation, a, b, c, d in SequenceMatcher(
+            None, before, after, autojunk=False
+        ).get_opcodes():
+            if operation == "equal":
+                continue
+            if operation in ("insert", "replace"):
+                changes.append("新增/修改：" + " ".join(after[c:d])[:100])
+            if operation in ("delete", "replace"):
+                changes.append("删除：" + " ".join(before[a:b])[:80])
+            if len(changes) >= 3:
+                break
+        if old.get("resources_hash") != new.get("resources_hash"):
+            changes.append("正文图片或链接发生变化，请查看原文。")
+        if len(changes) == body_change_start:
+            changes.append("正文保留片段之外有修改，请查看原文。")
+    text = "；".join(changes) or "正文已更新，请查看原文。"
+    return text if len(text) <= 260 else text[:259] + "…"
 
 
 def article(row):
@@ -150,41 +322,87 @@ def article(row):
         )
     except (ValueError, TypeError):
         published = "官网未提供可识别时间"
-    summary = plain(row.get("Summary") or row.get("Content") or "", 200)
+    summary = body_excerpt(row.get("Content") or "", title)
+    facts = content_facts(row.get("Content") or "")
+    complete = "Content" in row and type(row.get("Content")) is str
+    version = _digest([title, category, facts["body_hash"]]) if complete else None
     return {
         "id": news_id,
         "title": title,
         "category": category,
         "published": published,
-        "summary": summary or "官网未提供摘要。",
+        "summary": summary,
+        "version": version,
+        "detail_complete": complete,
+        **facts,
     }
 
 
 def news_document(item):
-    url = "https://ff.web.sdo.com/web8/index.html#/newstab/newscont/" + item["id"]
-    lines = (
-        f"类别：官网类别 {item['category']}",
-        f"时间：{item['published']}",
-        item["summary"],
+    news_id = item["id"]
+    if type(news_id) is not str or not _ID.fullmatch(news_id):
+        raise ValueError("news_id_invalid")
+    url = "https://ff.web.sdo.com/web8/index.html#/newstab/newscont/" + news_id
+    category_label = CATEGORY_NAMES.get(
+        item["category"], "官网分类 " + item["category"]
     )
-    return DisplayDocument(
-        title="FF14 国服新闻",
-        subject=item["title"],
-        ordered_blocks=tuple(TextBlock(line) for line in lines)
-        + (LinksBlock((Link("官方原文", url),)),),
-        sources=("最终幻想14 国服官网",),
-        card=ff14_card(
-            item["title"],
-            category="国服新闻",
-            blocks=tuple(cards.Text(line) for line in lines) + (cards.Text(url),),
+    try:
+        time_label = (
+            datetime.fromisoformat(item["published"])
+            .astimezone(ZoneInfo("Asia/Shanghai"))
+            .strftime("%Y-%m-%d %H:%M")
+            + "（北京时间）"
+        )
+    except (ValueError, TypeError):
+        time_label = item["published"]
+    blocks = [
+        TextBlock(
+            "修改摘要：" + item["change_summary"]
+            if item.get("change_summary")
+            else item["summary"]
         ),
+        LinksBlock((Link("官方原文", url),)),
+    ]
+    version = item.get("version")
+    if type(version) is str and _HASH.fullmatch(version):
+        blocks.append(
+            UnknownBlock(
+                kind="official_desktop_screenshot_v1:" + version,
+                required=False,
+                fallback_text="网页截图暂不可用，请查看原文。",
+            )
+        )
+    return DisplayDocument(
+        title=item["title"],
+        subject="分类：" + category_label + " · 时间：" + time_label,
+        ordered_blocks=tuple(blocks),
     )
 
 
 class NewsCollector:
+    @staticmethod
+    def validate_screenshot_detail(content: bytes, news_id: str, version: str) -> bool:
+        """Check the official detail response against the collected revision."""
+        try:
+            value = json.loads(content)
+            if not isinstance(value, dict) or str(value.get("Code")) != "0":
+                return False
+            data = value.get("Data")
+            return (
+                isinstance(data, dict)
+                and str(data.get("Id")) == news_id
+                and article(data)["version"] == version
+            )
+        except (TypeError, ValueError, UnicodeDecodeError):
+            return False
+
     def __init__(self, services, *, clock=lambda: datetime.now(UTC)):
         self.services = services
         self.clock = clock
+        # Runtime-only progress across failed detail rounds. Keep normalized
+        # public facts, never full HTML, cookies or bytes. This is not a cursor:
+        # only a complete observation can advance durable known/seen state.
+        self._detail_cache = {}
 
     def normalize(self, parameters):
         if not isinstance(parameters, Mapping) or parameters:
@@ -204,19 +422,18 @@ class NewsCollector:
         ):
             raise ValueError("news_collection_invalid")
         now = self.clock()
-        known_ids = None
-        if previous is not None:
-            stored = previous.payload.get("known_ids")
-            if isinstance(stored, (list, tuple)):
-                known_ids = set(stored)
-            elif previous.completeness is ObservationCompleteness.COMPLETE:
-                known_ids = {row["id"] for row in previous.payload.get("articles", ())}
+        prior = dict(previous.payload) if previous is not None else {}
+        known_ids = prior.get("known_ids")
+        if (
+            known_ids is None
+            and previous is not None
+            and previous.completeness is ObservationCompleteness.COMPLETE
+        ):
+            known_ids = [row["id"] for row in prior.get("articles", ())]
         try:
-            # A single bounded source phase; Core also fences the execution lease.
             async with asyncio.timeout(80):
                 http = (await self.services.scopes.bind(context.invocation)).http
-                rows = await self._read(http, known_ids=known_ids)
-            payload = {"articles": rows, "known_ids": [row["id"] for row in rows]}
+                payload = await self._read(http, known_ids=known_ids, prior=prior)
             completeness = ObservationCompleteness.COMPLETE
         except (
             ValueError,
@@ -227,7 +444,20 @@ class NewsCollector:
         ) as exc:
             if isinstance(exc, SourceHttpError) and exc.code == "cancelled":
                 raise
-            payload = {"known_ids": None if known_ids is None else sorted(known_ids)}
+            # Preserve the last committed refresh position and all confirmed
+            # versions. Failed detail IO cannot erase the previous diff baseline.
+            payload = {
+                key: prior[key]
+                for key in (
+                    "details",
+                    "refresh_cursor",
+                    "poll_round",
+                    "pending_new_ids",
+                    "revisions",
+                )
+                if key in prior
+            }
+            payload["known_ids"] = known_ids
             completeness = ObservationCompleteness.FAILED
         return Observation(
             uuid.uuid4().hex,
@@ -280,7 +510,10 @@ class NewsCollector:
             raise ValueError("news_pagination_invalid")
         return page
 
-    async def _read(self, http, *, known_ids=None):
+    async def _read(self, http, *, known_ids=None, prior=None):
+        prior = prior or {}
+        if known_ids is None:
+            self._detail_cache.clear()
         first = await self._page(http, 0)
         rows = list(first["Data"])
         # Match Core's per-source concurrency bound. TaskGroup drains/cancels
@@ -304,30 +537,117 @@ class NewsCollector:
         # Detect insertions/reordering during traversal without relying on max ID.
         if await self._page(http, 0) != first:
             raise ValueError("news_pagination_changed")
-        result = []
-        for row in rows:
-            # Baseline needs IDs, not hundreds of historical detail requests.
-            # Later snapshots fetch a detail only for a newly discovered ID
-            # lacking a list summary. A failed detail keeps the prior known set.
-            if (
-                (not row.get("Summary") or not row.get("Title"))
-                and known_ids is not None
-                and str(row.get("Id")) not in known_ids
-            ):
-                news_id = str(row.get("Id"))
-                if not _ID.fullmatch(news_id):
-                    raise ValueError("news_id_invalid")
-                detail = await self._json(
-                    http, "/api/news/newsDetail", (("gameCode", "ff"), ("id", news_id))
+        by_id = {str(row["Id"]): row for row in rows}
+        if any(not _ID.fullmatch(news_id) for news_id in by_id):
+            raise ValueError("news_id_invalid")
+        details = {
+            key: dict(value)
+            for key, value in prior.get("details", {}).items()
+            if key in by_id
+        }
+        # Shared, durable revision counters, not per-recipient counters. Retain
+        # compact entries even when an ID leaves the current archive window.
+        revisions = {
+            key: dict(value) for key, value in prior.get("revisions", {}).items()
+        }
+        for key, value in prior.get("details", {}).items():
+            if value.get("version") and key not in revisions:
+                revisions[key] = {"version": value["version"], "revision": 1}
+        round_number = int(prior.get("poll_round", 0))
+        cursor = str(prior.get("refresh_cursor", ""))
+        pending_new_ids = [
+            key for key in prior.get("pending_new_ids", ()) if key in by_id
+        ]
+        if known_ids is not None:
+            known = set(known_ids)
+            pending_new_ids = list(
+                dict.fromkeys(
+                    pending_new_ids
+                    + [news_id for news_id in by_id if news_id not in known]
                 )
-                if (
-                    not isinstance(detail.get("Data"), dict)
-                    or str(detail["Data"].get("Id")) != news_id
-                ):
-                    raise ValueError("news_detail_invalid")
-                row = detail["Data"]
-            result.append(article(row))
-        return result
+            )
+            fresh = pending_new_ids
+            changed = [
+                news_id
+                for news_id in by_id
+                if news_id in details
+                and details[news_id].get("list_signature")
+                != self._list_signature(by_id[news_id])
+            ]
+            # Poll the current headlines every round, rotate the archive as well.
+            # A maximum scan costs 32 pages + one head check + 12 details,
+            # below the source's 60 RPM cap. Concurrency remains two.
+            priority = list(
+                dict.fromkeys(fresh + changed + list(by_id)[:HEAD_REFRESH])
+            )[:DETAIL_BUDGET]
+            remaining = sorted((key for key in by_id if key not in priority), key=int)
+            rotating = [
+                key for key in remaining if not cursor or int(key) > int(cursor)
+            ]
+            rotating += [key for key in remaining if cursor and int(key) <= int(cursor)]
+            selected_rotation = rotating[: max(0, DETAIL_BUDGET - len(priority))]
+            selected = priority + selected_rotation
+            for news_id in selected:
+                row = by_id[news_id]
+                cache_key = (news_id, _digest([round_number, row]))
+                cached = self._detail_cache.get(cache_key)
+                if cached is None:
+                    detail = await self._json(
+                        http,
+                        "/api/news/newsDetail",
+                        (("gameCode", "ff"), ("id", news_id)),
+                    )
+                    if (
+                        not isinstance(detail.get("Data"), dict)
+                        or str(detail["Data"].get("Id")) != news_id
+                        or type(detail["Data"].get("Content")) is not str
+                    ):
+                        raise ValueError("news_detail_invalid")
+                    cached = article(detail["Data"])
+                    cached["list_signature"] = self._list_signature(row)
+                    self._detail_cache[cache_key] = dict(cached)
+                    while len(self._detail_cache) > MAX_ARTICLES:
+                        del self._detail_cache[next(iter(self._detail_cache))]
+                old_revision = revisions.get(news_id)
+                revision = (old_revision["revision"] if old_revision else 0) + (
+                    old_revision is None or old_revision["version"] != cached["version"]
+                )
+                revisions[news_id] = {
+                    "version": cached["version"],
+                    "revision": revision,
+                }
+                details[news_id] = {**cached, "revision": revision}
+                if len(revisions) > MAX_REMEMBERED:
+                    raise ValueError("news_backlog_limit")
+            pending_new_ids = [key for key in pending_new_ids if key not in selected]
+            if selected_rotation:
+                cursor = selected_rotation[-1]
+        # A list record (even if it happens to contain Content) is not proof of
+        # a complete detail response. Only confirmed details establish versions.
+        result = [
+            details[key]
+            if key in details
+            else article(
+                {name: value for name, value in row.items() if name != "Content"}
+            )
+            for key, row in by_id.items()
+        ]
+        self._detail_cache.clear()
+        return {
+            "articles": result,
+            "revisions": revisions,
+            "known_ids": list(by_id),
+            "details": details,
+            "refresh_cursor": cursor,
+            "poll_round": round_number + 1,
+            "pending_new_ids": pending_new_ids,
+        }
+
+    @staticmethod
+    def _list_signature(row):
+        return _digest(
+            [plain(row.get("Title") or "", 160), str(row.get("CategoryCode", ""))]
+        )
 
 
 class NewsEvaluator:
@@ -337,26 +657,90 @@ class NewsEvaluator:
             return EvaluationDecision(state, False)
         rows = list(observation.payload["articles"])
         if state is None:
-            return EvaluationDecision(
-                {"seen": sorted(row["id"] for row in rows), "pending": []}, False
-            )
+            state = {
+                "seen": [row["id"] for row in rows],
+                "pending": [],
+                "schema": 3,
+                "latest": {},
+                "last_revisions": {},
+            }
         seen = set(state["seen"])
-        pending = list(state["pending"])
+        current_ids = {row["id"] for row in rows}
+        latest = {
+            key: dict(value)
+            for key, value in state.get("latest", {}).items()
+            if key in current_ids
+        }
+        last_revisions = dict(state.get("last_revisions", {}))
+        pending = [dict(item) for item in state["pending"]]
+        if state.get("schema") != 3:
+            # Pending deliveries retain their original committed event identity.
+            for item in pending:
+                if state.get("schema") != 2:
+                    item["legacy_event"] = True
+                else:
+                    item["legacy_hash_event"] = True
         for row in rows:
-            if row["id"] not in seen:
-                pending.append(dict(row))
-                seen.add(row["id"])
-        if len(seen) > MAX_REMEMBERED or len(pending) > MAX_ARTICLES:
+            item = dict(row)
+            news_id, version = item["id"], item.get("version")
+            if (
+                not item.get("detail_complete")
+                or type(version) is not str
+                or not _HASH.fullmatch(version)
+            ):
+                continue
+            old = latest.get(news_id)
+            revision = item.get("revision", 1)
+            if type(revision) is not int or revision < 1:
+                raise ValueError("news_revision_invalid")
+            item["revision"] = revision
+            previous_revision = last_revisions.get(news_id)
+            is_new = news_id not in seen
+            migrated_change = (
+                state.get("schema") == 2
+                and old is not None
+                and old.get("version") is not None
+                and old.get("version") != version
+            )
+            if (
+                is_new
+                or migrated_change
+                or (previous_revision is not None and revision > previous_revision)
+            ):
+                event_item = {
+                    key: value
+                    for key, value in item.items()
+                    if key not in ("body_snapshot", "list_signature")
+                }
+                if not is_new:
+                    event_item["change_summary"] = (
+                        change_excerpt(old, item)
+                        if old is not None
+                        else "文章内容已有修改，旧正文不在当前保留范围内，请查看原文。"
+                    )
+                pending.append(event_item)
+            # A known legacy/baseline ID with no body is learned silently.
+            seen.add(news_id)
+            # Migrated IDs adopt the shared collector revision; only an actual
+            # hash change emits. Stale observations cannot roll back the baseline.
+            if previous_revision is None or revision >= previous_revision:
+                last_revisions[news_id] = revision
+                latest[news_id] = item
+        if (
+            len(seen) > MAX_REMEMBERED
+            or len(last_revisions) > MAX_REMEMBERED
+            or len(pending) > MAX_ARTICLES
+        ):
             raise ValueError("news_backlog_limit")
         selected, pending = pending[:3], pending[3:]
         events = []
         for item in selected:
-            item = dict(item)
-            # Business identity is the official ID, never edit time or subscription.
             key = "ff14:cn:news:" + item["id"]
-            digest = hashlib.sha256(
-                json.dumps(item, sort_keys=True).encode()
-            ).hexdigest()[:16]
+            if not item.get("legacy_event"):
+                if not item.get("legacy_hash_event"):
+                    key += ":r" + str(item["revision"])
+                key += ":" + item["version"]
+            digest = _digest(item)[:16]
             events.append(
                 EvaluationEvent(
                     key,
@@ -366,7 +750,15 @@ class NewsEvaluator:
                 )
             )
         return EvaluationDecision(
-            {"seen": sorted(seen), "pending": pending}, False, events=tuple(events)
+            {
+                "schema": 3,
+                "seen": sorted(seen),
+                "latest": latest,
+                "last_revisions": last_revisions,
+                "pending": pending,
+            },
+            False,
+            events=tuple(events),
         )
 
 
@@ -374,10 +766,22 @@ class NewsComposer:
     def compose(self, contributions):
         if not contributions or any(c.composer_id != COMPOSER for c in contributions):
             raise ValueError("news_contribution_invalid")
-        if len({c.payload["id"] for c in contributions}) != 1:
+        if (
+            len(
+                {
+                    (
+                        c.payload["id"],
+                        c.payload.get("revision"),
+                        c.payload.get("version"),
+                    )
+                    for c in contributions
+                }
+            )
+            != 1
+        ):
             raise ValueError("news_contribution_conflict")
-        # Different captured edits may overlap before sealing. One deterministic
-        # captured version is rendered; event identity remains the official ID.
+        # Contributions may differ in a recipient's previous diff baseline, but
+        # only the same article/content version may share one public event.
         selected = min(contributions, key=lambda c: c.contribution_key)
         return ComposedPublicEvent(news_document(selected.payload))
 

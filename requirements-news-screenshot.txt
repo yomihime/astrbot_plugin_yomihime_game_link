@@ -1,0 +1,3 @@
+# Optional controller only. Reuse an installed Edge/Chrome/Chromium.
+# Do not run playwright install; missing browser means text-only delivery.
+playwright>=1.48.0,<2
