@@ -43,3 +43,18 @@ class RuntimeDependencyTests(unittest.TestCase):
                 self.assertNotIn(Version("0.0.1"), requirement.specifier)
         aiohttp = next(item for item in requirements if item.name == "aiohttp")
         self.assertIn(Version("3.14.5"), aiohttp.specifier)
+
+    def test_optional_news_controller_is_shipped_but_not_a_base_dependency(self):
+        from scripts.build_dashboard_zip import ROOT_FILES
+
+        self.assertIn("requirements-news-screenshot.txt", ROOT_FILES)
+        content = (ROOT / "requirements-news-screenshot.txt").read_text()
+        optional = [
+            Requirement(line)
+            for line in content.splitlines()
+            if line.strip() and not line.startswith("#")
+        ]
+        self.assertEqual(len(optional), 1)
+        self.assertEqual(optional[0].name, "playwright")
+        self.assertIn(Version("1.62.0"), optional[0].specifier)
+        self.assertNotIn("playwright", (ROOT / "requirements.txt").read_text().lower())

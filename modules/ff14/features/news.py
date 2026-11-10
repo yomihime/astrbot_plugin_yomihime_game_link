@@ -2,7 +2,7 @@
 
 The endpoint is a public website JSON source, not a promised developer API.
 External HTML is reduced to literal excerpts; OutLink is never followed.
-An optional display marker asks Core to capture the fixed official mobile page.
+An optional display marker asks Core to capture the fixed official desktop page.
 """
 
 from __future__ import annotations

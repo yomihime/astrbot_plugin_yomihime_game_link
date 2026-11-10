@@ -177,7 +177,9 @@ class ScreenshotRenderTests(unittest.IsolatedAsyncioTestCase):
 
 
 class BrowserBoundaryTests(unittest.IsolatedAsyncioTestCase):
-    async def capture(self, *, height=500, title="公告标题", error=None, changed=False):
+    async def capture(
+        self, *, height=500, title="公告标题", error=None, changed=False, wrong_id=False
+    ):
         async def screenshot(**kwargs):
             if error:
                 raise error
@@ -228,6 +230,8 @@ class BrowserBoundaryTests(unittest.IsolatedAsyncioTestCase):
             row = source_row()
             if changed:
                 row["Content"] = "<p>新的正文</p>"
+            if wrong_id:
+                row["Id"] = 123
             yield json.dumps({"Code": "0", "Data": row}).encode()
 
         @asynccontextmanager
@@ -299,6 +303,10 @@ class BrowserBoundaryTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(RuntimeError):
             await self.capture(error=RuntimeError("screenshot failed"))
 
+    async def test_capture_cancellation_closes_browser_and_propagates(self):
+        with self.assertRaises(asyncio.CancelledError):
+            await self.capture(error=asyncio.CancelledError())
+
     async def test_long_article_is_contiguous_ordered_pages_not_truncated(self):
         result, page, _ = await self.capture(height=12000)
         self.assertEqual(len(result), 3)
@@ -311,6 +319,10 @@ class BrowserBoundaryTests(unittest.IsolatedAsyncioTestCase):
     async def test_changed_body_is_not_paired_with_older_summary(self):
         with self.assertRaisesRegex(ValueError, "incomplete"):
             await self.capture(changed=True)
+
+    async def test_different_article_id_with_identical_content_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "incomplete"):
+            await self.capture(wrong_id=True)
 
     async def test_excessive_page_count_falls_back_as_a_whole(self):
         with self.assertRaisesRegex(ValueError, "image_budget"):

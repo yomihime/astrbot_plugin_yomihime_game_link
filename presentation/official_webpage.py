@@ -349,7 +349,9 @@ class OfficialWebpageRenderer:
                                     value = json.loads(content)
                                     data = value.get("Data")
                                     if (
-                                        not isinstance(data, dict)
+                                        str(value.get("Code")) != "0"
+                                        or not isinstance(data, dict)
+                                        or str(data.get("Id")) != url.rsplit("/", 1)[-1]
                                         or article(data)["version"] != version
                                     ):
                                         raise ValueError(

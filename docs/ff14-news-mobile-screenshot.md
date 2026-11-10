@@ -16,11 +16,13 @@
 
 仅复用运行 AstrBot 环境中**已有**的浏览器：Windows 标准安装位置的 Edge/Chrome，Linux 的 Chromium/Chrome（含常见系统与 Snap 路径），macOS 的应用目录 Chrome/Edge/Chromium。只检查明确的可执行文件，不读取个人浏览器配置、Cookie、历史或凭据，不操作用户已经打开的浏览器窗口。非标准安装路径目前不自动搜索。
 
-可选的 Python 控制层是 Playwright：
+可选的 Python 控制层是 Playwright。需要截图时，由管理员安装这个 Python 包即可，不会随安装包自动下载浏览器。完整插件 ZIP 附带 `requirements-news-screenshot.txt`；进入插件安装目录，用**运行 AstrBot 的同一个 Python/虚拟环境**执行（若 `python` 指向别处，请改为该解释器的完整路径）：
 
 ```sh
 python -m pip install -r requirements-news-screenshot.txt
 ```
+
+安装后可用同一解释器执行 `python -c "import playwright.async_api"` 检查导入；若 Host 缓存了导入状态，可重载插件。不要为此修改系统默认 Python 或安装到无关环境。控制层不列入基础 `requirements.txt`，不使用截图的环境无需承担其安装体积。
 
 **不要运行 `playwright install`，本功能不需要下载 Playwright 自带浏览器。** 插件不安装浏览器、不自动安装控制层，也不使用远程截图服务。缺少 Playwright、没有可用已有浏览器、版本不兼容或沙箱不可用时，不输出图片，正常推送完整文字和原文链接。系统浏览器自动升级后兼容性仍需验证，不能保证所有版本均支持。
 
