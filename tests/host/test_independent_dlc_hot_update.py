@@ -2,15 +2,19 @@
 
 import asyncio
 import hashlib
+import io
 import json
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 from uuid import uuid4
 
+from PIL import Image as PillowImage
 from ygl_test_subject.adapters.astrbot.runtime import AstrBotRuntime
 from ygl_test_subject.bootstrap.coordinator import get_coordinator
+from ygl_test_subject.services.core_runtime import CoreRuntime
 from ygl_test_subject.services.extension_discovery import ExtensionDiscovery
 from ygl_test_subject.services.extension_transition import ExtensionControlEndpoint
 from ygl_test_subject.services.external_packages import (
@@ -23,7 +27,15 @@ from ygl_test_subject.services.source_credentials import (
     SourceCredentialPolicy,
 )
 
-from yomihime_game_link_sdk.declarations import SourceDeclaration
+from yomihime_game_link_sdk import cards
+from yomihime_game_link_sdk.declarations import (
+    ModuleDisplay,
+    PageResource,
+    SourceDeclaration,
+)
+from yomihime_game_link_sdk.display import DisplayAudience, DisplayDocument, TextBlock
+from yomihime_game_link_sdk.errors import InvalidInvocation
+from yomihime_game_link_sdk.host import ExtensionHostError
 from yomihime_game_link_sdk.services import HealthStatus
 
 
@@ -202,6 +214,155 @@ class IndependentSourceHealthTest(unittest.IsolatedAsyncioTestCase):
         self.assertIs(
             await self.health("missing", "bundled/demo"), HealthStatus.UNAVAILABLE
         )
+
+    def logo_core(self):
+        with io.BytesIO() as buffer:
+            with PillowImage.new("RGB", (8, 8), "red") as logo:
+                logo.save(buffer, format="PNG")
+            self.logo_bytes = buffer.getvalue()
+        self.module.display = ModuleDisplay("Demo", logo_resource="assets/logo.png")
+        self.module.resources = (
+            PageResource(
+                "assets/logo.png", hashlib.sha256(self.logo_bytes).hexdigest()
+            ),
+        )
+
+        def resource(path):
+            self.assertEqual(path, "package/assets/logo.png")
+            return self.logo_bytes
+
+        self.package.bundle = SimpleNamespace(
+            resource_root=Path(self.temp.name), read_resource=resource
+        )
+        self.package.candidate.package.package_dir = Path(self.temp.name) / "package"
+        self.package.candidate.package._provenance = None
+        registered = SimpleNamespace(manifest=self.module, epoch=1)
+        self.current_module = registered
+        core = CoreRuntime.__new__(CoreRuntime)
+        core.registry = SimpleNamespace(
+            snapshot=lambda: SimpleNamespace(module=lambda owner: self.current_module),
+            is_active=lambda row: row is self.current_module,
+        )
+        core.extension_runtime = SimpleNamespace(
+            candidate=lambda owner: self.package.candidate
+        )
+        core._command_card_resource_reader = self.runtime._read_command_card_resource
+        return core
+
+    async def test_independent_logo_renders_declared_card_png(self):
+        from ygl_test_subject.presentation.command_card import CommandCardRenderer
+        from ygl_test_subject.presentation.png_validation import validate_png
+
+        from tests.presentation.test_layout_renderer import Font
+
+        core = self.logo_core()
+        logo = await core._command_card_logo("unknown_dlc/demo")
+        self.assertEqual(logo.content, self.logo_bytes)
+        document = DisplayDocument(
+            "Demo",
+            "Result",
+            (TextBlock("Complete app details"),),
+            card=cards.Document(
+                "Demo",
+                (cards.Text("Complete app details"),),
+                brand="GAME LINK",
+                logo=logo,
+            ),
+        )
+        presentation = CommandCardRenderer(font_provider_factory=Font)(
+            document, audience=DisplayAudience.PUBLIC
+        )
+        self.assertIsNotNone(presentation.bitmap)
+        validate_png(presentation.bitmap)
+        self.assertIn("Complete app details", presentation.text)
+
+    async def test_independent_logo_rejects_revoked_gate_and_missing_reader(self):
+        core = self.logo_core()
+        self.granted = False
+        with self.assertRaises(ExtensionHostError):
+            await core._command_card_logo("unknown_dlc/demo")
+        self.granted = True
+        core._command_card_resource_reader = None
+        with self.assertRaises(ValueError):
+            await core._command_card_logo("unknown_dlc/demo")
+
+    async def test_independent_logo_rejects_manifest_unknown_resource_and_bad_hash(
+        self,
+    ):
+        core = self.logo_core()
+        with self.assertRaises(ExtensionHostError):
+            self.packages.read_module_resource(
+                "unknown_dlc/demo", SimpleNamespace(module_id="demo"), "assets/logo.png"
+            )
+        with self.assertRaises(ExtensionHostError):
+            self.packages.read_module_resource(
+                "unknown_dlc/demo", self.module, "unknown.png"
+            )
+        self.package.bundle.read_resource = lambda path: b"corrupt"
+        with self.assertRaises(ExtensionHostError):
+            await core._command_card_logo("unknown_dlc/demo")
+
+    async def test_independent_logo_rechecks_package_and_gate_after_read(self):
+        core = self.logo_core()
+
+        def revoked(path):
+            self.granted = False
+            return self.logo_bytes
+
+        self.package.bundle.read_resource = revoked
+        with self.assertRaises(ExtensionHostError):
+            await core._command_card_logo("unknown_dlc/demo")
+        self.granted = True
+
+        def replaced(path):
+            self.packages.packages["unknown_dlc"] = object()
+            return self.logo_bytes
+
+        self.package.bundle.read_resource = replaced
+        with self.assertRaises(ExtensionHostError):
+            await core._command_card_logo("unknown_dlc/demo")
+
+    async def test_logo_rechecks_registry_generation_and_reader_hash(self):
+        core = self.logo_core()
+
+        async def changed(module_id, manifest, path):
+            content = await self.runtime._read_command_card_resource(
+                module_id, manifest, path
+            )
+            self.current_module = SimpleNamespace(manifest=self.module, epoch=2)
+            return content
+
+        core._command_card_resource_reader = changed
+        with self.assertRaises(InvalidInvocation):
+            await core._command_card_logo("unknown_dlc/demo")
+
+        async def corrupt(module_id, manifest, path):
+            return b"corrupt"
+
+        core._command_card_resource_reader = corrupt
+        with self.assertRaises(ValueError):
+            await core._command_card_logo("unknown_dlc/demo")
+
+    async def test_bundled_and_legacy_logo_keep_provenance_capture(self):
+        core = self.logo_core()
+        provenance = object()
+        self.package.candidate.package._provenance = provenance
+
+        async def forbidden(*args):
+            raise AssertionError(
+                "legacy capture must not use independent resource reader"
+            )
+
+        core._command_card_resource_reader = forbidden
+        with patch(
+            "ygl_test_subject.extensions.page_resources.capture_page_resources",
+            return_value={"assets/logo.png": self.logo_bytes},
+        ) as capture:
+            logo = await core._command_card_logo("unknown_dlc/demo")
+        capture.assert_called_once_with(
+            provenance, self.package.candidate.package.manifest
+        )
+        self.assertEqual(logo.content, self.logo_bytes)
 
 
 class LogicalArtifactPathsTest(unittest.TestCase):

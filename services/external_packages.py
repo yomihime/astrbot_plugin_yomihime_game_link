@@ -674,6 +674,45 @@ class IndependentPackageRuntime:
             features=FEATURES,
         )
 
+    def read_module_resource(self, module_id, manifest, path):
+        """Read a declared resource from the current, gated package bundle."""
+        import hashlib
+
+        package_id, _, local_id = module_id.partition("/")
+        package = self.packages.get(package_id)
+        if self._closed or package is None or not package.active:
+            raise ExtensionHostError("package_unavailable")
+        declared = next(
+            (
+                row
+                for row in package.candidate.package.manifest.modules
+                if row.module_id == local_id
+            ),
+            None,
+        )
+        if declared is None or declared != manifest:
+            raise ExtensionHostError("module_unavailable")
+        resource = next((row for row in declared.resources if row.path == path), None)
+        if resource is None:
+            raise ExtensionHostError("page_resource_unavailable")
+        content = package.bundle.read_resource(
+            (
+                package.candidate.package.package_dir.relative_to(
+                    package.bundle.resource_root
+                )
+                / path
+            ).as_posix()
+        )
+        if (
+            type(content) is not bytes
+            or hashlib.sha256(content).hexdigest() != resource.sha256
+            or self.packages.get(package_id) is not package
+            or self._closed
+            or not package.active
+        ):
+            raise ExtensionHostError("page_resource_changed")
+        return content
+
     def source_ready(self, module_id, source_id):
         """Check current package wiring without reading secrets or probing HTTP."""
         package_id, _, local_id = module_id.partition("/")
