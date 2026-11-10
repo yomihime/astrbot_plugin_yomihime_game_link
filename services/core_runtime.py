@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
 import logging
 import re
@@ -482,6 +483,7 @@ class CoreRuntime:
         | None = None,
         command_heading_projector: CommandHeadingProjector | None = None,
         command_card_renderer=None,
+        command_card_resource_reader=None,
         config_principal_id: str,
         identity_namespace: str,
         trusted_bundled_defaults: Mapping[str, tuple[str, ...]] | None = None,
@@ -598,6 +600,11 @@ class CoreRuntime:
                 raise TypeError(f"{name} must be callable")
         if source_health is not None and not callable(source_health):
             raise TypeError("source_health must be callable")
+        if command_card_resource_reader is not None and not callable(
+            command_card_resource_reader
+        ):
+            raise TypeError("command_card_resource_reader must be callable")
+        self._command_card_resource_reader = command_card_resource_reader
         if not isinstance(display_limits, DisplayLimits):
             raise TypeError("display_limits must be DisplayLimits")
         if not callable(getattr(renderer, "render", None)):
@@ -1187,7 +1194,6 @@ class CoreRuntime:
         package = candidate.package if candidate is not None else None
         if (
             package is None
-            or package._provenance is None
             or package.manifest is None
             or next(
                 (m for m in package.manifest.modules if m.module_id == local_id), None
@@ -1196,15 +1202,31 @@ class CoreRuntime:
             or not self.registry.is_active(module)
         ):
             raise ValueError("command logo package is unavailable")
-        resources = await asyncio.to_thread(
-            capture_page_resources, package._provenance, package.manifest
-        )
+        if package._provenance is None:
+            reader = self._command_card_resource_reader
+            if reader is None:
+                raise ValueError("command logo package is unavailable")
+            content = await reader(module_id, module.manifest, path)
+            declaration = next(
+                (item for item in module.manifest.resources if item.path == path), None
+            )
+            if (
+                declaration is None
+                or type(content) is not bytes
+                or hashlib.sha256(content).hexdigest() != declaration.sha256
+            ):
+                raise ValueError("command logo resource is unavailable")
+        else:
+            resources = await asyncio.to_thread(
+                capture_page_resources, package._provenance, package.manifest
+            )
+            content = resources[path]
         if not self.registry.is_active(module):
             raise InvalidInvocation()
         kind = {".svg": "svg", ".png": "png", ".jpg": "jpeg", ".jpeg": "jpeg"}[
             Path(path).suffix.lower()
         ]
-        return Asset(kind, resources[path], alt=display.default_name)
+        return Asset(kind, content, alt=display.default_name)
 
     async def subscription_gate_state(self, module_id: str) -> SubscriptionGateState:
         """Read exact persistent eligibility and live state under the original gate."""

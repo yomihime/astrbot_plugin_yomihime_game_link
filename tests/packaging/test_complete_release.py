@@ -246,6 +246,7 @@ class CompleteReleaseTests(unittest.TestCase):
         spec.loader.exec_module(module)
         compare = module.VersionComparator.compare_version
         for new, old in (
+            ("0.2.3", "0.2.2"),
             ("0.2.2", "0.2.1"),
             ("0.2.1", "0.2.0"),
             ("0.2.0", "0.1.13"),
@@ -262,7 +263,7 @@ class CompleteReleaseTests(unittest.TestCase):
             {
                 "name": "astrbot_plugin_yomihime_game_link",
                 "author": "yomihime",
-                "version": "0.2.2",
+                "version": "0.2.3",
             },
         )
 

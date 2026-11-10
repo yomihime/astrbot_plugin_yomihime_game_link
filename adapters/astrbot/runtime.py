@@ -2087,6 +2087,7 @@ class AstrBotRuntime:
                     http_transport=self._http_transport,
                     renderer=GenericDisplayRenderer(rendering_bounds),
                     command_card_renderer=self._command_cards,
+                    command_card_resource_reader=self._read_command_card_resource,
                     command_heading_projector=partial(
                         project_command_heading,
                         max_heading_chars=rendering_bounds.max_chars_per_page,
@@ -2723,6 +2724,12 @@ class AstrBotRuntime:
             raise CoreRuntimeCleanupPending("http_transport_close") from exc
         self._transport_closed = True
         self._http_transport = None
+
+    async def _read_command_card_resource(self, module_id, manifest, path):
+        manager = getattr(self, "_independent_packages", None)
+        if manager is None:
+            raise ValueError("command card package is unavailable")
+        return manager.read_module_resource(module_id, manifest, path)
 
     async def _source_health(self, module_id: str, source_id: str) -> CapabilityHealth:
         """Report local wiring readiness only; never probe remote endpoints."""
