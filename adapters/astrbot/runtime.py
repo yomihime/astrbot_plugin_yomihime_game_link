@@ -2730,7 +2730,7 @@ class AstrBotRuntime:
             CapabilityHealth(HealthStatus.UNAVAILABLE, "source_unavailable")
         )
         if (
-            self._independent_packages is not None
+            getattr(self, "_independent_packages", None) is not None
             and self._independent_packages.source_ready(module_id, source_id)
         ) or (
             self._extension_host is not None

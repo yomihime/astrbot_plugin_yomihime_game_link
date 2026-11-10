@@ -170,11 +170,38 @@ class IndependentSourceHealthTest(unittest.IsolatedAsyncioTestCase):
         self.assertIs(await self.health(), HealthStatus.UNAVAILABLE)
 
     async def test_legacy_source_readiness_still_uses_owned_transport(self):
-        self.runtime._independent_packages = None
+        del self.runtime._independent_packages
         self.runtime._extension_host = SimpleNamespace(source_ready=lambda *_: True)
         self.assertIs(await self.health(), HealthStatus.AVAILABLE)
         self.runtime._http_transport = None
         self.assertIs(await self.health(), HealthStatus.UNAVAILABLE)
+
+    async def test_non_hot_bundled_source_readiness_without_independent_runtime(self):
+        self.runtime = AstrBotRuntime(
+            SimpleNamespace(),
+            plugin_root=Path(self.temp.name),
+            data_dir=Path(self.temp.name) / "data",
+            font_manager_factory=lambda root: SimpleNamespace(provider=lambda: None),
+        )
+        self.assertFalse(hasattr(self.runtime, "_independent_packages"))
+        self.runtime._http_transport = SimpleNamespace(closed=False)
+        self.runtime._trusted_bundle = True
+        self.runtime._assembly = SimpleNamespace(
+            module_id="bundled/demo",
+            source_hosts={"public": "public.example.test"},
+            credential_policies=(),
+        )
+        self.runtime._source_credential_policies = ()
+        module = SimpleNamespace(manifest=self.module)
+        self.runtime._core = SimpleNamespace(
+            registry=SimpleNamespace(
+                snapshot=lambda: SimpleNamespace(module=lambda owner: module)
+            )
+        )
+        self.assertIs(await self.health(owner="bundled/demo"), HealthStatus.AVAILABLE)
+        self.assertIs(
+            await self.health("missing", "bundled/demo"), HealthStatus.UNAVAILABLE
+        )
 
 
 class LogicalArtifactPathsTest(unittest.TestCase):
