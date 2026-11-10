@@ -13,6 +13,7 @@ from PIL import Image
 from ygl_test_subject.modules.ff14.features.news import article, news_document
 from ygl_test_subject.presentation.official_webpage import (
     OfficialWebpageRenderer,
+    installed_browsers,
     normalize_png,
     public_addresses,
     requested_url,
@@ -256,6 +257,10 @@ class BrowserBoundaryTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch.dict("sys.modules", {"playwright.async_api": fake_api}),
             patch("aiohttp.ClientSession.get", get),
+            patch(
+                "ygl_test_subject.presentation.official_webpage.installed_browsers",
+                return_value=("/usr/bin/chromium",),
+            ),
         ):
             try:
                 result = await OfficialWebpageRenderer()._capture(
@@ -278,6 +283,10 @@ class BrowserBoundaryTests(unittest.IsolatedAsyncioTestCase):
         page.screenshot.assert_awaited_once()
         self.assertEqual(page.screenshot.await_args.kwargs["clip"]["height"], 500)
         self.assertTrue(launch.await_args.kwargs["chromium_sandbox"])
+        self.assertEqual(
+            launch.await_args.kwargs["executable_path"], "/usr/bin/chromium"
+        )
+        self.assertNotIn("channel", launch.await_args.kwargs)
         self.assertIn("--disable-quic", launch.await_args.kwargs["args"])
 
     async def test_oversize_article_does_not_silently_crop(self):
@@ -306,3 +315,115 @@ class BrowserBoundaryTests(unittest.IsolatedAsyncioTestCase):
     async def test_excessive_page_count_falls_back_as_a_whole(self):
         with self.assertRaisesRegex(ValueError, "image_budget"):
             await self.capture(height=45000)
+
+
+class ExistingBrowserDiscoveryTests(unittest.TestCase):
+    def test_linux_known_executables_only_and_deduplicated(self):
+        with (
+            patch("sys.platform", "linux"),
+            patch("pathlib.Path.is_file", return_value=True),
+            patch("os.access", return_value=True),
+            patch("pathlib.Path.resolve", lambda p: p),
+            patch.dict("os.environ", {"PATH": "/untrusted"}),
+        ):
+            paths = installed_browsers()
+        self.assertEqual(paths[0], "/usr/bin/chromium")
+        self.assertEqual(len(paths), 3)
+        self.assertFalse(any("untrusted" in p or "ms-playwright" in p for p in paths))
+
+    def test_windows_only_exact_edge_chrome_install_executables(self):
+        with (
+            patch("sys.platform", "win32"),
+            patch.dict(
+                "os.environ",
+                {"PROGRAMFILES": "/program-files", "LOCALAPPDATA": "/local-apps"},
+                clear=True,
+            ),
+            patch("pathlib.Path.is_file", return_value=True),
+            patch("os.access", return_value=True),
+            patch("pathlib.Path.resolve", lambda p: p),
+        ):
+            paths = installed_browsers()
+        self.assertEqual(
+            paths[:2],
+            (
+                "/program-files/Microsoft/Edge/Application/msedge.exe",
+                "/program-files/Google/Chrome/Application/chrome.exe",
+            ),
+        )
+        self.assertTrue(all(p.endswith(("msedge.exe", "chrome.exe")) for p in paths))
+        self.assertFalse(any("User Data" in p for p in paths))
+
+    def test_snap_launcher_path_is_not_resolved_to_snap_dispatcher(self):
+        with (
+            patch("sys.platform", "linux"),
+            patch("pathlib.Path.is_file", lambda p: str(p) == "/snap/bin/chromium"),
+            patch("os.access", return_value=True),
+            patch(
+                "pathlib.Path.resolve",
+                side_effect=AssertionError("must preserve launcher path"),
+            ),
+        ):
+            self.assertEqual(installed_browsers(), ("/snap/bin/chromium",))
+
+    def test_missing_or_non_executable_installation_is_unsupported(self):
+        for is_file, executable in ((False, True), (True, False)):
+            with (
+                patch("pathlib.Path.is_file", return_value=is_file),
+                patch("os.access", return_value=executable),
+            ):
+                self.assertEqual(installed_browsers(), ())
+
+
+class MissingBrowserFallbackTests(unittest.IsolatedAsyncioTestCase):
+    async def test_absent_browser_does_not_even_import_or_start_playwright(self):
+        start = AsyncMock()
+        fake = SimpleNamespace(async_playwright=start)
+        with (
+            patch(
+                "ygl_test_subject.presentation.official_webpage.installed_browsers",
+                return_value=(),
+            ),
+            patch.dict("sys.modules", {"playwright.async_api": fake}),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "existing_browser_unavailable"):
+                await OfficialWebpageRenderer().render(document())
+        start.assert_not_called()
+
+    async def test_absent_optional_controller_does_not_install_anything(self):
+        with (
+            patch(
+                "ygl_test_subject.presentation.official_webpage.installed_browsers",
+                return_value=("/usr/bin/chromium",),
+            ),
+            patch.dict("sys.modules", {"playwright.async_api": None}),
+        ):
+            with self.assertRaises(ModuleNotFoundError):
+                await OfficialWebpageRenderer().render(document())
+
+    async def test_incompatible_installed_browsers_never_launch_default_download(self):
+        launch = AsyncMock(side_effect=RuntimeError("incompatible browser"))
+
+        @asynccontextmanager
+        async def playwright():
+            yield SimpleNamespace(chromium=SimpleNamespace(launch=launch))
+
+        with (
+            patch(
+                "ygl_test_subject.presentation.official_webpage.installed_browsers",
+                return_value=("/usr/bin/chromium", "/usr/bin/google-chrome"),
+            ),
+            patch.dict(
+                "sys.modules",
+                {"playwright.async_api": SimpleNamespace(async_playwright=playwright)},
+            ),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "existing_browser_unavailable"):
+                await OfficialWebpageRenderer().render(document())
+        self.assertEqual(
+            [call.kwargs["executable_path"] for call in launch.await_args_list],
+            ["/usr/bin/chromium", "/usr/bin/google-chrome"],
+        )
+        self.assertTrue(
+            all(call.kwargs["chromium_sandbox"] for call in launch.await_args_list)
+        )

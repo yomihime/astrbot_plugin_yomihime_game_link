@@ -183,7 +183,7 @@ class FF14NewsRuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.start(targets=["test-platform-1:GroupMessage:group-42"])
         await self.tick()
         self.core._official_webpage_renderer.render.side_effect = RuntimeError(
-            "unavailable"
+            "existing_browser_unavailable"
         )
         self.transport.rows += [row(7)]
         self.now += timedelta(seconds=900)

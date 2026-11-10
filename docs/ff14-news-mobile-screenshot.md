@@ -14,14 +14,17 @@
 
 ## 截图与运行环境
 
-在运行 AstrBot 的同一 Python 环境、同一系统用户下安装可选依赖：
+仅复用运行 AstrBot 环境中**已有**的浏览器：Windows 标准安装位置的 Edge/Chrome，Linux 的 Chromium/Chrome（含常见系统与 Snap 路径），macOS 的应用目录 Chrome/Edge/Chromium。只检查明确的可执行文件，不读取个人浏览器配置、Cookie、历史或凭据，不操作用户已经打开的浏览器窗口。非标准安装路径目前不自动搜索。
+
+可选的 Python 控制层是 Playwright：
 
 ```sh
 python -m pip install -r requirements-news-screenshot.txt
-python -m playwright install chromium
 ```
 
-Linux 还需 Playwright 系统库和可用 Chromium 沙箱。插件不会自行下载浏览器、关闭TLS验证或关闭浏览器沙箱。缺少浏览器时仍可采集与推送文字。
+**不要运行 `playwright install`，本功能不需要下载 Playwright 自带浏览器。** 插件不安装浏览器、不自动安装控制层，也不使用远程截图服务。缺少 Playwright、没有可用已有浏览器、版本不兼容或沙箱不可用时，不输出图片，正常推送完整文字和原文链接。系统浏览器自动升级后兼容性仍需验证，不能保证所有版本均支持。
+
+每次截图显式启动检测到的已有浏览器可执行文件，使用独立临时无头会话，完成后关闭；不连接用户现有会话，不关闭 TLS 验证或浏览器沙箱。最多尝试三个已存在的候选，每个启动预算8秒，总截图预算仍为35秒。
 
 截图打开官网 `index.html`，采用1440像素桌面视口和DPR 1，截取 `.newsCont` 文章容器完整纵向范围，正文为 `.newcontbox`。保留标题、日期、正文与容器尾部；不修改网页排版。截图必须校验官网详情版本与待推送版本一致，避免旧摘要配新图片。等待正文图片完整加载；官网变化、超时或资源不可用时明确降级。
 
@@ -39,4 +42,4 @@ Linux 还需 Playwright 系统库和可用 Chromium 沙箱。插件不会自行�
 
 离线回归覆盖内容指纹、修改差异、持久状态迁移、失败重试、重复版本、详情轮转、完整分片、多图单次发送、UNKNOWN不重试及网络边界。Host集成使用真实Core、SQLite、调度和AstrBot适配器，但注入合成截图，不连接真实IM。
 
-桌面官网URL和DOM已经云浏览器只读核实。当前执行环境启动Chromium仍被socket权限限制，因此新代码自动浏览器端到端、实际官网长图和真实IM展示尚未验收，PR保持Draft。不能用人工网页demo或离线通过替代这一项。
+桌面官网URL和DOM已经云浏览器只读核实。当前执行环境启动Chromium仍被socket权限限制，因此新代码自动浏览器端到端、Windows Edge/Chrome、实际官网长图和真实IM展示尚未验收，PR保持Draft。不能用人工网页demo或离线通过替代这一项。

@@ -11,11 +11,14 @@ import asyncio
 import ipaddress
 import json
 import math
+import os
 import re
 import socket
+import sys
 from collections import OrderedDict
 from dataclasses import replace
 from io import BytesIO
+from pathlib import Path
 from time import monotonic
 from urllib.parse import urlsplit
 
@@ -41,6 +44,59 @@ USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
 )
+
+
+def installed_browsers():
+    """Known installation executables only; never profiles, PATH or downloads.
+
+    Only the environment running AstrBot is inspected. No shell expansion,
+    user-configured executable, remote browser or Playwright cache is used.
+    """
+    candidates = []
+    if sys.platform == "win32":
+        for variable in ("PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA"):
+            root = os.environ.get(variable)
+            if not root or not Path(root).is_absolute():
+                continue
+            for suffix in (
+                "Microsoft/Edge/Application/msedge.exe",
+                "Google/Chrome/Application/chrome.exe",
+            ):
+                candidates.append(Path(root) / suffix)
+    elif sys.platform.startswith("linux"):
+        candidates = [
+            Path(path)
+            for path in (
+                "/usr/bin/chromium",
+                "/usr/bin/chromium-browser",
+                "/usr/bin/google-chrome",
+                "/usr/bin/google-chrome-stable",
+                "/opt/google/chrome/chrome",
+                "/snap/bin/chromium",
+                "/usr/local/bin/chromium",
+            )
+        ]
+    elif sys.platform == "darwin":
+        candidates = [
+            Path(path)
+            for path in (
+                "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+                "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+                "/Applications/Chromium.app/Contents/MacOS/Chromium",
+            )
+        ]
+    found = []
+    for candidate in candidates:
+        try:
+            if candidate.is_file() and os.access(candidate, os.X_OK):
+                # Preserve launcher identity: Snap dispatches based on argv[0],
+                # so resolving /snap/bin/chromium to /usr/bin/snap breaks it.
+                value = str(candidate)
+                if value not in found:
+                    found.append(value)
+        except OSError:
+            continue
+    return tuple(found[:3])
 
 
 def requested_version(document):
@@ -170,6 +226,9 @@ class OfficialWebpageRenderer:
                 return content
 
     async def _capture(self, url, title, version):
+        executables = installed_browsers()
+        if not executables:
+            raise RuntimeError("existing_browser_unavailable")
         import aiohttp
         from playwright.async_api import async_playwright
 
@@ -197,17 +256,30 @@ class OfficialWebpageRenderer:
                 ) as session,
                 async_playwright() as playwright,
             ):
-                # Never disable TLS verification or Chromium's sandbox. The Host
-                # administrator installs Chromium explicitly; runtime downloads none.
-                browser = await playwright.chromium.launch(
-                    headless=True,
-                    chromium_sandbox=True,
-                    proxy={"server": "http://127.0.0.1:9", "bypass": "<-loopback>"},
-                    args=[
-                        "--disable-quic",
-                        "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
-                    ],
-                )
+                # A fresh temporary session, never an attached user's browser
+                # or profile. Do not install browsers or fall back to bundled ones.
+                browser = None
+                for executable in executables:
+                    try:
+                        browser = await playwright.chromium.launch(
+                            executable_path=executable,
+                            headless=True,
+                            chromium_sandbox=True,
+                            proxy={
+                                "server": "http://127.0.0.1:9",
+                                "bypass": "<-loopback>",
+                            },
+                            args=[
+                                "--disable-quic",
+                                "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
+                            ],
+                            timeout=8000,
+                        )
+                    except Exception:
+                        continue
+                    break
+                if browser is None:
+                    raise RuntimeError("existing_browser_unavailable")
                 try:
                     context = await browser.new_context(
                         viewport={"width": WIDTH, "height": 900},
