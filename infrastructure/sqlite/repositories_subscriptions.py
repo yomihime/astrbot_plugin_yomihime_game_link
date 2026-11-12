@@ -58,6 +58,7 @@ from ...core.ports import (
     EvaluationCheckpoint,
     ExecutionLease,
     PersistedSubscriptionGateRead,
+    PublicGroupRoute,
     RevisionConflict,
     SubscriptionFence,
     SubscriptionGateBinding,
@@ -364,29 +365,7 @@ def _attach_public_event(unit, event, record, collected_at):
     ).fetchone()[0]
     if sealed is not None or count >= 100:
         reason = "sealed_membership" if sealed is not None else "member_limit"
-        unit.execute(
-            "INSERT OR IGNORE INTO b04_public_event_suppressed VALUES (?,?,?,?,?,?,?)",
-            (
-                window_id,
-                event.subscription_id,
-                event.subscription_revision,
-                event.event_key,
-                event.event_version,
-                reason,
-                _iso(collected_at),
-            ),
-        )
-        cancelled = replace(event, state=DeliveryState.CANCELLED)
-        unit.execute(
-            "UPDATE b04_delivery_events SET state='cancelled',event_json=? WHERE event_key=? AND event_version=? AND subscription_id=? AND subscription_revision=?",
-            (
-                _dump(cancelled),
-                event.event_key,
-                event.event_version,
-                event.subscription_id,
-                event.subscription_revision,
-            ),
-        )
+        _suppress_public_event(unit, window_id, event, reason, collected_at)
         return
     # Same contribution key from different owners must agree before any send.
     for row in unit.execute(
@@ -449,6 +428,33 @@ def _attach_public_event(unit, event, record, collected_at):
 
 def _iso(value: datetime) -> str:
     return value.astimezone(UTC).isoformat()
+
+
+def _suppress_public_event(unit, window_id, event, reason, when):
+    key = (
+        event.event_key,
+        event.event_version,
+        event.subscription_id,
+        event.subscription_revision,
+    )
+    unit.execute(
+        "INSERT OR IGNORE INTO b04_public_event_suppressed VALUES (?,?,?,?,?,?,?)",
+        (
+            window_id,
+            event.subscription_id,
+            event.subscription_revision,
+            event.event_key,
+            event.event_version,
+            reason,
+            _iso(when),
+        ),
+    )
+    # Both callers provide the original pending snapshot, not a receipt.
+    cancelled = replace(event, state=DeliveryState.CANCELLED)
+    unit.execute(
+        "UPDATE b04_delivery_events SET state='cancelled',retry_at=NULL,event_json=? WHERE event_key=? AND event_version=? AND subscription_id=? AND subscription_revision=?",
+        (_dump(cancelled), *key),
+    )
 
 
 def _project_public_attempt(unit, envelope, attempt):
@@ -2254,6 +2260,62 @@ def _save_envelope(
 
 
 class SQLiteDigestWindowRepository(_Repository):
+    def _public_group_attempt(
+        self,
+        unit: SQLiteUnitOfWork,
+        envelope: DigestEnvelope,
+        resolve: Callable[[str], str],
+    ) -> DeliveryState | None:
+        """Check physical destination aliases without changing exact saved routes."""
+        destination = resolve(envelope.recipient.conversation_id)
+        if not destination:
+            return None
+        event = envelope.member_associations[0].event
+        # The business event key includes the content revision. This matches
+        # the public event identity table, independent of payload format version.
+        rows = unit.execute(
+            "SELECT e.event_json, json_extract(s.record_json,'$.fields.module_id') "
+            "FROM b04_delivery_events e "
+            "JOIN b04_subscriptions s ON e.subscription_id=s.subscription_id "
+            "WHERE e.event_key=? AND e.state IN ('sending','sent','unknown') "
+            "AND json_extract(e.event_json,'$.fields.public_contribution') IS NOT NULL "
+            "AND json_extract(e.event_json,'$.fields.recipient.fields.adapter_id')=? "
+            "AND json_extract(s.record_json,'$.fields.module_id')=( "
+            "SELECT json_extract(record_json,'$.fields.module_id') FROM b04_subscriptions "
+            "WHERE subscription_id=?) "
+            "ORDER BY e.state='sending'",
+            (event.event_key, envelope.recipient.adapter_id, event.subscription_id),
+        ).fetchall()
+        in_flight = False
+        for row in rows:
+            prior = _load(row[0])
+            if (
+                prior.recipient.delivery_route != envelope.recipient.delivery_route
+                or prior.recipient.kind is not envelope.recipient.kind
+                or resolve(prior.recipient.conversation_id) != destination
+            ):
+                continue
+            if prior.state is not DeliveryState.SENDING:
+                return prior.state
+            # Earlier recovery could leave the member projection SENDING
+            # after marking its envelope UNKNOWN. The envelope owns the claim.
+            recovered = unit.execute(
+                "SELECT e.state FROM b04_public_event_identity i "
+                "JOIN b04_digest_envelopes e ON e.window_id=i.window_id "
+                "WHERE i.business_key=? AND e.recipient_key=?",
+                (
+                    _dump((row[1], prior.recipient, prior.event_key)),
+                    _route_key(prior.recipient),
+                ),
+            ).fetchone()
+            if (
+                recovered is not None
+                and recovered[0] == DigestEnvelopeState.UNKNOWN.value
+            ):
+                return DeliveryState.UNKNOWN
+            in_flight = True
+        return DeliveryState.SENDING if in_flight else None
+
     async def begin_commentary(self, key: str) -> tuple[bool, str | None]:
         """One persisted model attempt; a crashed STARTED attempt falls back."""
 
@@ -2763,8 +2825,14 @@ class SQLiteDigestWindowRepository(_Repository):
         expected_revision: int,
         attempt_number: int,
         started_at: datetime,
+        group_route: PublicGroupRoute | None = None,
     ) -> DigestEnvelope | None:
         started_at = _utc_instant(started_at, "started_at")
+        # The Host snapshot is taken on the calling loop. The SQLite worker
+        # receives only a pure projection when that adapter has group aliases.
+        if not claim.envelope.window_id.startswith("public-event:v1:"):
+            group_route = None
+        project = group_route.project_session_id if group_route is not None else None
 
         def _run(unit: SQLiteUnitOfWork) -> Any:
             current = self._claim_current(unit, claim, expected_revision)
@@ -2788,6 +2856,42 @@ class SQLiteDigestWindowRepository(_Repository):
                 attempt_number, DeliveryState.SENDING, key, started_at
             )
             if attempt_number != len(current.delivery_attempts) + 1:
+                return None
+            previous_group_attempt = (
+                self._public_group_attempt(unit, current, project)
+                if project is not None and current.recipient == claim.envelope.recipient
+                else None
+            )
+            if previous_group_attempt is not None:
+                # Let a concurrent attempt settle. A known unsent attempt does
+                # not reserve the group, but an ambiguous attempt does.
+                defer = previous_group_attempt is DeliveryState.SENDING
+                updated = replace(
+                    current,
+                    revision=current.revision + 1,
+                    state=(
+                        DigestEnvelopeState.READY
+                        if defer
+                        else DigestEnvelopeState.CANCELLED
+                    ),
+                    members=current.members if defer else (),
+                    member_associations=(current.member_associations if defer else ()),
+                    claim_token=None,
+                    claimed_at=None,
+                    claim_expires_at=None,
+                )
+                if (
+                    _save_envelope(unit, updated, expected_revision=expected_revision)
+                    and not defer
+                ):
+                    for item in current.member_associations:
+                        _suppress_public_event(
+                            unit,
+                            current.window_id,
+                            item.event,
+                            "group_destination_already_attempted",
+                            started_at,
+                        )
                 return None
             updated = DigestEnvelope(
                 current.envelope_id,

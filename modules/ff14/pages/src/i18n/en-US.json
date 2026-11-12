@@ -165,8 +165,8 @@
   "settings.field.ff14_news_admins": "News administrators",
   "settings.field.ff14_news_targets": "News destinations",
   "settings.field.ff14_news_interval_seconds": "News collection interval",
-  "settings.hint.ff14_news_admins": "Comma separated: platform instance ID:account ID. Empty disables addhere.",
-  "settings.hint.ff14_news_targets": "Comma separated: platform instance ID:FriendMessage:account ID or platform instance ID:GroupMessage:group ID. First complete scan establishes a baseline. Removing a target cancels its configured subscription.",
+  "settings.hint.ff14_news_admins": "Comma separated: platform instance ID:UID. For QQ Official, use Bot ID and UID from /sid, not a numeric QQ account. Empty disables addhere.",
+  "settings.hint.ff14_news_targets": "Comma separated: complete UMO from /sid (instance ID:FriendMessage or GroupMessage:session ID). Obtain it in each direct or group conversation; do not rewrite the message type. The first complete collection sets the baseline; removing a target cancels its configured subscription.",
   "settings.invalidNews": "Check news destinations, administrator format and interval. Each list accepts up to 20 distinct entries.",
   "settings.minutes": "{count} minutes"
 }

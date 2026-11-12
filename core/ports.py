@@ -539,6 +539,15 @@ class AdminAuthorizationPort(Protocol):
 
 
 @dataclass(frozen=True, slots=True)
+class PublicGroupRoute:
+    """An internal dispatch snapshot. A missing platform cannot be used to send."""
+
+    platform: object | None
+    adapter_name: str | None
+    project_session_id: Callable[[str], str] | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class MessageTarget:
     """Descriptive target; its authorized flag and ConversationRef prove nothing.
 
@@ -550,6 +559,7 @@ class MessageTarget:
     recipient_id: str | None = None
     conversation: ConversationRef | None = None
     authorized: bool = False
+    public_group_route: PublicGroupRoute | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.conversation_id, str) or not self.conversation_id:
@@ -572,6 +582,13 @@ class MessageTarget:
             raise ValueError(
                 "authorized delivery requires a trusted direct conversation"
             )
+        if self.public_group_route is not None and (
+            not isinstance(self.public_group_route, PublicGroupRoute)
+            or self.authorized
+            or self.conversation is None
+            or self.conversation.kind is not ConversationKind.GROUP
+        ):
+            raise ValueError("invalid public group dispatch snapshot")
 
 
 @dataclass(frozen=True, slots=True)
@@ -1461,6 +1478,7 @@ class DigestWindowRepository(Protocol):
         expected_revision: int,
         attempt_number: int,
         started_at: datetime,
+        group_route: PublicGroupRoute | None = None,
     ) -> DigestEnvelope | None:
         """CAS the live claim to SENDING and append its ledger attempt.
 

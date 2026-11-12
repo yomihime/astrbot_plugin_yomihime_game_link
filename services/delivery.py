@@ -747,6 +747,7 @@ class DeliveryService:
                     recipient,
                     authorized,
                 )
+                dispatch_target = target
                 state: dict[str, object] = {}
                 task_name = f"digest:{uuid4().hex}"
                 stable_members = tuple(
@@ -754,6 +755,7 @@ class DeliveryService:
                 )
 
                 async def final_check() -> SendApproval | None:
+                    nonlocal dispatch_target
                     final_checks: list[tuple[object, DeliveryEvent, _Eligibility]] = []
                     final_receipts: list[DigestMemberReceipt] = []
                     for member, event, prior_check in stable:
@@ -861,11 +863,24 @@ class DeliveryService:
                     started = self._utc_now()
                     attempt_number = len(final_envelope.delivery_attempts) + 1
                     try:
+                        group_route = None
+                        if public_event:
+                            resolve_group = getattr(
+                                self._message_port, "public_group_route", None
+                            )
+                            if callable(resolve_group):
+                                group_route = resolve_group(recipient)
+                        group_options = (
+                            {"group_route": group_route}
+                            if group_route is not None
+                            else {}
+                        )
                         sending = await self._windows.begin_envelope_send(
                             claim,
                             expected_revision=final_envelope.revision,
                             attempt_number=attempt_number,
                             started_at=started,
+                            **group_options,
                         )
                     except asyncio.CancelledError:
                         await _drain_cleanup(
@@ -926,6 +941,10 @@ class DeliveryService:
                         return None
                     state["sending"] = sending
                     state["reconciled"] = final_envelope
+                    if group_route is not None:
+                        dispatch_target = replace(
+                            target, public_group_route=group_route
+                        )
                     return approval
 
                 async def abort_before_dispatch(
@@ -989,7 +1008,7 @@ class DeliveryService:
                     return await self._send_digest(
                         claim,
                         sending,
-                        target,
+                        dispatch_target,
                         rendered,
                         lease,
                         state,

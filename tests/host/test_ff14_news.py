@@ -9,7 +9,7 @@ import json
 import unittest
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 from ygl_test_subject.services.core_runtime import CoreRuntime
 
@@ -178,6 +178,137 @@ class FF14NewsRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.now += timedelta(seconds=900)
         await self.tick()
         self.assertEqual(len(self.context.calls) - before, 6)
+
+    async def test_official_qq_addhere_keeps_exact_reply_and_deduplicates_group_push(
+        self,
+    ):
+        uid_a = "A1B2C3D4E5F60718293A4B5C6D7E8F90"
+        uid_b = "B2C3D4E5F60718293A4B5C6D7E8F90A1"
+        group = "F0E1D2C3B4A5968778695A4B3C2D1E0F"
+        platform_names = {
+            "official_a": "qq_official",
+            "official_b": "qq_official_webhook",
+        }
+        await self.start(
+            targets=tuple(f"{bot}:GroupMessage:{group}" for bot in platform_names),
+            admins=(f"official_a:{uid_a}", f"official_b:{uid_b}"),
+        )
+        platforms = {
+            bot: SimpleNamespace(meta=lambda name=name: SimpleNamespace(name=name))
+            for bot, name in platform_names.items()
+        }
+        self.context.get_platform_inst = platforms.get
+
+        def event(bot, uid):
+            message = self._event(message="/ygl ff14 news addhere")
+            message.platform = bot
+            message.sender = uid
+            message.conversation = f"{uid}_{group}"
+            return message
+
+        await self.runtime.handle_event(event("official_b", uid_a))
+        self.assertEqual(
+            len(await self.sql("SELECT subscription_id FROM b04_subscriptions")), 2
+        )
+        for bot, uid in (("official_a", uid_a), ("official_b", uid_b)):
+            await self.runtime.handle_event(event(bot, uid))
+            self.assertEqual(
+                self.context.calls[-1][0], f"{bot}:GroupMessage:{uid}_{group}"
+            )
+        self.assertEqual(
+            len(await self.sql("SELECT subscription_id FROM b04_subscriptions")), 4
+        )
+
+        await self.tick()
+        before = len(self.context.calls)
+        self.transport.rows += [row(7)]
+        self.now += timedelta(seconds=900)
+        await self.tick()
+        self.assertEqual(
+            sorted(
+                (session.split(":")[0], session.rsplit(":", 1)[-1].rsplit("_", 1)[-1])
+                for session, _ in self.context.calls[before:]
+            ),
+            [("official_a", group), ("official_b", group)],
+        )
+        self.assertEqual(
+            await self.sql("SELECT state FROM b04_digest_envelopes ORDER BY state"),
+            [("cancelled",), ("cancelled",), ("unknown",), ("unknown",)],
+        )
+        self.now += timedelta(seconds=900)
+        await self.tick()
+        self.assertEqual(len(self.context.calls) - before, 2)
+
+    async def test_public_group_platform_changes_fail_before_send_and_retry_boundedly(
+        self,
+    ):
+        await self.start(targets=("official_a:GroupMessage:GROUPA",))
+        self.context.get_platform_inst = Mock()
+        lookup = self.context.get_platform_inst
+        lookup.return_value = None
+        await self.tick()
+        self.transport.rows += [row(7)]
+        self.now += timedelta(seconds=900)
+        await self.tick()
+        self.assertEqual(self.context.calls, [])
+        self.assertEqual(
+            await self.sql("SELECT state FROM b04_digest_envelopes"), [("failed",)]
+        )
+
+        # Switch the same route to QQ Official after the known non-QQ snapshot
+        # reached SQLite. The old dispatch authorization cannot send to it.
+        lookup.return_value = SimpleNamespace(
+            meta=lambda: SimpleNamespace(name="aiocqhttp")
+        )
+        official = SimpleNamespace(meta=lambda: SimpleNamespace(name="qq_official"))
+        windows = self.core.b04_repositories.windows
+        check = windows.is_current_for_send
+
+        async def switch_platform(*args, **kwargs):
+            result = await check(*args, **kwargs)
+            lookup.return_value = official
+            return result
+
+        windows.is_current_for_send = switch_platform
+        self.now += timedelta(seconds=301)
+        await self.core.delivery.dispatch_due_digests()
+        windows.is_current_for_send = check
+        self.assertEqual(self.context.calls, [])
+        self.assertEqual(
+            await self.sql("SELECT state FROM b04_digest_envelopes"), [("failed",)]
+        )
+
+        self.now += timedelta(seconds=301)
+        await self.core.delivery.dispatch_due_digests()
+        self.assertEqual(len(self.context.calls), 1)
+        self.assertEqual(
+            await self.sql("SELECT state FROM b04_digest_envelopes"), [("unknown",)]
+        )
+
+        # A route that remains absent uses the existing three-attempt budget.
+        lookup.return_value = None
+        self.transport.rows += [row(8)]
+        self.now += timedelta(seconds=900)
+        await self.tick()
+        for _ in range(2):
+            self.now += timedelta(seconds=301)
+            await self.core.delivery.dispatch_due_digests()
+        lookup.return_value = official
+        self.now += timedelta(seconds=301)
+        await self.core.delivery.dispatch_due_digests()
+        self.assertEqual(len(self.context.calls), 1)
+        self.assertEqual(
+            await self.sql(
+                "SELECT state, retry_at FROM b04_digest_envelopes ORDER BY state"
+            ),
+            [("failed", None), ("unknown", None)],
+        )
+        self.assertEqual(
+            await self.sql(
+                "SELECT COUNT(*) FROM b04_delivery_attempts WHERE state='failed'"
+            ),
+            [(5,)],
+        )
 
     async def test_screenshot_failure_keeps_one_text_message_without_replay(self):
         await self.start(targets=["test-platform-1:GroupMessage:group-42"])
