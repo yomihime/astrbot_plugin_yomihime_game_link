@@ -1,6 +1,7 @@
 """Synthetic durable sends: optional images cannot discard complete news text."""
 
 import unittest
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -134,3 +135,86 @@ class NewsMessagePortTests(unittest.IsolatedAsyncioTestCase):
             receipt = await port.send(self.target(), RenderedMessage("news"))
             self.assertIs(receipt.status, MessageStatus.UNKNOWN)
             send.assert_awaited_once()
+
+    async def test_webhook_multiplage_screenshot_falls_back_before_dispatch(self):
+        for name, pages, expected_count in (
+            ("qq_official_webhook", (b"one", b"two"), 0),
+            ("qq_official_webhook", (b"one",), 1),
+            ("qq_official", (b"one", b"two"), 2),
+        ):
+            with self.subTest(name=name, count=len(pages)):
+                send = AsyncMock(return_value=True)
+                image = Mock(side_effect=lambda page: page)
+                port = AstrBotMessagePort(
+                    SimpleNamespace(
+                        send_message=send,
+                        get_platform_inst=lambda _: SimpleNamespace(
+                            meta=lambda: SimpleNamespace(name=name)
+                        ),
+                    ),
+                    plain_factory=str,
+                    chain_factory=tuple,
+                    image_factory=image,
+                )
+                text = "Title, summary and original URL https://example.invalid/news"
+                receipt = await port.send(
+                    self.target(),
+                    RenderedMessage(text, png_pages=pages, image_profile="webpage"),
+                )
+                expected = (
+                    (text, *pages)
+                    if expected_count
+                    else (text + "\n网页截图暂不可用，请查看原文。",)
+                )
+                self.assertIs(receipt.status, MessageStatus.UNKNOWN)
+                self.assertEqual(image.call_count, expected_count)
+                send.assert_awaited_once_with(
+                    "synthetic-platform:GroupMessage:news-group", expected
+                )
+
+    async def test_unavailable_group_snapshot_cannot_send_after_route_reappears(self):
+        send = AsyncMock(return_value=True)
+        lookup = Mock(return_value=None)
+        port = AstrBotMessagePort(
+            SimpleNamespace(send_message=send, get_platform_inst=lookup),
+            plain_factory=str,
+            chain_factory=tuple,
+        )
+        target = self.target()
+        self.assertIsNone(target.public_group_route)
+        snapshot = port.public_group_route(target.conversation)
+        self.assertIsNone(snapshot.platform)
+        lookup.return_value = SimpleNamespace(
+            meta=lambda: SimpleNamespace(name="qq_official")
+        )
+        stale = replace(target, public_group_route=snapshot)
+        receipt = await port.send(stale, RenderedMessage("news"))
+        self.assertIs(receipt.status, MessageStatus.FAILED)
+        send.assert_not_awaited()
+
+        fresh = replace(
+            target, public_group_route=port.public_group_route(target.conversation)
+        )
+        receipt = await port.send(fresh, RenderedMessage("news"))
+        self.assertIs(receipt.status, MessageStatus.UNKNOWN)
+        send.assert_awaited_once()
+
+    async def test_legacy_private_target_does_not_need_group_snapshot(self):
+        send = AsyncMock(return_value=True)
+        port = AstrBotMessagePort(
+            SimpleNamespace(
+                send_message=send,
+                get_platform_inst=lambda _: SimpleNamespace(
+                    meta=lambda: SimpleNamespace(name="aiocqhttp")
+                ),
+            ),
+            plain_factory=str,
+            chain_factory=tuple,
+        )
+        route = ConversationRef("onebot", ConversationKind.DIRECT, "42", "onebot")
+        target = MessageTarget("42", "local-owner", route, True)
+        self.assertIsNone(target.public_group_route)
+        self.assertIsNone(port.public_group_route(route))
+        receipt = await port.send(target, RenderedMessage("private"))
+        self.assertIs(receipt.status, MessageStatus.ACCEPTED)
+        send.assert_awaited_once_with("onebot:FriendMessage:42", ("private",))

@@ -5,13 +5,21 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
-from ...core.ports import MessageReceipt, MessageStatus, MessageTarget, RenderedMessage
-from ...yomihime_game_link_sdk.subscriptions import ConversationKind
+from ...core.ports import (
+    MessageReceipt,
+    MessageStatus,
+    MessageTarget,
+    PublicGroupRoute,
+    RenderedMessage,
+)
+from ...yomihime_game_link_sdk.subscriptions import ConversationKind, ConversationRef
 
 ImageFactory = Callable[[bytes], object]
 
 PlainFactory = Callable[[str], object]
 MessageChainFactory = Callable[[Sequence[object]], object]
+
+_OFFICIAL_QQ_ADAPTERS = ("qq_official", "qq_official_webhook")
 
 
 class AstrBotMessagePort:
@@ -70,17 +78,32 @@ class AstrBotMessagePort:
         send_message = getattr(self._context, "send_message", None)
         if not callable(send_message):
             return MessageReceipt(MessageStatus.FAILED)
+        lookup = getattr(self._context, "get_platform_inst", None)
+        platform, adapter_name = self._platform(lookup, conversation.delivery_route)
+        group_route = target.public_group_route
+        if group_route is not None and (
+            group_route.platform is None
+            or platform is not group_route.platform
+            or adapter_name != group_route.adapter_name
+        ):
+            return MessageReceipt(MessageStatus.FAILED)
         try:
-            plain = self._plain_factory(payload.text)
-            components = (plain,)
+            components = (self._plain_factory(payload.text),)
             if payload.png_pages:
-                try:
-                    # Construct every page before dispatch, never send a partial set.
-                    images = tuple(
-                        self._image_factory(page) for page in payload.png_pages
-                    )
-                    components += images
-                except Exception:
+                # The Host's Webhook adapter cannot run the shared
+                # multi-image send recursion on its own instance.
+                unavailable = (
+                    adapter_name == "qq_official_webhook" and len(payload.png_pages) > 1
+                )
+                if not unavailable:
+                    try:
+                        # Construct the entire set before dispatch.
+                        components += tuple(
+                            self._image_factory(page) for page in payload.png_pages
+                        )
+                    except Exception:
+                        unavailable = True
+                if unavailable:
                     components = (
                         self._plain_factory(
                             payload.text + "\n网页截图暂不可用，请查看原文。"
@@ -100,18 +123,9 @@ class AstrBotMessagePort:
         # QQ Official may return normally without sending (for example a
         # group with no cached scene after Host restart). Never mark that
         # as SENT or retry it: the remote outcome is genuinely unknown.
-        unconfirmed_platform = False
-        lookup = getattr(self._context, "get_platform_inst", None)
-        if callable(lookup):
-            try:
-                platform = lookup(conversation.delivery_route)
-                meta = platform.meta() if platform is not None else None
-                unconfirmed_platform = meta is None or meta.name in (
-                    "qq_official",
-                    "qq_official_webhook",
-                )
-            except Exception:
-                unconfirmed_platform = True
+        unconfirmed_platform = adapter_name in _OFFICIAL_QQ_ADAPTERS or (
+            callable(lookup) and adapter_name is None
+        )
         try:
             sent = await send_message(session, chain)
         except Exception:
@@ -126,6 +140,41 @@ class AstrBotMessagePort:
         if sent is False:
             return MessageReceipt(MessageStatus.FAILED)
         return MessageReceipt(MessageStatus.UNKNOWN)
+
+    def public_group_route(
+        self, conversation: ConversationRef
+    ) -> PublicGroupRoute | None:
+        """Bind public group dispatch to the adapter used to check deduplication."""
+        lookup = getattr(self._context, "get_platform_inst", None)
+        if (
+            conversation.kind is not ConversationKind.GROUP
+            or conversation.adapter_id != conversation.delivery_route
+            or not callable(lookup)
+        ):
+            return None
+        platform, adapter_name = self._platform(lookup, conversation.delivery_route)
+        if adapter_name not in _OFFICIAL_QQ_ADAPTERS:
+            return PublicGroupRoute(platform, adapter_name)
+        # AstrBot's isolated group session is sender_id + '_' + group_id.
+        # Both official adapters use its final component when sending.
+        return PublicGroupRoute(platform, adapter_name, self._qq_group_id)
+
+    @staticmethod
+    def _qq_group_id(session_id: str) -> str:
+        return session_id.rsplit("_", 1)[-1]
+
+    @staticmethod
+    def _platform(lookup, route: str) -> tuple[object | None, str | None]:
+        if callable(lookup):
+            try:
+                platform = lookup(route)
+                if platform is not None:
+                    name = platform.meta().name
+                    if type(name) is str and name:
+                        return platform, name
+            except Exception:
+                pass
+        return None, None
 
     async def send_command(
         self, ingress, target, payload, *, image_current=None

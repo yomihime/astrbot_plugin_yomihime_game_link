@@ -10,8 +10,10 @@ import unittest
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
+from ygl_test_subject.adapters.astrbot.message_port import AstrBotMessagePort
 from ygl_test_subject.core.contracts.subscriptions import (
     DeliveryAttempt,
     DeliveryEvent,
@@ -4179,6 +4181,157 @@ class B04SubscriptionRepositoryTests(unittest.IsolatedAsyncioTestCase):
             [len((await self.windows.get(route.window_id)).members) for route in due]
         )
         self.assertEqual(member_counts, [1, 1, 1, 2])
+
+    async def test_public_qq_group_aliases_share_persisted_send_boundary(self):
+        platform_types = {
+            "official_a": "qq_official",
+            "official_b": "qq_official_webhook",
+            "onebot": "aiocqhttp",
+        }
+        port = AstrBotMessagePort(
+            SimpleNamespace(
+                get_platform_inst=lambda route: SimpleNamespace(
+                    meta=lambda: SimpleNamespace(name=platform_types[route])
+                )
+            )
+        )
+
+        def windows():
+            return SQLiteDigestWindowRepository(
+                self.db,
+                subscription_gate_bindings=self.bindings,
+            )
+
+        routes = (
+            ("official_a", "GROUPA"),
+            ("official_a", "MEMBERA_GROUPA"),
+            ("official_a", "MEMBERB_GROUPA"),
+            ("official_a", "GROUPB"),
+            ("official_b", "GROUPA"),
+            ("onebot", "42"),
+            ("onebot", "17_42"),
+        )
+        keys = ("ff14:news:7:old", "ff14:news:7:new")
+        observation = self._observation(identity="news-with-aliases")
+        cursor = ObservationCursor(
+            observation.observation_id, 1, observation.completeness, ()
+        )
+        changes = []
+        for index, (bot, session) in enumerate(routes):
+            record = await self._create(
+                replace(
+                    self._record(f"alias-{index}", owner=f"owner-{index}"),
+                    recipient=ConversationRef(
+                        bot, ConversationKind.GROUP, session, bot
+                    ),
+                )
+            )
+            changes.append(
+                SubscriptionEvaluationCommit(
+                    record.subscription_id,
+                    1,
+                    None,
+                    EvaluationState(1, {"seen": ["7"]}),
+                    cursor,
+                    tuple(
+                        replace(
+                            self._event(record, event_key=key),
+                            display_data=DisplayDocument(
+                                "news", "synthetic", (TextBlock("summary"),)
+                            ),
+                            public_contribution=PublicEventContribution(
+                                "news-card", key, {"id": "7"}
+                            ),
+                        )
+                        for key in keys
+                    ),
+                )
+            )
+        lease = await self._lease()
+        self.assertTrue(
+            await self.scheduler.commit_observation_with_evaluations(
+                lease, ObservationEvaluationCommit(observation, tuple(changes))
+            )
+        )
+        now = self.now + timedelta(seconds=31)
+        repo = windows()
+        candidates = await repo.list_due_routes(now=now, limit=20)
+        self.assertEqual(len(candidates), 14)
+        by_route = {}
+        for candidate in candidates:
+            window = await repo.get(candidate.window_id)
+            route = candidate.recipient
+            event_key = window.members[0].event_key
+            by_route[(route.adapter_id, route.conversation_id, event_key)] = candidate
+
+        async def claim(route, key):
+            item = by_route[(*route, key)]
+            result = await repo.claim_due_envelope(
+                item.window_id,
+                item.recipient,
+                now=now,
+                lease_expires_at=now + timedelta(minutes=1),
+            )
+            self.assertIsNotNone(result)
+            return result
+
+        async def begin(claimed):
+            return await repo.begin_envelope_send(
+                claimed,
+                expected_revision=claimed.envelope.revision,
+                attempt_number=1,
+                started_at=now,
+                group_route=port.public_group_route(claimed.envelope.recipient),
+            )
+
+        old, new = keys
+        claims = [await claim(route, old) for route in routes[:3]]
+        sends = await asyncio.gather(*(begin(item) for item in claims))
+        self.assertEqual(sum(item is not None for item in sends), 1)
+        for item, send in zip(claims, sends):
+            if send is None:
+                saved = await repo.current_envelope(
+                    item.envelope.window_id, item.envelope.recipient
+                )
+                self.assertIs(saved.state, DigestEnvelopeState.READY)
+
+        # The first attempt may have reached QQ before restart. Recovery must
+        # keep that UNKNOWN and suppress the other pre-existing group aliases.
+        repo = windows()
+        recovered = await repo.recover_expired_envelope_claims(
+            before=now, recovered_at=now, restart=True
+        )
+        self.assertEqual(
+            [item.state for item in recovered], [DigestEnvelopeState.UNKNOWN]
+        )
+        for route, sent in zip(routes, sends):
+            if sent is None:
+                alias = await claim(route, old)
+                self.assertIsNone(await begin(alias))
+                saved = await repo.current_envelope(
+                    alias.envelope.window_id, alias.envelope.recipient
+                )
+                self.assertIs(saved.state, DigestEnvelopeState.CANCELLED)
+                self.assertFalse(saved.delivery_attempts)
+
+        for route in routes[3:]:
+            self.assertIsNotNone(await begin(await claim(route, old)))
+
+        # A new article revision is a distinct delivery. A known failure
+        # for one alias leaves another eligible alias free to send it.
+        claimed = await claim(routes[0], new)
+        sending = await begin(claimed)
+        attempt = replace(
+            sending.delivery_attempts[-1],
+            state=DeliveryState.FAILED,
+            completed_at=now,
+            error_code="host_send_failed",
+        )
+        failed = await repo.complete_envelope_send(
+            claimed, attempt, expected_revision=sending.revision
+        )
+        self.assertIs(failed.state, DigestEnvelopeState.FAILED)
+        self.assertIsNotNone(await begin(await claim(routes[1], new)))
 
 
 def json_load(value: str):
