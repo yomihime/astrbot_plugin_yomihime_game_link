@@ -165,8 +165,8 @@
   "settings.field.ff14_news_admins": "新闻管理员",
   "settings.field.ff14_news_targets": "新闻推送目标",
   "settings.field.ff14_news_interval_seconds": "新闻同步周期",
-  "settings.hint.ff14_news_admins": "以逗号分隔：平台实例 ID:账户 ID。留空时禁止 addhere。",
-  "settings.hint.ff14_news_targets": "以逗号分隔：平台实例 ID:FriendMessage:账户 ID 或 平台实例 ID:GroupMessage:群 ID。首次完整采集建立基线，删除目标会取消配置订阅。",
+  "settings.hint.ff14_news_admins": "以逗号分隔：平台实例 ID:UID。QQ 官方机器人使用 /sid 的 Bot ID 与 UID，不是数字 QQ 号。留空时禁止 addhere。",
+  "settings.hint.ff14_news_targets": "以逗号分隔，填写 /sid 的完整 UMO（平台实例 ID:FriendMessage 或 GroupMessage:会话 ID）。私聊和群组分别获取，不要手工改消息类型。首次完整采集建立基线，删除目标会取消配置订阅。",
   "settings.invalidNews": "请检查新闻目标、管理员格式及同步周期，每项最多 20 条且不重复。",
   "settings.minutes": "{count} 分钟"
 }

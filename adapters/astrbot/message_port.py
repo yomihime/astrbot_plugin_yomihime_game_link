@@ -96,13 +96,33 @@ class AstrBotMessagePort:
             chain = self._chain_factory(components)
         except Exception:
             return MessageReceipt(MessageStatus.FAILED)
+        # Context's bool confirms adapter dispatch, not a platform receipt.
+        # QQ Official may return normally without sending (for example a
+        # group with no cached scene after Host restart). Never mark that
+        # as SENT or retry it: the remote outcome is genuinely unknown.
+        unconfirmed_platform = False
+        lookup = getattr(self._context, "get_platform_inst", None)
+        if callable(lookup):
+            try:
+                platform = lookup(conversation.delivery_route)
+                meta = platform.meta() if platform is not None else None
+                unconfirmed_platform = meta is None or meta.name in (
+                    "qq_official",
+                    "qq_official_webhook",
+                )
+            except Exception:
+                unconfirmed_platform = True
         try:
             sent = await send_message(session, chain)
         except Exception:
             # Once dispatch begins, even ValueError may follow a platform send.
             return MessageReceipt(MessageStatus.UNKNOWN)
         if sent is True:
-            return MessageReceipt(MessageStatus.ACCEPTED)
+            return MessageReceipt(
+                MessageStatus.UNKNOWN
+                if unconfirmed_platform
+                else MessageStatus.ACCEPTED
+            )
         if sent is False:
             return MessageReceipt(MessageStatus.FAILED)
         return MessageReceipt(MessageStatus.UNKNOWN)

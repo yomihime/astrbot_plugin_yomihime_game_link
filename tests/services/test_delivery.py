@@ -1242,6 +1242,28 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(saved.attempt.error_code, "cancelled_before_dispatch")
         self.assertEqual(self.port.calls, [])
 
+    async def test_unknown_receipt_does_not_disable_next_subscription_event(self):
+        port = _MessagePort(receipt=MessageReceipt(MessageStatus.UNKNOWN))
+        service = self._service(port=port)
+        first = await service.dispatch_event("event-1", 1, "sub-1", 1)
+        self.assertEqual(first.state, DeliveryState.UNKNOWN)
+        record = await self.subscriptions.current("sub-1")
+        self.assertEqual(record.status, SubscriptionStatus.ACTIVE)
+        # Unknown is terminal only for this event, not for the subscription.
+        next_event = self._event(key="event-2", title="next news revision")
+        await create_subscription_event_fixture(
+            self.deliveries, self.bindings, next_event
+        )
+        second = await service.dispatch_event("event-2", 1, "sub-1", 1)
+        again = await service.dispatch_event("event-1", 1, "sub-1", 1)
+        self.assertEqual(second.state, DeliveryState.UNKNOWN)
+        self.assertEqual(again.state, DeliveryState.UNKNOWN)
+        self.assertEqual(len(port.calls), 2)
+        self.assertEqual(
+            (await self.subscriptions.current("sub-1")).status,
+            SubscriptionStatus.ACTIVE,
+        )
+
     async def test_host_exception_is_unknown_and_not_retried(self) -> None:
         port = _MessagePort(error=OSError("private transport detail"))
         service = self._service(port=port)

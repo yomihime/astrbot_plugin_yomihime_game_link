@@ -440,6 +440,22 @@ class NewsEvaluatorTests(unittest.TestCase):
         self.assertEqual(len(changed.events), 1)
         self.assertIn(":r2:", changed.events[0].event_key)
 
+    def test_official_qq_configuration_preserves_opaque_ids(self):
+        uid = "A1B2C3D4E5F60718293A4B5C6D7E8F90"
+        validate_admins([f"official_a:{uid}", f"official_b:{uid}"])
+        validate_targets(
+            [
+                f"official_a:FriendMessage:{uid}",
+                f"official_a:GroupMessage:{uid}",
+                f"official_b:FriendMessage:{uid}",
+            ]
+        )
+        # UMO belongs in routing, not in the instance-scoped admin field.
+        with self.assertRaises(ValueError):
+            validate_admins([f"official_a:FriendMessage:{uid}"])
+        with self.assertRaises(ValueError):
+            validate_targets([uid])
+
     def test_configuration_validation_full_identity_and_bounds(self):
         validate_admins(["platform-a:17", "platform-b:17"])
         validate_targets(
@@ -1030,3 +1046,27 @@ class NewsCommandTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(requests[0], requests[1])
         self.assertEqual(requests[0].creation_key, "ff14-news-addhere-v1")
         self.assertFalse(requests[0].collector_parameters)
+
+    async def test_official_qq_addhere_checks_instance_scoped_uid(self):
+        uid = "A1B2C3D4E5F60718293A4B5C6D7E8F90"
+        create = AsyncMock()
+        services = SimpleNamespace(
+            config=SimpleNamespace(
+                current=AsyncMock(
+                    return_value=SimpleNamespace(values={ADMINS: [f"official_a:{uid}"]})
+                )
+            ),
+            subscriptions=SimpleNamespace(create_request=create),
+        )
+        handler = NewsAddHere(services)
+        permitted = replace(
+            INVOCATION, adapter_id="official_a", actor_id=f"official_a:{uid}"
+        )
+        denied = replace(
+            INVOCATION, adapter_id="official_b", actor_id=f"official_b:{uid}"
+        )
+        self.assertEqual((await handler.invoke(denied, {})).status.value, "error")
+        create.assert_not_awaited()
+        await handler.invoke(permitted, {})
+        create.assert_awaited_once()
+        self.assertEqual(create.await_args.args[0], permitted)

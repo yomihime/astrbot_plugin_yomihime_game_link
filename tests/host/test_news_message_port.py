@@ -61,3 +61,76 @@ class NewsMessagePortTests(unittest.IsolatedAsyncioTestCase):
                 "synthetic-platform:GroupMessage:news-group",
                 (("text", "Complete text"), ("image", b"png")),
             )
+
+    async def test_official_qq_opaque_ids_and_instance_routes_are_preserved(self):
+        uid = "A1B2C3D4E5F60718293A4B5C6D7E8F90"
+        for instance in ("default_123456", "official_second"):
+            for kind, message_type in (
+                (ConversationKind.DIRECT, "FriendMessage"),
+                (ConversationKind.GROUP, "GroupMessage"),
+            ):
+                with self.subTest(instance=instance, kind=kind):
+                    lookup = Mock(
+                        return_value=SimpleNamespace(
+                            meta=lambda: SimpleNamespace(
+                                name="qq_official", id=instance
+                            )
+                        )
+                    )
+                    send = AsyncMock(return_value=True)
+                    port = AstrBotMessagePort(
+                        SimpleNamespace(send_message=send, get_platform_inst=lookup),
+                        plain_factory=lambda text: text,
+                        chain_factory=tuple,
+                    )
+                    target = MessageTarget(
+                        uid, conversation=ConversationRef(instance, kind, uid, instance)
+                    )
+                    receipt = await port.send(target, RenderedMessage("news"))
+                    self.assertIs(receipt.status, MessageStatus.UNKNOWN)
+                    lookup.assert_called_once_with(instance)
+                    send.assert_awaited_once_with(
+                        f"{instance}:{message_type}:{uid}", ("news",)
+                    )
+
+    async def test_context_result_is_not_fabricated_platform_receipt(self):
+        for name, result, expected in (
+            ("qq_official", True, MessageStatus.UNKNOWN),
+            ("qq_official", False, MessageStatus.FAILED),
+            ("qq_official", None, MessageStatus.UNKNOWN),
+            ("qq_official_webhook", True, MessageStatus.UNKNOWN),
+            ("qq_official_webhook", False, MessageStatus.FAILED),
+            ("qq_official_webhook", None, MessageStatus.UNKNOWN),
+            ("aiocqhttp", True, MessageStatus.ACCEPTED),
+        ):
+            with self.subTest(name=name, result=result):
+                send = AsyncMock(return_value=result)
+                port = AstrBotMessagePort(
+                    SimpleNamespace(
+                        send_message=send,
+                        get_platform_inst=lambda _: SimpleNamespace(
+                            meta=lambda: SimpleNamespace(name=name)
+                        ),
+                    ),
+                    plain_factory=str,
+                    chain_factory=tuple,
+                )
+                receipt = await port.send(self.target(), RenderedMessage("news"))
+                self.assertIs(receipt.status, expected)
+                self.assertIsNone(receipt.platform_message_id)
+                send.assert_awaited_once()
+
+    async def test_platform_disappearing_or_metadata_failure_is_unknown(self):
+        for lookup in (Mock(return_value=None), Mock(side_effect=RuntimeError)):
+            send = AsyncMock(return_value=True)
+            port = AstrBotMessagePort(
+                SimpleNamespace(
+                    send_message=send,
+                    get_platform_inst=lookup,
+                ),
+                plain_factory=str,
+                chain_factory=tuple,
+            )
+            receipt = await port.send(self.target(), RenderedMessage("news"))
+            self.assertIs(receipt.status, MessageStatus.UNKNOWN)
+            send.assert_awaited_once()
