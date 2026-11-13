@@ -45,6 +45,7 @@ class RuntimeEffectGate:
         grant_revision=0,
         authority_check: Callable[[], None] | None = None,
         policy_assert: Callable[[Any], None] | None = None,
+        installation_guard: Callable[[], bool] | None = None,
         initially_open=True,
     ):
         if not core_token or type(core_epoch) is not int or core_epoch < 1:
@@ -71,6 +72,7 @@ class RuntimeEffectGate:
             grant_revision,
         )
         self.authority_check, self.policy_assert = authority_check, policy_assert
+        self.installation_guard = installation_guard
         self._open = bool(initially_open)
         self._preparing = package_id is not None and not initially_open
         self.prepare_violation = False
@@ -101,6 +103,7 @@ class RuntimeEffectGate:
                 or record.token != self.identity.core_token
             ):
                 raise EffectRejected()
+            self._check_installation()
             self._preparing = False
             self._open = True
 
@@ -117,6 +120,7 @@ class RuntimeEffectGate:
             self._check_locked()
 
     def _check_locked(self):
+        self._check_installation()
         record = self.kernel._record(self.scope)
         if (
             not self._open
@@ -125,6 +129,16 @@ class RuntimeEffectGate:
             or record.epoch != self.identity.core_epoch
         ):
             raise EffectRejected()
+
+    def _check_installation(self):
+        if self.installation_guard is not None and not self.installation_guard():
+            raise EffectRejected()
+
+    @contextmanager
+    def _commit_fence(self):
+        with self.kernel.lock:
+            self._check_locked()
+            yield
 
     def capture(self):
         self.check()
@@ -157,6 +171,9 @@ class EffectOperation:
 
         if not self.executing or self.finished:
             raise EffectRejected()
+        if self.gate.installation_guard is not None:
+            self.gate._check_installation()
+            unit.add_commit_guard(self.gate._commit_fence)
         identity = self.gate.identity
         assert_owner(unit, "core", identity.core_token, identity.core_epoch, 0)
         if identity.package_id is not None:

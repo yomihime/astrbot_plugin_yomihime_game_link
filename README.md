@@ -105,13 +105,13 @@ POSIX 入口保留交互终端和文件所有者检查；Windows 仅接受已资
 
 ## 安装
 
-当前 `0.2.0` 是开发候选；生产发布、发布者密钥保管和首次可信密钥登记仍待配置。测试签名只用于隔离验收，不代表正式发布者身份。
+在 AstrBot 的插件管理页上传完整安装包 `astrbot_plugin_yomihime_game_link-v0.2.8.zip`，即可安装或更新。无需配置签名身份、登记公钥或逐包批准。Steam DLC 使用支持普通安装格式的版本（0.3.1 起），通过同一宿主入口独立安装。
 
-只安装完整发布 ZIP：`astrbot_plugin_yomihime_game_link-v0.2.0.zip`。ZIP 包含 `ygl-plugin.json`、闭合全文件清单 `release.json`、对清单原始字节的 Ed25519 签名 `release.sig.json`、清单覆盖的 `release-key.json`、私有 SDK、SQL 与静态页面及许可证。核对 `SHA256SUMS`，在 AstrBot 原生插件管理上传该完整 ZIP；Actions 工件需先解开外层 ZIP。源码 checkout 和 GitHub 自动 Source code.zip 缺少生成的签名与清单，不能直接安装。
+ZIP 包含 `ygl-plugin.json`、完整文件清单 `release.json`、私有 SDK、SQL、静态页面及许可证。可用 `SHA256SUMS` 核对下载文件；Actions 工件需先解开外层 ZIP。源码 checkout 和 GitHub 自动 Source code.zip 缺少生成的清单与静态资产，不能直接安装。
 
 市场条目的 `download_url` 必须指向不可变完整 ZIP Release asset，不能指向源码归档。没有市场条目时，通过正常 AstrBot ZIP 上传完成安装/更新；插件没有网络自更新器。Core 与扩展独立发布，扩展页面与资源由运行时通用投影加载。
 
-同一新协议内的兼容更新通过宿主生命周期排空并切换，不要求整个 AstrBot 重启。共享依赖、原生库或运行环境变更属于单独的环境维护，须按具体变更说明处理。旧版 pre-coordinator alpha 到本版本的首次迁移不承诺热切换；无需因 alpha 标识例行清库或重装。更新前备份一致的配置、数据库与私有密钥材料。外部降级（包括普通手动 ZIP 上传）拒绝；只允许当前权限下内部 last-good 回退，没有公开的跳过版本检查入口。
+同一新协议内的兼容更新通过宿主生命周期排空并切换，不要求整个 AstrBot 重启。共享依赖、原生库或运行环境变更属于单独的环境维护，须按具体变更说明处理。旧版 pre-coordinator alpha 到本版本的首次迁移不承诺热切换；无需因 alpha 标识例行清库或重装。更新前备份一致的配置、数据库与私有密钥材料。普通安装遵循 AstrBot 选择的版本，仍检查宿主、SDK 和数据兼容性；这不保证任意旧版本都能读取升级后的数据。内部 last-good 回退只使用经过兼容性校验的精确缓存，不覆盖数据库。
 
 运行依赖由 `requirements.txt` 声明最低版本。无需安装独立 canonical SDK wheel；开发 wheel 可单独用于 SDK 工具验证，不决定 Core/DLC 版本配对。实际依赖组合仍须验证。
 
@@ -119,7 +119,7 @@ POSIX 入口保留交互终端和文件所有者检查；Windows 仅接受已资
 
 ## 开发
 
-开发环境、构建命令和验证范围见[贡献指南](https://github.com/yomihime/astrbot_plugin_yomihime_game_link/blob/master/CONTRIBUTING.md)。项目更新记录见[CHANGELOG](https://github.com/yomihime/astrbot_plugin_yomihime_game_link/blob/master/CHANGELOG.md)。本地 `python scripts/build_release.py --test-signing --output-dir <私有候选目录>` 生成测试签名完整 ZIP 与 `SHA256SUMS`；私钥仅存在进程内。正式签名使用受保护的外部 Ed25519 PEM 文件 `--signing-key`，本轮不配置生产密钥或发布。发布插件到 AstrBot 市场时，请以[AstrBot 插件发布说明](https://docs.astrbot.app/dev/star/plugin-publish.html)为准。
+开发环境、构建命令和验证范围见[贡献指南](https://github.com/yomihime/astrbot_plugin_yomihime_game_link/blob/master/CONTRIBUTING.md)。项目更新记录见[CHANGELOG](https://github.com/yomihime/astrbot_plugin_yomihime_game_link/blob/master/CHANGELOG.md)。本地 `python scripts/build_release.py --output-dir <构建目录>` 生成普通完整 ZIP 与 `SHA256SUMS`，不需要签名密钥。旧签名格式仅作为兼容选项保留，见[完整发布包](docs/release-packaging.md)。发布插件到 AstrBot 市场时，请以[AstrBot 插件发布说明](https://docs.astrbot.app/dev/star/plugin-publish.html)为准。
 
 Core、Host、SDK、FF14 的职责与模块入口见[模块维护速查](https://github.com/yomihime/astrbot_plugin_yomihime_game_link/blob/master/docs/module-maintainer-guide.md)；首版能力、离线检查和待真实验收范围见[FF14 首版能力表](https://github.com/yomihime/astrbot_plugin_yomihime_game_link/blob/master/docs/ff14-first-release.md)。当前文档及构建完成不代表新版本已经部署、真实 FFLogs 或全部平台验收通过。
 
@@ -129,7 +129,7 @@ Core、Host、SDK、FF14 的职责与模块入口见[模块维护速查](https:/
 
 ## 当前安装边界
 
-最低宿主版本通过官方 `astrbot_version: ">=4.29.1"` 元数据声明，当前以 AstrBot 4.29.1 的正式插件页面接口验证。只安装构建生成的完整签名 ZIP；源码 checkout 缺少生成的发布清单和签名，不能直接加载。外部运行依赖声明最低版本，私有 SDK 纳入发布全文件清单。
+最低宿主版本通过官方 `astrbot_version: ">=4.29.1"` 元数据声明，当前以 AstrBot 4.29.1 的正式插件页面接口验证。只安装构建生成的完整 ZIP；源码 checkout 缺少生成的发布清单和静态资产，不能直接加载。外部运行依赖声明最低版本，私有 SDK 纳入发布全文件清单。
 
 管理入口要求当前请求应用自有 adapter 上绑定的同步 Dashboard token 验证方法，并逐次检查同源、身份、有效期、POST 与精确路径；接口缺失或返回合同不匹配时拒绝授权。宿主版本标签不代替接口验证，离线源码合同回归不代表已在目标实例安装验收。
 

@@ -65,6 +65,7 @@ class SQLiteDatabase:
         migrations_dir: str | Path | None = None,
         timeout: float = 1.0,
         busy_timeout_ms: int | None = None,
+        migration_commit_guard=None,
     ) -> None:
         if not isinstance(path, (str, Path)) or not str(path).strip():
             raise ValueError("database path must be non-empty")
@@ -95,6 +96,7 @@ class SQLiteDatabase:
         self._executor_lock = threading.Lock()
         self._executor: Any = None
         self._storage_epoch: int | None = None
+        self._migration_commit_guard = migration_commit_guard
 
     def _validate_existing_file(self) -> None:
         if not self.path.exists():
@@ -191,7 +193,7 @@ class SQLiteDatabase:
                 self._check_integrity(connection)
                 version = MigrationRunner(
                     connection, directory=self.migrations_dir
-                ).apply()
+                ).apply(commit_guard=self._migration_commit_guard)
                 self._assert_storage_epoch(connection)
             except sqlite3.DatabaseError as exc:
                 if (

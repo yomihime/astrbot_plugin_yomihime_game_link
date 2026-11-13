@@ -11,6 +11,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 from uuid import uuid4
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -111,6 +112,8 @@ class PrivateCoreIntegrationTest(unittest.IsolatedAsyncioTestCase):
         payload_mib=0,
         with_pages=False,
         with_jobs=False,
+        ordinary=False,
+        host_identity=None,
     ):
         root = self.root / (package_id + "_" + version.replace(".", "_"))
         descriptor = {
@@ -184,9 +187,29 @@ class PrivateCoreIntegrationTest(unittest.IsolatedAsyncioTestCase):
         release.update(
             release=version,
             release_sequence=sequence,
-            plugin_id={"author": "Synthetic Author", "name": package_id},
+            plugin_id=host_identity
+            or {"author": "Synthetic Author", "name": package_id},
         )
+        if ordinary:
+            release["schema"] = "ygl.release/2"
+            del release["channel"], release["release_sequence"]
         raw = json.dumps(release).encode()
+        instance = object()
+        metadata = SimpleNamespace(
+            **release["plugin_id"],
+            version=version,
+            activated=True,
+            star_cls=instance,
+            root_dir_name=root.name,
+            module=SimpleNamespace(__file__=str(root / "main.py")),
+        )
+        (root / "release.json").write_bytes(raw)
+        if ordinary:
+            signature_path = root / "release.sig.json"
+            if signature_path.exists():
+                signature_path.unlink()
+            self.registry.append(metadata)
+            return self.manager.discovery.for_instance(instance), metadata
         key = getattr(self, "key", None)
         if key is None:
             self.key = key = Ed25519PrivateKey.generate()
@@ -203,7 +226,6 @@ class PrivateCoreIntegrationTest(unittest.IsolatedAsyncioTestCase):
             "key_id": self.key_id,
             "signature_base64": base64.b64encode(key.sign(raw)).decode(),
         }
-        (root / "release.json").write_bytes(raw)
         (root / "release.sig.json").write_text(json.dumps(signature))
         disk_manifest = importlib.import_module(
             self.namespace + ".extensions.disk_manifest"
@@ -226,15 +248,6 @@ class PrivateCoreIntegrationTest(unittest.IsolatedAsyncioTestCase):
                 actor_ref="offline authenticated test",
                 expected_revision=0,
             )
-        instance = object()
-        metadata = SimpleNamespace(
-            name=package_id,
-            author="Synthetic Author",
-            activated=True,
-            star_cls=instance,
-            root_dir_name=root.name,
-            module=SimpleNamespace(__file__=str(root / "main.py")),
-        )
         self.registry.append(metadata)
         return self.manager.discovery.for_instance(instance), metadata
 
@@ -576,6 +589,164 @@ class PrivateCoreIntegrationTest(unittest.IsolatedAsyncioTestCase):
         self.manager.packages["beta"].gate.check()
         with self.assertRaises(Exception):
             old_gate.check()
+
+    async def test_host_install_refresh_needs_no_legacy_approval_and_fences_old_effects(
+        self,
+    ):
+        executor = self.runtime._core.database.executor
+        invocation_guard = importlib.import_module(
+            self.namespace + ".services.runtime_effect_gate"
+        ).invocation_guard
+        installation, metadata = await self.make_dlc("native", ordinary=True)
+        self.assertEqual((await self.manager.replace(installation))["state"], "active")
+        old = self.manager.packages["native"]
+        old_digest = old.receipt.artifact_digest
+        self.assertIsNone(await self.manager.repository.grant("native"))
+        self.assertIsNone(await self.manager.repository.head("native", "", "stable"))
+
+        def save_config(unit):
+            unit.execute(
+                "INSERT INTO config_state VALUES ('test-user', 'native/demo', 1)"
+            )
+            unit.execute(
+                "INSERT INTO config_entries (principal_id, module_id, field, value_json, revision) "
+                "VALUES ('test-user', 'native/demo', 'test', '\"kept\"', 1)"
+            )
+
+        with invocation_guard(old.gate):
+            await executor.run_transaction(save_config)
+        metadata.activated = False
+        self.assertFalse(old.active)
+        self.registry.remove(metadata)
+
+        signed, metadata = await self.make_dlc("native", "1.0.1", 2)
+        self.assertEqual((await self.manager.replace(signed))["state"], "active")
+        old_grant = await self.manager.repository.grant("native")
+        old_head = await self.manager.repository.head("native", self.key_id, "stable")
+        self.registry.remove(metadata)
+        ordinary, metadata = await self.make_dlc("native", "1.0.1", ordinary=True)
+        result = await self.manager.replace(ordinary)
+        self.assertEqual(result["runtime_state"], "active")
+        self.assertEqual(result["running_version"], "1.0.1")
+        active = self.manager.packages["native"]
+        self.assertNotEqual(active.receipt.artifact_digest, old_digest)
+        self.assertEqual(await self.manager.repository.grant("native"), old_grant)
+        self.assertEqual(
+            await self.manager.repository.head("native", self.key_id, "stable"),
+            old_head,
+        )
+        self.assertIsNone(
+            await self.manager.repository.approval(active.receipt.artifact_digest)
+        )
+
+        await self.manager.repository.revoke_package(
+            "native",
+            actor_ref="offline authenticated test",
+            expected_revision=old_grant["revision"],
+        )
+        active.gate.check()
+
+        def disable_before_commit(unit):
+            unit.execute(
+                "UPDATE config_entries SET value_json = '\"late\"', revision = 2 "
+                "WHERE principal_id = 'test-user' AND module_id = 'native/demo'"
+            )
+            metadata.activated = False
+
+        with (
+            invocation_guard(active.gate),
+            self.assertRaisesRegex(RuntimeError, "stale_lease"),
+        ):
+            await executor.run_transaction(disable_before_commit)
+        persisted = await executor.run_read(
+            lambda unit: tuple(
+                unit.execute(
+                    "SELECT value_json, revision FROM config_entries "
+                    "WHERE principal_id = 'test-user' AND module_id = 'native/demo'"
+                ).fetchone()
+            )
+        )
+        self.assertEqual(persisted, ('"kept"', 1))
+
+    async def test_ordinary_owner_survives_legacy_grant_and_activation_without_pin(
+        self,
+    ):
+        signed, metadata = await self.make_dlc("native")
+        self.registry.remove(metadata)
+        executor = self.runtime._core.database.executor
+        await executor.run_internal_transaction(
+            lambda unit: (
+                unit.execute(
+                    "INSERT INTO extension_installation_grants VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        "native",
+                        "native",
+                        "old root",
+                        1,
+                        "{}",
+                        "a" * 64,
+                        "b" * 64,
+                        "fixture",
+                        0,
+                    ),
+                ).rowcount
+            )
+        )
+        await self.manager.repository.revoke_package(
+            "native", actor_ref="offline authenticated test", expected_revision=1
+        )
+        other = {"author": "Different Owner", "name": "different-host-plugin"}
+        unowned, metadata = await self.make_dlc(
+            "native", "1.0.1", ordinary=True, host_identity=other
+        )
+        with self.assertRaisesRegex(ValueError, "package_already_owned"):
+            await self.manager.replace(unowned)
+        self.registry.remove(metadata)
+        author_only = {"author": "Different Owner", "name": "native"}
+        unowned, metadata = await self.make_dlc(
+            "native", "1.0.2", ordinary=True, host_identity=author_only
+        )
+        with self.assertRaisesRegex(ValueError, "package_already_owned"):
+            await self.manager.replace(unowned)
+        self.assertNotIn("native", self.manager.cache.current)
+        self.registry.remove(metadata)
+
+        successor, _ = await self.make_dlc("native", "1.0.3", ordinary=True)
+        self.assertEqual(successor.plugin_id, signed.plugin_id)
+        with patch.object(
+            self.manager.cache,
+            "publish",
+            side_effect=RuntimeError("failed pin publication"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "failed pin publication"):
+                await self.manager.replace(successor)
+        self.assertNotIn("native", self.manager.cache.current)
+        owner = await executor.run_internal_transaction(
+            lambda unit: unit.execute(
+                "SELECT plugin_id FROM extension_package_owners WHERE package_id=?",
+                ("native",),
+            ).fetchone()[0]
+        )
+        self.assertEqual(json.loads(owner), signed.plugin_id)
+        self.assertTrue((await self.manager.repository.grant("native"))["revoked"])
+
+        # A fresh ordinary package can commit durable identity without any legacy grant.
+        fresh, metadata = await self.make_dlc("fresh", ordinary=True)
+        with patch.object(
+            self.manager.cache,
+            "publish",
+            side_effect=RuntimeError("failed pin publication"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "failed pin publication"):
+                await self.manager.replace(fresh)
+        self.assertNotIn("fresh", self.manager.cache.current)
+        self.assertIsNone(await self.manager.repository.grant("fresh"))
+        self.registry.remove(metadata)
+        replacement, _ = await self.make_dlc(
+            "fresh", "1.0.1", ordinary=True, host_identity=other
+        )
+        with self.assertRaisesRegex(ValueError, "package_already_owned"):
+            await self.manager.replace(replacement)
 
     async def test_same_instance_reapproval_retries_fresh_epoch_and_retires_old_lease(
         self,

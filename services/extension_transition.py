@@ -43,6 +43,7 @@ class ExtensionControlEndpoint:
         fence,
         features=(),
         capacity=256,
+        installation_guard=None,
     ):
         if type(core_epoch) is not int or core_epoch < 1:
             raise ValueError("invalid Core epoch")
@@ -52,6 +53,7 @@ class ExtensionControlEndpoint:
         self.core_epoch = core_epoch
         self.activate, self.withdraw, self.fence = activate, withdraw, fence
         self.features = tuple(features)
+        self._installation_guard = installation_guard
         self.capacity = capacity
         self._operations = OrderedDict()
         self._leases = {}
@@ -79,6 +81,8 @@ class ExtensionControlEndpoint:
             doc = parse_control(
                 json.dumps(message, ensure_ascii=False, allow_nan=False).encode("utf-8")
             )
+            if self._installation_guard is not None and not self._installation_guard():
+                return self._error("core_unavailable", retryable=True)
             if doc["op"] == "describe":
                 return self._reply(
                     "parked" if self._closed else "ready",
@@ -193,6 +197,7 @@ class ExtensionControlEndpoint:
                 "artifact_tampered",
                 "release_downgrade",
                 "environment_change_required",
+                "package_already_owned",
                 "data_incompatible",
                 "prepare_side_effect_forbidden",
                 "prepare_timeout",

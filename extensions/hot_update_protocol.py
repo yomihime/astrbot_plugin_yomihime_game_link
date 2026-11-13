@@ -1,4 +1,4 @@
-"""Bounded, host-independent YGL hot-update wire protocol (v1).
+"""Bounded, host-independent YGL hot-update wire protocol.
 
 Parsing does not authenticate a host caller, verify a signature, inspect a
 filesystem, or grant capabilities. Those are separate Core admission steps.
@@ -25,6 +25,7 @@ _ID = re.compile(r"[a-z][a-z0-9_]*(?:[.-][a-z0-9_]+)*\Z")
 _VERSION = re.compile(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\Z")
 _FEATURE = re.compile(r"[a-z][a-z0-9._-]{0,63}/[1-9][0-9]{0,5}\Z")
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
+HOST_RELEASE_SCHEMA = "ygl.release/2"
 _B05 = frozenset(
     {
         "schema_version",
@@ -357,29 +358,26 @@ def payload_digest(files: Sequence[Mapping[str, Any]]) -> str:
 
 def parse_release(data: bytes) -> dict[str, Any]:
     doc = _load(data, 2097152, depth=12, nodes=50000)
-    _fields(
-        doc,
-        {
-            "schema",
-            "plugin_id",
-            "package_id",
-            "release",
-            "channel",
-            "release_sequence",
-            "payload_digest",
-            "files",
-        },
-    )
-    if doc["schema"] != "ygl.release/1":
+    fields = {"schema", "plugin_id", "package_id", "release", "payload_digest", "files"}
+    schema = doc.get("schema")
+    if schema == "ygl.release/1":
+        _fields(doc, fields | {"channel", "release_sequence"})
+        if doc["channel"] not in ("stable", "preview"):
+            raise ProtocolError("invalid release channel")
+        _integer(doc["release_sequence"])
+    elif schema == HOST_RELEASE_SCHEMA:
+        _fields(doc, fields)
+    else:
         raise ProtocolError("unsupported release schema")
     _plugin_id(doc["plugin_id"])
     _package_id(doc["package_id"])
     _match(doc["release"], _VERSION)
-    if doc["channel"] not in ("stable", "preview"):
-        raise ProtocolError("invalid release channel")
-    _integer(doc["release_sequence"])
     if _match(doc["payload_digest"], _DIGEST) != payload_digest(doc["files"]):
         raise ProtocolError("payload digest mismatch")
+    if schema == HOST_RELEASE_SCHEMA and any(
+        row["path"].casefold() == "release-key.json" for row in doc["files"]
+    ):
+        raise ProtocolError("host release contains a signing key envelope")
     return doc
 
 

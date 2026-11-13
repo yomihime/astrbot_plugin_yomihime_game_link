@@ -283,6 +283,14 @@ class ProtocolTests(unittest.TestCase):
                 "payload_digest": "a" * 64,
                 "files": [{"path": "main.py", "size": 0, "sha256": "a" * 64}],
             },
+            "ygl-release-v2.json": {
+                "schema": "ygl.release/2",
+                "plugin_id": {"author": "A", "name": "N"},
+                "package_id": "new_unseen_dlc",
+                "release": "1.2.3",
+                "payload_digest": "a" * 64,
+                "files": [{"path": "main.py", "size": 0, "sha256": "a" * 64}],
+            },
         }
         for name, fixture in fixtures.items():
             with self.subTest(name=name):

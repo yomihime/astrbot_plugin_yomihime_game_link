@@ -66,7 +66,7 @@ class SQLiteExecutorTests(unittest.IsolatedAsyncioTestCase):
             ),
         ):
             version = await self.executor.initialize()
-            self.assertEqual(version, 230)
+            self.assertEqual(version, 240)
             await self.executor.run_transaction(
                 lambda unit: _execute_statement(
                     unit, "CREATE TABLE worker_probe(value TEXT)"

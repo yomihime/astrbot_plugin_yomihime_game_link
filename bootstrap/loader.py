@@ -11,7 +11,11 @@ import asyncio
 import hashlib
 from pathlib import Path
 
-from ..extensions.hot_update_protocol import parse_plugin_descriptor, parse_release
+from ..extensions.hot_update_protocol import (
+    HOST_RELEASE_SCHEMA,
+    parse_plugin_descriptor,
+    parse_release,
+)
 from ..extensions.runtime_bundle import RuntimeBundleError
 from .artifact_cache import ArtifactCache as ArtifactCache
 from .coordinator import get_coordinator
@@ -33,7 +37,16 @@ FEATURES = (
 class CoreGeneration:
     """Keep exact owner, token and cleanup task through Host module purges."""
 
-    def __init__(self, owner, context, data_root, bundle):
+    def __init__(
+        self,
+        owner,
+        context,
+        data_root,
+        bundle,
+        *,
+        host_is_current=None,
+        close_host_pages=None,
+    ):
         self.owner = owner
         self.context = context
         self.scope = (Path(data_root), context)
@@ -46,6 +59,35 @@ class CoreGeneration:
         self.durable_fenced = False
         self.state = "parked"
         self._released = False
+        self._host_is_current = host_is_current
+        self._close_host_pages = close_host_pages
+        self._installation_lost = False
+        self._loop = asyncio.get_running_loop() if host_is_current is not None else None
+
+    @property
+    def installation_guard(self):
+        return self.installation_current if self._host_is_current is not None else None
+
+    def installation_current(self):
+        if self._host_is_current is None:
+            return True
+        with self.kernel.lock:
+            if not self._installation_lost and not self._host_is_current():
+                self._installation_lost = True
+                if self.receipt is not None:
+                    # SQL workers detect revocation too. Fence admission there,
+                    # and leave asynchronous cleanup with this generation's loop.
+                    self._loop.call_soon_threadsafe(self._fence_lost_installation)
+            return not self._installation_lost
+
+    def require_installation(self):
+        if not self.installation_current():
+            raise RuntimeBundleError("core_installation_changed")
+
+    def _fence_lost_installation(self):
+        self.sync_fence()
+        if self._close_host_pages is not None:
+            self._close_host_pages()
 
     async def acquire(self):
         """Acquire lifecycle ownership only; production uses acquire_admitted."""
@@ -64,15 +106,18 @@ class CoreGeneration:
 
     async def acquire_admitted(self, cache):
         """Strict production admission, independent of cache attachment order."""
+        self.require_installation()
         cache.check_core_admission(self.bundle)
         result = await self.acquire()
         if result["state"] == "acquired":
+            self.require_installation()
             cache.check_core_admission(self.bundle)
         return result
 
     def mount_admitted_core(self, cache, *, fallback):
         if self.receipt is None:
             raise RuntimeBundleError("core_owner_missing")
+        self.require_installation()
         cache.check_core_admission(self.bundle, fallback=fallback)
         return self.bundle.mount_core()
 
@@ -187,13 +232,20 @@ def validate_core_release(raw_release, signature_bytes, bundle):
     It is deliberately not an independent trust root against malicious ZIPs.
     The native Host administrator's installation selects the Core publisher.
     """
+    descriptor = validate_core_descriptor(bundle)
+    if bundle.release_doc["schema"] == HOST_RELEASE_SCHEMA:
+        if signature_bytes is not None or parse_release(raw_release) != dict(
+            bundle.release_doc
+        ):
+            raise RuntimeBundleError("core_release_invalid")
+        return descriptor
+
     import base64
 
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
     from ..extensions.hot_update_protocol import _load
 
-    descriptor = validate_core_descriptor(bundle)
     if signature_bytes is None:
         raise RuntimeBundleError("core_signature_missing")
     try:

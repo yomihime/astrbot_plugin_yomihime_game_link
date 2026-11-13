@@ -177,7 +177,7 @@ def build_release(
     external_page_roots=(),
     external_source_policy_roots=(),
 ):
-    """Build one complete signed Core ZIP and SHA256SUMS; no DLC checkout needed."""
+    """Build one complete Core ZIP and SHA256SUMS; no DLC checkout needed."""
     repository_root = Path(repository_root).resolve(strict=True)
     name, metadata_version = plugin_metadata(repository_root)
     if tag is not None:
@@ -227,7 +227,7 @@ def main():
     else:
         from release_envelope import signing_key
     parser = argparse.ArgumentParser(
-        description="Build a complete independently installable signed Core ZIP."
+        description="Build a complete AstrBot Core installation ZIP."
     )
     parser.add_argument("--tag")
     parser.add_argument("--output-dir", type=Path)
@@ -237,17 +237,24 @@ def main():
         action="store_true",
         help="Ephemeral development key; not publisher enrollment or production signing.",
     )
-    parser.add_argument("--channel", choices=("preview", "stable"), default="preview")
-    parser.add_argument("--sequence", type=int, default=1)
+    parser.add_argument("--channel", choices=("preview", "stable"))
+    parser.add_argument("--sequence", type=int)
     args = parser.parse_args()
-    if args.test_signing and args.channel != "preview":
+    if args.test_signing and args.signing_key is not None:
+        parser.error("choose --signing-key or --test-signing")
+    if not (args.test_signing or args.signing_key) and (
+        args.channel is not None or args.sequence is not None
+    ):
+        parser.error("--channel and --sequence apply to signed releases")
+    channel = args.channel or "preview"
+    if args.test_signing and channel != "preview":
         parser.error("test signing is preview-only")
     for path in build_release(
         args.tag,
         args.output_dir,
         signing_key=signing_key(args.signing_key, test=args.test_signing),
-        channel=args.channel,
-        sequence=args.sequence,
+        channel=channel,
+        sequence=1 if args.sequence is None else args.sequence,
     ):
         print(f"Created {path}")
 

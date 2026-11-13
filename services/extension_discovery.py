@@ -23,10 +23,26 @@ class HostInstallation:
     root: Path
     descriptor: dict
     descriptor_digest: str
+    author: str | None
+    name: str | None
+    version: str | None
 
     @property
     def package_id(self):
         return self.descriptor["package_id"]
+
+    @property
+    def plugin_id(self):
+        return {"author": self.author, "name": self.name}
+
+    def metadata_current(self):
+        return (
+            self.metadata.activated is True
+            and self.metadata.star_cls is self.instance
+            and getattr(self.metadata, "author", None) == self.author
+            and getattr(self.metadata, "name", None) == self.name
+            and getattr(self.metadata, "version", None) == self.version
+        )
 
 
 class ExtensionDiscovery:
@@ -102,11 +118,14 @@ class ExtensionDiscovery:
             root,
             descriptor,
             hashlib.sha256(raw).hexdigest(),
+            getattr(metadata, "author", None),
+            getattr(metadata, "name", None),
+            getattr(metadata, "version", None),
         )
 
     def current(self, installation):
         # Rescan revalidates exact metadata, instance, root, descriptor and conflicts.
-        return any(
+        return installation.metadata_current() and any(
             item.metadata is installation.metadata
             and item.instance is installation.instance
             and item.root == installation.root

@@ -1,10 +1,18 @@
 # Trusted external source policies
 
+## Ordinary native installations
+
+Core 0.2.8 accepts complete `ygl.release/2` DLC packages from the current enabled AstrBot plugin instance. Uploading the package through AstrBot is sufficient; no second publisher, package or artifact approval is required. The descriptor, manifest, content inventory, plugin identity, version and data compatibility are still validated before activation. The package declares finite source and credential rules; these do not bypass current user authorization, secret-reference checks, HTTP budgets, instance ownership, runtime epochs or commit fences. Compatible updates use the normal hot-update lifecycle without a Host restart.
+
+The grant and plan workflow below describes the legacy installation path only. Ordinary packages do not depend on or rewrite these old approval records. See [complete packages](release-packaging.md) for both formats.
+
+## Legacy installation grants
+
 Core accepts external sensitive configuration only under a trusted installation grant. The Host first verifies the installed plugin instance and package root. Management reads a bounded permission plan and approves its exact fingerprint and current revision; approval is recorded in SQLite and takes effect after a normal restart. A package's proposed `yomihime.source-policy.json` never approves itself. A stock Core build supports this path without embedding that extension's pages or Python.
 
 The grant binds plugin/package/root ownership and approved source, credential, authorization and job permissions. Runtime still captures and validates current manifest, Python and resource content hashes. Compatible package-version or page changes therefore retain existing permissions without a new Core build. Permission expansion is rejected until trusted management approves the new plan. Existing build-selected `external-source-policies.json` inputs can migrate equivalent permissions with an audit record; explicit legacy builds may still pair `--external-source-policy-package` and `--external-page-package`. Those files contain public protocol declarations, never credentials.
 
-In the Core module-management page, expand “独立扩展安装授权”, enter the Host plugin name and local package ID, read the plan, review its exact host/path/method/field rules, then approve. The same guarded operations are `admin/module-install-plan` and `admin/module-install-approve`. Client selectors, a page asset ticket and a module declaration confer no management authority. Replaced instances, roots, request contexts and revisions remain fenced.
+The historical installation-permission UI is no longer part of the current module-management page. Legacy backend compatibility operations remain guarded at `admin/module-install-plan` and `admin/module-install-approve`; they bind the Host plugin name, package ID and exact host/path/method/field rules. Ordinary packages do not use this workflow. Client selectors, a page asset ticket and a module declaration confer no management authority. Replaced instances, roots, request contexts and revisions remain fenced.
 
 An explicitly approved `config_migrations` rule can normalize an old ordinary integer range with `kind: "integer_floor"`, `owner`, `field`, `from_minimum` and `to_minimum`. The field must be nonsensitive and its declared schema minimum must equal the approved destination. Only stored integers in that exact old range change. Value, module CAS and migration audit commit together; defaults, other values, credentials and bindings are preserved. No game-specific migration rule lives in Core.
 
