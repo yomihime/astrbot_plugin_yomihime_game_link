@@ -10,10 +10,15 @@ import asyncio
 import json
 import secrets
 from collections import OrderedDict
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from uuid import uuid4
 
-from ..extensions.hot_update_protocol import ProtocolError, parse_control
+from ..extensions.hot_update_protocol import (
+    CONTROL_RETIRE_FEATURE,
+    ProtocolError,
+    parse_control,
+)
 from .extension_discovery import DiscoveryError
 
 
@@ -41,9 +46,10 @@ class ExtensionControlEndpoint:
         activate,
         withdraw,
         fence,
-        features=(),
+        features=(CONTROL_RETIRE_FEATURE,),
         capacity=256,
         installation_guard=None,
+        retirement_lock=None,
     ):
         if type(core_epoch) is not int or core_epoch < 1:
             raise ValueError("invalid Core epoch")
@@ -54,9 +60,13 @@ class ExtensionControlEndpoint:
         self.activate, self.withdraw, self.fence = activate, withdraw, fence
         self.features = tuple(features)
         self._installation_guard = installation_guard
+        self._retirement_lock = (
+            retirement_lock if retirement_lock is not None else nullcontext()
+        )
         self.capacity = capacity
         self._operations = OrderedDict()
         self._leases = {}
+        self._withdrawals = {}
         self._closed = False
         self._reconcile_task = None
 
@@ -92,6 +102,8 @@ class ExtensionControlEndpoint:
                 )
             if doc["op"] == "disconnect":
                 return self._disconnect(caller, doc["lease"])
+            if doc["op"] == "retire":
+                return self._retire(caller)
             if doc["op"] == "status":
                 return self._status(caller, doc)
             if self._closed:
@@ -126,7 +138,11 @@ class ExtensionControlEndpoint:
         if len(self._operations) < self.capacity:
             return True
         for key, operation in tuple(self._operations.items()):
-            if operation.task.done() and operation.lease is None:
+            if (
+                operation.task.done()
+                and operation.lease is None
+                and id(operation.instance) not in self._withdrawals
+            ):
                 del self._operations[key]
                 return True
         return False
@@ -155,6 +171,8 @@ class ExtensionControlEndpoint:
                 raise DiscoveryError("stale_instance")
             # Composition must recheck current() immediately before commit too.
             result = await self.activate(installation)
+            if id(installation.instance) in self._withdrawals:
+                return
             if type(result) is not dict:
                 raise TypeError("invalid activation result")
             # No publication authority comes from an input caller or reply.
@@ -187,7 +205,10 @@ class ExtensionControlEndpoint:
         except DiscoveryError as exc:
             operation.reply = self._error(exc.code)
         except asyncio.CancelledError:
-            if operation.reply.get("error", {}).get("code") != "prepare_timeout":
+            if (
+                not self.discovery.is_tombstoned(installation.instance)
+                and operation.reply.get("error", {}).get("code") != "prepare_timeout"
+            ):
                 operation.reply = self._error("operation_interrupted")
             raise
         except Exception as error:
@@ -262,6 +283,9 @@ class ExtensionControlEndpoint:
         for operation in tuple(self._operations.values()):
             if operation.instance is instance:
                 operation.lease = None
+                if state == "cleanup_pending" and operation.reply.get("state") == state:
+                    # Retiring an already-blocked owner cannot erase its diagnostic.
+                    continue
                 operation.reply = self._reply(
                     state, operation_id=operation.operation_id
                 )
@@ -270,27 +294,55 @@ class ExtensionControlEndpoint:
         operation = self._leases.get(lease)
         if operation is None or operation.instance is not caller:
             return self._reply("already_detached")
-        # Synchronous fence before the first await, including Host terminate.
-        self.fence(caller)
-        self.discovery.tombstone(caller)
-        self.retire_instance(caller, "cleanup_pending")
-        operation.task = asyncio.create_task(
-            self._withdraw(operation), name="ygl-package-disconnect"
-        )
-        return self._reply("queued", operation_id=operation.operation_id)
+        return self._retire(caller, operation=operation)
 
-    async def _withdraw(self, operation):
+    def _retire(self, caller, *, operation=None):
+        if id(caller) in self._withdrawals or self.discovery.is_tombstoned(caller):
+            return self._reply("already_detached")
+        owned = tuple(op for op in self._operations.values() if op.instance is caller)
+        if not owned:
+            if self._closed:
+                return self._reply("already_detached")
+            self.discovery.for_instance(caller)
+        # Fence the exact instance before returning, even if no lease was issued.
+        with self._retirement_lock:
+            self.discovery.tombstone(caller)
+        # Jobs and module admission may acquire the kernel lock from their own
+        # commit fences. The tombstone already rejects new effects and commits.
+        self.fence(caller)
+        self.retire_instance(caller, "cleanup_pending")
+        for pending in owned:
+            self._cancel_activation(pending)
+        task = asyncio.create_task(
+            self._withdraw(caller, owned), name="ygl-package-disconnect"
+        )
+        self._withdrawals[id(caller)] = task
+        if operation is not None:
+            return self._reply("queued", operation_id=operation.operation_id)
+        return self._reply("queued")
+
+    async def _withdraw(self, instance, owned):
         try:
-            await self.withdraw(operation.instance)
-            operation.reply = self._reply(
-                "disabled", operation_id=operation.operation_id
-            )
+            if owned:
+                await asyncio.gather(
+                    *(operation.task for operation in owned), return_exceptions=True
+                )
+            await self.withdraw(instance)
+            self.retire_instance(instance)
         except Exception:
-            operation.reply = self._reply(
-                "cleanup_pending",
-                operation_id=operation.operation_id,
-                reason="cleanup_failed",
-            )
+            self.mark_instance_error(instance, "cleanup_failed")
+        finally:
+            self._withdrawals.pop(id(instance), None)
+
+    @staticmethod
+    def _cancel_activation(operation):
+        if (
+            operation.activating
+            and not operation.task.done()
+            and not operation.cancellation_requested
+        ):
+            operation.cancellation_requested = True
+            operation.task.cancel()
 
     def stop_accepting(self):
         self._closed = True
@@ -299,18 +351,13 @@ class ExtensionControlEndpoint:
 
     async def close(self):
         self.stop_accepting()
-        # Snapshot preparatory owners before disconnect creates withdrawal
-        # cleanup tasks. Each activation receives at most one cancel request.
+        # Cancel each activation once and retain its task beside any withdrawal.
         for operation in tuple(self._operations.values()):
-            if (
-                operation.activating
-                and not operation.task.done()
-                and not operation.cancellation_requested
-            ):
-                operation.cancellation_requested = True
-                operation.task.cancel()
+            self._cancel_activation(operation)
         for lease, operation in tuple(self._leases.items()):
             self._disconnect(operation.instance, lease)
-        tasks = tuple(operation.task for operation in self._operations.values())
+        tasks = tuple(
+            operation.task for operation in self._operations.values()
+        ) + tuple(self._withdrawals.values())
         if tasks:
             await asyncio.shield(asyncio.gather(*tasks, return_exceptions=True))

@@ -57,7 +57,11 @@ class ExtensionDiscovery:
         # Retain the object: id reuse must never detach a successor.
         self._tombstones[id(instance)] = instance
 
-    def scan(self):
+    def is_tombstoned(self, instance):
+        return self._tombstones.get(id(instance)) is instance
+
+    def prune_tombstones(self):
+        """Called by event-loop reconciliation, the other tombstone writer."""
         metadata_snapshot = tuple(self.context.get_all_stars())
         present = {
             id(getattr(meta, "star_cls", None)): getattr(meta, "star_cls", None)
@@ -66,18 +70,22 @@ class ExtensionDiscovery:
         self._tombstones = {
             key: obj for key, obj in self._tombstones.items() if present.get(key) is obj
         }
+
+    def scan(self):
+        # SQL workers also scan. Their snapshots must not prune retirements.
+        metadata_snapshot = tuple(self.context.get_all_stars())
         found = []
-        self.rejections = {}
+        rejections = {}
         for metadata in metadata_snapshot:
             instance = getattr(metadata, "star_cls", None)
             if getattr(metadata, "activated", None) is not True or instance is None:
                 continue
-            if self._tombstones.get(id(instance)) is instance:
+            if self.is_tombstoned(instance):
                 continue
             try:
                 candidate = self._read(metadata)
             except DiscoveryError as exc:
-                self.rejections[getattr(metadata, "name", "")] = exc.code
+                rejections[getattr(metadata, "name", "")] = exc.code
                 continue
             if candidate is not None:
                 found.append(candidate)
@@ -86,7 +94,8 @@ class ExtensionDiscovery:
             counts[item.package_id] = counts.get(item.package_id, 0) + 1
         for item in found:
             if counts[item.package_id] != 1:
-                self.rejections[item.package_id] = "owner_conflict"
+                rejections[item.package_id] = "owner_conflict"
+        self.rejections = rejections
         return tuple(item for item in found if counts[item.package_id] == 1)
 
     @staticmethod

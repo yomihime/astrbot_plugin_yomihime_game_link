@@ -12,6 +12,7 @@ import hashlib
 from pathlib import Path
 
 from ..extensions.hot_update_protocol import (
+    CONTROL_RETIRE_FEATURE,
     HOST_RELEASE_SCHEMA,
     parse_plugin_descriptor,
     parse_release,
@@ -21,6 +22,7 @@ from .artifact_cache import ArtifactCache as ArtifactCache
 from .coordinator import get_coordinator
 
 FEATURES = (
+    CONTROL_RETIRE_FEATURE,
     "source.policies/1",
     "source.http/1",
     "storage.records/1",

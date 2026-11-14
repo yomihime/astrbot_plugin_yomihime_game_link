@@ -5,6 +5,7 @@ import hashlib
 import io
 import json
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -15,7 +16,10 @@ from PIL import Image as PillowImage
 from ygl_test_subject.adapters.astrbot.runtime import AstrBotRuntime
 from ygl_test_subject.bootstrap.coordinator import get_coordinator
 from ygl_test_subject.services.core_runtime import CoreRuntime
-from ygl_test_subject.services.extension_discovery import ExtensionDiscovery
+from ygl_test_subject.services.extension_discovery import (
+    DiscoveryError,
+    ExtensionDiscovery,
+)
 from ygl_test_subject.services.extension_transition import ExtensionControlEndpoint
 from ygl_test_subject.services.external_packages import (
     IndependentPackageRuntime,
@@ -599,13 +603,13 @@ class IndependentDiscoveryTest(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(release.set)
         observer = asyncio.create_task(self.endpoint.close())
         await asyncio.wait_for(entered.wait(), 1)
-        actual = self.endpoint._operations[ready["operation_id"]].task
+        actual = self.endpoint._withdrawals[id(active)]
         observer.cancel()
         with self.assertRaises(asyncio.CancelledError):
             await observer
         second = asyncio.create_task(self.endpoint.close())
         await asyncio.sleep(0)
-        self.assertIs(self.endpoint._operations[ready["operation_id"]].task, actual)
+        self.assertIs(self.endpoint._withdrawals[id(active)], actual)
         self.assertFalse(actual.done())
         self.assertTrue(activation.cancelled())
         self.assertEqual(activation.cancelling(), 1)
@@ -613,6 +617,122 @@ class IndependentDiscoveryTest(unittest.IsolatedAsyncioTestCase):
         release.set()
         await asyncio.wait_for(second, 1)
         self.assertEqual(self.removed, [active])
+
+    async def test_retire_cancels_queued_and_preparing_operations_for_exact_owner(self):
+        owner, digest, _ = self.install("retiring")
+        self.allow.clear()
+        preparing = await self.connect(owner, digest)
+        await asyncio.sleep(0)
+        queued = await self.connect(owner, digest)
+        retire = {"protocol": "ygl.control/1", "op": "retire"}
+        self.assertEqual(
+            (await self.endpoint.request(object(), retire))["error"]["code"],
+            "stale_instance",
+        )
+        self.assertEqual(
+            (await self.endpoint.request(owner, retire))["state"], "queued"
+        )
+        self.assertEqual(self.fenced, [owner])
+        self.assertEqual(
+            (await self.endpoint.request(owner, retire))["state"], "already_detached"
+        )
+        successor, successor_digest, _ = self.install("retiring", "replacement")
+        next_queued = await self.connect(successor, successor_digest)
+        self.allow.set()
+        await self.endpoint._withdrawals[id(owner)]
+        self.assertEqual(self.removed, [owner])
+        for reply in (preparing, queued):
+            operation = self.endpoint._operations[reply["operation_id"]]
+            self.assertTrue(operation.task.cancelled())
+            self.assertEqual(operation.task.cancelling(), 1)
+            self.assertEqual(
+                (await self.status(owner, operation.operation_id))["state"], "disabled"
+            )
+        self.assertEqual(
+            (await self.status(successor, next_queued["operation_id"]))["state"],
+            "active",
+        )
+
+    async def test_older_worker_snapshot_cannot_forget_a_new_retirement(self):
+        loop_thread = threading.get_ident()
+        snapshot_taken = asyncio.Event()
+        release_snapshot = threading.Event()
+        loop = asyncio.get_running_loop()
+
+        def registry_snapshot():
+            snapshot = tuple(self.registry)
+            if threading.get_ident() != loop_thread:
+                loop.call_soon_threadsafe(snapshot_taken.set)
+                if not release_snapshot.wait(3):
+                    raise AssertionError("worker snapshot was not released")
+            return snapshot
+
+        self.context.get_all_stars = registry_snapshot
+        worker = asyncio.create_task(asyncio.to_thread(self.discovery.scan))
+        try:
+            await asyncio.wait_for(snapshot_taken.wait(), 3)
+            owner, digest, metadata = self.install("retirement_race")
+            retire = {"protocol": "ygl.control/1", "op": "retire"}
+            reply = await self.endpoint.request(owner, retire)
+            self.assertEqual(reply["state"], "queued")
+        finally:
+            release_snapshot.set()
+            self.assertEqual(await worker, ())
+
+        self.assertTrue(metadata.activated)
+        self.discovery.prune_tombstones()
+        self.assertTrue(self.discovery.is_tombstoned(owner))
+        with self.assertRaisesRegex(DiscoveryError, "stale_instance"):
+            self.discovery.for_instance(owner)
+        self.assertEqual(
+            (await self.connect(owner, digest))["error"]["code"], "stale_instance"
+        )
+        self.assertEqual(
+            (await self.endpoint.request(owner, retire))["state"], "already_detached"
+        )
+
+        self.registry.remove(metadata)
+        self.discovery.prune_tombstones()
+        self.assertFalse(self.discovery.is_tombstoned(owner))
+        successor, _, _ = self.install("retirement_race", "replacement")
+        self.assertIs(self.discovery.for_instance(successor).instance, successor)
+
+    async def test_retire_does_not_hold_kernel_lock_during_job_fence(self):
+        owner, _, _ = self.install("retire_lock_order")
+        kernel_lock = threading.RLock()
+        job_lock = threading.Lock()
+        worker_ready = asyncio.Event()
+        fencing = threading.Event()
+        loop = asyncio.get_running_loop()
+        tombstoned = []
+
+        def worker_commit():
+            with job_lock:
+                loop.call_soon_threadsafe(worker_ready.set)
+                if not fencing.wait(3):
+                    raise AssertionError("retirement did not start fencing")
+                acquired = kernel_lock.acquire(timeout=1)
+                if acquired:
+                    kernel_lock.release()
+                return acquired
+
+        def fence(instance):
+            tombstoned.append(self.discovery.is_tombstoned(instance))
+            fencing.set()
+            with job_lock:
+                self.fenced.append(instance)
+
+        self.endpoint._retirement_lock = kernel_lock
+        self.endpoint.fence = fence
+        worker = asyncio.create_task(asyncio.to_thread(worker_commit))
+        await asyncio.wait_for(worker_ready.wait(), 3)
+        reply = await self.endpoint.request(
+            owner, {"protocol": "ygl.control/1", "op": "retire"}
+        )
+        self.assertTrue(await worker)
+        self.assertEqual(reply["state"], "queued")
+        self.assertEqual(tombstoned, [True])
+        self.assertEqual(self.fenced, [owner])
 
     async def test_cancellation_does_not_cancel_queued_operation(self):
         instance, digest, _ = self.install("cancel")

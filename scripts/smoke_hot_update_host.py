@@ -628,6 +628,25 @@ async def main():
                     running_version=market_version,
                     running_digest=next_digest,
                 )
+                previous = new_package
+                prerelease_version = "1.0.0-rc.1+fixture.7"
+                dlc_prerelease = derive(
+                    installed_dlc,
+                    fixtures / "dlc-prerelease.zip",
+                    None,
+                    version=prerelease_version,
+                )
+                await upload(dlc_prerelease)
+                replacement, new_package = await ready_dlc(
+                    DLC_NAME, "steam_dlc", dlc_prerelease, manager
+                )
+                verify_data()
+                assert fenced(previous) and sibling.active and star(NAME) is owner
+                installed_dlc = dlc_prerelease
+                record(
+                    "native_prerelease_dlc_upload_preserves_data_and_sibling",
+                    running_version=prerelease_version,
+                )
             # Ten successive native uploads, plus native reload, retaining
             # old package objects only to test that their gates/importers close.
             repeated = []
@@ -682,15 +701,26 @@ async def main():
                         "same_version_native_core_upload_activates_changed_release_bytes_and_reconnects_all_dlc",
                     )
                 )
+                core_updates.append(
+                    (
+                        derive(
+                            core_same_version,
+                            fixtures / "core-prerelease.zip",
+                            None,
+                            version="1.0.0-rc.1+fixture.7",
+                        ),
+                        "native_prerelease_core_upload_reconnects_all_dlc",
+                    )
+                )
             for candidate, assertion in core_updates:
                 old_endpoint = manager.endpoint
                 old_packages = list(manager.packages.values())
                 old_namespace = owner._generation.bundle.namespace
                 instances = (star(DLC_NAME), star(UNKNOWN_NAME))
-                _, digest = read_release(candidate)
+                candidate_release, digest = read_release(candidate)
                 assert digest != owner._running_digest
                 await upload(candidate)
-                new_owner = await ready_core(core_version, digest)
+                new_owner = await ready_core(candidate_release["release"], digest)
                 assert new_owner is not owner
                 assert new_owner._generation.bundle.namespace != old_namespace
                 assert all(fenced(p) for p in old_packages) and old_endpoint._closed

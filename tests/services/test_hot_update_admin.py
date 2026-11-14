@@ -124,6 +124,8 @@ class HotUpdateAdminTests(unittest.IsolatedAsyncioTestCase):
         }
         envelope = envelope_fixture()
         envelope.update(package_id=PACKAGE)
+        if ordinary:
+            envelope["required_features"].append("control.retire/1")
         if changed:
             envelope["modules"][0]["capabilities"][0]["input_schema"]["properties"][
                 "value"

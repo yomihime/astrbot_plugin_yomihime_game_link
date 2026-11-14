@@ -8,6 +8,7 @@ import json
 import os
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -109,6 +110,8 @@ class PrivateCoreIntegrationTest(unittest.IsolatedAsyncioTestCase):
         sequence=1,
         *,
         source_transform=None,
+        requirements=None,
+        required_features=(),
         payload_mib=0,
         with_pages=False,
         with_jobs=False,
@@ -131,7 +134,7 @@ class PrivateCoreIntegrationTest(unittest.IsolatedAsyncioTestCase):
             package_version=version,
             release=version,
             module_contract={"major": 2, "minimum_minor": 0},
-            required_features=[],
+            required_features=list(required_features),
             optional_features=[],
             data={"schema": 1, "writes": 1, "readable": [1]},
         )
@@ -144,7 +147,7 @@ class PrivateCoreIntegrationTest(unittest.IsolatedAsyncioTestCase):
             .replace(b"from yomihime_game_link_sdk", b"from ._api_v2")
         )
         if with_jobs:
-            manifest["required_features"] = ["jobs.durable/1"]
+            manifest["required_features"].append("jobs.durable/1")
             manifest["modules"][0]["jobs"] = [
                 {
                     "job_id": "work",
@@ -172,6 +175,8 @@ class PrivateCoreIntegrationTest(unittest.IsolatedAsyncioTestCase):
             "packages/business/manifest.json": json.dumps(manifest).encode(),
             "packages/business/module.py": source,
         }
+        if requirements is not None:
+            files["requirements.txt"] = requirements
         if with_pages:
             files["packages/business/pages/entry.js"] = (
                 ROOT / "examples/modules/minimal/pages/entry.js"
@@ -251,7 +256,7 @@ class PrivateCoreIntegrationTest(unittest.IsolatedAsyncioTestCase):
         self.registry.append(metadata)
         return self.manager.discovery.for_instance(instance), metadata
 
-    async def preparing_fixture(self, package_id, *, resistant=False):
+    async def preparing_fixture(self, package_id, *, resistant=False, ordinary=False):
         def transform(source):
             body = (
                 "        del services\n"
@@ -287,7 +292,9 @@ class PrivateCoreIntegrationTest(unittest.IsolatedAsyncioTestCase):
                 ).encode()
             )
 
-        installation, _ = await self.make_dlc(package_id, source_transform=transform)
+        installation, _ = await self.make_dlc(
+            package_id, source_transform=transform, ordinary=ordinary
+        )
         reply = await self.manager.endpoint.request(
             installation.instance,
             {
@@ -394,6 +401,17 @@ class PrivateCoreIntegrationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(module.STOPPED), 1)
         held = self.store.reserved_bytes("dlc")
         self.assertGreater(held, 0)
+        retire = await self.manager.endpoint.request(
+            installation.instance, {"protocol": "ygl.control/1", "op": "retire"}
+        )
+        self.assertEqual(retire["state"], "queued")
+        withdrawal = self.manager.endpoint._withdrawals[id(installation.instance)]
+        await asyncio.wait_for(asyncio.shield(withdrawal), 3)
+        self.assertEqual(operation.reply["state"], "cleanup_pending")
+        self.assertEqual(operation.reply["error"]["code"], "prepare_timeout")
+        self.assertIs(self.manager._prepared[id(installation.instance)], package)
+        self.assertIs(package.prepare_cleanup_task, cleanup)
+        self.assertEqual(len(module.STOPPED), 1)
         candidate, _ = await self.make_dlc("after_failed_stop")
         captures = []
         original_capture = self.manager.cache.capture
@@ -424,6 +442,7 @@ class PrivateCoreIntegrationTest(unittest.IsolatedAsyncioTestCase):
             json.dumps(
                 {
                     "failed_cleanup_retained": True,
+                    "retire_preserved_failure_and_exact_cleanup": True,
                     "capture_blocked": True,
                     "stop_once": len(module.STOPPED) == 1,
                     "takeover_blocked": True,
@@ -476,6 +495,126 @@ class PrivateCoreIntegrationTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(module.CANCELLED.is_set())
         self.assertTrue(operation.task.done())
         self.assertEqual(self.store.reserved_bytes("dlc"), 0)
+
+    async def test_retire_preparing_ordinary_package_before_any_lease(self):
+        installation, operation, module = await self.preparing_fixture(
+            "retire_preparing", resistant=True, ordinary=True
+        )
+
+        async def release_factory():
+            module.RELEASE.set()
+
+        self.addAsyncCleanup(release_factory)
+        owner = installation.instance
+        self.assertIsNone(operation.lease)
+        self.assertTrue(installation.metadata.activated)
+        result = await self.manager.endpoint.request(
+            owner, {"protocol": "ygl.control/1", "op": "retire"}
+        )
+        self.assertEqual(result["state"], "queued")
+        await asyncio.wait_for(module.CANCELLED.wait(), 2)
+        withdrawal = self.manager.endpoint._withdrawals[id(owner)]
+        self.assertFalse(withdrawal.done())
+        self.assertFalse(self.manager.discovery.current(installation))
+        module.RELEASE.set()
+        await asyncio.wait_for(asyncio.shield(withdrawal), 3)
+        self.assertIsNone(operation.lease)
+        self.assertEqual(operation.reply["state"], "disabled")
+        self.assertEqual(len(module.STOPPED), 1)
+        self.assertNotIn(installation.package_id, self.manager.packages)
+        self.assertNotIn(installation.package_id, self.manager.cache.current)
+        self.assertNotIn(id(owner), self.manager._prepared)
+        self.assertEqual(self.store.reserved_bytes("dlc"), 0)
+
+    async def test_retire_before_package_open_commit_leaves_durable_owner_closed(self):
+        installation, metadata = await self.make_dlc(
+            "retire_at_commit", ordinary=True, required_features=("control.retire/1",)
+        )
+        ownership = importlib.import_module(
+            self.namespace + ".infrastructure.sqlite.runtime_ownership"
+        ).RuntimeOwnership
+        open_active = ownership.open_active
+        loop = asyncio.get_running_loop()
+        opened = asyncio.Event()
+        release_commit = threading.Event()
+        stop_calls = []
+        prepare = self.manager._prepare
+
+        async def observe_stop(*args, **kwargs):
+            package = await prepare(*args, **kwargs)
+            instance = package.instances["retire_at_commit/demo"]._delegate
+            stop = instance.stop
+
+            async def stop_once():
+                stop_calls.append(instance)
+                await stop()
+
+            instance.stop = stop_once
+            return package
+
+        def stage_open(*args, **kwargs):
+            result = open_active(*args, **kwargs)
+            loop.call_soon_threadsafe(opened.set)
+            if not release_commit.wait(3):
+                raise AssertionError("package open commit was not released")
+            return result
+
+        owner = installation.instance
+        endpoint = self.manager.endpoint
+        describe = await endpoint.request(
+            owner, {"protocol": "ygl.control/1", "op": "describe"}
+        )
+        self.assertEqual(describe["features"].count("control.retire/1"), 1)
+        with (
+            patch.object(ownership, "open_active", side_effect=stage_open),
+            patch.object(self.manager, "_prepare", side_effect=observe_stop),
+        ):
+            queued = await endpoint.request(
+                owner,
+                {
+                    "protocol": "ygl.control/1",
+                    "op": "connect",
+                    "request_id": str(uuid4()),
+                    "descriptor_digest": installation.descriptor_digest,
+                },
+            )
+            try:
+                await asyncio.wait_for(opened.wait(), 3)
+                self.assertTrue(metadata.activated)
+                self.assertEqual(
+                    (
+                        await endpoint.request(
+                            owner,
+                            {
+                                "protocol": "ygl.control/1",
+                                "op": "retire",
+                            },
+                        )
+                    )["state"],
+                    "queued",
+                )
+                withdrawal = endpoint._withdrawals[id(owner)]
+            finally:
+                release_commit.set()
+            await asyncio.wait_for(asyncio.shield(withdrawal), 3)
+
+        operation = endpoint._operations[queued["operation_id"]]
+        self.assertIsNone(operation.lease)
+        self.assertEqual(operation.reply["state"], "disabled")
+        self.assertNotIn(installation.package_id, self.manager.packages)
+        self.assertNotIn(installation.package_id, self.manager.cache.current)
+        self.assertNotIn(id(owner), self.manager._prepared)
+        self.assertEqual(len(stop_calls), 1)
+        row = await self.runtime._core.database.executor.run_read(
+            lambda unit: tuple(
+                unit.execute(
+                    "SELECT o.accepting, t.phase FROM runtime_owners AS o "
+                    "JOIN runtime_transitions AS t ON t.scope=o.scope "
+                    "WHERE o.scope='package:retire_at_commit'"
+                ).fetchone()
+            )
+        )
+        self.assertEqual(row, (0, "PUBLISHED"))
 
     async def test_resistant_prepare_retains_exact_factory_and_cleanup_until_late_stop(
         self,
@@ -747,6 +886,66 @@ class PrivateCoreIntegrationTest(unittest.IsolatedAsyncioTestCase):
         )
         with self.assertRaisesRegex(ValueError, "package_already_owned"):
             await self.manager.replace(replacement)
+
+    async def test_ordinary_prerelease_update_accepts_changed_dependency_bytes(self):
+        first, metadata = await self.make_dlc(
+            "prerelease", ordinary=True, requirements=b"# old\n"
+        )
+        await self.manager.replace(first)
+        prior = self.manager.packages["prerelease"]
+        self.registry.remove(metadata)
+        version = "1.0.1-beta.4+build.07"
+        successor, metadata = await self.make_dlc(
+            "prerelease", version, ordinary=True, requirements=b"# new\r\n"
+        )
+        metadata.version = "v" + version
+        successor = self.manager.discovery.for_instance(successor.instance)
+        result = await self.manager.replace(successor)
+        self.assertEqual(result["running_version"], version)
+        self.assertEqual(result["installed_version"], version)
+        self.assertNotEqual(self.manager.cache.current["prerelease"], prior.cache_key)
+        self.assertFalse(prior.active)
+
+    async def test_ordinary_prepare_error_does_not_use_a_legacy_pin(self):
+        first, metadata = await self.make_dlc("no_fallback")
+        await self.manager.replace(first)
+        prior = self.manager.packages["no_fallback"]
+        self.registry.remove(metadata)
+        successor, _ = await self.make_dlc(
+            "no_fallback",
+            "1.0.1",
+            ordinary=True,
+            source_transform=lambda source: source
+            + b"\nraise RuntimeError('factory probe')\n",
+        )
+        with self.assertRaisesRegex(RuntimeError, "factory probe"):
+            await self.manager.replace(successor)
+        self.assertEqual(self.manager.cache.current["no_fallback"], prior.cache_key)
+        self.assertIs(self.manager.packages["no_fallback"], prior)
+        self.assertFalse(prior.active)
+
+    async def test_ordinary_start_error_cleans_up_without_using_previous_pin(self):
+        first, metadata = await self.make_dlc("start_failure", ordinary=True)
+        await self.manager.replace(first)
+        pinned = self.manager.cache.current["start_failure"]
+        self.registry.remove(metadata)
+        successor, _ = await self.make_dlc("start_failure", "1.0.1", ordinary=True)
+        original_prepare = self.manager._prepare
+
+        async def prepare(installation, **kwargs):
+            package = await original_prepare(installation, **kwargs)
+
+            async def fail_start():
+                raise RuntimeError("ordinary start probe")
+
+            package.instances["start_failure/demo"]._delegate.start = fail_start
+            return package
+
+        with patch.object(self.manager, "_prepare", side_effect=prepare):
+            with self.assertRaisesRegex(RuntimeError, "ordinary start probe"):
+                await self.manager.replace(successor)
+        self.assertNotIn("start_failure", self.manager.packages)
+        self.assertEqual(self.manager.cache.current["start_failure"], pinned)
 
     async def test_same_instance_reapproval_retries_fresh_epoch_and_retires_old_lease(
         self,
@@ -1437,7 +1636,7 @@ class PrivateCoreIntegrationTest(unittest.IsolatedAsyncioTestCase):
                 any(name.startswith(old_namespace + ".") for name in sys.modules)
             )
 
-    async def test_cached_recovery_keeps_head_and_current_authority(self):
+    async def test_tampered_successor_does_not_activate_a_cached_artifact(self):
         first, first_metadata = await self.make_dlc("recover")
         await self.manager.replace(first)
         first_package = self.manager.packages["recover"]
@@ -1466,11 +1665,13 @@ class PrivateCoreIntegrationTest(unittest.IsolatedAsyncioTestCase):
         self.registry.remove(second_metadata)
         broken, _ = await self.make_dlc("recover", "1.0.2", 3)
         (broken.root / "packages/business/module.py").write_bytes(b"tampered")
-        status = await self.manager.replace(broken)
-        self.assertEqual(status["state"], "active")
-        self.assertEqual(status["runtime_state"], "fallback")
-        self.assertEqual(status["installed_version"], "1.0.2")
-        self.assertEqual(status["running_version"], "1.0.1")
+        pinned = self.manager.cache.current["recover"]
+        previous = self.manager.packages["recover"]
+        with self.assertRaisesRegex(ValueError, "bundle_file_invalid"):
+            await self.manager.replace(broken)
+        self.assertEqual(self.manager.cache.current["recover"], pinned)
+        self.assertIs(self.manager.packages["recover"], previous)
+        self.assertFalse(previous.active)
         head = await self.manager.repository.head("recover", self.key_id, "stable")
         self.assertEqual(head["release_sequence"], 2)
         publisher = await self.manager.repository.publisher(self.key_id)

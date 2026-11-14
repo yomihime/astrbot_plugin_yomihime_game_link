@@ -60,15 +60,14 @@ class HelpCatalog:
                 for module in modules
             )
             intro = validate_contract(
-                TextBlock("总帮助：当前活跃模块；使用模块帮助查看能力。\n" + summaries)
+                TextBlock("发送对应的帮助命令，即可查看模块用法。\n" + summaries)
             )
             blocks = (intro, validate_contract(CommandsBlock(tuple(commands))))
         else:
             blocks = (
                 validate_contract(
                     TextBlock(
-                        "当前没有活跃可用模块。使用 /ygl help 查看帮助；"
-                        "模块可用后，这里会显示模块帮助入口。"
+                        "目前没有可用模块。模块启用并就绪后，帮助入口会出现在这里。"
                     )
                 ),
                 validate_contract(
@@ -112,13 +111,13 @@ class HelpCatalog:
         manifest = module.manifest
         commands = self._children(manifest.commands)
         entries = tuple(self._overview(manifest.route, command) for command in commands)
-        hint = "子命令与可选参数：在对应命令后加 help"
+        hint = "在命令末尾加 help，可查看子命令和可选参数。"
         blocks = (
             validate_contract(TextBlock(hint)),
             validate_contract(
                 CommandsBlock(
                     tuple(f"{usage}\n{summary}" for usage, summary in entries),
-                    fallback_text="该模块没有声明命令。" if not entries else None,
+                    fallback_text="此模块暂无命令。" if not entries else None,
                 )
             ),
         )
@@ -292,7 +291,7 @@ class HelpCatalog:
                 (
                     validate_contract(
                         TextBlock(
-                            f"未找到模块路由：{route}。请使用 /ygl help 查看已注册模块。"
+                            f"模块 {route} 当前不可用。发送 /ygl help 查看当前可用模块。"
                         )
                     ),
                     validate_contract(CommandsBlock(("/ygl help",))),

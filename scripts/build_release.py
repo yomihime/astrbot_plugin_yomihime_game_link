@@ -21,6 +21,7 @@ if __package__:
         validate_output_paths,
         validate_wheel,
     )
+    from .release_envelope import _HOST_VERSION
 else:
     from build_dashboard_zip import build as build_dashboard_zip
     from build_dashboard_zip import (
@@ -28,6 +29,7 @@ else:
         validate_output_paths,
         validate_wheel,
     )
+    from release_envelope import _HOST_VERSION
 
 ROOT = Path(__file__).resolve().parents[1]
 EXPECTED_PYTHON = (3, 13)
@@ -66,9 +68,11 @@ def plugin_metadata(repository_root: Path = ROOT) -> tuple[str, str]:
     if not PLUGIN_NAME_PATTERN.fullmatch(plugin_name):
         raise ValueError(f"Unsupported plugin name in metadata.yaml: {plugin_name!r}")
     plugin_version = "v" + plugin_version.removeprefix("v")
-    if not TAG_PATTERN.fullmatch(plugin_version):
+    if len(plugin_version) > 129 or not re.fullmatch(
+        "v" + _HOST_VERSION, plugin_version
+    ):
         raise ValueError(
-            f"metadata.yaml version must be a vMAJOR.MINOR.PATCH tag: {plugin_version!r}"
+            f"metadata.yaml version must be valid SemVer: {plugin_version!r}"
         )
     return plugin_name, plugin_version
 

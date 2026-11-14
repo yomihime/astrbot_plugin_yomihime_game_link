@@ -42,10 +42,18 @@ test('signed packages require explicit publisher key/channels then fresh inspect
  }finally{f.close();}});
 test('bridge exception details are never rendered',async()=>{const f=fixture();try{const work=f.view.refresh();f.calls.at(-1).reject(Error('/private/owner-token=secret-value'));await work;await flush();assert.doesNotMatch(f.container.textContent,/private|owner-token|secret-value/);assert.match(f.container.textContent,/hot_update_failed/);}finally{f.close();}});
 test('ordinary Host-installed package needs no approval and keeps inspection and retry available',async()=>{const f=fixture();try{
- const ordinary={...plan(),state:'active',signature_state:'host_install'};
- let work=f.view.refresh();f.calls.at(-1).resolve({...status(),packages:[ordinary]});await work;
+ const ordinary={...plan(),state:'queued',signature_state:'host_install'};
+ const waiting={...status(),core:{...status().core,phase:'parked',ready:false},packages:[ordinary]};
+ let work=f.view.refresh();f.calls.at(-1).resolve(waiting);await work;
  work=f.view.inspect('arbitrary/package');f.calls.at(-1).resolve(ordinary);await work;await flush();
- assert.match(f.container.textContent,/Installed and enabled by AstrBot; no additional approval is needed/);
+ assert.match(f.container.textContent,/AstrBot manages installation and activation. No additional approval is needed/);
+ assert.match(f.container.textContent,/Not started/);
+ const inspection=f.container.querySelector('[aria-label="Extension package inspection"]');
+ assert.ok(inspection);
+ assert.match(inspection.textContent,/Waiting to load/);
+ assert.match(inspection.textContent,/Permissions declared by the package/);
+ assert.match(inspection.querySelector('pre').textContent,/module\/config\/key/);
+ assert.doesNotMatch(inspection.textContent,/Permission changes|"added"/);
  const labels=[...f.container.querySelectorAll('button')].map(b=>b.textContent);
  for(const label of ['Approve package permissions','Approve exact artifact','Revoke package approval','Revoke artifact approval'])assert.equal(labels.includes(label),false,label);
  assert.equal(f.container.querySelector('.legacy-publisher-management').open,false);

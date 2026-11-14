@@ -23,9 +23,16 @@ class ProtocolError(ValueError):
 _SAFE_INT = 2**53 - 1
 _ID = re.compile(r"[a-z][a-z0-9_]*(?:[.-][a-z0-9_]+)*\Z")
 _VERSION = re.compile(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\Z")
+_PRERELEASE_ID = r"(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)"
+_HOST_VERSION = re.compile(
+    _VERSION.pattern.removesuffix(r"\Z")
+    + rf"(?:-{_PRERELEASE_ID}(?:\.{_PRERELEASE_ID})*)?"
+    + r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?\Z"
+)
 _FEATURE = re.compile(r"[a-z][a-z0-9._-]{0,63}/[1-9][0-9]{0,5}\Z")
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 HOST_RELEASE_SCHEMA = "ygl.release/2"
+CONTROL_RETIRE_FEATURE = "control.retire/1"
 _B05 = frozenset(
     {
         "schema_version",
@@ -206,7 +213,9 @@ def parse_plugin_descriptor(data: bytes) -> dict[str, Any]:
     return doc
 
 
-def parse_package_manifest(data: bytes) -> dict[str, Any]:
+def parse_package_manifest(
+    data: bytes, *, host_install: bool = False
+) -> dict[str, Any]:
     """Validate v1 envelope. Caller must also validate ``b05_manifest_bytes`` with B05 parse_manifest."""
     doc = _load(data, 1048576, depth=32, nodes=20000)
     _fields(
@@ -225,7 +234,7 @@ def parse_package_manifest(data: bytes) -> dict[str, Any]:
         raise ProtocolError("unsupported manifest schema")
     _package_id(doc["package_id"])
     for field in ("release", "package_version"):
-        _match(doc[field], _VERSION)
+        _match(doc[field], _HOST_VERSION if host_install else _VERSION)
     if doc["release"] != doc["package_version"] or doc["contract_version"] != "2.0":
         raise ProtocolError("inconsistent manifest versions")
     for field in ("author", "license", "source"):
@@ -371,7 +380,7 @@ def parse_release(data: bytes) -> dict[str, Any]:
         raise ProtocolError("unsupported release schema")
     _plugin_id(doc["plugin_id"])
     _package_id(doc["package_id"])
-    _match(doc["release"], _VERSION)
+    _match(doc["release"], _HOST_VERSION if schema == HOST_RELEASE_SCHEMA else _VERSION)
     if _match(doc["payload_digest"], _DIGEST) != payload_digest(doc["files"]):
         raise ProtocolError("payload digest mismatch")
     if schema == HOST_RELEASE_SCHEMA and any(
@@ -400,6 +409,7 @@ def parse_control(data: bytes) -> dict[str, Any]:
         "connect": {"request_id", "descriptor_digest"},
         "status": {"operation_id", "lease"},
         "disconnect": {"lease"},
+        "retire": set(),
     }
     if type(op) is not str or op not in optional:
         raise ProtocolError("unsupported operation")

@@ -415,7 +415,8 @@ class HotUpdateAdmin:
             ):
                 raise HotUpdateAdminError("artifact_tampered")
             envelope = parse_package_manifest(
-                bundle.read_resource(descriptor["manifest"])
+                bundle.read_resource(descriptor["manifest"]),
+                host_install=bundle.release_doc["schema"] == HOST_RELEASE_SCHEMA,
             )
             negotiate_manifest(envelope, 0, FEATURES)
             b05 = b05_manifest_bytes(envelope)

@@ -4,7 +4,7 @@
 
 > Windows 存储：全新且没有旧库存的实例会在运行身份的 KnownFolder LocalAppData 下选择专属私密存储，不要求先修改整个 AstrBot 数据目录的 ACL。现有布局保留原位；只有权威根和数据库安全性确认后才可隔离不安全凭据子树。若凭据存储进入 `blocked/unknown`，不读取环境密钥、不降级到其他目录或新库，秘密读写均关闭；部署者修复运行身份/访问条件后，正常冷重启同一 Host。不要清 selector、改真实 ACL 或重填旧密钥。CLI 仅提供迁移计划，当前不支持生产旧库迁移；Windows 本地证据与 Ubuntu CI 分开，详见下方[Windows 资格](#windows-原生文件系统资格)。
 
-当前 Core `0.2.8` 可通过 AstrBot 原生插件管理安装和更新完整 ZIP，无需配置签名身份。通过 `ygl.control/1`、模块契约 `2.0` 与版本化 features 协商扩展兼容性，运行时私有 SDK 随包捕获；兼容新扩展无需重新构建 Core。
+游戏连结可通过 AstrBot 的插件管理安装和更新。Steam DLC 单独安装，Core 就绪且通过兼容性检查后，DLC 会自动接入。
 
 ## FF14 功能
 
@@ -105,15 +105,15 @@ POSIX 入口保留交互终端和文件所有者检查；Windows 仅接受已资
 
 ## 安装
 
-在 AstrBot 的插件管理页上传完整安装包 `astrbot_plugin_yomihime_game_link-v0.2.8.zip`，即可安装或更新。无需配置签名身份、登记公钥或逐包批准。Steam DLC 使用支持普通安装格式的版本（0.3.1 起），通过同一宿主入口独立安装。
+在 AstrBot 的插件管理页上传并启用游戏连结的完整 ZIP。更新时在同一入口上传新版本。安装 Steam DLC 时，请另外上传并启用它的完整 ZIP。两个插件可以按任意顺序安装，兼容的 Steam DLC 会在 Core 就绪后自动接入。普通 ZIP 无需额外审批。
 
-ZIP 包含 `ygl-plugin.json`、完整文件清单 `release.json`、私有 SDK、SQL、静态页面及许可证。可用 `SHA256SUMS` 核对下载文件；Actions 工件需先解开外层 ZIP。源码 checkout 和 GitHub 自动 Source code.zip 缺少生成的清单与静态资产，不能直接安装。
+下载后可用 `SHA256SUMS` 核对完整安装包。如果从 GitHub Actions 下载工件，请先解开外层归档，再上传其中的插件 ZIP。GitHub 自动生成的 `Source code.zip` 缺少安装所需的生成文件，无法直接安装。
 
-市场条目的 `download_url` 必须指向不可变完整 ZIP Release asset，不能指向源码归档。没有市场条目时，通过正常 AstrBot ZIP 上传完成安装/更新；插件没有网络自更新器。Core 与扩展独立发布，扩展页面与资源由运行时通用投影加载。
+如果 AstrBot 插件市场提供完整安装包，也可从市场更新。上传后可在模块管理中查看已安装版本和运行状态。
 
-同一新协议内的兼容更新通过宿主生命周期排空并切换，不要求整个 AstrBot 重启。共享依赖、原生库或运行环境变更属于单独的环境维护，须按具体变更说明处理。旧版 pre-coordinator alpha 到本版本的首次迁移不承诺热切换；无需因 alpha 标识例行清库或重装。更新前备份一致的配置、数据库与私有密钥材料。普通安装遵循 AstrBot 选择的版本，仍检查宿主、SDK 和数据兼容性；这不保证任意旧版本都能读取升级后的数据。内部 last-good 回退只使用经过兼容性校验的精确缓存，不覆盖数据库。
+同一协议内的兼容更新无需重启 AstrBot。Core 更新后，兼容的扩展会自动接入。首次从早期 alpha 迁移，以及共享依赖、原生库或运行环境变更，请按对应版本的维护说明操作。
 
-运行依赖由 `requirements.txt` 声明最低版本。无需安装独立 canonical SDK wheel；开发 wheel 可单独用于 SDK 工具验证，不决定 Core/DLC 版本配对。实际依赖组合仍须验证。
+更新前请备份配置、数据库和现有密钥。回退前请核对旧版本能否读取升级后的数据库。安装包的兼容、校验和恢复边界见[完整发布包](docs/release-packaging.md)。
 
 
 
