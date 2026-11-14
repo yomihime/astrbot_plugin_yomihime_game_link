@@ -27,7 +27,12 @@ from ..core.contracts.administration import (
 )
 from ..core.contracts.validation_boundary import validate_contract
 from ..core.health import HealthResolver
-from ..core.lifecycle import LifecycleController, LifecycleError, _ServiceLifetime
+from ..core.lifecycle import (
+    LifecycleController,
+    LifecycleError,
+    ModuleNotFound,
+    _ServiceLifetime,
+)
 from ..core.ports import AdminAuthorizationPort, RevisionConflict, RunIdentity
 from ..core.registry import Registry
 from ..extensions.discovery import (
@@ -449,10 +454,13 @@ class ExtensionRuntime:
                     and state.identity is None
                     and not state.cleanup_pending
                 ):
-                    # A failed unpublished start can already have drained and
-                    # rolled back its exact instance, leaving only registration.
-                    stops.append((owner, None))
-                    continue
+                    # A rollback can leave only registration; a dormant module
+                    # with the same state still owns a constructed instance.
+                    try:
+                        self.lifecycle.instance(owner)
+                    except ModuleNotFound:
+                        stops.append((owner, None))
+                        continue
                 op_id = self._host_stop_ids.setdefault(owner, uuid4().hex)
                 identity = self.lifecycle.quiesce(
                     owner, op_id, "external_plugin_unloaded"

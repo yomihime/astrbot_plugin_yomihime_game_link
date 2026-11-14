@@ -241,15 +241,37 @@ class ReleaseBuildTests(unittest.TestCase):
             validate_tag(metadata_version, metadata_version), metadata_version
         )
 
-        for tag in ("v1.2", "0.1.2", "v01.2.3", "v1.2.3-rc1", "branch-name"):
+        for tag in (
+            "v1.2.3",
+            "v1.2.3-alpha.1",
+            "v1.2.3-rc.1+build.007",
+            "v1.2.3+build.007",
+            "v1.2.3+" + "a" * 122,
+        ):
+            with self.subTest(tag=tag):
+                self.assertEqual(validate_tag(tag, tag), tag)
+        for tag in (
+            "v1.2",
+            "0.1.2",
+            "V1.2.3",
+            "v01.2.3",
+            "v1.2.3-rc.01",
+            "v1.2.3-rc..1",
+            "v1.2.3+",
+            "v1.2.3+build..1",
+            "v1.2.3+" + "a" * 123,
+            "branch-name",
+        ):
             with self.subTest(tag=tag), self.assertRaisesRegex(ValueError, "Invalid"):
-                validate_tag(tag, metadata_version)
-        next_parts = metadata_version[1:].split(".")
-        next_parts[-1] = str(int(next_parts[-1]) + 1)
-        mismatched_tag = f"v{'.'.join(next_parts)}"
+                validate_tag(tag, tag)
+        with self.assertRaisesRegex(ValueError, "does not match"):
+            validate_tag("v1.2.3-rc.1+build.2", "v1.2.3-rc.1+build.1")
+        mismatched_tag = "v1.2.3" if metadata_version != "v1.2.3" else "v1.2.4"
         with tempfile.TemporaryDirectory(prefix="yomihime-release-tag-") as work:
+            output = Path(work) / "artifacts"
             with self.assertRaisesRegex(ValueError, "does not match"):
-                build_release(mismatched_tag, output_dir=Path(work) / "artifacts")
+                build_release(mismatched_tag, output_dir=output)
+            self.assertFalse(output.exists())
 
     def test_runtime_manifest_contains_plugin_assets_and_extensions_only(self) -> None:
         paths = included_files(ROOT)

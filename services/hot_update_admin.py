@@ -44,6 +44,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from ..core.contracts.administration import AdminAuthorizationDenied, AdminOperation
 from ..extensions.disk_manifest import ManifestError, parse_manifest
 from ..extensions.hot_update_protocol import (
+    HOST_RELEASE_SCHEMA,
     ProtocolError,
     _load,
     b05_manifest_bytes,
@@ -414,7 +415,8 @@ class HotUpdateAdmin:
             ):
                 raise HotUpdateAdminError("artifact_tampered")
             envelope = parse_package_manifest(
-                bundle.read_resource(descriptor["manifest"])
+                bundle.read_resource(descriptor["manifest"]),
+                host_install=bundle.release_doc["schema"] == HOST_RELEASE_SCHEMA,
             )
             negotiate_manifest(envelope, 0, FEATURES)
             b05 = b05_manifest_bytes(envelope)
@@ -439,17 +441,36 @@ class HotUpdateAdmin:
                 )
             else:
                 projection = permission_snapshot(manifest)
-            key_id, state, publisher_revision = await self._signature(raw, signature)
             reason = None
-            try:
-                await self.manager.trust.evaluate(
-                    raw,
-                    None if signature is None else _load(signature, 16384),
-                    host_plugin_id=plugin_id,
-                    permission_projection=projection,
+            if bundle.release_doc["schema"] == HOST_RELEASE_SCHEMA:
+                if (
+                    signature is not None
+                    or type(installation.version) is not str
+                    or installation.version.removeprefix("v")
+                    != manifest.package_version
+                ):
+                    raise HotUpdateAdminError("artifact_tampered")
+                self.manager.cache.check_package_identity(package_id, plugin_id)
+                await self.repository.check_package_owner(
+                    package_id, plugin_id, host_install=True
                 )
-            except PolicyError as exc:
-                reason = exc.code
+                key_id, state, publisher_revision = "", "host_install", 0
+            else:
+                await self.repository.check_package_owner(
+                    package_id, plugin_id, host_install=False
+                )
+                key_id, state, publisher_revision = await self._signature(
+                    raw, signature
+                )
+                try:
+                    await self.manager.trust.evaluate(
+                        raw,
+                        None if signature is None else _load(signature, 16384),
+                        host_plugin_id=plugin_id,
+                        permission_projection=projection,
+                    )
+                except PolicyError as exc:
+                    reason = exc.code
             checked.update(
                 raw=raw,
                 signature_digest=hashlib.sha256(signature).hexdigest()
@@ -472,8 +493,10 @@ class HotUpdateAdmin:
             if not self.manager.discovery.current(installation):
                 raise HotUpdateAdminError("plan_changed")
             digest = hashlib.sha256(checked["raw"]).hexdigest()
-            grant = await self.repository.grant(package_id)
-            approval = await self.repository.approval(digest)
+            grant = approval = None
+            if checked["signature_state"] != "host_install":
+                grant = await self.repository.grant(package_id)
+                approval = await self.repository.approval(digest)
             grant_revision = grant["revision"] if grant else 0
             artifact_revision = approval["revision"] if approval else 0
             projection = checked["projection"]
@@ -693,6 +716,8 @@ class HotUpdateAdmin:
                 raise HotUpdateAdminError("plan_changed")
             await self._check(epoch, grant, operation)
             kwargs["admin_check"] = self._worker_check(epoch, grant, operation, plan)
+            if plan.signature_state == "host_install":
+                raise HotUpdateAdminError("host_install_managed")
             if plan.signature_state not in {"unsigned", "verified"}:
                 raise HotUpdateAdminError("publisher_untrusted")
             if plan.reason not in {None, "approval_required"}:

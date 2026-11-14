@@ -43,8 +43,6 @@ def _consumer_pins(overrides=None):
         return overrides.get(path, (ROOT / path).read_text(encoding="utf8"))
 
     pins = {}
-    for path in CLIS:
-        pins[path] = {_literal(source(path), "_SDK_VERSION")}
     builder = source("scripts/build_dashboard_zip.py")
     member_versions = {
         name.split(".dist-info/", 1)[0].removeprefix("yomihime_game_link_sdk-")
@@ -76,7 +74,9 @@ def _consumer_pins(overrides=None):
     return pins
 
 
-def _execute_actual_cli_guard(path, *, release, abi="2.0", foreign=False):
+def _execute_actual_cli_guard(
+    path, *, release, abi="2.0", foreign=False, foreign_version=False
+):
     tree = ast.parse((ROOT / path).read_text(encoding="utf8"))
     start = next(
         index
@@ -92,7 +92,7 @@ def _execute_actual_cli_guard(path, *, release, abi="2.0", foreign=False):
         for index in range(start, len(tree.body))
         if isinstance(tree.body[index], ast.Try)
     )
-    # Execute the exact production import/path/release/ABI guard. SDK imports are
+    # Execute the exact production import/path/ABI guard. SDK imports are
     # controlled preloaded descriptors; Core imports and credential code never run.
     code = compile(
         ast.Module(body=tree.body[start : end + 1], type_ignores=[]), path, "exec"
@@ -105,7 +105,14 @@ def _execute_actual_cli_guard(path, *, release, abi="2.0", foreign=False):
             else ROOT / "yomihime_game_link_sdk/__init__.py"
         ),
     )
-    version = SimpleNamespace(MODULE_ABI_VERSION=abi)
+    version = SimpleNamespace(
+        MODULE_ABI_VERSION=abi,
+        __file__=str(
+            ROOT.parent / "foreign-sdk/version.py"
+            if foreign_version
+            else ROOT / "yomihime_game_link_sdk/version.py"
+        ),
+    )
     modules = {
         "yomihime_game_link_sdk": package,
         "yomihime_game_link_sdk.version": version,
@@ -188,31 +195,7 @@ class SDKReleasePinTests(unittest.TestCase):
                     with self.assertRaises(AssertionError):
                         self.assertEqual(stale, REVIEWED_WHEEL_SHA256)
 
-    def test_stale_cli_pin_is_detected_in_memory(self):
-        expected = _current_release()
-        self.assertNotEqual(expected, "0.1.0a3")
-        for path in CLIS:
-            with self.subTest(consumer=path):
-                tree = ast.parse((ROOT / path).read_text(encoding="utf8"))
-                assignment = next(
-                    node
-                    for node in tree.body
-                    if isinstance(node, ast.Assign)
-                    and any(
-                        isinstance(target, ast.Name) and target.id == "_SDK_VERSION"
-                        for target in node.targets
-                    )
-                )
-                assignment.value = ast.Constant("0.1.0a3")
-                pins = _consumer_pins({path: ast.unparse(tree)})
-                self.assertEqual(
-                    {key for key, values in pins.items() if values != {expected}},
-                    {path},
-                )
-                with self.assertRaises(AssertionError):
-                    self.assertEqual(pins[path], {expected})
-
-    def test_actual_cli_guards_accept_only_local_current_release_and_abi(self):
+    def test_actual_cli_guards_accept_local_compatible_sdk_without_release_pin(self):
         expected = _current_release()
         for path in CLIS:
             with self.subTest(consumer=path, case="local current ABI"):
@@ -220,10 +203,15 @@ class SDKReleasePinTests(unittest.TestCase):
                     namespace = _execute_actual_cli_guard(path, release=expected)
                 except RuntimeError as failure:
                     self.fail(f"current local SDK was refused: {failure}")
-                self.assertEqual(namespace["_SDK_VERSION"], expected)
                 self.assertEqual(namespace["_SDK_MODULE_ABI_VERSION"], "2.0")
+            for release in ("0.1.0a3", "0.1.0a25", "99.0.0"):
+                with self.subTest(consumer=path, compatible_release=release):
+                    _execute_actual_cli_guard(path, release=release)
             for case, arguments in (
-                ("old release", {"release": "0.1.0a3"}),
+                (
+                    "foreign version leaf",
+                    {"release": expected, "foreign_version": True},
+                ),
                 ("foreign preloaded package", {"release": expected, "foreign": True}),
                 (
                     "mixed incompatible version leaf",
@@ -232,7 +220,7 @@ class SDKReleasePinTests(unittest.TestCase):
             ):
                 with self.subTest(consumer=path, case=case):
                     with self.assertRaisesRegex(
-                        RuntimeError, "^the pinned plugin-local SDK is unavailable$"
+                        RuntimeError, "^the compatible plugin-local SDK is unavailable$"
                     ) as caught:
                         _execute_actual_cli_guard(path, **arguments)
                     self.assertIsNone(caught.exception.__cause__)

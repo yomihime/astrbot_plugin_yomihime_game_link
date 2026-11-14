@@ -1,24 +1,75 @@
-"""Disposable signed derivatives of exact candidates, never release builders."""
+"""Create disposable native smoke derivatives of exact package candidates."""
 
 import base64
 import hashlib
 import io
 import json
+import re
 import zipfile
 from pathlib import Path
+
+HOST_RELEASE_SCHEMA = "ygl.release/2"
+LEGACY_RELEASE_SCHEMA = "ygl.release/1"
 
 
 def encode(value):
     return (json.dumps(value, sort_keys=True, indent=2) + "\n").encode()
 
 
+def read_release(source):
+    with zipfile.ZipFile(source) as archive:
+        raw = archive.read("release.json")
+    return json.loads(raw), hashlib.sha256(raw).hexdigest()
+
+
+def _inventory(files):
+    rows = [
+        {"path": name, "size": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+        for name, data in sorted(files.items())
+    ]
+    digest = hashlib.sha256()
+    for row in rows:
+        digest.update(
+            (
+                row["path"] + "\0" + str(row["size"]) + "\0" + row["sha256"] + "\n"
+            ).encode()
+        )
+    return rows, digest.hexdigest()
+
+
 def derive(
-    source, target, key, *, version=None, sequence=2, unknown=None, repo_root=None
+    source, target, key=None, *, version=None, sequence=2, unknown=None, repo_root=None
 ):
     with zipfile.ZipFile(source) as archive:
-        files = {name: archive.read(name) for name in archive.namelist()}
+        names = archive.namelist()
+        if len(names) != len(set(names)):
+            raise ValueError("duplicate fixture source entry")
+        files = {name: archive.read(name) for name in names}
     release = json.loads(files.pop("release.json"))
-    files.pop("release.sig.json", None)
+    signature = files.pop("release.sig.json", None)
+    fields = {"schema", "plugin_id", "package_id", "release", "payload_digest", "files"}
+    ordinary = release["schema"] == HOST_RELEASE_SCHEMA
+    if ordinary:
+        if (
+            key is not None
+            or signature is not None
+            or any(
+                name.casefold() in {"release.sig.json", "release-key.json"}
+                for name in files
+            )
+        ):
+            raise ValueError("ordinary fixture source must be unsigned")
+    elif release["schema"] == LEGACY_RELEASE_SCHEMA and key is not None:
+        fields.update(("channel", "release_sequence"))
+    else:
+        raise ValueError("legacy fixture requires an explicit signing key")
+    rows, digest = _inventory(files)
+    if (
+        set(release) != fields
+        or release["files"] != rows
+        or release["payload_digest"] != digest
+    ):
+        raise ValueError("fixture source release inventory mismatch")
     if unknown:
         original = files["main.py"].decode()
         name = "astrbot_plugin_hot_update_host_" + unknown
@@ -68,18 +119,32 @@ def derive(
             package_id=unknown, plugin_id={"author": "yomihime", "name": name}
         )
         version = "1.0.0"
-        files["main.py"] = files["main.py"].replace(b'"0.3.0"', b'"1.0.0"')
     if version:
-        old = release["release"]
+        old = release["release"].encode()
+        updated = version.encode()
         for path in tuple(files):
-            if (
-                path == "main.py"
-                or path == "metadata.yaml"
-                or path.endswith("yomihime.manifest.json")
-            ):
-                files[path] = files[path].replace(old.encode(), version.encode())
+            if path == "main.py":
+                files[path] = files[path].replace(
+                    b'"' + old + b'"', b'"' + updated + b'"'
+                )
+            elif path == "metadata.yaml":
+                files[path] = re.sub(
+                    rb"(?m)^(version: v?)" + re.escape(old) + rb"(?=\r?$)",
+                    lambda match: match[1] + updated,
+                    files[path],
+                )
+            elif path.endswith("/yomihime.manifest.json"):
+                manifest = json.loads(files[path])
+                manifest["package_version"] = version
+                if "release" in manifest:
+                    manifest["release"] = version
+                for module in manifest["modules"]:
+                    if module["module_version"] == release["release"]:
+                        module["module_version"] = version
+                files[path] = encode(manifest)
         release["release"] = version
-    release["release_sequence"] = sequence
+    if not ordinary:
+        release["release_sequence"] = sequence
     files["HOT_UPDATE_HOST_FIXTURE.json"] = encode(
         {
             "synthetic": True,
@@ -87,30 +152,20 @@ def derive(
             "purpose": "offline native lifecycle verification only",
         }
     )
-    release["files"] = [
-        {"path": name, "size": len(data), "sha256": hashlib.sha256(data).hexdigest()}
-        for name, data in sorted(files.items())
-    ]
-    digest = hashlib.sha256()
-    for row in release["files"]:
-        digest.update(
-            (
-                row["path"] + "\0" + str(row["size"]) + "\0" + row["sha256"] + "\n"
-            ).encode()
-        )
-    release["payload_digest"] = digest.hexdigest()
+    release["files"], release["payload_digest"] = _inventory(files)
     raw = encode(release)
     files["release.json"] = raw
-    from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+    if not ordinary:
+        from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
-    public = key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
-    files["release.sig.json"] = encode(
-        {
-            "algorithm": "ed25519",
-            "key_id": hashlib.sha256(public).hexdigest(),
-            "signature_base64": base64.b64encode(key.sign(raw)).decode(),
-        }
-    )
+        public = key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+        files["release.sig.json"] = encode(
+            {
+                "algorithm": "ed25519",
+                "key_id": hashlib.sha256(public).hexdigest(),
+                "signature_base64": base64.b64encode(key.sign(raw)).decode(),
+            }
+        )
     stream = io.BytesIO()
     with zipfile.ZipFile(stream, "w", zipfile.ZIP_DEFLATED) as archive:
         for name, data in sorted(files.items()):

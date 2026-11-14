@@ -1,6 +1,7 @@
 """Build destinations cannot overwrite inputs or follow linked output files."""
 
 import hashlib
+import json
 import os
 import shutil
 import subprocess
@@ -9,6 +10,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+from zipfile import ZipFile
 
 from scripts import build_dashboard_zip as dashboard
 from scripts import build_release as release
@@ -105,7 +107,13 @@ class BuildOutputSafetyTests(unittest.TestCase):
 
             def build_zip(source, destination, repository, **kwargs):
                 self.assertEqual(source, wheel)
-                destination.write_bytes(b"plugin fixture")
+                with ZipFile(destination, "w") as bundle:
+                    bundle.writestr(
+                        "release.json",
+                        json.dumps(
+                            {"plugin_id": {"name": "sample"}, "release": "0.1.2"}
+                        ),
+                    )
 
             with (
                 patch.object(release, "validate_wheel", return_value={}) as validate,

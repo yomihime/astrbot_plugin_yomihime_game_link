@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import math
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
@@ -380,8 +380,10 @@ class ExternalPackageHost:
                         plugin_name,
                         root,
                         candidate.package,
-                        current=lambda: self.current()
-                        and self._owner_current(plugin_name, plugin_instance),
+                        current=lambda: (
+                            self.current()
+                            and self._owner_current(plugin_name, plugin_instance)
+                        ),
                     )
                 )
             self._packages[key] = lease
@@ -627,6 +629,13 @@ class _HotPackage:
             return False
 
 
+@dataclass(frozen=True, slots=True)
+class _HostInstallReceipt:
+    package_id: str
+    artifact_digest: str
+    grant_revision: int = 0
+
+
 class IndependentPackageRuntime:
     """Core-owned trust, prepare, drain and closed-publication composition."""
 
@@ -672,6 +681,8 @@ class IndependentPackageRuntime:
             withdraw=self.withdraw_instance,
             fence=self.fence_instance,
             features=FEATURES,
+            installation_guard=generation.installation_guard,
+            retirement_lock=generation.kernel.lock,
         )
 
     def read_module_resource(self, module_id, manifest, path):
@@ -859,6 +870,8 @@ class IndependentPackageRuntime:
     def before_mutation(self, kind, key):
         for package in tuple(self.packages.values()):
             receipt = package.receipt
+            if isinstance(receipt, _HostInstallReceipt):
+                continue
             if (
                 (kind == "package_grant" and receipt.package_id == key)
                 or (kind == "publisher" and receipt.publisher_key_id == key)
@@ -909,12 +922,21 @@ class IndependentPackageRuntime:
         raise RuntimeError("package_owner_unavailable")
 
     def _current(self, package):
-        if self._closed or not package.policy_current or not self.runtime.ready:
+        if (
+            self._closed
+            or not package.policy_current
+            or not self.runtime.ready
+            or self.discovery.is_tombstoned(package.installation.instance)
+        ):
             return False
         metadata = package.installation.metadata
         if (
             metadata.activated is not True
             or metadata.star_cls is not package.installation.instance
+            or (
+                isinstance(package.receipt, _HostInstallReceipt)
+                and not package.installation.metadata_current()
+            )
         ):
             return False
         # Public registry snapshot is synchronous and never performs SQL/IO.
@@ -923,6 +945,23 @@ class IndependentPackageRuntime:
         ):
             return False
         return self.packages.get(package.receipt.package_id) is package
+
+    def _assert_installed_effect(self, unit, package):
+        from .runtime_effect_gate import EffectRejected
+
+        def check():
+            if not self._current(package):
+                raise EffectRejected()
+
+        @contextmanager
+        def commit_guard():
+            with self.generation.kernel.lock:
+                check()
+                package.gate._check_locked()
+                yield
+
+        check()
+        unit.add_commit_guard(commit_guard)
 
     async def _prepare(self, installation, *, cache_key=None):
         if self._failed_candidate_cleanup:
@@ -936,6 +975,7 @@ class IndependentPackageRuntime:
         from ..extensions.discovery import DiscoveredPackage
         from ..extensions.disk_manifest import parse_manifest
         from ..extensions.hot_update_protocol import (
+            HOST_RELEASE_SCHEMA,
             _load,
             b05_manifest_bytes,
             negotiate_manifest,
@@ -972,7 +1012,12 @@ class IndependentPackageRuntime:
             ):
                 raise ExtensionHostError("artifact_tampered")
             manifest_path = descriptor["manifest"]
-            envelope = parse_package_manifest(bundle.read_resource(manifest_path))
+            host_install = bundle.release_doc["schema"] == HOST_RELEASE_SCHEMA
+            if cache_key is not None and host_install:
+                raise ExtensionHostError("artifact_tampered")
+            envelope = parse_package_manifest(
+                bundle.read_resource(manifest_path), host_install=host_install
+            )
             negotiate_manifest(envelope, 0, FEATURES)
             raw_b05 = b05_manifest_bytes(envelope)
             manifest = parse_manifest(raw_b05)
@@ -1000,21 +1045,44 @@ class IndependentPackageRuntime:
                 else None
             )
             metadata = installation.metadata
-            arguments = dict(
-                host_plugin_id={"author": metadata.author, "name": metadata.name},
-                permission_projection=projection,
-            )
-            if cache_key is None:
-                receipt = await self.trust.evaluate(raw, signature, **arguments)
-            else:
-                if cache_key not in {
-                    self.cache.current.get(installation.package_id),
-                    self.cache.last_good.get(installation.package_id),
-                }:
-                    raise ExtensionHostError("cache_pin_changed")
-                receipt = await self.trust.evaluate_cached(
-                    raw, signature, pinned_digest=cache_key, **arguments
+            if cache_key is not None and cache_key not in {
+                self.cache.current.get(installation.package_id),
+                self.cache.last_good.get(installation.package_id),
+            }:
+                raise ExtensionHostError("cache_pin_changed")
+            if host_install:
+                if not self.discovery.current(installation):
+                    raise ExtensionHostError("stale_instance")
+                if (
+                    signature is not None
+                    or bundle.release_doc["plugin_id"] != installation.plugin_id
+                    or type(installation.version) is not str
+                    or installation.version.removeprefix("v")
+                    != bundle.release_doc["release"]
+                ):
+                    raise ExtensionHostError("artifact_tampered")
+                self.cache.check_package_identity(
+                    installation.package_id, installation.plugin_id
                 )
+                receipt = _HostInstallReceipt(
+                    installation.package_id, hashlib.sha256(raw).hexdigest()
+                )
+            else:
+                arguments = dict(
+                    host_plugin_id={"author": metadata.author, "name": metadata.name},
+                    permission_projection=projection,
+                )
+                if cache_key is None:
+                    receipt = await self.trust.evaluate(raw, signature, **arguments)
+                else:
+                    receipt = await self.trust.evaluate_cached(
+                        raw, signature, pinned_digest=cache_key, **arguments
+                    )
+            await self.repository.check_package_owner(
+                installation.package_id,
+                installation.plugin_id,
+                host_install=host_install,
+            )
             checked.update(
                 envelope=envelope,
                 manifest=manifest,
@@ -1037,9 +1105,18 @@ class IndependentPackageRuntime:
             if not self.discovery.current(installation):
                 raise ExtensionHostError("stale_instance")
             old = self.packages.get(receipt.package_id)
-            if old is not None and bundle.files.get(
-                "requirements.txt"
-            ) != old.bundle.files.get("requirements.txt"):
+            if (
+                isinstance(receipt, _HostInstallReceipt)
+                and old is not None
+                and old.bundle.release_doc["plugin_id"] != installation.plugin_id
+            ):
+                raise ExtensionHostError("artifact_tampered")
+            if (
+                not isinstance(receipt, _HostInstallReceipt)
+                and old is not None
+                and bundle.files.get("requirements.txt")
+                != old.bundle.files.get("requirements.txt")
+            ):
                 raise ExtensionHostError("environment_change_required")
             bundle.mount_package(
                 self.generation.bundle, receipt.package_id, checked["business_root"]
@@ -1095,8 +1172,13 @@ class IndependentPackageRuntime:
                 package_epoch=epoch,
                 grant_revision=receipt.grant_revision,
                 initially_open=False,
+                installation_guard=self.generation.installation_guard,
                 authority_check=lambda: self._current(package),
-                policy_assert=lambda unit: assert_execution_policy(unit, receipt),
+                policy_assert=(
+                    lambda unit: self._assert_installed_effect(unit, package)
+                )
+                if isinstance(receipt, _HostInstallReceipt)
+                else (lambda unit: assert_execution_policy(unit, receipt)),
             )
             package.gate = gate
             self._prepared[id(installation.instance)] = package
@@ -1164,16 +1246,8 @@ class IndependentPackageRuntime:
             package.envelope = checked["envelope"]
             package.fallback = fallback
             package.installed_version = (
-                None if fallback else bundle.release_doc["release"]
+                installation.version if fallback else bundle.release_doc["release"]
             )
-            if fallback:
-                try:
-                    from ..extensions.hot_update_protocol import parse_release
-
-                    installed_raw = (installation.root / "release.json").read_bytes()
-                    package.installed_version = parse_release(installed_raw)["release"]
-                except Exception:
-                    pass
             self._prepared[id(installation.instance)] = package
             return package
         except BaseException:
@@ -1254,7 +1328,7 @@ class IndependentPackageRuntime:
             task.exception()  # Observe detached failures; awaiters still see them.
 
     async def replace(self, installation):
-        if self._closed:
+        if self._closed or not self.generation.installation_current():
             raise ExtensionHostError("core_unavailable")
         if self._failed_candidate_cleanup:
             raise ExtensionHostError("cleanup_pending")
@@ -1267,6 +1341,7 @@ class IndependentPackageRuntime:
             return await asyncio.shield(task)
         except asyncio.CancelledError:
             self._cancel_replacement(task)
+            await asyncio.shield(asyncio.gather(task, return_exceptions=True))
             raise
 
     async def _replace_owned(self, installation):
@@ -1288,6 +1363,7 @@ class IndependentPackageRuntime:
             if (
                 isinstance(original, asyncio.CancelledError)
                 or not was_published
+                or isinstance(package.receipt, _HostInstallReceipt)
                 or self._closed
                 or not self.discovery.current(installation)
             ):
@@ -1340,29 +1416,7 @@ class IndependentPackageRuntime:
                 and self.discovery.current(installation)
             ):
                 return self._status(old)
-            try:
-                package = await self._prepare(installation, cache_key=cache_key)
-            except Exception as original:
-                if cache_key is not None:
-                    raise
-                if not self.discovery.current(installation) or self._closed:
-                    raise
-                package = None
-                for pin in dict.fromkeys(
-                    (
-                        self.cache.current.get(installation.package_id),
-                        self.cache.last_good.get(installation.package_id),
-                    )
-                ):
-                    if pin is None:
-                        continue
-                    try:
-                        package = await self._prepare(installation, cache_key=pin)
-                        break
-                    except Exception:
-                        continue
-                if package is None:
-                    raise original
+            package = await self._prepare(installation, cache_key=cache_key)
             active_bytes = sum(
                 current.bundle.total_bytes
                 for key, current in self.packages.items()
@@ -1459,48 +1513,81 @@ class IndependentPackageRuntime:
                 )
             )
 
-            def commit(unit):
-                from contextlib import contextmanager
+            from .runtime_effect_gate import EffectRejected
 
+            def current_owner(*, revalidate=True):
+                if (
+                    self._closed
+                    or not self.generation.installation_current()
+                    or self.discovery.is_tombstoned(installation.instance)
+                    or installation.metadata.activated is not True
+                    or installation.metadata.star_cls is not installation.instance
+                    or (
+                        isinstance(package.receipt, _HostInstallReceipt)
+                        and not installation.metadata_current()
+                    )
+                    or (revalidate and not self.discovery.current(installation))
+                ):
+                    raise ExtensionHostError("stale_instance")
+                record = self.generation.kernel._record(self.generation.scope)
+                if (
+                    record.fenced
+                    or record.token != self.generation.receipt["owner_token"]
+                ):
+                    raise EffectRejected()
+
+            @contextmanager
+            def commit_fence():
+                current_owner()
+                with self.generation.kernel.lock:
+                    current_owner(revalidate=False)
+                    yield
+
+            def commit(unit):
                 from ..infrastructure.sqlite.repositories_extension_policy import (
                     advance_release_head,
                     assert_execution_policy,
+                    check_package_owner,
                 )
-                from .runtime_effect_gate import EffectRejected
-
-                def current_owner(*, revalidate=True):
-                    if (
-                        self._closed
-                        or installation.metadata.activated is not True
-                        or installation.metadata.star_cls is not installation.instance
-                        or (revalidate and not self.discovery.current(installation))
-                    ):
-                        raise ExtensionHostError("stale_instance")
-                    record = self.generation.kernel._record(self.generation.scope)
-                    if (
-                        record.fenced
-                        or record.token != self.generation.receipt["owner_token"]
-                    ):
-                        raise EffectRejected()
-
-                @contextmanager
-                def commit_fence():
-                    current_owner()
-                    with self.generation.kernel.lock:
-                        current_owner(revalidate=False)
-                        yield
 
                 current_owner()
                 unit.add_commit_guard(commit_fence)
-                assert_execution_policy(unit, package.receipt)
-                row = unit.connection.execute(
-                    "SELECT * FROM extension_release_heads WHERE package_id=? AND publisher_key_id=? AND channel=?",
-                    (
-                        package.receipt.package_id,
-                        package.receipt.publisher_key_id,
-                        package.receipt.channel,
-                    ),
-                ).fetchone()
+                release_commit = None
+                receipt = package.receipt
+                host_install = isinstance(receipt, _HostInstallReceipt)
+                check_package_owner(
+                    unit,
+                    installation.package_id,
+                    installation.plugin_id,
+                    host_install=host_install,
+                    bind=True,
+                )
+                if not host_install:
+                    assert_execution_policy(unit, receipt)
+                    if not package.fallback:
+                        row = unit.connection.execute(
+                            "SELECT * FROM extension_release_heads WHERE package_id=? AND publisher_key_id=? AND channel=?",
+                            (
+                                receipt.package_id,
+                                receipt.publisher_key_id,
+                                receipt.channel,
+                            ),
+                        ).fetchone()
+
+                        def release_commit(transaction):
+                            advance_release_head(
+                                transaction,
+                                package_id=receipt.package_id,
+                                publisher_key_id=receipt.publisher_key_id,
+                                channel=receipt.channel,
+                                sequence=receipt.release_sequence,
+                                artifact_digest=receipt.artifact_digest,
+                                expected_sequence=row["release_sequence"]
+                                if row
+                                else None,
+                                expected_digest=row["artifact_digest"] if row else None,
+                            )
+
                 closed = RuntimeOwnership.commit_closed(
                     unit,
                     package.transition_id,
@@ -1511,20 +1598,7 @@ class IndependentPackageRuntime:
                     grant_revision=package.receipt.grant_revision,
                     boot_id=self.generation.kernel.boot_id,
                     new_token=package.gate.identity.package_token,
-                    release_commit=(
-                        None
-                        if package.fallback
-                        else lambda u: advance_release_head(
-                            u,
-                            package_id=package.receipt.package_id,
-                            publisher_key_id=package.receipt.publisher_key_id,
-                            channel=package.receipt.channel,
-                            sequence=package.receipt.release_sequence,
-                            artifact_digest=package.receipt.artifact_digest,
-                            expected_sequence=row["release_sequence"] if row else None,
-                            expected_digest=row["artifact_digest"] if row else None,
-                        )
-                    ),
+                    release_commit=release_commit,
                 )
                 RuntimeOwnership.check_data_contract(
                     unit,
@@ -1548,8 +1622,9 @@ class IndependentPackageRuntime:
                 ext = self.core.extension_runtime
                 ext.attach_host_package(
                     package.candidate,
-                    live=lambda: self._current(package)
-                    and self.discovery.current(installation),
+                    live=lambda: (
+                        self._current(package) and self.discovery.current(installation)
+                    ),
                 )
                 self._publish_policy(package)
                 self.core.admin_operations.attach_external_package(
@@ -1600,17 +1675,25 @@ class IndependentPackageRuntime:
                         unit, package.transition_id, "COMMITTED_CLOSED", "PUBLISHED"
                     )
                 )
-                if not self.discovery.current(installation) or self._closed:
+                if (
+                    not self.discovery.current(installation)
+                    or self._closed
+                    or not self.generation.installation_current()
+                ):
                     raise ExtensionHostError("stale_instance")
-                await executor.run_internal_transaction(
-                    lambda unit: RuntimeOwnership.open_active(
+
+                def open_owner(unit):
+                    current_owner()
+                    unit.add_commit_guard(commit_fence)
+                    return RuntimeOwnership.open_active(
                         unit,
                         package.transition_id,
                         package.gate.identity.package_token,
                         closed["revision"],
                         boot_id=self.generation.kernel.boot_id,
                     )
-                )
+
+                await executor.run_internal_transaction(open_owner)
                 package.gate.open()
                 from .runtime_effect_gate import invocation_guard
 
@@ -1755,19 +1838,30 @@ class IndependentPackageRuntime:
 
     async def withdraw_instance(self, instance):
         self.endpoint.retire_instance(instance, "cleanup_pending")
+        prepared = self._prepared.get(id(instance))
+        if (
+            prepared is not None
+            and prepared.installation.instance is instance
+            and prepared.prepare_cleanup_task is not None
+        ):
+            await self._discard_prepared(prepared)
         for package in tuple(self.packages.values()):
             if package.installation.instance is instance:
                 self.fence_instance(instance)
                 await self.core.database.executor.run_internal_transaction(
-                    lambda unit: unit.connection.execute(
-                        "UPDATE runtime_owners SET accepting=0,revision=revision+1 WHERE scope=? AND token=?",
-                        (
-                            "package:" + package.receipt.package_id,
-                            package.gate.identity.package_token,
-                        ),
-                    ).rowcount
+                    lambda unit: (
+                        unit.connection.execute(
+                            "UPDATE runtime_owners SET accepting=0,revision=revision+1 WHERE scope=? AND token=?",
+                            (
+                                "package:" + package.receipt.package_id,
+                                package.gate.identity.package_token,
+                            ),
+                        ).rowcount
+                    )
                 )
                 await self._cleanup_package(package)
+                if self._prepared.get(id(instance)) is package:
+                    self._prepared.pop(id(instance))
         self.endpoint.retire_instance(instance)
 
     def _status(self, package):
@@ -1792,6 +1886,7 @@ class IndependentPackageRuntime:
         import hashlib
         from uuid import UUID
 
+        self.discovery.prune_tombstones()
         snapshot = self.discovery.scan()
         for package in tuple(self.packages.values()):
             if not any(

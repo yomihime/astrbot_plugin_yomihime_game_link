@@ -12,6 +12,7 @@ import os
 import shutil
 import socket
 import sys
+import tempfile
 from pathlib import Path
 
 parser = argparse.ArgumentParser(description=__doc__)
@@ -19,7 +20,7 @@ parser.add_argument(
     "--host-source",
     required=True,
     type=Path,
-    help="Official AstrBot checkout root (v4.29.1)",
+    help="Official AstrBot checkout root (v4.29.1 or v4.29.4)",
 )
 parser.add_argument("--plugin-zip", required=True, type=Path)
 parser.add_argument(
@@ -35,10 +36,14 @@ parser.add_argument(
     / "presentation/assets/fonts/NotoSansCJKsc-Regular.otf",
 )
 parser.add_argument("--dlc-zip", required=True, type=Path)
-parser.add_argument("--test-signing-key", required=True, type=Path)
+parser.add_argument(
+    "--test-signing-key",
+    type=Path,
+    help="Enable the legacy signed fixture with this test key; omit for ordinary ZIPs",
+)
 args = parser.parse_args()
 dlc_zip = args.dlc_zip.resolve(strict=True)
-test_key = args.test_signing_key.resolve(strict=True)
+test_key = args.test_signing_key.resolve(strict=True) if args.test_signing_key else None
 repo_root = Path(__file__).resolve().parents[1]
 
 if sys.flags.optimize:
@@ -53,7 +58,7 @@ if root.exists() or root.is_symlink():
     )
 if not (host_source / "astrbot/dashboard/server.py").is_file():
     parser.error("--host-source must be the official checkout root")
-if not plugin_zip.is_file() or not font.is_file():
+if not all(path.is_file() for path in (plugin_zip, dlc_zip, font)):
     parser.error("ZIP and font must be readable regular files")
 if (
     hashlib.sha256(font.read_bytes()).hexdigest()
@@ -79,29 +84,50 @@ if subprocess.check_output(
 import importlib.metadata
 import zipfile
 
+from hot_update_host_fixtures import (
+    HOST_RELEASE_SCHEMA,
+    LEGACY_RELEASE_SCHEMA,
+    derive,
+    read_release,
+)
 from packaging.requirements import Requirement
+from packaging.version import Version
 
-with zipfile.ZipFile(plugin_zip) as archive:
-    requirements_text = archive.read("requirements.txt").decode("utf-8")
-for line in requirements_text.splitlines():
-    line = line.strip()
-    if not line or line.startswith("#"):
-        continue
-    requirement = Requirement(line)
-    if requirement.url:
-        parser.error("Direct URL dependencies are not allowed in this offline smoke")
-    if requirement.marker and not requirement.marker.evaluate():
-        continue
-    try:
-        installed_version = importlib.metadata.version(requirement.name)
-    except importlib.metadata.PackageNotFoundError:
-        parser.error(
-            f"Preinstall missing dependency before offline smoke: {requirement}"
-        )
-    if installed_version not in requirement.specifier:
-        parser.error(f"Preinstall required version before offline smoke: {requirement}")
+core_release, core_digest = read_release(plugin_zip)
+dlc_release, dlc_digest = read_release(dlc_zip)
+expected_schema = LEGACY_RELEASE_SCHEMA if test_key else HOST_RELEASE_SCHEMA
+if any(doc["schema"] != expected_schema for doc in (core_release, dlc_release)):
+    parser.error(f"Both source ZIPs must use {expected_schema} in this fixture mode")
+
+for path in (plugin_zip, dlc_zip):
+    with zipfile.ZipFile(path) as archive:
+        requirements_text = archive.read("requirements.txt").decode("utf-8")
+    for line in requirements_text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        requirement = Requirement(line)
+        if requirement.url:
+            parser.error(
+                "Direct URL dependencies are not allowed in this offline smoke"
+            )
+        if requirement.marker and not requirement.marker.evaluate():
+            continue
+        try:
+            installed_version = importlib.metadata.version(requirement.name)
+        except importlib.metadata.PackageNotFoundError:
+            parser.error(
+                f"Preinstall missing dependency before offline smoke: {requirement}"
+            )
+        if installed_version not in requirement.specifier:
+            parser.error(
+                f"Preinstall required version before offline smoke: {requirement}"
+            )
 root.mkdir(parents=True, exist_ok=False)
 root = root.resolve()
+temp = root / "system-temp"
+temp.mkdir()
+tempfile.tempdir = str(temp)
 sys.path[:0] = [str(root), str(host_source)]
 os.chdir(root)
 os.environ["ASTRBOT_ROOT"] = str(root)
@@ -175,59 +201,69 @@ lifecycle_module.update_llm_metadata = offline_metadata
 import httpx
 
 NAME = "astrbot_plugin_yomihime_game_link"
-
-
-class Event:
-    def __init__(self):
-        self.calls = []
-
-    def get_platform_id(self):
-        return "isolated"
-
-    def get_sender_id(self):
-        return "tester"
-
-    def get_session_id(self):
-        return "tester"
-
-    def get_message_type(self):
-        return "FriendMessage"
-
-    def get_message_str(self):
-        return "/ygl help"
-
-    def chain_result(self, components):
-        return type("Result", (), {"chain": components})()
-
-    async def send(self, chain):
-        self.calls.append(chain)
+DLC_NAME = "astrbot_plugin_yomihime_game_link_steam_dlc"
+UNKNOWN_ID = "never_predeclared_native"
+UNKNOWN_NAME = "astrbot_plugin_hot_update_host_" + UNKNOWN_ID
 
 
 async def main():
     from astrbot.core.utils.version_comparator import VersionComparator
-    from cryptography.hazmat.primitives.serialization import (
-        Encoding,
-        PublicFormat,
-        load_pem_private_key,
-    )
-    from hot_update_host_fixtures import derive
 
-    key = load_pem_private_key(test_key.read_bytes(), password=None)
-    public = key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+    key = public = None
+    if test_key is not None:
+        from cryptography.hazmat.primitives.serialization import (
+            Encoding,
+            PublicFormat,
+            load_pem_private_key,
+        )
+
+        key = load_pem_private_key(test_key.read_bytes(), password=None)
+        public = key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+
+    def next_patch(release, step):
+        version = Version(release["release"])
+        return f"{version.major}.{version.minor}.{version.micro + step}"
+
     fixtures = root / "fixtures"
     fixtures.mkdir()
-    core_next = derive(plugin_zip, fixtures / "core-0.2.1.zip", key, version="0.2.1")
-    dlc_next = derive(dlc_zip, fixtures / "dlc-0.3.1.zip", key, version="0.3.1")
+    core_version = next_patch(core_release, 1)
+    dlc_version = next_patch(dlc_release, 1)
+    market_version = next_patch(dlc_release, 2)
+    core_sequence = core_release.get("release_sequence", 0)
+    dlc_sequence = dlc_release.get("release_sequence", 0)
+    core_next = derive(
+        plugin_zip,
+        fixtures / f"core-{core_version}.zip",
+        key,
+        version=core_version,
+        sequence=core_sequence + 1,
+    )
+    dlc_next = derive(
+        dlc_zip,
+        fixtures / f"dlc-{dlc_version}.zip",
+        key,
+        version=dlc_version,
+        sequence=dlc_sequence + 1,
+    )
     dlc_market = derive(
-        dlc_zip, fixtures / "dlc-0.3.2.zip", key, version="0.3.2", sequence=3
+        dlc_zip,
+        fixtures / f"dlc-{market_version}.zip",
+        key,
+        version=market_version,
+        sequence=dlc_sequence + 2,
     )
     unknown = derive(
         dlc_zip,
         fixtures / "unknown.zip",
         key,
-        unknown="never_predeclared_native",
+        unknown=UNKNOWN_ID,
         repo_root=repo_root,
     )
+    fixture_paths = [plugin_zip, dlc_zip, core_next, dlc_next, dlc_market, unknown]
+    if key is None:
+        dlc_same_version = derive(dlc_market, fixtures / "dlc-same-version.zip")
+        core_same_version = derive(core_next, fixtures / "core-same-version.zip")
+        fixture_paths.extend((dlc_same_version, core_same_version))
     astrbot_config["disable_metrics"] = True
     astrbot_config["provider"] = []
     astrbot_config["provider_sources"] = []
@@ -242,17 +278,18 @@ async def main():
     target.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(font, target)
     host = AstrBotCoreLifecycle(LogBroker(), db_helper)
-    await host.initialize()
     result = {
         "schema": "hot-update-native-host/1",
         "host_commit": host_commit,
         "python": sys.version,
+        "release_schema": expected_schema,
+        "status": "incomplete",
+        "host_process_pid": os.getpid(),
         "assertions": [],
         "artifact_sha256": {
-            str(p.name): hashlib.sha256(p.read_bytes()).hexdigest()
-            for p in (plugin_zip, dlc_zip, core_next, dlc_next, dlc_market, unknown)
+            p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in fixture_paths
         },
-        "fixture_boundary": "Unmodified native Host lifecycle/routes/install/updater/extraction/permissions; external ZIP HTTP transport only is deterministic; signed derivatives are synthetic test-only.",
+        "fixture_boundary": "Official Host lifecycle, routes, install and updater in process. Market ZIP HTTP transport and unrelated network background jobs are isolated. Derived update ZIPs are synthetic.",
     }
 
     def record(name, **facts):
@@ -264,17 +301,21 @@ async def main():
     def star(name):
         return host.star_context.get_registered_star(name).star_cls
 
-    async def ready_core():
+    async def ready_core(version, digest):
         owner = star(NAME)
         await asyncio.wait_for(owner._start_task, 30)
         assert owner._runtime.ready and owner._state == "active"
+        assert owner._running_version == owner._installed_version == version
+        assert owner._running_digest == owner._installed_digest == digest
         return owner
 
     async def eventually(predicate, label, timeout=30):
-        async with asyncio.timeout(timeout):
-            while not predicate():
-                await asyncio.sleep(0.05)
-        return True
+        try:
+            async with asyncio.timeout(timeout):
+                while not predicate():
+                    await asyncio.sleep(0.05)
+        except TimeoutError as exc:
+            raise AssertionError(f"Timed out waiting for {label}") from exc
 
     def fenced(package):
         try:
@@ -283,12 +324,29 @@ async def main():
             return True
         return False
 
-    dashboard = AstrBotDashboard(host, db_helper, asyncio.Event())
-    token = dashboard.asgi_app.state.services.auth.generate_jwt("isolated-native-admin")
-    headers = {"Authorization": "Bearer " + token, "Origin": "https://test.invalid"}
-    dlc_name = "astrbot_plugin_yomihime_game_link_steam_dlc"
-    unknown_name = "astrbot_plugin_hot_update_host_never_predeclared_native"
+    # Preexisting native configuration and plugin data in the disposable root.
+    config_path = root / "data/config" / f"{NAME}_config.json"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    original_config = b'{"web_public_origin":"https://fixture.invalid"}\n'
+    config_path.write_bytes(original_config)
+    sentinels = {config_path: original_config}
+    for name in (NAME, DLC_NAME):
+        marker = root / "data/plugin_data" / name / "native-smoke-data.bin"
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        contents = f"preexisting plugin data for {name}\n".encode()
+        marker.write_bytes(contents)
+        sentinels[marker] = contents
+
+    def verify_data():
+        assert all(path.read_bytes() == data for path, data in sentinels.items())
+
     try:
+        await host.initialize()
+        dashboard = AstrBotDashboard(host, db_helper, asyncio.Event())
+        token = dashboard.asgi_app.state.services.auth.generate_jwt(
+            "isolated-native-admin"
+        )
+        headers = {"Authorization": "Bearer " + token, "Origin": "https://test.invalid"}
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(dashboard.asgi_app),
             base_url="https://test.invalid",
@@ -343,74 +401,129 @@ async def main():
                 )
                 await admin("retry", {"core_epoch": epoch, "package_id": package_id})
 
+            async def ready_dlc(plugin_name, package_id, path, manager):
+                instance = star(plugin_name)
+                expected_release, digest = read_release(path)
+                await eventually(
+                    lambda: (
+                        instance.connection_state == "connected"
+                        and instance._core_instance is manager.generation.owner
+                    ),
+                    f"{package_id} connect ({expected_release['release']})",
+                )
+                package = manager.packages[package_id]
+                assert package.active and package.published
+                assert (
+                    package.bundle.release_doc["release"] == expected_release["release"]
+                )
+                assert package.receipt.artifact_digest == digest
+                if key is None:
+                    assert await manager.repository.grant(package_id) is None
+                    assert await manager.repository.approval(digest) is None
+                return instance, package
+
+            async def check_ordinary_status(epoch, package_ids):
+                status = await admin("status", {"core_epoch": epoch})
+                assert status["publishers"] == []
+                core = status["core"]
+                assert core["ready"] and core["phase"] == "active"
+                assert core["installed_digest"] == core["running_digest"]
+                assert {
+                    item["package_id"] for item in status["packages"]
+                } == package_ids
+                for item in status["packages"]:
+                    assert item["signature_state"] == "host_install"
+                    assert item["state"] == "active" and item["reason_code"] is None
+                    assert item["installed_digest"] == item["running_digest"]
+                    assert item["installed_version"] == item["running_version"]
+                    assert item["grant_revision"] == item["artifact_revision"] == 0
+                    assert item["publisher_revision"] == 0
+
+            with dlc_zip.open("rb") as stream:
+                denied = await client.post(
+                    "/api/v1/plugins/install/upload",
+                    files={"file": (dlc_zip.name, stream, "application/zip")},
+                    data={"ignore_version_check": "false"},
+                )
+            assert denied.status_code in (401, 403)
+            assert host.star_context.get_registered_star(DLC_NAME) is None
+            record(
+                "unauthenticated_native_upload_denied", http_status=denied.status_code
+            )
+
             # DLC first: no Core installation exists yet.
             await upload(dlc_zip)
-            dlc = star(dlc_name)
+            pending_dlc = star(DLC_NAME)
             await eventually(
-                lambda: dlc.connection_state == "waiting_core", "DLC waiting Core"
+                lambda: pending_dlc.connection_state == "waiting_core",
+                "DLC waiting Core",
             )
             record(
                 "native_dashboard_upload_dlc_before_core_waits",
-                connection_state=dlc.connection_state,
+                connection_state=pending_dlc.connection_state,
             )
             await upload(plugin_zip)
-            owner = await ready_core()
+            owner = await ready_core(core_release["release"], core_digest)
+            verify_data()
+            assert owner._host_config["web_public_origin"] == "https://fixture.invalid"
             original_digest = owner._running_digest
             original_namespace = owner._generation.bundle.namespace
             assert "yomihime_game_link_sdk" not in sys.modules
             record(
                 "native_dashboard_upload_core_private_generation",
                 version=owner._running_version,
+                digest=original_digest,
                 namespace=original_namespace,
             )
-            epoch = (await bootstrap())["core_epoch"]
+            epoch = owner._generation.receipt["core_epoch"]
+            if key is not None:
+                assert (await bootstrap())["core_epoch"] == epoch
+                await admin(
+                    "publisher-enroll",
+                    {
+                        "core_epoch": epoch,
+                        "public_key_base64": base64.b64encode(public).decode(),
+                        "channels": [dlc_release["channel"]],
+                        "expected_revision": 0,
+                    },
+                )
+                await approve("steam_dlc")
+            manager = owner._runtime._independent_packages
+            dlc, original_package = await ready_dlc(
+                DLC_NAME, "steam_dlc", dlc_zip, manager
+            )
+            assert dlc is pending_dlc
+            old_lease = dlc._lease
             denied = await client.post(
-                "/api/v1/plugins/extensions/"
-                + NAME
-                + "/admin/module-hot-update-publisher-enroll",
-                json={
-                    "core_epoch": epoch,
-                    "public_key_base64": base64.b64encode(public).decode(),
-                    "channels": ["preview"],
-                    "expected_revision": 0,
-                },
+                f"/api/v1/plugins/extensions/{NAME}/admin/module-hot-update-status",
+                json={"core_epoch": epoch},
             )
             assert denied.status_code in (401, 403)
-            await admin(
-                "publisher-enroll",
-                {
-                    "core_epoch": epoch,
-                    "public_key_base64": base64.b64encode(public).decode(),
-                    "channels": ["preview"],
-                    "expected_revision": 0,
-                },
-            )
-            await approve("steam_dlc")
-            await eventually(
-                lambda: dlc.connection_state == "connected", "signed DLC connect"
-            )
-            manager = owner._runtime._independent_packages
-            original_package = manager.packages["steam_dlc"]
-            old_lease = dlc._lease
             record(
-                "authenticated_publisher_enrollment_exact_package_approval_and_native_reconnect",
+                "unauthenticated_hot_update_status_denied",
+                http_status=denied.status_code,
+            )
+            if key is None:
+                await check_ordinary_status(epoch, {"steam_dlc"})
+            verify_data()
+            record(
+                "ordinary_dlc_native_connect_without_publisher_or_approval"
+                if key is None
+                else "authenticated_legacy_package_approval_and_native_reconnect",
                 package="steam_dlc",
+                digest=dlc_digest,
                 core_epoch=epoch,
                 package_epoch=dlc._package_epoch,
-                unauthorized_status=denied.status_code,
             )
             await upload(unknown)
-            await approve("never_predeclared_native")
-            other = star(unknown_name)
-            await eventually(
-                lambda: other.connection_state == "connected", "unknown connect"
-            )
-            sibling = manager.packages["never_predeclared_native"]
+            if key is not None:
+                await approve(UNKNOWN_ID)
+            _, sibling = await ready_dlc(UNKNOWN_NAME, UNKNOWN_ID, unknown, manager)
             sibling_epoch = sibling.epoch
             assert owner._running_digest == original_digest
             record(
                 "native_unknown_dlc_admitted_without_core_change",
-                package="never_predeclared_native",
+                package=UNKNOWN_ID,
                 core_digest=original_digest,
             )
 
@@ -422,12 +535,10 @@ async def main():
             await sibling_health()
             await upload(dlc_next)
             await sibling_health()
-            replacement = star(dlc_name)
-            await eventually(
-                lambda: replacement.connection_state == "connected",
-                "DLC overwrite connect",
+            replacement, new_package = await ready_dlc(
+                DLC_NAME, "steam_dlc", dlc_next, manager
             )
-            new_package = manager.packages["steam_dlc"]
+            verify_data()
             assert replacement is not dlc and new_package is not original_package
             assert dlc._closed and fenced(original_package)
             assert sibling.active and sibling.epoch == sibling_epoch
@@ -445,14 +556,14 @@ async def main():
             # Use actual registry cache parsing/source binding. Only remote ZIP bytes
             # are supplied by a deterministic HTTPX transport; native updater runs.
             service = dashboard.asgi_app.state.services.plugins
-            metadata = host.star_context.get_registered_star(dlc_name)
-            archive_url = "https://fixture.invalid/native-dlc-0.3.2.zip"
+            metadata = host.star_context.get_registered_star(DLC_NAME)
+            archive_url = f"https://fixture.invalid/native-dlc-{market_version}.zip"
             market = {
                 "native-fixture/steam": {
                     "market_plugin_id": "native-fixture/steam",
-                    "name": dlc_name,
+                    "name": DLC_NAME,
                     "repo": metadata.repo,
-                    "version": "0.3.2",
+                    "version": market_version,
                     "download_url": archive_url,
                 }
             }
@@ -460,15 +571,17 @@ async def main():
             service.save_plugin_cache(source.cache_file, market, "")
             await call(
                 "POST",
-                "/api/v1/plugins/" + dlc_name + "/source",
+                f"/api/v1/plugins/{DLC_NAME}/source",
                 json={
                     "install_method": "market",
                     "market_plugin_id": "native-fixture/steam",
                 },
             )
-            info = await service.resolve_market_update_info(dlc_name)
+            info = await service.resolve_market_update_info(DLC_NAME)
             assert info["download_url"] == archive_url
-            assert VersionComparator.compare_version("0.3.2", metadata.version) == 1
+            assert (
+                VersionComparator.compare_version(market_version, metadata.version) == 1
+            )
             downloads = []
 
             def transport(request):
@@ -476,33 +589,70 @@ async def main():
                 downloads.append(str(request.url))
                 return httpx.Response(200, content=dlc_market.read_bytes())
 
-            host.plugin_manager._updater._create_httpx_client = (
-                lambda **kw: httpx.AsyncClient(
+            host.plugin_manager._updater._create_httpx_client = lambda **kw: (
+                httpx.AsyncClient(
                     transport=httpx.MockTransport(transport), follow_redirects=True
                 )
             )
             previous = new_package
-            await call("POST", "/api/v1/plugins/" + dlc_name + "/update", json={})
-            replacement = star(dlc_name)
-            await eventually(
-                lambda: replacement.connection_state == "connected", "market reconnect"
+            await call("POST", f"/api/v1/plugins/{DLC_NAME}/update", json={})
+            replacement, new_package = await ready_dlc(
+                DLC_NAME, "steam_dlc", dlc_market, manager
             )
-            assert (
-                manager.packages["steam_dlc"].bundle.release_doc["release"] == "0.3.2"
-            )
-            assert fenced(previous) and sibling.active and star(NAME) is owner
+            verify_data()
+            assert previous is not new_package and fenced(previous)
+            assert sibling.active and star(NAME) is owner
             assert downloads == [archive_url]
             record(
                 "native_market_source_version_comparator_download_url_update_and_reload",
                 downloads=downloads,
-                running_version="0.3.2",
+                running_version=market_version,
                 sibling_active=True,
             )
+            installed_dlc = dlc_market
+            if key is None:
+                previous, old_instance = new_package, replacement
+                await upload(dlc_same_version)
+                replacement, new_package = await ready_dlc(
+                    DLC_NAME, "steam_dlc", dlc_same_version, manager
+                )
+                verify_data()
+                assert replacement is not old_instance and old_instance._closed
+                assert fenced(previous)
+                assert sibling.active and star(NAME) is owner
+                next_digest = new_package.receipt.artifact_digest
+                assert next_digest != previous.receipt.artifact_digest
+                installed_dlc = dlc_same_version
+                record(
+                    "same_version_native_dlc_upload_activates_changed_release_bytes",
+                    running_version=market_version,
+                    running_digest=next_digest,
+                )
+                previous = new_package
+                prerelease_version = "1.0.0-rc.1+fixture.7"
+                dlc_prerelease = derive(
+                    installed_dlc,
+                    fixtures / "dlc-prerelease.zip",
+                    None,
+                    version=prerelease_version,
+                )
+                await upload(dlc_prerelease)
+                replacement, new_package = await ready_dlc(
+                    DLC_NAME, "steam_dlc", dlc_prerelease, manager
+                )
+                verify_data()
+                assert fenced(previous) and sibling.active and star(NAME) is owner
+                installed_dlc = dlc_prerelease
+                record(
+                    "native_prerelease_dlc_upload_preserves_data_and_sibling",
+                    running_version=prerelease_version,
+                )
             # Ten successive native uploads, plus native reload, retaining
             # old package objects only to test that their gates/importers close.
             repeated = []
+            installed_unknown = unknown
             for index in range(1, 11):
-                previous_unknown = manager.packages["never_predeclared_native"]
+                previous_unknown = manager.packages[UNKNOWN_ID]
                 old_namespace = previous_unknown.bundle.namespace
                 candidate = derive(
                     unknown,
@@ -512,65 +662,101 @@ async def main():
                     sequence=index + 2,
                 )
                 await upload(candidate)
-                current_unknown = star(unknown_name)
-                await eventually(
-                    lambda: current_unknown.connection_state == "connected",
-                    "repeat native update",
-                )
+                installed_unknown = candidate
+                await ready_dlc(UNKNOWN_NAME, UNKNOWN_ID, installed_unknown, manager)
                 if index % 3 == 0:
-                    await host.plugin_manager.reload(unknown_name)
-                    current_unknown = star(unknown_name)
-                    await eventually(
-                        lambda: current_unknown.connection_state == "connected",
-                        "repeat native reload",
+                    await host.plugin_manager.reload(UNKNOWN_NAME)
+                    await ready_dlc(
+                        UNKNOWN_NAME, UNKNOWN_ID, installed_unknown, manager
                     )
+                verify_data()
                 assert fenced(previous_unknown)
                 assert old_namespace not in sys.modules
                 assert manager.packages["steam_dlc"].active
                 assert star(NAME) is owner
                 repeated.append(
-                    {"version": f"1.0.{index}", "old_namespace_released": True}
+                    {
+                        "version": f"1.0.{index}",
+                        "sha256": hashlib.sha256(candidate.read_bytes()).hexdigest(),
+                        "old_namespace_released": True,
+                    }
                 )
-            other = star(unknown_name)
             record(
                 "ten_native_compatible_upload_updates_with_repeated_reload",
                 generations=repeated,
                 shared_core_digest=owner._running_digest,
                 rss_claim="not measured",
             )
-            # Core overwrite through native dashboard; DLC installations stay put.
-            old_endpoint = manager.endpoint
-            old_packages = list(manager.packages.values())
-            instances = (star(dlc_name), other)
-            await upload(core_next)
-            new_owner = await ready_core()
-            assert new_owner is not owner
-            await eventually(
-                lambda: all(
-                    p.connection_state == "connected" and p._core_instance is new_owner
-                    for p in instances
-                ),
-                "Core reconnect all DLC",
-            )
-            assert new_owner._running_version == "0.2.1"
-            assert new_owner._generation.receipt["core_epoch"] > epoch
-            assert new_owner._generation.bundle.namespace != original_namespace
-            assert all(fenced(p) for p in old_packages) and old_endpoint._closed
-            assert original_namespace not in sys.modules
-            manager = new_owner._runtime._independent_packages
-            assert set(manager.packages) == {"steam_dlc", "never_predeclared_native"}
-            record(
-                "native_core_upload_update_reconnects_all_dlc_without_reinstall_or_host_restart",
-                version=new_owner._running_version,
-                core_epoch=new_owner._generation.receipt["core_epoch"],
-                old_namespace_released=True,
-            )
+            # Consecutive native Core uploads; both DLC instances stay installed.
+            core_updates = [
+                (
+                    core_next,
+                    "native_core_upload_update_reconnects_all_dlc_without_reinstall_or_host_restart",
+                )
+            ]
+            if key is None:
+                core_updates.append(
+                    (
+                        core_same_version,
+                        "same_version_native_core_upload_activates_changed_release_bytes_and_reconnects_all_dlc",
+                    )
+                )
+                core_updates.append(
+                    (
+                        derive(
+                            core_same_version,
+                            fixtures / "core-prerelease.zip",
+                            None,
+                            version="1.0.0-rc.1+fixture.7",
+                        ),
+                        "native_prerelease_core_upload_reconnects_all_dlc",
+                    )
+                )
+            for candidate, assertion in core_updates:
+                old_endpoint = manager.endpoint
+                old_packages = list(manager.packages.values())
+                old_namespace = owner._generation.bundle.namespace
+                instances = (star(DLC_NAME), star(UNKNOWN_NAME))
+                candidate_release, digest = read_release(candidate)
+                assert digest != owner._running_digest
+                await upload(candidate)
+                new_owner = await ready_core(candidate_release["release"], digest)
+                assert new_owner is not owner
+                assert new_owner._generation.bundle.namespace != old_namespace
+                assert all(fenced(p) for p in old_packages) and old_endpoint._closed
+                assert old_namespace not in sys.modules
+                manager = new_owner._runtime._independent_packages
+                steam, _ = await ready_dlc(
+                    DLC_NAME, "steam_dlc", installed_dlc, manager
+                )
+                custom, _ = await ready_dlc(
+                    UNKNOWN_NAME, UNKNOWN_ID, installed_unknown, manager
+                )
+                assert steam is instances[0] and custom is instances[1]
+                assert set(manager.packages) == {"steam_dlc", UNKNOWN_ID}
+                assert (
+                    new_owner._host_config["web_public_origin"]
+                    == "https://fixture.invalid"
+                )
+                verify_data()
+                next_epoch = new_owner._generation.receipt["core_epoch"]
+                assert next_epoch > epoch
+                if key is None:
+                    await check_ordinary_status(next_epoch, {"steam_dlc", UNKNOWN_ID})
+                record(
+                    assertion,
+                    version=new_owner._running_version,
+                    digest=digest,
+                    core_epoch=next_epoch,
+                    old_namespace_released=True,
+                )
+                epoch, owner = next_epoch, new_owner
             current = manager.packages["steam_dlc"]
-            current_instance = star(dlc_name)
+            current_instance = star(DLC_NAME)
             current_lease = current_instance._lease
             await call(
                 "PATCH",
-                "/api/v1/plugins/" + dlc_name + "/enabled",
+                f"/api/v1/plugins/{DLC_NAME}/enabled",
                 json={"enabled": False},
             )
             assert current_instance._closed and fenced(current)
@@ -579,7 +765,7 @@ async def main():
                 {"protocol": "ygl.control/1", "op": "status", "lease": current_lease},
             )
             assert response.get("state") != "active"
-            assert manager.packages["never_predeclared_native"].active
+            assert manager.packages[UNKNOWN_ID].active
             record(
                 "native_disable_fences_old_instance_and_exact_lease",
                 old_state=response["state"],
@@ -587,23 +773,29 @@ async def main():
             )
             await call(
                 "PATCH",
-                "/api/v1/plugins/" + dlc_name + "/enabled",
+                f"/api/v1/plugins/{DLC_NAME}/enabled",
                 json={"enabled": True},
             )
-            enabled = star(dlc_name)
-            await eventually(
-                lambda: enabled.connection_state == "connected", "enable reconnect"
+            enabled, current = await ready_dlc(
+                DLC_NAME, "steam_dlc", installed_dlc, manager
             )
-            current = manager.packages["steam_dlc"]
             await call(
                 "DELETE",
                 "/api/v1/plugins/by-id",
-                params={"plugin_id": dlc_name},
+                params={"plugin_id": DLC_NAME},
                 json={"delete_config": False, "delete_data": False},
             )
             assert fenced(current) and enabled._closed
-            assert manager.packages["never_predeclared_native"].active
-            assert host.star_context.get_registered_star(dlc_name) is None
+            assert manager.packages[UNKNOWN_ID].active
+            assert host.star_context.get_registered_star(DLC_NAME) is None
+            verify_data()
+            record(
+                "native_install_update_and_preserving_remove_keep_config_and_data_bytes",
+                sentinels={
+                    str(path.relative_to(root)): hashlib.sha256(data).hexdigest()
+                    for path, data in sentinels.items()
+                },
+            )
             record("native_uninstall_fences_removed_dlc_and_preserves_sibling")
             # Removal invalidates any in-flight resource-scoped management
             # proof. A fresh read must succeed after owned cleanup settles.
@@ -630,11 +822,17 @@ async def main():
             )
             result["status"] = "passed"
     finally:
-        await host.stop()
-        result["network_connections_allowed_by_fixture"] = 0
-        result["blocked_attempts"] = attempts
-        result["offline_background_jobs"] = offline_jobs
-        (root / "native-hot-update.json").write_text(json.dumps(result, indent=2))
+        try:
+            await host.stop()
+            result["host_stopped"] = True
+        except BaseException:
+            result["status"] = "cleanup_failed"
+            raise
+        finally:
+            result["network_connections_allowed_by_fixture"] = 0
+            result["blocked_attempts"] = attempts
+            result["offline_background_jobs"] = offline_jobs
+            (root / "native-hot-update.json").write_text(json.dumps(result, indent=2))
     print(json.dumps(result, indent=2))
 
 

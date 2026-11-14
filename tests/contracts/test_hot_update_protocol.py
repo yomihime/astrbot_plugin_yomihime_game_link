@@ -118,6 +118,68 @@ class ProtocolTests(unittest.TestCase):
             ):
                 check_data_compatibility(doc, *args)
 
+    def test_ordinary_prerelease_and_build_metadata_are_profile_specific(self):
+        files = [{"path": "main.py", "size": 0, "sha256": "a" * 64}]
+        release = {
+            "schema": "ygl.release/2",
+            "plugin_id": {"author": "A", "name": "N"},
+            "package_id": "new_unseen_dlc",
+            "files": files,
+            "payload_digest": payload_digest(files),
+        }
+        schemas = Path(__file__).parents[2] / "schemas"
+        release_schema = Draft202012Validator(
+            json.loads((schemas / "ygl-release-v2.json").read_text())
+        )
+        package_schema = Draft202012Validator(
+            json.loads((schemas / "ygl-package-v1.json").read_text())
+        )
+        for version in ("1.2.3-beta.4+build.07", "10.20.30-rc.1", "1.2.3+linux"):
+            with self.subTest(version=version):
+                candidate = release | {"release": version}
+                business = manifest() | {"release": version, "package_version": version}
+                release_schema.validate(candidate)
+                package_schema.validate(business)
+                self.assertEqual(parse_release(encoded(candidate))["release"], version)
+                self.assertEqual(
+                    parse_manifest(
+                        b05_manifest_bytes(
+                            parse_package_manifest(encoded(business), host_install=True)
+                        )
+                    ).package_version,
+                    version,
+                )
+                with self.assertRaises(ProtocolError):
+                    parse_release(
+                        encoded(
+                            candidate
+                            | {
+                                "schema": "ygl.release/1",
+                                "channel": "preview",
+                                "release_sequence": 1,
+                            }
+                        )
+                    )
+                with self.assertRaises(ProtocolError):
+                    parse_package_manifest(encoded(business))
+        for version in (
+            "v1.2.3",
+            "01.2.3",
+            "1.2.3-beta.04",
+            "1.2.3-beta..4",
+            "1.2.3+",
+            "1.2.3-" + "a" * 123,
+        ):
+            with self.subTest(version=version):
+                candidate = release | {"release": version}
+                business = manifest() | {"release": version, "package_version": version}
+                self.assertFalse(release_schema.is_valid(candidate))
+                self.assertFalse(package_schema.is_valid(business))
+                with self.assertRaises(ProtocolError):
+                    parse_release(encoded(candidate))
+                with self.assertRaises(ProtocolError):
+                    parse_package_manifest(encoded(business), host_install=True)
+
     def test_descriptor_and_release_digest(self):
         descriptor = {
             "schema": "ygl.plugin/1",
@@ -283,6 +345,14 @@ class ProtocolTests(unittest.TestCase):
                 "payload_digest": "a" * 64,
                 "files": [{"path": "main.py", "size": 0, "sha256": "a" * 64}],
             },
+            "ygl-release-v2.json": {
+                "schema": "ygl.release/2",
+                "plugin_id": {"author": "A", "name": "N"},
+                "package_id": "new_unseen_dlc",
+                "release": "1.2.3",
+                "payload_digest": "a" * 64,
+                "files": [{"path": "main.py", "size": 0, "sha256": "a" * 64}],
+            },
         }
         for name, fixture in fixtures.items():
             with self.subTest(name=name):
@@ -297,9 +367,12 @@ class ProtocolTests(unittest.TestCase):
         parse_control(encoded(control("status", operation_id="op")))
         parse_control(encoded(control("status", lease="b" * 64)))
         parse_control(encoded(control("disconnect", lease="b" * 64)))
+        parse_control(encoded(control("retire")))
         for invalid in [
             control("status"),
             control("disconnect", lease="old"),
+            control("retire", lease="b" * 64),
+            control("retire", package_id="another_package"),
             {**message, "request_id": request_id.upper()},
             {**message, "descriptor_digest": "A" * 64},
             {**message, "permissions": []},

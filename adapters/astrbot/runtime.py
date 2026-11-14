@@ -709,6 +709,7 @@ class AstrBotRuntime:
                 or source is self._module_admin_source
             )
             and not self._closing
+            and self._installation_current()
             and getattr(core, "management_available", False) is True
         )
 
@@ -1191,7 +1192,7 @@ class AstrBotRuntime:
             return (
                 alive
                 and generation == self._generation
-                and self._ready
+                and self.ready
                 and self.management_current(core, source)
                 and dashboard_fence.current(raw)
             )
@@ -1371,11 +1372,13 @@ class AstrBotRuntime:
                         AdminOperation.UPDATE_CONFIG,
                     },
                     resources={target: fields},
-                    live=lambda actual: actual is raw
-                    and alive
-                    and generation == self._generation
-                    and self._ready
-                    and self.management_current(core, field_source),
+                    live=lambda actual: (
+                        actual is raw
+                        and alive
+                        and generation == self._generation
+                        and self.ready
+                        and self.management_current(core, field_source)
+                    ),
                 )
                 try:
                     for granted_operation in (
@@ -1721,7 +1724,12 @@ class AstrBotRuntime:
 
     @property
     def ready(self) -> bool:
-        return self._ready
+        return self._ready and self._installation_current()
+
+    def _installation_current(self):
+        generation = getattr(self, "_hot_generation", None)
+        guard = getattr(generation, "installation_guard", None)
+        return guard is None or guard()
 
     def public_web_status(self) -> dict:
         return {
@@ -1737,7 +1745,7 @@ class AstrBotRuntime:
             core is not None
             and core is self._core
             and generation == self._generation
-            and self._ready
+            and self.ready
             and not self._closing
         )
 
@@ -1837,7 +1845,7 @@ class AstrBotRuntime:
 
     def public_module_catalog(self) -> dict:
         """Expose Core's metadata directory without reading module configuration."""
-        generation, core, was_ready = self._generation, self._core, self._ready
+        generation, core, was_ready = self._generation, self._core, self.ready
         if self._closing:
             raise RuntimeError("page state generation changed")
         if core is None or self._config_error is not None and not was_ready:
@@ -1854,7 +1862,7 @@ class AstrBotRuntime:
             self._closing
             or generation != self._generation
             or core is not self._core
-            or was_ready != self._ready
+            or was_ready != self.ready
         ):
             raise RuntimeError("page state generation changed")
         if not was_ready:
@@ -2051,7 +2059,10 @@ class AstrBotRuntime:
                 storage_guard = layout.open_guard(isolate_credentials=True)
                 storage_guard.__enter__()
                 self._private_storage_guard = storage_guard
-                database = SQLiteDatabase(layout.database_path)
+                database = SQLiteDatabase(
+                    layout.database_path,
+                    migration_commit_guard=self._migration_commit_guard(),
+                )
                 self._installation_trust = ExternalInstallationTrust(
                     database,
                     self._context,
@@ -2321,10 +2332,12 @@ class AstrBotRuntime:
                     source_policies=self._external_source_policies,
                     installation_trust=self._installation_trust,
                     generation=generation,
-                    current=lambda: self._ready
-                    and not self._closing
-                    and self._core is core
-                    and self._generation == generation,
+                    current=lambda: (
+                        self.ready
+                        and not self._closing
+                        and self._core is core
+                        and self._generation == generation
+                    ),
                     changed=self._external_packages_changed,
                     registration_timeout=core._handler_timeout,
                 )
@@ -2463,6 +2476,19 @@ class AstrBotRuntime:
                     # observation, never infer quiet from waiter completion.
                     await asyncio.sleep(0.1)
 
+    def _migration_commit_guard(self):
+        generation = getattr(self, "_hot_generation", None)
+        if generation is None or generation.installation_guard is None:
+            return None
+
+        @contextmanager
+        def guard():
+            with generation.kernel.lock:
+                generation.require_installation()
+                yield
+
+        return guard
+
     async def activate_core_owner(self, core):
         generation = getattr(self, "_hot_generation", None)
         if generation is None:
@@ -2480,13 +2506,19 @@ class AstrBotRuntime:
         transition_id = str(uuid4())
         self._hot_transition_id = transition_id
         self._hot_gate = RuntimeEffectGate(
-            generation.kernel, generation.scope, token, epoch, initially_open=False
+            generation.kernel,
+            generation.scope,
+            token,
+            epoch,
+            installation_guard=generation.installation_guard,
+            initially_open=False,
         )
 
         def require_owner():
             record = generation.kernel._record(generation.scope)
             if (
                 self._closing
+                or not self._installation_current()
                 or record.fenced
                 or record.token != token
                 or record.epoch != epoch
@@ -2574,10 +2606,12 @@ class AstrBotRuntime:
         token = generation.receipt["owner_token"]
         # An exact-token control fence cannot affect the next Core owner.
         await database.executor.run_internal_transaction(
-            lambda unit: unit.connection.execute(
-                "UPDATE runtime_owners SET accepting=0,revision=revision+1 WHERE scope='core' AND token=?",
-                (token,),
-            ).rowcount
+            lambda unit: (
+                unit.connection.execute(
+                    "UPDATE runtime_owners SET accepting=0,revision=revision+1 WHERE scope='core' AND token=?",
+                    (token,),
+                ).rowcount
+            )
         )
 
     async def _close_owned_runtime(self) -> None:
@@ -3056,7 +3090,7 @@ class AstrBotRuntime:
     def _tool_owner_current(self, handle):
         publisher = self._tool_publisher
         return (
-            self._ready
+            self.ready
             and not self._closing
             and self._core is not None
             and publisher is not None
@@ -3066,7 +3100,7 @@ class AstrBotRuntime:
 
     def _command_current(self, ingress):
         return (
-            self._ready
+            self.ready
             and not self._closing
             and self._core is not None
             and self._core.accepting

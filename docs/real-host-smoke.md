@@ -24,6 +24,20 @@ Outputs: `zip-smoke.json` (ZIP hash, host commit, results and sanitized blocked 
 - ZIP dependencies are checked before startup; subprocess creation is denied during the smoke to prevent dependency-recovery commands from escaping the Python guards
 - Before importing the host, DNS lookup and socket connect/connect_ex/sendto operations are denied; aiohttp requests are rejected before transport/DNS. ASGI requests are in-process and use no network
 - Only two unrelated host background jobs are replaced with recorded no-op coroutines: official T2I endpoint discovery and LLM metadata refresh
-- No plugin installer, bootstrap, authentication, view-serving, runtime, rendering or business response is mocked. Providers/platforms are empty. Dashboard identity and signing key are synthetic disposable test values
+- No plugin installer, bootstrap, authentication, view-serving, runtime, rendering or business response is mocked. Providers/platforms are empty. Dashboard identity is a synthetic disposable test value; ordinary packages require no signing key
 - Fixed public calendar synchronization may attempt startup requests; optional Host subprocess probes may also be denied. These are rejected, not fabricated; the report separates rejected attempts from allowed network connections (zero). No live FFLogs, calendar success, provider, IM delivery, browser rendering, or production-security claim is made
 - Python-level test guards are not an OS network sandbox. Use an externally network-disabled container when adversarial code isolation is needed. The supplied official host and reviewed plugin are the trusted test subjects
+
+## Native Core and DLC updates
+
+The paired smoke uses the official plugin manager and Dashboard upload/update routes, then independently checks Core Ready, DLC connection and old-generation fences:
+
+```sh
+python scripts/smoke_hot_update_host.py \
+  --host-source /absolute/path/to/AstrBot \
+  --plugin-zip /absolute/path/to/core.zip \
+  --dlc-zip /absolute/path/to/dlc.zip \
+  --work-root /absolute/path/to/new-disposable-root
+```
+
+Use the default ordinary packages from both builders. No publisher enrollment or package approval is performed. The fixture derives local update packages and runs consecutive updates in one Host process; it does not upload them to a real user instance or send QQ messages. Fixture configuration/data and a second extension are checked across updates. Reports retain exact input hashes, installed/running versions and lifecycle assertions. This test cannot establish recovery of an actual user's backup or delivery to a real platform.

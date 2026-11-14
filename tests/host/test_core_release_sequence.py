@@ -7,11 +7,13 @@ import base64
 import hashlib
 import importlib
 import json
+import sqlite3
 import subprocess
 import sys
 import tempfile
 import types
 import unittest
+from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -62,7 +64,14 @@ class CoreReleaseSequenceTest(unittest.IsolatedAsyncioTestCase):
         return cache
 
     def install(
-        self, sequence, tag="first", *, key=None, channel="preview", migration=b""
+        self,
+        sequence,
+        tag="first",
+        *,
+        key=None,
+        channel="preview",
+        migration=b"",
+        ordinary=False,
     ):
         self.serial += 1
         root = self.root / f"install-{self.serial}"
@@ -94,6 +103,8 @@ class CoreReleaseSequenceTest(unittest.IsolatedAsyncioTestCase):
         }
         if migration:
             files["infrastructure/sqlite/migrations/0010_example.sql"] = migration
+        if ordinary:
+            files.pop("release-key.json")
         inventory = [
             {"path": p, "size": len(b), "sha256": sha(b)} for p, b in files.items()
         ]
@@ -110,6 +121,9 @@ class CoreReleaseSequenceTest(unittest.IsolatedAsyncioTestCase):
             "files": inventory,
             "payload_digest": payload_digest(inventory),
         }
+        if ordinary:
+            doc["schema"] = "ygl.release/2"
+            del doc["channel"], doc["release_sequence"]
         raw = json.dumps(doc, sort_keys=True, separators=(",", ":")).encode()
         signature = json.dumps(
             {
@@ -118,11 +132,10 @@ class CoreReleaseSequenceTest(unittest.IsolatedAsyncioTestCase):
                 "signature_base64": base64.b64encode(private.sign(raw)).decode(),
             }
         ).encode()
-        for name, content in {
-            **files,
-            "release.json": raw,
-            "release.sig.json": signature,
-        }.items():
+        files["release.json"] = raw
+        if not ordinary:
+            files["release.sig.json"] = signature
+        for name, content in files.items():
             path = root / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(content)
@@ -146,6 +159,207 @@ class CoreReleaseSequenceTest(unittest.IsolatedAsyncioTestCase):
         if publish:
             cache.publish("ygl_core", cache.check_core_admission(bundle))
         return generation
+
+    async def test_ordinary_refreshes_same_version_preserving_legacy_pin_history(self):
+        _, legacy_key = await self.capture(self.install(2))
+        self.cache.publish("ygl_core", legacy_key)
+        legacy_heads = self.cache.release_heads
+        fresh, fresh_key = await self.capture(self.install(2, ordinary=True))
+        plan = self.cache.core_recovery_plan(fresh)
+        with self.assertRaisesRegex(RuntimeBundleError, "core_admission_missing"):
+            await self.cache.load(fresh_key, kind="core", validate=validate)
+        old, _, old_key = await self.cache.load_core_fallback(
+            legacy_key, recovery=plan, validate=validate
+        )
+        self.bundles.append(old)
+        self.assertEqual(old_key, legacy_key)
+        self.cache.publish("ygl_core", fresh_key)
+        _, replacement_key = await self.capture(
+            self.install(2, "new content", ordinary=True)
+        )
+        self.assertNotEqual(fresh_key, replacement_key)
+        self.cache.publish("ygl_core", replacement_key)
+        reopened = self.new_cache()
+        self.assertEqual(reopened.current["ygl_core"], replacement_key)
+        self.assertEqual(reopened.last_good["ygl_core"], fresh_key)
+        self.assertEqual(reopened.release_heads, legacy_heads)
+
+    async def test_ordinary_shell_rejects_version_mismatch_before_generation(self):
+        instance = self.shell()
+        instance._plugin_root = self.install(2, ordinary=True)
+        metadata = SimpleNamespace(
+            activated=True,
+            author="yomihime",
+            name="astrbot_plugin_yomihime_game_link",
+            module=SimpleNamespace(__file__=str(instance._plugin_root / "main.py")),
+            version="0.2.3",
+            star_cls=instance,
+            root_dir_name=instance._plugin_root.name,
+        )
+        instance._host_context = SimpleNamespace(get_all_stars=lambda: [metadata])
+        with patch("ygl_test_subject.main.CoreGeneration") as generation:
+            with self.assertRaisesRegex(
+                RuntimeBundleError, "core_installation_changed"
+            ):
+                await instance._start_generation()
+            generation.assert_not_called()
+        self.assertEqual(instance._state, "failed")
+
+    async def ordinary_runtime(self, *, lose_during_migration=False):
+        from tests.extensions.test_private_runtime_bundle import _release, _write
+        from tests.host.test_external_packages import _Font, _Transport
+        from tests.host.test_private_core_integration import runtime_files
+
+        shell = self.shell()
+        installation = self.install(2, ordinary=True)
+        shell._plugin_root = installation
+        files = runtime_files()
+        for name in ("main.py", "metadata.yaml", "requirements.txt", "ygl-plugin.json"):
+            files[name] = (installation / name).read_bytes()
+        _write(installation, files)
+        release = _release(files, package_id="ygl_core")
+        release.update(
+            schema="ygl.release/2",
+            release="0.2.2",
+            plugin_id={
+                "author": "yomihime",
+                "name": "astrbot_plugin_yomihime_game_link",
+            },
+        )
+        del release["channel"], release["release_sequence"]
+        (installation / "release.json").write_bytes(json.dumps(release).encode())
+        metadata = SimpleNamespace(
+            activated=True,
+            **release["plugin_id"],
+            module=SimpleNamespace(__file__=str(installation / "main.py")),
+            version=release["release"],
+            star_cls=shell,
+            root_dir_name=installation.name,
+        )
+        registry = [metadata]
+        shell._host_context = SimpleNamespace(get_all_stars=lambda: registry)
+        original_import = importlib.import_module
+
+        class Pages:
+            def __init__(self, *_):
+                pass
+
+            def register(self):
+                pass
+
+            def close(self):
+                pass
+
+        def import_test_runtime(name):
+            if name.startswith("_ygl_runtime_"):
+                if name.endswith(".adapters.astrbot.runtime"):
+                    runtime_module = original_import(name)
+                    actual = runtime_module.AstrBotRuntime
+                    storage = original_import(
+                        name.split(".")[0] + ".infrastructure.private_storage"
+                    )
+                    runtime_module.resolve_private_storage = lambda path: (
+                        storage.PrivateStorageLayout(
+                            path, path, None, "legacy_review_required"
+                        )
+                    )
+                    if lose_during_migration:
+                        db_module = original_import(
+                            name.split(".")[0] + ".infrastructure.sqlite.database"
+                        )
+                        real_apply = db_module.MigrationRunner.apply
+
+                        def apply(runner, *, commit_guard=None):
+                            def drop_registration():
+                                metadata.activated = False
+                                registry.clear()
+                                return commit_guard()
+
+                            return real_apply(runner, commit_guard=drop_registration)
+
+                        db_module.MigrationRunner.apply = apply
+
+                    def runtime(*args, **kwargs):
+                        return actual(
+                            *args,
+                            **kwargs,
+                            font_manager_factory=_Font,
+                            bundled_selection=None,
+                            plain_factory=lambda text: text,
+                            chain_factory=list,
+                            http_transport_factory=_Transport,
+                        )
+
+                    return SimpleNamespace(AstrBotRuntime=runtime)
+                if name.endswith(
+                    (".adapters.astrbot.public_pages", ".adapters.astrbot.admin_pages")
+                ):
+                    return SimpleNamespace(PublicPages=Pages, AdminPages=Pages)
+            return original_import(name)
+
+        with patch(
+            "ygl_test_subject.main.importlib.import_module",
+            side_effect=import_test_runtime,
+        ):
+            try:
+                await shell._start_generation()
+            finally:
+                if shell._generation is not None:
+                    self.generations.append(shell._generation)
+        return shell, metadata, registry
+
+    async def test_ordinary_registry_loss_at_migration_commit_rolls_back(self):
+        with self.assertRaisesRegex(RuntimeBundleError, "core_installation_changed"):
+            await self.ordinary_runtime(lose_during_migration=True)
+        databases = list(self.root.rglob("runtime.sqlite3"))
+        self.assertEqual(len(databases), 1)
+        with closing(sqlite3.connect(databases[0])) as conn:
+            self.assertIsNone(
+                conn.execute(
+                    "SELECT name FROM sqlite_master WHERE name='schema_migrations'"
+                ).fetchone()
+            )
+
+    async def test_ordinary_registry_loss_fences_ready_endpoint_and_open_sql_commit(
+        self,
+    ):
+        shell, metadata, registry = await self.ordinary_runtime()
+        runtime = shell._runtime
+        endpoint = shell.get_ygl_endpoint_v1()
+        self.assertTrue(runtime.ready)
+        self.assertIsNotNone(endpoint)
+        executor = runtime._core.database.executor
+        db_path = runtime._core.database.path
+
+        def lose_before_commit(unit):
+            unit.execute(
+                "INSERT INTO config_state VALUES ('lost-test', 'ordinary/test', 1)"
+            )
+            metadata.activated = False
+            registry.clear()
+
+        with self.assertRaisesRegex(RuntimeError, "stale_lease"):
+            await executor.run_transaction(lose_before_commit)
+        self.assertFalse(runtime.ready)
+        self.assertIsNone(shell.get_ygl_endpoint_v1())
+        self.assertEqual(
+            (
+                await endpoint.request(
+                    None, {"protocol": "ygl.control/1", "op": "describe"}
+                )
+            )["error"]["code"],
+            "core_unavailable",
+        )
+        metadata.activated = True
+        registry.append(metadata)
+        self.assertFalse(runtime.ready)
+        self.assertEqual((await shell._generation.terminate())["state"], "quiet")
+        with closing(sqlite3.connect(db_path)) as conn:
+            self.assertIsNone(
+                conn.execute(
+                    "SELECT * FROM config_state WHERE principal_id='lost-test'"
+                ).fetchone()
+            )
 
     async def test_same_stream_collision_downgrade_idempotence_and_forward(self):
         installation = self.install(2)

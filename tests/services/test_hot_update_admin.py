@@ -63,6 +63,7 @@ class HotUpdateAdminTests(unittest.IsolatedAsyncioTestCase):
         self.metadata = SimpleNamespace(
             **PLUGIN,
             activated=True,
+            version="1.2.3",
             star_cls=object(),
             root_dir_name="plugin",
             module=SimpleNamespace(__file__=str(self.root / "main.py")),
@@ -111,7 +112,9 @@ class HotUpdateAdminTests(unittest.IsolatedAsyncioTestCase):
             self.manager, self.auth, management_source=self.source
         )
 
-    def write_artifact(self, *, signed=False, changed=False, invalid_signature=False):
+    def write_artifact(
+        self, *, signed=False, changed=False, invalid_signature=False, ordinary=False
+    ):
         descriptor = {
             "schema": "ygl.plugin/1",
             "role": "dlc",
@@ -121,6 +124,8 @@ class HotUpdateAdminTests(unittest.IsolatedAsyncioTestCase):
         }
         envelope = envelope_fixture()
         envelope.update(package_id=PACKAGE)
+        if ordinary:
+            envelope["required_features"].append("control.retire/1")
         if changed:
             envelope["modules"][0]["capabilities"][0]["input_schema"]["properties"][
                 "value"
@@ -155,6 +160,9 @@ class HotUpdateAdminTests(unittest.IsolatedAsyncioTestCase):
             "payload_digest": payload_digest(inventory),
             "files": inventory,
         }
+        if ordinary:
+            release["schema"] = "ygl.release/2"
+            del release["channel"], release["release_sequence"]
         raw = json.dumps(release).encode()
         (self.root / "release.json").write_bytes(raw)
         signature = self.root / "release.sig.json"
@@ -203,6 +211,25 @@ class HotUpdateAdminTests(unittest.IsolatedAsyncioTestCase):
         result = await self.call("inspect", package_id=PACKAGE)
         self.assertTrue(result["ok"], result)
         return result
+
+    async def test_host_install_is_visible_and_does_not_offer_legacy_approval(self):
+        expected_digest = self.write_artifact(ordinary=True)
+        plan = await self.inspect()
+        self.assertEqual(plan["signature_state"], "host_install")
+        self.assertEqual(plan["installed_digest"], expected_digest)
+        self.assertEqual(plan["grant_revision"], 0)
+        self.assertEqual(plan["artifact_revision"], 0)
+        self.assertIsNone(plan["reason_code"])
+        for action in ("package-approve", "artifact-approve"):
+            result = await self.call(
+                action, package_id=PACKAGE, plan_id=plan["plan_id"], expected_revision=0
+            )
+            self.assertEqual(result["error"]["code"], "host_install_managed")
+        self.assertIsNone(await self.repo.grant(PACKAGE))
+        self.assertIsNone(await self.repo.approval(expected_digest))
+        self.metadata.version = "2.0.0"
+        result = await self.call("inspect", package_id=PACKAGE)
+        self.assertEqual(result["error"]["code"], "artifact_tampered")
 
     async def test_inert_inspection_status_has_no_secrets_and_both_versions(self):
         plan = await self.inspect()

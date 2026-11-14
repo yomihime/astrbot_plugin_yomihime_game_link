@@ -41,6 +41,27 @@ test('signed packages require explicit publisher key/channels then fresh inspect
  await click(f,'Revoke publisher');assert.deepEqual(f.calls.at(-1).body,{key_id:'f'.repeat(64),expected_revision:3,core_epoch:7});
  }finally{f.close();}});
 test('bridge exception details are never rendered',async()=>{const f=fixture();try{const work=f.view.refresh();f.calls.at(-1).reject(Error('/private/owner-token=secret-value'));await work;await flush();assert.doesNotMatch(f.container.textContent,/private|owner-token|secret-value/);assert.match(f.container.textContent,/hot_update_failed/);}finally{f.close();}});
+test('ordinary Host-installed package needs no approval and keeps inspection and retry available',async()=>{const f=fixture();try{
+ const ordinary={...plan(),state:'queued',signature_state:'host_install'};
+ const waiting={...status(),core:{...status().core,phase:'parked',ready:false},packages:[ordinary]};
+ let work=f.view.refresh();f.calls.at(-1).resolve(waiting);await work;
+ work=f.view.inspect('arbitrary/package');f.calls.at(-1).resolve(ordinary);await work;await flush();
+ assert.match(f.container.textContent,/AstrBot manages installation and activation. No additional approval is needed/);
+ assert.match(f.container.textContent,/Not started/);
+ const inspection=f.container.querySelector('[aria-label="Extension package inspection"]');
+ assert.ok(inspection);
+ assert.match(inspection.textContent,/Waiting to load/);
+ assert.match(inspection.textContent,/Permissions declared by the package/);
+ assert.match(inspection.querySelector('pre').textContent,/module\/config\/key/);
+ assert.doesNotMatch(inspection.textContent,/Permission changes|"added"/);
+ const labels=[...f.container.querySelectorAll('button')].map(b=>b.textContent);
+ for(const label of ['Approve package permissions','Approve exact artifact','Revoke package approval','Revoke artifact approval'])assert.equal(labels.includes(label),false,label);
+ assert.equal(f.container.querySelector('.legacy-publisher-management').open,false);
+ assert.doesNotMatch(f.container.querySelector('[data-package-id]').textContent,/Package approval revision|Artifact approval revision/);
+ await click(f,'Retry activation');assert.match(f.calls.at(-1).endpoint,/retry$/);assert.deepEqual(f.calls.at(-1).body,{package_id:'arbitrary/package',core_epoch:7});
+ f.calls.at(-1).resolve({ok:true,core_epoch:7});await flush();f.calls.at(-1).resolve({...status(),packages:[ordinary]});await flush();f.calls.at(-1).resolve(ordinary);await flush();
+ assert.equal(f.calls.some(c=>/approve|enroll|revoke/.test(c.endpoint)),false);
+ }finally{f.close();}});
 test('confirmed mutation followed by bootstrap failure preserves failure and never claims refreshed status',async()=>{const f=fixture();try{
  let work=f.view.refresh();f.calls.at(-1).resolve(status());await work;
  work=f.view.mutate('retry',{package_id:'arbitrary/package'},{});await flush();f.calls.at(-1).resolve({ok:true,core_epoch:7,state:'active'});await flush();assert.match(f.calls.at(-1).endpoint,/bootstrap$/);const count=f.calls.length;

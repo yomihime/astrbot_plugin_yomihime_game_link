@@ -247,15 +247,15 @@ jobs:
           tests.packaging.test_release_build
           tests.packaging.test_runtime_dependencies
 
-      - name: Build complete test-signed Core candidate
+      - name: Build ordinary AstrBot Core ZIP
         env:
           RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || inputs.tag }}
         shell: bash
         run: |
           if [[ -z "$RELEASE_TAG" ]]; then
-            python scripts/build_release.py --test-signing
+            python scripts/build_release.py
           else
-            python scripts/build_release.py --test-signing --tag "$RELEASE_TAG"
+            python scripts/build_release.py --tag "$RELEASE_TAG"
           fi
 
       - name: Upload build artifacts

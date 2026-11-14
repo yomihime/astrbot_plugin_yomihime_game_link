@@ -56,7 +56,9 @@ from .version import COMPATIBLE_CONTRACT_VERSIONS as COMPATIBLE_CONTRACT_VERSION
 from .version import CONTRACT_VERSION as CONTRACT_VERSION
 
 _IDENTIFIER = re.compile("[a-z][a-z0-9_]*(?:[.-][a-z0-9_]+)*\\Z")
-_VERSION = re.compile("[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?\\Z")
+_VERSION = re.compile(
+    r"[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?\Z"
+)
 EXTENSION_MANIFEST_FILENAME = "yomihime.manifest.json"
 EXTENSION_MANIFEST_SCHEMA_VERSION = 1
 EXTENSION_MANIFEST_MAX_BYTES = 262144

@@ -227,16 +227,17 @@ class HelpCatalogTests(unittest.TestCase):
         )
         self.assertEqual(handler.calls, 0)
 
-    def test_hp01_zero_modules_has_explicit_empty_state_and_help_prompt(self) -> None:
+    def test_hp01_zero_modules_explains_when_help_entries_appear(self) -> None:
         document = HelpCatalog(active_query=lambda module_id: True).total(
             Registry().snapshot()
         )
 
         self.assertIsInstance(document.ordered_blocks[0], TextBlock)
         text = document.ordered_blocks[0].text
-        self.assertIn("没有活跃可用模块", text)
-        self.assertIn("/ygl help", text)
+        self.assertIn("没有可用模块", text)
+        self.assertIn("模块启用并就绪后", text)
         self.assertIsInstance(document.ordered_blocks[1], CommandsBlock)
+        self.assertEqual(document.ordered_blocks[1].commands, ())
 
     def test_hp02_total_help_filters_natural_language_commands(self) -> None:
         module, handlers, _ = _module("first", "zeta")
@@ -262,7 +263,7 @@ class HelpCatalogTests(unittest.TestCase):
         intro = document.ordered_blocks[0]
         commands = document.ordered_blocks[1]
         self.assertIsInstance(intro, TextBlock)
-        self.assertIn("命令后加 help", intro.text)
+        self.assertIn("在命令末尾加 help", intro.text)
         self.assertIsInstance(commands, CommandsBlock)
         self.assertIn("/ygl zeta 查询", commands.commands[0])
         self.assertIn("/ygl zeta 绑定", commands.commands[1])
@@ -282,7 +283,7 @@ class HelpCatalogTests(unittest.TestCase):
         catalog = HelpCatalog(active_query=lambda module_id: True)
 
         unknown = catalog.module(registry.snapshot(), "missing")
-        self.assertIn("未找到模块路由", unknown.ordered_blocks[0].text)
+        self.assertIn("发送 /ygl help 查看当前可用模块", unknown.ordered_blocks[0].text)
         self.assertEqual(("/ygl help",), unknown.ordered_blocks[1].commands)
 
         alpha = catalog.module(registry.snapshot(), "alpha")
@@ -314,9 +315,9 @@ class HelpCatalogTests(unittest.TestCase):
         old_document = catalog.module(disabled, "alpha")
         new_document = catalog.module(registry.snapshot(), "alpha")
 
-        self.assertIn("未找到模块路由", old_document.ordered_blocks[0].text)
-        self.assertIn("命令后加 help", new_document.ordered_blocks[0].text)
-        self.assertIn("未找到模块路由", document.ordered_blocks[0].text)
+        self.assertIn("当前不可用", old_document.ordered_blocks[0].text)
+        self.assertIn("在命令末尾加 help", new_document.ordered_blocks[0].text)
+        self.assertIn("当前不可用", document.ordered_blocks[0].text)
         self.assertEqual(handler.calls, 0)
 
     def test_hp06_owner_floor_is_described_as_private_direct_use(self) -> None:

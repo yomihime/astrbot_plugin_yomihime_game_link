@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import re
 import sqlite3
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -159,7 +160,7 @@ class MigrationRunner:
     def registered(self) -> tuple[Migration, ...]:
         return tuple(self._migrations)
 
-    def apply(self) -> int:
+    def apply(self, *, commit_guard=None) -> int:
         if not self._migrations:
             raise MigrationDiscoveryError("no migrations registered")
         if self._migrations[0].version != 0:
@@ -219,7 +220,8 @@ class MigrationRunner:
                         datetime.now(UTC).isoformat(),
                     ),
                 )
-            connection.commit()
+            with commit_guard() if commit_guard is not None else nullcontext():
+                connection.commit()
         except Exception:
             if connection.in_transaction:
                 connection.rollback()

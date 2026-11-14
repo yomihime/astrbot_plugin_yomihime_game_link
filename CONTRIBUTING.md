@@ -57,12 +57,12 @@ npm run typecheck --prefix pages/frontend
 npm run build --prefix pages/frontend
 python scripts/prepare_test_font.py
 python scripts/verify_frontend_build.py
-python scripts/build_release.py --test-signing
+python scripts/build_release.py
 ```
 
-生成 `dist/astrbot_plugin_yomihime_game_link-v0.2.0.zip` 与 `dist/SHA256SUMS`。Core ZIP 必须包含原始清单 Ed25519 签名、被清单覆盖的公钥、私有 SDK 和完整静态页面；不得使用无签名 Core 绕过路径。`--test-signing` 仅为 preview 在进程内产生临时测试密钥。正式 `--signing-key` 接受外部受保护 Ed25519 PEM；生产密钥保管和登记是未来发布配置，本轮不创建或发布生产密钥。
+生成 `dist/astrbot_plugin_yomihime_game_link-v0.2.8.zip` 与 `dist/SHA256SUMS`。默认普通 ZIP 包含闭合全文件清单、私有 SDK 和完整静态页面，无需配置签名身份或逐包批准。显式 `--signing-key` / `--test-signing` 保留旧签名格式兼容，普通构建不需要这些参数。
 
-`--tag v0.2.0` 仅验证 metadata 版本，不创建 tag。Core 与 DLC 独立构建和发布；每 ZIP 严格小于 16,000,000 字节。源码归档不含生成签名和闭合清单，不可安装。市场 download_url 必须指向不可变完整 ZIP asset；无市场条目通过 AstrBot 原生 ZIP 上传。详见[完整发布包](docs/release-packaging.md)。
+`--tag v0.2.8` 仅验证 metadata 版本，不创建 tag。Core 与 DLC 独立构建和发布；每 ZIP 严格小于 16,000,000 字节。源码归档不含生成的静态资产和闭合清单，不可安装。市场 download_url 必须指向不可变完整 ZIP asset；无市场条目通过 AstrBot 原生 ZIP 上传。详见[完整发布包](docs/release-packaging.md)。
 
 ### SDK 发行版本或 ABI 变化
 

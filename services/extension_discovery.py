@@ -23,10 +23,26 @@ class HostInstallation:
     root: Path
     descriptor: dict
     descriptor_digest: str
+    author: str | None
+    name: str | None
+    version: str | None
 
     @property
     def package_id(self):
         return self.descriptor["package_id"]
+
+    @property
+    def plugin_id(self):
+        return {"author": self.author, "name": self.name}
+
+    def metadata_current(self):
+        return (
+            self.metadata.activated is True
+            and self.metadata.star_cls is self.instance
+            and getattr(self.metadata, "author", None) == self.author
+            and getattr(self.metadata, "name", None) == self.name
+            and getattr(self.metadata, "version", None) == self.version
+        )
 
 
 class ExtensionDiscovery:
@@ -41,7 +57,11 @@ class ExtensionDiscovery:
         # Retain the object: id reuse must never detach a successor.
         self._tombstones[id(instance)] = instance
 
-    def scan(self):
+    def is_tombstoned(self, instance):
+        return self._tombstones.get(id(instance)) is instance
+
+    def prune_tombstones(self):
+        """Called by event-loop reconciliation, the other tombstone writer."""
         metadata_snapshot = tuple(self.context.get_all_stars())
         present = {
             id(getattr(meta, "star_cls", None)): getattr(meta, "star_cls", None)
@@ -50,18 +70,22 @@ class ExtensionDiscovery:
         self._tombstones = {
             key: obj for key, obj in self._tombstones.items() if present.get(key) is obj
         }
+
+    def scan(self):
+        # SQL workers also scan. Their snapshots must not prune retirements.
+        metadata_snapshot = tuple(self.context.get_all_stars())
         found = []
-        self.rejections = {}
+        rejections = {}
         for metadata in metadata_snapshot:
             instance = getattr(metadata, "star_cls", None)
             if getattr(metadata, "activated", None) is not True or instance is None:
                 continue
-            if self._tombstones.get(id(instance)) is instance:
+            if self.is_tombstoned(instance):
                 continue
             try:
                 candidate = self._read(metadata)
             except DiscoveryError as exc:
-                self.rejections[getattr(metadata, "name", "")] = exc.code
+                rejections[getattr(metadata, "name", "")] = exc.code
                 continue
             if candidate is not None:
                 found.append(candidate)
@@ -70,7 +94,8 @@ class ExtensionDiscovery:
             counts[item.package_id] = counts.get(item.package_id, 0) + 1
         for item in found:
             if counts[item.package_id] != 1:
-                self.rejections[item.package_id] = "owner_conflict"
+                rejections[item.package_id] = "owner_conflict"
+        self.rejections = rejections
         return tuple(item for item in found if counts[item.package_id] == 1)
 
     @staticmethod
@@ -102,11 +127,14 @@ class ExtensionDiscovery:
             root,
             descriptor,
             hashlib.sha256(raw).hexdigest(),
+            getattr(metadata, "author", None),
+            getattr(metadata, "name", None),
+            getattr(metadata, "version", None),
         )
 
     def current(self, installation):
         # Rescan revalidates exact metadata, instance, root, descriptor and conflicts.
-        return any(
+        return installation.metadata_current() and any(
             item.metadata is installation.metadata
             and item.instance is installation.instance
             and item.root == installation.root

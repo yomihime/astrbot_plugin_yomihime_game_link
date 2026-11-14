@@ -15,6 +15,7 @@ from unittest.mock import patch
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+from ygl_test_subject.infrastructure.sqlite.migrations import discover_migrations
 
 from tests.extensions.test_private_runtime_bundle import _release, _write
 from tests.host.test_external_packages import _Font, _Transport
@@ -168,7 +169,10 @@ class CoreShellFallbackTest(unittest.IsolatedAsyncioTestCase):
                 1,
             )
             if changed_migration:
-                files["infrastructure/sqlite/migrations/0240_fallback_probe.sql"] = (
+                migration_dir = "infrastructure/sqlite/migrations"
+                latest = discover_migrations(installation / migration_dir)[-1]
+                probe_file = f"{latest.version + 1:04d}_fallback_probe.sql"
+                files[f"{migration_dir}/{probe_file}"] = (
                     b"CREATE TABLE fallback_probe(id INTEGER);"
                 )
             write("1.0.1")

@@ -105,7 +105,7 @@ class AstrBotCommandBridge:
                 except RegistryError:
                     module = None
                 if module is not None and not self._registry.is_active(module):
-                    return "模块当前不可用。请使用 /ygl help 查看活跃模块。"
+                    return "模块当前不可用。发送 /ygl help 查看当前可用模块。"
                 matches = []
                 if module is not None:
                     for command in module.manifest.commands:
@@ -192,9 +192,9 @@ class AstrBotCommandBridge:
         try:
             module = snapshot.module_for_route(tokens[0])
         except RegistryError:
-            return "未找到模块路由。请使用 /ygl help 查看活跃模块。"
+            return "找不到该模块。发送 /ygl help 查看当前可用模块。"
         if not self._registry.is_active(module):
-            return "模块当前不可用。请使用 /ygl help 查看活跃模块。"
+            return "模块当前不可用。发送 /ygl help 查看当前可用模块。"
         tail = tokens[1:]
         if not tail or tail == ["help"]:
             return self._render(

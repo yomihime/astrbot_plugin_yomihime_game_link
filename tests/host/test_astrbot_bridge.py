@@ -138,7 +138,7 @@ class AstrBotCommandBridgeTests(unittest.TestCase):
         self.registry.is_active = lambda module: False
         self.bridge = AstrBotCommandBridge(self.registry)
         empty = self.bridge.parse(event)
-        self.assertIn("没有活跃可用模块", empty)
+        self.assertIn("没有可用模块", empty)
         self.assertNotIn("开始吧", empty)
 
     def test_event_needs_neither_hashability_nor_weakrefs(self):
@@ -204,7 +204,7 @@ class AstrBotCommandBridgeTests(unittest.TestCase):
         root = self.bridge.handle(_FakeEvent("/ygl"))
         explicit = self.bridge.handle(_FakeEvent("  /ygl    help  "))
 
-        self.assertIn("当前没有活跃可用模块", root)
+        self.assertIn("目前没有可用模块", root)
         self.assertTrue(root.startswith("如月怜的游戏连结\n"))
         self.assertNotIn("开始吧", root)
         self.assertIn("暂无可用模块命令", root)
