@@ -22,7 +22,7 @@ from ..extensions.file_identity import (
     handle_identity,
     stable_identity,
 )
-from ..extensions.hot_update_protocol import parse_release
+from ..extensions.hot_update_protocol import HOST_RELEASE_SCHEMA, parse_release
 from ..extensions.runtime_bundle import RuntimeBundleError, RuntimeBundleStore
 from ..infrastructure.runtime_owner_lock import RuntimeOwnerLock
 from .coordinator import get_coordinator
@@ -305,6 +305,15 @@ class ArtifactCache:
         if not set(last_good) <= set(current):
             raise ValueError("orphan previous pin")
 
+    @_locked
+    def check_package_identity(self, package_id, plugin_id):
+        self._assert_pins_unchanged()
+        key = self.current.get(package_id)
+        if key is not None:
+            raw = _read(self._path(key) / "release.json", _RELEASE_LIMIT)
+            if self._key(raw) != key or parse_release(raw)["plugin_id"] != plugin_id:
+                raise RuntimeBundleError("artifact_tampered")
+
     def _load_pins(self):
         path = self.root / "pins.json"
         if not path.exists() and not path.is_symlink():
@@ -354,7 +363,7 @@ class ArtifactCache:
             if not legacy and entry.name not in known_core:
                 continue
             try:
-                raw, _ = self._metadata(entry)
+                raw, signature = self._metadata(entry)
                 doc = parse_release(raw)
             except (OSError, ValueError):
                 if entry.name in known_core:
@@ -363,6 +372,12 @@ class ArtifactCache:
                 # it cannot supply any Core release-head history.
                 continue
             if doc["package_id"] != "ygl_core":
+                continue
+            if doc["schema"] == HOST_RELEASE_SCHEMA:
+                if legacy or entry.name not in core_pins:
+                    raise RuntimeBundleError("cache_core_head_migration_required")
+                if signature is not None:
+                    raise ValueError("host Core release has a signature sidecar")
                 continue
             key_bytes = _read(entry / "release-key.json", 16384)
             key_row = next(
@@ -424,13 +439,14 @@ class ArtifactCache:
 
     @staticmethod
     def _core_identity(bundle):
-        # This method is used only after validate_core_release has authenticated
-        # the inventory-covered key. It does not enroll a DLC publisher or grant.
-        public = json.loads(bundle.read_resource("release-key.json"))
         doc = bundle.release_doc
-        stream = f"{doc['package_id']}:{public['key_id']}:{doc['channel']}"
-        if _CORE_STREAM.fullmatch(stream) is None:
-            raise RuntimeBundleError("core_identity_mismatch")
+        stream = None
+        if doc["schema"] != HOST_RELEASE_SCHEMA:
+            # The inventory-covered legacy key was already verified by the loader.
+            public = json.loads(bundle.read_resource("release-key.json"))
+            stream = f"{doc['package_id']}:{public['key_id']}:{doc['channel']}"
+            if _CORE_STREAM.fullmatch(stream) is None:
+                raise RuntimeBundleError("core_identity_mismatch")
         migrations = tuple(
             sorted(
                 (row["path"], row["size"], row["sha256"])
@@ -443,6 +459,8 @@ class ArtifactCache:
 
     def _core_head_check(self, bundle, key):
         stream, _, _ = self._core_identity(bundle)
+        if stream is None:
+            return None, None
         head = self._state["release_heads"].get(stream)
         sequence = bundle.release_doc["release_sequence"]
         if head is not None and (
@@ -454,12 +472,13 @@ class ArtifactCache:
 
     def _accept_core(self, bundle, key):
         stream, sequence = self._core_head_check(bundle, key)
-        heads = self.release_heads
-        head = {"release_sequence": sequence, "digest": key}
-        if heads.get(stream) != head:
-            heads[stream] = head
-            self._check_heads(heads)  # Never evict a historical stream to fit.
-            self._save_pins(dict(self.current), dict(self.last_good), heads)
+        if stream is not None:
+            heads = self.release_heads
+            head = {"release_sequence": sequence, "digest": key}
+            if heads.get(stream) != head:
+                heads[stream] = head
+                self._check_heads(heads)  # Never evict a historical stream to fit.
+                self._save_pins(dict(self.current), dict(self.last_good), heads)
         self._core_admissions[id(bundle)] = (bundle, key, False)
 
     @_locked
@@ -494,15 +513,16 @@ class ArtifactCache:
         )
 
     def _check_core_recovery(self, key, bundle, recovery):
+        stream, plugin_id, migrations = self._core_identity(bundle)
         if (
             not isinstance(recovery, _CoreRecovery)
             or recovery.root != self._scope
             or key is None
             or key not in recovery.pins
             or key not in (self.current.get("ygl_core"), self.last_good.get("ygl_core"))
-            or self._core_identity(bundle)
-            != (recovery.stream, recovery.plugin_id, recovery.migrations)
-            or recovery.stream not in self._state["release_heads"]
+            or (plugin_id, migrations) != (recovery.plugin_id, recovery.migrations)
+            or (recovery.stream is not None and stream != recovery.stream)
+            or (stream is not None and stream not in self._state["release_heads"])
         ):
             raise RuntimeBundleError("core_fallback_rejected")
 
@@ -604,9 +624,10 @@ class ArtifactCache:
                 self._assert_pins_unchanged()
                 if kind == "core":
                     stream, sequence = self._core_head_check(bundle, key)
-                    heads = self.release_heads
-                    heads[stream] = {"release_sequence": sequence, "digest": key}
-                    self._check_heads(heads)
+                    if stream is not None:
+                        heads = self.release_heads
+                        heads[stream] = {"release_sequence": sequence, "digest": key}
+                        self._check_heads(heads)
                     self._initialize_core_ledger()
                 self._persist(key, raw, signature, bundle)
                 if kind == "core":
@@ -659,9 +680,16 @@ class ArtifactCache:
             raw, signature = self._metadata(root)
             if self._key(raw) != key:
                 raise RuntimeBundleError("cache_release_changed")
+            release = parse_release(raw)
+            if (
+                kind == "core"
+                and release["schema"] == HOST_RELEASE_SCHEMA
+                and recovery is None
+            ):
+                raise RuntimeBundleError("core_admission_missing")
             self._hold(key)
             try:
-                bundle = self.store.capture(root, parse_release(raw), kind=kind)
+                bundle = self.store.capture(root, release, kind=kind)
             except BaseException:
                 self._drop_hold(key)
                 raise

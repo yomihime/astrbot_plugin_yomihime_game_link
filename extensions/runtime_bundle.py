@@ -23,7 +23,7 @@ from types import MappingProxyType
 from typing import Any
 from uuid import uuid4
 
-from .hot_update_protocol import ProtocolError, parse_release
+from .hot_update_protocol import HOST_RELEASE_SCHEMA, ProtocolError, parse_release
 from .snapshot_importer import SnapshotFinder
 
 CORE_MAX_BYTES = 128 * 1024 * 1024
@@ -35,7 +35,6 @@ DLC_MAX_FILES = 256
 MAX_TREE_ENTRIES = 8192
 MAX_DEPTH = 24
 _IMPORT_LOCK = threading.RLock()
-_EXCLUDED = frozenset({"release.json", "release.sig.json"})
 _FORBIDDEN_DLC_PARTS = frozenset({"_api_v2", "yomihime_game_link_sdk", "bootstrap"})
 _PACKAGE_ID = re.compile(r"[a-z][a-z0-9_]*(?:[.-][a-z0-9_]+)*\Z")
 
@@ -115,7 +114,7 @@ class RuntimeBundleStore:
     ) -> RuntimeBundleLease:
         if kind not in ("core", "dlc"):
             raise RuntimeBundleError("invalid_bundle_kind")
-        # Reparse even if a caller supplied a dict to establish the exact v1 shape.
+        # Reparse even if a caller supplied a dict to establish the exact shape.
         import json
 
         try:
@@ -148,8 +147,11 @@ class RuntimeBundleStore:
                 raise RuntimeBundleError("runtime_bundle_budget_exceeded")
             self._used[kind] += maximum
         try:
+            excluded = {"release.json"}
+            if doc["schema"] != HOST_RELEASE_SCHEMA:
+                excluded.add("release.sig.json")
             captured = _capture_closed_tree(
-                Path(installation_root), listed, file_maximum
+                Path(installation_root), listed, file_maximum, excluded
             )
             lease = RuntimeBundleLease(self, kind, doc, captured)
         except BaseException:
@@ -420,10 +422,13 @@ class RuntimeBundleLease:
 
 
 def _capture_closed_tree(
-    root: Path, listed: Mapping[str, Mapping[str, Any]], file_limit: int
+    root: Path,
+    listed: Mapping[str, Mapping[str, Any]],
+    file_limit: int,
+    excluded: set[str],
 ) -> dict[str, bytes]:
     if os.name == "nt":
-        return _capture_windows_tree(root, listed, file_limit)
+        return _capture_windows_tree(root, listed, file_limit, excluded)
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
     try:
         root_fd = os.open(root, flags)
@@ -467,7 +472,7 @@ def _capture_closed_tree(
                     if path not in listed:
                         if cache:
                             continue
-                        if path.casefold() in _EXCLUDED:
+                        if path.casefold() in excluded:
                             continue
                         raise RuntimeBundleError("unlisted_file")
                     if (
@@ -542,7 +547,12 @@ def _handle_identity(info: os.stat_result) -> tuple[int, ...]:
 
 
 def _capture_windows_tree(
-    root: Path, listed: Mapping[str, Mapping[str, Any]], file_limit: int
+    root: Path,
+    listed: Mapping[str, Mapping[str, Any]],
+    file_limit: int,
+    excluded: set[str] | frozenset[str] = frozenset(
+        {"release.json", "release.sig.json"}
+    ),
 ) -> dict[str, bytes]:
     """Handle-checked Windows capture; native race testing belongs in Host CI.
 
@@ -591,7 +601,7 @@ def _capture_windows_tree(
                     if relative not in listed:
                         if cache:
                             continue
-                        if relative.casefold() in _EXCLUDED:
+                        if relative.casefold() in excluded:
                             continue
                         raise RuntimeBundleError("unlisted_file")
                     if (

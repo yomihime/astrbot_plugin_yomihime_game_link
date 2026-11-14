@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
-from ..extensions.hot_update_protocol import parse_release
+from ..extensions.hot_update_protocol import HOST_RELEASE_SCHEMA, parse_release
 from ..infrastructure.sqlite.repositories_extension_policy import (
     PolicyError,
     _identity,
@@ -93,6 +93,8 @@ class PublisherTrust:
         """
         _projection(permission_projection)
         release = parse_release(raw_release)
+        if release["schema"] == HOST_RELEASE_SCHEMA:
+            raise PolicyError("host_install_managed")
         identity = _identity(host_plugin_id)
         if _identity(release["plugin_id"]) != identity:
             raise PolicyError("artifact_tampered")

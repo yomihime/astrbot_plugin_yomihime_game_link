@@ -1239,6 +1239,10 @@ class SourceCredentialCliTests(unittest.IsolatedAsyncioTestCase):
                     self.data_dir / "runtime.sqlite3"
                 )
 
+
+class SourceCredentialBootstrapTests(unittest.TestCase):
+    """Import-only checks do not need private credential storage fixtures."""
+
     def test_module_help_runs_from_package_parent_with_local_sdk_bootstrap(
         self,
     ) -> None:
@@ -1260,7 +1264,7 @@ class SourceCredentialCliTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("set", completed.stdout)
         self.assertNotIn("client_secret", completed.stdout)
 
-    def test_both_official_clis_keep_exact_sdk_path_release_and_abi_pins(self):
+    def test_both_official_clis_require_local_compatible_sdk_without_release_pin(self):
         code = r"""
 import importlib, sys
 from pathlib import Path
@@ -1274,19 +1278,22 @@ elif mismatch == 'abi':
     version.MODULE_ABI_VERSION = '1.7.0'
 elif mismatch == 'path':
     sdk.__file__ = str(Path(root).parent / 'foreign-sdk' / '__init__.py')
+elif mismatch == 'version_path':
+    version.__file__ = str(Path(root).parent / 'foreign-sdk' / 'version.py')
 elif mismatch == 'future':
-    # An independent unsupported release, not the next alpha that may be current.
-    assert sdk.__version__ != '99.0.0', 'negative fixture must differ from current release'
+    # Release numbering is not the local ABI contract.
     sdk.__version__ = '99.0.0'
 else:
     raise AssertionError('unknown probe')
 try:
     importlib.import_module(module)
 except RuntimeError as exc:
-    assert str(exc) == 'the pinned plugin-local SDK is unavailable'
-    print('EXACT_PIN_REJECTED')
+    assert mismatch in {'abi', 'path', 'version_path'}, 'compatible release rejected'
+    assert str(exc) == 'the compatible plugin-local SDK is unavailable'
+    print('LOCAL_ABI_REJECTED')
 else:
-    raise AssertionError('unreviewed SDK was accepted')
+    assert mismatch in {'version', 'future'}, 'foreign or incompatible SDK accepted'
+    print('COMPATIBLE_RELEASE_ACCEPTED')
 """
         for cli_name in ("admin_credentials", "configure_source_credentials"):
             module = f"{ROOT.name}.scripts.{cli_name}"
@@ -1300,7 +1307,7 @@ else:
                 )
                 self.assertEqual(help_result.returncode, 0, help_result.stderr)
                 self.assertIn("usage:", help_result.stdout)
-            mismatches = ["version", "abi", "path", "future"]
+            mismatches = ["version", "abi", "path", "version_path", "future"]
             for mismatch in mismatches:
                 with self.subTest(cli=cli_name, mismatch=mismatch):
                     result = subprocess.run(
@@ -1311,7 +1318,12 @@ else:
                         timeout=30,
                     )
                     self.assertEqual(result.returncode, 0, result.stderr)
-                    self.assertIn("EXACT_PIN_REJECTED", result.stdout)
+                    self.assertIn(
+                        "COMPATIBLE_RELEASE_ACCEPTED"
+                        if mismatch in {"version", "future"}
+                        else "LOCAL_ABI_REJECTED",
+                        result.stdout,
+                    )
 
 
 if __name__ == "__main__":

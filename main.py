@@ -10,13 +10,15 @@ from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Star, register
 
 from .bootstrap.loader import ArtifactCache, CoreGeneration, validate_core_release
+from .extensions.hot_update_protocol import HOST_RELEASE_SCHEMA
+from .extensions.runtime_bundle import RuntimeBundleError
 
 
 @register(
     "astrbot_plugin_yomihime_game_link",
     "yomihime",
     "如月怜的游戏连结：聚合游戏角色、战绩与资讯。",
-    "0.2.7",
+    "0.2.8",
 )
 class YomihimeGameLink(Star):
     """Hold no canonical SDK, business objects or mutable resource imports."""
@@ -64,32 +66,44 @@ class YomihimeGameLink(Star):
 
     async def _start_generation(self):
         cache = ArtifactCache(self._data_root)
+        identity = {"author": "yomihime", "name": "astrbot_plugin_yomihime_game_link"}
+        host_is_current = None
 
         async def validate(raw, signature, bundle):
             descriptor = validate_core_release(raw, signature, bundle)
-            if bundle.release_doc["plugin_id"] != {
-                "author": "yomihime",
-                "name": "astrbot_plugin_yomihime_game_link",
-            }:
+            if bundle.release_doc["plugin_id"] != identity:
                 raise ValueError("core_identity_mismatch")
+            return descriptor
+
+        async def validate_installed(raw, signature, bundle):
+            nonlocal host_is_current
+            descriptor = await validate(raw, signature, bundle)
+            if bundle.release_doc["schema"] == HOST_RELEASE_SCHEMA:
+                host_is_current = self._host_installation_guard(
+                    identity, bundle.release_doc["release"]
+                )
+                if not host_is_current():
+                    raise RuntimeBundleError("core_installation_changed")
             return descriptor
 
         try:
             bundle, _, key = await cache.capture(
-                self._plugin_root, kind="core", validate=validate
+                self._plugin_root, kind="core", validate=validate_installed
             )
         except BaseException:
             cache.close()
             self._state = "failed"
             raise
-        # This comparison comes only from the fully captured, signed installed
+        # This comparison comes only from the fully captured installed
         # candidate. A corrupt installation cannot supply a migration proof.
         recovery_plan = cache.core_recovery_plan(bundle)
         self._installed_version = bundle.release_doc["release"]
         self._installed_digest = key
         pins = recovery_plan.pins
         try:
-            await self._run_candidate(cache, bundle, key, fallback=False)
+            await self._run_candidate(
+                cache, bundle, key, fallback=False, host_is_current=host_is_current
+            )
             return
         except asyncio.CancelledError:
             raise
@@ -115,6 +129,8 @@ class YomihimeGameLink(Star):
                 recovery = ArtifactCache(self._data_root)
 
                 async def validate_cached(raw, signature, cached):
+                    if host_is_current is not None and not host_is_current():
+                        raise RuntimeBundleError("core_installation_changed")
                     return await validate(raw, signature, cached)
 
                 try:
@@ -127,7 +143,11 @@ class YomihimeGameLink(Star):
                 self._generation = self._runtime = None
                 try:
                     await self._run_candidate(
-                        recovery, cached, cached_key, fallback=True
+                        recovery,
+                        cached,
+                        cached_key,
+                        fallback=True,
+                        host_is_current=host_is_current,
                     )
                     return
                 except asyncio.CancelledError:
@@ -145,10 +165,50 @@ class YomihimeGameLink(Star):
             self._state = "failed"
             raise initial_error
 
-    async def _run_candidate(self, cache, bundle, key, *, fallback):
+    def _host_installation_guard(self, identity, version):
+        def matching_registration():
+            matches = tuple(
+                item
+                for item in self._host_context.get_all_stars()
+                if item.activated is True
+                and item.author == identity["author"]
+                and item.name == identity["name"]
+            )
+            if len(matches) != 1:
+                return None
+            item = matches[0]
+            path = getattr(item.module, "__file__", None)
+            if (
+                item.star_cls is self
+                and type(path) is str
+                and Path(path).parent == self._plugin_root
+                and item.root_dir_name == self._plugin_root.name
+                and type(item.version) is str
+                and item.version.removeprefix("v") == version
+            ):
+                return item
+            return None
+
+        authorized = matching_registration()
+
+        def check():
+            return authorized is not None and matching_registration() is authorized
+
+        return check
+
+    async def _run_candidate(
+        self, cache, bundle, key, *, fallback, host_is_current=None
+    ):
         if cache.check_core_admission(bundle, fallback=fallback) != key:
             raise ValueError("core_admission_digest_mismatch")
-        generation = CoreGeneration(self, self._host_context, self._data_root, bundle)
+        generation = CoreGeneration(
+            self,
+            self._host_context,
+            self._data_root,
+            bundle,
+            host_is_current=host_is_current,
+            close_host_pages=self._close_pages,
+        )
         self._generation = generation
         generation.cache = cache
         try:
@@ -186,6 +246,7 @@ class YomihimeGameLink(Star):
             if self._stopping:
                 generation.sync_fence()
                 return
+            generation.require_installation()
             self._pages.register()
             self._admin_pages.register()
             if not fallback:
@@ -194,10 +255,7 @@ class YomihimeGameLink(Star):
             self._running_digest = key
             self._state = generation.state = "fallback" if fallback else "active"
         except BaseException:
-            if self._pages is not None:
-                self._pages.close()
-            if self._admin_pages is not None:
-                self._admin_pages.close()
+            self._close_pages()
             if generation.receipt is not None:
                 generation.sync_fence()
             else:
@@ -225,15 +283,18 @@ class YomihimeGameLink(Star):
         if callable(callback):
             callback()
 
+    def _close_pages(self):
+        if self._pages is not None:
+            self._pages.close()
+        if self._admin_pages is not None:
+            self._admin_pages.close()
+
     async def terminate(self):
         self._stopping = True
         # All old gates close synchronously before the first await.
         if self._generation is not None:
             self._generation.sync_fence()
-        if self._pages is not None:
-            self._pages.close()
-        if self._admin_pages is not None:
-            self._admin_pages.close()
+        self._close_pages()
         try:
             if self._generation is not None:
                 await self._generation.terminate(timeout=5.0)

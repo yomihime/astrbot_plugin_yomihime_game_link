@@ -163,6 +163,40 @@ def assert_execution_policy(unit, receipt):
             raise PolicyError("approval_required")
 
 
+def check_package_owner(unit, package_id, plugin_id, *, host_install, bind=False):
+    """Keep package-scoped data attached to the installer identity across releases."""
+    _package_id(package_id)
+    identity = _identity(plugin_id)
+    owner = unit.execute(
+        "SELECT plugin_id FROM extension_package_owners WHERE package_id=?",
+        (package_id,),
+    ).fetchone()
+    if owner is not None:
+        if owner["plugin_id"] != identity:
+            raise PolicyError("package_already_owned")
+        return
+    if not host_install:
+        return
+
+    early = unit.execute(
+        "SELECT plugin_name FROM extension_installation_grants WHERE package_id=?",
+        (package_id,),
+    ).fetchone()
+    legacy = unit.execute(
+        "SELECT plugin_id FROM extension_package_grants WHERE package_id=?",
+        (package_id,),
+    ).fetchone()
+    if (early is not None and early["plugin_name"] != plugin_id["name"]) or (
+        legacy is not None and legacy["plugin_id"] != identity
+    ):
+        raise PolicyError("package_already_owned")
+    if bind:
+        unit.execute(
+            "INSERT INTO extension_package_owners (package_id, plugin_id) VALUES (?, ?)",
+            (package_id, identity),
+        )
+
+
 def advance_release_head(
     unit,
     *,
@@ -276,6 +310,13 @@ class ExtensionPolicyRepository:
 
         return await self.database.executor.run_read(read)
 
+    async def check_package_owner(self, package_id, plugin_id, *, host_install):
+        await self.database.executor.run_read(
+            lambda unit: check_package_owner(
+                unit, package_id, plugin_id, host_install=host_install
+            )
+        )
+
     async def _put(
         self, table, identity, values, *, actor_ref, expected_revision, admin_check=None
     ):
@@ -284,6 +325,10 @@ class ExtensionPolicyRepository:
 
         def write(unit):
             _check_admin(unit, admin_check)
+            if table == "extension_package_grants":
+                check_package_owner(
+                    unit, key, json.loads(values["plugin_id"]), host_install=False
+                )
             row = unit.execute(
                 f"SELECT revision FROM {table} WHERE {column}=?", (key,)
             ).fetchone()

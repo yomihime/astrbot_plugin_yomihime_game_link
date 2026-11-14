@@ -7,6 +7,10 @@ import {coreText} from './i18n/messages';
 import type {UiParams} from './i18n/locale';
 
 type Row={package_id:string;plan_id?:string;installed_version?:string;running_version?:string;installed_digest?:string;running_digest?:string;state:string;reason_code?:string;grant_revision?:number;artifact_revision?:number;signature_state?:string;permissions_delta?:unknown};
+const displayStates = new Set([
+ 'active','installed','fallback','cleanup_pending','approval_required','rejected','failed',
+ 'preparing','queued','parked','starting','booting','initializing','ready','quiet','closed','stopped',
+]);
 type Publisher={key_id:string;public_key_base64:string;channels:string[];revision:number;revoked:boolean};
 type Status={core_epoch:number;core:Record<string,unknown>;packages:Row[];publishers:Publisher[]};
 const safeCode=(value:unknown)=>typeof value==='string'&&/^[a-z][a-z0-9_]{0,63}$/.test(value)?value:'hot_update_failed';
@@ -65,25 +69,39 @@ export function createInstallationManagement(bridge:Bridge,confirmation:InlineCo
   disabled:!current()||disabled,'aria-disabled':String(busy.value||!current()||disabled),'aria-busy':String(busy.value),
   onClick:()=>{if(!busy.value&&current()&&!disabled)onClick();},
  },()=>text('hotUpdate.'+action));
- const displayFact=(name:string,value:unknown)=>value===null||value===undefined?text('hotUpdate.unknown'):name==='ready'?text(value===true?'hotUpdate.readyYes':'hotUpdate.readyNo'):['state','phase'].includes(name)&&['active','installed','fallback','cleanup_pending','approval_required','rejected','failed','preparing','stopped'].includes(String(value))?text('hotUpdate.state.'+value):String(value);
- const facts=(row:Row|Record<string,unknown>)=>h('dl',{class:'hot-update-facts'},['installed_version','installed_digest','running_version','running_digest',...('phase' in row?['phase','ready']:['state','reason_code','grant_revision','artifact_revision','publisher_key_id','operation_id'])].map(name=>h('div',{key:name},[h('dt',text('hotUpdate.'+name)),h('dd',{style:{overflowWrap:'anywhere',marginInlineStart:'1rem'}},displayFact(name,row[name as keyof typeof row]))])));
+ const displayFact=(name:string,value:unknown)=>value===null||value===undefined?text('hotUpdate.unknown'):name==='ready'?text(value===true?'hotUpdate.readyYes':'hotUpdate.readyNo'):['state','phase'].includes(name)&&displayStates.has(String(value))?text('hotUpdate.state.'+value):String(value);
+ const facts=(row:Row|Record<string,unknown>)=>h('dl',{class:'hot-update-facts'},['installed_version','installed_digest','running_version','running_digest',...('phase' in row?['phase','ready']:row.signature_state==='host_install'?['state','reason_code','operation_id']:['state','reason_code','grant_revision','artifact_revision','publisher_key_id','operation_id'])].map(name=>h('div',{key:name},[h('dt',text('hotUpdate.'+name)),h('dd',{style:{overflowWrap:'anywhere',marginInlineStart:'1rem'}},displayFact(name,row[name as keyof typeof row]))])));
  const input=(id:string,label:string,value:string,change:(value:string)=>void)=>h(FormField,{controlId:id,label:text(label)},{default:({controlAttrs}:any)=>h('input',{...controlAttrs,value,disabled:busy.value,maxlength:1024,onInput:(event:Event)=>{serial++;plan.value=null;confirmation.cancel();change((event.target as HTMLInputElement).value);}})});
+ function renderPlan(row:Row){
+  const ordinary=row.signature_state==='host_install';
+  const heading=text(ordinary?'hotUpdate.packageInspection':'hotUpdate.review');
+  const delta=row.permissions_delta;
+  const permissions=ordinary&&object(delta)?delta.added:delta;
+  return h('section',{'aria-label':heading},[
+   h('h3',heading+' · '+row.package_id),facts(row),
+   h('p',ordinary?text('hotUpdate.hostInstall'):text('hotUpdate.signature')+' · '+row.signature_state),
+   ordinary?h('h4',text('hotUpdate.declaredPermissions')):null,
+   h('pre',{style:{whiteSpace:'pre-wrap',overflowWrap:'anywhere',maxHeight:'28rem',overflow:'auto'}},JSON.stringify(permissions,null,2)),
+   h('div',{class:'module-management-actions'},[
+    ...(ordinary?[]:[button('package-approve',()=>approve('package-approve'),!['unsigned','verified'].includes(row.signature_state||'')),
+    button('artifact-approve',()=>approve('artifact-approve'),row.signature_state!=='unsigned'||!row.grant_revision),
+    button('package-revoke',()=>void mutate('package-revoke',{package_id:row.package_id,expected_revision:row.grant_revision},row),!row.grant_revision),
+    button('artifact-revoke',()=>void mutate('artifact-revoke',{package_id:row.package_id,artifact_digest:row.installed_digest,expected_revision:row.artifact_revision},row),!row.artifact_revision)]),
+    button('retry',()=>void mutate('retry',{package_id:row.package_id},row)),
+   ]),
+  ]);
+ }
  return {invalidate,dispose(){invalidate();closed=true;},refresh,inspect,mutate,render(){return h('details',{class:'extension-installation-management',onToggle:(event:Event)=>{if((event.currentTarget as HTMLDetailsElement).open&&!status.value&&!busy.value)void refresh();}},[
   h('summary',text('hotUpdate.heading')),h('p',text('hotUpdate.help')),button('refresh',()=>void refresh()),
   message.value?h('p',{role:'status'},[text(message.value),code.value?' · '+code.value:'']):null,
   status.value?h('section',{'aria-label':'Core'},[h('h3','Core'),facts(status.value.core)]):null,
   ...(status.value?.packages||[]).map(row=>h('section',{key:row.package_id,'data-package-id':row.package_id},[h('h3',row.package_id),facts(row),row.state==='fallback'||row.state==='cleanup_pending'?h('p',text(row.state==='fallback'?'hotUpdate.fallbackHelp':'hotUpdate.cleanupHelp')):null,button('inspect',()=>void inspect(row.package_id))])),
   h(FormGrid,null,{default:()=>[input('hot-update-package','installation.packageId',pkg.value,value=>pkg.value=value)]}),button('inspect',()=>void inspect(),!status.value||!pkg.value.trim()),
-  plan.value?h('section',{'aria-label':text('hotUpdate.review')},[h('h3',text('hotUpdate.review')+' · '+plan.value.package_id),facts(plan.value),h('p',text('hotUpdate.signature')+' · '+plan.value.signature_state),h('pre',{style:{whiteSpace:'pre-wrap',overflowWrap:'anywhere',maxHeight:'28rem',overflow:'auto'}},JSON.stringify(plan.value.permissions_delta,null,2)),h('div',{class:'module-management-actions'},[
-   button('package-approve',()=>approve('package-approve'),!['unsigned','verified'].includes(plan.value.signature_state||'')),
-   button('artifact-approve',()=>approve('artifact-approve'),plan.value.signature_state!=='unsigned'||!plan.value.grant_revision),
-   button('package-revoke',()=>void mutate('package-revoke',{package_id:plan.value!.package_id,expected_revision:plan.value!.grant_revision},plan.value),!plan.value.grant_revision),
-   button('artifact-revoke',()=>void mutate('artifact-revoke',{package_id:plan.value!.package_id,artifact_digest:plan.value!.installed_digest,expected_revision:plan.value!.artifact_revision},plan.value),!plan.value.artifact_revision),
-   button('retry',()=>void mutate('retry',{package_id:plan.value!.package_id},plan.value)),
-  ])]):null,
-  h('h3',text('hotUpdate.publishers')),h('p',text('hotUpdate.publisherHelp')),
+  plan.value?renderPlan(plan.value):null,
+  h('details',{class:'legacy-publisher-management'},[h('summary',text('hotUpdate.legacy')),h('h3',text('hotUpdate.publishers')),h('p',text('hotUpdate.publisherHelp')),
   h(FormGrid,null,{default:()=>[input('hot-update-public-key','hotUpdate.publicKey',key.value,value=>key.value=value),input('hot-update-channels','hotUpdate.channels',channels.value,value=>channels.value=value)]}),
   button('publisher-enroll',()=>{const existing=status.value?.publishers.find(p=>p.public_key_base64===key.value.trim());void mutate('publisher-enroll',{public_key_base64:key.value.trim(),channels:channels.value.split(',').map(s=>s.trim()).filter(Boolean),expected_revision:existing?.revision??0},{public_key_base64:key.value.trim(),channels:channels.value});},!status.value||!key.value.trim()||!channels.value.trim()),
   ...(status.value?.publishers||[]).map(p=>h('section',{key:p.key_id},[h('p',{style:{overflowWrap:'anywhere'}},p.key_id+' · '+p.public_key_base64+' · '+p.channels.join(', ')+' · '+text(p.revoked?'hotUpdate.revoked':'hotUpdate.enrolled')),button('publisher-revoke',()=>void mutate('publisher-revoke',{key_id:p.key_id,expected_revision:p.revision},p),p.revoked)])),
+  ]),
  ]);}};
 }

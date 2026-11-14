@@ -126,4 +126,4 @@ Module config pages preserve reply_theme with null meaning follow Core. Read cho
 
 ## 独立安装与更新
 
-Core模块管理可读取并批准已安装插件的权限计划；来源、凭据注入、作业及兼容迁移扩张必须明确批准，模块不能自批。普通版本和页面内容更新使用当前有效lease捕获的完整性资源，同一Core包不因DLC页面变化重建。已有构建选择的等价策略可审计导入，保留配置、绑定、凭据与CAS。审批方法与边界见[source policies](source-policies.md)。
+在 AstrBot 插件管理中安装并启用普通 `ygl.release/2` 扩展，无需额外包批准。Core 就绪后，扩展会重新检查兼容性并自动接入。来源、凭据注入、作业及数据声明仍由 Core 校验，并受业务授权和运行代约束。旧格式仍通过 Core 模块管理读取并批准权限计划，模块不能自批。Core 通过当前有效租约提供已校验的扩展页面和资源，扩展页面更新可独立发布。已有构建选择的等价策略可审计导入，保留配置、绑定、凭据与 CAS。审批方法与边界见[source policies](source-policies.md)。

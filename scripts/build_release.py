@@ -21,6 +21,7 @@ if __package__:
         validate_output_paths,
         validate_wheel,
     )
+    from .release_envelope import _HOST_VERSION
 else:
     from build_dashboard_zip import build as build_dashboard_zip
     from build_dashboard_zip import (
@@ -28,6 +29,7 @@ else:
         validate_output_paths,
         validate_wheel,
     )
+    from release_envelope import _HOST_VERSION
 
 ROOT = Path(__file__).resolve().parents[1]
 EXPECTED_PYTHON = (3, 13)
@@ -66,9 +68,11 @@ def plugin_metadata(repository_root: Path = ROOT) -> tuple[str, str]:
     if not PLUGIN_NAME_PATTERN.fullmatch(plugin_name):
         raise ValueError(f"Unsupported plugin name in metadata.yaml: {plugin_name!r}")
     plugin_version = "v" + plugin_version.removeprefix("v")
-    if not TAG_PATTERN.fullmatch(plugin_version):
+    if len(plugin_version) > 129 or not re.fullmatch(
+        "v" + _HOST_VERSION, plugin_version
+    ):
         raise ValueError(
-            f"metadata.yaml version must be a vMAJOR.MINOR.PATCH tag: {plugin_version!r}"
+            f"metadata.yaml version must be valid SemVer: {plugin_version!r}"
         )
     return plugin_name, plugin_version
 
@@ -177,7 +181,7 @@ def build_release(
     external_page_roots=(),
     external_source_policy_roots=(),
 ):
-    """Build one complete signed Core ZIP and SHA256SUMS; no DLC checkout needed."""
+    """Build one complete Core ZIP and SHA256SUMS; no DLC checkout needed."""
     repository_root = Path(repository_root).resolve(strict=True)
     name, metadata_version = plugin_metadata(repository_root)
     if tag is not None:
@@ -227,7 +231,7 @@ def main():
     else:
         from release_envelope import signing_key
     parser = argparse.ArgumentParser(
-        description="Build a complete independently installable signed Core ZIP."
+        description="Build a complete AstrBot Core installation ZIP."
     )
     parser.add_argument("--tag")
     parser.add_argument("--output-dir", type=Path)
@@ -237,17 +241,24 @@ def main():
         action="store_true",
         help="Ephemeral development key; not publisher enrollment or production signing.",
     )
-    parser.add_argument("--channel", choices=("preview", "stable"), default="preview")
-    parser.add_argument("--sequence", type=int, default=1)
+    parser.add_argument("--channel", choices=("preview", "stable"))
+    parser.add_argument("--sequence", type=int)
     args = parser.parse_args()
-    if args.test_signing and args.channel != "preview":
+    if args.test_signing and args.signing_key is not None:
+        parser.error("choose --signing-key or --test-signing")
+    if not (args.test_signing or args.signing_key) and (
+        args.channel is not None or args.sequence is not None
+    ):
+        parser.error("--channel and --sequence apply to signed releases")
+    channel = args.channel or "preview"
+    if args.test_signing and channel != "preview":
         parser.error("test signing is preview-only")
     for path in build_release(
         args.tag,
         args.output_dir,
         signing_key=signing_key(args.signing_key, test=args.test_signing),
-        channel=args.channel,
-        sequence=args.sequence,
+        channel=channel,
+        sequence=1 if args.sequence is None else args.sequence,
     ):
         print(f"Created {path}")
 

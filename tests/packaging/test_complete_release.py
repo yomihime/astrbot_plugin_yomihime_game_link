@@ -22,6 +22,7 @@ from ygl_test_subject.extensions.runtime_bundle import (
 )
 
 from scripts import build_dashboard_zip as dashboard
+from scripts import build_release
 from scripts import release_envelope as envelope
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -132,9 +133,43 @@ class CompleteReleaseTests(unittest.TestCase):
         with self.assertRaises(RuntimeBundleError):
             validate_core_release(files["release.json"], None, bundle)
 
-    def test_core_cannot_be_unsigned(self):
-        with self.assertRaisesRegex(ValueError, "requires an Ed25519"):
-            self.make(signed=False)
+    def test_core_ordinary_zip_has_closed_payload_without_signing_material(self):
+        files = self.unpack(self.make(signed=False))
+        release = parse_release(files["release.json"])
+        self.assertEqual(release["schema"], "ygl.release/2")
+        self.assertNotIn("release.sig.json", files)
+        self.assertNotIn("release-key.json", files)
+        self.assertNotIn("release_sequence", release)
+        self.assertNotIn("channel", release)
+        store = RuntimeBundleStore()
+        bundle = store.capture(self.root, release, kind="core")
+        self.addCleanup(bundle.release)
+        self.assertEqual(
+            validate_core_release(files["release.json"], None, bundle)["role"], "core"
+        )
+        with self.assertRaisesRegex(RuntimeBundleError, "core_release_invalid"):
+            validate_core_release(files["release.json"], b"{}", bundle)
+        (self.root / "Release.Sig.JSON").write_bytes(b"{}")
+        with self.assertRaisesRegex(RuntimeBundleError, "unlisted_file"):
+            store.capture(self.root, release, kind="core")
+
+    def test_core_ordinary_prerelease_uses_host_version_with_optional_v(self):
+        version = b"1.0.0-beta.4+build.07"
+        self.files["metadata.yaml"] = self.files["metadata.yaml"].replace(
+            b"1.0.0", b"v" + version
+        )
+        self.files["main.py"] = self.files["main.py"].replace(b"1.0.0", version)
+        (self.source_root / "metadata.yaml").write_bytes(self.files["metadata.yaml"])
+        self.assertEqual(
+            build_release.plugin_metadata(self.source_root),
+            ("sample", "v" + version.decode()),
+        )
+        files = self.unpack(self.make(signed=False))
+        self.assertEqual(
+            parse_release(files["release.json"])["release"], version.decode()
+        )
+        with self.assertRaisesRegex(ValueError, "invalid release version"):
+            self.make(signed=True)
 
     def test_signed_and_unsigned_dlc_are_complete(self):
         for signed in (False, True):

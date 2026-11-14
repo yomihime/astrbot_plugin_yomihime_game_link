@@ -21,7 +21,6 @@ from pathlib import Path
 # Pin the SDK import to this installed package before importing Core-facing APIs,
 # while keeping this small maintenance CLI independent of AstrBot main.py.
 _PLUGIN_ROOT = Path(__file__).resolve().parents[1]
-_SDK_VERSION = "0.1.0a24"
 _SDK_MODULE_ABI_VERSION = "2.0"
 if str(_PLUGIN_ROOT) not in sys.path:
     sys.path.insert(0, str(_PLUGIN_ROOT))
@@ -31,12 +30,13 @@ try:
     _sdk_root = Path(_sdk.__file__).resolve().parent
     if (
         _sdk_root != (_PLUGIN_ROOT / "yomihime_game_link_sdk").resolve()
-        or _sdk.__version__ != _SDK_VERSION
+        or Path(_sdk_version.__file__).resolve()
+        != (_PLUGIN_ROOT / "yomihime_game_link_sdk/version.py").resolve()
         or _sdk_version.MODULE_ABI_VERSION != _SDK_MODULE_ABI_VERSION
     ):
         raise RuntimeError("unsupported plugin-local SDK")
 except Exception:
-    raise RuntimeError("the pinned plugin-local SDK is unavailable") from None
+    raise RuntimeError("the compatible plugin-local SDK is unavailable") from None
 
 from ..infrastructure.sqlite.executor import SQLiteExecutorCloseTimeout
 from ..infrastructure.sqlite.repositories_admin_credentials import (
