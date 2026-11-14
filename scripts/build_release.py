@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import ast
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -12,7 +13,9 @@ import subprocess
 import sys
 import tempfile
 from importlib.metadata import PackageNotFoundError, version
+from io import BytesIO
 from pathlib import Path
+from zipfile import ZipFile
 
 if __package__:
     from .build_dashboard_zip import build as build_dashboard_zip
@@ -37,8 +40,12 @@ EXPECTED_TOOL_VERSIONS = {"setuptools": "80.9.0", "wheel": "0.45.1"}
 SOURCE_DATE_EPOCH = "315532800"
 SDK_SOURCE_FILES = ("SDK-LICENSE", "pyproject.toml", "setup.py")
 SDK_EXAMPLE_DIRS = ("empty_module", "offline_sample")
-TAG_PATTERN = re.compile(r"v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\Z")
+TAG_PATTERN = re.compile("v" + _HOST_VERSION)
 PLUGIN_NAME_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*\Z")
+
+
+def _valid_tag(tag: str) -> bool:
+    return len(tag) <= 129 and TAG_PATTERN.fullmatch(tag) is not None
 
 
 def _metadata_value(metadata_path: Path, key: str) -> str:
@@ -68,9 +75,7 @@ def plugin_metadata(repository_root: Path = ROOT) -> tuple[str, str]:
     if not PLUGIN_NAME_PATTERN.fullmatch(plugin_name):
         raise ValueError(f"Unsupported plugin name in metadata.yaml: {plugin_name!r}")
     plugin_version = "v" + plugin_version.removeprefix("v")
-    if len(plugin_version) > 129 or not re.fullmatch(
-        "v" + _HOST_VERSION, plugin_version
-    ):
+    if not _valid_tag(plugin_version):
         raise ValueError(
             f"metadata.yaml version must be valid SemVer: {plugin_version!r}"
         )
@@ -78,9 +83,9 @@ def plugin_metadata(repository_root: Path = ROOT) -> tuple[str, str]:
 
 
 def validate_tag(tag: str, metadata_version: str) -> str:
-    """Require a stable vMAJOR.MINOR.PATCH tag matching plugin metadata."""
-    if not TAG_PATTERN.fullmatch(tag):
-        raise ValueError(f"Invalid release tag {tag!r}; expected vMAJOR.MINOR.PATCH")
+    """Require a v-prefixed SemVer tag matching plugin metadata."""
+    if not _valid_tag(tag):
+        raise ValueError(f"Invalid release tag {tag!r}. Expected v-prefixed SemVer.")
     if tag != metadata_version:
         raise ValueError(
             f"Release tag {tag!r} does not match metadata.yaml version {metadata_version!r}"
@@ -210,6 +215,14 @@ def build_release(
             external_source_policy_roots=external_source_policy_roots,
         )
         payload = staged.read_bytes()
+        # Source capture happens after preflight. Check the exact bytes about to
+        # be published in case the checkout changed between those steps.
+        with ZipFile(BytesIO(payload)) as built_zip:
+            release = json.loads(built_zip.read("release.json"))
+        if release["plugin_id"]["name"] != name or release[
+            "release"
+        ] != metadata_version.removeprefix("v"):
+            raise ValueError("Built ZIP identity changed since reading metadata.yaml")
         sums = f"{hashlib.sha256(payload).hexdigest()}  {archive.name}\n".encode(
             "ascii"
         )

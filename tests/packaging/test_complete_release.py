@@ -153,23 +153,93 @@ class CompleteReleaseTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeBundleError, "unlisted_file"):
             store.capture(self.root, release, kind="core")
 
-    def test_core_ordinary_prerelease_uses_host_version_with_optional_v(self):
-        version = b"1.0.0-beta.4+build.07"
-        self.files["metadata.yaml"] = self.files["metadata.yaml"].replace(
-            b"1.0.0", b"v" + version
+    def test_tagged_ordinary_prerelease_uses_host_version_with_optional_v(self):
+        version = "1.0.0-rc.4+build.07"
+        tag = "v" + version
+        metadata = self.source_root / "metadata.yaml"
+        self.files["main.py"] = self.files["main.py"].replace(
+            b"1.0.0", version.encode()
         )
-        self.files["main.py"] = self.files["main.py"].replace(b"1.0.0", version)
-        (self.source_root / "metadata.yaml").write_bytes(self.files["metadata.yaml"])
-        self.assertEqual(
-            build_release.plugin_metadata(self.source_root),
-            ("sample", "v" + version.decode()),
-        )
-        files = self.unpack(self.make(signed=False))
-        self.assertEqual(
-            parse_release(files["release.json"])["release"], version.decode()
-        )
-        with self.assertRaisesRegex(ValueError, "invalid release version"):
-            self.make(signed=True)
+        (self.source_root / "main.py").write_bytes(self.files["main.py"])
+        inputs = tuple(self.source_root / name for name in self.files)
+
+        for metadata_version in (version, tag):
+            with self.subTest(metadata_version=metadata_version):
+                self.files["metadata.yaml"] = (
+                    f"name: sample\nauthor: tests\nversion: {metadata_version}\n".encode()
+                )
+                metadata.write_bytes(self.files["metadata.yaml"])
+                self.assertEqual(
+                    build_release.plugin_metadata(self.source_root), ("sample", tag)
+                )
+                with (
+                    patch.object(
+                        dashboard, "capture_payload", return_value=(self.files, inputs)
+                    ),
+                    patch.object(dashboard, "included_files", return_value=inputs),
+                ):
+                    output = self.root / "artifacts"
+                    archive, checksums = build_release.build_release(
+                        tag, output, repository_root=self.source_root
+                    )
+                    payload = archive.read_bytes()
+                    self.assertEqual(archive.name, f"sample-{tag}.zip")
+                    self.assertEqual(
+                        checksums.read_text(encoding="ascii"),
+                        f"{hashlib.sha256(payload).hexdigest()}  {archive.name}\n",
+                    )
+                    with zipfile.ZipFile(BytesIO(payload)) as bundle:
+                        release = parse_release(bundle.read("release.json"))
+                        self.assertEqual(release["schema"], "ygl.release/2")
+                        self.assertEqual(release["release"], version)
+                    with self.assertRaisesRegex(ValueError, "invalid release version"):
+                        build_release.build_release(
+                            tag,
+                            output,
+                            repository_root=self.source_root,
+                            signing_key=self.key,
+                        )
+                    self.assertEqual(archive.read_bytes(), payload)
+
+    def test_release_rejects_source_identity_change_after_tag_validation(self):
+        inputs = tuple(self.source_root / name for name in self.files)
+        output = self.root / "artifacts"
+        output.mkdir()
+        archive = output / "sample-v1.0.0.zip"
+        checksums = output / "SHA256SUMS"
+        archive.write_bytes(b"previous ZIP")
+        checksums.write_bytes(b"previous checksums")
+
+        for original, replacement in ((b"1.0.0", b"1.0.1"), (b"sample", b"other")):
+            with self.subTest(replacement=replacement):
+                for name in ("metadata.yaml", "main.py"):
+                    (self.source_root / name).write_bytes(self.files[name])
+                captures = []
+
+                def capture(_root):
+                    if not captures:
+                        for name in ("metadata.yaml", "main.py"):
+                            (self.source_root / name).write_bytes(
+                                self.files[name].replace(original, replacement)
+                            )
+                    snapshot = {
+                        name: (self.source_root / name).read_bytes()
+                        for name in self.files
+                    }
+                    captures.append(snapshot)
+                    return snapshot, inputs
+
+                with (
+                    patch.object(dashboard, "capture_payload", side_effect=capture),
+                    patch.object(dashboard, "included_files", return_value=inputs),
+                    self.assertRaisesRegex(ValueError, "Built ZIP identity changed"),
+                ):
+                    build_release.build_release(
+                        "v1.0.0", output, repository_root=self.source_root
+                    )
+                self.assertEqual(captures, [captures[0], captures[0]])
+                self.assertEqual(archive.read_bytes(), b"previous ZIP")
+                self.assertEqual(checksums.read_bytes(), b"previous checksums")
 
     def test_signed_and_unsigned_dlc_are_complete(self):
         for signed in (False, True):
