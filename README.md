@@ -4,7 +4,7 @@
 
 > Windows 存储：全新且没有旧库存的实例会在运行身份的 KnownFolder LocalAppData 下选择专属私密存储，不要求先修改整个 AstrBot 数据目录的 ACL。现有布局保留原位；只有权威根和数据库安全性确认后才可隔离不安全凭据子树。若凭据存储进入 `blocked/unknown`，不读取环境密钥、不降级到其他目录或新库，秘密读写均关闭；部署者修复运行身份/访问条件后，正常冷重启同一 Host。不要清 selector、改真实 ACL 或重填旧密钥。CLI 仅提供迁移计划，当前不支持生产旧库迁移；Windows 本地证据与 Ubuntu CI 分开，详见下方[Windows 资格](#windows-原生文件系统资格)。
 
-当前 Core `0.2.0` 为 preview 本地候选，通过 `ygl.control/1`、模块契约 `2.0` 与版本化 features 协商扩展兼容性。Core 独立构建、安装和发布，运行时私有 SDK 随包捕获；兼容新扩展无需重新构建 Core。
+当前 Core `0.2.8` 可通过 AstrBot 原生插件管理安装和更新完整 ZIP，无需配置签名身份。通过 `ygl.control/1`、模块契约 `2.0` 与版本化 features 协商扩展兼容性，运行时私有 SDK 随包捕获；兼容新扩展无需重新构建 Core。
 
 ## FF14 功能
 
