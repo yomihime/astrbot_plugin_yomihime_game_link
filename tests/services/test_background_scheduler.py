@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import tempfile
 import unittest
 from dataclasses import replace
@@ -148,34 +149,39 @@ class BackgroundSchedulerTests(unittest.IsolatedAsyncioTestCase):
         self.lifecycle = LifecycleController(
             self.registry, issuer=self.issuer, admission=admission
         )
-        instance = _SchedulerModuleInstance(handlers)
-        owned = self.lifecycle.adopt_candidate(
-            "pkg", self.manifest, "install", instance
-        )
-        self.lifecycle.install_dormant("pkg", "pkg/pricing", "install", instance, owned)
-        identity, _ = await self.lifecycle.start_candidate("pkg/pricing", "start")
-        self.lifecycle.publish_committed_intent(
-            "pkg/pricing", "start", identity, True, self.registry.snapshot().revision
-        )
-        await self.database.executor.run_transaction(
-            lambda unit: unit.execute(
-                "INSERT INTO module_runtime_intents VALUES ('pkg','pricing',1,1,'enable',?)",
-                (self.now.isoformat(),),
-            ).rowcount
-        )
+        await self.start_module("pkg", self.manifest, handlers)
         self.repository = SQLiteSchedulerRepository(
             self.database, utc_clock=lambda: self.now
         )
         self.binder = _Binder()
         self.scheduler = self.make_scheduler()
 
+    async def start_module(self, package_id, manifest, handlers):
+        module_id = f"{package_id}/{manifest.module_id}"
+        instance = _SchedulerModuleInstance(handlers)
+        owned = self.lifecycle.adopt_candidate(
+            package_id, manifest, "install", instance
+        )
+        self.lifecycle.install_dormant(
+            package_id, module_id, "install", instance, owned
+        )
+        identity, _ = await self.lifecycle.start_candidate(module_id, "start")
+        self.lifecycle.publish_committed_intent(
+            module_id, "start", identity, True, self.registry.snapshot().revision
+        )
+        await self.database.executor.run_transaction(
+            lambda unit: unit.execute(
+                "INSERT INTO module_runtime_intents VALUES (?,?,1,1,'enable',?)",
+                (package_id, manifest.module_id, self.now.isoformat()),
+            ).rowcount
+        )
+
     def make_scheduler(self):
-        async def current_config(_):
-            snapshot = await self.config.current_initialized(self.target)
+        async def current_config(module):
+            target = ConfigTarget(self.target.principal_id, module.module_id)
+            snapshot = await self.config.current_initialized(target)
             return (
-                snapshot
-                if snapshot is not None
-                else await self.config.current(self.target)
+                snapshot if snapshot is not None else await self.config.current(target)
             )
 
         return SharedCollectionScheduler(
@@ -315,6 +321,64 @@ class BackgroundSchedulerTests(unittest.IsolatedAsyncioTestCase):
             {"stage": "collection_scan", "code": "authority_rejected"},
         )
         self.assertNotIn("private-sentinel", "\n".join(logs.output))
+
+    async def test_stopping_one_active_module_keeps_other_page_candidates_runnable(
+        self,
+    ):
+        healthy = _Collector()
+        schedule = replace(self.schedule, background_parameters=({"item": "cn"},))
+        manifest = validate_contract(
+            replace(self.manifest, route="other-pricing", schedules=(schedule,))
+        )
+        handlers = validate_contract(
+            ModuleHandlers({"read.data": _Capability()}, {"prices": healthy}, {})
+        )
+        self.registry.register_package(
+            PackageManifest(
+                "other", "0.1.0", "2.0", (manifest,), "Tests", "AGPL-3.0", "offline"
+            ),
+            {"pricing": handlers},
+        )
+        await self.start_module("other", manifest, handlers)
+        self.collector.finish.clear()
+        run = asyncio.create_task(self.scheduler.run_due_page())
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(self.collector.started.wait(), healthy.started.wait()),
+                timeout=2,
+            )
+            await self.lifecycle.stop("pkg/pricing")
+            self.assertFalse(run.done())
+            healthy.finish.set()
+            page = await asyncio.wait_for(run, timeout=2)
+            self.assertEqual((page.processed, page.without_result), (3, 2))
+            saved = await self.database.executor.run_read(
+                lambda unit: tuple(
+                    (
+                        json.loads(row["key_json"])["fields"]["module_id"],
+                        row["observation_id"] is not None,
+                        row["lease_token"],
+                    )
+                    for row in unit.execute(
+                        "SELECT key_json,observation_id,lease_token FROM b04_collection_jobs"
+                    )
+                )
+            )
+            self.assertCountEqual(
+                saved,
+                [
+                    ("pkg/pricing", False, None),
+                    ("pkg/pricing", False, None),
+                    ("other/pricing", True, None),
+                ],
+            )
+        finally:
+            healthy.finish.set()
+            self.collector.finish.set()
+            if not run.done():
+                run.cancel()
+            await asyncio.gather(run, return_exceptions=True)
+            await self.lifecycle.stop("other/pricing")
 
     async def test_runs_without_subscribers_and_preserves_due_across_restart(self):
         page = await self.scheduler.run_due_page()
