@@ -191,6 +191,7 @@ class DeclarativeLogsCommandTests(unittest.IsolatedAsyncioTestCase):
                 (stage, category, status),
             )
             self.assertGreaterEqual(row["elapsed_ms"], 0)
+            self.assertGreaterEqual(diagnostic["elapsed_ms"], row["elapsed_ms"])
             matching_trace = next(
                 trace
                 for trace in self.runtime.core_runtime.sync_diagnostics.snapshot()[

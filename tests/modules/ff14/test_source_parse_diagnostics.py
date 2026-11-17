@@ -153,6 +153,9 @@ class SourceParseDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(result.result.status, ResultStatus.ERROR)
         self.assertEqual(len(warnings), 1)
         self.assertEqual(warnings[0]["event_id"], EVENT)
+        self.assertIs(type(warnings[0]["elapsed_ms"]), int)
+        self.assertGreaterEqual(warnings[0]["elapsed_ms"], 0)
+        self.assertEqual(set(warnings[0]["payload"]), {"source", "stage", "category"})
 
     async def test_bad_cache_then_successful_source_does_not_warn(self):
         port = SimpleNamespace(emit=AsyncMock())

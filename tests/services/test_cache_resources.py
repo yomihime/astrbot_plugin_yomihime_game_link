@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import tempfile
 import threading
 import unittest
@@ -32,6 +33,11 @@ from ygl_test_subject.infrastructure.sqlite.repositories_cache_resources import 
 )
 from ygl_test_subject.infrastructure.sqlite.repositories_identity import (
     SQLiteIdentityRepository,
+)
+from ygl_test_subject.infrastructure.sync_diagnostics import (
+    MAX_EVENTS,
+    SyncDiagnostics,
+    emit,
 )
 from ygl_test_subject.services import resources as resource_service_module
 from ygl_test_subject.services.cache import CacheAccessService
@@ -416,10 +422,94 @@ class CacheResourcesServiceTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(InvalidInvocation):
             await self._cache(view, repository=Revoked()).get("entry")
 
+    async def test_cache_failure_stages_are_safe_and_survive_a_full_trace(self):
+        import sqlite3
+
+        from yomihime_game_link_sdk import CacheUnavailable
+
+        class Broken:
+            def __getattr__(inner, name):
+                return getattr(self.cache_repository, name)
+
+            async def get(inner, request):
+                raise sqlite3.OperationalError("private database path")
+
+            async def put(inner, *args, **kwargs):
+                raise CacheUnavailable()
+
+        for public, full in ((True, False), (True, True), (False, False)):
+            with self.subTest(public=public, full=full):
+                view = self._invocation("alice")
+                traces, warnings = [], []
+                diagnostics = SyncDiagnostics(
+                    trace_sink=traces.append, warning_sink=warnings.append
+                )
+                token = diagnostics.activate(
+                    view.invocation_id, "command", public=public
+                )
+                try:
+                    emit("core_start", budget_ms=1000)
+                    healthy = self._cache(view)
+                    await healthy.put("healthy", {}, ttl_seconds=30)
+                    await healthy.get("healthy")
+                    if full:
+                        for _ in range(MAX_EVENTS):
+                            emit("network_attempt")
+                    cache = self._cache(view, repository=Broken())
+                    with self.assertRaises(CacheUnavailable):
+                        await cache.get("sensitive-cache-key")
+                    with self.assertRaises(CacheUnavailable):
+                        await cache.put(
+                            "sensitive-cache-key",
+                            {"data": "sensitive-payload"},
+                            ttl_seconds=30,
+                        )
+                    emit("core_final", code="completed", capability_status="success")
+                    self.assertEqual(warnings, [])
+                    if not public:
+                        self.assertEqual(
+                            (traces, diagnostics.snapshot()["attempts"]), ([], [])
+                        )
+                        continue
+                    (trace,) = traces
+                    self.assertEqual(
+                        trace["cache_failures"], {"cache_read": 1, "cache_write": 1}
+                    )
+                    self.assertLessEqual(len(trace["events"]), MAX_EVENTS)
+                    stages = [
+                        (event["stage"], event["code"])
+                        for event in trace["events"]
+                        if event["stage"].startswith("cache_")
+                    ]
+                    self.assertEqual(
+                        stages,
+                        []
+                        if full
+                        else [
+                            ("cache_read", "cache_unavailable"),
+                            ("cache_write", "cache_unavailable"),
+                        ],
+                    )
+                    serialized = json.dumps(trace)
+                    for private in (
+                        "sensitive-cache-key",
+                        "sensitive-payload",
+                        "private database path",
+                    ):
+                        self.assertNotIn(private, serialized)
+                finally:
+                    diagnostics.reset(token)
+                    diagnostics.close()
+
     async def test_cache_cancellation_and_permission_are_not_backend_outages(self):
         from yomihime_game_link_sdk import AccessDenied
 
         view = self._invocation("alice")
+        diagnostics = SyncDiagnostics()
+        token = diagnostics.activate(view.invocation_id, "command")
+        self.addCleanup(diagnostics.reset, token)
+        self.addCleanup(diagnostics.close)
+        emit("core_start")
 
         class Cancelled:
             def __getattr__(inner, name):
@@ -440,6 +530,9 @@ class CacheResourcesServiceTests(unittest.IsolatedAsyncioTestCase):
 
         with self.assertRaises(AccessDenied):
             await self._cache(view, repository=Denied()).get("entry")
+        emit("core_final", code="stale")
+        (trace,) = diagnostics.snapshot()["attempts"]
+        self.assertNotIn("cache_failures", trace)
 
     async def asyncTearDown(self) -> None:
         for view, lease in self._views:

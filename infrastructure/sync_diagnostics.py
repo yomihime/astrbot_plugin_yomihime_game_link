@@ -13,8 +13,12 @@ from ..yomihime_game_link_sdk.errors import AccessDenied, OperationTimeout
 
 MAX_ATTEMPTS = 8
 MAX_EVENTS = 48
-_STAGES = frozenset(
-    "core_start bind handler_start handler_return publication output_start output_return collector_start collector_return validate core_commit core_failure core_final http_queue http_quota http_transport network_attempt transport_error http_response http_end auth_failure".split()
+_CACHE_FAILURE_STAGES = frozenset({"cache_read", "cache_write"})
+_STAGES = (
+    frozenset(
+        "core_start bind handler_start handler_return publication output_start output_return collector_start collector_return validate core_commit core_failure core_final http_queue http_quota http_transport network_attempt transport_error http_response http_end auth_failure".split()
+    )
+    | _CACHE_FAILURE_STAGES
 )
 _LABEL = re.compile(r"[a-zA-Z][a-zA-Z0-9_.-]{0,95}\Z")
 _LOGICAL_ID = re.compile(r"[a-z][a-z0-9_]*(?:[.-][a-z0-9_]+)*\Z")
@@ -225,6 +229,10 @@ class SyncDiagnostics:
             context.phase = stage
         if stage == "network_attempt":
             trace["network_attempts"] += 1
+        if stage in _CACHE_FAILURE_STAGES and event.get("code") == "cache_unavailable":
+            # Keep degradation visible even after the bounded event list fills.
+            counts = trace.setdefault("cache_failures", {})
+            counts[stage] = min(1_000_000, counts.get(stage, 0) + 1)
         if event.get("code") in _HTTP_FAILURE_CODES and (
             stage == "auth_failure"
             or stage == "http_end"
@@ -283,7 +291,7 @@ class SyncDiagnostics:
             if not quiet and pending_warning is not None:
                 sink, envelope = pending_warning
                 try:
-                    sink(envelope)
+                    sink({**envelope, "elapsed_ms": event["elapsed_ms"]})
                     warning_reported = True
                 except Exception:
                     # The generic projection is still available as a fallback.

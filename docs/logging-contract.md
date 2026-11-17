@@ -12,10 +12,11 @@
 ## 已接通的路径
 
 - Core 公共 command/tool/web 调用及公共采集在终态通过 `GAME_LINK_TRACE` 输出一条 DEBUG 摘要，包含经严格语法和长度校验的模块标识、能力或采集器标识，至多 48 个阶段事件和丢弃计数。标识来自已验证声明，不来自查询参数、用户或群身份。默认 DEBUG 未开启时不复制/序列化该摘要。
-- AstrBot 的插件级日志设置同时控制终态 DEBUG、请求 WARNING 与调度停止 ERROR。Core 在已确认的终态输出一条 WARNING，优先采用模块经校验的阶段和类别，必要时以 `GAME_LINK_FAILURE` 补充通用安全分类。取消或旧生命周期结束时只保留 DEBUG。
+- AstrBot 的插件级日志设置同时控制终态 DEBUG、请求 WARNING 与调度停止 ERROR。Core 在已确认的终态输出一条 WARNING，记录有界调用耗时，优先采用模块经校验的阶段和类别，必要时以 `GAME_LINK_FAILURE` 补充通用安全分类。取消或旧生命周期结束时只保留 DEBUG。
 - `partial_success` 只有同时记录到该调用的真实 HTTP 失败才产生 `partial_upstream_failure`。单纯部分数据、无数据不报警；成功恢复的完整结果仅保留 DEBUG 证据。这表示两者同次发生，不推断所有缺项均由该错误造成。
 - 新闻采集的 `FF14NewsFailure` 通过 SDK diagnostics 记录列表/详情阶段、固定类别、HTTP 状态和耗时。FAILED 观察还有 Core 兜底告警；失败不改动公告游标、去重或重发策略。
 - 物品来源解析失败标记候选搜索、详情或获取途径。市场来源解析失败标记服务器目录、聚合价格或挂牌。FFLogs 的安全失败摘要与通用终态共享同一调用标识。独立的 FFLogs 研究证据仅保留在有界内存诊断存储中。
+- 普通缓存后端故障在终态 DEBUG 中标记 `cache_read` 或 `cache_write`，固定类别为 `cache_unavailable`。阶段事件达到上限时，终态仍保留有界读写故障计数。成功的缓存操作和授权失败不产生缓存故障事件。使用来源数据成功降级的查询不因此报警。
 - 调度 pump 意外停止输出 ERROR；正常取消不报 ERROR。
 
 ## 安全与预算

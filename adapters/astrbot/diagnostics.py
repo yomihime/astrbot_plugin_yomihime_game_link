@@ -19,13 +19,21 @@ def plugin_diagnostic_logger(plugin_name):
 
 
 def forward_diagnostic(event, *, logger=None, warning=False):
-    if type(event) is not dict or set(event) != {
+    expected = {
         "owner",
         "epoch",
         "trace",
         "event_id",
         "payload",
-    }:
+    }
+    if type(event) is not dict:
+        raise ValueError("invalid diagnostic envelope")
+    if warning and "elapsed_ms" in event:
+        elapsed = event["elapsed_ms"]
+        if type(elapsed) is not int or not 0 <= elapsed <= 86400000:
+            raise ValueError("invalid diagnostic elapsed time")
+        expected.add("elapsed_ms")
+    if set(event) != expected:
         raise ValueError("invalid diagnostic envelope")
     if (
         type(event["epoch"]) is not int
