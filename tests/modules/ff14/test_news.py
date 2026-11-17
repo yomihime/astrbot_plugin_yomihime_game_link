@@ -52,7 +52,7 @@ VIEW = SubscriptionView(
     "synthetic-sub", 1, "synthetic-owner", None, "group-42", {"kind": "official_news"}
 )
 INVOCATION = InvocationView(
-    "synthetic-invocation",
+    "a" * 32,
     InvocationOrigin.COMMAND,
     "test-platform-1:user-17",
     "group-42",

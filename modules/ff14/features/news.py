@@ -16,6 +16,7 @@ from collections.abc import Mapping
 from datetime import UTC, datetime
 from difflib import SequenceMatcher
 from html.parser import HTMLParser
+from time import monotonic
 from unicodedata import category
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from zoneinfo import ZoneInfo
@@ -28,7 +29,11 @@ from ....yomihime_game_link_sdk.display import (
     TextBlock,
     UnknownBlock,
 )
-from ....yomihime_game_link_sdk.errors import SourceHttpError
+from ....yomihime_game_link_sdk.errors import (
+    OperationTimeout,
+    ServiceUnavailable,
+    SourceHttpError,
+)
 from ....yomihime_game_link_sdk.results import (
     CapabilityResult,
     ErrorCode,
@@ -379,6 +384,49 @@ def news_document(item):
     )
 
 
+def _news_control_error(error):
+    """Expose the strongest control failure from a drained pagination group."""
+    pending = [error]
+    fallback = None
+    while pending:
+        current = pending.pop()
+        if isinstance(current, ExceptionGroup):
+            pending.extend(reversed(current.exceptions))
+        elif isinstance(current, PermissionError) or (
+            isinstance(current, SourceHttpError) and current.code == "cancelled"
+        ):
+            return current
+        elif isinstance(current, OperationTimeout) or (
+            fallback is None and isinstance(current, ServiceUnavailable)
+        ):
+            fallback = current
+    return fallback
+
+
+def _news_failure(error):
+    if isinstance(error, ExceptionGroup):
+        error = error.exceptions[0]
+        return _news_failure(error)
+    if isinstance(error, SourceHttpError):
+        code = {
+            "timeout": "timeout",
+            "transport_failed": "transport_error",
+            "rate_limited": "rate_limited",
+            "upstream_error": "http_error",
+            "invalid_response": "payload_parse",
+            "response_too_large": "payload_parse",
+        }.get(error.code, "request_rejected")
+        status = error.status_code
+        if status == 429:
+            code = "rate_limited"
+        return code, status if type(status) is int and 100 <= status <= 599 else None
+    if isinstance(error, TimeoutError):
+        return "timeout", None
+    if isinstance(error, OSError):
+        return "transport_error", None
+    return "payload_parse", None
+
+
 class NewsCollector:
     @staticmethod
     def validate_screenshot_detail(content: bytes, news_id: str, version: str) -> bool:
@@ -430,10 +478,34 @@ class NewsCollector:
             and previous.completeness is ObservationCompleteness.COMPLETE
         ):
             known_ids = [row["id"] for row in prior.get("articles", ())]
+        started = monotonic()
+        bound = None
+        progress = {"stage": "binding", "http_status": None}
         try:
             async with asyncio.timeout(80):
-                http = (await self.services.scopes.bind(context.invocation)).http
-                payload = await self._read(http, known_ids=known_ids, prior=prior)
+                bound = await self.services.scopes.bind(context.invocation)
+                http = bound.http
+
+                class ObservedHttp:
+                    async def fetch(self, request):
+                        progress["stage"] = (
+                            "detail"
+                            if request.path == "/api/news/newsDetail"
+                            else "listing"
+                        )
+                        progress["http_status"] = None
+                        response = await http.fetch(request)
+                        status = response.status_code
+                        progress["http_status"] = (
+                            status
+                            if type(status) is int and 100 <= status <= 599
+                            else None
+                        )
+                        return response
+
+                payload = await self._read(
+                    ObservedHttp(), known_ids=known_ids, prior=prior
+                )
             completeness = ObservationCompleteness.COMPLETE
         except (
             ValueError,
@@ -442,8 +514,38 @@ class NewsCollector:
             SourceHttpError,
             ExceptionGroup,
         ) as exc:
-            if isinstance(exc, SourceHttpError) and exc.code == "cancelled":
+            control = _news_control_error(exc)
+            if control is exc:
                 raise
+            if control is not None:
+                raise control from None
+            port = getattr(bound, "diagnostics", None)
+            if port is not None:
+                code, status = _news_failure(exc)
+                try:
+                    await port.emit(
+                        "FF14NewsFailure",
+                        {
+                            "source": SOURCE,
+                            "stage": progress["stage"],
+                            "category": code,
+                            "http_status": status
+                            if status is not None
+                            else (
+                                progress["http_status"]
+                                if isinstance(exc, ValueError)
+                                else None
+                            ),
+                            "elapsed_ms": min(
+                                86400000, max(0, int((monotonic() - started) * 1000))
+                            ),
+                        },
+                    )
+                except (PermissionError, OperationTimeout, ServiceUnavailable):
+                    raise
+                except Exception:
+                    # Optional diagnostics never replace the business outcome.
+                    pass
             # Preserve the last committed refresh position and all confirmed
             # versions. Failed detail IO cannot erase the previous diff baseline.
             payload = {

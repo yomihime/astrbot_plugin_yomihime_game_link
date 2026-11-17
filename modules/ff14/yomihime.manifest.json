@@ -722,6 +722,16 @@
       ],
       "config_fields": [
         {
+          "name": "ff14_server_directory_generation",
+          "default": "initial",
+          "description": "服务器目录清除标记",
+          "value_schema": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          }
+        },
+        {
           "name": "ff14_default_region",
           "default": "cn",
           "description": "默认查询区域",
@@ -1069,6 +1079,13 @@
       ],
       "collections": [
         {
+          "name": "server_directory",
+          "schema_version": 1,
+          "owner_kind": "public",
+          "retention_category": "standard",
+          "indexes": []
+        },
+        {
           "name": "calendar_snapshots",
           "schema_version": 1,
           "owner_kind": "public",
@@ -1143,6 +1160,7 @@
           ],
           "role": "config",
           "config_fields": [
+            "ff14_server_directory_generation",
             "ff14_default_region",
             "ff14_subscriptions_enabled",
             "ff14_news_admins",
@@ -1167,7 +1185,7 @@
         },
         {
           "path": "pages/dist/entry.js",
-          "sha256": "4bbb30c9bc7ecfa65b2573eacb418b221586cce075c8bbd5d117d15cf3f22279"
+          "sha256": "32c1c6789393ee6ef12be4d4f0572c9365d950edf91158578fd5ed139ab63d56"
         },
         {
           "path": "pages/dist/presentation-ff14.css",
@@ -3626,6 +3644,227 @@
             },
             "required": [
               "stage"
+            ],
+            "additionalProperties": false
+          }
+        },
+        {
+          "event_id": "FF14LogsFailure",
+          "payload_schema": {
+            "type": "object",
+            "properties": {
+              "failures": {
+                "$ref": "#/$defs/s1"
+              },
+              "elapsed_ms": {
+                "$ref": "#/$defs/s7"
+              }
+            },
+            "required": [
+              "failures",
+              "elapsed_ms"
+            ],
+            "additionalProperties": false,
+            "$defs": {
+              "s3": {
+                "type": "string",
+                "maxLength": 160,
+                "enum": [
+                  "universalis_market",
+                  "fflogs_public_cn",
+                  "fflogs_public_global"
+                ]
+              },
+              "s4": {
+                "type": "string",
+                "maxLength": 160,
+                "enum": [
+                  "realm_directory",
+                  "authentication",
+                  "server_directory",
+                  "character_query",
+                  "ranking_schema",
+                  "ranking_metadata",
+                  "ranking_history"
+                ]
+              },
+              "s5": {
+                "type": "string",
+                "maxLength": 160,
+                "enum": [
+                  "credentials_unavailable",
+                  "unauthorized",
+                  "forbidden",
+                  "rate_limited",
+                  "timeout",
+                  "http_error",
+                  "transport_error",
+                  "request_rejected",
+                  "payload_parse",
+                  "graphql_error",
+                  "incomplete_directory",
+                  "identity_mismatch",
+                  "selection_mismatch",
+                  "service_unavailable",
+                  "internal_error",
+                  "region_unresolved"
+                ]
+              },
+              "s6": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 100,
+                "maximum": 599
+              },
+              "s7": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 86400000
+              },
+              "s8": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 10000
+              },
+              "s2": {
+                "type": "object",
+                "properties": {
+                  "source": {
+                    "$ref": "#/$defs/s3"
+                  },
+                  "stage": {
+                    "$ref": "#/$defs/s4"
+                  },
+                  "category": {
+                    "$ref": "#/$defs/s5"
+                  },
+                  "http_status": {
+                    "$ref": "#/$defs/s6"
+                  },
+                  "elapsed_ms": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "count": {
+                    "$ref": "#/$defs/s8"
+                  }
+                },
+                "required": [
+                  "source",
+                  "stage",
+                  "category",
+                  "http_status",
+                  "elapsed_ms",
+                  "count"
+                ],
+                "additionalProperties": false
+              },
+              "s1": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/s2"
+                },
+                "maxItems": 8
+              }
+            }
+          }
+        },
+        {
+          "event_id": "FF14NewsFailure",
+          "payload_schema": {
+            "type": "object",
+            "properties": {
+              "source": {
+                "type": "string",
+                "maxLength": 32,
+                "enum": [
+                  "ff14_news_official"
+                ]
+              },
+              "stage": {
+                "type": "string",
+                "maxLength": 32,
+                "enum": [
+                  "binding",
+                  "listing",
+                  "detail"
+                ]
+              },
+              "category": {
+                "type": "string",
+                "maxLength": 32,
+                "enum": [
+                  "timeout",
+                  "transport_error",
+                  "rate_limited",
+                  "http_error",
+                  "payload_parse",
+                  "request_rejected"
+                ]
+              },
+              "http_status": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 100,
+                "maximum": 599
+              },
+              "elapsed_ms": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 86400000
+              }
+            },
+            "required": [
+              "source",
+              "stage",
+              "category",
+              "http_status",
+              "elapsed_ms"
+            ],
+            "additionalProperties": false
+          }
+        },
+        {
+          "event_id": "FF14SourceParseFailure",
+          "payload_schema": {
+            "type": "object",
+            "properties": {
+              "source": {
+                "type": "string",
+                "maxLength": 32,
+                "enum": [
+                  "xivapi_items",
+                  "garland_items",
+                  "universalis_market"
+                ]
+              },
+              "stage": {
+                "type": "string",
+                "maxLength": 32,
+                "enum": [
+                  "item_search",
+                  "item_detail",
+                  "item_acquisition",
+                  "market_directory",
+                  "market_aggregated",
+                  "market_listings"
+                ]
+              },
+              "category": {
+                "type": "string",
+                "maxLength": 32,
+                "enum": [
+                  "payload_parse"
+                ]
+              }
+            },
+            "required": [
+              "source",
+              "stage",
+              "category"
             ],
             "additionalProperties": false
           }

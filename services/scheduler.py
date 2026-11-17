@@ -40,6 +40,12 @@ from ..core.contracts.subscriptions import (
 )
 from ..core.contracts.validation import _validate as _validate_schema
 from ..core.contracts.validation_boundary import validate_contract
+from ..core.lifecycle import (
+    ModuleDisabled,
+    ModuleNotFound,
+    ModuleStopping,
+    StaleEpochError,
+)
 from ..core.ports import (
     AdmissionPort,
     BackgroundJob,
@@ -52,12 +58,22 @@ from ..core.ports import (
     SubscriptionStore,
 )
 from ..core.registry import RegisteredModule, Registry, RegistrySnapshot
-from ..core.task_scope import ScopeCancelled, ScopeDeadlineExceeded, ScopeStaleError
+from ..core.task_scope import (
+    ScopeCancelled,
+    ScopeClosedError,
+    ScopeDeadlineExceeded,
+    ScopeStaleError,
+)
 from ..infrastructure.sync_diagnostics import SyncDiagnostics
 from ..infrastructure.sync_diagnostics import emit as diagnostic
 from ..yomihime_game_link_sdk.contexts import InvocationOrigin, InvocationView
 from ..yomihime_game_link_sdk.declarations import SourceDeclaration
-from ..yomihime_game_link_sdk.errors import SourceHttpError
+from ..yomihime_game_link_sdk.errors import (
+    AccessDenied,
+    InvalidInvocation,
+    OperationTimeout,
+    SourceHttpError,
+)
 from ..yomihime_game_link_sdk.services import ConfigSnapshot, InvocationServiceBinder
 from ..yomihime_game_link_sdk.storage import (
     GrantReference,
@@ -260,6 +276,7 @@ class ScanPage:
     processed: int
     next_cursor: object | None
     exhausted: bool
+    without_result: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -676,14 +693,36 @@ class SharedCollectionScheduler:
             now=now, limit=page_limit, after_cursor=after_cursor
         )
         results = await asyncio.gather(
-            *(self.run_due_job(candidate) for candidate in jobs)
+            *(self._run_page_candidate(candidate) for candidate in jobs)
         )
-        del results
         return ScanPage(
             processed=len(jobs),
             next_cursor=None if not jobs else jobs[-1].cursor,
             exhausted=len(jobs) < page_limit,
+            without_result=sum(result is None for result in results),
         )
+
+    async def _run_page_candidate(self, candidate):
+        try:
+            return await self.run_due_job(candidate)
+        except (
+            ModuleNotFound,
+            ModuleDisabled,
+            ModuleStopping,
+            StaleEpochError,
+            ScopeCancelled,
+            ScopeClosedError,
+            ScopeStaleError,
+        ):
+            # A retained due candidate can outlive its active module scope.
+            # The remaining jobs still belong to this scan.
+            return None
+        except asyncio.CancelledError:
+            waiter = asyncio.current_task()
+            if waiter is not None and not waiter.cancelling():
+                # The module-owned task stopped, not the page waiter.
+                return None
+            raise
 
     async def run_due_job(self, candidate: DueCollectionJob) -> CollectionResult | None:
         """Resolve the live declaration then join or claim one persistent execution."""
@@ -1059,6 +1098,8 @@ class SharedCollectionScheduler:
                         invocation.invocation_id,
                         invocation.origin.value,
                         public=candidate.key.scope.kind is OwnershipKind.PUBLIC,
+                        module_id=module.module_id,
+                        collector_id=schedule.collector_id,
                     )
                     diagnostic_active = candidate.key.scope.kind is OwnershipKind.PUBLIC
                     trace_event("core_start", budget_ms=int(timeout_seconds * 1000))
@@ -1177,11 +1218,19 @@ class SharedCollectionScheduler:
             core_final = "stale"
             trace_event("core_failure", code="stale")
             return None
-        except (ScopeDeadlineExceeded, asyncio.TimeoutError) as exc:
+        except (ScopeDeadlineExceeded, asyncio.TimeoutError, AccessDenied) as exc:
+            invocation_expired = (
+                isinstance(exc, InvalidInvocation) and exc.code == "invocation_expired"
+            )
+            if isinstance(exc, AccessDenied) and not invocation_expired:
+                core_final = "stale"
+                trace_event("core_failure", code="stale")
+                return None
             trace_event(
                 "core_failure",
                 code="core_deadline"
-                if isinstance(exc, ScopeDeadlineExceeded)
+                if invocation_expired
+                or isinstance(exc, (ScopeDeadlineExceeded, OperationTimeout))
                 else "collector_timeout",
             )
             if lease is None:
@@ -1202,6 +1251,10 @@ class SharedCollectionScheduler:
             )
             return result
         except SourceHttpError as exc:
+            if exc.code == "cancelled":
+                core_final = "cancelled"
+                trace_event("core_failure", code="cancelled")
+                return None
             next_available = exc.next_available_at
             if (
                 lease is not None

@@ -74,6 +74,7 @@ class HostModulePageSessions:
         generation,
         expiry,
         previous_session=None,
+        relative_expiry=False,
     ):
         if type(binding) is not ModulePageGrant:
             raise AdminAuthorizationDenied
@@ -93,8 +94,9 @@ class HostModulePageSessions:
                 lineage = previous.lineage_id
             if len(self._sessions) >= 128 and previous_session is None:
                 raise AdminAuthorizationDenied
-            expiry = min(float(expiry), self._clock() + 30.0)
-            if expiry <= self._clock():
+            now = self._clock()
+            expiry = min(float(expiry), now + 30.0)
+            if expiry <= now:
                 raise AdminAuthorizationDenied
             if previous_session is not None:
                 del self._sessions[previous_session]
@@ -102,6 +104,8 @@ class HostModulePageSessions:
             self._sessions[handle] = _Session(
                 subject, bearer_digest, binding, generation, expiry, lineage
             )
+            if relative_expiry:
+                return {"page_session": handle, "expires_in": expiry - now}
             return {"page_session": handle, "expires_at": expiry}
 
     def revoke(self, handle, *, subject, bearer_digest):

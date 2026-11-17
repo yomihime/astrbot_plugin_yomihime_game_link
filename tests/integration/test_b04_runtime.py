@@ -22,6 +22,7 @@ from ygl_test_subject.core.contracts.subscriptions import (
     digest_envelope_idempotency_key,
 )
 from ygl_test_subject.core.contracts.validation_boundary import validate_contract
+from ygl_test_subject.core.lifecycle import ModuleDisabled
 from ygl_test_subject.core.ports import MessageStatus, RevisionConflict, SecretOwner
 from ygl_test_subject.infrastructure.sqlite.database import SQLiteDatabase
 from ygl_test_subject.presentation.rendering import (
@@ -166,6 +167,17 @@ class B04RuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
             )
         finally:
             connection.close()
+
+    async def _assert_collection_lease_released(self):
+        leases = await self.runtime.database.executor.run_read(
+            lambda unit: [
+                tuple(row)
+                for row in unit.execute(
+                    "SELECT lease_token, lease_expires_at FROM b04_collection_jobs"
+                )
+            ]
+        )
+        self.assertEqual(leases, [(None, None)])
 
     async def test_i01_i02_b03_compatibility_bundle_and_b04_module_bundle(self):
         base_factory = ModuleServicesFactory(
@@ -1227,16 +1239,47 @@ class B04RuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.runtime.message_port.calls, [])
 
     async def test_i06_disable_cancels_collection_without_commit(self):
+        view = await self._create("alice", minimum=0)
+        record = await self.runtime.repositories.subscriptions.current(
+            view.subscription_id
+        )
+        self.runtime.collector.block = True
+        run = asyncio.create_task(self.runtime.scheduler.run_due_page())
+        await asyncio.wait_for(self.runtime.collector.started.wait(), timeout=2)
+        await self.runtime.lifecycle.stop("sample/feed")
+        # Module-owned cancellation completes this page with an unexecuted
+        # candidate. Only cancelling the page itself cancels the scan.
+        page = await asyncio.wait_for(run, timeout=2)
+        self.assertEqual((page.processed, page.without_result), (1, 1))
+        self.assertTrue(page.exhausted)
+        with self.assertRaises(ModuleDisabled):
+            self.runtime.lifecycle.scope("sample/feed")
+        self.assertEqual(self._count("b04_observations"), 0)
+        self.assertEqual(self._count("b04_delivery_events"), 0)
+        self.assertEqual(self._count("b04_evaluation_states"), 0)
+        await self._assert_collection_lease_released()
+        due = await self.runtime.repositories.scheduler.list_due_jobs(
+            now=self.clock(), limit=10
+        )
+        self.assertEqual([candidate.key for candidate in due], [record.collection_key])
+
+    async def test_cancelling_page_propagates_and_lifecycle_stop_drains_collection(
+        self,
+    ):
         await self._create("alice", minimum=0)
         self.runtime.collector.block = True
         run = asyncio.create_task(self.runtime.scheduler.run_due_page())
-        await self.runtime.collector.started.wait()
-        await self.runtime.lifecycle.stop("sample/feed")
-        self.runtime.collector.release.set()
-        with self.assertRaises(asyncio.CancelledError):
-            await run
+        try:
+            await asyncio.wait_for(self.runtime.collector.started.wait(), timeout=2)
+            run.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await asyncio.wait_for(run, timeout=2)
+        finally:
+            await self.runtime.lifecycle.stop("sample/feed")
         self.assertEqual(self._count("b04_observations"), 0)
         self.assertEqual(self._count("b04_delivery_events"), 0)
+        self.assertEqual(self._count("b04_evaluation_states"), 0)
+        await self._assert_collection_lease_released()
 
     async def test_i15_local_collection_cancellation_releases_lease_without_commit(
         self,
@@ -1502,7 +1545,7 @@ class B04RuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(failing_runtime.message_port.calls, [])
         self.assertEqual(len(self.runtime.message_port.calls), 1)
         reopened = type(self.runtime.database)(self.root / "runtime.sqlite3")
-        self.assertEqual(reopened.schema_version(), 240)
+        self.assertEqual(reopened.schema_version(), 250)
         recovered = build_runtime(self.root, clock=self.clock)
         self.assertTrue(
             await recovered.resource_visibility.contains_non_public_resource_reference(

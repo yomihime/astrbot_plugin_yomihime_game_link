@@ -182,12 +182,19 @@ def assemble_reviewed(inventory, *, principal_id, support, selected=False):
     ):
         raise ValueError("assembly version or owner mismatch")
     raw_diagnostics = descriptor["diagnostics"]
-    _keys(raw_diagnostics, {"events", "max_events", "max_bytes", "event_limits"})
+    diagnostics_keys = {"events", "max_events", "max_bytes", "event_limits"}
+    if type(raw_diagnostics) is dict and "warning_events" in raw_diagnostics:
+        diagnostics_keys.add("warning_events")
+    _keys(raw_diagnostics, diagnostics_keys)
     events = raw_diagnostics["events"]
+    warning_events = raw_diagnostics.get("warning_events", [])
     if (
         type(events) is not list
         or len(set(events)) != len(events)
         or not set(events) <= {item.event_id for item in module.diagnostics}
+        or type(warning_events) is not list
+        or len(set(warning_events)) != len(warning_events)
+        or not set(warning_events) <= set(events)
     ):
         raise ValueError("diagnostic policy declaration mismatch")
     diagnostic_policies = MappingProxyType(
@@ -197,6 +204,7 @@ def assemble_reviewed(inventory, *, principal_id, support, selected=False):
                 raw_diagnostics["max_events"],
                 raw_diagnostics["max_bytes"],
                 raw_diagnostics["event_limits"],
+                frozenset(warning_events),
             )
         }
     )

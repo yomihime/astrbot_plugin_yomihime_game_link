@@ -6,7 +6,7 @@ import json
 import unittest
 from io import BytesIO
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from PIL import Image
 from ygl_test_subject.presentation.card_bitmap import BitmapUnavailable
@@ -15,6 +15,7 @@ from ygl_test_subject.presentation.layout_renderer import render_document
 from tests.host import test_astrbot_runtime as runtime_fixture
 from tests.host import test_fflogs_tools as fixture
 from tests.modules.ff14 import test_fflogs_cards as card_fixture
+from yomihime_game_link_sdk.services import HttpResponse
 
 
 class DeclarativeLogsCommandTests(unittest.IsolatedAsyncioTestCase):
@@ -41,7 +42,11 @@ class DeclarativeLogsCommandTests(unittest.IsolatedAsyncioTestCase):
             if request.source_id == "universalis_market":
                 self.directory_requests.append(request.path)
                 if request.path.endswith("worlds"):
-                    return [{"id": 71001, "name": "Cerberus"}]
+                    return [
+                        {"id": 71001, "name": "Cerberus"},
+                        # Universalis can list worlds outside the DC directory.
+                        {"id": 71002, "name": "Synthetic Cloud Test"},
+                    ]
                 return [
                     {
                         "name": "SyntheticDC",
@@ -139,6 +144,99 @@ class DeclarativeLogsCommandTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_global_two_parameter_command_routes_without_provider(self):
         await self._assert_command_png(region="Europe")
+
+    async def test_failed_stages_send_safe_group_hint_and_one_correlated_warning(self):
+        logger = MagicMock()
+        logger.isEnabledFor.return_value = True
+        with patch(
+            "ygl_test_subject.adapters.astrbot.runtime.plugin_diagnostic_logger",
+            return_value=logger,
+        ):
+            await self._start_catalog()
+        original = self.transport.callback
+
+        async def exchange_unavailable(request):
+            return HttpResponse(503, {}, fixture.SENTINEL.encode())
+
+        async def graphql_rejected(request):
+            if request.source_id == "fflogs_public_cn":
+                query = json.loads(request.body)["query"]
+                if "FF14PublicCharacter" in query:
+                    return {"errors": [{"message": fixture.SENTINEL}]}
+            return await original(request)
+
+        async def invoke(target, stage, category, status, hint):
+            logger.reset_mock()
+            event = runtime_fixture._Event(context=self.context)
+            event.message = f"/ygl ff14 logs {target} PrivateRoleFixture"
+            await self.runtime.handle_event(event)
+            sent = self.context.calls[-1][1].chain[0].text
+            self.assertIn(hint, sent)
+            self.assertNotIn("PrivateRoleFixture", sent)
+            self.assertNotIn(fixture.SENTINEL, sent)
+            warnings = [
+                call.args[0]
+                for call in logger.warning.call_args_list
+                if call.args and call.args[0].startswith("GAME_LINK_")
+            ]
+            self.assertEqual(len(warnings), 1)
+            self.assertTrue(warnings[0].startswith("GAME_LINK_DIAGNOSTIC "))
+            self.assertNotIn("PrivateRoleFixture", warnings[0])
+            self.assertNotIn(fixture.SENTINEL, warnings[0])
+            diagnostic = json.loads(warnings[0].split(" ", 1)[1])
+            self.assertEqual(diagnostic["event_id"], "FF14LogsFailure")
+            (row,) = diagnostic["payload"]["failures"]
+            self.assertEqual(
+                (row["stage"], row["category"], row["http_status"]),
+                (stage, category, status),
+            )
+            self.assertGreaterEqual(row["elapsed_ms"], 0)
+            self.assertGreaterEqual(diagnostic["elapsed_ms"], row["elapsed_ms"])
+            matching_trace = next(
+                trace
+                for trace in self.runtime.core_runtime.sync_diagnostics.snapshot()[
+                    "attempts"
+                ]
+                if trace["invocation_id"] == diagnostic["trace"]
+            )
+            self.assertEqual(matching_trace["capability_status"], "error")
+            debug = [call.args[0] for call in logger.debug.call_args_list]
+            self.assertEqual(len(debug), 1)
+            self.assertTrue(debug[0].startswith("GAME_LINK_TRACE "))
+            self.assertNotIn("PrivateRoleFixture", debug[0])
+            self.assertNotIn(fixture.SENTINEL, debug[0])
+            self.assertEqual(
+                json.loads(debug[0].split(" ", 1)[1])["invocation_id"],
+                diagnostic["trace"],
+            )
+            return diagnostic
+
+        await invoke(
+            '"Synthetic Cloud Test"',
+            "realm_directory",
+            "region_unresolved",
+            200,
+            "无法判断 FFLogs 区域",
+        )
+        with patch.object(
+            self.transport, "request_credential_exchange", exchange_unavailable
+        ):
+            auth = await invoke(
+                "Cerberus",
+                "server_directory",
+                "http_error",
+                503,
+                "授权或服务器目录查询失败",
+            )
+            self.assertEqual(
+                auth["authorization_failure"]["source"], "fflogs_public_cn"
+            )
+            self.assertEqual(auth["authorization_failure"]["stage"], "auth_failure")
+            self.assertEqual(auth["authorization_failure"]["http_status"], 503)
+        self.transport.callback = graphql_rejected
+        await invoke(
+            "Cerberus", "character_query", "graphql_error", 200, "角色查询失败"
+        )
 
     async def test_old_three_positions_and_unknown_duplicate_options_never_query(self):
         await self._start_catalog()

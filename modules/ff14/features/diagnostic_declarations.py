@@ -1,6 +1,7 @@
 """FF14-owned diagnostic field whitelist, not runtime authority."""
 
 from ....yomihime_game_link_sdk import DiagnosticDeclaration
+from .fflogs_failures import CATEGORIES, EVENT, SOURCES, STAGE_MESSAGES
 
 
 def text(limit=160, nullable=False, values=None):
@@ -271,7 +272,64 @@ def compact_schema(rule):
     return result
 
 
+_FAILURES = obj(
+    {
+        "failures": array(
+            obj(
+                {
+                    "source": text(values=list(SOURCES)),
+                    "stage": text(values=list(STAGE_MESSAGES)),
+                    "category": text(values=list(CATEGORIES)),
+                    "http_status": integer(100, 599, True),
+                    "elapsed_ms": integer(0, 86400000),
+                    "count": integer(1, 10000),
+                }
+            ),
+            8,
+        ),
+        "elapsed_ms": integer(0, 86400000),
+    }
+)
 DECLARATIONS = tuple(
     DiagnosticDeclaration(key, compact_schema(envelope(value)))
     for key, value in PAYLOADS.items()
+) + (DiagnosticDeclaration(EVENT, compact_schema(_FAILURES)),)
+
+NEWS_FAILURE_DECLARATION = DiagnosticDeclaration(
+    "FF14NewsFailure",
+    {
+        "type": "object",
+        "properties": {
+            "source": {
+                "type": "string",
+                "maxLength": 32,
+                "enum": ["ff14_news_official"],
+            },
+            "stage": {
+                "type": "string",
+                "maxLength": 32,
+                "enum": ["binding", "listing", "detail"],
+            },
+            "category": {
+                "type": "string",
+                "maxLength": 32,
+                "enum": [
+                    "timeout",
+                    "transport_error",
+                    "rate_limited",
+                    "http_error",
+                    "payload_parse",
+                    "request_rejected",
+                ],
+            },
+            "http_status": {
+                "type": ["integer", "null"],
+                "minimum": 100,
+                "maximum": 599,
+            },
+            "elapsed_ms": {"type": "integer", "minimum": 0, "maximum": 86400000},
+        },
+        "required": ["source", "stage", "category", "http_status", "elapsed_ms"],
+        "additionalProperties": False,
+    },
 )

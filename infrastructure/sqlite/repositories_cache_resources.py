@@ -150,6 +150,13 @@ def _check_authorization_deadline(value: datetime | None) -> None:
         raise AuthorizationWindowExpired("grant authorization window has expired")
 
 
+def _next_cache_revision(previous: int) -> int:
+    # SQLite signed INTEGER revisions cannot wrap without admitting stale CAS.
+    if previous >= (1 << 63) - 1:
+        raise OverflowError("cache revision exhausted")
+    return previous + 1
+
+
 class SQLiteCacheRepository:
     """A real SQLite implementation of the frozen ``CacheRepository`` port."""
 
@@ -267,7 +274,10 @@ class SQLiteCacheRepository:
             if expected_revision is None:
                 if current is not None:
                     raise RevisionConflict("cache", 0, current)
-                revision = 1
+                floor = unit.execute(
+                    "SELECT retired_revision FROM cache_revision_floor WHERE singleton=1"
+                ).fetchone()[0]
+                revision = _next_cache_revision(floor)
                 try:
                     unit.execute(
                         "INSERT INTO cache_entries(cache_key,visibility,user_id,grant_id,grant_revision,"
@@ -285,7 +295,7 @@ class SQLiteCacheRepository:
             else:
                 if current != expected_revision:
                     raise RevisionConflict("cache", expected_revision, current or 0)
-                revision = expected_revision + 1
+                revision = _next_cache_revision(expected_revision)
                 unit.execute(
                     "UPDATE cache_entries SET payload_json=?, expires_at=?, source_version=?, "
                     "revision=?, invalidated=0 WHERE cache_key=? AND visibility=? AND user_id IS ? "
@@ -322,13 +332,42 @@ class SQLiteCacheRepository:
         def _write(unit: SQLiteUnitOfWork) -> None:
             _check_authorization_deadline(authorization_deadline)
             unit.execute(
-                "UPDATE cache_entries SET invalidated=1, revision=revision+1 "
+                "UPDATE cache_entries SET invalidated=1, revision=MIN(revision+1,9223372036854775807) "
                 "WHERE cache_key=? AND visibility=? AND user_id IS ? AND grant_id IS ? AND grant_revision IS ?",
                 params,
             )
             _check_authorization_deadline(authorization_deadline)
 
         await self.database.executor.run_transaction(_write, begin_mode="IMMEDIATE")
+
+    async def prune_expired(self) -> int:
+        """Retire up to 128 expired cache rows using the expiry index."""
+        cutoff = datetime.now(UTC).isoformat()
+
+        def has_expired(unit: SQLiteUnitOfWork) -> bool:
+            return (
+                unit.execute(
+                    "SELECT 1 FROM cache_entries WHERE expires_at<=? LIMIT 1", (cutoff,)
+                ).fetchone()
+                is not None
+            )
+
+        if not await self.database.executor.run_read(has_expired):
+            return 0
+
+        def prune(unit: SQLiteUnitOfWork) -> int:
+            # Re-evaluate expiry under the write lock: a put may have renewed
+            # a row since the read. The deletion trigger advances the CAS floor.
+            return unit.execute(
+                "DELETE FROM cache_entries WHERE rowid IN "
+                "(SELECT rowid FROM cache_entries WHERE expires_at<=? "
+                "ORDER BY expires_at LIMIT 128)",
+                (cutoff,),
+            ).rowcount
+
+        return await self.database.executor.run_transaction(
+            prune, begin_mode="IMMEDIATE"
+        )
 
     async def current_revision(self, request: CacheAccessRequest) -> int | None:
         request = self._request(request)

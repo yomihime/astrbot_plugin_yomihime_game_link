@@ -212,6 +212,68 @@ class MarketHostIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("public_session", json.dumps(second))
         self.assertTrue(self.runtime.core_runtime.database is not None)
 
+    async def test_large_server_directory_survives_runtime_restart_and_serves_logs(
+        self,
+    ):
+        await self.start()
+        worlds = copy.deepcopy(WORLDS) + [
+            {"id": 3000, "name": "Cloudtest01"},
+            {"id": 3001, "name": "Cloudtest02"},
+        ]
+        dcs = copy.deepcopy(DCS) + [
+            {"name": f"SyntheticDC{i}", "region": "China", "worlds": []}
+            for i in range(12)
+        ]
+        for index in range(121):
+            world_id = 91001 + index
+            worlds.append({"id": world_id, "name": f"SyntheticWorld{index}"})
+            dcs[5 + index % 12]["worlds"].append(world_id)
+
+        async def upstream(request):
+            return {"/api/v2/worlds": worlds, "/api/v2/data-centers": dcs}.get(
+                request.path
+            )
+
+        self.transport.callback = upstream
+        market = {"query": "44091", "server": 90001, "intent": "min"}
+        self.assertEqual((await self.public(market))["status"], "success")
+
+        def inspect(unit):
+            return [
+                dict(row)
+                for row in unit.execute(
+                    "SELECT record_key, owner_kind, payload_json FROM module_records "
+                    "WHERE module_id='ff14/ff14' AND collection='server_directory'"
+                ).fetchall()
+            ]
+
+        rows = await self.runtime.core_runtime.database.executor.run_read(inspect)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(
+            (rows[0]["record_key"], rows[0]["owner_kind"]), ("universalis", "public")
+        )
+        snapshot = json.loads(rows[0]["payload_json"])["snapshot"]
+        self.assertEqual((len(snapshot["worlds"]), len(snapshot["dcs"])), (128, 17))
+        assigned = {member for dc in snapshot["dcs"] for member in dc["worlds"]}
+        self.assertEqual(
+            {row["id"] for row in snapshot["worlds"]} - assigned, {3000, 3001}
+        )
+
+        await self.runtime.terminate()
+        await self.start(expect_calendar_cached=True)
+        logs = runtime_fixture._Event(context=self.context)
+        logs.message = '/ygl ff14 logs SyntheticWorld120 "Synthetic Hero"'
+        await self.runtime.handle_event(logs)
+        self.assertIn("配置对应来源的凭据", self.context.calls[-1][1].chain[0].text)
+        self.assertEqual(self.transport.requests, [])
+        self.assertEqual((await self.public(market))["status"], "success")
+        self.assertFalse(
+            any(
+                request.path in ("/api/v2/worlds", "/api/v2/data-centers")
+                for request in self.transport.requests
+            )
+        )
+
     async def test_fixed_host_auth_dispatch_real_market_handler_and_protocol_denials(
         self,
     ):
@@ -528,7 +590,7 @@ class MarketHostIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(newer["error"]["code"], "parameter_error")
         release.set()
         self.assertEqual((await first)["error"]["code"], "parameter_error")
-        self.assertEqual(config.calls, 2)
+        self.assertEqual(config.calls, 1)  # Invalid replacement does not read defaults.
         self.assertFalse(any("aggregated" in r.path for r in self.transport.requests))
 
     async def test_handler_candidate_expiry_and_module_restart_do_not_restore_state(

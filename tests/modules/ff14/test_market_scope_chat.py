@@ -54,7 +54,7 @@ def context(event, *, select=False, **changes):
 
 
 def snapshot():
-    return SimpleNamespace(
+    return CatalogSnapshot(
         catalog=ScopeCatalog(
             (
                 CatalogEntry("dc", "SyntheticCN", "SyntheticCN", "China"),
@@ -134,7 +134,7 @@ class MarketScopeTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(self.handler.close)
 
         class Session:
-            async def catalog(self):
+            async def catalog(self, targets=()):
                 outer.catalog_calls += 1
                 return outer.catalog_snapshot
 
@@ -541,7 +541,13 @@ class MarketScopeTests(unittest.IsolatedAsyncioTestCase):
 
                 async def bind(ctx, _original_bind=original_bind):
                     scope = await _original_bind(ctx)
-                    return SimpleNamespace(message=scope.message, http=http, cache=None)
+                    return SimpleNamespace(
+                        message=scope.message, http=http, cache=None, records=records
+                    )
+
+                from .test_server_directory import MemoryRecords
+
+                records = MemoryRecords()
 
                 self.handler.services.bind = bind
                 self.handler.source = MarketSourceClient(
@@ -847,7 +853,7 @@ class MarketScopeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(registry.pending.states), 0)
 
     async def test_handler_dc_choice_preserves_real_namespace_and_configuration(self):
-        self.catalog_snapshot = SimpleNamespace(
+        self.catalog_snapshot = CatalogSnapshot(
             catalog=ScopeCatalog(
                 (
                     CatalogEntry("dc", 1, "SharedDC", "China"),

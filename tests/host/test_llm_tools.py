@@ -2841,7 +2841,7 @@ class LLMToolTests(unittest.IsolatedAsyncioTestCase):
         )
         start_bound = handler.source.start_bound
 
-        async def failing_catalog():
+        async def failing_catalog(targets=()):
             self.assertEqual(handler.registry.size, 1)
             self.assertFalse(hasattr(handler, "_tool_event"))
             raise RuntimeError("synthetic internal catalog failure")

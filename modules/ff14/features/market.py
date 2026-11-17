@@ -13,7 +13,11 @@ from ....yomihime_game_link_sdk.display import (
     Privacy,
     TextBlock,
 )
-from ....yomihime_game_link_sdk.errors import SourceHttpError
+from ....yomihime_game_link_sdk.errors import (
+    AccessDenied,
+    OperationTimeout,
+    SourceHttpError,
+)
 from ....yomihime_game_link_sdk.results import (
     CapabilityResult,
     ErrorCode,
@@ -577,6 +581,9 @@ class MarketClient:
                     parameters,
                     lambda payload: parser(payload, query, region, self.catalog),
                     clean=cleaner,
+                    diagnostic_stage="market_aggregated"
+                    if plan.endpoint == "aggregated"
+                    else "market_listings",
                     key_context=(
                         query.parser_version,
                         query.scope.kind,
@@ -585,6 +592,8 @@ class MarketClient:
                     ),
                 )
                 return ScopeOutcome(region, target, data, provenance)
+            except (AccessDenied, OperationTimeout):
+                raise
             except (
                 MarketPayloadError,
                 MarketSourceIncompleteError,
@@ -592,6 +601,8 @@ class MarketClient:
                 SourceHttpError,
                 PermissionError,
             ) as exc:
+                if isinstance(exc, SourceHttpError) and exc.code == "cancelled":
+                    raise
                 return _diagnostic(exc, region, target)
 
         work = [

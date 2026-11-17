@@ -5,6 +5,7 @@ import unittest
 from collections import deque
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 from ygl_test_subject.core.contracts.validation_boundary import validate_contract
 from ygl_test_subject.modules.ff14.features.item_sources import (
@@ -17,7 +18,11 @@ from ygl_test_subject.modules.ff14.features.item_sources import (
 from ygl_test_subject.modules.ff14.features.items import ItemLookup
 from ygl_test_subject.modules.ff14.models import AcquisitionKind
 
-from yomihime_game_link_sdk.errors import SourceHttpError
+from yomihime_game_link_sdk.errors import (
+    AccessDenied,
+    OperationTimeout,
+    SourceHttpError,
+)
 from yomihime_game_link_sdk.results import ErrorCode, ResultStatus
 from yomihime_game_link_sdk.services import HttpRequest, HttpResponse
 
@@ -67,6 +72,31 @@ class ItemLookupTests(unittest.IsolatedAsyncioTestCase):
     def _handler(self, http: _FakeHttp) -> ItemLookup:
         services = type("Services", (), {"scopes": _Scopes(http)})()
         return ItemLookup(services)
+
+    async def test_command_does_not_convert_bound_control_errors(self):
+        for error in (AccessDenied("source_revoked"), OperationTimeout()):
+            http = _FakeHttp([])
+            with (
+                self.subTest(error=error.code),
+                patch.object(_Scopes, "bind", side_effect=error),
+                self.assertRaises(type(error)) as caught,
+            ):
+                await self._handler(http).invoke(None, {"query": "Sample Ore"})
+            self.assertIs(caught.exception, error)
+            self.assertEqual(http.requests, [])
+
+        for query, responses in (
+            ("Sample Ore", []),
+            ("90001", []),
+            ("90001", [self.fixture["xivcdn"]["item_detail"]]),
+        ):
+            cancelled = SourceHttpError("cancelled")
+            http = _FakeHttp([*responses, cancelled])
+            with self.subTest(query=query, upstream_before_cancel=len(responses)):
+                with self.assertRaises(SourceHttpError) as caught:
+                    await self._handler(http).invoke(None, {"query": query})
+                self.assertIs(caught.exception, cancelled)
+                self.assertEqual(len(http.requests), len(responses) + 1)
 
     async def test_ambiguous_search_uses_bounded_cursor_and_never_selects_first(
         self,

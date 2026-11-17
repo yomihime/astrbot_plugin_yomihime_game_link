@@ -125,6 +125,40 @@ class ModulePageHTTPTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(denied.status_code, 403, denied.text)
 
+    async def test_relative_expiry_preserves_legacy_response_and_scope(self):
+        for relative in ({}, {"relative_expiry": True}):
+            with self.subTest(relative=relative):
+                response = await self.call(
+                    "module-page-session", self.binding | relative
+                )
+                self.assertEqual(response.status_code, 200, response.text)
+                data = response.json()["data"]
+                try:
+                    if relative:
+                        self.assertEqual(set(data), {"page_session", "expires_in"})
+                        self.assertGreater(data["expires_in"], 0)
+                        self.assertLessEqual(data["expires_in"], 30)
+                    else:
+                        self.assertEqual(set(data), {"page_session", "expires_at"})
+                        self.assertGreater(data["expires_at"], time.time())
+                    read = await self.call(
+                        "module-config-current",
+                        self.binding | {"page_session": data["page_session"]},
+                    )
+                    self.assertEqual(read.status_code, 200, read.text)
+                finally:
+                    closed = await self.call(
+                        "module-page-session-close",
+                        {"page_session": data["page_session"]},
+                    )
+                    self.assertEqual(closed.status_code, 200, closed.text)
+        for invalid in (False, 1, "true", None):
+            with self.subTest(invalid=invalid):
+                response = await self.call(
+                    "module-page-session", self.binding | {"relative_expiry": invalid}
+                )
+                self.assertEqual(response.status_code, 400, response.text)
+
     async def test_actual_host_verifier_revoked_after_sql_before_commit_rolls_back(
         self,
     ):

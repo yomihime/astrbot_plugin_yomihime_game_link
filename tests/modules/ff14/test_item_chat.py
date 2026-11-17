@@ -39,7 +39,11 @@ from yomihime_game_link_sdk.contexts import (
     InvocationView,
     MessageContext,
 )
-from yomihime_game_link_sdk.errors import SourceHttpError
+from yomihime_game_link_sdk.errors import (
+    AccessDenied,
+    OperationTimeout,
+    SourceHttpError,
+)
 from yomihime_game_link_sdk.results import ErrorCode, FactDocument, ResultStatus
 
 from .test_items import _FakeHttp
@@ -80,6 +84,25 @@ class _Services:
 
 
 class ItemChatTests(unittest.IsolatedAsyncioTestCase):
+    async def test_tool_does_not_convert_bound_control_errors(self):
+        self.setup_handler([])
+        for error in (AccessDenied("source_revoked"), OperationTimeout()):
+            with (
+                self.subTest(error=error.code),
+                patch.object(self.services, "bind", side_effect=error),
+                self.assertRaises(type(error)) as caught,
+            ):
+                await self.call("查90001", "90001")
+            self.assertIs(caught.exception, error)
+            self.assertEqual(self.http.requests, [])
+
+        cancelled = SourceHttpError("cancelled")
+        self.http.responses.extend([FIXTURE["xivcdn"]["item_detail"], cancelled])
+        with self.assertRaises(SourceHttpError) as caught:
+            await self.call("查90001", "90001", event="cancelled-route")
+        self.assertIs(caught.exception, cancelled)
+        self.assertEqual(len(self.http.requests), 2)
+
     async def test_consumed_confirmation_and_source_cannot_restart_after_success(self):
         pending = await self.pending()
         self.detail_responses()

@@ -211,7 +211,7 @@ test('home mount receives the declared static Logo without requesting additional
           calls.push(action);
           if (action === 'admin/read') {assert.deepEqual(body,{scope:'page_locale'});return {};}
           if (action === 'admin/module-page-session') {
-            return {page_session: 'fixture-proof', expires_at: Date.now() / 1000 + 30};
+            return {page_session: 'fixture-proof', expires_in: 30};
           }
           if (action === 'admin/module-page-session-close') return {closed: true};
           assert.fail(action);

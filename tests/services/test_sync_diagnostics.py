@@ -34,8 +34,14 @@ from tests.services import test_background_scheduler as background_fixture
 from tests.services.test_http_transport import _request, _ResponseContext, _Session
 from tests.services.test_source_http import _FakeTransport
 from yomihime_game_link_sdk.declarations import SourceDeclaration
-from yomihime_game_link_sdk.errors import SourceHttpError
-from yomihime_game_link_sdk.results import ResultStatus
+from yomihime_game_link_sdk.errors import (
+    AccessDenied,
+    OperationTimeout,
+    ParameterError,
+    ServiceUnavailable,
+    SourceHttpError,
+)
+from yomihime_game_link_sdk.results import ErrorCode, ResultStatus
 from yomihime_game_link_sdk.services import HttpRequest
 
 SECRET = "PRIVATE-SENTINEL-https://secret.invalid/?token=secret-C:/private/secret"
@@ -175,6 +181,49 @@ class CalendarDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(self.store, "_sink", side_effect=asyncio.CancelledError()):
             with self.assertRaises(asyncio.CancelledError):
                 await fixture.sync()
+
+
+class BoundDiagnosticsFailureTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.check = AsyncMock()
+        self.store = Mock(spec=DiagnosticStore)
+        event = validate_contract(DECLARATION)
+        self.port = BoundDiagnostics(
+            SimpleNamespace(),
+            (event,),
+            DiagnosticPolicy(frozenset({event.event_id})),
+            self.store,
+            self.check,
+        )
+
+    async def test_optional_store_failure_cannot_hide_revocation_on_recheck(self):
+        self.store.record.side_effect = RuntimeError(SECRET)
+        self.check.side_effect = [None, AccessDenied("grant_revoked")]
+
+        with self.assertRaises(AccessDenied) as raised:
+            await self.port.emit("CalendarSync", {})
+
+        self.assertEqual(raised.exception.code, "grant_revoked")
+        self.assertEqual(self.check.await_count, 2)
+        self.store.record.assert_called_once()
+
+    async def test_store_control_and_payload_failures_still_propagate(self):
+        for failure in (
+            AccessDenied(),
+            OperationTimeout(),
+            ServiceUnavailable(),
+            ParameterError(),
+            asyncio.CancelledError(),
+        ):
+            with self.subTest(failure=type(failure).__name__):
+                self.check.reset_mock()
+                self.store.record.side_effect = failure
+                with self.assertRaises(type(failure)):
+                    await self.port.emit("CalendarSync", {})
+                expected_checks = (
+                    1 if isinstance(failure, asyncio.CancelledError) else 2
+                )
+                self.assertEqual(self.check.await_count, expected_checks)
 
 
 class SyncDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
@@ -421,6 +470,157 @@ class SyncDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
         finally:
             fixture.gateway.fence_public_web()
             self.assertTrue(await fixture.gateway.drain_public_web(1))
+
+    async def test_publication_staleness_is_quiet_and_deadlines_are_reported(self):
+        for mode in ("closed", "proof_revoked", "deadline_before", "deadline_after"):
+            with self.subTest(mode=mode):
+                fixture = web_fixture.PublicWebGatewayTests()
+                await fixture._ready_web()
+                warnings = []
+                diagnostics = SyncDiagnostics(warning_sink=warnings.append)
+                self.addCleanup(diagnostics.close)
+                fixture.gateway._sync_diagnostics = diagnostics
+                tick = [1000.0]
+                fixture.gateway._clock = fixture.fixture.issuer._clock = lambda: tick[0]
+                proof = fixture.proofs.new("testpkg/records", "record.query")
+                revoke = fixture.proofs.revoke
+                create = asyncio.create_task
+
+                def change_before_publication(_task):
+                    if mode == "closed":
+                        fixture.gateway.fence_public_web()
+                    elif mode == "proof_revoked":
+                        revoke(proof)
+                    elif mode == "deadline_before":
+                        tick[0] = 1031.0
+
+                def create_task(work, *, name=None, **kwargs):
+                    task = create(work, name=name, **kwargs)
+                    if name == "gateway:public_web":
+                        task.add_done_callback(change_before_publication)
+                    return task
+
+                def revoke_on_cleanup(proof):
+                    revoke(proof)
+                    if mode == "deadline_after":
+                        tick[0] = 1031.0
+
+                fixture.proofs.revoke = revoke_on_cleanup
+                try:
+                    with patch("asyncio.create_task", create_task):
+                        result = await fixture._invoke(proof=proof)
+                    self.assertIs(result.error.code, ErrorCode.MODULE_UNAVAILABLE)
+                    trace = diagnostics.snapshot()["attempts"][-1]
+                    expired = mode.startswith("deadline")
+                    self.assertEqual(
+                        trace["core_failure_code"],
+                        "core_deadline" if expired else "stale",
+                    )
+                    self.assertEqual(
+                        [warning["category"] for warning in warnings],
+                        ["core_deadline"] if expired else [],
+                    )
+                finally:
+                    fixture.gateway.fence_public_web()
+                    self.assertTrue(await fixture.gateway.drain_public_web(0.5))
+
+    async def test_command_publication_distinguishes_release_from_deadline(self):
+        for mode in ("released", "deadline"):
+            with self.subTest(mode=mode):
+                fixture = web_fixture.GatewayTests()
+                fixture.setUp()
+                started = asyncio.Event()
+                release = asyncio.Event()
+                _, view = await fixture._ready(
+                    handler=web_fixture._Handler(started=started, release=release)
+                )
+                now = [asyncio.get_running_loop().time()]
+                if mode == "deadline":
+                    fixture.issuer.release(view)
+                    fixture.issuer._clock = lambda: now[0]
+                    view = fixture.issuer.issue(
+                        origin=view.origin,
+                        module_id=view.module_id,
+                        module_epoch=view.module_epoch,
+                        registry_revision=view.registry_revision,
+                        actor_id=view.actor_id,
+                        conversation_id=view.conversation_id,
+                        capability_id=view.capability_id,
+                        deadline=now[0] + 30,
+                    )
+                warnings = []
+                diagnostics = SyncDiagnostics(warning_sink=warnings.append)
+                self.addCleanup(diagnostics.close)
+                gateway = fixture._gateway()
+                gateway._sync_diagnostics = diagnostics
+                pending = asyncio.create_task(
+                    gateway.invoke_command(view, "查询", {"id": "x"})
+                )
+                try:
+                    await asyncio.wait_for(started.wait(), 1)
+                    if mode == "released":
+                        fixture.issuer.release(view)
+                    else:
+                        now[0] += 31
+                    release.set()
+                    result = await pending
+                    self.assertIs(result.error.code, ErrorCode.MODULE_UNAVAILABLE)
+                    trace = diagnostics.snapshot()["attempts"][-1]
+                    expired = mode == "deadline"
+                    self.assertEqual(
+                        trace["core_failure_code"],
+                        "core_deadline" if expired else "stale",
+                    )
+                    self.assertEqual(
+                        [warning["category"] for warning in warnings],
+                        ["core_deadline"] if expired else [],
+                    )
+                finally:
+                    release.set()
+                    if not pending.done():
+                        await pending
+                    if mode == "deadline":
+                        fixture.issuer.release(view)
+
+    async def test_terminal_warning_ignores_stale_and_cancelled_work(self):
+        warnings = []
+        diagnostics = SyncDiagnostics(warning_sink=warnings.append)
+        self.addCleanup(diagnostics.close)
+        for number, (runtime_code, final_code, expected_warning) in enumerate(
+            (
+                ("stale", "error", None),
+                ("cancelled", "error", None),
+                (None, "cancelled", None),
+                (None, "stale", None),
+                ("core_deadline", "error", "core_deadline"),
+                ("error", "error", "error"),
+                (None, "completed", "module_unavailable"),
+            )
+        ):
+            with self.subTest(runtime_code=runtime_code, final_code=final_code):
+                trace_id = f"{number:032x}"
+                token = diagnostics.activate(trace_id, "command")
+                try:
+                    warnings.clear()
+                    emit("core_start", budget_ms=1000)
+                    if runtime_code is not None:
+                        emit("core_failure", code=runtime_code)
+                    emit(
+                        "core_final",
+                        code=final_code,
+                        capability_status="error",
+                        failure_code="module_unavailable",
+                    )
+                    trace = diagnostics.snapshot()["attempts"][-1]
+                    self.assertEqual(trace["invocation_id"], trace_id)
+                    self.assertEqual(trace["core_final"], final_code)
+                    self.assertEqual(trace["core_failure_code"], runtime_code)
+                    self.assertEqual(
+                        [row["category"] for row in warnings],
+                        [] if expected_warning is None else [expected_warning],
+                    )
+                finally:
+                    diagnostics.reset(token)
 
     async def test_ring_terminal_public_opt_in_and_runtime_isolated(self):
         emit("core_start", budget_ms=1234)

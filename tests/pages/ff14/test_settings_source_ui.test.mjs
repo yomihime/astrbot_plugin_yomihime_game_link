@@ -71,3 +71,81 @@ test('shared settings theme keeps focused draft node and credential regions rema
   const regions=[...container.querySelectorAll('.ui-segmented button')];assert.deepEqual(regions.map(b=>b.getAttribute('aria-pressed')),['true','false']);regions[1].click();await flush();assert.deepEqual(regions.map(b=>b.getAttribute('aria-pressed')),['false','true']);const forms=[...container.querySelectorAll('.ff14-credential')];assert.deepEqual(forms.map(f=>f.hidden),[true,false]);assert.ok([...forms[1].querySelectorAll('input')].every(i=>i.type==='password'));assert.equal(writes,0);
  }finally{page.dispose();container.remove();}
 });
+
+test('actual settings render a focus-stable server-cache action independent of form save',async()=>{
+ const key='ff14_server_directory_generation';
+ let revision=4,generation='initial',releaseWrite;
+ const calls=[],container=window.document.createElement('main');
+ window.document.body.append(container);
+ const context={owner:'ff14/ff14',runtimeId:'cache-ui',epoch:1,boundary:'cache-ui',available:true,theme:'light',locale:'zh-CN'};
+ const options={routeId:'config',context,scope:{isCurrent:()=>true,onDispose(){}},services:{
+  config:{
+   current:async()=>({revision,fields:{[key]:{value:generation,state:'valid',present:true,source:'sqlite'}}}),
+   save:(expected,patch)=>{
+    calls.push([expected,patch]);
+    return new Promise(resolve=>{releaseWrite=()=>{generation=patch[key];resolve({revision:++revision});};});
+   },
+  },
+  credentials:{status:async()=>({revision,fields:{}})},
+ }};
+ const page=mountSettings(container,options);
+ try{
+  await flush();
+  const clear=[...container.querySelectorAll('button')].find(button=>button.textContent==='清除服务器缓存');
+  assert.ok(clear);
+  const hint=window.document.getElementById(clear.getAttribute('aria-describedby'));
+  assert.match(hint.textContent,/长期保存.*下次查询会重新获取目录.*其他数据不受影响/);
+  assert.equal(clear.type,'button');
+  assert.equal(clear.closest('form'),null);
+  assert.equal(container.querySelector(`[name="${key}"]`),null);
+  assert.equal(container.textContent.includes(key),false);
+  const ordinary=container.querySelector('input[name="ff14_calendar_default_days"]');
+  const regions=container.querySelectorAll('.ui-segmented button');
+  regions[1].click();await flush();
+  const password=container.querySelector('#credential_fflogs_global-client_secret');
+  for(const [input,value] of [[ordinary,'13'],[password,'synthetic-secret']]){
+   input.value=value;input.dispatchEvent(new window.Event('input',{bubbles:true}));
+  }
+  await flush();
+  clear.focus();clear.click();await flush();
+  assert.equal(window.document.activeElement,clear);
+  assert.equal(clear.getAttribute('aria-disabled'),'true');
+  assert.equal(clear.getAttribute('aria-busy'),'true');
+  assert.equal(password.disabled,true);
+  assert.equal(ordinary.disabled,false);
+  clear.click();await flush();
+  assert.equal(calls.length,1);
+  assert.equal(calls[0][0],4);
+  assert.deepEqual(Object.keys(calls[0][1]),[key]);
+  assert.doesNotMatch(container.textContent,/服务器缓存已清除/);
+
+  releaseWrite();await flush();
+  assert.equal(window.document.activeElement,clear);
+  assert.equal(clear.hasAttribute('aria-disabled'),false);
+  assert.equal(clear.hasAttribute('aria-busy'),false);
+  assert.equal(ordinary.value,'13');
+  assert.equal(password.value,'synthetic-secret');
+  assert.equal(password.type,'password');
+  assert.equal(regions[1].getAttribute('aria-pressed'),'true');
+  assert.equal(page.navigationImpact().ordinary,true);
+  assert.equal(page.navigationImpact().credentials,true);
+  assert.match(container.textContent,/服务器缓存已清除/);
+ }finally{page.dispose();container.remove();}
+
+ const home=window.document.createElement('main');
+ window.document.body.append(home);
+ const homePage=mountSettings(home,{...options,routeId:'home'});
+ try{await flush();assert.doesNotMatch(home.textContent,/清除服务器缓存/);}
+ finally{homePage.dispose();home.remove();}
+});
+
+test('server-cache copy is present in all FF14 locales',async()=>{
+ const expected={'zh-CN':'清除服务器缓存','zh-TW':'清除伺服器快取','ja-JP':'サーバーキャッシュを消去','en-US':'Clear server cache'};
+ const keys=['serverCacheTitle','serverCacheDescription','serverCacheClearing','serverCacheCleared','serverCacheClearUnverified','serverCacheClearCancelled'];
+ for(const [locale,button] of Object.entries(expected)){
+  const source=new URL(`../../../modules/ff14/pages/src/i18n/${locale}.json`,import.meta.url);
+  const catalog=JSON.parse(await readFile(source,'utf8'));
+  assert.equal(catalog['settings.clearServerCache'],button);
+  for(const key of keys)assert.ok(catalog[`settings.${key}`],`${locale}: ${key}`);
+ }
+});

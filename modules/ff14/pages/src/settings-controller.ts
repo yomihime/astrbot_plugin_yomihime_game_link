@@ -14,6 +14,17 @@ export const ordinaryFields = [
   {name:'ff14_calendar_sync_interval_seconds',value:21600,choices:[['21600','settings.hours'],['43200','settings.hours'],['86400','settings.hours']]},
 ] as const;
 export const credentialFields = [{name:'credential_fflogs_cn',labelKey:'region.cn'},{name:'credential_fflogs_global',labelKey:'region.global'}] as const;
+export const directoryGenerationField = 'ff14_server_directory_generation';
+
+function newDirectoryGeneration(): string {
+  // Web Crypto random bytes are available on local HTTP management pages too.
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('');
+  return [hex.slice(0, 8), hex.slice(8, 12), hex.slice(12, 16), hex.slice(16, 20), hex.slice(20)].join('-');
+}
+
 const drafts = new Map<string,Record<string,string>>();
 const authorityErrors=new Set(['admin_authorization_denied','access_denied','auth_expired','page_revoked','page_unavailable','stale_context','module_unavailable']);
 function errorCode(error:unknown):string {if(error&&typeof error==='object'){const e=error as {code?:unknown;message?:unknown};return typeof e.code==='string'?e.code:typeof e.message==='string'?e.message:'';}return '';}
@@ -25,7 +36,7 @@ export function createSettingsController(options:PageOptions,onChanged:()=>void)
   let messageKey = 'settings.reading';
   const state={context:options.context,revision:0,get credentialRevision():number{return this.revision;},ready:false,draftEditable:false,baselineUnverified:false,pending:false,get message():string{return ff14Text(this.context.locale,messageKey);},error:false,
     draft:{} as Record<string,string>,pairs:Object.fromEntries(credentialFields.map(f=>[f.name,{client_id:'',client_secret:''}])),
-    credentials:null as CredentialSnapshot|null,themeChoices:[] as {value:string;label:string}[],themeAvailable:false,dirty:false};
+    credentials:null as CredentialSnapshot|null,themeChoices:[] as {value:string;label:string}[],themeAvailable:false,directoryCacheAvailable:false,dirty:false};
   let disposed=false,bindingRevoked=false,sequence=0,editVersion=0,minimumRevision=0,baseline:Record<string,string>={};
   let acknowledgementPending=false,acknowledgedSubmission:{values:Record<string,string>;version:number}|null=null;
   const editedAt:Record<string,number>={};
@@ -40,6 +51,7 @@ export function createSettingsController(options:PageOptions,onChanged:()=>void)
     for(const [name,version] of Object.entries(editedAt))if(version>startedAt)patch[name]=state.draft[name];
     state.revision=config.revision;state.credentials=credentials;minimumRevision=Math.max(minimumRevision,config.revision);
     state.themeAvailable=Boolean(config.descriptors?.reply_theme);
+    state.directoryCacheAvailable=Object.hasOwn(config.fields,directoryGenerationField);
     state.themeChoices=(config.descriptors?.reply_theme?.choices||[]).flatMap(choice=>typeof choice.value==='string'&&choice.value?[{value:choice.value,label:choice.label}]:[]);
     baseline=Object.fromEntries(ordinaryFields.filter(f=>f.name!=='reply_theme'||state.themeAvailable).map(f=>{
       const stored=config.fields[f.name];return [f.name,stored?.state==='invalid'?(f.name==='reply_theme'?'!invalid':''):Array.isArray(f.value)?(Array.isArray(stored?.value)?stored.value:f.value).join(', '):String(stored?.value??f.value??'')];
@@ -54,14 +66,14 @@ export function createSettingsController(options:PageOptions,onChanged:()=>void)
     }
     throw Error('revision_conflict');
   }
-  function failure(error:unknown,field?:string,committed=false,reading=false){
+  function failure(error:unknown,field?:string,committed=false,reading=false,clearingDirectory=false){
     // A failed management read cannot establish authority. Scrub this current
     // context's secrets without pretending an unknown failure is an auth denial.
     if(reading)scrub();
     const code=errorCode(error);
     if(authorityErrors.has(code)){state.ready=false;state.baselineUnverified=true;state.draftEditable=false;scrub();notify('settings.authorizationLost',true);return;}
-    if(committed){state.ready=false;state.baselineUnverified=true;if(field)scrub(field);notify('settings.writeUnverified',true);return;}
-    if(code==='operation_cancelled'){notify('settings.credentialCancelled');return;}
+    if(committed){state.ready=false;state.baselineUnverified=true;if(field)scrub(field);notify(clearingDirectory?'settings.serverCacheClearUnverified':'settings.writeUnverified',true);return;}
+    if(code==='operation_cancelled'){notify(clearingDirectory?'settings.serverCacheClearCancelled':'settings.credentialCancelled');return;}
     if(code==='invalid_config'){notify('settings.invalidInput',true);return;}
     if(code==='revision_conflict'){state.ready=false;state.baselineUnverified=true;notify('settings.conflict',true);return;}
     state.ready=false;state.baselineUnverified=true;
@@ -74,14 +86,23 @@ export function createSettingsController(options:PageOptions,onChanged:()=>void)
     catch(error){if(current(n))failure(error,undefined,acknowledgementPending,true);}
     finally{if(current(n)){state.pending=false;changed();}}
   }
-  async function mutate(action:(revision:number)=>Promise<{revision:number}>,submitted?:Record<string,string>,field?:string){
+  async function mutate(action:(revision:number)=>Promise<{revision:number}>,submitted?:Record<string,string>,field?:string,directoryGeneration?:string){
     if(!state.ready||state.pending||!current(sequence))return;
-    const n=++sequence,startedAt=editVersion,revision=state.revision;state.pending=true;changed();let committed=false;
-    try{const receipt=await action(revision);if(!current(n))return;committed=true;acknowledgementPending=true;minimumRevision=Math.max(minimumRevision,receipt.revision);state.ready=false;state.baselineUnverified=true;
+    const clearingDirectory=directoryGeneration!==undefined;
+    const n=++sequence,startedAt=editVersion,revision=state.revision;
+    state.pending=true;
+    if(clearingDirectory)notify('settings.serverCacheClearing');else changed();
+    let committed=false;
+    try{if(!current(n))return;const receipt=await action(revision);if(!current(n))return;committed=true;acknowledgementPending=true;minimumRevision=Math.max(minimumRevision,receipt.revision);state.ready=false;state.baselineUnverified=true;
       if(submitted)acknowledgedSubmission={values:submitted,version:startedAt};
-      if(field)scrub(field);const pair=await snapshots(n);if(!pair)return;accept(...pair,startedAt);
-      notify(state.dirty?'settings.savedWithDraft':'settings.saved');
-    }catch(error){if(current(n))failure(error,field,committed,committed);}
+      if(field)scrub(field);const pair=await snapshots(n);if(!pair)return;
+      if(clearingDirectory){
+        const stored=pair[0].fields[directoryGenerationField];
+        if(stored?.state!=='valid'||stored.value!==directoryGeneration)throw Error('directory_generation_unverified');
+      }
+      accept(...pair,startedAt);
+      notify(clearingDirectory?'settings.serverCacheCleared':state.dirty?'settings.savedWithDraft':'settings.saved');
+    }catch(error){if(current(n))failure(error,field,committed,committed&&!clearingDirectory,clearingDirectory);}
     finally{if(current(n)){state.pending=false;changed();}}
   }
   function cancel(){sequence++;state.pending=false;scrub();state.ready=false;state.baselineUnverified=true;notify('settings.stopped');}
@@ -100,6 +121,11 @@ export function createSettingsController(options:PageOptions,onChanged:()=>void)
       if(!['true','false'].includes(submitted.ff14_subscriptions_enabled)||!['cn','global'].includes(String(values.ff14_default_region))||!Number.isInteger(values.ff14_calendar_default_days)||Number(values.ff14_calendar_default_days)<1||Number(values.ff14_calendar_default_days)>30||![21600,43200,86400].includes(Number(values.ff14_calendar_sync_interval_seconds))||!/^([01]\d|2[0-3]):[0-5]\d$/.test(String(values.ff14_calendar_default_delivery_time))){notify('settings.checkFields',true);return Promise.resolve();}
       try{new Intl.DateTimeFormat('en',{timeZone:String(values.ff14_calendar_default_timezone)});}catch{notify('settings.invalidTimezone',true);return Promise.resolve();}
       return mutate(revision=>options.services.config.save(revision,values),submitted);},
+    clearServerCache(){
+      if(!state.directoryCacheAvailable||!state.ready||state.pending||!current(sequence))return Promise.resolve();
+      const generation=newDirectoryGeneration();
+      return mutate(revision=>options.services.config.save(revision,{[directoryGenerationField]:generation}),undefined,undefined,generation);
+    },
     replace(field:string){const pair=state.pairs[field];if(!pair||Object.values(pair).some(value=>!value.trim()||value.length>512||/[\x00-\x1f\x7f-\x9f]/u.test(value))){notify('settings.invalidCredential',true);return Promise.resolve();}const submitted={...pair};return mutate(revision=>options.services.credentials.replace(revision,field,submitted),undefined,field);},
     clear(field:string){if(!state.pairs[field])return Promise.resolve();return mutate(revision=>options.services.credentials.clear(revision,field),undefined,field);},
     update(context:Readonly<PageContext>){

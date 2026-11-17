@@ -80,13 +80,30 @@ class CatalogEntry:
 class ScopeCatalog:
     entries: tuple[CatalogEntry, ...]
     available: bool = True
+    unassigned_worlds: tuple[tuple[int, str], ...] = ()
 
     def __post_init__(self) -> None:
-        if type(self.entries) is not tuple or type(self.available) is not bool:
+        if (
+            type(self.entries) is not tuple
+            or type(self.available) is not bool
+            or type(self.unassigned_worlds) is not tuple
+        ):
             raise ValueError("catalog must be immutable")
         if any(not isinstance(entry, CatalogEntry) for entry in self.entries):
             raise ValueError("invalid catalog entry")
         identities = tuple((entry.kind, entry.id) for entry in self.entries)
+        for world in self.unassigned_worlds:
+            if (
+                type(world) is not tuple
+                or len(world) != 2
+                or type(world[0]) is not int
+                or world[0] <= 0
+            ):
+                raise ValueError("invalid unassigned world")
+            _text(world[1], "catalog name")
+        identities += tuple(
+            ("world", world_id) for world_id, _ in self.unassigned_worlds
+        )
         if len(identities) != len(set(identities)):
             raise ValueError("duplicate catalog IDs")
         dcs = {entry.id: entry for entry in self.entries if entry.kind == "dc"}
@@ -100,14 +117,22 @@ class ScopeCatalog:
         if not self.available:
             raise QueryResolutionError("范围目录暂不可用。", ErrorCode.UPSTREAM_ERROR)
         token = _scope_token(value, kind)
+        name = token.casefold()
+        if kind == "world" and any(
+            str(world_id) == token or world_name.casefold() == name
+            for world_id, world_name in self.unassigned_worlds
+        ):
+            raise QueryResolutionError(
+                "服务器目录无法确认该名称或 ID 的归属。", ErrorCode.UPSTREAM_ERROR
+            )
         candidates = tuple(
             entry
             for entry in self.entries
             if entry.kind == kind
             and (
                 str(entry.id) == token
-                or entry.name.casefold() == token.casefold()
-                or any(alias.casefold() == token.casefold() for alias in entry.aliases)
+                or entry.name.casefold() == name
+                or any(alias.casefold() == name for alias in entry.aliases)
             )
         )
         if not candidates:
@@ -244,6 +269,31 @@ class MarketQueryResolver:
     def __init__(self, catalog: ScopeCatalog) -> None:
         self.catalog = catalog
 
+    @staticmethod
+    def validate_inputs(
+        parameters: Mapping[str, object], *, chat: bool = False
+    ) -> tuple[str, str, str]:
+        allowed = (
+            _KEYS | {"action", "request_language", "context_language"}
+            if chat
+            else _KEYS
+        )
+        if not isinstance(parameters, Mapping) or any(
+            key not in allowed for key in parameters
+        ):
+            raise QueryResolutionError("查询包含未知参数。")
+        try:
+            query = validate_item_query(parameters.get("query"))
+        except ValueError as exc:
+            raise QueryResolutionError(str(exc)) from exc
+        quality = parameters.get("quality", "all")
+        intent = parameters.get("intent", "overview")
+        if type(quality) is not str or quality not in ("all", "nq", "hq"):
+            raise QueryResolutionError("quality 必须为 all/nq/hq。")
+        if type(intent) is not str or intent not in ("overview", "min", "listings"):
+            raise QueryResolutionError("intent 必须为 overview/min/listings。")
+        return query, quality, intent
+
     def parse(
         self, parameters: Mapping[str, object], defaults: QueryDefaults, *, chat=False
     ) -> MarketQuery:
@@ -263,20 +313,7 @@ class MarketQueryResolver:
             }
             if not any(key in parameters for key in ("region", "server", "dc")):
                 defaults = replace(defaults, default_region=region)
-        if not isinstance(parameters, Mapping) or any(
-            key not in _KEYS for key in parameters
-        ):
-            raise QueryResolutionError("查询包含未知参数。")
-        try:
-            query = validate_item_query(parameters.get("query"))
-        except ValueError as exc:
-            raise QueryResolutionError(str(exc)) from exc
-        quality = parameters.get("quality", "all")
-        intent = parameters.get("intent", "overview")
-        if type(quality) is not str or quality not in ("all", "nq", "hq"):
-            raise QueryResolutionError("quality 必须为 all/nq/hq。")
-        if type(intent) is not str or intent not in ("overview", "min", "listings"):
-            raise QueryResolutionError("intent 必须为 overview/min/listings。")
+        query, quality, intent = self.validate_inputs(parameters)
         world = (
             self.catalog.find("world", parameters["server"])
             if "server" in parameters

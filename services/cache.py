@@ -30,8 +30,13 @@ from ..core.ports import (
 )
 from ..core.ports_jobs import JobRunLease
 from ..core.public_errors import parameters, public_boundary
+from ..infrastructure.sync_diagnostics import emit as diagnostic
 from ..yomihime_game_link_sdk.contexts import InvocationOrigin, InvocationView
-from ..yomihime_game_link_sdk.errors import CacheUnavailable, ServiceUnavailable
+from ..yomihime_game_link_sdk.errors import (
+    AccessDenied,
+    CacheUnavailable,
+    ServiceUnavailable,
+)
 from ..yomihime_game_link_sdk.services import CacheAccess
 from ..yomihime_game_link_sdk.storage import (
     CacheEntry,
@@ -46,6 +51,7 @@ from .identity import (
     PrincipalResolutionDenied,
     PrincipalResolutionUnavailable,
 )
+from .runtime_effect_gate import EffectRejected
 
 _T = TypeVar("_T")
 
@@ -210,7 +216,9 @@ class _CacheAccessCoordinator:
                 "invocation admission is no longer active", code="admission_denied"
             ) from exc
 
-    async def _await_boundary(self, operation: Callable[[], Awaitable[_T]]) -> _T:
+    async def _await_boundary(
+        self, stage: str, operation: Callable[[], Awaitable[_T]]
+    ) -> _T:
         self._check_admission()
         await self._assert_grant_current()
         try:
@@ -223,18 +231,32 @@ class _CacheAccessCoordinator:
             # Authority after the failed backend await wins over availability.
             self._check_admission()
             await self._assert_grant_current()
-            if isinstance(
+            if isinstance(error, EffectRejected):
+                # An executor effect rejection is an authority fence even when
+                # the current in-process invocation and grant still pass.
+                if error.code == "stale_lease":
+                    failure = InvalidInvocation()
+                elif error.code == "grant_revoked":
+                    failure = AccessDenied("grant_revoked")
+                else:
+                    failure = ServiceUnavailable()
+            elif isinstance(error, CacheUnavailable):
+                failure = error
+            elif isinstance(
                 error,
                 (PermissionError, TimeoutError, RevisionConflict, ServiceUnavailable),
             ):
                 raise
-            failure = CacheUnavailable()
+            else:
+                failure = CacheUnavailable()
         except BaseException:
             self._check_admission()
             raise
         else:
             failure = None
         if failure is not None:
+            if isinstance(failure, CacheUnavailable):
+                diagnostic(stage, code="cache_unavailable")
             raise failure
         self._check_admission()
         await self._assert_grant_current()
@@ -315,7 +337,9 @@ class _CacheAccessCoordinator:
             raise CacheAccessError(
                 "cache scope is outside invocation", code="scope_denied"
             )
-        result = await self._await_boundary(lambda: self.__repository.get(request))
+        result = await self._await_boundary(
+            "cache_read", lambda: self.__repository.get(request)
+        )
         if type(result) is not CacheLookup:
             raise ValueError("cache repository returned an invalid lookup")
         validate_contract(result)
@@ -366,7 +390,7 @@ class _CacheAccessCoordinator:
         )
         if expected_revision is None:
             expected_revision = await self._await_boundary(
-                lambda: self.__repository.current_revision(request)
+                "cache_write", lambda: self.__repository.current_revision(request)
             )
         try:
             async with self._write_mutation("cache-put"):
@@ -375,12 +399,13 @@ class _CacheAccessCoordinator:
                     grant_deadline if scope.grant is not None else None
                 )
                 return await self._await_boundary(
+                    "cache_write",
                     lambda: self.__repository.put(
                         request,
                         entry,
                         expected_revision=expected_revision,
                         authorization_deadline=authorization_deadline,
-                    )
+                    ),
                 )
         except RevisionConflict:
             raise
@@ -411,9 +436,10 @@ class _CacheAccessCoordinator:
                 grant_deadline if request.scope.grant is not None else None
             )
             await self._await_boundary(
+                "cache_write",
                 lambda: invalidate(
                     request, authorization_deadline=authorization_deadline
-                )
+                ),
             )
 
     def _default_visibility(self) -> CacheVisibility:

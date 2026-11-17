@@ -142,7 +142,7 @@ class DutyOrderCatalog:
             } or error.status_code in (401, 403):
                 raise PermissionError() from None
             if error.code == "cancelled":
-                raise ServiceUnavailable() from None
+                raise
             result, ttl = DutyOrder(), FAILURE_SECONDS
             state = "unavailable"
         except (ServiceUnavailable, PermissionError, OperationTimeout):
@@ -206,9 +206,9 @@ def apply_duty_order(character, catalog):
     )
     ordered = sorted(
         enumerate(ultimate),
-        key=lambda item: (0, -matches[item[0]], item[0])
-        if item[0] in matches
-        else (1, 0, item[0]),
+        key=lambda item: (
+            (0, -matches[item[0]], item[0]) if item[0] in matches else (1, 0, item[0])
+        ),
     )
     groups = tuple(group for _, group in ordered) + tuple(
         group for group in character.groups if group.category != "ultimate"

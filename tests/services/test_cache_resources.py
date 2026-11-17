@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import tempfile
 import threading
 import unittest
@@ -32,6 +33,11 @@ from ygl_test_subject.infrastructure.sqlite.repositories_cache_resources import 
 )
 from ygl_test_subject.infrastructure.sqlite.repositories_identity import (
     SQLiteIdentityRepository,
+)
+from ygl_test_subject.infrastructure.sync_diagnostics import (
+    MAX_EVENTS,
+    SyncDiagnostics,
+    emit,
 )
 from ygl_test_subject.services import resources as resource_service_module
 from ygl_test_subject.services.cache import CacheAccessService
@@ -416,10 +422,94 @@ class CacheResourcesServiceTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(InvalidInvocation):
             await self._cache(view, repository=Revoked()).get("entry")
 
+    async def test_cache_failure_stages_are_safe_and_survive_a_full_trace(self):
+        import sqlite3
+
+        from yomihime_game_link_sdk import CacheUnavailable
+
+        class Broken:
+            def __getattr__(inner, name):
+                return getattr(self.cache_repository, name)
+
+            async def get(inner, request):
+                raise sqlite3.OperationalError("private database path")
+
+            async def put(inner, *args, **kwargs):
+                raise CacheUnavailable()
+
+        for public, full in ((True, False), (True, True), (False, False)):
+            with self.subTest(public=public, full=full):
+                view = self._invocation("alice")
+                traces, warnings = [], []
+                diagnostics = SyncDiagnostics(
+                    trace_sink=traces.append, warning_sink=warnings.append
+                )
+                token = diagnostics.activate(
+                    view.invocation_id, "command", public=public
+                )
+                try:
+                    emit("core_start", budget_ms=1000)
+                    healthy = self._cache(view)
+                    await healthy.put("healthy", {}, ttl_seconds=30)
+                    await healthy.get("healthy")
+                    if full:
+                        for _ in range(MAX_EVENTS):
+                            emit("network_attempt")
+                    cache = self._cache(view, repository=Broken())
+                    with self.assertRaises(CacheUnavailable):
+                        await cache.get("sensitive-cache-key")
+                    with self.assertRaises(CacheUnavailable):
+                        await cache.put(
+                            "sensitive-cache-key",
+                            {"data": "sensitive-payload"},
+                            ttl_seconds=30,
+                        )
+                    emit("core_final", code="completed", capability_status="success")
+                    self.assertEqual(warnings, [])
+                    if not public:
+                        self.assertEqual(
+                            (traces, diagnostics.snapshot()["attempts"]), ([], [])
+                        )
+                        continue
+                    (trace,) = traces
+                    self.assertEqual(
+                        trace["cache_failures"], {"cache_read": 1, "cache_write": 1}
+                    )
+                    self.assertLessEqual(len(trace["events"]), MAX_EVENTS)
+                    stages = [
+                        (event["stage"], event["code"])
+                        for event in trace["events"]
+                        if event["stage"].startswith("cache_")
+                    ]
+                    self.assertEqual(
+                        stages,
+                        []
+                        if full
+                        else [
+                            ("cache_read", "cache_unavailable"),
+                            ("cache_write", "cache_unavailable"),
+                        ],
+                    )
+                    serialized = json.dumps(trace)
+                    for private in (
+                        "sensitive-cache-key",
+                        "sensitive-payload",
+                        "private database path",
+                    ):
+                        self.assertNotIn(private, serialized)
+                finally:
+                    diagnostics.reset(token)
+                    diagnostics.close()
+
     async def test_cache_cancellation_and_permission_are_not_backend_outages(self):
         from yomihime_game_link_sdk import AccessDenied
 
         view = self._invocation("alice")
+        diagnostics = SyncDiagnostics()
+        token = diagnostics.activate(view.invocation_id, "command")
+        self.addCleanup(diagnostics.reset, token)
+        self.addCleanup(diagnostics.close)
+        emit("core_start")
 
         class Cancelled:
             def __getattr__(inner, name):
@@ -440,6 +530,116 @@ class CacheResourcesServiceTests(unittest.IsolatedAsyncioTestCase):
 
         with self.assertRaises(AccessDenied):
             await self._cache(view, repository=Denied()).get("entry")
+        emit("core_final", code="stale")
+        (trace,) = diagnostics.snapshot()["attempts"]
+        self.assertNotIn("cache_failures", trace)
+
+    async def test_sqlite_owner_and_grant_fences_are_not_cache_outages(self):
+        from ygl_test_subject.services.runtime_effect_gate import (
+            RuntimeEffectGate,
+            invocation_guard,
+        )
+
+        from tests.storage.test_runtime_effect_executor import RuntimeExecutorTests
+        from yomihime_game_link_sdk import AccessDenied, InvalidInvocation
+
+        owner = RuntimeExecutorTests()
+        await owner.asyncSetUp()
+        self.addAsyncCleanup(owner.asyncTearDown)
+        view = self._invocation()
+        cache = self._cache(view, repository=SQLiteCacheRepository(owner.database))
+        original = await cache.put("entry", {"value": "original"}, ttl_seconds=60)
+        diagnostics = SyncDiagnostics()
+        token = diagnostics.activate(view.invocation_id, "scheduler")
+        self.addCleanup(diagnostics.reset, token)
+        self.addCleanup(diagnostics.close)
+        emit("core_start")
+
+        async def replace_core_token(core_token):
+            await owner.executor.run_internal_transaction(
+                lambda unit: (
+                    unit.execute(
+                        "UPDATE runtime_owners SET token=? WHERE scope='core'",
+                        (core_token,),
+                    ).rowcount
+                )
+            )
+
+        await replace_core_token("b" * 64)
+        try:
+            with self.assertRaises(InvalidInvocation) as stale:
+                await cache.put(
+                    "entry",
+                    {"value": "stale"},
+                    ttl_seconds=60,
+                    expected_revision=original.revision,
+                )
+            self.assertEqual(stale.exception.code, "invalid_invocation")
+            self.assertIsNone(stale.exception.__context__)
+        finally:
+            await replace_core_token(owner.token)
+
+        package = RuntimeEffectGate(
+            owner.kernel,
+            owner.scope,
+            owner.token,
+            1,
+            package_id="a",
+            package_token="c" * 64,
+            package_epoch=1,
+            grant_revision=3,
+            authority_check=lambda: None,
+            policy_assert=lambda unit: None,
+        )
+        await owner.executor.run_internal_transaction(
+            lambda unit: (
+                unit.execute(
+                    "INSERT INTO runtime_owners VALUES (?,?,1,1,1,1,4,?,?)",
+                    ("package:a", "c" * 64, "a" * 64, owner.kernel.boot_id),
+                ).rowcount
+            )
+        )
+        with invocation_guard(package), self.assertRaises(AccessDenied) as denied:
+            await cache.put(
+                "entry",
+                {"value": "denied"},
+                ttl_seconds=60,
+                expected_revision=original.revision,
+            )
+        self.assertEqual(denied.exception.code, "grant_revoked")
+        self.assertIsNone(denied.exception.__context__)
+
+        commit_gate = RuntimeEffectGate(
+            owner.kernel, owner.scope, owner.token, 1, installation_guard=lambda: True
+        )
+        transact = owner.executor.run_transaction
+
+        async def fence_after_write(callback, **kwargs):
+            def write(unit):
+                result = callback(unit)
+                commit_gate.close()
+                return result
+
+            return await transact(write, **kwargs)
+
+        with (
+            invocation_guard(commit_gate),
+            patch.object(
+                owner.executor, "run_transaction", side_effect=fence_after_write
+            ),
+            self.assertRaises(InvalidInvocation),
+        ):
+            await cache.put(
+                "entry",
+                {"value": "fenced-before-commit"},
+                ttl_seconds=60,
+                expected_revision=original.revision,
+            )
+        self.admission.check(self.issuer.lease_for(view))
+        self.assertEqual(await cache.get("entry"), original)
+        emit("core_final", code="stale")
+        (trace,) = diagnostics.snapshot()["attempts"]
+        self.assertNotIn("cache_failures", trace)
 
     async def asyncTearDown(self) -> None:
         for view, lease in self._views:

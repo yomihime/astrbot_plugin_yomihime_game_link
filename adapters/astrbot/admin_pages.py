@@ -32,6 +32,7 @@ _OPERATIONS = {
     "font-upload": AdminOperation.UPDATE_CONFIG,
     "read": AdminOperation.READ_CONFIG,
     "sync-diagnostics": AdminOperation.READ_CONFIG,
+    "scheduler-diagnostics": AdminOperation.READ_CONFIG,
     "catalog": AdminOperation.READ_CONFIG,
     "update": AdminOperation.UPDATE_CONFIG,
     "recover": AdminOperation.RECOVER_CONFIG,
@@ -491,6 +492,22 @@ class AdminPages:
                 resources=ops.ordinary_resources(),
             )
             return core.sync_diagnostics.snapshot()
+        if endpoint == "scheduler-diagnostics":
+            if set(data) != {"module_id"} or type(data["module_id"]) is not str:
+                raise ValueError("invalid scheduler diagnostic parameters")
+            target = validate_contract(
+                ConfigTarget(ops.config_principal_id, data["module_id"])
+            )
+            resources = ops.ordinary_resources()
+            if target not in resources:
+                raise AdminAuthorizationDenied
+            await core.admin_authorization.authorize(
+                AdminOperation.READ_CONFIG,
+                invocation=None,
+                context=context,
+                resources={target: resources[target]},
+            )
+            return await core.scheduler_diagnostics(target.module_id)
         if endpoint.startswith("font-"):
             current, source = self.runtime.management_entry()
             if current is not core:

@@ -21,7 +21,9 @@ from ....yomihime_game_link_sdk.display import (
     TextBlock,
 )
 from ....yomihime_game_link_sdk.errors import (
+    AccessDenied,
     CacheUnavailable,
+    OperationTimeout,
     ParameterError,
     ServiceUnavailable,
     SourceHttpError,
@@ -67,6 +69,7 @@ from .fflogs_catalog import (
     ultimate_group_key,
     ultimate_group_name,
 )
+from .fflogs_failures import STAGE_MESSAGES, LookupFailures
 from .fflogs_models import (
     CharacterRanking,
     CharacterRankingGroup,
@@ -132,8 +135,12 @@ class StatisticsPageError(FFLogsPayloadError):
 class FFLogsCharacterLookup:
     """Resolve an explicit directory entry and query its public character."""
 
-    def __init__(self, services: ModuleServices) -> None:
+    def __init__(self, services: ModuleServices, *, directory=None) -> None:
         self._services = services
+        from .market_sources import MarketSourceClient
+
+        self._directory = directory
+        self._directory_source = MarketSourceClient(None)
         self._lifecycle = object()
         self._metadata_cache: dict[str, tuple[float, OutputMetadata | None, str]] = {}
         self._ranking_contract_cache = {}
@@ -152,7 +159,15 @@ class FFLogsCharacterLookup:
         self._chat_pending.close()
 
     async def _character_metadata(
-        self, scope, source_id, lifecycle, evidence=None, *, deadline=None, metrics=None
+        self,
+        scope,
+        source_id,
+        lifecycle,
+        evidence=None,
+        *,
+        deadline=None,
+        metrics=None,
+        failures=None,
     ):
         """Enrich actual rows using the existing fixed schema/catalog contract.
 
@@ -207,21 +222,35 @@ class FFLogsCharacterLookup:
                 if metadata.character_catalog_verified
                 else "base_catalog"
             )
-        except SourceHttpError:
+        except SourceHttpError as exc:
+            if exc.code == "cancelled":
+                raise
             state = "unavailable_source"
+            if failures is not None:
+                failures.source_error(exc)
         except FFLogsGraphQLError:
             state = "unavailable_graphql"
+            if failures is not None:
+                failures.record("graphql_error", status=failures.last_status)
         except FFLogsPayloadError:
             state = "unavailable_payload"
-        except ServiceUnavailable:
+            if failures is not None:
+                failures.record("payload_parse", status=failures.last_status)
+        except ServiceUnavailable as exc:
             state = "unavailable_service"
+            if failures is not None:
+                failures.source_error(exc)
+        except (AccessDenied, OperationTimeout):
+            raise
         except PermissionError:
             state = "unavailable_permission"
-        except TimeoutError:
+        except TimeoutError as exc:
             state = "unavailable_timeout"
-        except Exception:
-            # Source error strings/response bodies are never public metadata.
-            pass
+            if failures is not None:
+                failures.source_error(exc)
+        except Exception as exc:
+            if failures is not None:
+                failures.source_error(exc)
         check_active()
         ttl = (
             METADATA_CACHE_SECONDS
@@ -247,6 +276,7 @@ class FFLogsCharacterLookup:
         cache_owner=None,
         metrics=None,
         budget=None,
+        failures=None,
     ):
         from .fflogs_history_cache import (
             HISTORY_CACHE_TTL,
@@ -355,7 +385,7 @@ class FFLogsCharacterLookup:
                     dates.update(times)
                 except CacheUnavailable:
                     loaded[index] = {}
-                except (PermissionError, ServiceUnavailable):
+                except (PermissionError, ServiceUnavailable, OperationTimeout):
                     raise
                 except TimeoutError:
                     break
@@ -381,6 +411,7 @@ class FFLogsCharacterLookup:
             fetched=acquired,
             on_attempt=attempted.update,
             summary=summary,
+            failures=failures,
         )
         summary["fetch_ms"] = max(0, int((monotonic() - fetch_started) * 1000))
         active()
@@ -422,7 +453,7 @@ class FFLogsCharacterLookup:
                 saved.update(updates)
             except CacheUnavailable:
                 unsaved.update(updates)
-            except (PermissionError, ServiceUnavailable):
+            except (PermissionError, ServiceUnavailable, OperationTimeout):
                 raise
             except TimeoutError:
                 unsaved.update(prepared.keys() - saved)
@@ -520,6 +551,7 @@ class FFLogsCharacterLookup:
         fetched=None,
         on_attempt=None,
         summary=None,
+        failures=None,
     ):
         """Query bounded batches; every catalog target retains an outcome."""
         stop_at = deadline if deadline is not None else monotonic() + 30
@@ -528,6 +560,8 @@ class FFLogsCharacterLookup:
 
         async def batch(keys):
             nonlocal limited
+            started = monotonic()
+            status = None
             if self._lifecycle is not lifecycle:
                 raise ServiceUnavailable()
             if monotonic() >= stop_at:
@@ -591,6 +625,7 @@ class FFLogsCharacterLookup:
                             headers={"Content-Type": "application/json"},
                         )
                     )
+                status = response.status_code
                 if self._lifecycle is not lifecycle:
                     raise ServiceUnavailable()
                 data = parse_graphql_envelope(
@@ -610,6 +645,10 @@ class FFLogsCharacterLookup:
                     or not isinstance(value.get("server"), dict)
                     or value["server"].get("name") != character.server_name
                 ):
+                    if failures is not None:
+                        failures.record(
+                            "identity_mismatch", status=status, started=started
+                        )
                     raise PermissionError("catalog character identity changed")
                 if evidence is not None:
                     evidence.observe(
@@ -619,25 +658,45 @@ class FFLogsCharacterLookup:
                         filters=variables,
                     )
             except SourceHttpError as error:
+                if error.code == "cancelled":
+                    raise
+                if failures is not None:
+                    failures.source_error(error, started=started)
                 if error.status_code in (401, 403):
                     raise PermissionError() from None
                 if error.status_code == 429:
                     limited = True
                 return {key: "request_failed" for key in keys}
-            except (
-                FFLogsGraphQLError,
-                FFLogsPayloadError,
-                TimeoutError,
-            ):
+            except (FFLogsGraphQLError, FFLogsPayloadError) as error:
+                if failures is not None:
+                    failures.record(
+                        "graphql_error"
+                        if isinstance(error, FFLogsGraphQLError)
+                        else "payload_parse",
+                        status=status,
+                        started=started,
+                    )
+                return {key: "request_failed" for key in keys}
+            except OperationTimeout:
+                raise
+            except TimeoutError as error:
+                if failures is not None:
+                    failures.source_error(error, started=started)
                 return {key: "request_failed" for key in keys}
             except (ServiceUnavailable, PermissionError):
                 raise
-            except Exception:
+            except Exception as error:
+                if failures is not None:
+                    failures.source_error(error, started=started)
                 return {key: "request_failed" for key in keys}
             result = {}
             for index, key in enumerate(keys):
                 try:
                     if f"z{index}" not in value:
+                        if failures is not None:
+                            failures.record(
+                                "graphql_error", status=status, started=started
+                            )
                         result[key] = "missing_alias"
                         continue
                     selection = parse_rankings(value[f"z{index}"])
@@ -661,11 +720,17 @@ class FFLogsCharacterLookup:
                     ) != len(selection.rows):
                         raise FFLogsPayloadError("catalog selection changed")
                     if not _selection_membership_matches(metadata, key[0], selection):
+                        if failures is not None:
+                            failures.record(
+                                "selection_mismatch", status=status, started=started
+                            )
                         result[key] = "failed_membership"
                         continue
                     result[key] = selection
                     fetched[key] = time()
                 except FFLogsPayloadError:
+                    if failures is not None:
+                        failures.record("payload_parse", status=status, started=started)
                     result[key] = "invalid"
             return result
 
@@ -711,6 +776,12 @@ class FFLogsCharacterLookup:
     async def invoke(
         self, context: InvocationView, parameters: JsonObject
     ) -> CapabilityResult:
+        failures = LookupFailures()
+        result = await self._invoke(context, parameters, failures)
+        await failures.flush()
+        return result
+
+    async def _invoke(self, context, parameters, failures) -> CapabilityResult:
         explicit_command = "command" in parameters
         if explicit_command:
             from .fflogs_server import LOGS_USAGE, command_parameters
@@ -726,7 +797,7 @@ class FFLogsCharacterLookup:
         if context is not None and context.origin is InvocationOrigin.LLM_TOOL:
             from .fflogs_chat import invoke_character_tool
 
-            return await invoke_character_tool(self, context, parameters)
+            return await invoke_character_tool(self, context, parameters, failures)
         from .fflogs_evidence import RequestMetrics
 
         metrics = RequestMetrics() if explicit_command else None
@@ -756,23 +827,34 @@ class FFLogsCharacterLookup:
                     deadline=work_stop,
                     metrics=metrics,
                     observation=observation,
+                    failures=failures,
                     budget={
                         "invocation_budget_ms": max(0, int((stop_at - started) * 1000)),
                         "output_reserve_ms": max(0, int((stop_at - work_stop) * 1000)),
                     },
                 )
-                return observation.attach(result) if observation is not None else result
+                if observation is not None:
+                    result = observation.attach(result)
+        except OperationTimeout:
+            raise
         except TimeoutError:
+            failures.source_error(TimeoutError())
             result = _error(ErrorCode.UPSTREAM_ERROR, "FFLogs 查询超时，请稍后重试。")
+            if (
+                getattr(context, "origin", None) is InvocationOrigin.COMMAND
+                and failures.stage
+            ):
+                result = _error(
+                    ErrorCode.UPSTREAM_ERROR, STAGE_MESSAGES[failures.stage]
+                )
             if observation is not None:
                 observation.reject("deadline")
-                return observation.attach(result)
-            return result
-        finally:
-            if metrics is not None:
-                metrics.finish()
-                if metrics.evidence is not None:
-                    await metrics.evidence.flush()
+                result = observation.attach(result)
+        if metrics is not None:
+            metrics.finish()
+            if metrics.evidence is not None:
+                await metrics.evidence.flush()
+        return result
 
     async def _execute(
         self,
@@ -789,6 +871,7 @@ class FFLogsCharacterLookup:
         metrics=None,
         observation=None,
         budget=None,
+        failures=None,
     ) -> CapabilityResult:
         lifecycle = self._lifecycle
         inputs = _character_inputs(parameters)
@@ -808,42 +891,67 @@ class FFLogsCharacterLookup:
             return _error(
                 ErrorCode.PARAMETER_ERROR, "这些筛选条件仅支持正式网页单范围查询。"
             )
-        if metrics is not None:
-            from types import SimpleNamespace
+        from types import SimpleNamespace
 
-            if scope is None:
-                scope = await self._services.scopes.bind(context)
-            metrics.diagnostics = scope.diagnostics
-            observed_http = metrics.wrap(scope.http)
-            scope = SimpleNamespace(
-                http=observation.wrap(observed_http)
-                if observation is not None
-                else observed_http,
-                cache=getattr(scope, "cache", None),
-            )
+        if scope is None:
+            scope = await self._services.scopes.bind(context)
+        observed_http = scope.http
+        if failures is not None:
+            if failures.port is None:
+                failures.port = getattr(scope, "diagnostics", None)
+            observed_http = failures.wrap(observed_http)
+        if metrics is not None:
+            metrics.diagnostics = getattr(scope, "diagnostics", None)
+            observed_http = metrics.wrap(observed_http)
+        scope = SimpleNamespace(
+            http=observation.wrap(observed_http)
+            if observation is not None
+            else observed_http,
+            cache=getattr(scope, "cache", None),
+            records=getattr(scope, "records", None),
+        )
         if realm is None:
             from ..query_resolution import QueryResolutionError
             from .fflogs_server import resolve_realm
             from .market_sources import MarketPayloadError
 
             try:
-                if scope is None:
-                    scope = await self._services.scopes.bind(context)
+                if failures is not None:
+                    failures.begin("universalis_market", "realm_directory")
                 realm = await resolve_realm(
+                    self._directory_source,
                     scope.http,
-                    getattr(scope, "cache", None),
+                    scope.records,
                     server_label,
                     deadline=deadline if deadline is not None else monotonic() + 30,
+                    directory=self._directory,
                     metrics=metrics,
                 )
                 if self._lifecycle is not lifecycle:
                     raise ServiceUnavailable()
             except QueryResolutionError as exc:
+                if failures is not None and exc.code is ErrorCode.UPSTREAM_ERROR:
+                    failures.record("region_unresolved", status=failures.last_status)
+                    return _error(exc.code, STAGE_MESSAGES["realm_directory"])
                 return _error(exc.code, str(exc))
-            except (SourceHttpError, MarketPayloadError, ServiceUnavailable):
+            except OperationTimeout:
+                raise
+            except (
+                SourceHttpError,
+                MarketPayloadError,
+                ServiceUnavailable,
+                TimeoutError,
+            ) as exc:
+                if isinstance(exc, SourceHttpError) and exc.code == "cancelled":
+                    raise
+                if failures is not None:
+                    if isinstance(exc, MarketPayloadError):
+                        failures.record("payload_parse", status=failures.last_status)
+                    else:
+                        failures.source_error(exc)
                 return _error(
                     ErrorCode.UPSTREAM_ERROR,
-                    "服务器目录暂不可用，无法判断 FFLogs 区域，请稍后重试。",
+                    STAGE_MESSAGES["realm_directory"],
                 )
         source_id, host = _realm_source(realm)
         from .fflogs_evidence import Evidence
@@ -857,24 +965,41 @@ class FFLogsCharacterLookup:
             metrics.evidence = evidence
         credential_state = await _credential_state(self._services, realm)
 
+        def stage_error(code, default):
+            if (
+                failures is not None
+                and failures.stage is not None
+                and getattr(context, "origin", None) is InvocationOrigin.COMMAND
+            ):
+                return _error(code, STAGE_MESSAGES[failures.stage])
+            return _error(code, default)
+
         def source_error(error):
+            if error.code == "cancelled":
+                raise error
+            if failures is not None:
+                failures.source_error(error)
             result = _http_error(error, credential_state=credential_state)
             if tool:
                 from .fflogs_chat import credential_error_facts
 
                 return credential_error_facts(result, credential_state, error.code)
+            if result.error.code in (ErrorCode.UPSTREAM_ERROR, ErrorCode.UNPARSED):
+                return stage_error(result.error.code, result.error.message)
             return result
 
         if guard is not None:
             await guard()
         if credential_state != "configured":
+            if failures is not None:
+                failures.begin(source_id, "authentication")
             return source_error(SourceHttpError("credentials_unavailable"))
         try:
-            if scope is None:
-                scope = await self._services.scopes.bind(context)
             if advanced_filters:
                 from .fflogs_scope_contract import fetch_contract
 
+                if failures is not None:
+                    failures.begin(source_id, "ranking_schema")
                 if observation is not None:
                     observation.stage = "schema"
 
@@ -919,6 +1044,8 @@ class FFLogsCharacterLookup:
                         ),
                     )
             if resolved_server is None:
+                if failures is not None:
+                    failures.begin(source_id, "server_directory")
                 if observation is not None:
                     observation.stage = "server-directory"
                 catalog = FFLogsCatalog(scope.http, source_id)
@@ -937,19 +1064,38 @@ class FFLogsCharacterLookup:
                 resolution = SimpleNamespace(complete=True, matches=(resolved_server,))
         except SourceHttpError as exc:
             return source_error(exc)
-        except (FFLogsPayloadError, FFLogsGraphQLError):
-            return _error(
+        except (FFLogsPayloadError, FFLogsGraphQLError) as exc:
+            if failures is not None:
+                failures.record(
+                    "graphql_error"
+                    if isinstance(exc, FFLogsGraphQLError)
+                    else "payload_parse",
+                    status=failures.last_status,
+                )
+            return stage_error(
                 ErrorCode.UNPARSED, "FFLogs 服务器目录格式暂不可用，未尝试自动猜测。"
             )
-        except (PermissionError, ServiceUnavailable, TimeoutError):
+        except (AccessDenied, OperationTimeout):
+            raise
+        except (PermissionError, ServiceUnavailable, TimeoutError) as exc:
+            if failures is not None:
+                failures.source_error(exc)
             if tool:
                 raise
-            return _error(ErrorCode.MODULE_UNAVAILABLE, "FFLogs 来源服务暂不可用。")
-        except Exception:
-            return _error(ErrorCode.MODULE_UNAVAILABLE, "FFLogs 来源服务暂不可用。")
+            return stage_error(
+                ErrorCode.MODULE_UNAVAILABLE, "FFLogs 来源服务暂不可用。"
+            )
+        except Exception as exc:
+            if failures is not None:
+                failures.source_error(exc)
+            return stage_error(
+                ErrorCode.MODULE_UNAVAILABLE, "FFLogs 来源服务暂不可用。"
+            )
 
         if not resolution.complete:
-            return _error(
+            if failures is not None:
+                failures.record("incomplete_directory", status=failures.last_status)
+            return stage_error(
                 ErrorCode.UNPARSED,
                 "FFLogs 服务器目录不完整，无法安全选择服务器。",
             )
@@ -1001,6 +1147,8 @@ class FFLogsCharacterLookup:
                 zoneId=zone_tuple[0], difficulty=zone_tuple[1], partition=zone_tuple[2]
             )
         try:
+            if failures is not None:
+                failures.begin(source_id, "character_query")
             if advanced_filters:
                 declarations, arguments = [], []
                 if "timeframe" in advanced_filters:
@@ -1032,11 +1180,12 @@ class FFLogsCharacterLookup:
                 observation.stage = "graphql-envelope"
             data = parse_graphql_envelope(response.body, exact_numbers=True)
             character_data = data.get("characterData")
-            raw_character = (
-                character_data.get("character")
-                if isinstance(character_data, dict)
-                else None
-            )
+            if (
+                not isinstance(character_data, dict)
+                or "character" not in character_data
+            ):
+                raise FFLogsPayloadError("character projection is missing")
+            raw_character = character_data["character"]
             if observation is not None:
                 observation.stage = "character-shape"
                 observation.character_shape(raw_character, name, server.name)
@@ -1083,7 +1232,9 @@ class FFLogsCharacterLookup:
                         if field == "name"
                         else raw_character["server"].get("name"),
                     )
-                return _error(
+                if failures is not None:
+                    failures.record("identity_mismatch", status=response.status_code)
+                return stage_error(
                     ErrorCode.UNPARSED,
                     "FFLogs 返回的角色或服务器与本次目标不一致，未展示战绩。",
                 )
@@ -1096,7 +1247,9 @@ class FFLogsCharacterLookup:
                         "metric",
                         value=raw_character["rankings"].get("metric"),
                     )
-                return _error(
+                if failures is not None:
+                    failures.record("selection_mismatch", status=response.status_code)
+                return stage_error(
                     ErrorCode.UNPARSED,
                     "FFLogs \u8fd4\u56de\u7684\u6307\u6807\u4e0e\u8bf7\u6c42\u4e0d\u4e00\u81f4\uff0c\u672a\u5c55\u793a\u8fd9\u7ec4\u6218\u7ee9\u3002",
                 )
@@ -1127,7 +1280,9 @@ class FFLogsCharacterLookup:
                         field,
                         value=raw_character["rankings"].get(field),
                     )
-                return _error(
+                if failures is not None:
+                    failures.record("selection_mismatch", status=response.status_code)
+                return stage_error(
                     ErrorCode.UNPARSED,
                     "FFLogs返回的副本、难度或分区与请求不一致。未展示战绩。",
                 )
@@ -1158,23 +1313,39 @@ class FFLogsCharacterLookup:
         except SourceHttpError as exc:
             return source_error(exc)
         except FFLogsGraphQLError:
-            return _error(ErrorCode.UPSTREAM_ERROR, "FFLogs 未接受公开角色查询。")
+            if failures is not None:
+                failures.record("graphql_error", status=failures.last_status)
+            return stage_error(ErrorCode.UPSTREAM_ERROR, "FFLogs 未接受公开角色查询。")
         except FFLogsPayloadError:
-            return _error(
+            if failures is not None:
+                failures.record("payload_parse", status=failures.last_status)
+            return stage_error(
                 ErrorCode.UNPARSED,
                 "FFLogs 角色记录格式暂不可用，未提取不认识的字段。",
             )
-        except (PermissionError, ServiceUnavailable, TimeoutError):
+        except (AccessDenied, OperationTimeout):
+            raise
+        except (PermissionError, ServiceUnavailable, TimeoutError) as exc:
+            if failures is not None:
+                failures.source_error(exc)
             if tool:
                 raise
-            return _error(ErrorCode.MODULE_UNAVAILABLE, "FFLogs 来源服务暂不可用。")
-        except Exception:
-            return _error(ErrorCode.MODULE_UNAVAILABLE, "FFLogs 来源服务暂不可用。")
+            return stage_error(
+                ErrorCode.MODULE_UNAVAILABLE, "FFLogs 来源服务暂不可用。"
+            )
+        except Exception as exc:
+            if failures is not None:
+                failures.source_error(exc)
+            return stage_error(
+                ErrorCode.MODULE_UNAVAILABLE, "FFLogs 来源服务暂不可用。"
+            )
         if guard is not None:
             await guard()
         metadata = None
         if not tool and zone_tuple is None:
             try:
+                if failures is not None:
+                    failures.begin(source_id, "ranking_metadata")
                 metadata = await self._character_metadata(
                     scope,
                     source_id,
@@ -1182,8 +1353,11 @@ class FFLogsCharacterLookup:
                     evidence,
                     deadline=deadline,
                     metrics=metrics,
+                    failures=failures,
                 )
                 if metadata is not None and metadata.character_catalog_verified:
+                    if failures is not None:
+                        failures.begin(source_id, "ranking_history")
                     character = await self._catalog_rankings(
                         scope,
                         source_id,
@@ -1196,9 +1370,16 @@ class FFLogsCharacterLookup:
                         cache_owner=context,
                         metrics=metrics,
                         budget=budget,
+                        failures=failures,
                     )
-            except (ServiceUnavailable, PermissionError):
-                return _error(ErrorCode.MODULE_UNAVAILABLE, "FFLogs 来源服务暂不可用。")
+            except AccessDenied:
+                raise
+            except (ServiceUnavailable, PermissionError) as exc:
+                if failures is not None:
+                    failures.source_error(exc)
+                return stage_error(
+                    ErrorCode.MODULE_UNAVAILABLE, "FFLogs 来源服务暂不可用。"
+                )
         if observation is not None:
             observation.stage = "result"
         result = _character_result(
@@ -2218,6 +2399,8 @@ async def _credential_state(services, realm):
         return (
             "configured" if metadata.state is SecretMetadataState.ACTIVE else "unusable"
         )
+    except (AccessDenied, OperationTimeout):
+        raise
     except Exception:
         return "unknown"
 

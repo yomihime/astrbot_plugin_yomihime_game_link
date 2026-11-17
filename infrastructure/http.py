@@ -639,7 +639,11 @@ class SourceHttpService(SourceHttp):
             )
             response = self._validate_response(result)
             await self._check_authority(_check_authority, deadline)
-            diagnostic("http_response", http_status=response.status_code)
+            diagnostic(
+                "http_response",
+                source=checked.source_id,
+                http_status=response.status_code,
+            )
             self._ensure_remaining(deadline)
             if response.status_code == 401 and lease is not None:
                 await self._invalidate_credential(source.declaration, lease, deadline)
@@ -698,7 +702,12 @@ class SourceHttpService(SourceHttp):
                     if response.status_code == 503
                     else None,
                 ) from None
-            diagnostic("http_end", code="ok", http_status=response.status_code)
+            diagnostic(
+                "http_end",
+                source=checked.source_id,
+                code="ok",
+                http_status=response.status_code,
+            )
             # The service owns this provenance. Never trust a transport's URL,
             # and never expose a query that could contain upstream secrets.
             return self._validate_response(
@@ -710,13 +719,18 @@ class SourceHttpService(SourceHttp):
                 )
             )
         except asyncio.CancelledError:
-            diagnostic("http_end", code="cancelled")
+            diagnostic("http_end", source=checked.source_id, code="cancelled")
             raise
         except SourceHttpError as exc:
-            diagnostic("http_end", code=exc.code, http_status=exc.status_code)
+            diagnostic(
+                "http_end",
+                source=checked.source_id,
+                code=exc.code,
+                http_status=exc.status_code,
+            )
             raise
         except Exception:
-            diagnostic("http_end", code="error")
+            diagnostic("http_end", source=checked.source_id, code="error")
             raise
         finally:
             if source_acquired:
@@ -827,6 +841,9 @@ class SourceHttpService(SourceHttp):
         service = self._credential_service
         module_id = self._module_id
         if service is None or module_id is None:
+            diagnostic(
+                "auth_failure", source=request.source_id, code="credentials_unavailable"
+            )
             raise SourceHttpError("credentials_unavailable") from None
         try:
             return await self._wait_for_deadline(
@@ -834,9 +851,18 @@ class SourceHttpService(SourceHttp):
             )
         except asyncio.CancelledError:
             raise
-        except SourceHttpError:
+        except SourceHttpError as error:
+            diagnostic(
+                "auth_failure",
+                source=request.source_id,
+                code=error.code,
+                http_status=error.status_code,
+            )
             raise
         except Exception:
+            diagnostic(
+                "auth_failure", source=request.source_id, code="credentials_unavailable"
+            )
             raise SourceHttpError("credentials_unavailable") from None
 
     async def _invalidate_credential(

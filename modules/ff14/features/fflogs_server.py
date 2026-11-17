@@ -64,12 +64,19 @@ def realm_from_catalog(catalog, server_label: str) -> str:
 
 
 async def resolve_realm(
-    http, cache, server_label: str, *, deadline: float, metrics=None
+    source,
+    http,
+    records,
+    server_label: str,
+    *,
+    deadline: float,
+    directory=None,
+    metrics=None,
 ) -> str:
-    from .market_sources import MarketSourceClient
-
-    session = MarketSourceClient(None).start_bound(http, cache, deadline=deadline)
-    public = await session.catalog()
+    session = source.start_bound(
+        http, None, deadline=deadline, directory=directory, records=records
+    )
+    public = await session.catalog((("world", server_label),))
     if metrics is not None and len(public.provenance) == 2:
         for operation, provenance in zip(
             ("UniversalisWorlds", "UniversalisDataCenters"),

@@ -84,12 +84,23 @@
       "FF14RequestSummary",
       "FF14HistorySummary",
       "FF14DutyOrderState",
-      "CalendarSync"
+      "CalendarSync",
+      "FF14LogsFailure",
+      "FF14NewsFailure",
+      "FF14SourceParseFailure"
     ],
     "max_events": 64,
     "max_bytes": 524288,
     "event_limits": {
-      "CalendarSync": 48
-    }
+      "CalendarSync": 48,
+      "FF14LogsFailure": 1,
+      "FF14NewsFailure": 1,
+      "FF14SourceParseFailure": 1
+    },
+    "warning_events": [
+      "FF14LogsFailure",
+      "FF14NewsFailure",
+      "FF14SourceParseFailure"
+    ]
   }
 }

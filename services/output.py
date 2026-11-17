@@ -205,6 +205,7 @@ class OutputService:
         principal_resolver: InvocationPrincipalResolver,
         owner_authority: OwnerRouteProofAuthority | None = None,
         command_heading_projector: CommandHeadingProjector | None = None,
+        command_error_messages=None,
         command_card_renderer=None,
         command_theme_settings=None,
         command_card_logo=None,
@@ -228,6 +229,10 @@ class OutputService:
         ):
             raise TypeError("command heading projector must be callable")
         self._command_heading_projector = command_heading_projector
+        self._command_error_messages = {
+            key: frozenset(messages)
+            for key, messages in (command_error_messages or {}).items()
+        }
         self._command_card_renderer = command_card_renderer
         self._command_theme_settings = command_theme_settings
         self._command_card_logo = command_card_logo
@@ -1286,8 +1291,14 @@ class OutputService:
     ) -> RenderedMessage:
         validate_contract(result)
         if result.status is ResultStatus.ERROR:
-            # Use stable core error text, never module or exception strings.
             message = _ERROR_MESSAGES.get(result.error.code, "request failed")
+            if invocation is not None and invocation.origin is InvocationOrigin.COMMAND:
+                reviewed = self._command_error_messages.get(
+                    (invocation.module_id, invocation.capability_id, result.error.code),
+                    (),
+                )
+                if result.error.message in reviewed:
+                    message = result.error.message
             if result.error.retry_after_seconds is not None:
                 message += f" 建议等待 {result.error.retry_after_seconds} 秒后重试。"
             return RenderedMessage(message)

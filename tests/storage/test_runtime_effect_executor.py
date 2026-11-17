@@ -5,9 +5,13 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from ygl_test_subject.bootstrap.coordinator import get_coordinator
 from ygl_test_subject.infrastructure.sqlite.database import SQLiteDatabase
+from ygl_test_subject.infrastructure.sqlite.repositories_cache_resources import (
+    SQLiteCacheRepository,
+)
 from ygl_test_subject.infrastructure.sqlite.runtime_ownership import (
     OwnershipConflict,
     RuntimeOwnership,
@@ -104,6 +108,32 @@ class RuntimeExecutorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(("unknown", "started"), await self.values())
         with self.assertRaises(EffectRejected):
             await self.executor.run_transaction(lambda unit: None)
+
+    async def test_cache_prune_loses_owner_between_probe_and_write(self):
+        await self.executor.run_transaction(
+            lambda unit: unit.execute(
+                "INSERT INTO cache_entries(cache_key,visibility,payload_json,expires_at,revision) "
+                "VALUES ('retained','public','{}','2000-01-01T00:00:00+00:00',31)"
+            ).rowcount
+        )
+        read = self.executor.run_read
+
+        async def fence_after_read(check):
+            self.assertTrue(await read(check))
+            self.core.close()
+            return True
+
+        with patch.object(self.executor, "run_read", side_effect=fence_after_read):
+            with self.assertRaises(EffectRejected):
+                await SQLiteCacheRepository(self.database).prune_expired()
+        retained = await self.executor.run_internal_transaction(
+            lambda unit: tuple(
+                unit.execute(
+                    "SELECT revision,retired_revision FROM cache_entries,cache_revision_floor"
+                ).fetchone()
+            )
+        )
+        self.assertEqual(retained, (31, 0))
 
     async def test_same_transaction_stale_owner_and_grant(self):
         await self.executor.run_internal_transaction(

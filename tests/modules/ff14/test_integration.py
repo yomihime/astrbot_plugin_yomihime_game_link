@@ -341,6 +341,7 @@ class FF14InstalledModuleTests(unittest.IsolatedAsyncioTestCase):
                     "credential_fflogs_cn",
                     "credential_fflogs_global",
                     "ff14_default_region",
+                    "ff14_server_directory_generation",
                     "ff14_subscriptions_enabled",
                     "ff14_calendar_sync_interval_seconds",
                     "ff14_calendar_default_days",

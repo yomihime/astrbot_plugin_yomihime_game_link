@@ -544,6 +544,10 @@ class BackgroundTimeout15Tests(unittest.IsolatedAsyncioTestCase):
 
     async def test_setup_exhaustion_does_not_start_a_fresh_full_wait(self):
         fixture = await self.background()
+        warnings = []
+        diagnostics = SyncDiagnostics(warning_sink=warnings.append)
+        self.addCleanup(diagnostics.close)
+        fixture.scheduler.diagnostics = diagnostics
         original = fixture.binder.bind
 
         async def bind(view):
@@ -555,6 +559,11 @@ class BackgroundTimeout15Tests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result.failed)
         self.assertEqual(fixture.collector.calls, 0)
         self.assertEqual((await self.rows(fixture))[0][0][1], "failed")
+        (trace,) = diagnostics.snapshot()["attempts"]
+        self.assertEqual(trace["core_failure_code"], "core_deadline")
+        self.assertEqual(
+            [warning["category"] for warning in warnings], ["core_deadline"]
+        )
 
     async def test_replaced_expired_token_cannot_commit_over_fresh_claim(self):
         from yomihime_game_link_sdk.subscriptions import Observation

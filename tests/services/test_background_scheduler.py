@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import tempfile
 import unittest
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 from ygl_test_subject.core.admission import AdmissionController, AdmissionError
 from ygl_test_subject.core.context_issuer import ContextIssuer
@@ -23,7 +25,10 @@ from ygl_test_subject.infrastructure.sqlite.repositories_config import (
 )
 from ygl_test_subject.infrastructure.sqlite.repositories_subscriptions import (
     SQLiteSchedulerRepository,
+    _dump,
+    _job_key,
 )
+from ygl_test_subject.services.core_runtime import CoreRuntime
 from ygl_test_subject.services.scheduler import (
     ExecutionClaimProofRegistry,
     RescheduleConfiguration,
@@ -144,34 +149,41 @@ class BackgroundSchedulerTests(unittest.IsolatedAsyncioTestCase):
         self.lifecycle = LifecycleController(
             self.registry, issuer=self.issuer, admission=admission
         )
-        instance = _SchedulerModuleInstance(handlers)
-        owned = self.lifecycle.adopt_candidate(
-            "pkg", self.manifest, "install", instance
-        )
-        self.lifecycle.install_dormant("pkg", "pkg/pricing", "install", instance, owned)
-        identity, _ = await self.lifecycle.start_candidate("pkg/pricing", "start")
-        self.lifecycle.publish_committed_intent(
-            "pkg/pricing", "start", identity, True, self.registry.snapshot().revision
-        )
-        await self.database.executor.run_transaction(
-            lambda unit: unit.execute(
-                "INSERT INTO module_runtime_intents VALUES ('pkg','pricing',1,1,'enable',?)",
-                (self.now.isoformat(),),
-            ).rowcount
-        )
+        await self.start_module("pkg", self.manifest, handlers)
         self.repository = SQLiteSchedulerRepository(
             self.database, utc_clock=lambda: self.now
         )
         self.binder = _Binder()
         self.scheduler = self.make_scheduler()
 
+    async def start_module(self, package_id, manifest, handlers):
+        module_id = f"{package_id}/{manifest.module_id}"
+        instance = _SchedulerModuleInstance(handlers)
+        owned = self.lifecycle.adopt_candidate(
+            package_id, manifest, "install", instance
+        )
+        self.lifecycle.install_dormant(
+            package_id, module_id, "install", instance, owned
+        )
+        identity, _ = await self.lifecycle.start_candidate(module_id, "start")
+        self.lifecycle.publish_committed_intent(
+            module_id, "start", identity, True, self.registry.snapshot().revision
+        )
+        await self.database.executor.run_transaction(
+            lambda unit: (
+                unit.execute(
+                    "INSERT INTO module_runtime_intents VALUES (?,?,1,1,'enable',?)",
+                    (package_id, manifest.module_id, self.now.isoformat()),
+                ).rowcount
+            )
+        )
+
     def make_scheduler(self):
-        async def current_config(_):
-            snapshot = await self.config.current_initialized(self.target)
+        async def current_config(module):
+            target = ConfigTarget(self.target.principal_id, module.module_id)
+            snapshot = await self.config.current_initialized(target)
             return (
-                snapshot
-                if snapshot is not None
-                else await self.config.current(self.target)
+                snapshot if snapshot is not None else await self.config.current(target)
             )
 
         return SharedCollectionScheduler(
@@ -220,6 +232,161 @@ class BackgroundSchedulerTests(unittest.IsolatedAsyncioTestCase):
             now=self.now,
         )
 
+    async def test_unavailable_durable_candidate_leaves_the_next_page_runnable(self):
+        candidate, *_ = await self.candidates()
+        retired = replace(candidate.key, module_id="retired/missing")
+        job_key = _job_key(retired)
+
+        def seed_retained_subscription(unit):
+            # A previously installed module can leave an active subscription
+            # and collector job behind when its package is unavailable.
+            unit.execute(
+                "INSERT INTO b04_collection_jobs "
+                "(job_key,key_json,scope_kind,due_at,cadence_seconds,config_revision) "
+                "VALUES (?,?,'public',?,21600,1)",
+                (
+                    job_key,
+                    _dump(retired),
+                    (self.now - timedelta(seconds=1)).isoformat(),
+                ),
+            )
+            unit.execute(
+                "INSERT INTO b04_subscriptions "
+                "(subscription_id,revision,owner_id,scope_kind,status,record_json) "
+                "VALUES ('retained',1,'synthetic-owner','public','active','{}')"
+            )
+            unit.execute(
+                "INSERT INTO b04_subscription_jobs "
+                "(subscription_id,job_key,subscription_revision,association_revision,"
+                "cadence_seconds,config_revision) VALUES ('retained',?,1,1,21600,1)",
+                (job_key,),
+            )
+
+        await self.database.executor.run_transaction(seed_retained_subscription)
+        first = await self.scheduler.run_due_page(limit=1)
+        self.assertEqual(first.processed, 1)
+        self.assertEqual(first.without_result, 1)
+        self.assertEqual(self.collector.calls, 0)
+        self.assertFalse(first.exhausted)
+        self.scheduler.quotas = replace(self.scheduler.quotas, max_scan_page=1)
+        pump = SimpleNamespace(
+            _accepting=True,
+            _pump_interval=0,
+            _pump_failure=None,
+            _pump_failures=(),
+            _register_declared_subscription_gates=AsyncMock(),
+            _configured_public_subscriptions=SimpleNamespace(reconcile=AsyncMock()),
+            _utc_clock=lambda: self.now,
+            _monotonic_clock=lambda: 0,
+            repositories=SimpleNamespace(
+                cache=SimpleNamespace(prune_expired=AsyncMock())
+            ),
+            registry=self.registry,
+            scheduler=self.scheduler,
+        )
+
+        async def finish_after_current_jobs():
+            if self.collector.calls == 2:
+                pump._accepting = False
+
+        pump.delivery = SimpleNamespace(
+            dispatch_due_events=finish_after_current_jobs,
+            dispatch_due_digests=AsyncMock(),
+        )
+        with patch.object(
+            self.scheduler, "create_digest_windows_page", new=AsyncMock()
+        ):
+            await asyncio.wait_for(CoreRuntime._pump_loop(pump), timeout=2)
+        self.assertEqual(self.collector.calls, 2)
+        self.assertIsNone(pump._pump_failure)
+        self.assertEqual(pump._pump_last_success_at, self.now.isoformat())
+        retained = await self.database.executor.run_read(
+            lambda unit: tuple(
+                unit.execute(
+                    "SELECT due_at, lease_token FROM b04_collection_jobs WHERE job_key=?",
+                    (job_key,),
+                ).fetchone()
+            )
+        )
+        self.assertEqual(
+            retained, ((self.now - timedelta(seconds=1)).isoformat(), None)
+        )
+
+        pump._accepting = True
+        with (
+            patch.object(
+                self.lifecycle, "scope", side_effect=PermissionError("private-sentinel")
+            ),
+            self.assertLogs(
+                "ygl_test_subject.services.core_runtime", "WARNING"
+            ) as logs,
+        ):
+            await asyncio.wait_for(CoreRuntime._pump_loop(pump), timeout=2)
+        self.assertEqual(
+            pump._pump_failure,
+            {"stage": "collection_scan", "code": "authority_rejected"},
+        )
+        self.assertEqual([record.levelname for record in logs.records], ["ERROR"])
+        self.assertNotIn("private-sentinel", "\n".join(logs.output))
+
+    async def test_stopping_one_active_module_keeps_other_page_candidates_runnable(
+        self,
+    ):
+        healthy = _Collector()
+        schedule = replace(self.schedule, background_parameters=({"item": "cn"},))
+        manifest = validate_contract(
+            replace(self.manifest, route="other-pricing", schedules=(schedule,))
+        )
+        handlers = validate_contract(
+            ModuleHandlers({"read.data": _Capability()}, {"prices": healthy}, {})
+        )
+        self.registry.register_package(
+            PackageManifest(
+                "other", "0.1.0", "2.0", (manifest,), "Tests", "AGPL-3.0", "offline"
+            ),
+            {"pricing": handlers},
+        )
+        await self.start_module("other", manifest, handlers)
+        self.collector.finish.clear()
+        run = asyncio.create_task(self.scheduler.run_due_page())
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(self.collector.started.wait(), healthy.started.wait()),
+                timeout=2,
+            )
+            await self.lifecycle.stop("pkg/pricing")
+            self.assertFalse(run.done())
+            healthy.finish.set()
+            page = await asyncio.wait_for(run, timeout=2)
+            self.assertEqual((page.processed, page.without_result), (3, 2))
+            saved = await self.database.executor.run_read(
+                lambda unit: tuple(
+                    (
+                        json.loads(row["key_json"])["fields"]["module_id"],
+                        row["observation_id"] is not None,
+                        row["lease_token"],
+                    )
+                    for row in unit.execute(
+                        "SELECT key_json,observation_id,lease_token FROM b04_collection_jobs"
+                    )
+                )
+            )
+            self.assertCountEqual(
+                saved,
+                [
+                    ("pkg/pricing", False, None),
+                    ("pkg/pricing", False, None),
+                    ("other/pricing", True, None),
+                ],
+            )
+        finally:
+            healthy.finish.set()
+            self.collector.finish.set()
+            if not run.done():
+                run.cancel()
+            await asyncio.gather(run, return_exceptions=True)
+            await self.lifecycle.stop("other/pricing")
+
     async def test_runs_without_subscribers_and_preserves_due_across_restart(self):
         page = await self.scheduler.run_due_page()
         self.assertEqual(page.processed, 2)
@@ -258,19 +425,23 @@ class BackgroundSchedulerTests(unittest.IsolatedAsyncioTestCase):
         candidate = (await self.candidates())[0]
         lease = await self.claim(candidate)
         await self.database.executor.run_transaction(
-            lambda unit: unit.execute(
-                "UPDATE config_state SET revision=revision+1 WHERE principal_id=? AND module_id=?",
-                ("host-config", "pkg/pricing"),
-            ).rowcount
+            lambda unit: (
+                unit.execute(
+                    "UPDATE config_state SET revision=revision+1 WHERE principal_id=? AND module_id=?",
+                    ("host-config", "pkg/pricing"),
+                ).rowcount
+            )
         )
         self.assertFalse(await self.repository.is_current(lease, now=self.now))
         refreshed = (await self.candidates())[0]
         fresh = await self.claim(refreshed)
         self.assertIsNotNone(fresh)
         await self.database.executor.run_transaction(
-            lambda unit: unit.execute(
-                "UPDATE module_runtime_intents SET desired_enabled=0,intent_revision=2 WHERE package_id='pkg'"
-            ).rowcount
+            lambda unit: (
+                unit.execute(
+                    "UPDATE module_runtime_intents SET desired_enabled=0,intent_revision=2 WHERE package_id='pkg'"
+                ).rowcount
+            )
         )
         self.assertFalse(await self.repository.is_current(fresh, now=self.now))
         self.assertEqual(await self.candidates(), ())
@@ -406,9 +577,9 @@ class BackgroundSchedulerTests(unittest.IsolatedAsyncioTestCase):
             {"value": 1},
         )
         await self.database.executor.run_transaction(
-            lambda unit: unit.execute(
-                "UPDATE config_state SET revision=revision+1"
-            ).rowcount
+            lambda unit: (
+                unit.execute("UPDATE config_state SET revision=revision+1").rowcount
+            )
         )
         self.assertFalse(await self.repository.commit_observation(lease, observation))
         count = await self.database.executor.run_read(

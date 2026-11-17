@@ -14,7 +14,12 @@ from types import SimpleNamespace
 from urllib.parse import quote
 
 from ....yomihime_game_link_sdk.display import DisplayDocument, TextBlock
-from ....yomihime_game_link_sdk.errors import ServiceUnavailable, SourceHttpError
+from ....yomihime_game_link_sdk.errors import (
+    AccessDenied,
+    OperationTimeout,
+    ServiceUnavailable,
+    SourceHttpError,
+)
 from ....yomihime_game_link_sdk.results import (
     CapabilityResult,
     ErrorCode,
@@ -266,10 +271,11 @@ def server_facts(matches, realm, server_label, name):
     }
 
 
-async def invoke_character_tool(handler, context, parameters):
+async def invoke_character_tool(handler, context, parameters, failures):
     from .fflogs import _error
-    from .fflogs_server import realm_from_catalog
-    from .market_sources import MarketPayloadError, MarketSourceClient
+    from .fflogs_failures import STAGE_MESSAGES
+    from .fflogs_server import resolve_realm
+    from .market_sources import MarketPayloadError
 
     state = None
     key = None
@@ -287,6 +293,7 @@ async def invoke_character_tool(handler, context, parameters):
             raise TimeoutError
         async with asyncio.timeout(max(0, deadline - monotonic())):
             scope = await handler._services.scopes.bind(context)
+            failures.port = getattr(scope, "diagnostics", None)
             message = await scope.message.read()
             values = validate_message_parameters(parameters, message.text)
             action = semantic_action(parameters)
@@ -503,25 +510,32 @@ async def invoke_character_tool(handler, context, parameters):
                                 scope=SimpleNamespace(http=GuardedHttp()),
                                 tool=True,
                                 guard=guard,
+                                failures=failures,
                             )
                         )
                 server_region = None
-                public_source = MarketSourceClient(None)
-                session = public_source.start_bound(
-                    GuardedHttp(), getattr(scope, "cache", None), deadline=deadline
-                )
+                failures.begin("universalis_market", "realm_directory")
                 try:
-                    public = await session.catalog()
-                    server_region = realm_from_catalog(public.catalog, actual["server"])
-                except (
-                    SourceHttpError,
-                    MarketPayloadError,
-                    ServiceUnavailable,
-                    QueryResolutionError,
-                ):
-                    # An unavailable or missing public directory never proves a
-                    # Logs server absent. Its authenticated directory remains authoritative.
-                    pass
+                    server_region = await resolve_realm(
+                        handler._directory_source,
+                        failures.wrap(GuardedHttp()),
+                        getattr(scope, "records", None),
+                        actual["server"],
+                        deadline=deadline,
+                        directory=handler._directory,
+                    )
+                except MarketPayloadError:
+                    failures.record("payload_parse", status=failures.last_status)
+                except (SourceHttpError, ServiceUnavailable) as exc:
+                    if isinstance(exc, SourceHttpError) and exc.code == "cancelled":
+                        raise
+                    failures.source_error(exc)
+                except QueryResolutionError as exc:
+                    if exc.code is ErrorCode.UPSTREAM_ERROR:
+                        failures.record(
+                            "region_unresolved", status=failures.last_status
+                        )
+                    # Its authenticated directory remains authoritative for explicit realms.
                 await guard()
                 explicit = actual.get("realm")
                 if (
@@ -543,7 +557,7 @@ async def invoke_character_tool(handler, context, parameters):
                     return tool_result(
                         _error(
                             ErrorCode.UPSTREAM_ERROR,
-                            "服务器目录未能确定区域，请核对服务器或稍后重试。",
+                            STAGE_MESSAGES["realm_directory"],
                         )
                     )
                 state.values = dict(actual)
@@ -574,6 +588,7 @@ async def invoke_character_tool(handler, context, parameters):
                     guard=guard,
                     resolved_server=selected,
                     server_candidates=candidates,
+                    failures=failures,
                 )
             finally:
                 state.inflight = False
@@ -590,15 +605,19 @@ async def invoke_character_tool(handler, context, parameters):
             return result
     except (ValueError, QueryResolutionError) as exc:
         return tool_result(_error(ErrorCode.PARAMETER_ERROR, str(exc)))
+    except (AccessDenied, OperationTimeout):
+        raise
     except PermissionError:
         return tool_result(
             _error(ErrorCode.UNSUPPORTED, "当前真实用户消息或模块生命周期已失效。")
         )
-    except ServiceUnavailable:
+    except ServiceUnavailable as exc:
+        failures.source_error(exc)
         return tool_result(
             _error(ErrorCode.MODULE_UNAVAILABLE, "FFLogs 来源服务暂不可用。")
         )
-    except TimeoutError:
+    except TimeoutError as exc:
+        failures.source_error(exc)
         return tool_result(_error(ErrorCode.UPSTREAM_ERROR, "FFLogs 角色查询超时。"))
     finally:
         if owns_flight and state is not None:
