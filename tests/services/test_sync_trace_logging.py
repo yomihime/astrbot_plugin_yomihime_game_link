@@ -216,6 +216,65 @@ class TraceLogicalIdentityTests(unittest.TestCase):
 
 
 class LiveLogicalIdentityTests(unittest.IsolatedAsyncioTestCase):
+    async def test_handler_denial_response_does_not_depend_on_trace_classification(
+        self,
+    ):
+        from unittest.mock import AsyncMock
+
+        from tests.core import test_invocation as fixture_module
+        from yomihime_game_link_sdk.errors import (
+            AccessDenied,
+            OperationTimeout,
+            SourceHttpError,
+        )
+        from yomihime_game_link_sdk.results import ErrorCode
+
+        fixture = fixture_module.GatewayTests()
+        fixture.setUp()
+        handler, view = await fixture._ready()
+        gateway = fixture._gateway()
+        try:
+            for error, expected_code, trace_code, warned in (
+                (AccessDenied(), ErrorCode.UNKNOWN, "stale", False),
+                (
+                    AccessDenied("source_revoked"),
+                    ErrorCode.MODULE_UNAVAILABLE,
+                    "stale",
+                    False,
+                ),
+                (
+                    OperationTimeout(),
+                    ErrorCode.MODULE_UNAVAILABLE,
+                    "core_deadline",
+                    True,
+                ),
+                (
+                    SourceHttpError("cancelled"),
+                    ErrorCode.MODULE_UNAVAILABLE,
+                    "cancelled",
+                    False,
+                ),
+            ):
+                with self.subTest(error=error.code):
+                    warnings = []
+                    diagnostics = SyncDiagnostics(warning_sink=warnings.append)
+                    gateway._sync_diagnostics = diagnostics
+                    handler.invoke = AsyncMock(side_effect=error)
+                    try:
+                        result = await gateway.invoke_command(view, "查询", {"id": "x"})
+                        self.assertIs(result.error.code, expected_code)
+                        (trace,) = diagnostics.snapshot()["attempts"]
+                        self.assertEqual(trace["core_failure_code"], trace_code)
+                        self.assertEqual(
+                            [warning["category"] for warning in warnings],
+                            [trace_code] if warned else [],
+                        )
+                    finally:
+                        diagnostics.close()
+        finally:
+            fixture.issuer.release(view)
+            await fixture.lifecycle.stop(view.module_id)
+
     async def test_real_gateway_supplies_declaration_ids_on_handler_failure(self):
         from unittest.mock import AsyncMock
 

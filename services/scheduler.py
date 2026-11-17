@@ -70,6 +70,7 @@ from ..yomihime_game_link_sdk.contexts import InvocationOrigin, InvocationView
 from ..yomihime_game_link_sdk.declarations import SourceDeclaration
 from ..yomihime_game_link_sdk.errors import (
     AccessDenied,
+    InvalidInvocation,
     OperationTimeout,
     SourceHttpError,
 )
@@ -1213,15 +1214,23 @@ class SharedCollectionScheduler:
             core_final = "cancelled"
             trace_event("core_failure", code="cancelled")
             raise
-        except (ScopeCancelled, ScopeStaleError, AccessDenied):
+        except (ScopeCancelled, ScopeStaleError):
             core_final = "stale"
             trace_event("core_failure", code="stale")
             return None
-        except (ScopeDeadlineExceeded, asyncio.TimeoutError) as exc:
+        except (ScopeDeadlineExceeded, asyncio.TimeoutError, AccessDenied) as exc:
+            invocation_expired = (
+                isinstance(exc, InvalidInvocation) and exc.code == "invocation_expired"
+            )
+            if isinstance(exc, AccessDenied) and not invocation_expired:
+                core_final = "stale"
+                trace_event("core_failure", code="stale")
+                return None
             trace_event(
                 "core_failure",
                 code="core_deadline"
-                if isinstance(exc, (ScopeDeadlineExceeded, OperationTimeout))
+                if invocation_expired
+                or isinstance(exc, (ScopeDeadlineExceeded, OperationTimeout))
                 else "collector_timeout",
             )
             if lease is None:

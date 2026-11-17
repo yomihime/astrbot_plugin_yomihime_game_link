@@ -827,8 +827,38 @@ class Gateway:
                 else _publication_failure_code(error)
             )
             diagnostic("core_failure", code=code or "error")
+            # A denied business operation intentionally shares the opaque
+            # handler failure response. Trace classification is independent.
+            unavailable = (
+                isinstance(
+                    error,
+                    (
+                        _MessageSourceRejected,
+                        ScopeCancelled,
+                        ScopeDeadlineExceeded,
+                        ScopeStaleError,
+                        LifecycleError,
+                        AdmissionError,
+                        InvalidInvocation,
+                        OperationTimeout,
+                    ),
+                )
+                or isinstance(error, AccessDenied)
+                and error.code
+                in {
+                    "invalid_invocation",
+                    "grant_expired",
+                    "grant_revoked",
+                    "source_revoked",
+                    "origin_denied",
+                }
+                or isinstance(error, SourceHttpError)
+                and error.code == "cancelled"
+            )
             return finish(
-                denied(ErrorCode.MODULE_UNAVAILABLE if code else ErrorCode.UNKNOWN),
+                denied(
+                    ErrorCode.MODULE_UNAVAILABLE if unavailable else ErrorCode.UNKNOWN
+                ),
                 "error",
             )
 
