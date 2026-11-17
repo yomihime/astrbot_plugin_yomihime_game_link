@@ -22,7 +22,9 @@ preview 保留 success、partial_success、needs_selection 的原业务 document
 
 当前内部请求协议为闭合 `admin/module-*` 动作：config-current/save/clear、credential-status/replace/clear/authorize。请求身份包含 owner、page、runtime_id、module_epoch；save 携 values，config clear 携 fields，凭据 replace 携 field/pair，凭据 clear 携 field 与固定确认。静态pair为token及可选subject，OAuth仍用client_id/client_secret。authorize(revision,flow_id,step,session_id)只接受受信flow的begin/poll/cancel/qr/revoke，返回安全状态或当前管理会话的QR PNG，原始票据/秘密不返回。身份闭包不是授权；后端每请求独立验证当前 token/page、受信政策、owner/epoch、字段资源 READ/UPDATE、capability 和 CAS。普通查询不因此获得管理权限。
 
-壳每次挂载先通过固定 `admin/module-page-session` 用上述身份取得 server-issued page_session（expires_at 为 UTC epoch seconds，最长 30 秒）。proof 只在内部服务闭包，各管理动作随请求提交。到期前的并发读取共享一次续期，并仅携自身 previous_session；不能撤销另一视图的 proof。尚有效proof轮换保持私有授权lineage，旧proof立即失效；过期后fresh bootstrap不继承旧扫码会话。dispose 固定关闭自身 proof并失效对应授权lineage，迟到 bootstrap 结果也关闭自身 proof。已提交写入的失败或未知结果不自动重试；本地过期前续期不代表后台已完成写入。Host 必须校验真实会话及 Origin，客户端身份或字段声明本身不授权。
+壳每次挂载先通过固定 `admin/module-page-session` 用上述身份和 `relative_expiry: true` 取得服务端签发的 `{page_session, expires_in}`。`expires_in` 按 Host 签发时刻计算，最多 30 秒，并受 Host 登录会话期限约束。浏览器使用从请求发出时开始的单调计时计算本地期限。旧壳省略此参数时仍接收 `{page_session, expires_at}`，期限为 UTC epoch 秒。
+
+proof 只在内部服务闭包，各管理动作随请求提交。到期前的并发读取共享一次续期，仅携本视图的 `previous_session`。有效 proof 轮换保持本视图的授权 lineage，使旧 proof 失效。到期后重新申请不继承旧扫码会话。dispose 和迟到的 bootstrap 都关闭自身 proof。写入失败或结果未知时保留人工核对流程。Host 逐次校验真实会话、Origin 和页面权限。
 
 到期后的旧 proof 已被 server registry 清除，不能再用作 previous_session。闲置超过 TTL 后采用 fresh bootstrap，重新校验当前 Host 会话与页面授权；只有未到期 proof 才轮换。并发读取仍只申请一次，授权失效不降级为旧 proof，已经发出的写入不因期间到期而重发。前端只把精确授权错误映射为受控授权失效，未知异常显示固定错误，保留未确认写的人工核对流程。
 

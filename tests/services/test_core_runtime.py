@@ -2310,7 +2310,7 @@ class CoreRuntimeTests(unittest.IsolatedAsyncioTestCase):
         entered = asyncio.Event()
         release = asyncio.Event()
 
-        async def pending_page():
+        async def pending_page(*, after_cursor=None):
             entered.set()
             try:
                 await release.wait()

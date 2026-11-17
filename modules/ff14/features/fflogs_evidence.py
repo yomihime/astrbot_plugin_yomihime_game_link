@@ -10,6 +10,8 @@ from decimal import Decimal
 from secrets import token_hex
 from time import monotonic
 
+from ....yomihime_game_link_sdk.errors import ServiceUnavailable
+
 MARKER = "FF14_LOGS_EVIDENCE"
 MAX_BYTES = 512 * 1024
 MAX_CHUNKS = 64
@@ -865,4 +867,10 @@ class Evidence:
         # No rebind, logging backchannel, or stored invocation beyond this call.
         pending, self._pending = self._pending, []
         for operation, payload in pending:
-            await self._diagnostics.emit(operation, payload)
+            try:
+                await self._diagnostics.emit(operation, payload)
+            except (PermissionError, TimeoutError, ServiceUnavailable):
+                raise
+            except Exception:
+                # Optional diagnostics must not replace a validated result.
+                continue

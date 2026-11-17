@@ -33,7 +33,7 @@ function harness({data=catalog(),loader,initialContext,readyTask,sessionHandler,
   const gets=[],posts=[],mounts=[],pageSessions=[],languageReads=[]; let callback;
   window.scrollTo=()=>{};
   const context={pluginName:'astrbot_plugin_yomihime_game_link',pageName:'00-game-link',binding:1,isDark:false,locale:'zh-CN'};
-  const bridge={ready:()=>readyTask?.promise || Promise.resolve(initialContext === undefined ? context : initialContext),onContext(fn){callback=fn;return()=>{callback=null;};},apiGet(path){const p=deferred();gets.push({path,...p});return p.promise;},apiPost(path,body){if(path==='admin/read'&&body?.scope==='page_locale'){languageReads.push(body);return languageHandler();}if(path==='admin/module-page-session'){pageSessions.push({path,body});return sessionHandler?sessionHandler(body):Promise.resolve({page_session:'synthetic-proof',expires_at:Date.now()/1000+30});}if(path==='admin/module-page-session-close'){pageSessions.push({path,body});return Promise.resolve({closed:true});}const p=deferred();posts.push({path,body,...p});return p.promise;}};
+  const bridge={ready:()=>readyTask?.promise || Promise.resolve(initialContext === undefined ? context : initialContext),onContext(fn){callback=fn;return()=>{callback=null;};},apiGet(path){const p=deferred();gets.push({path,...p});return p.promise;},apiPost(path,body){if(path==='admin/read'&&body?.scope==='page_locale'){languageReads.push(body);return languageHandler();}if(path==='admin/module-page-session'){pageSessions.push({path,body});return sessionHandler?sessionHandler(body):Promise.resolve({page_session:'synthetic-proof',expires_in:30});}if(path==='admin/module-page-session-close'){pageSessions.push({path,body});return Promise.resolve({closed:true});}const p=deferred();posts.push({path,body,...p});return p.promise;}};
   const loadPage=loader||(async(entry)=>({mount(view,options){const input=window.document.createElement('input');input.value='draft';view.append(input);const mount={view,input,options,updates:[],disposed:0};mounts.push(mount);return{update(context){mount.updates.push(context);},dispose(){mount.disposed++;view.replaceChildren();}};}}));
   const shell=createShell({bridge,container,window,expectedPage,loadPage:entry=>{imports.push(entry);return loadPage(entry);},changed(){},timeoutMs:100}); shell.start();
   return {shell,dom,container,gets,posts,mounts,pageSessions,languageReads,styleRequests,imports,context,emit:c=>callback?.(c),async start(){await flush();gets[0].resolve(data);await flush();},close(){shell.dispose();dom.window.close();}};
@@ -69,13 +69,13 @@ test('verified language choice and Host context updates preserve an active modul
 for(const outcome of ['resolve','reject'])test(`late ${outcome} of a disposed home bootstrap preserves the same owner's current settings`,async()=>{
  const data=catalog('steam_dlc/cs2'),module=data.modules[0],late=deferred();
  module.pages=module.pages.map((page,index)=>({...page,route_id:index?'settings':'home',role:index?'config':'home',capability_id:index?null:'status'}));
- const h=harness({data,hash:'#/module/steam_dlc%2Fcs2/home',sessionHandler:body=>body.page==='home'?late.promise:Promise.resolve({page_session:'settings-proof',expires_at:Date.now()/1000+30})});
+ const h=harness({data,hash:'#/module/steam_dlc%2Fcs2/home',sessionHandler:body=>body.page==='home'?late.promise:Promise.resolve({page_session:'settings-proof',expires_in:30})});
  try{
   await h.start();assert.equal(h.mounts.length,0);assert.equal(h.pageSessions.length,1);
   h.shell.selectSettings('steam_dlc/cs2');await flush();const settings=h.mounts[0];
   assert.ok(settings);assert.equal(settings.options.routeId,'settings');const message=h.shell.state.message;
   settings.input.focus();settings.input.setSelectionRange(1,3);
-  if(outcome==='resolve')late.resolve({page_session:'late-home-proof',expires_at:Date.now()/1000+30});else late.reject(Error('admin_authorization_denied'));
+  if(outcome==='resolve')late.resolve({page_session:'late-home-proof',expires_in:30});else late.reject(Error('admin_authorization_denied'));
   await flush();
   assert.equal(h.shell.state.mounted,true);assert.equal(h.mounts.length,1);assert.equal(settings.disposed,0);
   assert.equal(h.container.firstElementChild,settings.view);assert.equal(settings.options.scope.isCurrent(),true);

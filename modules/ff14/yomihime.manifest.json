@@ -3629,6 +3629,128 @@
             ],
             "additionalProperties": false
           }
+        },
+        {
+          "event_id": "FF14LogsFailure",
+          "payload_schema": {
+            "type": "object",
+            "properties": {
+              "failures": {
+                "$ref": "#/$defs/s1"
+              },
+              "elapsed_ms": {
+                "$ref": "#/$defs/s7"
+              }
+            },
+            "required": [
+              "failures",
+              "elapsed_ms"
+            ],
+            "additionalProperties": false,
+            "$defs": {
+              "s3": {
+                "type": "string",
+                "maxLength": 160,
+                "enum": [
+                  "universalis_market",
+                  "fflogs_public_cn",
+                  "fflogs_public_global"
+                ]
+              },
+              "s4": {
+                "type": "string",
+                "maxLength": 160,
+                "enum": [
+                  "realm_directory",
+                  "authentication",
+                  "server_directory",
+                  "character_query",
+                  "ranking_schema",
+                  "ranking_metadata",
+                  "ranking_history"
+                ]
+              },
+              "s5": {
+                "type": "string",
+                "maxLength": 160,
+                "enum": [
+                  "credentials_unavailable",
+                  "unauthorized",
+                  "forbidden",
+                  "rate_limited",
+                  "timeout",
+                  "http_error",
+                  "transport_error",
+                  "request_rejected",
+                  "payload_parse",
+                  "graphql_error",
+                  "incomplete_directory",
+                  "identity_mismatch",
+                  "selection_mismatch",
+                  "service_unavailable",
+                  "internal_error",
+                  "region_unresolved"
+                ]
+              },
+              "s6": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 100,
+                "maximum": 599
+              },
+              "s7": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 86400000
+              },
+              "s8": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 10000
+              },
+              "s2": {
+                "type": "object",
+                "properties": {
+                  "source": {
+                    "$ref": "#/$defs/s3"
+                  },
+                  "stage": {
+                    "$ref": "#/$defs/s4"
+                  },
+                  "category": {
+                    "$ref": "#/$defs/s5"
+                  },
+                  "http_status": {
+                    "$ref": "#/$defs/s6"
+                  },
+                  "elapsed_ms": {
+                    "$ref": "#/$defs/s7"
+                  },
+                  "count": {
+                    "$ref": "#/$defs/s8"
+                  }
+                },
+                "required": [
+                  "source",
+                  "stage",
+                  "category",
+                  "http_status",
+                  "elapsed_ms",
+                  "count"
+                ],
+                "additionalProperties": false
+              },
+              "s1": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/s2"
+                },
+                "maxItems": 8
+              }
+            }
+          }
         }
       ],
       "display": {

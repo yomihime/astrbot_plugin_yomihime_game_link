@@ -24,8 +24,9 @@ for line in sys.stdin:
         if request["action"] == "issue":
             result = registry.issue(
                 **common,
-                expiry=now[0] + 30,
+                expiry=request.get("auth_expires_at", now[0] + 30),
                 previous_session=request.get("previous_session"),
+                relative_expiry=request.get("relative_expiry", False),
             )
         elif request["action"] == "require":
             registry.require(request["page_session"], **common)

@@ -34,7 +34,7 @@ Dashboard 模块页面通过 `POST admin/module-invoke` 查询、`POST admin/mod
 
 唯一正式根为 `00-game-link`。模块的配置与凭据动作还要求独立的、仅内存保存的 `page_session`；它不能由静态资产令牌、页面名称、Referer或客户端角色声明替代。
 
-`POST admin/module-page-session` 接收当前目录中的 `owner`、`page`、`runtime_id`、`module_epoch`，可选 `previous_session` 仅旋转本视图先前的opaque proof。后端先验证真实Dashboard JWT、Origin及当前请求身份，再核当前注册／启用／active模块与运行identity，并将页面声明字段和受信部署资源取交集，独立核普通配置及凭据字段的READ／UPDATE授权。返回 `{page_session, expires_at}`；后者为UTC epoch秒，最长30秒。会话表最多128项并清理到期项，不保存JWT原文或持久化proof。
+`POST admin/module-page-session` 接收当前目录中的 `owner`、`page`、`runtime_id`、`module_epoch`，可选 `previous_session` 仅旋转本视图先前的opaque proof。后端先验证真实Dashboard JWT、Origin及当前请求身份，再核当前注册／启用／active模块与运行identity，并将页面声明字段和受信部署资源取交集，独立核普通配置及凭据字段的READ／UPDATE授权。请求携带 `relative_expiry: true` 时返回 `{page_session, expires_in}`，其中相对秒数从 Host 签发时刻计算，受 JWT 期限和 30 秒上限约束。省略此参数时返回旧版 `{page_session, expires_at}`，期限为 UTC epoch 秒。两个响应格式使用同一服务端期限。会话表只在内存保存最多 128 项及对应的 Bearer 摘要，并清理到期项。
 
 六个 `module-config-current/save/clear`、`module-credential-status/replace/clear` 请求在原身份正文之外携带 `page_session`。Host逐次检查真实会话、scope、runtime／epoch、字段交集及generation，再签发当前动作的Core管理proof；后续异步边界及提交围栏继续检查。会话不能选择任意管理API、全局密钥、Core主题或其他owner字段。`module-page-session-close` 只关闭绑定到同一真实会话的本proof，正文仅 `{page_session}`。两个视图各有独立proof；刷新仅替换自己的previous proof，不使另一视图的并发读取失效。卸载、runtime更换、关闭或到期使旧proof失效。
 
@@ -47,6 +47,8 @@ AstrBot 4.29.1父页bridge用普通Dashboard JWT发送API请求，没有向插�
 全新安装从当前SQLite值和声明默认值启动。普通历史字段只有经受信、闭合的copy policy才能按目标字段名作临时effective projection；目标已有值即停止，source保留。显式plan／execute进行双revision CAS，不能任意读取Core配置；详情见[架构规范](code-architecture.md)及[凭据存储](credential-storage.md)。显式无效值保留，管理读取只返回安全状态；管理员修正后按全部目标revision重新验证恢复。恢复不重置数据库、生成秘密或改变订阅。
 
 加密诊断只返回 `key_state`、`codec_state` 固定枚举。缺少部署密钥仅阻止需要秘密的操作，不阻止非秘密能力。
+
+`POST admin/scheduler-diagnostics` 仅接受 `{module_id}`，按该模块已声明的普通配置资源验证 `READ_CONFIG`。它只读后台调度状态、固定失败类别，以及该模块公开采集器的订阅、任务、租约、检查点和投递状态计数；数据库读取受独立工作预算约束。不返回订阅 ID、目标、参数、正文或凭据，不执行采集、发送、重置或重试。Core Ready 与后台调度正常运行是两个独立状态；`unknown` 投递计数也不证明发送失败，不能据此补发。
 
 ## 测试边界
 

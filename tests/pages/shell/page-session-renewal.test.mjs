@@ -15,32 +15,35 @@ async function registry(){
  void exited.catch(()=>{});
  return {request(action,now,body={}){return new Promise((resolve,reject)=>{if(failure){reject(failure);return;}const id=++serial;waiting.set(id,{resolve,reject});child.stdin.write(JSON.stringify({id,action,now,...body})+'\n');});},async close(){closing=true;child.stdin.end();await exited;}};
 }
-for(const seconds of [29,30,31])test(`real registry permits fresh authorized use after ${seconds}s idle without expired rotation`,async()=>{
- const server=await registry(),nativeNow=Date.now;let now=1000,dispose,authorized=true;Date.now=()=>now*1000;const calls=[];
+for(const seconds of [29,30,31])test(`real registry permits fresh authorized use after ${seconds}s idle without expired rotation`,async(t)=>{
+ const server=await registry();let now=1000,dispose,authorized=true;const calls=[];
+ t.mock.method(performance,'now',()=>now*1000);
  try{
-  const bridge={async apiPost(action,body){calls.push({action,body});if(action==='admin/module-page-session')return server.request('issue',now,{previous_session:body.previous_session,authorized});if(action==='admin/module-page-session-close')return server.request('close',now,body);await server.request('require',now,{page_session:body.page_session,authorized});return action==='admin/module-config-save'?{revision:2}:{revision:1,fields:{}};}};
+  const bridge={async apiPost(action,body){calls.push({action,body});if(action==='admin/module-page-session')return server.request('issue',now,{previous_session:body.previous_session,relative_expiry:body.relative_expiry,authorized});if(action==='admin/module-page-session-close')return server.request('close',now,body);await server.request('require',now,{page_session:body.page_session,authorized});return action==='admin/module-config-save'?{revision:2}:{revision:1,fields:{}};}};
   const options={bridge,binding:{owner:'example/demo',page:'config',runtime_id:'synthetic',module_epoch:1},capabilityId:null,isCurrent:()=>true,onDispose:fn=>{dispose=fn;},confirmClear:async()=>true};
   const services=await createModuleServices(options),other=await createModuleServices({...options,onDispose(){}});now+=seconds;
   await Promise.all([services.config.current(),services.credentials.status()]);assert.equal(calls.filter(call=>call.action==='admin/module-page-session').length,3);
   const renewal=calls.filter(call=>call.action==='admin/module-page-session').at(-1).body;assert.equal(Object.hasOwn(renewal,'previous_session'),seconds<30);
   if(seconds<30)await other.config.current();await services.config.save(1,{sample:'after-idle'});assert.equal(calls.filter(call=>call.action==='admin/module-config-save').length,1);
   authorized=false;now+=31;await assert.rejects(services.config.current());assert.equal(calls.filter(call=>call.action==='admin/module-config-save').length,1);dispose();await new Promise(resolve=>setImmediate(resolve));
- }finally{Date.now=nativeNow;await server.close();}
+ }finally{await server.close();}
 });
-test('expiry while awaiting an already submitted write never causes a mutation retry',async()=>{
- const server=await registry(),nativeNow=Date.now;let now=1000,release,writes=0,issues=0;Date.now=()=>now*1000;
+test('expiry while awaiting an already submitted write never causes a mutation retry',async(t)=>{
+ const server=await registry();let now=1000,release,writes=0,issues=0;
+ t.mock.method(performance,'now',()=>now*1000);
  try{
-  const services=await createModuleServices({bridge:{async apiPost(action,body){if(action==='admin/module-page-session'){issues++;return server.request('issue',now,{previous_session:body.previous_session});}if(action==='admin/module-page-session-close')return server.request('close',now,body);await server.request('require',now,{page_session:body.page_session});writes++;await new Promise(resolve=>{release=resolve;});return {revision:2};}},binding:{owner:'example/demo',page:'config',runtime_id:'synthetic',module_epoch:1},capabilityId:null,isCurrent:()=>true,onDispose(){},confirmClear:async()=>true});
+  const services=await createModuleServices({bridge:{async apiPost(action,body){if(action==='admin/module-page-session'){issues++;return server.request('issue',now,{previous_session:body.previous_session,relative_expiry:body.relative_expiry});}if(action==='admin/module-page-session-close')return server.request('close',now,body);await server.request('require',now,{page_session:body.page_session});writes++;await new Promise(resolve=>{release=resolve;});return {revision:2};}},binding:{owner:'example/demo',page:'config',runtime_id:'synthetic',module_epoch:1},capabilityId:null,isCurrent:()=>true,onDispose(){},confirmClear:async()=>true});
   const pending=services.config.save(1,{sample:'new'});while(!release)await new Promise(resolve=>setImmediate(resolve));now+=31;release();assert.deepEqual(await pending,{revision:2});assert.equal(writes,1);assert.equal(issues,1);
- }finally{Date.now=nativeNow;await server.close();}
+ }finally{await server.close();}
 });
 
-test('real registry keeps one rotating view alive through 64s of 2s authorization polls',async()=>{
- const server=await registry(),nativeNow=Date.now;let now=1000;Date.now=()=>now*1000;const calls=[],proofs=[];
+test('real registry keeps one rotating view alive through 64s of 2s authorization polls',async(t)=>{
+ const server=await registry();let now=1000;const calls=[],proofs=[];
+ t.mock.method(performance,'now',()=>now*1000);
  try{
   const services=await createModuleServices({bridge:{async apiPost(action,body){calls.push({action,body});
    if(action==='admin/module-page-session'){
-    const result=await server.request('issue',now,{previous_session:body.previous_session});
+    const result=await server.request('issue',now,{previous_session:body.previous_session,relative_expiry:body.relative_expiry});
     if(body.previous_session)await assert.rejects(server.request('require',now,{page_session:body.previous_session}),/AdminAuthorizationDenied/);
     proofs.push(result.page_session);return result;
    }
@@ -53,5 +56,46 @@ test('real registry keeps one rotating view alive through 64s of 2s authorizatio
   const polls=calls.filter(call=>call.action==='admin/module-credential-authorize');assert.equal(polls.length,32);
   assert.ok(polls.every(call=>call.body.expected_revision===7&&call.body.session_id==='synthetic-authorization-session'));
   assert.equal(new Set(polls.map(call=>call.body.page_session)).size,4);
- }finally{Date.now=nativeNow;await server.close();}
+ }finally{await server.close();}
+});
+
+for(const skew of [-120,120])test(`Host clock skew of ${skew}s and short JWT expiry preserve session authority`,async(t)=>{
+ const server=await registry();
+ const binding={owner:'example/demo',page:'config',runtime_id:'synthetic',module_epoch:1};
+ const issues=[],calls=[];
+ let now=1000;
+ const authExpiry=now+skew+15;
+ t.mock.method(Date,'now',()=>now*1000);
+ t.mock.method(performance,'now',()=>now*1000);
+ const bridge={async apiPost(action,body){
+  calls.push({action,body});
+  const hostNow=now+skew;
+  if(action==='admin/module-page-session'){
+   const value=await server.request('issue',hostNow,{
+    relative_expiry:body.relative_expiry,
+    previous_session:body.previous_session,
+    auth_expires_at:authExpiry,
+   });
+   issues.push(value);
+   return value;
+  }
+  await server.request('require',hostNow,{page_session:body.page_session});
+  return {revision:1,fields:{}};
+ }};
+ try{
+  const services=await createModuleServices({bridge,binding,capabilityId:null,isCurrent:()=>true,onDispose(){},confirmClear:async()=>true});
+  assert.equal(issues[0].expires_in,15);
+  now+=4;
+  await services.config.current();
+  assert.equal(issues.length,1);
+  now+=1;
+  await services.credentials.status();
+  assert.equal(issues.length,2);
+  assert.equal(issues[1].expires_in,10);
+  assert.equal(calls.filter(call=>call.action==='admin/module-page-session')[1].body.previous_session,issues[0].page_session);
+  now+=10;
+  await assert.rejects(services.config.current(),/operation_unavailable/);
+  assert.equal(calls.at(-1).action,'admin/module-page-session');
+  assert.equal(Object.hasOwn(calls.at(-1).body,'previous_session'),false);
+ }finally{await server.close();}
 });

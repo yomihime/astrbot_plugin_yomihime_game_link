@@ -40,6 +40,12 @@ from ..core.contracts.subscriptions import (
 )
 from ..core.contracts.validation import _validate as _validate_schema
 from ..core.contracts.validation_boundary import validate_contract
+from ..core.lifecycle import (
+    ModuleDisabled,
+    ModuleNotFound,
+    ModuleStopping,
+    StaleEpochError,
+)
 from ..core.ports import (
     AdmissionPort,
     BackgroundJob,
@@ -52,7 +58,12 @@ from ..core.ports import (
     SubscriptionStore,
 )
 from ..core.registry import RegisteredModule, Registry, RegistrySnapshot
-from ..core.task_scope import ScopeCancelled, ScopeDeadlineExceeded, ScopeStaleError
+from ..core.task_scope import (
+    ScopeCancelled,
+    ScopeClosedError,
+    ScopeDeadlineExceeded,
+    ScopeStaleError,
+)
 from ..infrastructure.sync_diagnostics import SyncDiagnostics
 from ..infrastructure.sync_diagnostics import emit as diagnostic
 from ..yomihime_game_link_sdk.contexts import InvocationOrigin, InvocationView
@@ -260,6 +271,7 @@ class ScanPage:
     processed: int
     next_cursor: object | None
     exhausted: bool
+    without_result: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -676,14 +688,36 @@ class SharedCollectionScheduler:
             now=now, limit=page_limit, after_cursor=after_cursor
         )
         results = await asyncio.gather(
-            *(self.run_due_job(candidate) for candidate in jobs)
+            *(self._run_page_candidate(candidate) for candidate in jobs)
         )
-        del results
         return ScanPage(
             processed=len(jobs),
             next_cursor=None if not jobs else jobs[-1].cursor,
             exhausted=len(jobs) < page_limit,
+            without_result=sum(result is None for result in results),
         )
+
+    async def _run_page_candidate(self, candidate):
+        try:
+            return await self.run_due_job(candidate)
+        except (
+            ModuleNotFound,
+            ModuleDisabled,
+            ModuleStopping,
+            StaleEpochError,
+            ScopeCancelled,
+            ScopeClosedError,
+            ScopeStaleError,
+        ):
+            # A retained due candidate can outlive its active module scope.
+            # The remaining jobs still belong to this scan.
+            return None
+        except asyncio.CancelledError:
+            waiter = asyncio.current_task()
+            if waiter is not None and not waiter.cancelling():
+                # The module-owned task stopped, not the page waiter.
+                return None
+            raise
 
     async def run_due_job(self, candidate: DueCollectionJob) -> CollectionResult | None:
         """Resolve the live declaration then join or claim one persistent execution."""

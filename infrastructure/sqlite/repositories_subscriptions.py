@@ -1444,6 +1444,115 @@ class SQLiteSchedulerRepository(_Repository):
             raise TypeError("utc_clock must be callable")
         self._utc_clock = utc_clock
 
+    async def public_activity(self, module_id, schedules, *, now):
+        """Bounded metadata for declared collectors, with no payloads or row IDs."""
+        at = _iso(_utc_instant(now, "now"))
+
+        def read(unit: SQLiteUnitOfWork):
+            # Keep a diagnostic read from monopolizing the runtime executor if
+            # a database has accumulated more rows than this inspection needs.
+            steps = 0
+
+            def abort_over_budget():
+                nonlocal steps
+                steps += 1000
+                return int(steps > 1_000_000)
+
+            unit.connection.set_progress_handler(abort_over_budget, 1000)
+            try:
+                binding = self._subscription_gate_bindings.get(module_id)
+                fence = _read_subscription_fence(unit, binding)
+                rows = [
+                    self._public_collector_activity(
+                        unit, module_id, schedule, at, fence
+                    )
+                    for schedule in schedules
+                ]
+                return {
+                    "persisted_gate_admitted": fence is not None,
+                    "collectors": rows,
+                }
+            finally:
+                unit.connection.set_progress_handler(None, 0)
+
+        return await self.database.executor.run_read(read)
+
+    @staticmethod
+    def _public_collector_activity(unit, module_id, schedule, at, fence):
+        rows = unit.execute(
+            """
+            WITH matching_jobs AS (
+                SELECT job_key, due_at, lease_token, lease_expires_at, observation_id
+                  FROM b04_collection_jobs
+                 WHERE scope_kind='public'
+                   AND json_extract(key_json,'$.fields.module_id')=?1
+                   AND json_extract(key_json,'$.fields.collector_id')=?2
+                   AND json_extract(key_json,'$.fields.source_id')=?3
+                   AND json_extract(key_json,'$.fields.key_version')=?4
+            ), active_subscriptions AS (
+                SELECT s.subscription_id, s.revision, sj.job_key
+                  FROM b04_subscriptions s
+                  LEFT JOIN b04_subscription_jobs sj
+                    ON sj.subscription_id=s.subscription_id
+                   AND sj.subscription_revision=s.revision
+                 WHERE s.scope_kind='public' AND s.status='active'
+                   AND json_extract(s.record_json,'$.fields.collection_key.fields.module_id')=?1
+                   AND json_extract(s.record_json,'$.fields.collection_key.fields.collector_id')=?2
+                   AND json_extract(s.record_json,'$.fields.collection_key.fields.source_id')=?3
+                   AND json_extract(s.record_json,'$.fields.collection_key.fields.key_version')=?4
+            ), deliveries AS (
+                SELECT COUNT(CASE WHEN e.state='pending' THEN 1 END) AS pending,
+                       COUNT(CASE WHEN e.state='sending' THEN 1 END) AS sending,
+                       COUNT(CASE WHEN e.state='sent' THEN 1 END) AS sent,
+                       COUNT(CASE WHEN e.state='failed' THEN 1 END) AS failed,
+                       COUNT(CASE WHEN e.state='failed' AND e.retry_at<=?5 THEN 1 END) AS failed_retry_due,
+                       COUNT(CASE WHEN e.state='unknown' THEN 1 END) AS unknown,
+                       COUNT(CASE WHEN e.state='cancelled' THEN 1 END) AS cancelled
+                  FROM active_subscriptions a
+                  JOIN b04_delivery_events e
+                    ON e.subscription_id=a.subscription_id AND e.subscription_revision=a.revision
+            )
+            SELECT COUNT(*) AS jobs,
+                   COUNT(due_at) AS scheduled_jobs,
+                   COUNT(CASE WHEN due_at<=?5 THEN 1 END) AS due_jobs,
+                   COUNT(CASE WHEN due_at<=?5 AND
+                       (lease_token IS NULL OR lease_expires_at<=?5) THEN 1 END) AS due_without_live_lease,
+                   COUNT(CASE WHEN lease_token IS NOT NULL AND lease_expires_at>?5 THEN 1 END) AS live_leases,
+                   COUNT(CASE WHEN lease_token IS NOT NULL AND lease_expires_at<=?5 THEN 1 END) AS expired_leases,
+                   COUNT(observation_id) AS jobs_with_observations,
+                   (SELECT COUNT(*) FROM active_subscriptions) AS active_subscriptions,
+                   (SELECT COUNT(*) FROM active_subscriptions a JOIN matching_jobs j
+                       ON j.job_key=a.job_key) AS linked_subscriptions,
+                   (SELECT COUNT(*) FROM active_subscriptions a JOIN b04_evaluation_states e
+                       ON e.subscription_id=a.subscription_id) AS subscriptions_with_checkpoints,
+                   (SELECT COUNT(*) FROM active_subscriptions a JOIN b04_evaluation_states e
+                       ON e.subscription_id=a.subscription_id
+                      WHERE e.gate_revision=?6 AND e.intent_revision=?7) AS subscriptions_with_current_checkpoints,
+                   (SELECT json_object('pending',pending,'sending',sending,'sent',sent,
+                       'failed',failed,'failed_retry_due',failed_retry_due,
+                       'unknown',unknown,'cancelled',cancelled) FROM deliveries) AS delivery_counts
+              FROM matching_jobs
+            """,
+            (
+                module_id,
+                schedule.collector_id,
+                schedule.source_id,
+                schedule.key_version,
+                at,
+                None if fence is None else fence.gate_revision,
+                None if fence is None else fence.intent_revision,
+            ),
+        ).fetchone()
+        counts = dict(rows)
+        deliveries = json.loads(counts.pop("delivery_counts"))
+        return {
+            "collector_id": schedule.collector_id,
+            "source_id": schedule.source_id,
+            "trigger": schedule.trigger.value,
+            **counts,
+            "delivery_events": deliveries,
+        }
+
     async def reconcile_background_jobs(
         self, jobs: tuple[BackgroundJob, ...], *, now: datetime
     ) -> None:

@@ -110,6 +110,77 @@ class FF14NewsRuntimeTests(unittest.IsolatedAsyncioTestCase):
             lambda unit: [tuple(row) for row in unit.execute(sql).fetchall()]
         )
 
+    async def test_scheduler_summary_counts_news_without_read_side_effects(self):
+        await self.start(targets=["test-platform-1:GroupMessage:group-42"])
+
+        def news_activity(summary):
+            return next(
+                row
+                for row in summary["collectors"]
+                if row["collector_id"] == "ff14.news.collect"
+            )
+
+        config_before = await self.sql(
+            "SELECT principal_id,module_id,field,revision FROM config_entries ORDER BY 1,2,3"
+        )
+        subscriptions_before = await self.sql("SELECT * FROM b04_subscriptions")
+        jobs_before = await self.sql("SELECT * FROM b04_collection_jobs")
+        calls_before = len(self.context.calls)
+        requests_before = len(self.transport.requests)
+        summary = await self.core.scheduler_diagnostics("ff14/ff14")
+        self.assertTrue(summary["gate"]["persisted_admitted"])
+        self.assertIsNone(summary["pump"]["failure"])
+        news = news_activity(summary)
+        self.assertEqual(news["active_subscriptions"], 1)
+        self.assertEqual(news["linked_subscriptions"], 1)
+        self.assertEqual(news["jobs"], 1)
+        self.assertEqual(news["due_jobs"], 1)
+        self.assertEqual(news["due_without_live_lease"], 1)
+        self.assertEqual(news["live_leases"], 0)
+        self.assertEqual(news["subscriptions_with_checkpoints"], 0)
+        self.assertEqual(news["subscriptions_with_current_checkpoints"], 0)
+        self.assertEqual(news["delivery_events"]["pending"], 0)
+        self.assertNotIn("group-42", json.dumps(summary))
+        self.assertNotIn(subscriptions_before[0][0], json.dumps(summary))
+        self.assertEqual(
+            await self.sql("SELECT * FROM b04_subscriptions"), subscriptions_before
+        )
+        self.assertEqual(
+            await self.sql("SELECT * FROM b04_collection_jobs"), jobs_before
+        )
+        self.assertEqual(
+            await self.sql(
+                "SELECT principal_id,module_id,field,revision FROM config_entries ORDER BY 1,2,3"
+            ),
+            config_before,
+        )
+        self.assertEqual(len(self.context.calls), calls_before)
+        self.assertEqual(len(self.transport.requests), requests_before)
+        await self.tick()
+        summary = await self.core.scheduler_diagnostics("ff14/ff14")
+        news = news_activity(summary)
+        self.assertEqual(news["subscriptions_with_checkpoints"], 1)
+        self.assertEqual(news["subscriptions_with_current_checkpoints"], 1)
+        self.assertEqual(news["jobs_with_observations"], 1)
+        self.assertEqual(news["due_jobs"], 0)
+        self.assertEqual(len(self.context.calls), calls_before)
+
+        self.transport.rows += [row(7)]
+        self.now += timedelta(seconds=900)
+        await self.core.scheduler.run_due_page()
+        counts = news_activity(await self.core.scheduler_diagnostics("ff14/ff14"))[
+            "delivery_events"
+        ]
+        self.assertEqual((counts["pending"], counts["unknown"]), (1, 0))
+        self.context.send_message = AsyncMock(return_value=None)
+        self.now += timedelta(seconds=31)
+        await self.core.delivery.dispatch_due_digests()
+        counts = news_activity(await self.core.scheduler_diagnostics("ff14/ff14"))[
+            "delivery_events"
+        ]
+        self.assertEqual((counts["pending"], counts["unknown"]), (0, 1))
+        self.context.send_message.assert_awaited_once()
+
     async def test_addhere_permissions_and_repeated_command_are_real_core_idempotent(
         self,
     ):

@@ -21,23 +21,28 @@ function publicError(error:unknown):Error{
 }
 /** All authority is rechecked by the backend; this closure prevents accidental coupling. */
 export async function createModuleServices({bridge,binding,capabilityId,isCurrent,confirmClear,onDispose}:{bridge:Bridge;binding:ModuleBinding;capabilityId:string|null;isCurrent():boolean;onDispose(callback:()=>void):unknown;confirmClear(field:string,revision:number,isCurrent:()=>boolean):Promise<boolean>}):Promise<ModulePageServices> {
-  const identity=Object.freeze({...binding});let writing=false,closed=false,proof='',expiresAt=0,opening:Promise<string>|null=null;
+  const identity=Object.freeze({...binding});let writing=false,closed=false,proof='',deadlineMs=0,opening:Promise<string>|null=null;
   const closeProof=(page_session:string)=>{if(page_session)void Promise.resolve().then(()=>bridge.apiPost('admin/module-page-session-close',{page_session})).catch(()=>{});};
-  onDispose(()=>{closed=true;closeProof(proof);proof='';expiresAt=0;});
+  onDispose(()=>{closed=true;closeProof(proof);proof='';deadlineMs=0;});
   const check=(late=false)=>{if(!isCurrent())throw Error(late?'page_revoked':'page_unavailable');};
   async function pageSession():Promise<string>{
     check();if(closed)throw Error('page_revoked');
     // Rotate while the current proof still has enough life for the next poll.
     // A 2s UI poll can otherwise land exactly on the 30s expiry boundary.
-    if(proof&&Date.now()/1000<expiresAt-10)return proof;
+    if(proof&&performance.now()<deadlineMs-10_000)return proof;
     if(!opening)opening=(async()=>{
       // An expired proof cannot authorize rotation: the registry already prunes it.
       // A fresh bootstrap still rechecks the ordinary Host session and page grants.
-      const previous=Date.now()/1000<expiresAt?proof:'';
-      let value:unknown;try{value=await bridge.apiPost('admin/module-page-session',{...identity,...(previous?{previous_session:previous}:{})});}catch(error){throw publicError(error);}
-      if(!plain(value)||Object.keys(value).sort().join()!=='expires_at,page_session'||typeof value.page_session!=='string'||!value.page_session||value.page_session.length>512||typeof value.expires_at!=='number'||!Number.isFinite(value.expires_at)||value.expires_at<=Date.now()/1000||value.expires_at>Date.now()/1000+31)throw Error('operation_unavailable');
+      const startedAt=performance.now();
+      const previous=startedAt<deadlineMs?proof:'';
+      let value:unknown;try{value=await bridge.apiPost('admin/module-page-session',{...identity,relative_expiry:true,...(previous?{previous_session:previous}:{})});}catch(error){throw publicError(error);}
+      if(!plain(value)||Object.keys(value).sort().join()!=='expires_in,page_session'||typeof value.page_session!=='string'||!value.page_session||value.page_session.length>512||typeof value.expires_in!=='number'||!Number.isFinite(value.expires_in)||value.expires_in<=0||value.expires_in>30)throw Error('operation_unavailable');
       if(closed||!isCurrent()){closeProof(value.page_session);throw Error('page_revoked');}
-      proof=value.page_session;expiresAt=value.expires_at;return proof;
+      // Count the full round trip against the server's lease, without comparing
+      // the browser and Host wall clocks.
+      const deadline=startedAt+value.expires_in*1000;
+      if(performance.now()>=deadline){closeProof(value.page_session);throw Error('operation_unavailable');}
+      proof=value.page_session;deadlineMs=deadline;return proof;
     })().finally(()=>{opening=null;});
     return opening;
   }

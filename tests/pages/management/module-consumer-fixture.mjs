@@ -9,7 +9,7 @@ export async function consumer({owner='ff14/ff14',failure='',error=null,configur
  const state={failure,error,configured,decryptable,hold,revision:4,fields:{reply_theme:{value:null,state:'valid',present:false,source:'default'}},descriptors:{reply_theme:{description:'Reply theme',value_schema:{type:'string',enum:['one','two']},default:null,choices:[{value:null,label:'Follow Core'},{value:'one',label:'Server one'},{value:'two',label:'Server two'}]}}};
  const pairState=()=>({revision:state.revision,fields:Object.fromEntries(['cn','global'].map(region=>['credential_fflogs_'+region,{configured:state.configured,decryptable:state.decryptable,upstream:'unverified'}]))});
  const bridge={async apiPost(action,body){calls.push({action,body});
-  if(action==='admin/module-page-session')return {page_session:'synthetic-'+(++proof),expires_at:Date.now()/1000+30};
+  if(action==='admin/module-page-session')return {page_session:'synthetic-'+(++proof),expires_in:30};
   if(action==='admin/module-page-session-close')return {closed:true};
   if(action===state.hold)await new Promise(resolve=>pending.push(resolve));
   if(action===state.failure)throw state.error||Error('admin_authorization_denied');

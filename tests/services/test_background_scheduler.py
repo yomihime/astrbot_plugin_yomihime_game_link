@@ -8,7 +8,8 @@ import unittest
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 from ygl_test_subject.core.admission import AdmissionController, AdmissionError
 from ygl_test_subject.core.context_issuer import ContextIssuer
@@ -23,7 +24,10 @@ from ygl_test_subject.infrastructure.sqlite.repositories_config import (
 )
 from ygl_test_subject.infrastructure.sqlite.repositories_subscriptions import (
     SQLiteSchedulerRepository,
+    _dump,
+    _job_key,
 )
+from ygl_test_subject.services.core_runtime import CoreRuntime
 from ygl_test_subject.services.scheduler import (
     ExecutionClaimProofRegistry,
     RescheduleConfiguration,
@@ -219,6 +223,98 @@ class BackgroundSchedulerTests(unittest.IsolatedAsyncioTestCase):
             ),
             now=self.now,
         )
+
+    async def test_unavailable_durable_candidate_leaves_the_next_page_runnable(self):
+        candidate, *_ = await self.candidates()
+        retired = replace(candidate.key, module_id="retired/missing")
+        job_key = _job_key(retired)
+
+        def seed_retained_subscription(unit):
+            # A previously installed module can leave an active subscription
+            # and collector job behind when its package is unavailable.
+            unit.execute(
+                "INSERT INTO b04_collection_jobs "
+                "(job_key,key_json,scope_kind,due_at,cadence_seconds,config_revision) "
+                "VALUES (?,?,'public',?,21600,1)",
+                (
+                    job_key,
+                    _dump(retired),
+                    (self.now - timedelta(seconds=1)).isoformat(),
+                ),
+            )
+            unit.execute(
+                "INSERT INTO b04_subscriptions "
+                "(subscription_id,revision,owner_id,scope_kind,status,record_json) "
+                "VALUES ('retained',1,'synthetic-owner','public','active','{}')"
+            )
+            unit.execute(
+                "INSERT INTO b04_subscription_jobs "
+                "(subscription_id,job_key,subscription_revision,association_revision,"
+                "cadence_seconds,config_revision) VALUES ('retained',?,1,1,21600,1)",
+                (job_key,),
+            )
+
+        await self.database.executor.run_transaction(seed_retained_subscription)
+        first = await self.scheduler.run_due_page(limit=1)
+        self.assertEqual(first.processed, 1)
+        self.assertEqual(first.without_result, 1)
+        self.assertEqual(self.collector.calls, 0)
+        self.assertFalse(first.exhausted)
+        self.scheduler.quotas = replace(self.scheduler.quotas, max_scan_page=1)
+        pump = SimpleNamespace(
+            _accepting=True,
+            _pump_interval=0,
+            _pump_failure=None,
+            _pump_failures=(),
+            _register_declared_subscription_gates=AsyncMock(),
+            _configured_public_subscriptions=SimpleNamespace(reconcile=AsyncMock()),
+            _utc_clock=lambda: self.now,
+            registry=self.registry,
+            scheduler=self.scheduler,
+        )
+
+        async def finish_after_current_jobs():
+            if self.collector.calls == 2:
+                pump._accepting = False
+
+        pump.delivery = SimpleNamespace(
+            dispatch_due_events=finish_after_current_jobs,
+            dispatch_due_digests=AsyncMock(),
+        )
+        with patch.object(
+            self.scheduler, "create_digest_windows_page", new=AsyncMock()
+        ):
+            await asyncio.wait_for(CoreRuntime._pump_loop(pump), timeout=2)
+        self.assertEqual(self.collector.calls, 2)
+        self.assertIsNone(pump._pump_failure)
+        self.assertEqual(pump._pump_last_success_at, self.now.isoformat())
+        retained = await self.database.executor.run_read(
+            lambda unit: tuple(
+                unit.execute(
+                    "SELECT due_at, lease_token FROM b04_collection_jobs WHERE job_key=?",
+                    (job_key,),
+                ).fetchone()
+            )
+        )
+        self.assertEqual(
+            retained, ((self.now - timedelta(seconds=1)).isoformat(), None)
+        )
+
+        pump._accepting = True
+        with (
+            patch.object(
+                self.lifecycle, "scope", side_effect=PermissionError("private-sentinel")
+            ),
+            self.assertLogs(
+                "ygl_test_subject.services.core_runtime", "WARNING"
+            ) as logs,
+        ):
+            await asyncio.wait_for(CoreRuntime._pump_loop(pump), timeout=2)
+        self.assertEqual(
+            pump._pump_failure,
+            {"stage": "collection_scan", "code": "authority_rejected"},
+        )
+        self.assertNotIn("private-sentinel", "\n".join(logs.output))
 
     async def test_runs_without_subscribers_and_preserves_due_across_restart(self):
         page = await self.scheduler.run_due_page()

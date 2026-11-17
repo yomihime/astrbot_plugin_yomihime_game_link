@@ -132,6 +132,7 @@ REVIEWED_BUNDLE_SOURCES = {
             "features/fflogs_catalog.py",
             "features/fflogs_chat.py",
             "features/fflogs_evidence.py",
+            "features/fflogs_failures.py",
             "features/fflogs_history_cache.py",
             "features/fflogs_jobs.py",
             "features/fflogs_models.py",

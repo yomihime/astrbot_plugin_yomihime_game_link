@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {sourceModule} from './compile.mjs';
 const {createModuleServices}=await sourceModule('pages/frontend/src/module-services.ts');
 const binding={owner:'example/demo',page:'config',runtime_id:'synthetic-runtime',module_epoch:3};
-async function harness(handler,confirmClear=async()=>true){let current=true;const calls=[];const services=await createModuleServices({onDispose:()=>{},bridge:{apiPost:async(action,body)=>{if(action==='admin/module-page-session')return {page_session:'synthetic-proof',expires_at:Date.now()/1000+30};calls.push({action,body});return handler(action,body);}},binding,capabilityId:'example.query',isCurrent:()=>current,confirmClear});return {services,calls,revoke(){current=false;}};}
+async function harness(handler,confirmClear=async()=>true){let current=true;const calls=[];const services=await createModuleServices({onDispose:()=>{},bridge:{apiPost:async(action,body)=>{if(action==='admin/module-page-session')return {page_session:'synthetic-proof',expires_in:30};calls.push({action,body});return handler(action,body);}},binding,capabilityId:'example.query',isCurrent:()=>current,confirmClear});return {services,calls,revoke(){current=false;}};}
 test('native queries and image previews carry the current Host page grant and never use public ingress',async()=>{
  const h=await harness(()=>({schema_version:1,status:'success'}));
  await h.services.invoke('example.query',{query:'synthetic'});await h.services.preview('example.query',{});
@@ -33,32 +33,46 @@ test('cancelled/revoked credential confirmation writes nothing',async()=>{
 test('credential status refuses secret-bearing or invented upstream DTO',async()=>{
  for(const fields of [{credential:{configured:true,decryptable:true,upstream:'success'}},{credential:{configured:true,decryptable:true,upstream:'unverified',client_secret:'synthetic'}}]){const h=await harness(()=>({revision:1,fields}));await assert.rejects(h.services.credentials.status(),/operation_unavailable/);}
 });
-test('page session renews singleflight for simultaneous reads and rotates only its own proof',async()=>{
- const nativeNow=Date.now;let time=nativeNow()/1000;Date.now=()=>time*1000;let count=0,dispose;const calls=[];
- const bridge={async apiPost(action,body){calls.push({action,body});if(action==='admin/module-page-session')return {page_session:'proof-'+(++count),expires_at:time+30};if(action==='admin/module-config-current')return {revision:1,fields:{}};if(action==='admin/module-credential-status')return {revision:1,fields:{}};return {closed:true};}};
- try{
-  const services=await createModuleServices({bridge,binding,capabilityId:null,isCurrent:()=>true,onDispose:fn=>{dispose=fn;},confirmClear:async()=>true});time+=29;
-  await Promise.all([services.config.current(),services.credentials.status()]);assert.equal(count,2);assert.equal(calls.filter(c=>c.action==='admin/module-page-session')[1].body.previous_session,'proof-1');
-  for(const call of calls.filter(c=>c.action.endsWith('current')||c.action.endsWith('status')))assert.equal(call.body.page_session,'proof-2');
-  dispose();await Promise.resolve();assert.deepEqual(calls.at(-1),{action:'admin/module-page-session-close',body:{page_session:'proof-2'}});await assert.rejects(services.config.current(),/page_revoked/);
- }finally{Date.now=nativeNow;}
+test('page session renews singleflight for simultaneous reads and rotates only its own proof',async(t)=>{
+ let time=1000,count=0,dispose;const calls=[];
+ t.mock.method(performance,'now',()=>time*1000);
+ const bridge={async apiPost(action,body){calls.push({action,body});if(action==='admin/module-page-session')return {page_session:'proof-'+(++count),expires_in:30};if(action==='admin/module-config-current')return {revision:1,fields:{}};if(action==='admin/module-credential-status')return {revision:1,fields:{}};return {closed:true};}};
+ const services=await createModuleServices({bridge,binding,capabilityId:null,isCurrent:()=>true,onDispose:fn=>{dispose=fn;},confirmClear:async()=>true});time+=29;
+ await Promise.all([services.config.current(),services.credentials.status()]);assert.equal(count,2);assert.equal(calls.filter(c=>c.action==='admin/module-page-session')[1].body.previous_session,'proof-1');
+ assert.deepEqual(calls[0].body,{...binding,relative_expiry:true});
+ for(const call of calls.filter(c=>c.action.endsWith('current')||c.action.endsWith('status')))assert.equal(call.body.page_session,'proof-2');
+ dispose();await Promise.resolve();assert.deepEqual(calls.at(-1),{action:'admin/module-page-session-close',body:{page_session:'proof-2'}});await assert.rejects(services.config.current(),/page_revoked/);
 });
 test('late bootstrap after disposal closes its own new proof and never mounts a usable service',async()=>{
  let resolve,dispose,current=true;const calls=[];
  const promise=createModuleServices({bridge:{apiPost(action,body){calls.push({action,body});return action==='admin/module-page-session'?new Promise(done=>{resolve=done;}):Promise.resolve({closed:true});}},binding,capabilityId:null,isCurrent:()=>current,onDispose:fn=>{dispose=fn;},confirmClear:async()=>true});
- current=false;dispose();resolve({page_session:'late-proof',expires_at:Date.now()/1000+30});await assert.rejects(promise,/page_revoked/);await Promise.resolve();assert.deepEqual(calls.at(-1),{action:'admin/module-page-session-close',body:{page_session:'late-proof'}});
+ current=false;dispose();resolve({page_session:'late-proof',expires_in:30});await assert.rejects(promise,/page_revoked/);await Promise.resolve();assert.deepEqual(calls.at(-1),{action:'admin/module-page-session-close',body:{page_session:'late-proof'}});
 });
 
-test('proof rotates at the ten-second margin while earlier reads keep the existing proof',async()=>{
- const nativeNow=Date.now;let time=1000,issues=0;Date.now=()=>time*1000;const calls=[];
- try{
-  const services=await createModuleServices({bridge:{async apiPost(action,body){calls.push({action,body});if(action==='admin/module-page-session')return {page_session:'proof-'+(++issues),expires_at:time+30};return {revision:1,fields:{}};}},binding,capabilityId:null,isCurrent:()=>true,onDispose(){},confirmClear:async()=>true});
-  time=1019.999;await services.config.current();assert.equal(issues,1);assert.equal(calls.at(-1).body.page_session,'proof-1');
-  time=1020;await Promise.all([services.config.current(),services.credentials.status()]);assert.equal(issues,2);
-  const rotation=calls.filter(call=>call.action==='admin/module-page-session')[1];assert.equal(rotation.body.previous_session,'proof-1');
-  assert.equal(rotation.body.owner,binding.owner);assert.equal(rotation.body.page,binding.page);
-  assert.equal(calls.at(-1).body.page_session,'proof-2');
- }finally{Date.now=nativeNow;}
+test('proof rotates at the ten-second margin while earlier reads keep the existing proof',async(t)=>{
+ let time=1000,issues=0;const calls=[];
+ t.mock.method(performance,'now',()=>time*1000);
+ const services=await createModuleServices({bridge:{async apiPost(action,body){calls.push({action,body});if(action==='admin/module-page-session')return {page_session:'proof-'+(++issues),expires_in:30};return {revision:1,fields:{}};}},binding,capabilityId:null,isCurrent:()=>true,onDispose(){},confirmClear:async()=>true});
+ time=1019.999;await services.config.current();assert.equal(issues,1);assert.equal(calls.at(-1).body.page_session,'proof-1');
+ time=1020;await Promise.all([services.config.current(),services.credentials.status()]);assert.equal(issues,2);
+ const rotation=calls.filter(call=>call.action==='admin/module-page-session')[1];assert.equal(rotation.body.previous_session,'proof-1');
+ assert.equal(rotation.body.owner,binding.owner);assert.equal(rotation.body.page,binding.page);
+ assert.equal(calls.at(-1).body.page_session,'proof-2');
+});
+
+test('short proof spent in transit is closed without mounting services',async(t)=>{
+ let now=1000;const calls=[];
+ t.mock.method(performance,'now',()=>now);
+ const bridge={async apiPost(action,body){
+  calls.push({action,body});
+  if(action==='admin/module-page-session'){now+=500;return {page_session:'expired-in-transit',expires_in:0.5};}
+  return {closed:true};
+ }};
+ await assert.rejects(createModuleServices({bridge,binding,capabilityId:null,isCurrent:()=>true,onDispose(){},confirmClear:async()=>true}),/operation_unavailable/);
+ assert.deepEqual(calls,[
+  {action:'admin/module-page-session',body:{...binding,relative_expiry:true}},
+  {action:'admin/module-page-session-close',body:{page_session:'expired-in-transit'}},
+ ]);
 });
 test('an uncertain mutation is sent once without automatically renewing or retrying it',async()=>{
  const h=await harness(()=>{throw Error('write_unknown');});await assert.rejects(h.services.config.save(1,{sample:'new'}),/operation_unavailable/);assert.equal(h.calls.length,1);assert.equal(h.calls[0].action,'admin/module-config-save');

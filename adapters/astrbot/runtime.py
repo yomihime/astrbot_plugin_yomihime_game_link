@@ -89,7 +89,7 @@ from .bundled import (
     install_bundled_package,
 )
 from .command_bridge import AstrBotCommandBridge, CommandHelp, CommandInvocation
-from .diagnostics import forward_diagnostic
+from .diagnostics import forward_diagnostic, forward_sync_failure
 from .message_port import (
     AstrBotMessagePort,
     ImageFactory,
@@ -1210,9 +1210,14 @@ class AstrBotRuntime:
                 raise AdminAuthorizationDenied
             return {"closed": True}
         if bootstrap:
-            if set(data) not in (
-                {"owner", "page", "runtime_id", "module_epoch"},
-                {"owner", "page", "runtime_id", "module_epoch", "previous_session"},
+            required = {"owner", "page", "runtime_id", "module_epoch"}
+            optional = {"previous_session"}
+            if action == "module-page-session":
+                optional.add("relative_expiry")
+            if (
+                not required <= data.keys()
+                or data.keys() - required - optional
+                or data.get("relative_expiry", True) is not True
             ):
                 raise ValueError("invalid page session request")
         elif type(data.get("page_session")) is not str:
@@ -1405,6 +1410,7 @@ class AstrBotRuntime:
                 generation=generation,
                 expiry=expiry,
                 previous_session=data.get("previous_session"),
+                relative_expiry=data.get("relative_expiry", False),
             )
             try:
                 if (
@@ -2159,7 +2165,16 @@ class AstrBotRuntime:
                     diagnostic_policies=self._assembly.diagnostic_policies
                     if self._assembly
                     else {},
-                    diagnostics=DiagnosticStore(sink=forward_diagnostic),
+                    diagnostics=DiagnosticStore(
+                        sink=forward_diagnostic,
+                        warning_sink=partial(forward_diagnostic, warning=True),
+                    ),
+                    sync_failure_sink=forward_sync_failure,
+                    command_error_messages=getattr(
+                        self._assembly.support, "command_error_messages", None
+                    )
+                    if self._assembly is not None
+                    else None,
                     legacy_config_policies=self._assembly.legacy_config_policies
                     if self._assembly
                     else (),

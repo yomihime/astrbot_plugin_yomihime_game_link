@@ -13,6 +13,7 @@ from pathlib import Path
 from ygl_test_subject.adapters.astrbot.web_public import project_result
 from ygl_test_subject.core.contracts.validation_boundary import validate_contract
 from ygl_test_subject.infrastructure.http import SourceHttpService
+from ygl_test_subject.modules.ff14.features.fflogs_server import resolve_realm
 from ygl_test_subject.modules.ff14.features.market import (
     MarketClient,
     _result,
@@ -44,7 +45,11 @@ from ygl_test_subject.modules.ff14.query_resolution import (
     ScopeCatalog,
 )
 
-from yomihime_game_link_sdk.errors import SourceHttpError
+from yomihime_game_link_sdk.errors import (
+    AccessDenied,
+    CacheUnavailable,
+    SourceHttpError,
+)
 from yomihime_game_link_sdk.results import ErrorCode, ResultStatus
 from yomihime_game_link_sdk.services import HttpRequest, HttpResponse
 from yomihime_game_link_sdk.storage import CacheEntry
@@ -207,7 +212,6 @@ class CatalogContractTests(unittest.TestCase):
             (WORLDS, []),
             (WORLDS + [WORLDS[0]], DCS),
             (WORLDS, DCS + [DCS[0]]),
-            (WORLDS, DCS[:-1]),
             (WORLDS, [{**DCS[0], "worlds": [90001, 90001]}] + DCS[1:]),
             (WORLDS, [{**DCS[0], "worlds": [123]}] + DCS[1:]),
             (
@@ -220,6 +224,35 @@ class CatalogContractTests(unittest.TestCase):
         for worlds, dcs in cases:
             with self.subTest(worlds=worlds), self.assertRaises(MarketPayloadError):
                 parse_catalog(copy.deepcopy(worlds), copy.deepcopy(dcs))
+
+    def test_worlds_without_a_data_center_do_not_block_verified_market_scopes(self):
+        worlds = WORLDS + [{"id": 91001, "name": "Synthetic Cloud Test"}]
+        catalog = parse_catalog(worlds, DCS)
+        resolver = MarketQueryResolver(catalog)
+        defaults = QueryDefaults("global", 1, 2)
+        selected = resolver.parse(
+            {"query": "44091", "server": "SyntheticChina"}, defaults
+        )
+        self.assertEqual(
+            (selected.scope.target, selected.scope.regions), (90001, ("China",))
+        )
+        for server in ("synthetic cloud test", "91001", 91001):
+            with (
+                self.subTest(server=server),
+                self.assertRaises(QueryResolutionError) as missing,
+            ):
+                resolver.parse({"query": "44091", "server": server}, defaults)
+            self.assertIs(missing.exception.code, ErrorCode.UPSTREAM_ERROR)
+
+    def test_unassigned_world_cannot_hide_a_name_or_id_collision(self):
+        for name in ("SyntheticChina", "90001"):
+            with self.subTest(name=name):
+                catalog = parse_catalog(WORLDS + [{"id": 91001, "name": name}], DCS)
+                with self.assertRaises(QueryResolutionError) as ambiguous:
+                    catalog.find("world", name)
+                self.assertIs(ambiguous.exception.code, ErrorCode.UPSTREAM_ERROR)
+                self.assertEqual(catalog.find("world", "SyntheticJapan").id, 90004)
+                self.assertEqual(catalog.find("dc", "SyntheticChina").region, "China")
 
     def test_extra_directory_region_is_preserved_and_unsupported(self):
         cat = parse_catalog(
@@ -820,12 +853,16 @@ class MarketExecutionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_directory_cache_atomic_mapping_clean_and_original_fetched_time(self):
         cache = FakeCache()
-        http = FakeHttp(lambda request: WORLDS if request.path == WORLDS_PATH else DCS)
+        worlds = WORLDS + [{"id": 91001, "name": "Synthetic Cloud Test"}]
+        http = FakeHttp(lambda request: worlds if request.path == WORLDS_PATH else DCS)
         factory = MarketSourceClient(http, cache, wall_clock=lambda: NOW)
         first = await factory.start().catalog()
         second = await factory.start().catalog()
         self.assertEqual(len(http.requests), 2)
         self.assertEqual(first.catalog, second.catalog)
+        with self.assertRaises(QueryResolutionError) as missing:
+            second.catalog.find("world", "Synthetic Cloud Test")
+        self.assertIs(missing.exception.code, ErrorCode.UPSTREAM_ERROR)
         self.assertTrue(all(p.cached for p in second.provenance))
         self.assertEqual(
             tuple(p.fetched_at for p in first.provenance),
@@ -837,7 +874,7 @@ class MarketExecutionTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(cache.puts[0][2], 3600)
         bad = FakeHttp(
-            lambda request: WORLDS if request.path == WORLDS_PATH else DCS[:-1]
+            lambda request: WORLDS[:-1] if request.path == WORLDS_PATH else DCS
         )
         empty_cache = FakeCache()
         with self.assertRaises(MarketPayloadError):
@@ -847,6 +884,69 @@ class MarketExecutionTests(unittest.IsolatedAsyncioTestCase):
                 .catalog()
             )
         self.assertEqual(empty_cache.puts, [])
+
+    async def test_directory_cache_backend_failure_preserves_live_realm_lookup(self):
+        class UnavailableCache(FakeCache):
+            async def get(self, key):
+                cache_operations.append("get")
+                raise CacheUnavailable()
+
+            async def put(self, key, payload, *, ttl_seconds):
+                cache_operations.append("put")
+                raise CacheUnavailable()
+
+        cache_operations = []
+        worlds = WORLDS + [{"id": 91001, "name": "Synthetic Cloud Test"}]
+        http = FakeHttp(lambda request: worlds if request.path == WORLDS_PATH else DCS)
+        realm = await resolve_realm(
+            http,
+            UnavailableCache(),
+            "SyntheticChina",
+            deadline=asyncio.get_running_loop().time() + 30,
+        )
+        self.assertEqual(realm, "cn")
+        self.assertEqual(cache_operations, ["get", "put"])
+        self.assertCountEqual(
+            [request.path for request in http.requests], [WORLDS_PATH, DCS_PATH]
+        )
+
+    async def test_directory_malformed_cached_urls_are_refetched(self):
+        cache = FakeCache()
+        http = FakeHttp(lambda request: WORLDS if request.path == WORLDS_PATH else DCS)
+        factory = MarketSourceClient(http, cache, wall_clock=lambda: NOW)
+        first = await factory.start().catalog()
+        key, payload, ttl = cache.puts[0]
+        await cache.put(key, {**payload, "urls": None}, ttl_seconds=ttl)
+
+        fresh = await factory.start().catalog()
+        self.assertEqual(fresh.catalog, first.catalog)
+        self.assertFalse(any(row.cached for row in fresh.provenance))
+        self.assertCountEqual(
+            [request.path for request in http.requests], [WORLDS_PATH, DCS_PATH] * 2
+        )
+
+    async def test_directory_cache_authority_failure_propagates(self):
+        failure = AccessDenied("grant_revoked")
+
+        class DeniedCache(FakeCache):
+            async def get(self, key):
+                if denied_at == "get":
+                    raise failure
+                return await super().get(key)
+
+            async def put(self, key, payload, *, ttl_seconds):
+                raise failure
+
+        for denied_at, expected_requests in (("get", 0), ("put", 2)):
+            with self.subTest(denied_at=denied_at):
+                http = FakeHttp(
+                    lambda request: WORLDS if request.path == WORLDS_PATH else DCS
+                )
+                source = MarketSourceClient(http, DeniedCache(), wall_clock=lambda: NOW)
+                with self.assertRaises(AccessDenied) as raised:
+                    await source.start().catalog()
+                self.assertIs(raised.exception, failure)
+                self.assertEqual(len(http.requests), expected_requests)
 
     async def test_total_deadline_includes_prior_preparation_no_retries_and_keeps_completed(
         self,

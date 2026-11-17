@@ -50,6 +50,7 @@ from ..yomihime_game_link_sdk.results import (
     FactDocument,
     ResultStatus,
 )
+from .admission import AdmissionError
 from .context_issuer import ContextIssuer, InvalidInvocation
 from .contracts.validation import validate_parameters
 from .contracts.validation_boundary import validate_contract
@@ -88,6 +89,25 @@ def _error(code: ErrorCode, *, privacy: Privacy = Privacy.PUBLIC) -> CapabilityR
             error=validate_contract(ErrorDetail(code, _MESSAGES[code])),
         )
     )
+
+
+def _publication_failure_code(error: Exception) -> str | None:
+    if isinstance(error, (ScopeDeadlineExceeded, OperationTimeout)) or (
+        isinstance(error, InvalidInvocation) and error.code == "invocation_expired"
+    ):
+        return "core_deadline"
+    if isinstance(
+        error,
+        (
+            ScopeCancelled,
+            ScopeStaleError,
+            LifecycleError,
+            InvalidInvocation,
+            AdmissionError,
+        ),
+    ):
+        return "stale"
+    return None
 
 
 class _MessageSourceRejected(Exception):
@@ -336,6 +356,12 @@ class Gateway:
             )
         invocation_completed = False
 
+        def publication_failure(error):
+            code = _publication_failure_code(error)
+            if code is not None:
+                diagnostic("core_failure", code=code)
+            return _error(ErrorCode.MODULE_UNAVAILABLE)
+
         async def execute() -> CapabilityResult:
             with observe_tasks(flight):
                 flight.check()
@@ -379,14 +405,16 @@ class Gateway:
                     self._require_web_publication(
                         flight, binding.generation, active=True
                     )
+            elif done:
+                diagnostic("core_failure", code="cancelled")
         except asyncio.CancelledError:
             diagnostic("core_final", code="cancelled")
             flight.seal()
             if self._sync_diagnostics is not None:
                 self._sync_diagnostics.reset(diagnostic_token)
             raise
-        except Exception:
-            result = _error(ErrorCode.MODULE_UNAVAILABLE)
+        except Exception as error:
+            result = publication_failure(error)
         finally:
             flight.seal()
             if flight.root is None:
@@ -401,19 +429,14 @@ class Gateway:
                 # Synchronous cleanup hooks can consume the remaining deadline
                 # or close the gateway. Recheck after intentional proof release.
                 self._require_web_publication(flight, binding.generation, active=False)
-            except Exception:
-                diagnostic(
-                    "core_final",
-                    code="error",
-                    capability_status=ResultStatus.ERROR.value,
-                )
-                if self._sync_diagnostics is not None:
-                    self._sync_diagnostics.reset(diagnostic_token)
-                return _error(ErrorCode.MODULE_UNAVAILABLE)
+            except Exception as error:
+                invocation_completed = False
+                result = publication_failure(error)
         diagnostic(
             "core_final",
             code="completed" if invocation_completed else "error",
             capability_status=result.status.value,
+            failure_code=result.error.code.value if result.error is not None else None,
         )
         if self._sync_diagnostics is not None:
             self._sync_diagnostics.reset(diagnostic_token)
@@ -429,15 +452,22 @@ class Gateway:
             if flight.sealed:
                 raise ScopeCancelled("public web request is sealed")
             self._require_current(view, self._issuer.lease_for(view))
-        module = self._registry.snapshot().module(view.module_id)
+        module = self._registry.snapshot().modules.get(view.module_id)
+        if module is None:
+            raise ScopeStaleError("public web target is no longer current")
         descriptor = next(
-            item
-            for item in module.manifest.capabilities
-            if item.capability_id == view.capability_id
+            (
+                item
+                for item in module.manifest.capabilities
+                if item.capability_id == view.capability_id
+            ),
+            None,
         )
-        if not self._current_view(
-            None, module, view
-        ) or not self._issuer.allows_public_web(view.module_id, descriptor):
+        if (
+            descriptor is None
+            or not self._current_view(None, module, view)
+            or not self._issuer.allows_public_web(view.module_id, descriptor)
+        ):
             raise ScopeStaleError("public web target is no longer current")
         self._lifecycle.guard(view.module_id, epoch=view.module_epoch)
         if view.deadline is None or self._clock() >= view.deadline:
@@ -724,7 +754,14 @@ class Gateway:
             )
 
         def finish(outcome, code="completed"):
-            diagnostic("core_final", code=code, capability_status=outcome.status.value)
+            diagnostic(
+                "core_final",
+                code=code,
+                capability_status=outcome.status.value,
+                failure_code=outcome.error.code.value
+                if outcome.error is not None
+                else None,
+            )
             if self._sync_diagnostics is not None:
                 self._sync_diagnostics.reset(diagnostic_token)
             return outcome
@@ -806,8 +843,8 @@ class Gateway:
                 grant = await self._private_authorizer(trusted)
                 self._require_private_grant(grant, trusted)
                 self._require_current(trusted, lease)
-        except Exception:
-            diagnostic("core_failure", code="error")
+        except Exception as error:
+            diagnostic("core_failure", code=_publication_failure_code(error) or "error")
             return finish(denied(ErrorCode.MODULE_UNAVAILABLE), "error")
 
         try:

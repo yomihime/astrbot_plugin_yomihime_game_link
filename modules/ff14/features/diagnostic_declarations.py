@@ -1,6 +1,7 @@
 """FF14-owned diagnostic field whitelist, not runtime authority."""
 
 from ....yomihime_game_link_sdk import DiagnosticDeclaration
+from .fflogs_failures import CATEGORIES, EVENT, SOURCES, STAGE_MESSAGES
 
 
 def text(limit=160, nullable=False, values=None):
@@ -271,7 +272,25 @@ def compact_schema(rule):
     return result
 
 
+_FAILURES = obj(
+    {
+        "failures": array(
+            obj(
+                {
+                    "source": text(values=list(SOURCES)),
+                    "stage": text(values=list(STAGE_MESSAGES)),
+                    "category": text(values=list(CATEGORIES)),
+                    "http_status": integer(100, 599, True),
+                    "elapsed_ms": integer(0, 86400000),
+                    "count": integer(1, 10000),
+                }
+            ),
+            8,
+        ),
+        "elapsed_ms": integer(0, 86400000),
+    }
+)
 DECLARATIONS = tuple(
     DiagnosticDeclaration(key, compact_schema(envelope(value)))
     for key, value in PAYLOADS.items()
-)
+) + (DiagnosticDeclaration(EVENT, compact_schema(_FAILURES)),)

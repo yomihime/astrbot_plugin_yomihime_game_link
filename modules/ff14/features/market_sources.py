@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 from typing import TypeVar
 from urllib.parse import urlencode
 
-from ....yomihime_game_link_sdk.errors import SourceHttpError
+from ....yomihime_game_link_sdk.errors import CacheUnavailable, SourceHttpError
 from ....yomihime_game_link_sdk.services import CacheAccess, HttpRequest, SourceHttp
 from ..query_resolution import SUPPORTED_REGIONS, CatalogEntry, ScopeCatalog
 
@@ -100,8 +100,8 @@ def parse_catalog(worlds: object, data_centers: object) -> ScopeCatalog:
     """Normalize the two official arrays, without inventing World/DC aliases.
 
     China/中国 is the documented region spelling equivalence. Other directory
-    regions remain explicit unsupported entries rather than being reassigned to
-    one of the standard regions. Every World must have one verified DC parent.
+    regions remain explicit unsupported entries. Worlds without a verified DC
+    parent retain their identities for lookup but cannot be routed.
     """
     if not isinstance(worlds, list) or not 1 <= len(worlds) <= 1024:
         raise MarketPayloadError("invalid_worlds")
@@ -143,9 +143,14 @@ def parse_catalog(worlds: object, data_centers: object) -> ScopeCatalog:
                 raise MarketPayloadError("inconsistent_membership")
             assigned.add(member)
             entries.append(CatalogEntry("world", member, names[member], region, dc_id))
-    if assigned != set(names):
-        raise MarketPayloadError("unmapped_world")
-    return ScopeCatalog(tuple(entries))
+    return ScopeCatalog(
+        tuple(entries),
+        unassigned_worlds=tuple(
+            (world_id, name)
+            for world_id, name in names.items()
+            if world_id not in assigned
+        ),
+    )
 
 
 def _json_bytes(body: bytes) -> object:
@@ -321,13 +326,17 @@ class MarketSession:
         key = "market-directory-v1"
         urls = (SOURCE_ROOT + WORLDS_PATH, SOURCE_ROOT + DCS_PATH)
         if self.cache is not None:
-            entry = await self.run(self.cache.get(key))
+            try:
+                entry = await self.run(self.cache.get(key))
+            except CacheUnavailable:
+                entry = None
             if entry is not None:
                 try:
                     payload = plain_json(entry.payload)
                     if (
-                        payload.get("version") != SOURCE_VERSION
-                        or tuple(payload.get("urls", ())) != urls
+                        not isinstance(payload, dict)
+                        or payload.get("version") != SOURCE_VERSION
+                        or payload.get("urls") != list(urls)
                         or entry.expires_at <= self.wall_clock()
                     ):
                         raise MarketPayloadError("cache_provenance")
@@ -387,7 +396,7 @@ class MarketSession:
                     await self.run(
                         self.cache.put(key, payload, ttl_seconds=DIRECTORY_TTL)
                     )
-                except (MarketDeadlineError, SourceHttpError) as exc:
+                except (CacheUnavailable, MarketDeadlineError, SourceHttpError) as exc:
                     if isinstance(exc, SourceHttpError) and exc.code != "timeout":
                         raise
             return CatalogSnapshot(catalog, (worlds[1], dcs[1]))

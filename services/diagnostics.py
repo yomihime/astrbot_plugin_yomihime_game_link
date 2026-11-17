@@ -9,10 +9,15 @@ from types import MappingProxyType
 
 from ..core.contracts.diagnostics import DiagnosticLimitExceeded, diagnostic_payload
 from ..core.public_errors import public_boundary
+from ..infrastructure.sync_diagnostics import (
+    claim_failure_report,
+    mark_failure_reported,
+)
 from ..yomihime_game_link_sdk.errors import (
     AccessDenied,
     OperationTimeout,
     ParameterError,
+    ServiceUnavailable,
 )
 
 
@@ -22,9 +27,14 @@ class DiagnosticPolicy:
     max_events: int = 48
     max_bytes: int = 512 * 1024
     event_limits: object = None
+    warning_event_ids: frozenset[str] = frozenset()
 
     def __post_init__(self):
         object.__setattr__(self, "event_ids", frozenset(self.event_ids))
+        warnings = frozenset(self.warning_event_ids)
+        if not warnings <= self.event_ids:
+            raise ValueError("invalid diagnostic warning event")
+        object.__setattr__(self, "warning_event_ids", warnings)
         limits = dict(self.event_limits or {})
         if not set(limits) <= self.event_ids or any(
             type(n) is not int or not 1 <= n <= self.max_events for n in limits.values()
@@ -47,8 +57,9 @@ class DiagnosticStore:
     invocations drop optional events until an exact issuer release frees a slot.
     """
 
-    def __init__(self, sink=None):
+    def __init__(self, sink=None, *, warning_sink=None):
         self._sink = sink
+        self._warning_sink = warning_sink
         self._traces = OrderedDict()
         self._bytes = 0
         self._retained_events = 0
@@ -88,21 +99,11 @@ class DiagnosticStore:
             return
         key = invocation.invocation_id
         counts = self._counts.get(key)
-        # Reject before allocating metadata, including a single-event byte cap.
-        if size > policy.max_bytes:
-            return
-        if counts is None:
-            if len(self._counts) >= 8:
-                return
-        elif counts["invocation"] is not invocation:
+        if counts is not None and counts["invocation"] is not invocation:
             raise AccessDenied()
-        if counts is not None and (
-            counts["per_event"].get(event_id, 0)
-            >= policy.event_limits.get(event_id, policy.max_events)
-            or counts["events"] >= policy.max_events
-            or counts["bytes"] + size > policy.max_bytes
-        ):
-            return
+        warning = (
+            event_id in policy.warning_event_ids and self._warning_sink is not None
+        )
         event = {
             "owner": invocation.module_id,
             "epoch": invocation.module_epoch,
@@ -116,6 +117,25 @@ class DiagnosticStore:
             ).encode("ascii")
         )
         if envelope_size > 65536:
+            return
+        claim = claim_failure_report(key) if warning else None
+        if claim is True:
+            self._send(self._warning_sink, event, warning=True)
+
+        # Filling the optional retained evidence budget does not hide the
+        # reviewed failure warning for a live execution context.
+        # Reject before allocating metadata, including a single-event byte cap.
+        if size > policy.max_bytes:
+            return
+        if counts is None:
+            if len(self._counts) >= 8:
+                return
+        if counts is not None and (
+            counts["per_event"].get(event_id, 0)
+            >= policy.event_limits.get(event_id, policy.max_events)
+            or counts["events"] >= policy.max_events
+            or counts["bytes"] + size > policy.max_bytes
+        ):
             return
         if counts is None:
             counts = {
@@ -141,9 +161,18 @@ class DiagnosticStore:
         trace["bytes"] += size
         self._bytes += size
         self._retained_events += 1
-        if self._sink is not None:
+        if claim is None:
+            self._send(
+                self._warning_sink if warning else self._sink, event, warning=warning
+            )
+
+    @staticmethod
+    def _send(sink, event, *, warning):
+        if sink is not None:
             try:
-                self._sink(event)
+                sink(event)
+                if warning:
+                    mark_failure_reported(event["trace"])
             except (AccessDenied, OperationTimeout):
                 raise
             except Exception:
@@ -197,7 +226,13 @@ class BoundDiagnostics:
                 payload,
                 self.__policy,
             )
-        except Exception:
+        except Exception as error:
             await self.__check()
-            raise
+            if isinstance(
+                error,
+                (PermissionError, TimeoutError, ServiceUnavailable, ParameterError),
+            ):
+                raise
+            # An optional store failure cannot invalidate a current invocation.
+            return
         await self.__check()

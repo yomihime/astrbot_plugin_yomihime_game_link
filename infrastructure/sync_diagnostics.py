@@ -14,20 +14,60 @@ from ..yomihime_game_link_sdk.errors import AccessDenied, OperationTimeout
 MAX_ATTEMPTS = 8
 MAX_EVENTS = 48
 _STAGES = frozenset(
-    "core_start collector_start collector_return validate core_commit core_failure core_final http_queue http_quota http_transport network_attempt transport_error http_response http_end".split()
+    "core_start collector_start collector_return validate core_commit core_failure core_final http_queue http_quota http_transport network_attempt transport_error http_response http_end auth_failure".split()
 )
 _LABEL = re.compile(r"[a-zA-Z][a-zA-Z0-9_.-]{0,95}\Z")
+_WARNING_CODES = frozenset(
+    "upstream_error unparsed auth_required auth_expired module_unavailable unknown rate_limited".split()
+)
+_FAILURE_CODES = frozenset({"core_deadline", "validation_error", "error"})
+_QUIET_TERMINATIONS = frozenset({"cancelled", "stale"})
+_HTTP_FAILURE_CODES = frozenset(
+    "source_not_declared request_rejected request_too_large response_too_large rate_limited concurrency_limited timeout credentials_unavailable transport_failed invalid_response upstream_error redirect_disallowed".split()
+)
 
 
-@dataclass(frozen=True)
+@dataclass
 class _Context:
     store: object
     invocation_id: str
     origin: str
     started: float
+    failure_report_attempted: bool = False
+    failure_reported: bool = False
+    http_failure: dict | None = None
+    auth_failure: dict | None = None
 
 
 _current = ContextVar("runtime_diagnostic", default=None)
+
+
+def claim_failure_report(invocation_id):
+    """An invocation warning has a slot independent of retained evidence."""
+    context = _current.get()
+    if context is None or context.invocation_id != invocation_id:
+        return None
+    if context.failure_report_attempted:
+        return False
+    context.failure_report_attempted = True
+    return True
+
+
+def mark_failure_reported(invocation_id):
+    context = _current.get()
+    if context is not None and context.invocation_id == invocation_id:
+        context.failure_reported = True
+
+
+def related_auth_failure(invocation_id):
+    context = _current.get()
+    if (
+        context is not None
+        and context.invocation_id == invocation_id
+        and context.auth_failure is not None
+    ):
+        return dict(context.auth_failure)
+    return None
 
 
 def emit(stage, **fields):
@@ -42,9 +82,10 @@ def emit(stage, **fields):
 
 
 class SyncDiagnostics:
-    def __init__(self):
+    def __init__(self, *, warning_sink=None):
         self._attempts = OrderedDict()
         self._closed = False
+        self._warning_sink = warning_sink
 
     def activate(self, invocation_id, origin, *, public=True):
         if self._closed or not public:
@@ -116,6 +157,28 @@ class SyncDiagnostics:
                 event[key] = value
         if stage == "network_attempt":
             trace["network_attempts"] += 1
+        if event.get("code") in _HTTP_FAILURE_CODES and (
+            stage == "auth_failure"
+            or stage == "http_end"
+            and (
+                context.http_failure is None
+                or context.http_failure["stage"] != "auth_failure"
+                or context.http_failure["source"] != event.get("source")
+                or context.http_failure["category"] != event["code"]
+            )
+        ):
+            status = event.get("http_status")
+            context.http_failure = {
+                "stage": stage,
+                "source": event.get("source"),
+                "category": event["code"],
+                "http_status": status
+                if status is not None and 100 <= status <= 599
+                else None,
+                "elapsed_ms": event["elapsed_ms"],
+            }
+            if stage == "auth_failure":
+                context.auth_failure = context.http_failure
         event["network_attempts"] = trace["network_attempts"]
         if stage == "core_start":
             trace["core_budget_ms"] = event.get("budget_ms")
@@ -139,6 +202,27 @@ class SyncDiagnostics:
             trace["events"].append(event)
         if stage == "core_final":
             trace["terminal"] = True
+            business_code = fields.get("failure_code")
+            runtime_code = trace["core_failure_code"]
+            if (
+                self._warning_sink is not None
+                and not context.failure_reported
+                and event["code"] not in _QUIET_TERMINATIONS
+                and runtime_code not in _QUIET_TERMINATIONS
+                and (business_code in _WARNING_CODES or runtime_code in _FAILURE_CODES)
+            ):
+                failure = {
+                    "trace": context.invocation_id,
+                    "origin": context.origin,
+                    "stage": "capability",
+                    "category": runtime_code
+                    if runtime_code in _FAILURE_CODES
+                    else business_code,
+                    "elapsed_ms": event["elapsed_ms"],
+                }
+                if context.http_failure is not None:
+                    failure["last_http_failure"] = context.http_failure
+                self._warning_sink(failure)
 
     def snapshot(self):
         return {

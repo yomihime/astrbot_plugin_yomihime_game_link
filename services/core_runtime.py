@@ -9,7 +9,7 @@ import logging
 import re
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
 from math import isfinite
 from pathlib import Path
@@ -72,8 +72,12 @@ from ..yomihime_game_link_sdk.display import DisplayLimits, DisplayRenderer, Pri
 from ..yomihime_game_link_sdk.errors import AccessDenied, InvalidInvocation
 from ..yomihime_game_link_sdk.results import CapabilityResult, ResultStatus
 from ..yomihime_game_link_sdk.services import CapabilityHealth, ConfigTarget
-from ..yomihime_game_link_sdk.storage import GrantReference
-from ..yomihime_game_link_sdk.subscriptions import ConversationKind, ConversationRef
+from ..yomihime_game_link_sdk.storage import GrantReference, OwnershipKind
+from ..yomihime_game_link_sdk.subscriptions import (
+    ConversationKind,
+    ConversationRef,
+    ScheduleTrigger,
+)
 from .admin_authorization import AdminAuthorizationService, ContextValidator
 from .admin_facade import AdminFacade
 from .admin_operations import (
@@ -110,6 +114,7 @@ from .output import (
     _require_public_fact_resources,
 )
 from .owner_authority import OwnerRouteProofAuthority
+from .runtime_effect_gate import EffectRejected
 from .scheduler import (
     ExecutionClaimProofRegistry,
     RescheduleConfiguration,
@@ -482,6 +487,7 @@ class CoreRuntime:
         host_message_current_validator: Callable[[InvocationOrigin, HostIngress], bool]
         | None = None,
         command_heading_projector: CommandHeadingProjector | None = None,
+        command_error_messages=None,
         command_card_renderer=None,
         command_card_resource_reader=None,
         config_principal_id: str,
@@ -521,6 +527,7 @@ class CoreRuntime:
         owner_cleanup=None,
         diagnostic_policies=None,
         diagnostics=None,
+        sync_failure_sink=None,
         legacy_config_policies=(),
     ) -> None:
         validate_contract(renderer)
@@ -743,7 +750,7 @@ class CoreRuntime:
             self.lifecycle.admission,
             principal_id=config_principal_id,
         )
-        self.sync_diagnostics = SyncDiagnostics()
+        self.sync_diagnostics = SyncDiagnostics(warning_sink=sync_failure_sink)
         self.diagnostics = diagnostics if diagnostics is not None else DiagnosticStore()
         self.module_services = ModuleServicesFactory(
             self.registry,
@@ -779,6 +786,7 @@ class CoreRuntime:
             registry=self.registry,
             renderer=renderer,
             command_heading_projector=command_heading_projector,
+            command_error_messages=command_error_messages,
             command_card_renderer=command_card_renderer,
             command_theme_settings=self.theme_settings.current,
             command_card_logo=self._command_card_logo,
@@ -976,6 +984,10 @@ class CoreRuntime:
         self._jobs_cleanup_task: asyncio.Task[bool] | None = None
         self._host_flights: set[asyncio.Task[object]] = set()
         self._pump_failures: tuple[CoreRuntimeFailure, ...] = ()
+        self._pump_stage = "idle"
+        self._pump_failure = None
+        self._pump_last_success_at = None
+        self._pump_last_scan = None
         self._startup_report: CoreStartupReport | None = None
         self._close_lock = asyncio.Lock()
         self._startup_done = asyncio.Event()
@@ -1025,6 +1037,68 @@ class CoreRuntime:
             CoreRuntimeFailure("configured_subscriptions", module_id, reason)
             for module_id, reason in self._configured_public_subscriptions.failures
         )
+
+    async def scheduler_diagnostics(self, module_id: str) -> dict:
+        """Read a fixed public scheduler summary for one authorized module."""
+        if not self._started or self._closed:
+            raise RuntimeError("scheduler diagnostics unavailable")
+        module = self.registry.snapshot().modules.get(module_id)
+        schedules = (
+            tuple(
+                schedule
+                for schedule in module.manifest.schedules
+                if schedule.shared_scope is OwnershipKind.PUBLIC
+                and schedule.trigger
+                in (ScheduleTrigger.BACKGROUND, ScheduleTrigger.PERIODIC)
+            )
+            if module is not None
+            else ()
+        )
+        # The declaration budget is intentionally separate from SQL work.
+        if len(schedules) > 32:
+            raise ValueError("scheduler diagnostics declaration budget exceeded")
+        activity = await self.b04_repositories.scheduler.public_activity(
+            module_id, schedules, now=_require_utc(self._utc_clock())
+        )
+        gate = await self.subscription_gate_state(module_id)
+        if (
+            self._closed
+            or self.registry.snapshot().modules.get(module_id) is not module
+        ):
+            raise RuntimeError("scheduler diagnostics unavailable")
+        task = self._pump_task
+        if self._pump_failure is not None:
+            state = "failed"
+        elif task is None or task.done():
+            state = "stopped"
+        else:
+            state = "running"
+        return {
+            "schema_version": 1,
+            "module_id": module_id,
+            "pump": {
+                "state": state,
+                "stage": self._pump_stage,
+                "failure": (
+                    dict(self._pump_failure) if self._pump_failure is not None else None
+                ),
+                "last_success_at": self._pump_last_success_at,
+                "last_scan": (
+                    dict(self._pump_last_scan)
+                    if self._pump_last_scan is not None
+                    else None
+                ),
+            },
+            "gate": {
+                **asdict(gate),
+                "persisted_admitted": activity["persisted_gate_admitted"],
+            },
+            "configured_subscription_failed": any(
+                owner == module_id
+                for owner, _ in self._configured_public_subscriptions.failures
+            ),
+            "collectors": activity["collectors"],
+        }
 
     def public_module_catalog(self) -> dict:
         """Read registered modules through the fixed metadata-only projection."""
@@ -1692,8 +1766,10 @@ class CoreRuntime:
             )
 
     async def _pump_loop(self) -> None:
+        collection_cursor = None
         while self._accepting:
             try:
+                self._pump_stage = "gate_registration"
                 await self._register_declared_subscription_gates(
                     {
                         module.module_id: module.manifest
@@ -1701,21 +1777,43 @@ class CoreRuntime:
                         if module.enabled
                     }
                 )
+                self._pump_stage = "configured_subscriptions"
                 await self._configured_public_subscriptions.reconcile()
-                await self.scheduler.run_due_page()
+                self._pump_stage = "collection_scan"
+                page = await self.scheduler.run_due_page(after_cursor=collection_cursor)
+                collection_cursor = None if page.exhausted else page.next_cursor
+                self._pump_last_scan = {
+                    "processed": page.processed,
+                    "without_result": page.without_result,
+                    "exhausted": page.exhausted,
+                }
+                self._pump_stage = "digest_windows"
                 await self.scheduler.create_digest_windows_page()
+                self._pump_stage = "event_delivery"
                 await self.delivery.dispatch_due_events()
+                self._pump_stage = "digest_delivery"
                 await self.delivery.dispatch_due_digests()
+                self._pump_last_success_at = _require_utc(self._utc_clock()).isoformat()
             except asyncio.CancelledError:
                 raise
-            except Exception:
+            except Exception as exc:
+                reason = (
+                    "authority_rejected"
+                    if isinstance(exc, (PermissionError, EffectRejected))
+                    else "operation_failed"
+                )
+                self._pump_failure = {"stage": self._pump_stage, "code": reason}
                 self._pump_failures = (
                     *self._pump_failures,
                     CoreRuntimeFailure(
                         "scheduler_pump", "owned_pump", "operation_failed"
                     ),
                 )
+                _LOG.warning(
+                    "scheduler pump stopped stage=%s code=%s", self._pump_stage, reason
+                )
                 return
+            self._pump_stage = "idle"
             await asyncio.sleep(self._pump_interval)
 
     def stop_accepting_host_ingress(self) -> None:

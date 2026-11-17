@@ -15,6 +15,7 @@ from .config import (
     REGION_CONFIG_FIELD,
     FF14ConfigSnapshot,
 )
+from .features.fflogs_failures import COMMAND_HINTS
 from .features.news import ADMINS, TARGETS, TYPE, validate_admins, validate_targets
 
 REQUEST_LIMIT = 4096
@@ -108,6 +109,10 @@ class ReviewedSupport:
         TARGETS,
         "ff14_news_interval_seconds",
     )
+    command_error_messages = {
+        ("ff14/ff14", "ff14.logs.character", code): messages
+        for code, messages in COMMAND_HINTS.items()
+    }
 
     configured_public_subscriptions = {
         "ff14/ff14": (
