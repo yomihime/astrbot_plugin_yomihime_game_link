@@ -45,7 +45,15 @@ from ygl_test_subject.modules.ff14.query_resolution import (
     ScopeCatalog,
 )
 
-from yomihime_game_link_sdk.errors import SourceHttpError
+from yomihime_game_link_sdk.errors import (
+    AccessDenied,
+    CacheUnavailable,
+    OperationTimeout,
+    ParameterError,
+    RevisionConflict,
+    ServiceUnavailable,
+    SourceHttpError,
+)
 from yomihime_game_link_sdk.results import ErrorCode, ResultStatus
 from yomihime_game_link_sdk.services import HttpRequest, HttpResponse
 from yomihime_game_link_sdk.storage import CacheEntry
@@ -472,6 +480,120 @@ class MarketExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(failed.minimums)
         self.assertFalse(failed.listings)
         self.assertEqual(len(factory.http.requests), 3)
+
+    async def test_optional_cache_write_failure_keeps_fetched_market_result(self):
+        from unittest.mock import AsyncMock
+
+        for failure in (CacheUnavailable(), RevisionConflict("cache", 1, 2)):
+            with self.subTest(failure=type(failure).__name__):
+                cache = FakeCache()
+                cache.put = AsyncMock(side_effect=failure)
+                client, http = self.client(lambda request: aggregated(), cache)
+                execution = await client.execute(query())
+                self.assertIs(execution.result.status, ResultStatus.SUCCESS)
+                self.assertEqual(execution.minimums[0][2].minimum, 100)
+                self.assertFalse(execution.outcomes[0].provenance.cached)
+                self.assertEqual(len(http.requests), 1)
+                cache.put.assert_awaited_once()
+
+    async def test_optional_cache_read_failure_fetches_fresh_market_result(self):
+        from unittest.mock import AsyncMock
+
+        cache = FakeCache()
+        cache.get = AsyncMock(side_effect=CacheUnavailable())
+        client, http = self.client(lambda request: aggregated(), cache)
+        execution = await client.execute(query())
+        self.assertIs(execution.result.status, ResultStatus.SUCCESS)
+        self.assertEqual(execution.minimums[0][2].minimum, 100)
+        self.assertFalse(execution.outcomes[0].provenance.cached)
+        self.assertEqual(len(http.requests), 1)
+        cache.get.assert_awaited_once()
+
+    async def test_cache_read_control_failures_do_not_start_source_requests(self):
+        from unittest.mock import AsyncMock
+
+        for failure in (
+            AccessDenied("grant_revoked"),
+            ServiceUnavailable(),
+            OperationTimeout(),
+            ParameterError(),
+            asyncio.CancelledError(),
+            SourceHttpError("cancelled"),
+        ):
+            with self.subTest(failure=type(failure).__name__):
+                cache = FakeCache()
+                cache.get = AsyncMock(side_effect=failure)
+                http = FakeHttp(lambda request: {"value": 100})
+                session = MarketSession(http, cache, wall_clock=lambda: NOW)
+                with self.assertRaises(type(failure)) as caught:
+                    await session.read("/api/v2/China/44091", (), lambda body: body)
+                self.assertIs(caught.exception, failure)
+                self.assertEqual(http.requests, [])
+
+    async def test_cache_read_failure_after_deadline_does_not_start_source(self):
+        from unittest.mock import AsyncMock
+
+        now = [0.0]
+
+        async def late_read(*args):
+            now[0] = 31.0
+            raise CacheUnavailable()
+
+        cache = FakeCache()
+        cache.get = AsyncMock(side_effect=late_read)
+        http = FakeHttp(lambda request: {"value": 100})
+        session = MarketSession(
+            http, cache, clock=lambda: now[0], wall_clock=lambda: NOW
+        )
+        with self.assertRaises(MarketDeadlineError):
+            await session.read("/api/v2/China/44091", (), lambda body: body)
+        self.assertEqual(http.requests, [])
+
+    async def test_cache_write_control_failures_are_not_optional(self):
+        from unittest.mock import AsyncMock
+
+        for failure in (
+            AccessDenied("grant_revoked"),
+            ServiceUnavailable(),
+            OperationTimeout(),
+            ParameterError(),
+            asyncio.CancelledError(),
+            SourceHttpError("cancelled"),
+        ):
+            with self.subTest(failure=type(failure).__name__):
+                cache = FakeCache()
+                cache.put = AsyncMock(side_effect=failure)
+                session = MarketSession(
+                    FakeHttp(lambda request: {"value": 100}),
+                    cache,
+                    wall_clock=lambda: NOW,
+                )
+                with self.assertRaises(type(failure)) as caught:
+                    await session.read("/api/v2/China/44091", (), lambda body: body)
+                self.assertIs(caught.exception, failure)
+
+    async def test_cache_write_cannot_publish_after_actual_deadline(self):
+        from unittest.mock import AsyncMock
+
+        for failure in (None, CacheUnavailable(), RevisionConflict("cache", 1, 2)):
+            with self.subTest(failure=type(failure).__name__):
+                now = [0.0]
+
+                async def late_write(*args, **kwargs):
+                    now[0] = 31.0
+                    if failure is not None:
+                        raise failure
+
+                cache = FakeCache()
+                cache.put = AsyncMock(side_effect=late_write)
+                session = MarketSession(
+                    FakeHttp(lambda request: {"value": 100}),
+                    cache,
+                    clock=lambda: now[0],
+                    wall_clock=lambda: NOW,
+                )
+                with self.assertRaises(MarketDeadlineError):
+                    await session.read("/api/v2/China/44091", (), lambda body: body)
 
     async def test_direct_prices_keep_all_source_digits_without_six_digit_rounding(
         self,

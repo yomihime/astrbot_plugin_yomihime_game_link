@@ -14,16 +14,56 @@ from ..yomihime_game_link_sdk.errors import AccessDenied, OperationTimeout
 MAX_ATTEMPTS = 8
 MAX_EVENTS = 48
 _STAGES = frozenset(
-    "core_start collector_start collector_return validate core_commit core_failure core_final http_queue http_quota http_transport network_attempt transport_error http_response http_end auth_failure".split()
+    "core_start bind handler_start handler_return publication output_start output_return collector_start collector_return validate core_commit core_failure core_final http_queue http_quota http_transport network_attempt transport_error http_response http_end auth_failure".split()
 )
 _LABEL = re.compile(r"[a-zA-Z][a-zA-Z0-9_.-]{0,95}\Z")
+_LOGICAL_ID = re.compile(r"[a-z][a-z0-9_]*(?:[.-][a-z0-9_]+)*\Z")
+
+
+def _logical_identity(origin, module_id, capability_id, collector_id):
+    """Only trusted declaration identifiers; invalid metadata is never logged."""
+
+    def valid(value):
+        return type(value) is str and len(value) <= 96 and _LOGICAL_ID.fullmatch(value)
+
+    if type(module_id) is not str or len(module_id) > 193:
+        return ()
+    parts = module_id.split("/")
+    if len(parts) != 2 or not all(valid(part) for part in parts):
+        return ()
+    identity = [("module_id", module_id)]
+    if origin == "scheduler":
+        if (
+            capability_id is not None
+            or collector_id is not None
+            and not valid(collector_id)
+        ):
+            return ()
+        if collector_id is not None:
+            identity.append(("collector_id", collector_id))
+    elif origin in {"command", "llm_tool", "web_public"}:
+        if (
+            collector_id is not None
+            or capability_id is not None
+            and not valid(capability_id)
+        ):
+            return ()
+        if capability_id is not None:
+            identity.append(("capability_id", capability_id))
+    else:
+        return ()
+    return tuple(identity)
+
+
 _WARNING_CODES = frozenset(
     "upstream_error unparsed auth_required auth_expired module_unavailable unknown rate_limited".split()
 )
-_FAILURE_CODES = frozenset({"core_deadline", "validation_error", "error"})
+_FAILURE_CODES = frozenset(
+    {"core_deadline", "validation_error", "error", "collector_timeout"}
+)
 _QUIET_TERMINATIONS = frozenset({"cancelled", "stale"})
 _HTTP_FAILURE_CODES = frozenset(
-    "source_not_declared request_rejected request_too_large response_too_large rate_limited concurrency_limited timeout credentials_unavailable transport_failed invalid_response upstream_error redirect_disallowed".split()
+    "source_not_declared request_rejected request_too_large response_too_large rate_limited concurrency_limited timeout credentials_unavailable transport_failed invalid_response upstream_error redirect_disallowed http_deadline error".split()
 )
 
 
@@ -37,6 +77,8 @@ class _Context:
     failure_reported: bool = False
     http_failure: dict | None = None
     auth_failure: dict | None = None
+    phase: str = "core_start"
+    identity: tuple[tuple[str, str], ...] = ()
 
 
 _current = ContextVar("runtime_diagnostic", default=None)
@@ -82,12 +124,23 @@ def emit(stage, **fields):
 
 
 class SyncDiagnostics:
-    def __init__(self, *, warning_sink=None):
+    def __init__(self, *, warning_sink=None, trace_sink=None, trace_enabled=None):
         self._attempts = OrderedDict()
         self._closed = False
         self._warning_sink = warning_sink
+        self._trace_sink = trace_sink
+        self._trace_enabled = trace_enabled
 
-    def activate(self, invocation_id, origin, *, public=True):
+    def activate(
+        self,
+        invocation_id,
+        origin,
+        *,
+        public=True,
+        module_id=None,
+        capability_id=None,
+        collector_id=None,
+    ):
         if self._closed or not public:
             return _current.set(None)
         if type(invocation_id) is not str or not re.fullmatch(
@@ -109,6 +162,9 @@ class SyncDiagnostics:
                 if origin in {"scheduler", "command", "llm_tool", "web_public"}
                 else "unknown",
                 monotonic(),
+                identity=_logical_identity(
+                    origin, module_id, capability_id, collector_id
+                ),
             )
         )
 
@@ -125,6 +181,7 @@ class SyncDiagnostics:
             trace = {
                 "invocation_id": context.invocation_id,
                 "origin": context.origin,
+                **dict(context.identity),
                 "events": [],
                 "dropped_events": 0,
                 "terminal": False,
@@ -155,6 +212,19 @@ class SyncDiagnostics:
             value = fields.get(key)
             if type(value) is int and 0 <= value <= 1000000:
                 event[key] = value
+        if stage in {
+            "bind",
+            "handler_start",
+            "handler_return",
+            "publication",
+            "output_start",
+            "output_return",
+            "collector_start",
+            "collector_return",
+            "validate",
+            "core_commit",
+        }:
+            context.phase = stage
         if stage == "network_attempt":
             trace["network_attempts"] += 1
         if event.get("code") in _HTTP_FAILURE_CODES and (
@@ -204,25 +274,67 @@ class SyncDiagnostics:
             trace["terminal"] = True
             business_code = fields.get("failure_code")
             runtime_code = trace["core_failure_code"]
+            collection_failed = (
+                context.origin == "scheduler"
+                and trace["observation_completeness"] == "failed"
+            )
+            partial_upstream_failure = (
+                trace["capability_status"] == "partial_success"
+                and context.http_failure is not None
+            )
             if (
                 self._warning_sink is not None
                 and not context.failure_reported
                 and event["code"] not in _QUIET_TERMINATIONS
                 and runtime_code not in _QUIET_TERMINATIONS
-                and (business_code in _WARNING_CODES or runtime_code in _FAILURE_CODES)
+                and (
+                    business_code in _WARNING_CODES
+                    or runtime_code in _FAILURE_CODES
+                    or collection_failed
+                    or partial_upstream_failure
+                )
             ):
                 failure = {
                     "trace": context.invocation_id,
                     "origin": context.origin,
-                    "stage": "capability",
+                    **dict(context.identity),
+                    "stage": "collection"
+                    if context.origin == "scheduler"
+                    else "capability",
                     "category": runtime_code
                     if runtime_code in _FAILURE_CODES
-                    else business_code,
+                    else (
+                        "collection_failed"
+                        if collection_failed
+                        else "partial_upstream_failure"
+                        if partial_upstream_failure
+                        else business_code
+                    ),
                     "elapsed_ms": event["elapsed_ms"],
+                    "failure_stage": (
+                        context.phase
+                        if runtime_code in _FAILURE_CODES
+                        else context.http_failure["stage"]
+                        if context.http_failure is not None
+                        else "collector_return"
+                        if collection_failed
+                        else context.phase
+                    ),
                 }
                 if context.http_failure is not None:
                     failure["last_http_failure"] = context.http_failure
-                self._warning_sink(failure)
+                try:
+                    self._warning_sink(failure)
+                except (AccessDenied, OperationTimeout):
+                    raise
+                except Exception:
+                    pass
+            if self._trace_sink is not None and (
+                self._trace_enabled is None or self._trace_enabled()
+            ):
+                # One bounded terminal trace, copied only when DEBUG is enabled.
+                # Values here are Core-filtered metadata, never module payloads.
+                self._trace_sink(copy.deepcopy(trace))
 
     def snapshot(self):
         return {

@@ -158,7 +158,9 @@ class ItemChat:
                     if ticket is not None:
                         self.registry._current(ticket)
 
-                source = ItemSourceClient(scope.http)
+                source = ItemSourceClient(
+                    scope.http, diagnostics=getattr(scope, "diagnostics", None)
+                )
                 if context.capability_id == ITEM_SELECT:
                     if (
                         not isinstance(parameters, Mapping)

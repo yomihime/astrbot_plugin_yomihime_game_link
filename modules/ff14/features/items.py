@@ -58,7 +58,9 @@ class ItemLookup:
             scope = await self._services.scopes.bind(context)
         except Exception:
             return _error(ErrorCode.MODULE_UNAVAILABLE, "物品查询服务暂不可用。")
-        source = ItemSourceClient(scope.http)
+        source = ItemSourceClient(
+            scope.http, diagnostics=getattr(scope, "diagnostics", None)
+        )
 
         item_id = item_id_from_query(query)
         if item_id is not None:

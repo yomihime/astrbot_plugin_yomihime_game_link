@@ -348,7 +348,10 @@ class Gateway:
         diagnostic_token = None
         if self._sync_diagnostics is not None:
             diagnostic_token = self._sync_diagnostics.activate(
-                view.invocation_id, view.origin.value
+                view.invocation_id,
+                view.origin.value,
+                module_id=view.module_id,
+                capability_id=view.capability_id,
             )
             diagnostic(
                 "core_start",
@@ -378,7 +381,9 @@ class Gateway:
                         )
 
                     await current()
+                    diagnostic("output_start")
                     await _consume(view, value, current)
+                    diagnostic("output_return")
                     await current()
                 return value
 
@@ -496,6 +501,7 @@ class Gateway:
             lease = self._admission.admit(view, view.capability_id)
             self._require_current(view, lease)
             scope = self._lifecycle.scope(view.module_id)
+            diagnostic("handler_start")
             result = await scope.run(
                 module.handlers.capabilities[view.capability_id].invoke(
                     view, validated
@@ -503,6 +509,8 @@ class Gateway:
                 name=f"gateway:web:{view.capability_id}",
                 deadline_monotonic=view.deadline,
             )
+            diagnostic("handler_return")
+            diagnostic("publication")
             self._require_current(view, lease)
             current = self._registry.snapshot().module(view.module_id)
             descriptor = next(
@@ -751,6 +759,8 @@ class Gateway:
                 trusted.invocation_id,
                 trusted.origin.value,
                 public=not private and trusted.grant_id is None,
+                module_id=trusted.module_id,
+                capability_id=capability_id,
             )
 
         def finish(outcome, code="completed"):
@@ -798,7 +808,10 @@ class Gateway:
                         rejected = True
                     if rejected:
                         raise _MessageSourceRejected()
-                return await handler.invoke(trusted, validated)
+                diagnostic("handler_start")
+                result = await handler.invoke(trusted, validated)
+                diagnostic("handler_return")
+                return result
 
             result = await scope.run(
                 invoke_current(),
@@ -828,6 +841,7 @@ class Gateway:
             diagnostic("core_failure", code="error")
             return finish(denied(ErrorCode.UNKNOWN), "error")
 
+        diagnostic("publication")
         # Re-check both authority and static state after an await.  This closes
         # the release/disable race for handlers that complete late.
         try:
@@ -848,6 +862,7 @@ class Gateway:
             return finish(denied(ErrorCode.MODULE_UNAVAILABLE), "error")
 
         try:
+            diagnostic("validate")
             privacy = Privacy.PRIVATE if private else Privacy.PUBLIC
             return finish(self._valid_result(result, expected_privacy=privacy))
         except Exception:

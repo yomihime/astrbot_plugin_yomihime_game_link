@@ -18,6 +18,7 @@ from ..models import (
     ItemRecord,
     ItemSearchPage,
 )
+from .source_diagnostics import report_parse_failure
 
 XIVAPI_SOURCE = "xivapi_items"
 GARLAND_SOURCE = "garland_items"
@@ -46,8 +47,9 @@ class ItemLookupSnapshot:
 class ItemSourceClient:
     """Use only a request-bound SourceHttp port and fixed source paths."""
 
-    def __init__(self, http: SourceHttp) -> None:
+    def __init__(self, http: SourceHttp, *, diagnostics=None) -> None:
         self._http = http
+        self._diagnostics = diagnostics
 
     async def search(
         self, query: str, *, exact: bool = False
@@ -76,7 +78,11 @@ class ItemSourceClient:
             response = await self._http.fetch(
                 HttpRequest(XIVAPI_SOURCE, XIVAPI_SEARCH_PATH, query=parameters)
             )
-            page = parse_item_search_page(_json_object(response.body))
+            try:
+                page = parse_item_search_page(_json_object(response.body))
+            except ItemPayloadError:
+                await report_parse_failure(self._diagnostics, "item_search")
+                raise
             for candidate in page.candidates:
                 if candidate.item_id not in seen_ids:
                     seen_ids.add(candidate.item_id)
@@ -84,6 +90,7 @@ class ItemSourceClient:
             if page.next_cursor is None:
                 return tuple(found), False
             if page.next_cursor in seen_cursors:
+                await report_parse_failure(self._diagnostics, "item_search")
                 raise ItemPayloadError("repeated cursor")
             seen_cursors.add(page.next_cursor)
             if page_number + 1 == MAX_SEARCH_PAGES:
@@ -103,9 +110,13 @@ class ItemSourceClient:
                 ),
             )
         )
-        primary = parse_xivapi_item_detail(
-            _json_object(response.body), requested_id=item_id
-        )
+        try:
+            primary = parse_xivapi_item_detail(
+                _json_object(response.body), requested_id=item_id
+            )
+        except ItemPayloadError:
+            await report_parse_failure(self._diagnostics, "item_detail")
+            raise
         warnings: tuple[str, ...]
         routes: tuple[AcquisitionRoute, ...]
         effects: tuple[ItemEffect, ...] = ()
@@ -123,6 +134,7 @@ class ItemSourceClient:
             routes = ()
             warnings = (_source_warning(exc),)
         except ItemPayloadError:
+            await report_parse_failure(self._diagnostics, "item_acquisition")
             routes = ()
             warnings = ("Garland 获取途径响应格式无法识别。",)
         record = ItemRecord(

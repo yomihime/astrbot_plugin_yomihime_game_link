@@ -1093,6 +1093,8 @@ class SharedCollectionScheduler:
                         invocation.invocation_id,
                         invocation.origin.value,
                         public=candidate.key.scope.kind is OwnershipKind.PUBLIC,
+                        module_id=module.module_id,
+                        collector_id=schedule.collector_id,
                     )
                     diagnostic_active = candidate.key.scope.kind is OwnershipKind.PUBLIC
                     trace_event("core_start", budget_ms=int(timeout_seconds * 1000))

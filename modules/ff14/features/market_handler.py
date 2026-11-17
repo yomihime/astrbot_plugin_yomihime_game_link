@@ -591,6 +591,7 @@ class MarketQueryHandler:
                     deadline=deadline,
                     directory=self.directory,
                     records=records,
+                    diagnostics=getattr(scope, "diagnostics", None),
                 )
                 if selecting and not scope_selection:
                     if set(parameters) != {"selection"}:
@@ -706,7 +707,10 @@ class MarketQueryHandler:
                                 owner,
                                 values,
                                 self.services,
-                                ItemSourceClient(scope.http),
+                                ItemSourceClient(
+                                    scope.http,
+                                    diagnostics=getattr(scope, "diagnostics", None),
+                                ),
                                 entry=entry,
                                 ticket=ticket,
                                 retain_until_result=True,

@@ -3769,6 +3769,105 @@
               }
             }
           }
+        },
+        {
+          "event_id": "FF14NewsFailure",
+          "payload_schema": {
+            "type": "object",
+            "properties": {
+              "source": {
+                "type": "string",
+                "maxLength": 32,
+                "enum": [
+                  "ff14_news_official"
+                ]
+              },
+              "stage": {
+                "type": "string",
+                "maxLength": 32,
+                "enum": [
+                  "binding",
+                  "listing",
+                  "detail"
+                ]
+              },
+              "category": {
+                "type": "string",
+                "maxLength": 32,
+                "enum": [
+                  "timeout",
+                  "transport_error",
+                  "rate_limited",
+                  "http_error",
+                  "payload_parse",
+                  "request_rejected"
+                ]
+              },
+              "http_status": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 100,
+                "maximum": 599
+              },
+              "elapsed_ms": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 86400000
+              }
+            },
+            "required": [
+              "source",
+              "stage",
+              "category",
+              "http_status",
+              "elapsed_ms"
+            ],
+            "additionalProperties": false
+          }
+        },
+        {
+          "event_id": "FF14SourceParseFailure",
+          "payload_schema": {
+            "type": "object",
+            "properties": {
+              "source": {
+                "type": "string",
+                "maxLength": 32,
+                "enum": [
+                  "xivapi_items",
+                  "garland_items",
+                  "universalis_market"
+                ]
+              },
+              "stage": {
+                "type": "string",
+                "maxLength": 32,
+                "enum": [
+                  "item_search",
+                  "item_detail",
+                  "item_acquisition",
+                  "market_directory",
+                  "market_aggregated",
+                  "market_listings"
+                ]
+              },
+              "category": {
+                "type": "string",
+                "maxLength": 32,
+                "enum": [
+                  "payload_parse"
+                ]
+              }
+            },
+            "required": [
+              "source",
+              "stage",
+              "category"
+            ],
+            "additionalProperties": false
+          }
         }
       ],
       "display": {

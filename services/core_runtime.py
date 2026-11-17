@@ -528,6 +528,8 @@ class CoreRuntime:
         diagnostic_policies=None,
         diagnostics=None,
         sync_failure_sink=None,
+        sync_trace_sink=None,
+        sync_trace_enabled=None,
         legacy_config_policies=(),
     ) -> None:
         validate_contract(renderer)
@@ -750,7 +752,11 @@ class CoreRuntime:
             self.lifecycle.admission,
             principal_id=config_principal_id,
         )
-        self.sync_diagnostics = SyncDiagnostics(warning_sink=sync_failure_sink)
+        self.sync_diagnostics = SyncDiagnostics(
+            warning_sink=sync_failure_sink,
+            trace_sink=sync_trace_sink,
+            trace_enabled=sync_trace_enabled,
+        )
         self.diagnostics = diagnostics if diagnostics is not None else DiagnosticStore()
         self.module_services = ModuleServicesFactory(
             self.registry,
@@ -1809,7 +1815,7 @@ class CoreRuntime:
                         "scheduler_pump", "owned_pump", "operation_failed"
                     ),
                 )
-                _LOG.warning(
+                _LOG.error(
                     "scheduler pump stopped stage=%s code=%s", self._pump_stage, reason
                 )
                 return

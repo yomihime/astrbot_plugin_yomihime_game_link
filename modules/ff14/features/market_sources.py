@@ -13,7 +13,12 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, TypeVar
 from urllib.parse import urlencode
 
-from ....yomihime_game_link_sdk.errors import SourceHttpError
+from ....yomihime_game_link_sdk.errors import (
+    CacheUnavailable,
+    OperationTimeout,
+    RevisionConflict,
+    SourceHttpError,
+)
 from ....yomihime_game_link_sdk.services import (
     CacheAccess,
     HttpRequest,
@@ -26,6 +31,7 @@ from ..query_resolution import (
     QueryResolutionError,
     ScopeCatalog,
 )
+from .source_diagnostics import report_parse_failure
 
 if TYPE_CHECKING:
     from .server_directory import ServerDirectory
@@ -219,8 +225,10 @@ class MarketSession:
         gate: asyncio.Semaphore | None = None,
         directory: ServerDirectory | None = None,
         records: ModuleRecords | None = None,
+        diagnostics=None,
     ) -> None:
         self.http, self.cache = http, cache
+        self.diagnostics = diagnostics
         self.directory, self.records = directory, records
         self.clock, self.wall_clock = clock, wall_clock
         self.deadline = (
@@ -248,6 +256,10 @@ class MarketSession:
         try:
             async with asyncio.timeout(limit):
                 value = await work
+        except OperationTimeout:
+            # A bound service's invocation deadline is a control failure, not
+            # an optional cache/backend timeout.
+            raise
         except TimeoutError:
             if self.clock() >= self.deadline:
                 raise MarketDeadlineError("Market query deadline expired") from None
@@ -281,6 +293,7 @@ class MarketSession:
         clean: Callable[[object], object] | None = None,
         key_context: tuple[str, ...] = (),
         use_cache: bool = True,
+        diagnostic_stage: str | None = None,
     ) -> tuple[T, Provenance]:
         url = SOURCE_ROOT + path + (("?" + urlencode(parameters)) if parameters else "")
         key = (
@@ -293,7 +306,13 @@ class MarketSession:
             ).hexdigest()
         )
         if self.cache is not None and use_cache:
-            entry = await self.run(self.cache.get(key))
+            try:
+                entry = await self.run(self.cache.get(key))
+            except CacheUnavailable:
+                # The cache boundary has rechecked authority. An ordinary
+                # backend outage is a miss, not a reason to skip the source.
+                self.remaining()
+                entry = None
             if entry is not None:
                 payload = entry.payload
                 try:
@@ -317,8 +336,12 @@ class MarketSession:
                 else:
                     self.remaining()
                     return result, Provenance(url, fetched, True)
-        body = await self.run(self._fetch(path, parameters))
-        result = validate(body)
+        try:
+            body = await self.run(self._fetch(path, parameters))
+            result = validate(body)
+        except MarketPayloadError:
+            await report_parse_failure(self.diagnostics, diagnostic_stage)
+            raise
         self.remaining()
         fetched = self.wall_clock()
         if fetched.tzinfo is None or fetched.utcoffset() is None:
@@ -334,11 +357,15 @@ class MarketSession:
             }
             try:
                 await self.run(self.cache.put(key, payload, ttl_seconds=ttl))
-            except (MarketDeadlineError, SourceHttpError) as exc:
-                if isinstance(exc, SourceHttpError) and exc.code != "timeout":
+            except (CacheUnavailable, RevisionConflict):
+                # Ordinary backend failure or a competing cache writer must
+                # not discard validated source data. The bound cache service
+                # rechecks authority before exposing either failure.
+                self.remaining()
+            except SourceHttpError as exc:
+                if exc.code != "timeout":
                     raise
-                # Data already fetched and parsed before expiry remains useful;
-                # a cache write never creates a continuation beyond the deadline.
+                self.remaining()
         return result, Provenance(url, fetched)
 
     async def fetch_catalog(self) -> tuple[CatalogSnapshot, dict]:
@@ -348,7 +375,15 @@ class MarketSession:
             return value
 
         work = [
-            asyncio.create_task(self.read(path, (), array, use_cache=False))
+            asyncio.create_task(
+                self.read(
+                    path,
+                    (),
+                    array,
+                    use_cache=False,
+                    diagnostic_stage="market_directory",
+                )
+            )
             for path in (WORLDS_PATH, DCS_PATH)
         ]
         try:
@@ -356,7 +391,11 @@ class MarketSession:
             try:
                 catalog = parse_catalog(worlds[0], dcs[0])
             except QueryResolutionError:
+                await report_parse_failure(self.diagnostics, "market_directory")
                 raise MarketPayloadError() from None
+            except MarketPayloadError:
+                await report_parse_failure(self.diagnostics, "market_directory")
+                raise
             self.remaining()
             payload = {
                 "fetched_at_ms": [
@@ -417,6 +456,7 @@ class MarketSourceClient:
         deadline: float | None = None,
         directory: ServerDirectory | None = None,
         records: ModuleRecords | None = None,
+        diagnostics=None,
     ) -> MarketSession:
         """Use freshly bound invocation ports when sharing this gate across calls.
 
@@ -432,4 +472,5 @@ class MarketSourceClient:
             gate=self._gate,
             directory=directory,
             records=records,
+            diagnostics=diagnostics,
         )

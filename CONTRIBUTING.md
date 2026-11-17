@@ -68,6 +68,10 @@ python scripts/build_release.py
 
 生产模块使用每代私有 SDK facade，通过模块契约与 features 协商兼容性，不依赖全局 pip SDK 发行号。新协议内兼容更新通过生命周期排空切换，不要求整个 Host 重启。共享或原生依赖变更需要单独环境维护；旧 pre-coordinator alpha 的首次迁移不承诺热切换。外部降级（含普通手动上传）拒绝，仅支持当前授权下内部 last-good 回退，无公开跳过版本校验。
 
+## 日志与诊断
+
+新增或修改失败链路时遵循[日志分级与诊断契约](docs/logging-contract.md)：正常成功不刷屏，失败按调用聚合，DEBUG 保留有界安全阶段，取消和权限控制不被诊断吞掉。
+
 ## 验证
 
 CI 在 Ubuntu 上运行完整 unittest 套件和 Ruff：

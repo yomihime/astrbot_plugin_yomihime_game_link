@@ -577,6 +577,9 @@ class MarketClient:
                     parameters,
                     lambda payload: parser(payload, query, region, self.catalog),
                     clean=cleaner,
+                    diagnostic_stage="market_aggregated"
+                    if plan.endpoint == "aggregated"
+                    else "market_listings",
                     key_context=(
                         query.parser_version,
                         query.scope.kind,

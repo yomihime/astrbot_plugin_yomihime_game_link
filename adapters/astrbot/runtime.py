@@ -89,7 +89,12 @@ from .bundled import (
     install_bundled_package,
 )
 from .command_bridge import AstrBotCommandBridge, CommandHelp, CommandInvocation
-from .diagnostics import forward_diagnostic, forward_sync_failure
+from .diagnostics import (
+    forward_diagnostic,
+    forward_sync_failure,
+    forward_sync_trace,
+    sync_trace_enabled,
+)
 from .message_port import (
     AstrBotMessagePort,
     ImageFactory,
@@ -2170,6 +2175,8 @@ class AstrBotRuntime:
                         warning_sink=partial(forward_diagnostic, warning=True),
                     ),
                     sync_failure_sink=forward_sync_failure,
+                    sync_trace_sink=forward_sync_trace,
+                    sync_trace_enabled=sync_trace_enabled,
                     command_error_messages=getattr(
                         self._assembly.support, "command_error_messages", None
                     )
