@@ -131,6 +131,8 @@ class ItemSourceClient:
             routes, warnings = parse_garland_acquisition(garland, requested_id=item_id)
             effects = parse_garland_effects(garland, requested_id=item_id)
         except SourceHttpError as exc:
+            if exc.code == "cancelled":
+                raise
             routes = ()
             warnings = (_source_warning(exc),)
         except ItemPayloadError:

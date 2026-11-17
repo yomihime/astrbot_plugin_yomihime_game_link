@@ -8,6 +8,16 @@ import logging
 from ...infrastructure.sync_diagnostics import related_auth_failure
 
 
+def plugin_diagnostic_logger(plugin_name):
+    """Resolve the registered Host logger independently of captured module names."""
+    try:
+        from astrbot.core.log import LogManager
+    except ImportError:
+        # Offline adapters can run without AstrBot installed.
+        return logging.getLogger("astrbot")
+    return LogManager.get_plugin_logger(plugin_name)
+
+
 def forward_diagnostic(event, *, logger=None, warning=False):
     if type(event) is not dict or set(event) != {
         "owner",

@@ -73,8 +73,8 @@ class _Context:
     invocation_id: str
     origin: str
     started: float
-    failure_report_attempted: bool = False
-    failure_reported: bool = False
+    pending_warning: tuple | None = None
+    terminal: bool = False
     http_failure: dict | None = None
     auth_failure: dict | None = None
     phase: str = "core_start"
@@ -84,21 +84,16 @@ class _Context:
 _current = ContextVar("runtime_diagnostic", default=None)
 
 
-def claim_failure_report(invocation_id):
-    """An invocation warning has a slot independent of retained evidence."""
+def defer_failure_report(invocation_id, sink, event):
+    """Keep at most one reviewed warning until the invocation is terminal."""
     context = _current.get()
-    if context is None or context.invocation_id != invocation_id:
-        return None
-    if context.failure_report_attempted:
-        return False
-    context.failure_report_attempted = True
-    return True
-
-
-def mark_failure_reported(invocation_id):
-    context = _current.get()
-    if context is not None and context.invocation_id == invocation_id:
-        context.failure_reported = True
+    if (
+        context is not None
+        and context.invocation_id == invocation_id
+        and not context.terminal
+        and context.pending_warning is None
+    ):
+        context.pending_warning = (sink, event)
 
 
 def related_auth_failure(invocation_id):
@@ -174,7 +169,7 @@ class SyncDiagnostics:
             _current.reset(token)
 
     def record(self, context, stage, fields):
-        if self._closed or stage not in _STAGES:
+        if self._closed or context.terminal or stage not in _STAGES:
             return
         trace = self._attempts.get(context.invocation_id)
         if trace is None:
@@ -196,8 +191,6 @@ class SyncDiagnostics:
             self._attempts[context.invocation_id] = trace
             while len(self._attempts) > MAX_ATTEMPTS:
                 self._attempts.popitem(last=False)
-        if trace["terminal"]:
-            return
         event = {
             "stage": stage,
             "elapsed_ms": min(
@@ -271,9 +264,25 @@ class SyncDiagnostics:
         elif len(trace["events"]) < MAX_EVENTS:
             trace["events"].append(event)
         if stage == "core_final":
+            context.terminal = True
             trace["terminal"] = True
             business_code = fields.get("failure_code")
             runtime_code = trace["core_failure_code"]
+            quiet = (
+                event["code"] in _QUIET_TERMINATIONS
+                or runtime_code in _QUIET_TERMINATIONS
+            )
+            warning_reported = False
+            pending_warning = context.pending_warning
+            context.pending_warning = None
+            if not quiet and pending_warning is not None:
+                sink, envelope = pending_warning
+                try:
+                    sink(envelope)
+                    warning_reported = True
+                except Exception:
+                    # The generic projection is still available as a fallback.
+                    pass
             collection_failed = (
                 context.origin == "scheduler"
                 and trace["observation_completeness"] == "failed"
@@ -284,9 +293,8 @@ class SyncDiagnostics:
             )
             if (
                 self._warning_sink is not None
-                and not context.failure_reported
-                and event["code"] not in _QUIET_TERMINATIONS
-                and runtime_code not in _QUIET_TERMINATIONS
+                and not quiet
+                and not warning_reported
                 and (
                     business_code in _WARNING_CODES
                     or runtime_code in _FAILURE_CODES

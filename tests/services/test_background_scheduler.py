@@ -170,10 +170,12 @@ class BackgroundSchedulerTests(unittest.IsolatedAsyncioTestCase):
             module_id, "start", identity, True, self.registry.snapshot().revision
         )
         await self.database.executor.run_transaction(
-            lambda unit: unit.execute(
-                "INSERT INTO module_runtime_intents VALUES (?,?,1,1,'enable',?)",
-                (package_id, manifest.module_id, self.now.isoformat()),
-            ).rowcount
+            lambda unit: (
+                unit.execute(
+                    "INSERT INTO module_runtime_intents VALUES (?,?,1,1,'enable',?)",
+                    (package_id, manifest.module_id, self.now.isoformat()),
+                ).rowcount
+            )
         )
 
     def make_scheduler(self):
@@ -275,6 +277,10 @@ class BackgroundSchedulerTests(unittest.IsolatedAsyncioTestCase):
             _register_declared_subscription_gates=AsyncMock(),
             _configured_public_subscriptions=SimpleNamespace(reconcile=AsyncMock()),
             _utc_clock=lambda: self.now,
+            _monotonic_clock=lambda: 0,
+            repositories=SimpleNamespace(
+                cache=SimpleNamespace(prune_expired=AsyncMock())
+            ),
             registry=self.registry,
             scheduler=self.scheduler,
         )
@@ -320,6 +326,7 @@ class BackgroundSchedulerTests(unittest.IsolatedAsyncioTestCase):
             pump._pump_failure,
             {"stage": "collection_scan", "code": "authority_rejected"},
         )
+        self.assertEqual([record.levelname for record in logs.records], ["ERROR"])
         self.assertNotIn("private-sentinel", "\n".join(logs.output))
 
     async def test_stopping_one_active_module_keeps_other_page_candidates_runnable(
@@ -418,19 +425,23 @@ class BackgroundSchedulerTests(unittest.IsolatedAsyncioTestCase):
         candidate = (await self.candidates())[0]
         lease = await self.claim(candidate)
         await self.database.executor.run_transaction(
-            lambda unit: unit.execute(
-                "UPDATE config_state SET revision=revision+1 WHERE principal_id=? AND module_id=?",
-                ("host-config", "pkg/pricing"),
-            ).rowcount
+            lambda unit: (
+                unit.execute(
+                    "UPDATE config_state SET revision=revision+1 WHERE principal_id=? AND module_id=?",
+                    ("host-config", "pkg/pricing"),
+                ).rowcount
+            )
         )
         self.assertFalse(await self.repository.is_current(lease, now=self.now))
         refreshed = (await self.candidates())[0]
         fresh = await self.claim(refreshed)
         self.assertIsNotNone(fresh)
         await self.database.executor.run_transaction(
-            lambda unit: unit.execute(
-                "UPDATE module_runtime_intents SET desired_enabled=0,intent_revision=2 WHERE package_id='pkg'"
-            ).rowcount
+            lambda unit: (
+                unit.execute(
+                    "UPDATE module_runtime_intents SET desired_enabled=0,intent_revision=2 WHERE package_id='pkg'"
+                ).rowcount
+            )
         )
         self.assertFalse(await self.repository.is_current(fresh, now=self.now))
         self.assertEqual(await self.candidates(), ())
@@ -566,9 +577,9 @@ class BackgroundSchedulerTests(unittest.IsolatedAsyncioTestCase):
             {"value": 1},
         )
         await self.database.executor.run_transaction(
-            lambda unit: unit.execute(
-                "UPDATE config_state SET revision=revision+1"
-            ).rowcount
+            lambda unit: (
+                unit.execute("UPDATE config_state SET revision=revision+1").rowcount
+            )
         )
         self.assertFalse(await self.repository.commit_observation(lease, observation))
         count = await self.database.executor.run_read(

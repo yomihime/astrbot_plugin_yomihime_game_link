@@ -194,7 +194,9 @@ class SourceParseDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
 
     def test_installed_schema_and_warning_policy_match(self):
         root = Path(__file__).parents[3] / "modules" / "ff14"
-        manifest = json.loads((root / "yomihime.manifest.json").read_text())
+        manifest = json.loads(
+            (root / "yomihime.manifest.json").read_text(encoding="utf-8")
+        )
         declared = next(
             item
             for item in manifest["modules"][0]["diagnostics"]
@@ -204,7 +206,9 @@ class SourceParseDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
             validate_contract(DiagnosticDeclaration(**declared)),
             validate_contract(DECLARATION),
         )
-        policy = json.loads((root / "assembly.json").read_text())["diagnostics"]
+        policy = json.loads((root / "assembly.json").read_text(encoding="utf-8"))[
+            "diagnostics"
+        ]
         self.assertIn(EVENT, policy["events"])
         self.assertIn(EVENT, policy["warning_events"])
         self.assertEqual(policy["event_limits"][EVENT], 1)

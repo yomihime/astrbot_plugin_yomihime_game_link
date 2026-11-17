@@ -668,9 +668,11 @@ class MarketExecutionTests(unittest.IsolatedAsyncioTestCase):
         for intent in ("min", "overview", "listings"):
             with self.subTest(intent=intent):
                 client, http = self.client(
-                    lambda request: currently(rows=[listing(100, hq=True)])
-                    if intent == "listings"
-                    else aggregated()
+                    lambda request: (
+                        currently(rows=[listing(100, hq=True)])
+                        if intent == "listings"
+                        else aggregated()
+                    )
                 )
                 execution = await client.execute(query(intent=intent, quality="hq"))
                 lines = [
@@ -1043,6 +1045,23 @@ class MarketExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(http.requests), 0)
         self.assertIs(execution.result.error.code, ErrorCode.MODULE_UNAVAILABLE)
         self.assertNotIn("synthetic-sensitive", execution.result.error.message)
+
+    async def test_bound_control_failures_cannot_publish_partial_regional_results(self):
+        for failure in (
+            AccessDenied("grant_revoked"),
+            OperationTimeout(),
+            SourceHttpError("cancelled"),
+        ):
+            with self.subTest(failure=failure.code):
+
+                def upstream(request):
+                    region = request.path.split("/")[-2]
+                    return aggregated(region) if region == "Europe" else failure
+
+                client, _ = self.client(upstream)
+                with self.assertRaises(type(failure)) as raised:
+                    await client.execute(query(region="global"))
+                self.assertIs(raised.exception, failure)
 
     async def test_manifest_source_policy_and_registered_read_only_market(self):
         root = Path(__file__).resolve().parents[3]

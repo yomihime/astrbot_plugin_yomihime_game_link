@@ -9,10 +9,7 @@ from types import MappingProxyType
 
 from ..core.contracts.diagnostics import DiagnosticLimitExceeded, diagnostic_payload
 from ..core.public_errors import public_boundary
-from ..infrastructure.sync_diagnostics import (
-    claim_failure_report,
-    mark_failure_reported,
-)
+from ..infrastructure.sync_diagnostics import defer_failure_report
 from ..yomihime_game_link_sdk.errors import (
     AccessDenied,
     OperationTimeout,
@@ -118,9 +115,8 @@ class DiagnosticStore:
         )
         if envelope_size > 65536:
             return
-        claim = claim_failure_report(key) if warning else None
-        if claim is True:
-            self._send(self._warning_sink, event, warning=True)
+        if warning:
+            defer_failure_report(key, self._warning_sink, event)
 
         # Filling the optional retained evidence budget does not hide the
         # reviewed failure warning for a live execution context.
@@ -161,18 +157,14 @@ class DiagnosticStore:
         trace["bytes"] += size
         self._bytes += size
         self._retained_events += 1
-        if claim is None:
-            self._send(
-                self._warning_sink if warning else self._sink, event, warning=warning
-            )
+        if not warning:
+            self._send(self._sink, event)
 
     @staticmethod
-    def _send(sink, event, *, warning):
+    def _send(sink, event):
         if sink is not None:
             try:
                 sink(event)
-                if warning:
-                    mark_failure_reported(event["trace"])
             except (AccessDenied, OperationTimeout):
                 raise
             except Exception:

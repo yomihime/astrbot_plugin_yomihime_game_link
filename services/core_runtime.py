@@ -530,6 +530,7 @@ class CoreRuntime:
         sync_failure_sink=None,
         sync_trace_sink=None,
         sync_trace_enabled=None,
+        pump_logger: logging.Logger | None = None,
         legacy_config_policies=(),
     ) -> None:
         validate_contract(renderer)
@@ -991,6 +992,7 @@ class CoreRuntime:
         self._host_flights: set[asyncio.Task[object]] = set()
         self._pump_failures: tuple[CoreRuntimeFailure, ...] = ()
         self._pump_stage = "idle"
+        self._pump_logger = pump_logger if pump_logger is not None else _LOG
         self._pump_failure = None
         self._pump_last_success_at = None
         self._pump_last_scan = None
@@ -1773,6 +1775,7 @@ class CoreRuntime:
 
     async def _pump_loop(self) -> None:
         collection_cursor = None
+        next_cache_prune = float("-inf")
         while self._accepting:
             try:
                 self._pump_stage = "gate_registration"
@@ -1799,6 +1802,18 @@ class CoreRuntime:
                 await self.delivery.dispatch_due_events()
                 self._pump_stage = "digest_delivery"
                 await self.delivery.dispatch_due_digests()
+                now_monotonic = self._monotonic_clock()
+                if self._accepting and now_monotonic >= next_cache_prune:
+                    next_cache_prune = now_monotonic + 60
+                    self._pump_stage = "cache_maintenance"
+                    try:
+                        await self.repositories.cache.prune_expired()
+                    except (PermissionError, EffectRejected):
+                        raise
+                    except Exception:
+                        getattr(self, "_pump_logger", _LOG).warning(
+                            "query cache maintenance failed code=operation_failed"
+                        )
                 self._pump_last_success_at = _require_utc(self._utc_clock()).isoformat()
             except asyncio.CancelledError:
                 raise
@@ -1815,7 +1830,7 @@ class CoreRuntime:
                         "scheduler_pump", "owned_pump", "operation_failed"
                     ),
                 )
-                _LOG.error(
+                getattr(self, "_pump_logger", _LOG).error(
                     "scheduler pump stopped stage=%s code=%s", self._pump_stage, reason
                 )
                 return

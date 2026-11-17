@@ -146,8 +146,13 @@ class DeclarativeLogsCommandTests(unittest.IsolatedAsyncioTestCase):
         await self._assert_command_png(region="Europe")
 
     async def test_failed_stages_send_safe_group_hint_and_one_correlated_warning(self):
-        await self._start_catalog()
         logger = MagicMock()
+        logger.isEnabledFor.return_value = True
+        with patch(
+            "ygl_test_subject.adapters.astrbot.runtime.plugin_diagnostic_logger",
+            return_value=logger,
+        ):
+            await self._start_catalog()
         original = self.transport.callback
 
         async def exchange_unavailable(request):
@@ -194,35 +199,43 @@ class DeclarativeLogsCommandTests(unittest.IsolatedAsyncioTestCase):
                 if trace["invocation_id"] == diagnostic["trace"]
             )
             self.assertEqual(matching_trace["capability_status"], "error")
+            debug = [call.args[0] for call in logger.debug.call_args_list]
+            self.assertEqual(len(debug), 1)
+            self.assertTrue(debug[0].startswith("GAME_LINK_TRACE "))
+            self.assertNotIn("PrivateRoleFixture", debug[0])
+            self.assertNotIn(fixture.SENTINEL, debug[0])
+            self.assertEqual(
+                json.loads(debug[0].split(" ", 1)[1])["invocation_id"],
+                diagnostic["trace"],
+            )
             return diagnostic
 
-        with patch("astrbot.api.logger", logger, create=True):
-            await invoke(
-                '"Synthetic Cloud Test"',
-                "realm_directory",
-                "region_unresolved",
-                200,
-                "无法判断 FFLogs 区域",
+        await invoke(
+            '"Synthetic Cloud Test"',
+            "realm_directory",
+            "region_unresolved",
+            200,
+            "无法判断 FFLogs 区域",
+        )
+        with patch.object(
+            self.transport, "request_credential_exchange", exchange_unavailable
+        ):
+            auth = await invoke(
+                "Cerberus",
+                "server_directory",
+                "http_error",
+                503,
+                "授权或服务器目录查询失败",
             )
-            with patch.object(
-                self.transport, "request_credential_exchange", exchange_unavailable
-            ):
-                auth = await invoke(
-                    "Cerberus",
-                    "server_directory",
-                    "http_error",
-                    503,
-                    "授权或服务器目录查询失败",
-                )
-                self.assertEqual(
-                    auth["authorization_failure"]["source"], "fflogs_public_cn"
-                )
-                self.assertEqual(auth["authorization_failure"]["stage"], "auth_failure")
-                self.assertEqual(auth["authorization_failure"]["http_status"], 503)
-            self.transport.callback = graphql_rejected
-            await invoke(
-                "Cerberus", "character_query", "graphql_error", 200, "角色查询失败"
+            self.assertEqual(
+                auth["authorization_failure"]["source"], "fflogs_public_cn"
             )
+            self.assertEqual(auth["authorization_failure"]["stage"], "auth_failure")
+            self.assertEqual(auth["authorization_failure"]["http_status"], 503)
+        self.transport.callback = graphql_rejected
+        await invoke(
+            "Cerberus", "character_query", "graphql_error", 200, "角色查询失败"
+        )
 
     async def test_old_three_positions_and_unknown_duplicate_options_never_query(self):
         await self._start_catalog()

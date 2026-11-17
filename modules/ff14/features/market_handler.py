@@ -12,7 +12,12 @@ from time import monotonic
 
 from ....yomihime_game_link_sdk.contexts import InvocationOrigin, InvocationView
 from ....yomihime_game_link_sdk.display import DisplayDocument, Privacy, TextBlock
-from ....yomihime_game_link_sdk.errors import ServiceUnavailable, SourceHttpError
+from ....yomihime_game_link_sdk.errors import (
+    AccessDenied,
+    OperationTimeout,
+    ServiceUnavailable,
+    SourceHttpError,
+)
 from ....yomihime_game_link_sdk.results import (
     CapabilityResult,
     ErrorCode,
@@ -803,6 +808,8 @@ class MarketQueryHandler:
             return failure(exc.code, str(exc))
         except ItemPayloadError:
             return failure(ErrorCode.UNPARSED, "物品候选来源格式无法识别。")
+        except (AccessDenied, OperationTimeout):
+            raise
         except (
             MarketPayloadError,
             MarketDeadlineError,
@@ -810,6 +817,8 @@ class MarketQueryHandler:
             PermissionError,
             ServiceUnavailable,
         ) as exc:
+            if isinstance(exc, SourceHttpError) and exc.code == "cancelled":
+                raise
             outcome = _diagnostic(exc, "", "")
             return failure(outcome.code, "市场查询来源未完成，请稍后重试。")
         except TimeoutError:

@@ -119,6 +119,7 @@ class HostLogLevelTests(unittest.IsolatedAsyncioTestCase):
         failures.source_error(SourceHttpError("upstream_error", status_code=403))
         await failures.flush()
         await failures.flush()
+        self.assertEqual(warnings, [])
         emit("core_final", code="completed", failure_code="upstream_error")
         self.assertEqual(fallback, [])
         self.assertEqual(len(warnings), 1)
@@ -135,6 +136,21 @@ class HostLogLevelTests(unittest.IsolatedAsyncioTestCase):
             ),
             ("ranking_history", "forbidden", 403, 2),
         )
+
+    async def test_module_warning_does_not_log_after_cancellation_or_revocation(self):
+        for termination in ("cancelled", "stale"):
+            with self.subTest(termination=termination):
+                diagnostics, warnings, fallback = self.failure_bridge()
+                failures = LookupFailures()
+                failures.port = diagnostics
+                failures.begin("fflogs_public_cn", "ranking_history")
+                failures.source_error(
+                    SourceHttpError("upstream_error", status_code=503)
+                )
+                await failures.flush()
+                emit("core_failure", code=termination)
+                emit("core_final", code="error", failure_code="upstream_error")
+                self.assertEqual((warnings, fallback), ([], []))
 
     async def test_actual_default_host_sink_is_debug_only_and_generic(self):
         levels = []

@@ -75,7 +75,7 @@ class SQLiteGrantRevocationRepository:
                 expected_revision,
             )
             unit.execute(
-                "UPDATE cache_entries SET invalidated=1, revision=revision+1 "
+                "UPDATE cache_entries SET invalidated=1, revision=MIN(revision+1,9223372036854775807) "
                 "WHERE visibility='authorized' AND user_id=? AND grant_id=? "
                 "AND grant_revision=?",
                 (scope.principal_id, scope.grant_id, scope.revision),

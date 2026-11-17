@@ -68,7 +68,11 @@ from ..infrastructure.sync_diagnostics import SyncDiagnostics
 from ..infrastructure.sync_diagnostics import emit as diagnostic
 from ..yomihime_game_link_sdk.contexts import InvocationOrigin, InvocationView
 from ..yomihime_game_link_sdk.declarations import SourceDeclaration
-from ..yomihime_game_link_sdk.errors import SourceHttpError
+from ..yomihime_game_link_sdk.errors import (
+    AccessDenied,
+    OperationTimeout,
+    SourceHttpError,
+)
 from ..yomihime_game_link_sdk.services import ConfigSnapshot, InvocationServiceBinder
 from ..yomihime_game_link_sdk.storage import (
     GrantReference,
@@ -1209,7 +1213,7 @@ class SharedCollectionScheduler:
             core_final = "cancelled"
             trace_event("core_failure", code="cancelled")
             raise
-        except (ScopeCancelled, ScopeStaleError):
+        except (ScopeCancelled, ScopeStaleError, AccessDenied):
             core_final = "stale"
             trace_event("core_failure", code="stale")
             return None
@@ -1217,7 +1221,7 @@ class SharedCollectionScheduler:
             trace_event(
                 "core_failure",
                 code="core_deadline"
-                if isinstance(exc, ScopeDeadlineExceeded)
+                if isinstance(exc, (ScopeDeadlineExceeded, OperationTimeout))
                 else "collector_timeout",
             )
             if lease is None:
@@ -1238,6 +1242,10 @@ class SharedCollectionScheduler:
             )
             return result
         except SourceHttpError as exc:
+            if exc.code == "cancelled":
+                core_final = "cancelled"
+                trace_event("core_failure", code="cancelled")
+                return None
             next_available = exc.next_available_at
             if (
                 lease is not None

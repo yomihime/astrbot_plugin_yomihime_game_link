@@ -460,6 +460,43 @@ class CoreRuntimeTests(unittest.IsolatedAsyncioTestCase):
             managed_module_owners=managed_module_owners,
         )
 
+    async def test_idle_pump_retries_cache_maintenance_after_one_minute(self):
+        clock = [0.0]
+        runtime = self._runtime(monotonic_clock=lambda: clock[0], pump_interval=0.001)
+        ticks = iter((0.0, 1.0, 59.0, 60.0))
+        completed = asyncio.Event()
+
+        async def tick():
+            clock[0] = next(ticks, 60.0)
+
+        attempts = []
+
+        async def prune():
+            attempts.append(clock[0])
+            if len(attempts) == 1:
+                raise RuntimeError("private-sentinel")
+            completed.set()
+            return 0
+
+        with (
+            patch.object(runtime.delivery, "dispatch_due_digests", side_effect=tick),
+            patch.object(
+                runtime.repositories.cache, "prune_expired", side_effect=prune
+            ),
+            self.assertLogs(
+                "ygl_test_subject.services.core_runtime", "WARNING"
+            ) as logs,
+        ):
+            try:
+                await runtime.start()
+                await asyncio.wait_for(completed.wait(), timeout=5)
+                self.assertEqual(attempts, [0.0, 60.0])
+                self.assertIsNone(runtime._pump_failure)
+            finally:
+                await runtime.close()
+        self.assertIn("query cache maintenance failed", "\n".join(logs.output))
+        self.assertNotIn("private-sentinel", "\n".join(logs.output))
+
     async def _public_web_runtime(self, *, detached=False, block_root=False):
         from yomihime_game_link_sdk.errors import InvalidInvocation
 

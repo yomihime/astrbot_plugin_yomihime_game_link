@@ -14,6 +14,10 @@ from ygl_test_subject.core.ports import AuthorizationWindowExpired, RevisionConf
 from ygl_test_subject.infrastructure.files import LocalSafeFileStore
 from ygl_test_subject.infrastructure.sqlite import repositories_cache_resources
 from ygl_test_subject.infrastructure.sqlite.database import SQLiteDatabase
+from ygl_test_subject.infrastructure.sqlite.migrations import (
+    MigrationRunner,
+    discover_migrations,
+)
 from ygl_test_subject.infrastructure.sqlite.repositories_cache_resources import (
     SQLiteCacheRepository,
     SQLiteResourceRepository,
@@ -97,6 +101,138 @@ class CacheResourceRepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await repository.get(public)).status, CacheLookupStatus.MISS)
         reopened = SQLiteCacheRepository(self.database)
         self.assertEqual((await reopened.get(user_a)).entry.payload["value"], 2)
+
+    async def test_prune_legacy_expiry_is_bounded_and_recreation_rejects_stale_cas(
+        self,
+    ):
+        migrations = discover_migrations(self.database.migrations_dir)
+        connection = self.database.connect()
+        try:
+            MigrationRunner(
+                connection, migrations=[m for m in migrations if m.version <= 240]
+            ).apply()
+            connection.executemany(
+                "INSERT INTO cache_entries(cache_key,visibility,payload_json,expires_at,revision) "
+                "VALUES (?,'public','{}','2000-01-01T00:00:00+00:00',?)",
+                [(f"legacy-{i}", 37) for i in range(129)],
+            )
+            connection.execute(
+                "INSERT INTO module_collections VALUES ('ff14/ff14','server_directory',1,'public','[]')"
+            )
+            connection.execute(
+                "INSERT INTO module_records VALUES ('ff14/ff14','server_directory','public',"
+                "'','',0,'universalis',1,'{}',41)"
+            )
+            connection.execute(
+                "INSERT INTO b04_subscriptions(subscription_id,revision,owner_id,scope_kind,status,record_json) "
+                "VALUES ('retained',9,'owner','public','active','{}')"
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        repository = SQLiteCacheRepository(self.database)
+        request = self._request("legacy-0", CacheVisibility.PUBLIC, OwnerScope.public())
+        self.assertEqual(
+            (await repository.get(request)).status, CacheLookupStatus.EXPIRED
+        )
+        self.assertEqual(await repository.current_revision(request), 37)
+        live = self._request("legacy-0", CacheVisibility.USER, OwnerScope.user("alice"))
+        entry = CacheEntry(
+            "legacy-0", {"live": True}, datetime.now(UTC) + timedelta(days=1)
+        )
+        live_entry = await repository.put(live, entry)
+        self.assertEqual(await repository.prune_expired(), 128)
+        self.assertEqual(await repository.prune_expired(), 1)
+        with patch.object(
+            self.database.executor,
+            "run_transaction",
+            side_effect=AssertionError("idle write"),
+        ):
+            self.assertEqual(await repository.prune_expired(), 0)
+        self.assertEqual((await repository.get(live)).entry, live_entry)
+        self.assertEqual((await repository.get(request)).status, CacheLookupStatus.MISS)
+        with self.assertRaises(RevisionConflict):
+            await repository.put(request, entry, expected_revision=37)
+
+        reopened = SQLiteCacheRepository(self.database.path)
+        try:
+            recreated = await reopened.put(request, entry)
+            self.assertGreater(recreated.revision, 37)
+            with self.assertRaises(RevisionConflict):
+                await reopened.put(request, entry, expected_revision=37)
+            self.assertEqual((await reopened.get(request)).entry, recreated)
+        finally:
+            await reopened.database.executor.close()
+        connection = self.database.connect()
+        try:
+            self.assertEqual(
+                tuple(
+                    connection.execute(
+                        "SELECT record_key,revision FROM module_records WHERE collection='server_directory'"
+                    ).fetchone()
+                ),
+                ("universalis", 41),
+            )
+            self.assertEqual(
+                tuple(
+                    connection.execute(
+                        "SELECT subscription_id,revision,status FROM b04_subscriptions"
+                    ).fetchone()
+                ),
+                ("retained", 9, "active"),
+            )
+        finally:
+            connection.close()
+
+    async def test_exhausted_revision_never_wraps_or_promotes_to_float(self):
+        repository = SQLiteCacheRepository(self.database)
+        request = self._request("last", CacheVisibility.PUBLIC, OwnerScope.public())
+        maximum = (1 << 63) - 1
+        expired = CacheEntry("last", {}, datetime.now(UTC) - timedelta(seconds=1))
+        await repository.put(request, expired)
+        await self.database.executor.run_transaction(
+            lambda unit: unit.execute(
+                "UPDATE cache_entries SET revision=?", (maximum,)
+            ).rowcount
+        )
+        with self.assertRaisesRegex(OverflowError, "revision exhausted"):
+            await repository.put(request, expired, expected_revision=maximum)
+        await repository.invalidate(request)
+        self.assertEqual(await repository.current_revision(request), maximum)
+        self.assertEqual(await repository.prune_expired(), 1)
+        # Exhausting the shared creation floor disables inserts, including for
+        # new keys. Starting over at one would silently re-admit an old writer.
+        with self.assertRaisesRegex(OverflowError, "revision exhausted"):
+            await repository.put(request, expired)
+        self.assertIsNone(await repository.current_revision(request))
+
+    async def test_prune_rechecks_expiry_after_concurrent_renewal(self):
+        repository = SQLiteCacheRepository(self.database)
+        request = self._request("renew", CacheVisibility.PUBLIC, OwnerScope.public())
+        now = datetime.now(UTC)
+        stale = await repository.put(
+            request, CacheEntry("renew", {}, now - timedelta(days=1))
+        )
+        other = SQLiteCacheRepository(self.database.path)
+        write = self.database.executor.run_transaction
+
+        async def after_renewal(prune, **kwargs):
+            await other.put(
+                request,
+                CacheEntry("renew", {"renewed": True}, now + timedelta(days=1)),
+                expected_revision=stale.revision,
+            )
+            return await write(prune, **kwargs)
+
+        try:
+            with patch.object(
+                self.database.executor, "run_transaction", side_effect=after_renewal
+            ):
+                self.assertEqual(await repository.prune_expired(), 0)
+            self.assertTrue((await repository.get(request)).entry.payload["renewed"])
+        finally:
+            await other.database.executor.close()
 
     async def test_cache_authorized_scope_is_grant_revision_bound(self) -> None:
         repository = SQLiteCacheRepository(self.database)

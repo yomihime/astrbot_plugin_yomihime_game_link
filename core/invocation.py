@@ -42,6 +42,7 @@ from ..yomihime_game_link_sdk.errors import (
     OperationTimeout,
     ParameterError,
     ServiceUnavailable,
+    SourceHttpError,
 )
 from ..yomihime_game_link_sdk.results import (
     CapabilityResult,
@@ -92,6 +93,8 @@ def _error(code: ErrorCode, *, privacy: Privacy = Privacy.PUBLIC) -> CapabilityR
 
 
 def _publication_failure_code(error: Exception) -> str | None:
+    if isinstance(error, SourceHttpError) and error.code == "cancelled":
+        return "cancelled"
     if isinstance(error, (ScopeDeadlineExceeded, OperationTimeout)) or (
         isinstance(error, InvalidInvocation) and error.code == "invocation_expired"
     ):
@@ -102,7 +105,7 @@ def _publication_failure_code(error: Exception) -> str | None:
             ScopeCancelled,
             ScopeStaleError,
             LifecycleError,
-            InvalidInvocation,
+            AccessDenied,
             AdmissionError,
         ),
     ):
@@ -528,14 +531,8 @@ class Gateway:
         except asyncio.CancelledError:
             diagnostic("core_failure", code="cancelled")
             raise
-        except ScopeDeadlineExceeded:
-            diagnostic("core_failure", code="core_deadline")
-            return _error(ErrorCode.MODULE_UNAVAILABLE)
-        except (ScopeCancelled, ScopeStaleError):
-            diagnostic("core_failure", code="stale")
-            return _error(ErrorCode.MODULE_UNAVAILABLE)
-        except Exception:
-            diagnostic("core_failure", code="error")
+        except Exception as error:
+            diagnostic("core_failure", code=_publication_failure_code(error) or "error")
             return _error(ErrorCode.MODULE_UNAVAILABLE)
 
     async def invoke_command(
@@ -823,23 +820,17 @@ class Gateway:
             if self._sync_diagnostics is not None:
                 self._sync_diagnostics.reset(diagnostic_token)
             raise
-        except (
-            _MessageSourceRejected,
-            ScopeCancelled,
-            ScopeDeadlineExceeded,
-            ScopeStaleError,
-            LifecycleError,
-        ) as exc:
-            diagnostic(
-                "core_failure",
-                code="core_deadline"
-                if isinstance(exc, ScopeDeadlineExceeded)
-                else "stale",
+        except Exception as error:
+            code = (
+                "stale"
+                if isinstance(error, _MessageSourceRejected)
+                else _publication_failure_code(error)
             )
-            return finish(denied(ErrorCode.MODULE_UNAVAILABLE), "error")
-        except Exception:
-            diagnostic("core_failure", code="error")
-            return finish(denied(ErrorCode.UNKNOWN), "error")
+            diagnostic("core_failure", code=code or "error")
+            return finish(
+                denied(ErrorCode.MODULE_UNAVAILABLE if code else ErrorCode.UNKNOWN),
+                "error",
+            )
 
         diagnostic("publication")
         # Re-check both authority and static state after an await.  This closes

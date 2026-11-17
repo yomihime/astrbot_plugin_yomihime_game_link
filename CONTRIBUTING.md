@@ -60,9 +60,9 @@ python scripts/verify_frontend_build.py
 python scripts/build_release.py
 ```
 
-生成 `dist/astrbot_plugin_yomihime_game_link-v0.2.8.zip` 与 `dist/SHA256SUMS`。默认普通 ZIP 包含闭合全文件清单、私有 SDK 和完整静态页面，无需配置签名身份或逐包批准。显式 `--signing-key` / `--test-signing` 保留旧签名格式兼容，普通构建不需要这些参数。
+生成 `dist/astrbot_plugin_yomihime_game_link-v0.2.9.zip` 与 `dist/SHA256SUMS`。默认普通 ZIP 包含闭合全文件清单、私有 SDK 和完整静态页面，无需配置签名身份或逐包批准。显式 `--signing-key` / `--test-signing` 保留旧签名格式兼容，普通构建不需要这些参数。
 
-`--tag v0.2.8` 仅验证 metadata 版本，不创建 tag。Core 与 DLC 独立构建和发布；每 ZIP 严格小于 16,000,000 字节。源码归档不含生成的静态资产和闭合清单，不可安装。市场 download_url 必须指向不可变完整 ZIP asset；无市场条目通过 AstrBot 原生 ZIP 上传。详见[完整发布包](docs/release-packaging.md)。
+`--tag v0.2.9` 仅验证 metadata 版本，不创建 tag。Core 与 DLC 独立构建和发布；每 ZIP 严格小于 16,000,000 字节。源码归档不含生成的静态资产和闭合清单，不可安装。市场 download_url 必须指向不可变完整 ZIP asset；无市场条目通过 AstrBot 原生 ZIP 上传。详见[完整发布包](docs/release-packaging.md)。
 
 ### SDK 发行版本或 ABI 变化
 

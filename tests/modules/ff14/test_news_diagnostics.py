@@ -165,7 +165,9 @@ class NewsFailureDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
 
     def test_installed_declaration_and_warning_policy_match(self):
         root = Path(__file__).parents[3] / "modules" / "ff14"
-        manifest = json.loads((root / "yomihime.manifest.json").read_text())
+        manifest = json.loads(
+            (root / "yomihime.manifest.json").read_text(encoding="utf-8")
+        )
         declared = next(
             item
             for item in manifest["modules"][0]["diagnostics"]
@@ -175,7 +177,9 @@ class NewsFailureDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
             validate_contract(DiagnosticDeclaration(**declared)),
             validate_contract(NEWS_FAILURE_DECLARATION),
         )
-        policy = json.loads((root / "assembly.json").read_text())["diagnostics"]
+        policy = json.loads((root / "assembly.json").read_text(encoding="utf-8"))[
+            "diagnostics"
+        ]
         self.assertIn("FF14NewsFailure", policy["events"])
         self.assertIn("FF14NewsFailure", policy["warning_events"])
         self.assertEqual(policy["event_limits"]["FF14NewsFailure"], 1)

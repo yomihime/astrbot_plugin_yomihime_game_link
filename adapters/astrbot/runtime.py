@@ -93,6 +93,7 @@ from .diagnostics import (
     forward_diagnostic,
     forward_sync_failure,
     forward_sync_trace,
+    plugin_diagnostic_logger,
     sync_trace_enabled,
 )
 from .message_port import (
@@ -575,6 +576,7 @@ class AstrBotRuntime:
         if context is None:
             raise TypeError("AstrBot Context is required")
         self._context = context
+        self._diagnostic_logger = plugin_diagnostic_logger(PLUGIN_NAME)
         if (
             bundled_selection is not None
             and type(bundled_selection) is not ReviewedBundleSelection
@@ -2171,12 +2173,22 @@ class AstrBotRuntime:
                     if self._assembly
                     else {},
                     diagnostics=DiagnosticStore(
-                        sink=forward_diagnostic,
-                        warning_sink=partial(forward_diagnostic, warning=True),
+                        warning_sink=partial(
+                            forward_diagnostic,
+                            logger=self._diagnostic_logger,
+                            warning=True,
+                        ),
                     ),
-                    sync_failure_sink=forward_sync_failure,
-                    sync_trace_sink=forward_sync_trace,
-                    sync_trace_enabled=sync_trace_enabled,
+                    sync_failure_sink=partial(
+                        forward_sync_failure, logger=self._diagnostic_logger
+                    ),
+                    sync_trace_sink=partial(
+                        forward_sync_trace, logger=self._diagnostic_logger
+                    ),
+                    sync_trace_enabled=partial(
+                        sync_trace_enabled, logger=self._diagnostic_logger
+                    ),
+                    pump_logger=self._diagnostic_logger,
                     command_error_messages=getattr(
                         self._assembly.support, "command_error_messages", None
                     )
