@@ -4,6 +4,8 @@ import json
 import unittest
 from types import SimpleNamespace
 
+from tests.fixtures.runtime_cleanup import terminate_and_drain
+
 from . import test_astrbot_runtime as runtime_fixture
 from . import test_llm_tools as tools_fixture
 
@@ -219,7 +221,7 @@ class ItemToolHostTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(positive["status"], "needs_selection")
         pending = positive
         self.assertEqual(handler._chat.registry.size, 1)
-        await self.runtime.terminate()
+        await terminate_and_drain(self.runtime)
         self.assertEqual(handler._chat.registry.size, 0)
         with self.assertRaises(PermissionError):
             await old_aggregate.call(
