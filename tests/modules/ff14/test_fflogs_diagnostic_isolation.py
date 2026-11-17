@@ -20,6 +20,7 @@ from tests.modules.ff14 import test_fflogs as lookup_fixture
 from tests.modules.ff14 import test_fflogs_aggregation as fixture
 from yomihime_game_link_sdk.contexts import InvocationOrigin
 from yomihime_game_link_sdk.errors import (
+    AccessDenied,
     InvalidInvocation,
     OperationTimeout,
     ParameterError,
@@ -30,7 +31,7 @@ from yomihime_game_link_sdk.results import ResultStatus
 
 
 class CommandDiagnosticIsolationTests(unittest.IsolatedAsyncioTestCase):
-    async def invoke_command(self, diagnostics):
+    async def invoke_command(self, diagnostics, source_control=None):
         universalis = [
             [{"id": 701, "name": "Cerberus"}, {"id": 702, "name": "Synthetic Orphan"}],
             [{"name": "SyntheticDC", "region": "中国", "worlds": [701]}],
@@ -43,6 +44,18 @@ class CommandDiagnosticIsolationTests(unittest.IsolatedAsyncioTestCase):
                 ),
             ]
         )
+        fetch_default = http.fetch
+
+        async def fetch(request):
+            if (
+                source_control is not None
+                and request.body
+                and b"FF14PublicCharacter" in request.body
+            ):
+                raise source_control
+            return await fetch_default(request)
+
+        http.fetch = fetch
         handler = fflogs.FFLogsCharacterLookup(
             lookup_fixture._services(http, diagnostics=diagnostics)
         )
@@ -124,6 +137,20 @@ class CommandDiagnosticIsolationTests(unittest.IsolatedAsyncioTestCase):
                 await self.invoke_command(SimpleNamespace(emit=emit))
             self.assertIs(raised.exception, failure)
 
+    async def test_character_source_control_is_not_mapped_to_business_failure(self):
+        for control in (
+            AccessDenied("source_revoked"),
+            OperationTimeout(),
+            SourceHttpError("cancelled"),
+        ):
+            diagnostics = lookup_fixture._Diagnostics()
+            with (
+                self.subTest(code=control.code),
+                self.assertRaises(type(control)) as caught,
+            ):
+                await self.invoke_command(diagnostics, source_control=control)
+            self.assertIs(caught.exception, control)
+
 
 class DiagnosticIsolationTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
@@ -133,16 +160,19 @@ class DiagnosticIsolationTests(unittest.IsolatedAsyncioTestCase):
         self.role = fixture.record()
         self.calls = []
 
-    async def collect(self, evidence=None):
+    async def collect(self, evidence=None, source_control=None):
         async def fetch(request):
             variables = json.loads(request.body)["variables"]
             self.calls.append(variables)
+            if source_control is not None:
+                raise source_control
             character = dict(
                 id=self.role.character_id,
                 name=self.role.name,
                 hidden=False,
                 server={"name": self.role.server_name},
             )
+
             for alias, zone_id in variables.items():
                 if alias.startswith("z"):
                     suffix = alias[1:]
@@ -187,6 +217,19 @@ class DiagnosticIsolationTests(unittest.IsolatedAsyncioTestCase):
                 self.handler._lifecycle,
                 evidence,
             )
+
+    async def test_history_worker_does_not_degrade_sdk_control_failures(self):
+        for control in (
+            AccessDenied("source_revoked"),
+            OperationTimeout(),
+            SourceHttpError("cancelled"),
+        ):
+            with (
+                self.subTest(code=control.code),
+                self.assertRaises(type(control)) as caught,
+            ):
+                await self.collect(source_control=control)
+            self.assertIs(caught.exception, control)
 
     async def test_winner_builder_ordinary_failure_does_not_change_rankings(self):
         expected = await self.collect()

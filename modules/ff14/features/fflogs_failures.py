@@ -2,7 +2,11 @@
 
 from time import monotonic
 
-from ....yomihime_game_link_sdk.errors import ServiceUnavailable, SourceHttpError
+from ....yomihime_game_link_sdk.errors import (
+    OperationTimeout,
+    ServiceUnavailable,
+    SourceHttpError,
+)
 from ....yomihime_game_link_sdk.results import ErrorCode
 
 EVENT = "FF14LogsFailure"
@@ -143,6 +147,8 @@ class LookupFailures:
                     "elapsed_ms": _elapsed(self.started),
                 },
             )
+        except (PermissionError, OperationTimeout, ServiceUnavailable):
+            raise
         except Exception:
             # Optional telemetry cannot change the lookup result or expose a
             # rejected payload. Cancellation still follows the caller.

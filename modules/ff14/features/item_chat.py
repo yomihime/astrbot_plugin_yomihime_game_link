@@ -9,7 +9,12 @@ from time import monotonic
 
 from ....yomihime_game_link_sdk.contexts import InvocationOrigin
 from ....yomihime_game_link_sdk.display import DisplayDocument, TextBlock
-from ....yomihime_game_link_sdk.errors import ServiceUnavailable, SourceHttpError
+from ....yomihime_game_link_sdk.errors import (
+    AccessDenied,
+    OperationTimeout,
+    ServiceUnavailable,
+    SourceHttpError,
+)
 from ....yomihime_game_link_sdk.results import (
     CapabilityResult,
     ErrorCode,
@@ -259,10 +264,14 @@ class ItemChat:
         except QueryResolutionError as exc:
             return failure(exc.code, str(exc))
         except SourceHttpError as exc:
+            if exc.code == "cancelled":
+                raise
             result = _source_error(exc, operation=operation)
             return failure(result.error.code, result.error.message)
         except ItemPayloadError:
             return failure(ErrorCode.UNPARSED, "物品来源格式无法识别。")
+        except (AccessDenied, OperationTimeout):
+            raise
         except PermissionError:
             return failure(ErrorCode.UNSUPPORTED, "真实用户消息绑定已失效。")
         except ServiceUnavailable:

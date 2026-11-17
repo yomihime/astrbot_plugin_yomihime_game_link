@@ -116,7 +116,6 @@ class NewsFailureDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
             AccessDenied(),
             OperationTimeout(),
             SourceHttpError("cancelled"),
-            ExceptionGroup(SECRET, [AccessDenied()]),
         ]:
             port = SimpleNamespace(emit=AsyncMock())
             with (
@@ -125,6 +124,26 @@ class NewsFailureDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
             ):
                 await self.collect([error], port)
             port.emit.assert_not_awaited()
+
+    async def test_grouped_control_failure_takes_precedence_over_business_errors(self):
+        denied = AccessDenied()
+        port = SimpleNamespace(emit=AsyncMock())
+        with self.assertRaises(AccessDenied) as caught:
+            await self.collect(
+                [
+                    ExceptionGroup(
+                        SECRET,
+                        [
+                            ValueError(SECRET),
+                            OperationTimeout(),
+                            ExceptionGroup(SECRET, [denied]),
+                        ],
+                    )
+                ],
+                port,
+            )
+        self.assertIs(caught.exception, denied)
+        port.emit.assert_not_awaited()
 
     async def test_optional_telemetry_error_preserves_failure_but_authority_propagates(
         self,

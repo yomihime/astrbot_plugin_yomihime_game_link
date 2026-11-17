@@ -384,10 +384,23 @@ def news_document(item):
     )
 
 
-def _news_control(error):
-    return isinstance(
-        error, (PermissionError, OperationTimeout, ServiceUnavailable)
-    ) or (isinstance(error, SourceHttpError) and error.code == "cancelled")
+def _news_control_error(error):
+    """Expose the strongest control failure from a drained pagination group."""
+    pending = [error]
+    fallback = None
+    while pending:
+        current = pending.pop()
+        if isinstance(current, ExceptionGroup):
+            pending.extend(reversed(current.exceptions))
+        elif isinstance(current, PermissionError) or (
+            isinstance(current, SourceHttpError) and current.code == "cancelled"
+        ):
+            return current
+        elif isinstance(current, OperationTimeout) or (
+            fallback is None and isinstance(current, ServiceUnavailable)
+        ):
+            fallback = current
+    return fallback
 
 
 def _news_failure(error):
@@ -501,11 +514,11 @@ class NewsCollector:
             SourceHttpError,
             ExceptionGroup,
         ) as exc:
-            if _news_control(exc) or (
-                isinstance(exc, ExceptionGroup)
-                and exc.subgroup(_news_control) is not None
-            ):
+            control = _news_control_error(exc)
+            if control is exc:
                 raise
+            if control is not None:
+                raise control from None
             port = getattr(bound, "diagnostics", None)
             if port is not None:
                 code, status = _news_failure(exc)

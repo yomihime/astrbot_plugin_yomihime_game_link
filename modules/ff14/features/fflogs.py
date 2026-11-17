@@ -21,7 +21,9 @@ from ....yomihime_game_link_sdk.display import (
     TextBlock,
 )
 from ....yomihime_game_link_sdk.errors import (
+    AccessDenied,
     CacheUnavailable,
+    OperationTimeout,
     ParameterError,
     ServiceUnavailable,
     SourceHttpError,
@@ -221,6 +223,8 @@ class FFLogsCharacterLookup:
                 else "base_catalog"
             )
         except SourceHttpError as exc:
+            if exc.code == "cancelled":
+                raise
             state = "unavailable_source"
             if failures is not None:
                 failures.source_error(exc)
@@ -236,6 +240,8 @@ class FFLogsCharacterLookup:
             state = "unavailable_service"
             if failures is not None:
                 failures.source_error(exc)
+        except (AccessDenied, OperationTimeout):
+            raise
         except PermissionError:
             state = "unavailable_permission"
         except TimeoutError as exc:
@@ -379,7 +385,7 @@ class FFLogsCharacterLookup:
                     dates.update(times)
                 except CacheUnavailable:
                     loaded[index] = {}
-                except (PermissionError, ServiceUnavailable):
+                except (PermissionError, ServiceUnavailable, OperationTimeout):
                     raise
                 except TimeoutError:
                     break
@@ -447,7 +453,7 @@ class FFLogsCharacterLookup:
                 saved.update(updates)
             except CacheUnavailable:
                 unsaved.update(updates)
-            except (PermissionError, ServiceUnavailable):
+            except (PermissionError, ServiceUnavailable, OperationTimeout):
                 raise
             except TimeoutError:
                 unsaved.update(prepared.keys() - saved)
@@ -652,6 +658,8 @@ class FFLogsCharacterLookup:
                         filters=variables,
                     )
             except SourceHttpError as error:
+                if error.code == "cancelled":
+                    raise
                 if failures is not None:
                     failures.source_error(error, started=started)
                 if error.status_code in (401, 403):
@@ -669,6 +677,8 @@ class FFLogsCharacterLookup:
                         started=started,
                     )
                 return {key: "request_failed" for key in keys}
+            except OperationTimeout:
+                raise
             except TimeoutError as error:
                 if failures is not None:
                     failures.source_error(error, started=started)
@@ -767,10 +777,9 @@ class FFLogsCharacterLookup:
         self, context: InvocationView, parameters: JsonObject
     ) -> CapabilityResult:
         failures = LookupFailures()
-        try:
-            return await self._invoke(context, parameters, failures)
-        finally:
-            await failures.flush()
+        result = await self._invoke(context, parameters, failures)
+        await failures.flush()
+        return result
 
     async def _invoke(self, context, parameters, failures) -> CapabilityResult:
         explicit_command = "command" in parameters
@@ -824,7 +833,10 @@ class FFLogsCharacterLookup:
                         "output_reserve_ms": max(0, int((stop_at - work_stop) * 1000)),
                     },
                 )
-                return observation.attach(result) if observation is not None else result
+                if observation is not None:
+                    result = observation.attach(result)
+        except OperationTimeout:
+            raise
         except TimeoutError:
             failures.source_error(TimeoutError())
             result = _error(ErrorCode.UPSTREAM_ERROR, "FFLogs 查询超时，请稍后重试。")
@@ -837,13 +849,12 @@ class FFLogsCharacterLookup:
                 )
             if observation is not None:
                 observation.reject("deadline")
-                return observation.attach(result)
-            return result
-        finally:
-            if metrics is not None:
-                metrics.finish()
-                if metrics.evidence is not None:
-                    await metrics.evidence.flush()
+                result = observation.attach(result)
+        if metrics is not None:
+            metrics.finish()
+            if metrics.evidence is not None:
+                await metrics.evidence.flush()
+        return result
 
     async def _execute(
         self,
@@ -923,12 +934,16 @@ class FFLogsCharacterLookup:
                     failures.record("region_unresolved", status=failures.last_status)
                     return _error(exc.code, STAGE_MESSAGES["realm_directory"])
                 return _error(exc.code, str(exc))
+            except OperationTimeout:
+                raise
             except (
                 SourceHttpError,
                 MarketPayloadError,
                 ServiceUnavailable,
                 TimeoutError,
             ) as exc:
+                if isinstance(exc, SourceHttpError) and exc.code == "cancelled":
+                    raise
                 if failures is not None:
                     if isinstance(exc, MarketPayloadError):
                         failures.record("payload_parse", status=failures.last_status)
@@ -960,6 +975,8 @@ class FFLogsCharacterLookup:
             return _error(code, default)
 
         def source_error(error):
+            if error.code == "cancelled":
+                raise error
             if failures is not None:
                 failures.source_error(error)
             result = _http_error(error, credential_state=credential_state)
@@ -1058,6 +1075,8 @@ class FFLogsCharacterLookup:
             return stage_error(
                 ErrorCode.UNPARSED, "FFLogs 服务器目录格式暂不可用，未尝试自动猜测。"
             )
+        except (AccessDenied, OperationTimeout):
+            raise
         except (PermissionError, ServiceUnavailable, TimeoutError) as exc:
             if failures is not None:
                 failures.source_error(exc)
@@ -1304,6 +1323,8 @@ class FFLogsCharacterLookup:
                 ErrorCode.UNPARSED,
                 "FFLogs 角色记录格式暂不可用，未提取不认识的字段。",
             )
+        except (AccessDenied, OperationTimeout):
+            raise
         except (PermissionError, ServiceUnavailable, TimeoutError) as exc:
             if failures is not None:
                 failures.source_error(exc)
@@ -1351,6 +1372,8 @@ class FFLogsCharacterLookup:
                         budget=budget,
                         failures=failures,
                     )
+            except AccessDenied:
+                raise
             except (ServiceUnavailable, PermissionError) as exc:
                 if failures is not None:
                     failures.source_error(exc)
@@ -2376,6 +2399,8 @@ async def _credential_state(services, realm):
         return (
             "configured" if metadata.state is SecretMetadataState.ACTIVE else "unusable"
         )
+    except (AccessDenied, OperationTimeout):
+        raise
     except Exception:
         return "unknown"
 

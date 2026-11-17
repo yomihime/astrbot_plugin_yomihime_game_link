@@ -9,13 +9,18 @@ import json
 import unittest
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 
 from ygl_test_subject.services.core_runtime import CoreRuntime
 
 from tests.fixtures.runtime_cleanup import terminate_and_drain
 from tests.host import test_astrbot_runtime as fixture
 from tests.modules.ff14.test_news import page, row
+from yomihime_game_link_sdk.errors import (
+    AccessDenied,
+    OperationTimeout,
+    SourceHttpError,
+)
 from yomihime_game_link_sdk.services import HttpResponse
 
 
@@ -109,6 +114,65 @@ class FF14NewsRuntimeTests(unittest.IsolatedAsyncioTestCase):
         return await self.core.database.executor.run_read(
             lambda unit: [tuple(row) for row in unit.execute(sql).fetchall()]
         )
+
+    async def test_parallel_pagination_controls_reach_real_scheduler(self):
+        await self.start(targets=["test-platform-1:GroupMessage:group-42"])
+        await self.tick()
+        self.now += timedelta(seconds=900)
+        collector = (
+            self.core.registry.snapshot()
+            .module("ff14/ff14")
+            .handlers.collectors["ff14.news.collect"]
+        )
+        observation_count = await self.sql("SELECT COUNT(*) FROM b04_observations")
+        first = page([row(900)], pages=3, total=3)
+        warnings = []
+
+        for final, code, first_error, second_error in (
+            (
+                "cancelled",
+                "cancelled",
+                ValueError("synthetic"),
+                SourceHttpError("cancelled"),
+            ),
+            ("stale", "stale", OperationTimeout(), AccessDenied("source_revoked")),
+            ("error", "core_deadline", ValueError("synthetic"), OperationTimeout()),
+        ):
+            with self.subTest(code=code):
+                seen = []
+
+                async def read_page(http, index):
+                    seen.append(index)
+                    if index == 0:
+                        return first
+                    raise (first_error, second_error)[index - 1]
+
+                with (
+                    patch.object(collector, "_page", side_effect=read_page),
+                    patch.object(
+                        self.core.sync_diagnostics, "_warning_sink", warnings.append
+                    ),
+                ):
+                    await self.core.scheduler.run_due_page()
+                self.assertEqual(seen, [0, 1, 2])
+                trace = self.core.sync_diagnostics.snapshot()["attempts"][-1]
+                self.assertEqual(
+                    (trace["core_final"], trace["core_failure_code"]), (final, code)
+                )
+                if code == "core_deadline":
+                    self.assertEqual(
+                        [warning["category"] for warning in warnings], [code]
+                    )
+                else:
+                    self.assertEqual(warnings, [])
+                    self.assertEqual(
+                        await self.sql("SELECT COUNT(*) FROM b04_observations"),
+                        observation_count,
+                    )
+                self.assertEqual(
+                    await self.sql("SELECT * FROM b04_delivery_events"), []
+                )
+                self.assertEqual(self.context.calls, [])
 
     async def test_scheduler_summary_counts_news_without_read_side_effects(self):
         await self.start(targets=["test-platform-1:GroupMessage:group-42"])

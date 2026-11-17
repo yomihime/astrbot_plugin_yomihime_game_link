@@ -8,6 +8,7 @@ import logging
 import unittest
 from dataclasses import replace
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from ygl_test_subject.core.contracts.validation_boundary import validate_contract
 from ygl_test_subject.core.public_result import public_fact_strings
@@ -19,7 +20,11 @@ from yomihime_game_link_sdk.contexts import (
     InvocationView,
     MessageContext,
 )
-from yomihime_game_link_sdk.errors import SourceHttpError
+from yomihime_game_link_sdk.errors import (
+    AccessDenied,
+    OperationTimeout,
+    SourceHttpError,
+)
 from yomihime_game_link_sdk.results import ErrorCode, ResultStatus
 from yomihime_game_link_sdk.services import HttpResponse
 
@@ -464,6 +469,24 @@ class FFLogsChatTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn(SENTINEL, str(result.model_facts.facts))
                 if getattr(source, "code", None) == "timeout":
                     self.assertIn("超时", result.error.message)
+
+    async def test_bound_tool_control_errors_are_not_projected_as_facts(self):
+        self.setup_handler([])
+        for error in (AccessDenied("source_revoked"), OperationTimeout()):
+            with (
+                self.subTest(error=error.code),
+                patch.object(self.services.scopes, "bind", side_effect=error),
+                self.assertRaises(type(error)) as caught,
+            ):
+                await self.call()
+            self.assertIs(caught.exception, error)
+            self.assertEqual(self.http.requests, [])
+
+        cancelled = SourceHttpError("cancelled")
+        self.setup_handler([cancelled])
+        with self.assertRaises(SourceHttpError) as caught:
+            await self.call()
+        self.assertIs(caught.exception, cancelled)
 
     async def test_not_found_hidden_empty_and_graphql_errors(self):
         for variant, expected in (

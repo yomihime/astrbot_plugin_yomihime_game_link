@@ -8,8 +8,10 @@ from unittest.mock import Mock, patch
 
 from ygl_test_subject.adapters.astrbot.diagnostics import forward_sync_trace
 from ygl_test_subject.infrastructure.sync_diagnostics import (
+    MAX_ATTEMPTS,
     MAX_EVENTS,
     SyncDiagnostics,
+    defer_failure_report,
     emit,
 )
 
@@ -17,6 +19,47 @@ SECRET = "private https://secret.invalid/?token=secret /private/file"
 
 
 class SyncTraceLoggingTests(unittest.TestCase):
+    def test_live_trace_survives_recent_history_eviction(self):
+        traces, warnings = [], []
+        diagnostics = SyncDiagnostics(
+            trace_sink=traces.append, warning_sink=warnings.append
+        )
+        long_id = "a" * 32
+        token = diagnostics.activate(long_id, "command")
+        try:
+            emit("core_start", budget_ms=1000)
+            emit("network_attempt")
+            defer_failure_report(long_id, warnings.append, {"event_id": "failure"})
+            emit("core_failure", code="stale")
+            for index in range(MAX_ATTEMPTS):
+                short_token = diagnostics.activate(f"{index:032x}", "web_public")
+                try:
+                    emit("core_final", code="completed")
+                finally:
+                    diagnostics.reset(short_token)
+            self.assertNotIn(
+                long_id,
+                [
+                    entry["invocation_id"]
+                    for entry in diagnostics.snapshot()["attempts"]
+                ],
+            )
+            emit("core_final", code="error", failure_code="module_unavailable")
+            attempts = diagnostics.snapshot()["attempts"]
+            self.assertEqual(len(attempts), MAX_ATTEMPTS)
+            self.assertEqual(attempts[-1], traces[-1])
+            self.assertEqual(traces[-1]["invocation_id"], long_id)
+            self.assertEqual(traces[-1]["core_failure_code"], "stale")
+            self.assertEqual(traces[-1]["network_attempts"], 1)
+            self.assertEqual(
+                [event["stage"] for event in traces[-1]["events"]],
+                ["core_start", "network_attempt", "core_failure", "core_final"],
+            )
+            self.assertEqual(warnings, [])
+        finally:
+            diagnostics.reset(token)
+            diagnostics.close()
+
     def run_trace(self, diagnostics, *, public=True, final="completed"):
         token = diagnostics.activate("a" * 32, "scheduler", public=public)
         try:

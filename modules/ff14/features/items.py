@@ -10,7 +10,11 @@ from ....yomihime_game_link_sdk.display import (
     Privacy,
     TextBlock,
 )
-from ....yomihime_game_link_sdk.errors import SourceHttpError
+from ....yomihime_game_link_sdk.errors import (
+    AccessDenied,
+    OperationTimeout,
+    SourceHttpError,
+)
 from ....yomihime_game_link_sdk.results import (
     CapabilityResult,
     ErrorCode,
@@ -56,6 +60,8 @@ class ItemLookup:
 
         try:
             scope = await self._services.scopes.bind(context)
+        except (AccessDenied, OperationTimeout):
+            raise
         except Exception:
             return _error(ErrorCode.MODULE_UNAVAILABLE, "物品查询服务暂不可用。")
         source = ItemSourceClient(
@@ -69,6 +75,8 @@ class ItemLookup:
         try:
             candidates, truncated = await search_item_candidates(source, query)
         except SourceHttpError as exc:
+            if exc.code == "cancelled":
+                raise
             return _source_error(exc, operation="search")
         except ItemPayloadError:
             return _error(ErrorCode.UNPARSED, "XIVAPI 返回的物品候选格式无法识别。")
@@ -85,6 +93,8 @@ class ItemLookup:
         try:
             result = await source.lookup(item_id)
         except SourceHttpError as exc:
+            if exc.code == "cancelled":
+                raise
             return _source_error(exc, operation="item")
         except ItemPayloadError:
             return _error(ErrorCode.UNPARSED, "XIVAPI 返回的物品详情格式无法识别。")

@@ -14,7 +14,12 @@ from types import SimpleNamespace
 from urllib.parse import quote
 
 from ....yomihime_game_link_sdk.display import DisplayDocument, TextBlock
-from ....yomihime_game_link_sdk.errors import ServiceUnavailable, SourceHttpError
+from ....yomihime_game_link_sdk.errors import (
+    AccessDenied,
+    OperationTimeout,
+    ServiceUnavailable,
+    SourceHttpError,
+)
 from ....yomihime_game_link_sdk.results import (
     CapabilityResult,
     ErrorCode,
@@ -522,6 +527,8 @@ async def invoke_character_tool(handler, context, parameters, failures):
                 except MarketPayloadError:
                     failures.record("payload_parse", status=failures.last_status)
                 except (SourceHttpError, ServiceUnavailable) as exc:
+                    if isinstance(exc, SourceHttpError) and exc.code == "cancelled":
+                        raise
                     failures.source_error(exc)
                 except QueryResolutionError as exc:
                     if exc.code is ErrorCode.UPSTREAM_ERROR:
@@ -598,6 +605,8 @@ async def invoke_character_tool(handler, context, parameters, failures):
             return result
     except (ValueError, QueryResolutionError) as exc:
         return tool_result(_error(ErrorCode.PARAMETER_ERROR, str(exc)))
+    except (AccessDenied, OperationTimeout):
+        raise
     except PermissionError:
         return tool_result(
             _error(ErrorCode.UNSUPPORTED, "当前真实用户消息或模块生命周期已失效。")

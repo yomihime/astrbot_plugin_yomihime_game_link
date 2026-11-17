@@ -73,6 +73,7 @@ class _Context:
     invocation_id: str
     origin: str
     started: float
+    trace: dict | None = None
     pending_warning: tuple | None = None
     terminal: bool = False
     http_failure: dict | None = None
@@ -171,7 +172,9 @@ class SyncDiagnostics:
     def record(self, context, stage, fields):
         if self._closed or context.terminal or stage not in _STAGES:
             return
-        trace = self._attempts.get(context.invocation_id)
+        # Recent-history eviction must not reset a live invocation's counters
+        # or the failure classification used to suppress a stale warning.
+        trace = context.trace
         if trace is None:
             trace = {
                 "invocation_id": context.invocation_id,
@@ -188,6 +191,8 @@ class SyncDiagnostics:
                 "capability_status": None,
                 "observation_completeness": None,
             }
+            context.trace = trace
+        if self._attempts.get(context.invocation_id) is not trace:
             self._attempts[context.invocation_id] = trace
             while len(self._attempts) > MAX_ATTEMPTS:
                 self._attempts.popitem(last=False)
