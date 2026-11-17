@@ -30,6 +30,9 @@ from ..query_resolution import (
     QueryResolutionError,
     QueryTicket,
     TrustedOwner,
+    command_parameters,
+    natural_parameters,
+    structured_parameters,
     validate_tool_query,
 )
 from .chat_context import chat_owner, semantic_action
@@ -40,6 +43,7 @@ from .market_models import MarketExecution
 from .market_scope_chat import MarketScopeChoices
 from .market_sources import MarketDeadlineError, MarketPayloadError, MarketSourceClient
 from .public_projection import validate_public_market_facts
+from .server_directory import ServerDirectory
 
 
 def _stamp(stamp, observed):
@@ -425,13 +429,18 @@ def _unique_object(pairs):
 class MarketQueryHandler:
     """One module-local candidate table and two-slot market source gate."""
 
-    def __init__(self, services: ModuleServices, *, clock=monotonic) -> None:
+    def __init__(
+        self, services: ModuleServices, *, clock=monotonic, directory=None
+    ) -> None:
         self.services, self.clock = services, clock
         self.registry = CandidateRegistry(clock=clock)
         self._lifecycle = object()
         self.scope_choices = MarketScopeChoices(clock=clock)
         # Only start_bound is used: each query gets freshly authorized ports.
         self.source = MarketSourceClient(None, clock=clock)
+        self.directory = (
+            directory if directory is not None else ServerDirectory(services.config)
+        )
 
     async def invoke(
         self, context: InvocationView, parameters: Mapping
@@ -525,6 +534,9 @@ class MarketQueryHandler:
                     if scope_retry is not None:
                         scope_state = scope_retry
                         ticket = scope_state.values["ticket"]
+                        await self.directory.require_current(
+                            scope_state.values["catalog"]
+                        )
                         await guard()
                         return self._scope_candidates(scope_state)
                     retry = self.registry.tool_query(
@@ -562,6 +574,7 @@ class MarketQueryHandler:
                         owner, message.event_ref, choice
                     )
                     ticket = scope_state.values["ticket"]
+                    await self.directory.require_current(scope_state.values["catalog"])
                     if scope_values is not None:
                         self.registry.consume_events(
                             ticket, scope_state.values["event_refs"]
@@ -571,8 +584,13 @@ class MarketQueryHandler:
                         return self._scope_candidates(scope_state)
                     scope_selection = True
             async with asyncio.timeout(max(0, deadline - self.clock())):
+                records = getattr(scope, "records", None)
                 session = self.source.start_bound(
-                    scope.http, scope.cache, deadline=deadline
+                    scope.http,
+                    scope.cache,
+                    deadline=deadline,
+                    directory=self.directory,
+                    records=records,
                 )
                 if selecting and not scope_selection:
                     if set(parameters) != {"selection"}:
@@ -624,13 +642,54 @@ class MarketQueryHandler:
                         ),
                     )
                     ticket = QueryTicket(owner, choice["generation"])
-                    catalog = await session.catalog()
+                    if scope_state is not None:
+                        await self.directory.require_current(
+                            scope_state.values["catalog"]
+                        )
+                    targets = (
+                        ((query.scope.kind, query.scope.target),)
+                        if query.scope.kind in ("world", "dc")
+                        else ()
+                    )
+                    catalog = await session.catalog(targets)
                     await guard()
                 else:
+                    entry = (
+                        "tool"
+                        if context.origin is InvocationOrigin.LLM_TOOL
+                        else "structured"
+                    )
+                    values = scope_values if scope_selection else parameters
+                    if isinstance(parameters, Mapping) and "command" in parameters:
+                        if context.origin is not InvocationOrigin.COMMAND or set(
+                            parameters
+                        ) != {"command"}:
+                            raise QueryResolutionError("命令输入参数无效。")
+                        values = parameters["command"]
+                        if not isinstance(values, str):
+                            raise QueryResolutionError("命令参数必须为文本。")
+                        values = (
+                            natural_parameters(values)
+                            if (
+                                values.startswith("查一下")
+                                or values.endswith("多少钱")
+                                or values.endswith("什么价")
+                                or values.endswith("哪里最便宜")
+                            )
+                            else command_parameters(values)
+                        )
+                    values = structured_parameters(values)
+                    # Invalid input must not join an in-flight directory refresh.
+                    MarketQueryResolver.validate_inputs(values, chat=entry == "tool")
+                    targets = tuple(
+                        (kind, values[key])
+                        for kind, key in (("world", "server"), ("dc", "dc"))
+                        if key in values
+                    )
                     catalog = (
                         scope_state.values["catalog"]
                         if scope_selection
-                        else await session.catalog()
+                        else await session.catalog(targets)
                     )
                     await guard()
                     coordinator = QueryCoordinator(
@@ -641,32 +700,6 @@ class MarketQueryHandler:
                         ),
                         self.registry,
                     )
-                    entry, values = (
-                        (
-                            "tool"
-                            if context.origin is InvocationOrigin.LLM_TOOL
-                            else "structured"
-                        ),
-                        scope_values if scope_selection else parameters,
-                    )
-                    if isinstance(parameters, Mapping) and "command" in parameters:
-                        if context.origin is not InvocationOrigin.COMMAND or set(
-                            parameters
-                        ) != {"command"}:
-                            raise QueryResolutionError("命令输入参数无效。")
-                        values = parameters["command"]
-                        if not isinstance(values, str):
-                            raise QueryResolutionError("命令参数必须为文本。")
-                        entry = (
-                            "natural"
-                            if (
-                                values.startswith("查一下")
-                                or values.endswith("多少钱")
-                                or values.endswith("什么价")
-                                or values.endswith("哪里最便宜")
-                            )
-                            else "command"
-                        )
                     try:
                         resolved = await session.run(
                             coordinator.resolve(
@@ -685,6 +718,8 @@ class MarketQueryHandler:
                         )
                     except QueryResolutionError as exc:
                         if context.origin is InvocationOrigin.LLM_TOOL and exc.choices:
+                            await self.directory.require_current(catalog)
+                            await guard()
                             scope_state = self.scope_choices.publish(
                                 owner, message.event_ref, ticket, exc, catalog
                             )
@@ -693,6 +728,7 @@ class MarketQueryHandler:
                         raise
                     await guard()
                     if isinstance(resolved, CandidateBatch):
+                        await self.directory.require_current(catalog)
                         self.registry._current(ticket)
                         if scope_selection:
                             self.registry._current(
@@ -704,6 +740,8 @@ class MarketQueryHandler:
                             sources=tuple(p.url for p in catalog.provenance),
                         )
                     query = resolved
+                await self.directory.require_current(catalog)
+                await guard()
                 if scope_state is not None:
                     catalog = self.scope_choices.selection_catalog(scope_state, catalog)
                 execution = await MarketClient(session, catalog).execute(query)

@@ -13,6 +13,7 @@ from .config import (
     ORDINARY_FIELDS,
     REGION,
     REGION_CONFIG_FIELD,
+    SERVER_DIRECTORY_GENERATION,
     FF14ConfigSnapshot,
 )
 from .features.fflogs_failures import COMMAND_HINTS
@@ -104,6 +105,7 @@ class ReviewedSupport:
     validators: object = None
     metadata: object = None
     ordinary_config_fields = tuple(field.name for field in CALENDAR_CONFIG_FIELDS) + (
+        SERVER_DIRECTORY_GENERATION,
         "ff14_subscriptions_enabled",
         ADMINS,
         TARGETS,

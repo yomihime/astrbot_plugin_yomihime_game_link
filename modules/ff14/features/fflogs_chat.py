@@ -512,10 +512,12 @@ async def invoke_character_tool(handler, context, parameters, failures):
                 failures.begin("universalis_market", "realm_directory")
                 try:
                     server_region = await resolve_realm(
+                        handler._directory_source,
                         failures.wrap(GuardedHttp()),
-                        getattr(scope, "cache", None),
+                        getattr(scope, "records", None),
                         actual["server"],
                         deadline=deadline,
+                        directory=handler._directory,
                     )
                 except MarketPayloadError:
                     failures.record("payload_parse", status=failures.last_status)

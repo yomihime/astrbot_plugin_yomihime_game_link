@@ -269,6 +269,31 @@ class MarketQueryResolver:
     def __init__(self, catalog: ScopeCatalog) -> None:
         self.catalog = catalog
 
+    @staticmethod
+    def validate_inputs(
+        parameters: Mapping[str, object], *, chat: bool = False
+    ) -> tuple[str, str, str]:
+        allowed = (
+            _KEYS | {"action", "request_language", "context_language"}
+            if chat
+            else _KEYS
+        )
+        if not isinstance(parameters, Mapping) or any(
+            key not in allowed for key in parameters
+        ):
+            raise QueryResolutionError("查询包含未知参数。")
+        try:
+            query = validate_item_query(parameters.get("query"))
+        except ValueError as exc:
+            raise QueryResolutionError(str(exc)) from exc
+        quality = parameters.get("quality", "all")
+        intent = parameters.get("intent", "overview")
+        if type(quality) is not str or quality not in ("all", "nq", "hq"):
+            raise QueryResolutionError("quality 必须为 all/nq/hq。")
+        if type(intent) is not str or intent not in ("overview", "min", "listings"):
+            raise QueryResolutionError("intent 必须为 overview/min/listings。")
+        return query, quality, intent
+
     def parse(
         self, parameters: Mapping[str, object], defaults: QueryDefaults, *, chat=False
     ) -> MarketQuery:
@@ -288,20 +313,7 @@ class MarketQueryResolver:
             }
             if not any(key in parameters for key in ("region", "server", "dc")):
                 defaults = replace(defaults, default_region=region)
-        if not isinstance(parameters, Mapping) or any(
-            key not in _KEYS for key in parameters
-        ):
-            raise QueryResolutionError("查询包含未知参数。")
-        try:
-            query = validate_item_query(parameters.get("query"))
-        except ValueError as exc:
-            raise QueryResolutionError(str(exc)) from exc
-        quality = parameters.get("quality", "all")
-        intent = parameters.get("intent", "overview")
-        if type(quality) is not str or quality not in ("all", "nq", "hq"):
-            raise QueryResolutionError("quality 必须为 all/nq/hq。")
-        if type(intent) is not str or intent not in ("overview", "min", "listings"):
-            raise QueryResolutionError("intent 必须为 overview/min/listings。")
+        query, quality, intent = self.validate_inputs(parameters)
         world = (
             self.catalog.find("world", parameters["server"])
             if "server" in parameters

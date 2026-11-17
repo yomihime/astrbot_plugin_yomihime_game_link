@@ -22,6 +22,7 @@ from .features.fflogs import FFLogsCharacterLookup
 from .features.items import ItemLookup
 from .features.market_handler import MarketQueryHandler
 from .features.news import NewsAddHere, NewsCollector, NewsComposer, NewsEvaluator
+from .features.server_directory import ServerDirectory
 from .features.status_cards import build_status_document
 
 CAPABILITY_STATUS = "status"
@@ -68,9 +69,10 @@ class FF14Module:
         self, services: ModuleServices, *, config: FF14ConfigSnapshot | None = None
     ) -> None:
         self._started = False
-        self._market = MarketQueryHandler(services)
+        directory = ServerDirectory(services.config)
+        self._market = MarketQueryHandler(services, directory=directory)
         self._items = ItemLookup(services)
-        self._logs = FFLogsCharacterLookup(services)
+        self._logs = FFLogsCharacterLookup(services, directory=directory)
         calendar_snapshots = CalendarSnapshots(services)
         self._handlers = ModuleHandlers(
             capabilities={

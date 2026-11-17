@@ -722,6 +722,16 @@
       ],
       "config_fields": [
         {
+          "name": "ff14_server_directory_generation",
+          "default": "initial",
+          "description": "服务器目录清除标记",
+          "value_schema": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          }
+        },
+        {
           "name": "ff14_default_region",
           "default": "cn",
           "description": "默认查询区域",
@@ -1069,6 +1079,13 @@
       ],
       "collections": [
         {
+          "name": "server_directory",
+          "schema_version": 1,
+          "owner_kind": "public",
+          "retention_category": "standard",
+          "indexes": []
+        },
+        {
           "name": "calendar_snapshots",
           "schema_version": 1,
           "owner_kind": "public",
@@ -1143,6 +1160,7 @@
           ],
           "role": "config",
           "config_fields": [
+            "ff14_server_directory_generation",
             "ff14_default_region",
             "ff14_subscriptions_enabled",
             "ff14_news_admins",
@@ -1167,7 +1185,7 @@
         },
         {
           "path": "pages/dist/entry.js",
-          "sha256": "4bbb30c9bc7ecfa65b2573eacb418b221586cce075c8bbd5d117d15cf3f22279"
+          "sha256": "32c1c6789393ee6ef12be4d4f0572c9365d950edf91158578fd5ed139ab63d56"
         },
         {
           "path": "pages/dist/presentation-ff14.css",

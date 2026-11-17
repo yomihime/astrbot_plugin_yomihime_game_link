@@ -370,6 +370,7 @@ class AdminPagesTests(unittest.IsolatedAsyncioTestCase):
                 ("ff14/ff14", "ff14_calendar_default_timezone"),
                 ("ff14/ff14", "ff14_calendar_sync_interval_seconds"),
                 ("ff14/ff14", "ff14_default_region"),
+                ("ff14/ff14", "ff14_server_directory_generation"),
                 ("ff14/ff14", "ff14_subscriptions_enabled"),
                 ("ff14/ff14", "reply_theme"),
                 ("ff14/ff14", "ff14_news_admins"),
@@ -738,6 +739,40 @@ class AdminPagesTests(unittest.IsolatedAsyncioTestCase):
             (await self.call("update", body("ff14_news_targets", []))).status_code, 409
         )
 
+    async def test_server_directory_generation_uses_admin_config_cas(self):
+        name = "ff14_server_directory_generation"
+        module = "ff14/ff14"
+        original = (await self.call("read", {})).json()["data"][module]
+        self.assertEqual(original["fields"][name]["value"], "initial")
+
+        def update(value):
+            return {
+                "module_id": module,
+                "expected_revision": original["revision"],
+                "updates": [{"field": name, "mode": "replace", "value": value}],
+            }
+
+        generation = "6b06ce8b-e85b-4fb5-9bbb-c4fa33e6b04a"
+        self.assertEqual(
+            (await self.call("update", update(generation), headers={})).status_code, 401
+        )
+        for invalid in ([], "", "a" * 65):
+            self.assertEqual(
+                (await self.call("update", update(invalid))).status_code, 400
+            )
+        saved = await self.call("update", update(generation))
+        self.assertEqual(saved.status_code, 200, saved.text)
+        self.assertEqual(
+            (await self.call("update", update(generation))).status_code, 409
+        )
+        current = (await self.call("read", {})).json()["data"][module]
+        self.assertEqual(current["fields"][name]["value"], generation)
+        self.assertEqual(current["revision"], original["revision"] + 1)
+        self.assertEqual(
+            {key: field for key, field in original["fields"].items() if key != name},
+            {key: field for key, field in current["fields"].items() if key != name},
+        )
+
     async def test_reviewed_subscription_gate_bool_grant_and_exact_cas_boundaries(self):
         """Real reviewed composition with isolated storage and offline transport."""
         from ygl_test_subject.modules.ff14.config import ORDINARY_FIELDS
@@ -756,6 +791,7 @@ class AdminPagesTests(unittest.IsolatedAsyncioTestCase):
                 gate,
                 "reply_theme",
                 "ff14_default_region",
+                "ff14_server_directory_generation",
                 "ff14_calendar_default_days",
                 "ff14_calendar_default_timezone",
                 "ff14_calendar_default_delivery_time",

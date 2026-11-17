@@ -10,12 +10,25 @@ import time
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import TypeVar
+from typing import TYPE_CHECKING, TypeVar
 from urllib.parse import urlencode
 
-from ....yomihime_game_link_sdk.errors import CacheUnavailable, SourceHttpError
-from ....yomihime_game_link_sdk.services import CacheAccess, HttpRequest, SourceHttp
-from ..query_resolution import SUPPORTED_REGIONS, CatalogEntry, ScopeCatalog
+from ....yomihime_game_link_sdk.errors import SourceHttpError
+from ....yomihime_game_link_sdk.services import (
+    CacheAccess,
+    HttpRequest,
+    ModuleRecords,
+    SourceHttp,
+)
+from ..query_resolution import (
+    SUPPORTED_REGIONS,
+    CatalogEntry,
+    QueryResolutionError,
+    ScopeCatalog,
+)
+
+if TYPE_CHECKING:
+    from .server_directory import ServerDirectory
 
 UNIVERSALIS_SOURCE = "universalis_market"
 SOURCE_ROOT = "https://universalis.app"
@@ -24,7 +37,6 @@ DCS_PATH = "/api/v2/data-centers"
 SOURCE_VERSION = "universalis-market-v1"
 # Resource reuse only; cached facts retain original fetch/upload timestamps.
 # Expiry is checked on demand, with no background refresh or stale fallback.
-DIRECTORY_TTL = 3600
 MARKET_TTL = 300
 MAX_RESPONSE_BYTES = 1_048_576
 T = TypeVar("T")
@@ -53,6 +65,7 @@ class Provenance:
 class CatalogSnapshot:
     catalog: ScopeCatalog
     provenance: tuple[Provenance, ...]
+    generation: str | None = None
 
     def target(self, kind: str, target_id: int | str) -> str:
         entry = self.catalog.find(kind, target_id)
@@ -81,7 +94,10 @@ def number(value: object) -> int | float:
 def text(value: object, *, limit: int = 160) -> str:
     if not isinstance(value, str) or not value.strip() or len(value) > limit:
         raise MarketPayloadError("invalid_text")
-    if any(ord(char) < 32 or 0x7F <= ord(char) <= 0x9F for char in value):
+    if any(
+        ord(char) < 32 or 0x7F <= ord(char) <= 0x9F or 0xD800 <= ord(char) <= 0xDFFF
+        for char in value
+    ):
         raise MarketPayloadError("invalid_text")
     return value.strip()
 
@@ -114,18 +130,18 @@ def parse_catalog(worlds: object, data_centers: object) -> ScopeCatalog:
         world_id = integer(row.get("id"), minimum=1)
         if world_id in names:
             raise MarketPayloadError("duplicate_world")
-        names[world_id] = text(row.get("name"))
+        names[world_id] = text(row.get("name"), limit=120)
     entries: list[CatalogEntry] = []
     assigned: set[int] = set()
     dc_ids: set[str] = set()
     for row in data_centers:
         if not isinstance(row, Mapping):
             raise MarketPayloadError("invalid_dc")
-        dc_id = text(row.get("name"))
+        dc_id = text(row.get("name"), limit=120)
         if dc_id in dc_ids:
             raise MarketPayloadError("duplicate_dc")
         dc_ids.add(dc_id)
-        region = text(row.get("region"))
+        region = text(row.get("region"), limit=120)
         if region == "中国":
             region = "China"
         dc_name = dc_id
@@ -134,7 +150,7 @@ def parse_catalog(worlds: object, data_centers: object) -> ScopeCatalog:
         ):
             raise MarketPayloadError("unsafe_dc_name")
         member_ids = row.get("worlds")
-        if not isinstance(member_ids, list) or len(member_ids) > 1024:
+        if not isinstance(member_ids, list) or not 1 <= len(member_ids) <= 1024:
             raise MarketPayloadError("invalid_membership")
         entries.append(CatalogEntry("dc", dc_id, dc_name, region))
         for member in member_ids:
@@ -201,8 +217,11 @@ class MarketSession:
         wall_clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         deadline: float | None = None,
         gate: asyncio.Semaphore | None = None,
+        directory: ServerDirectory | None = None,
+        records: ModuleRecords | None = None,
     ) -> None:
         self.http, self.cache = http, cache
+        self.directory, self.records = directory, records
         self.clock, self.wall_clock = clock, wall_clock
         self.deadline = (
             min(clock() + 30, deadline) if deadline is not None else clock() + 30
@@ -322,47 +341,7 @@ class MarketSession:
                 # a cache write never creates a continuation beyond the deadline.
         return result, Provenance(url, fetched)
 
-    async def catalog(self) -> CatalogSnapshot:
-        key = "market-directory-v1"
-        urls = (SOURCE_ROOT + WORLDS_PATH, SOURCE_ROOT + DCS_PATH)
-        if self.cache is not None:
-            try:
-                entry = await self.run(self.cache.get(key))
-            except CacheUnavailable:
-                entry = None
-            if entry is not None:
-                try:
-                    payload = plain_json(entry.payload)
-                    if (
-                        not isinstance(payload, dict)
-                        or payload.get("version") != SOURCE_VERSION
-                        or payload.get("urls") != list(urls)
-                        or entry.expires_at <= self.wall_clock()
-                    ):
-                        raise MarketPayloadError("cache_provenance")
-                    times = payload.get("fetched_at_ms")
-                    if not isinstance(times, list) or len(times) != 2:
-                        raise MarketPayloadError("cache_timestamp")
-                    stamps = tuple(
-                        source_time(stamp, milliseconds=True) for stamp in times
-                    )
-                    if any(
-                        stamp is None or stamp > self.wall_clock() for stamp in stamps
-                    ):
-                        raise MarketPayloadError("cache_timestamp")
-                    catalog = parse_catalog(payload.get("worlds"), payload.get("dcs"))
-                except MarketPayloadError:
-                    pass
-                else:
-                    self.remaining()
-                    return CatalogSnapshot(
-                        catalog,
-                        tuple(
-                            Provenance(url, stamp, True)
-                            for url, stamp in zip(urls, stamps, strict=True)
-                        ),
-                    )
-
+    async def fetch_catalog(self) -> tuple[CatalogSnapshot, dict]:
         def array(value):
             if not isinstance(value, list):
                 raise MarketPayloadError("invalid_catalog_array")
@@ -374,37 +353,38 @@ class MarketSession:
         ]
         try:
             worlds, dcs = await asyncio.gather(*work)
-            catalog = parse_catalog(worlds[0], dcs[0])
+            try:
+                catalog = parse_catalog(worlds[0], dcs[0])
+            except QueryResolutionError:
+                raise MarketPayloadError() from None
             self.remaining()
-            if self.cache is not None:
-                payload = {
-                    "version": SOURCE_VERSION,
-                    "urls": list(urls),
-                    "fetched_at_ms": [
-                        int(value[1].fetched_at.timestamp() * 1000)
-                        for value in (worlds, dcs)
-                    ],
-                    "worlds": [
-                        {"id": row["id"], "name": row["name"]} for row in worlds[0]
-                    ],
-                    "dcs": [
-                        {key: row[key] for key in ("name", "region", "worlds")}
-                        for row in dcs[0]
-                    ],
-                }
-                try:
-                    await self.run(
-                        self.cache.put(key, payload, ttl_seconds=DIRECTORY_TTL)
-                    )
-                except (CacheUnavailable, MarketDeadlineError, SourceHttpError) as exc:
-                    if isinstance(exc, SourceHttpError) and exc.code != "timeout":
-                        raise
-            return CatalogSnapshot(catalog, (worlds[1], dcs[1]))
+            payload = {
+                "fetched_at_ms": [
+                    int(value[1].fetched_at.timestamp() * 1000)
+                    for value in (worlds, dcs)
+                ],
+                "worlds": [{"id": row["id"], "name": row["name"]} for row in worlds[0]],
+                "dcs": [
+                    {key: row[key] for key in ("name", "region", "worlds")}
+                    for row in dcs[0]
+                ],
+            }
+            return CatalogSnapshot(catalog, (worlds[1], dcs[1])), payload
         finally:
             for task in work:
                 if not task.done():
                     task.cancel()
             await asyncio.gather(*work, return_exceptions=True)
+
+    async def catalog(
+        self,
+        targets: tuple[tuple[str, object], ...] = (),
+    ) -> CatalogSnapshot:
+        if self.directory is None:
+            # Standalone source sessions may fetch, but never write a cache.
+            snapshot, _ = await self.fetch_catalog()
+            return snapshot
+        return await self.run(self.directory.read(self, self.records, targets))
 
 
 class MarketSourceClient:
@@ -435,6 +415,8 @@ class MarketSourceClient:
         cache: CacheAccess | None,
         *,
         deadline: float | None = None,
+        directory: ServerDirectory | None = None,
+        records: ModuleRecords | None = None,
     ) -> MarketSession:
         """Use freshly bound invocation ports when sharing this gate across calls.
 
@@ -448,4 +430,6 @@ class MarketSourceClient:
             wall_clock=self.wall_clock,
             deadline=deadline,
             gate=self._gate,
+            directory=directory,
+            records=records,
         )

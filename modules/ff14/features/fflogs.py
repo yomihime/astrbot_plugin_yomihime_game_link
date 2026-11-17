@@ -133,8 +133,12 @@ class StatisticsPageError(FFLogsPayloadError):
 class FFLogsCharacterLookup:
     """Resolve an explicit directory entry and query its public character."""
 
-    def __init__(self, services: ModuleServices) -> None:
+    def __init__(self, services: ModuleServices, *, directory=None) -> None:
         self._services = services
+        from .market_sources import MarketSourceClient
+
+        self._directory = directory
+        self._directory_source = MarketSourceClient(None)
         self._lifecycle = object()
         self._metadata_cache: dict[str, tuple[float, OutputMetadata | None, str]] = {}
         self._ranking_contract_cache = {}
@@ -893,6 +897,7 @@ class FFLogsCharacterLookup:
             if observation is not None
             else observed_http,
             cache=getattr(scope, "cache", None),
+            records=getattr(scope, "records", None),
         )
         if realm is None:
             from ..query_resolution import QueryResolutionError
@@ -903,10 +908,12 @@ class FFLogsCharacterLookup:
                 if failures is not None:
                     failures.begin("universalis_market", "realm_directory")
                 realm = await resolve_realm(
+                    self._directory_source,
                     scope.http,
-                    getattr(scope, "cache", None),
+                    scope.records,
                     server_label,
                     deadline=deadline if deadline is not None else monotonic() + 30,
+                    directory=self._directory,
                     metrics=metrics,
                 )
                 if self._lifecycle is not lifecycle:

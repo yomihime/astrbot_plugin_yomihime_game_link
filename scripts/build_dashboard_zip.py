@@ -151,6 +151,7 @@ REVIEWED_BUNDLE_SOURCES = {
             "features/market_sources.py",
             "features/news.py",
             "features/public_projection.py",
+            "features/server_directory.py",
             "features/status_cards.py",
             "models.py",
             "module.py",

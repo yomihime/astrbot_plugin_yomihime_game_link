@@ -15,6 +15,8 @@ DAYS = "ff14_calendar_default_days"
 TIMEZONE = "ff14_calendar_default_timezone"
 DELIVERY_TIME = "ff14_calendar_default_delivery_time"
 SYNC_INTERVAL = "ff14_calendar_sync_interval_seconds"
+SERVER_DIRECTORY_GENERATION = "ff14_server_directory_generation"
+INITIAL_DIRECTORY_GENERATION = "initial"
 CALENDAR_SYNC_INTERVALS = (21600, 43200, 86400)
 ORDINARY_FIELDS = frozenset((REGION, DAYS, TIMEZONE, DELIVERY_TIME, SYNC_INTERVAL))
 
@@ -25,6 +27,14 @@ REGION_CONFIG_FIELD = ConfigField(
     description="默认查询区域",
     value_schema={"type": "string", "enum": ["cn", "global"]},
 )
+
+
+def server_directory_generation(values: Mapping[str, object]) -> str:
+    generation = values.get(SERVER_DIRECTORY_GENERATION, INITIAL_DIRECTORY_GENERATION)
+    if type(generation) is not str or not 1 <= len(generation) <= 64:
+        raise ValueError("invalid server directory generation")
+    return generation
+
 
 CALENDAR_CONFIG_FIELDS = (
     REGION_CONFIG_FIELD,

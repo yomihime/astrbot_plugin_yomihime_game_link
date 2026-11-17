@@ -1,5 +1,5 @@
 import {createApp, defineComponent, h, ref} from 'vue';
-import {ActionBar, PageTemplate, SettingsRow, StatusHint, Surface, uiText} from '@game-link/ui';
+import {ActionBar, PageTemplate, SettingsGroup, SettingsRow, StatusHint, Surface, uiText} from '@game-link/ui';
 import type {PageTemplateSlots, TemplateActionKey, TemplateContent} from '@game-link/ui';
 import type {MountedLogo, MountedPage, PageOptions, ResourceScope} from '../../../../pages/public-contract';
 import {homeContent, settingsSectionsFor} from './page-content';
@@ -48,6 +48,7 @@ export function mountSettings(container: HTMLElement, options: PageOptions): Mou
     const text = (key: string, params?: Readonly<Record<string, string | number>>) => ff14Text(s.context.locale, key, params);
     const ordinaryDisabled = !s.draftEditable || !s.context.available;
     const credentialDisabled = s.pending || !s.ready || !s.context.available;
+    const clearCacheDisabled = credentialDisabled || !s.directoryCacheAvailable;
     const copy = (key: TemplateActionKey) => uiText(key, s.context.locale);
     const button = (label: string, props: Record<string, unknown> = {}) =>
       h('button', {type: 'button', class: 'ui-button', ...props}, label);
@@ -72,7 +73,7 @@ export function mountSettings(container: HTMLElement, options: PageOptions): Mou
         onVnodeUpdated: () => logo?.update(s.context, appearance),
       }, resourceUrl ? undefined : '✦'),
     } : {
-      aside: () => h(Surface, {title: text('settings.credentialsTitle'), eyebrow: 'SOURCE ACCESS'}, {default: () => [
+      aside: () => [h(Surface, {title: text('settings.credentialsTitle'), eyebrow: 'SOURCE ACCESS'}, {default: () => [
         h(StatusHint, {}, () => text('settings.credentialsScope')),
         h('div', {class: 'ui-segmented', 'aria-label': text('settings.credentialRegion')}, credentialFields.map(field =>
           button(text(field.labelKey), {'aria-pressed': activeRegion.value === field.name, onClick: () => { activeRegion.value = field.name; }}))),
@@ -105,6 +106,16 @@ export function mountSettings(container: HTMLElement, options: PageOptions): Mou
         }),
         h(StatusHint, {}, () => text('settings.credentialStorage')),
       ]}),
+        h(SettingsGroup, {title: text('settings.serverCacheTitle')}, {default: () => [
+          h(StatusHint, {id: `${idPrefix}-server-cache-hint`}, () => text('settings.serverCacheDescription')),
+          h(ActionBar, {}, () => button(text('settings.clearServerCache'), {
+            'aria-describedby': `${idPrefix}-server-cache-hint`,
+            'aria-disabled': clearCacheDisabled || undefined,
+            'aria-busy': s.pending || undefined,
+            onClick: () => { if (!clearCacheDisabled) void controller.clearServerCache(); },
+          })),
+        ]}),
+      ],
       footer: () => h(ActionBar, {}, () => [
         button(copy('refresh'), {disabled: !s.context.available, 'aria-disabled': s.pending || undefined,
           'aria-busy': s.pending || undefined, onClick: () => { if (!s.pending) void controller.load(); }}),

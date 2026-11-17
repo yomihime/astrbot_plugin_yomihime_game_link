@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import inspect
 import json
 import unittest
 from dataclasses import replace
@@ -13,7 +14,6 @@ from pathlib import Path
 from ygl_test_subject.adapters.astrbot.web_public import project_result
 from ygl_test_subject.core.contracts.validation_boundary import validate_contract
 from ygl_test_subject.infrastructure.http import SourceHttpService
-from ygl_test_subject.modules.ff14.features.fflogs_server import resolve_realm
 from ygl_test_subject.modules.ff14.features.market import (
     MarketClient,
     _result,
@@ -45,11 +45,7 @@ from ygl_test_subject.modules.ff14.query_resolution import (
     ScopeCatalog,
 )
 
-from yomihime_game_link_sdk.errors import (
-    AccessDenied,
-    CacheUnavailable,
-    SourceHttpError,
-)
+from yomihime_game_link_sdk.errors import SourceHttpError
 from yomihime_game_link_sdk.results import ErrorCode, ResultStatus
 from yomihime_game_link_sdk.services import HttpRequest, HttpResponse
 from yomihime_game_link_sdk.storage import CacheEntry
@@ -139,6 +135,8 @@ class FakeHttp:
     async def fetch(self, request):
         self.requests.append(request)
         value = self.callback(request)
+        if inspect.isawaitable(value):
+            value = await value
         if isinstance(value, Exception):
             raise value
         if isinstance(value, HttpResponse):
@@ -474,30 +472,6 @@ class MarketExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(failed.minimums)
         self.assertFalse(failed.listings)
         self.assertEqual(len(factory.http.requests), 3)
-
-    async def test_directory_cache_3600s_before_exact_after_boundary(self):
-        wall = [NOW]
-        cache = FakeCache(wall=lambda: wall[0])
-        http = FakeHttp(lambda request: WORLDS if request.path == WORLDS_PATH else DCS)
-        factory = MarketSourceClient(
-            http, cache, clock=lambda: 0, wall_clock=lambda: wall[0]
-        )
-        first = await factory.start().catalog()
-        self.assertEqual(cache.puts[0][2], 3600)
-        wall[0] = NOW + timedelta(seconds=3599.999)
-        cached = await factory.start().catalog()
-        self.assertTrue(all(p.cached for p in cached.provenance))
-        self.assertEqual(
-            cached.provenance[0].fetched_at, first.provenance[0].fetched_at
-        )
-        self.assertEqual(len(http.requests), 2)
-        wall[0] = NOW + timedelta(seconds=3600)
-        exact = await factory.start().catalog()
-        self.assertFalse(any(p.cached for p in exact.provenance))
-        self.assertEqual(len(http.requests), 4)
-        wall[0] = NOW + timedelta(seconds=7200.001)
-        await factory.start().catalog()
-        self.assertEqual(len(http.requests), 6)
 
     async def test_direct_prices_keep_all_source_digits_without_six_digit_rounding(
         self,
@@ -850,103 +824,6 @@ class MarketExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("源时钟异常", text)
         self.assertIn("86400 秒", text)
         self.assertIn("未知", text)
-
-    async def test_directory_cache_atomic_mapping_clean_and_original_fetched_time(self):
-        cache = FakeCache()
-        worlds = WORLDS + [{"id": 91001, "name": "Synthetic Cloud Test"}]
-        http = FakeHttp(lambda request: worlds if request.path == WORLDS_PATH else DCS)
-        factory = MarketSourceClient(http, cache, wall_clock=lambda: NOW)
-        first = await factory.start().catalog()
-        second = await factory.start().catalog()
-        self.assertEqual(len(http.requests), 2)
-        self.assertEqual(first.catalog, second.catalog)
-        with self.assertRaises(QueryResolutionError) as missing:
-            second.catalog.find("world", "Synthetic Cloud Test")
-        self.assertIs(missing.exception.code, ErrorCode.UPSTREAM_ERROR)
-        self.assertTrue(all(p.cached for p in second.provenance))
-        self.assertEqual(
-            tuple(p.fetched_at for p in first.provenance),
-            tuple(p.fetched_at for p in second.provenance),
-        )
-        self.assertEqual(len(cache.puts), 1)
-        self.assertEqual(
-            [request.path for request in http.requests], [WORLDS_PATH, DCS_PATH]
-        )
-        self.assertEqual(cache.puts[0][2], 3600)
-        bad = FakeHttp(
-            lambda request: WORLDS[:-1] if request.path == WORLDS_PATH else DCS
-        )
-        empty_cache = FakeCache()
-        with self.assertRaises(MarketPayloadError):
-            await (
-                MarketSourceClient(bad, empty_cache, wall_clock=lambda: NOW)
-                .start()
-                .catalog()
-            )
-        self.assertEqual(empty_cache.puts, [])
-
-    async def test_directory_cache_backend_failure_preserves_live_realm_lookup(self):
-        class UnavailableCache(FakeCache):
-            async def get(self, key):
-                cache_operations.append("get")
-                raise CacheUnavailable()
-
-            async def put(self, key, payload, *, ttl_seconds):
-                cache_operations.append("put")
-                raise CacheUnavailable()
-
-        cache_operations = []
-        worlds = WORLDS + [{"id": 91001, "name": "Synthetic Cloud Test"}]
-        http = FakeHttp(lambda request: worlds if request.path == WORLDS_PATH else DCS)
-        realm = await resolve_realm(
-            http,
-            UnavailableCache(),
-            "SyntheticChina",
-            deadline=asyncio.get_running_loop().time() + 30,
-        )
-        self.assertEqual(realm, "cn")
-        self.assertEqual(cache_operations, ["get", "put"])
-        self.assertCountEqual(
-            [request.path for request in http.requests], [WORLDS_PATH, DCS_PATH]
-        )
-
-    async def test_directory_malformed_cached_urls_are_refetched(self):
-        cache = FakeCache()
-        http = FakeHttp(lambda request: WORLDS if request.path == WORLDS_PATH else DCS)
-        factory = MarketSourceClient(http, cache, wall_clock=lambda: NOW)
-        first = await factory.start().catalog()
-        key, payload, ttl = cache.puts[0]
-        await cache.put(key, {**payload, "urls": None}, ttl_seconds=ttl)
-
-        fresh = await factory.start().catalog()
-        self.assertEqual(fresh.catalog, first.catalog)
-        self.assertFalse(any(row.cached for row in fresh.provenance))
-        self.assertCountEqual(
-            [request.path for request in http.requests], [WORLDS_PATH, DCS_PATH] * 2
-        )
-
-    async def test_directory_cache_authority_failure_propagates(self):
-        failure = AccessDenied("grant_revoked")
-
-        class DeniedCache(FakeCache):
-            async def get(self, key):
-                if denied_at == "get":
-                    raise failure
-                return await super().get(key)
-
-            async def put(self, key, payload, *, ttl_seconds):
-                raise failure
-
-        for denied_at, expected_requests in (("get", 0), ("put", 2)):
-            with self.subTest(denied_at=denied_at):
-                http = FakeHttp(
-                    lambda request: WORLDS if request.path == WORLDS_PATH else DCS
-                )
-                source = MarketSourceClient(http, DeniedCache(), wall_clock=lambda: NOW)
-                with self.assertRaises(AccessDenied) as raised:
-                    await source.start().catalog()
-                self.assertIs(raised.exception, failure)
-                self.assertEqual(len(http.requests), expected_requests)
 
     async def test_total_deadline_includes_prior_preparation_no_retries_and_keeps_completed(
         self,
