@@ -32,7 +32,11 @@ from ..core.ports_jobs import JobRunLease
 from ..core.public_errors import parameters, public_boundary
 from ..infrastructure.sync_diagnostics import emit as diagnostic
 from ..yomihime_game_link_sdk.contexts import InvocationOrigin, InvocationView
-from ..yomihime_game_link_sdk.errors import CacheUnavailable, ServiceUnavailable
+from ..yomihime_game_link_sdk.errors import (
+    AccessDenied,
+    CacheUnavailable,
+    ServiceUnavailable,
+)
 from ..yomihime_game_link_sdk.services import CacheAccess
 from ..yomihime_game_link_sdk.storage import (
     CacheEntry,
@@ -47,6 +51,7 @@ from .identity import (
     PrincipalResolutionDenied,
     PrincipalResolutionUnavailable,
 )
+from .runtime_effect_gate import EffectRejected
 
 _T = TypeVar("_T")
 
@@ -226,7 +231,16 @@ class _CacheAccessCoordinator:
             # Authority after the failed backend await wins over availability.
             self._check_admission()
             await self._assert_grant_current()
-            if isinstance(error, CacheUnavailable):
+            if isinstance(error, EffectRejected):
+                # An executor effect rejection is an authority fence even when
+                # the current in-process invocation and grant still pass.
+                if error.code == "stale_lease":
+                    failure = InvalidInvocation()
+                elif error.code == "grant_revoked":
+                    failure = AccessDenied("grant_revoked")
+                else:
+                    failure = ServiceUnavailable()
+            elif isinstance(error, CacheUnavailable):
                 failure = error
             elif isinstance(
                 error,
@@ -241,7 +255,8 @@ class _CacheAccessCoordinator:
         else:
             failure = None
         if failure is not None:
-            diagnostic(stage, code="cache_unavailable")
+            if isinstance(failure, CacheUnavailable):
+                diagnostic(stage, code="cache_unavailable")
             raise failure
         self._check_admission()
         await self._assert_grant_current()
