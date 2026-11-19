@@ -16,6 +16,7 @@ MAX_CACHE_BYTES = 65_536
 MAX_CACHE_NODES = 512
 POLICY = "explicit-non-echo-partition-pack-v3"
 COMPLETE_PACK_VERSION = "fflogs-complete-slice-v1"
+PARTIAL_PACK_VERSION = "fflogs-partial-slice-v1"
 
 
 def _digest(value):
@@ -100,6 +101,9 @@ def complete_pack_key(identity, planned):
 def complete_payload(cache_key, planned, selections, dates):
     entries = []
     for key in planned:
+        if key not in selections:
+            entries.append(None)
+            continue
         rank = selections[key]
         rows = [
             [
@@ -126,7 +130,8 @@ def complete_payload(cache_key, planned, selections, dates):
                 rows,
             ]
         )
-    value = {"version": COMPLETE_PACK_VERSION, "key": cache_key, "entries": entries}
+    version = PARTIAL_PACK_VERSION if None in entries else COMPLETE_PACK_VERSION
+    value = {"version": version, "key": cache_key, "entries": entries}
     _bounded(value)
     return value
 
@@ -137,7 +142,7 @@ def restore_complete_pack(payload, cache_key, planned):
     if (
         not isinstance(value, dict)
         or set(value) != {"version", "key", "entries"}
-        or value["version"] != COMPLETE_PACK_VERSION
+        or value["version"] not in (COMPLETE_PACK_VERSION, PARTIAL_PACK_VERSION)
         or value["key"] != cache_key
         or not isinstance(value["entries"], list)
         or len(value["entries"]) != len(planned)
@@ -145,6 +150,8 @@ def restore_complete_pack(payload, cache_key, planned):
         raise FFLogsPayloadError("complete history slice identity")
     selections, dates = {}, {}
     for key, entry in zip(planned, value["entries"], strict=True):
+        if entry is None and value["version"] == PARTIAL_PACK_VERSION:
+            continue
         if not isinstance(entry, list) or len(entry) != 8 or entry[0] != _digest(key):
             raise FFLogsPayloadError("complete history entry")
         _, fetched, metric, zone, difficulty, partition, size, rows = entry

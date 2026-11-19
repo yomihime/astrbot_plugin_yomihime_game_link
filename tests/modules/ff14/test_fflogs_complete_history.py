@@ -6,6 +6,7 @@ import asyncio
 import io
 import json
 import unittest
+from contextlib import asynccontextmanager
 from dataclasses import replace
 from time import monotonic, time
 from types import SimpleNamespace
@@ -47,7 +48,7 @@ from yomihime_game_link_sdk.errors import (
     InvalidInvocation,
     SourceHttpError,
 )
-from yomihime_game_link_sdk.storage import CacheLookup, CacheLookupStatus
+from yomihime_game_link_sdk.storage import CacheLookup, CacheLookupStatus, CacheQuery
 
 
 class CompleteHistoryTests(unittest.IsolatedAsyncioTestCase):
@@ -85,6 +86,273 @@ class CompleteHistoryTests(unittest.IsolatedAsyncioTestCase):
         )
         groups = complete_packs(self.metadata, keys)
         return [(complete_pack_key(identity, group), group) for group in groups]
+
+    def omit_rankings(self, scopes):
+        targets = {(key[0], key[2]) for key in scopes}
+        original = self.fetch
+
+        async def fetch(request):
+            response = await original(request)
+            variables = json.loads(request.body)["variables"]
+            value = json.loads(response.body)
+            character = value["data"]["characterData"]["character"]
+            for alias in tuple(character):
+                if (
+                    alias.startswith("z")
+                    and (variables[alias], variables.get("p" + alias[1:])) in targets
+                ):
+                    del character[alias]
+            return SimpleNamespace(status_code=200, body=json.dumps(value).encode())
+
+        self.scope.http.fetch = fetch
+
+    async def test_two_default_zones_share_refresh_when_their_history_keys_overlap(
+        self,
+    ):
+        compact = self.large_catalog()
+        first, members = compact[0]
+        self.omit_rankings(members[:1])
+        incomplete = self.scope.http.fetch
+        entered, release, waiting = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        second_requests = []
+        lock_keys = []
+        refresh = self.handler._refresh
+
+        @asynccontextmanager
+        async def observe_refresh(key, deadline):
+            if key[0] == "history":
+                lock_keys.append(key)
+                if len(lock_keys) == 2:
+                    waiting.set()
+            async with refresh(key, deadline) as acquired:
+                yield acquired
+
+        self.handler._refresh = observe_refresh
+
+        async def first_fetch(request):
+            if request.source_id == self.source:
+                entered.set()
+                await release.wait()
+            return await incomplete(request)
+
+        async def second_fetch(request):
+            if request.source_id == self.source:
+                second_requests.append(json.loads(request.body))
+            return await self.fetch(request)
+
+        def start(zone, fetch):
+            scope = SimpleNamespace(
+                cache=self.scope.cache, http=SimpleNamespace(fetch=fetch)
+            )
+            return asyncio.create_task(
+                self.handler._catalog_rankings(
+                    scope,
+                    self.source,
+                    replace(self.role, zone_id=zone),
+                    self.metadata,
+                    explicit_fixture.VARIABLES,
+                    self.handler._lifecycle,
+                    cache_owner=self.owner,
+                )
+            )
+
+        tasks = [start(73, first_fetch)]
+        try:
+            async with asyncio.timeout(5):
+                await entered.wait()
+                tasks.append(start(74, second_fetch))
+                await waiting.wait()
+            self.assertEqual(lock_keys[0], lock_keys[1])
+            self.assertFalse(tasks[1].done())
+            self.assertFalse(second_requests)
+            release.set()
+            partial, full = await asyncio.gather(*tasks)
+        finally:
+            release.set()
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self.assertFalse(partial.catalog_complete)
+        self.assertTrue(full.catalog_complete)
+        self.assertEqual(full.history_cache_hits, 162)
+        self.assertEqual(
+            self.requested(second_requests), [(members[0][0], members[0][2])]
+        )
+        stored = (await self.scope.cache.lookup(CacheQuery(first))).entry
+        restored, _ = restore_complete_pack(stored.payload, first, members)
+        self.assertEqual(set(restored), set(members))
+
+    async def test_distinct_sources_and_owners_can_refresh_while_first_is_in_flight(
+        self,
+    ):
+        tasks = []
+
+        async def start_and_wait(source, owner):
+            entered = asyncio.Event()
+
+            async def fetch(request):
+                if request.source_id != source:
+                    raise OSError("synthetic menu unavailable")
+                entered.set()
+                await asyncio.Future()
+
+            scope = SimpleNamespace(
+                cache=self.contract._cache(owner), http=SimpleNamespace(fetch=fetch)
+            )
+            tasks.append(
+                asyncio.create_task(
+                    self.handler._catalog_rankings(
+                        scope,
+                        source,
+                        self.role,
+                        self.metadata,
+                        explicit_fixture.VARIABLES,
+                        self.handler._lifecycle,
+                        cache_owner=owner,
+                    )
+                )
+            )
+            await entered.wait()
+
+        try:
+            async with asyncio.timeout(5):
+                await start_and_wait(self.source, self.owner)
+                await start_and_wait(self.source, self.contract._invocation("bob"))
+                await start_and_wait("fflogs_public_global", self.owner)
+            self.assertTrue(all(not task.done() for task in tasks))
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def test_sparse_anchor_reuses_every_valid_scope_without_rewriting(self):
+        compact = self.large_catalog()
+        _, members = compact[0]
+        failed = members[:1]
+        self.omit_rankings(failed)
+        first = await self.collect()
+        self.assertFalse(first.catalog_complete)
+        self.calls.clear()
+        writes = self.operations["put"]
+        lookup = self.scope.cache.lookup
+        reads = []
+
+        async def observe(query):
+            reads.append(query.key)
+            return await lookup(query)
+
+        self.scope.cache.lookup = observe
+        second = await self.collect()
+        self.assertEqual(second.groups, first.groups)
+        self.assertEqual(second.history_cache_hits, 162)
+        self.assertEqual(self.requested(self.calls), [(failed[0][0], failed[0][2])])
+        self.assertEqual(self.operations["put"], writes)
+        self.assertCountEqual(
+            [key for key in reads if key.startswith("fflogs-complete-")],
+            [key for key, _ in compact],
+        )
+        self.assertEqual(
+            sum(key.startswith("fflogs-history-pack-") for key in reads), 1
+        )
+
+    async def test_all_missing_anchor_discovers_siblings_without_proving_a_single_anchor_scope(
+        self,
+    ):
+        compact = self.large_catalog()
+        _, members = compact[0]
+        self.omit_rankings(members)
+        cold = await self.collect()
+        self.calls.clear()
+        hot = await self.collect()
+        self.assertFalse(cold.catalog_complete)
+        self.assertEqual(hot.groups, cold.groups)
+        self.assertEqual(hot.history_cache_hits, 163 - len(members))
+        self.assertCountEqual(
+            self.requested(self.calls), [(k[0], k[2]) for k in members]
+        )
+
+    async def test_sparse_update_preserves_unread_valid_sibling_and_original_date(self):
+        compact = self.large_catalog()
+        first = compact[0][0]
+        key, members = compact[1]
+        await self.collect()
+        lookup = self.scope.cache.lookup
+
+        def dates(entry):
+            return restore_complete_pack(entry.payload, key, members)[1]
+
+        before = dates((await lookup(CacheQuery(key))).entry)
+
+        async def undiscovered(query):
+            if query.key == first:
+                return CacheLookup(CacheLookupStatus.MISS)
+            return await lookup(query)
+
+        self.scope.cache.lookup = undiscovered
+        self.omit_rankings(members[:1])
+        partial = await self.collect()
+        self.assertFalse(partial.catalog_complete)
+        self.assertEqual(partial.history_cache_hits, 0)
+        after = dates((await lookup(CacheQuery(key))).entry)
+        self.assertEqual(after[members[0]], before[members[0]])
+        self.assertGreater(after[members[1]], before[members[1]])
+        self.scope.cache.lookup = lookup
+        self.calls.clear()
+        self.assertEqual((await self.collect()).history_cache_hits, 163)
+        self.assertFalse(self.calls)
+
+    async def test_sparse_anchor_never_replaces_corrupt_unverified_siblings(self):
+        compact = self.large_catalog()
+        first, members = compact[0]
+        await self.collect()
+        lookup, put = self.scope.cache.lookup, self.scope.cache.put
+        original = (await lookup(CacheQuery(first))).entry
+        writes = []
+
+        async def corrupt(query):
+            result = await lookup(query)
+            if query.key == first:
+                return SimpleNamespace(
+                    status=result.status,
+                    entry=SimpleNamespace(
+                        expires_at=original.expires_at, payload={"version": "bad"}
+                    ),
+                )
+            return result
+
+        async def observe(key, payload, **kwargs):
+            writes.append(key)
+            return await put(key, payload, **kwargs)
+
+        self.omit_rankings(members[:1])
+        self.scope.cache = SimpleNamespace(lookup=corrupt, put=observe)
+        self.assertFalse((await self.collect()).catalog_complete)
+        self.assertNotIn(first, writes)
+        self.assertEqual((await lookup(CacheQuery(first))).entry, original)
+
+    async def test_revocation_during_partial_sibling_merge_stops_publication(self):
+        compact = self.large_catalog()
+        first = compact[0][0]
+        missing, members = compact[1]
+        lookup, put = self.scope.cache.lookup, self.scope.cache.put
+        writes = []
+
+        async def revoke(query):
+            if query.key == missing:
+                self.contract.issuer.release(self.owner)
+            return await lookup(query)
+
+        async def observe(key, payload, **kwargs):
+            writes.append(key)
+            return await put(key, payload, **kwargs)
+
+        self.omit_rankings(members[:1])
+        self.scope.cache = SimpleNamespace(lookup=revoke, put=observe)
+        with self.assertRaises(PermissionError):
+            await self.collect()
+        self.assertNotIn(first, writes)
+        self.assertFalse(writes)
 
     async def test_complete_slices_migrate_existing_legacy_without_fetch_or_renewal(
         self,
